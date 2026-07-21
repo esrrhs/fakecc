@@ -4,6 +4,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 /* ---- helper ---- */
 static TokenArray lex_str(const char *src) {
@@ -120,6 +122,36 @@ static void test_keyword_import(void) {
     token_array_free(&a);
 }
 
+static void test_unknown_char_dies(void) {
+    /* unknown character '@' should cause die_at and exit */
+    int pid = fork();
+    if (pid == 0) {
+        TokenArray a;
+        token_array_init(&a);
+        lex("@", "test.c", &a);
+        token_array_free(&a);
+        _exit(0);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
+}
+
+static void test_preprocessor_rejected(void) {
+    /* #include <stdio.h> should be rejected with specific error */
+    int pid = fork();
+    if (pid == 0) {
+        TokenArray a;
+        token_array_init(&a);
+        lex("#include <stdio.h>", "test.c", &a);
+        token_array_free(&a);
+        _exit(0);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -134,5 +166,7 @@ int main(void) {
     test_position_tracking();
     test_string_literal();
     test_keyword_import();
+    test_unknown_char_dies();
+    test_preprocessor_rejected();
     return t_finalize();
 }
