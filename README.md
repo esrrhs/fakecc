@@ -69,6 +69,28 @@ int main() {
 }
 ```
 
+## Architecture
+
+```
+Source → Lexer → Tokens → Parser → AST → Sema → IR Generate → IR → Codegen → Machine Code → ELF Writer → Executable
+                  Frontend                              Middle               Backend
+```
+
+- **Frontend**: Lexer + Parser + Sema + IR Generate — language-specific, platform-independent
+- **Middle**: Single unified SSA IR (LLVM/QBE style) — grows incrementally across slices
+- **Backend**: Codegen (x86-64 machine code) + internal ELF writer — platform-specific, zero external dependencies
+
+The compiler uses a **single unified SSA IR** throughout. No dual-IR layer (unlike GCC's GIMPLE+RTL). Optimization passes will be added as `void opt_xxx(IRModule *)` functions that mutate the IR in-place.
+
+## Self-Contained Toolchain
+
+FakeCC includes its own assembler and linker — no external `gcc`, `as`, or `ld` required. The compiler directly writes a minimal static ELF64 executable to disk:
+
+- Internal x86-64 machine code encoding (no assembly text intermediate)
+- Internal ELF64 writer: ELF header + PT_LOAD segment + `_start` stub
+- `_start` stub: `call main` → `mov %eax,%edi` → `mov $60,%eax` → `syscall`
+- Generated binaries are valid static ELF executables
+
 ## Bootstrapping Roadmap
 
 FakeCC aims to **compile itself** in three stages:
