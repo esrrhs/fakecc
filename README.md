@@ -1,5 +1,9 @@
 # FakeCC
 
+[![CI](https://github.com/esrrhs/fakecc/actions/workflows/ci.yml/badge.svg)](https://github.com/esrrhs/fakecc/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Language: C99](https://img.shields.io/badge/language-C99-orange.svg)
+
 A C-like systems programming language — keeping C's execution model and performance, removing the preprocessor, and replacing header files with modern package management.
 
 ## Design Goals
