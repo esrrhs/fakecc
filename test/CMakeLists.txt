@@ -1,0 +1,25 @@
+# Test framework
+add_library(test_framework
+    test_framework.c
+)
+target_include_directories(test_framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# --- Unit tests ---
+
+add_executable(test_lexer unit/test_lexer.c)
+target_link_libraries(test_lexer PRIVATE fakecc_core test_framework)
+add_test(NAME test_lexer COMMAND test_lexer)
+
+add_executable(test_parser unit/test_parser.c)
+target_link_libraries(test_parser PRIVATE fakecc_core test_framework)
+add_test(NAME test_parser COMMAND test_parser)
+
+add_executable(test_codegen unit/test_codegen.c)
+target_link_libraries(test_codegen PRIVATE fakecc_core test_framework)
+add_test(NAME test_codegen COMMAND test_codegen)
+
+# --- e2e tests ---
+
+add_test(NAME e2e
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_e2e.sh $<TARGET_FILE:fakecc>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
