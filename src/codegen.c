@@ -12,4 +12,5 @@ void codegen(const TranslationUnit *tu, Buffer *out) {
     buffer_appendf(out, "    movl $%d, %%eax\n", fn->body.value);
     buffer_appendf(out, "    popq %%rbp\n");
     buffer_appendf(out, "    ret\n");
+    buffer_appendf(out, "    .section .note.GNU-stack,\"\",@progbits\n");
 }
