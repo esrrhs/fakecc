@@ -1,5 +1,6 @@
 #include "fakecc/codegen.h"
 #include "fakecc/common.h"
+#include "fakecc/ir.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
@@ -63,10 +64,15 @@ int main(int argc, char **argv) {
     /* 4. Semantic check */
     sema_check(&tu);
 
-    /* 5. Codegen */
+    /* 5. Generate IR */
+    IRModule ir;
+    ir_module_init(&ir);
+    ir_generate(&tu, &ir);
+
+    /* 6. Codegen */
     Buffer asm_buf;
     buffer_init(&asm_buf);
-    codegen(&tu, &asm_buf);
+    codegen(&ir, &asm_buf);
 
     /* 6. Write temporary .s file */
     char tmp_path[256];
@@ -95,6 +101,7 @@ int main(int argc, char **argv) {
 
     /* Cleanup */
     buffer_free(&asm_buf);
+    ir_module_free(&ir);
     tu_free(&tu);
     token_array_free(&tokens);
     free(source);

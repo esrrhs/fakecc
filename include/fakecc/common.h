@@ -3,6 +3,13 @@
 
 #include <stddef.h>
 
+/* Source location — shared by tokens, AST, IR, and error reporting */
+typedef struct {
+    const char *file;    /* pointer to long-lived filename string */
+    int line;
+    int col;
+} SourceLoc;
+
 /* Dynamic byte buffer (for source input, assembly output) */
 typedef struct {
     char *data;

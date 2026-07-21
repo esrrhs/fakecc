@@ -13,6 +13,7 @@ add_library(fakecc_core
     src/ast.c
     src/parser.c
     src/sema.c
+    src/ir.c
     src/codegen.c
 )
 target_include_directories(fakecc_core PUBLIC include)

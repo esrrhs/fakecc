@@ -18,6 +18,10 @@ add_executable(test_codegen unit/test_codegen.c)
 target_link_libraries(test_codegen PRIVATE fakecc_core test_framework)
 add_test(NAME test_codegen COMMAND test_codegen)
 
+add_executable(test_ir unit/test_ir.c)
+target_link_libraries(test_ir PRIVATE fakecc_core test_framework)
+add_test(NAME test_ir COMMAND test_ir)
+
 # --- e2e tests ---
 
 add_test(NAME e2e

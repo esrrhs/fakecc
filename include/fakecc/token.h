@@ -1,7 +1,7 @@
 #ifndef FAKECC_TOKEN_H
 #define FAKECC_TOKEN_H
 
-#include <stddef.h>
+#include "fakecc/common.h"
 
 typedef enum {
     TK_KW_PACKAGE,       /* "package" */
@@ -18,12 +18,6 @@ typedef enum {
     TK_SEMICOLON,        /* ; */
     TK_EOF,
 } TokenKind;
-
-typedef struct {
-    const char *file;    /* pointer to long-lived filename string in driver */
-    int line;
-    int col;
-} SourceLoc;
 
 typedef struct {
     TokenKind kind;

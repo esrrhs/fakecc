@@ -1,6 +1,7 @@
 #include "fakecc/ast.h"
 #include "fakecc/codegen.h"
 #include "fakecc/common.h"
+#include "fakecc/ir.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
@@ -21,13 +22,18 @@ static char *compile_to_asm(const char *src) {
     parse(&arr, &tu);
     sema_check(&tu);
 
+    IRModule ir;
+    ir_module_init(&ir);
+    ir_generate(&tu, &ir);
+
     Buffer asm_buf;
     buffer_init(&asm_buf);
-    codegen(&tu, &asm_buf);
+    codegen(&ir, &asm_buf);
 
     /* null-terminate for string searches */
     buffer_append(&asm_buf, "\0", 1);
 
+    ir_module_free(&ir);
     token_array_free(&arr);
     tu_free(&tu);
 
