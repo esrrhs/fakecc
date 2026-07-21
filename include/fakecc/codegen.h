@@ -1,9 +1,10 @@
 #ifndef FAKECC_CODEGEN_H
 #define FAKECC_CODEGEN_H
 
+#include "fakecc/emit.h"
 #include "fakecc/ir.h"
 
-/* Generate AT&T syntax x86-64 assembly from IR into out (appended). */
-void codegen(const IRModule *ir, Buffer *out);
+/* Generate x86-64 machine code from IR into out. */
+void codegen(const IRModule *ir, EmitModule *out);
 
 #endif /* FAKECC_CODEGEN_H */

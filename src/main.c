@@ -1,5 +1,6 @@
 #include "fakecc/codegen.h"
 #include "fakecc/common.h"
+#include "fakecc/emit.h"
 #include "fakecc/ir.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
@@ -9,7 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -69,38 +69,16 @@ int main(int argc, char **argv) {
     ir_module_init(&ir);
     ir_generate(&tu, &ir);
 
-    /* 6. Codegen */
-    Buffer asm_buf;
-    buffer_init(&asm_buf);
-    codegen(&ir, &asm_buf);
+    /* 6. Generate machine code */
+    EmitModule em;
+    emit_module_init(&em);
+    codegen(&ir, &em);
 
-    /* 6. Write temporary .s file */
-    char tmp_path[256];
-    snprintf(tmp_path, sizeof(tmp_path), "/tmp/fakecc_%d.s", (int)getpid());
-
-    FILE *asm_file = fopen(tmp_path, "w");
-    if (!asm_file) {
-        fprintf(stderr, "fakecc: cannot write '%s'\n", tmp_path);
-        exit(1);
-    }
-    fwrite(asm_buf.data, 1, asm_buf.len, asm_file);
-    fclose(asm_file);
-
-    /* 7. Call gcc to assemble + link */
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "gcc -x assembler '%s' -o '%s'", tmp_path, output_path);
-    int rc = system(cmd);
-    if (rc != 0) {
-        fprintf(stderr, "fakecc: assembler/linker failed\n");
-        unlink(tmp_path);
-        exit(1);
-    }
-
-    /* 8. Delete temporary file */
-    unlink(tmp_path);
+    /* 7. Write ELF executable */
+    emit_elf(&em, output_path);
 
     /* Cleanup */
-    buffer_free(&asm_buf);
+    emit_module_free(&em);
     ir_module_free(&ir);
     tu_free(&tu);
     token_array_free(&tokens);

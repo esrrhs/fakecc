@@ -15,6 +15,7 @@ add_library(fakecc_core
     src/sema.c
     src/ir.c
     src/codegen.c
+    src/emit.c
 )
 target_include_directories(fakecc_core PUBLIC include)
 

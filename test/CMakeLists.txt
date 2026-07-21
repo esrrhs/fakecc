@@ -22,6 +22,10 @@ add_executable(test_ir unit/test_ir.c)
 target_link_libraries(test_ir PRIVATE fakecc_core test_framework)
 add_test(NAME test_ir COMMAND test_ir)
 
+add_executable(test_emit unit/test_emit.c)
+target_link_libraries(test_emit PRIVATE fakecc_core test_framework)
+add_test(NAME test_emit COMMAND test_emit)
+
 # --- e2e tests ---
 
 add_test(NAME e2e
