@@ -16,6 +16,11 @@ typedef enum {
     TK_LBRACE,           /* { */
     TK_RBRACE,           /* } */
     TK_SEMICOLON,        /* ; */
+    TK_PLUS,             /* + */
+    TK_MINUS,            /* - */
+    TK_STAR,             /* * */
+    TK_SLASH,            /* / */
+    TK_PERCENT,          /* % */
     TK_EOF,
 } TokenKind;
 

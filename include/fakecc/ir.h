@@ -4,16 +4,38 @@
 #include "fakecc/common.h"
 #include <stddef.h>
 
-/* IR instruction opcodes — will grow in later slices */
+/* ------------------------------------------------------------------ */
+/* SSA virtual register — grows monotonically per function             */
+/* ------------------------------------------------------------------ */
+
+typedef int IRValue;   /* SSA virtual register id, incrementing from 0 */
+
+/* ------------------------------------------------------------------ */
+/* IR instruction opcodes                                              */
+/* ------------------------------------------------------------------ */
+
 typedef enum {
-    IR_RETURN,    /* return <value> */
+    IR_CONST,       /* dst = imm */
+    IR_ADD,         /* dst = a + b */
+    IR_SUB,         /* dst = a - b */
+    IR_MUL,         /* dst = a * b */
+    IR_DIV,         /* dst = a / b  (signed) */
+    IR_MOD,         /* dst = a % b  (signed) */
+    IR_NEG,         /* dst = -a */
+    IR_RETURN,      /* return a */
 } IROpcode;
 
 typedef struct {
     IROpcode op;
-    int value;        /* for IR_RETURN: the integer constant */
-    SourceLoc loc;    /* for error reporting / debug info */
+    IRValue  dst;      /* meaningless for IR_RETURN, fill -1 */
+    IRValue  a, b;     /* source operands; IR_CONST only uses imm */
+    int      imm;      /* only for IR_CONST */
+    SourceLoc loc;
 } IRInst;
+
+/* ------------------------------------------------------------------ */
+/* IR function & module                                                */
+/* ------------------------------------------------------------------ */
 
 typedef struct {
     IRInst *data;
@@ -24,6 +46,7 @@ typedef struct {
 typedef struct {
     char *name;       /* function name, xstrdup'd */
     IRInstArray insts;
+    int next_value_id; /* SSA id counter, incremented by lower_expr */
     SourceLoc loc;
 } IRFunction;
 

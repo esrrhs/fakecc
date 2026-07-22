@@ -152,6 +152,62 @@ static void test_preprocessor_rejected(void) {
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
 }
 
+/* ---- Slice 2: arithmetic operators ---- */
+
+static void test_arith_op_tokens(void) {
+    /* "1+2*3-4/5%6" → INT PLUS INT STAR INT MINUS INT SLASH INT PERCENT INT EOF */
+    TokenArray a = lex_str("1+2*3-4/5%6");
+    T_ASSERT_EQ_INT((int)a.len, 12);
+    T_ASSERT_EQ_INT((int)a.data[0].kind,  (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[1].kind,  (int)TK_PLUS);
+    T_ASSERT_EQ_INT((int)a.data[2].kind,  (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[3].kind,  (int)TK_STAR);
+    T_ASSERT_EQ_INT((int)a.data[4].kind,  (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[5].kind,  (int)TK_MINUS);
+    T_ASSERT_EQ_INT((int)a.data[6].kind,  (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[7].kind,  (int)TK_SLASH);
+    T_ASSERT_EQ_INT((int)a.data[8].kind,  (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[9].kind,  (int)TK_PERCENT);
+    T_ASSERT_EQ_INT((int)a.data[10].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[11].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_paren_expr_tokens(void) {
+    /* "(1+2)" → LPAREN INT PLUS INT RPAREN EOF */
+    TokenArray a = lex_str("(1+2)");
+    T_ASSERT_EQ_INT((int)a.len, 6);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_LPAREN);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_PLUS);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_RPAREN);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_comment_with_arith(void) {
+    /* "1 // comment\n+2" → comment eaten, tokens: INT PLUS INT EOF */
+    TokenArray a = lex_str("1 // comment\n+2");
+    T_ASSERT_EQ_INT((int)a.len, 4);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_PLUS);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_slash_not_comment(void) {
+    /* "1/2" → INT SLASH INT (not a comment) */
+    TokenArray a = lex_str("1/2");
+    T_ASSERT_EQ_INT((int)a.len, 4);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_SLASH);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -168,5 +224,9 @@ int main(void) {
     test_keyword_import();
     test_unknown_char_dies();
     test_preprocessor_rejected();
+    test_arith_op_tokens();
+    test_paren_expr_tokens();
+    test_comment_with_arith();
+    test_slash_not_comment();
     return t_finalize();
 }

@@ -38,24 +38,106 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
  * translation-unit  = package-decl function-decl EOF
  * package-decl      = "package" IDENT ";"
  * function-decl     = "int" IDENT "(" ")" "{" return-stmt "}"
- * return-stmt       = "return" INT_LITERAL ";"
+ * return-stmt       = "return" expr ";"
+ *
+ * expr              = add-expr
+ * add-expr          = mul-expr { ("+" | "-") mul-expr }
+ * mul-expr          = unary-expr { ("*" | "/" | "%") unary-expr }
+ * unary-expr        = ("+" | "-") unary-expr
+ *                   | primary-expr
+ * primary-expr      = INT_LITERAL
+ *                   | "(" expr ")"
  */
+
+/* ---- expression parsing (forward declarations) ---- */
+
+static Expr *parse_expr(Parser *p);
+static Expr *parse_add(Parser *p);
+static Expr *parse_mul(Parser *p);
+static Expr *parse_unary(Parser *p);
+static Expr *parse_primary(Parser *p);
+
+static Expr *parse_expr(Parser *p) {
+    return parse_add(p);
+}
+
+/* add-expr = mul-expr { ("+" | "-") mul-expr }  -- left associative */
+static Expr *parse_add(Parser *p) {
+    Expr *lhs = parse_mul(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_PLUS && k != TK_MINUS) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_mul(p);
+        BinOp op = (k == TK_PLUS) ? BOP_ADD : BOP_SUB;
+        lhs = expr_new_binop(op, lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* mul-expr = unary-expr { ("*" | "/" | "%") unary-expr }  -- left associative */
+static Expr *parse_mul(Parser *p) {
+    Expr *lhs = parse_unary(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_STAR && k != TK_SLASH && k != TK_PERCENT) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_unary(p);
+        BinOp op;
+        switch (k) {
+        case TK_STAR:    op = BOP_MUL; break;
+        case TK_SLASH:   op = BOP_DIV; break;
+        default:         op = BOP_MOD; break; /* TK_PERCENT */
+        }
+        lhs = expr_new_binop(op, lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* unary-expr = ("+" | "-") unary-expr | primary-expr */
+static Expr *parse_unary(Parser *p) {
+    TokenKind k = peek(p)->kind;
+    if (k == TK_PLUS || k == TK_MINUS) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *operand = parse_unary(p);
+        UnaryOp op = (k == TK_MINUS) ? UOP_NEG : UOP_POS;
+        return expr_new_unary(op, operand, loc);
+    }
+    return parse_primary(p);
+}
+
+/* primary-expr = INT_LITERAL | "(" expr ")" */
+static Expr *parse_primary(Parser *p) {
+    const Token *t = peek(p);
+    if (t->kind == TK_INT_LITERAL) {
+        Expr *e = expr_new_int(atoi(t->text), t->loc);
+        advance(p);
+        return e;
+    }
+    if (t->kind == TK_LPAREN) {
+        advance(p);
+        Expr *e = parse_expr(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        return e;
+    }
+    die_at(t->loc.file, t->loc.line, t->loc.col,
+           "expected expression but got '%s'", t->text);
+    return NULL; /* unreachable */
+}
 
 static ReturnStmt parse_return_stmt(Parser *p) {
     const Token *kw = peek(p);
     expect_kind(p, TK_KW_RETURN, "'return'");
 
-    const Token *val = peek(p);
-    if (val->kind != TK_INT_LITERAL) {
-        die_at(val->loc.file, val->loc.line, val->loc.col,
-               "expected integer literal but got '%s'", val->text);
-    }
-    advance(p);
+    Expr *e = parse_expr(p);
 
     expect_kind(p, TK_SEMICOLON, "';'");
 
     ReturnStmt rs;
-    rs.value = atoi(val->text);
+    rs.value = e;
     rs.loc = kw->loc;
     return rs;
 }
