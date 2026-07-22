@@ -34,6 +34,10 @@ add_executable(test_cfg unit/test_cfg.c)
 target_link_libraries(test_cfg PRIVATE fakecc_core test_framework)
 add_test(NAME test_cfg COMMAND test_cfg)
 
+add_executable(test_domtree unit/test_domtree.c)
+target_link_libraries(test_domtree PRIVATE fakecc_core test_framework)
+add_test(NAME test_domtree COMMAND test_domtree)
+
 # --- e2e tests ---
 
 add_test(NAME e2e

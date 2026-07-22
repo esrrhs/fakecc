@@ -15,6 +15,7 @@ add_library(fakecc_core
     src/sema.c
     src/ir.c
     src/cfg.c
+    src/domtree.c
     src/opt.c
     src/codegen.c
     src/emit.c

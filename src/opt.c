@@ -1,5 +1,6 @@
 #include "fakecc/opt.h"
 #include "fakecc/cfg.h"
+#include "fakecc/domtree.h"
 #include "fakecc/common.h"
 
 #include <stdio.h>
@@ -91,125 +92,6 @@ static int block_has_phi(BlockPhi *bp, int alloca_slot) {
     for (size_t i = 0; i < bp->num_phis; i++)
         if (bp->phis[i].alloca_slot == alloca_slot) return 1;
     return 0;
-}
-
-/* ================================================================== */
-/* Dominator tree + dominance frontiers                                */
-/* ================================================================== */
-
-/* ================================================================== */
-/* Dominator tree + dominance frontiers                                */
-/* ================================================================== */
-
-typedef struct {
-    int *idom;        /* idom[b] = immediate dominator of b; entry = -1 */
-    int **df;         /* df[b] = dominance-frontier set (array of block ids) */
-    size_t *df_len;
-    size_t n;
-} DomTree;
-
-/* Does block a dominate block b? (via idom chain) */
-static int dominates(const DomTree *dt, int a, int b) {
-    int runner = b;
-    while (runner != -1) {
-        if (runner == a) return 1;
-        if (runner == dt->idom[runner]) break; /* safety */
-        runner = dt->idom[runner];
-    }
-    return 0;
-}
-
-/* Compute immediate dominators via iterative dataflow.
- * idom[entry] = -1; for others, idom is the intersection of dominators
- * of all predecessors, walking up the (reverse-postorder-ish) order. */
-static void domtree_build(DomTree *dt, const CFG *g) {
-    size_t n = g->num;
-    dt->n = n;
-    dt->idom = xmalloc(n * sizeof(int));
-    for (size_t i = 0; i < n; i++) dt->idom[i] = -1;
-    /* entry dominates itself; mark with a sentinel distinct from -1 */
-    dt->idom[g->entry] = (int)g->entry;
-
-    /* intersect(a, b): walk up idom chains in lockstep until they meet */
-    /* (Cooper-Harvey-Kennedy intersect, with RPO order approximated by id) */
-
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        for (size_t bi = 0; bi < n; bi++) {
-            int b = (int)bi;
-            if (b == g->entry) continue;
-            CFGBlock *blk = &g->blocks[bi];
-            /* pick first processed predecessor */
-            int new_idom = -1;
-            for (size_t i = 0; i < blk->num_preds; i++) {
-                int p = blk->preds[i];
-                if (dt->idom[p] != -1) {
-                    new_idom = p;
-                    break;
-                }
-            }
-            if (new_idom == -1) continue; /* no processed predecessor yet */
-            for (size_t i = 0; i < blk->num_preds; i++) {
-                int p = blk->preds[i];
-                if (p == new_idom) continue;
-                if (dt->idom[p] != -1) {
-                    /* intersect new_idom and p */
-                    int f1 = new_idom, f2 = p;
-                    while (f1 != f2) {
-                        while (f1 > f2) f1 = dt->idom[f1];
-                        while (f2 > f1) f2 = dt->idom[f2];
-                    }
-                    new_idom = f1;
-                }
-            }
-            if (dt->idom[b] != new_idom) {
-                dt->idom[b] = new_idom;
-                changed = 1;
-            }
-        }
-    }
-    /* entry's idom is itself conventionally; set to -1 for "no parent" */
-    dt->idom[g->entry] = -1;
-
-    /* dominance frontiers */
-    dt->df = xmalloc(n * sizeof(int *));
-    dt->df_len = xmalloc(n * sizeof(size_t));
-    for (size_t i = 0; i < n; i++) {
-        dt->df[i] = NULL;
-        dt->df_len[i] = 0;
-    }
-    for (size_t bi = 0; bi < n; bi++) {
-        CFGBlock *b = &g->blocks[bi];
-        if (b->num_preds < 2) continue;
-        for (size_t i = 0; i < b->num_preds; i++) {
-            int runner = b->preds[i];
-            while (runner != -1 && runner != dt->idom[bi] && runner != (int)bi) {
-                /* add bi to DF[runner] if not present */
-                int found = 0;
-                for (size_t k = 0; k < dt->df_len[runner]; k++)
-                    if (dt->df[runner][k] == (int)bi) { found = 1; break; }
-                if (!found) {
-                    size_t cap = (dt->df_len[runner] + 4) & ~(size_t)3;
-                    if (cap <= dt->df_len[runner]) cap = dt->df_len[runner] + 4;
-                    dt->df[runner] = xrealloc(dt->df[runner], cap * sizeof(int));
-                    dt->df[runner][dt->df_len[runner]++] = (int)bi;
-                }
-                runner = dt->idom[runner];
-            }
-        }
-    }
-}
-
-static void domtree_free(DomTree *dt) {
-    for (size_t i = 0; i < dt->n; i++) free(dt->df[i]);
-    free(dt->df);
-    free(dt->df_len);
-    free(dt->idom);
-    dt->idom = NULL;
-    dt->df = NULL;
-    dt->df_len = NULL;
-    dt->n = 0;
 }
 
 /* ================================================================== */
@@ -449,7 +331,7 @@ static void domtree_children(const DomTree *dt, int parent, int **children,
 }
 
 static void opt_mem2reg(IRFunction *fn) {
-    (void)dominates; /* used in future dominator queries */
+    (void)domtree_dominates; /* used in future dominator queries */
     CFG cfg;
     cfg_build(&cfg, &fn->insts);
 
