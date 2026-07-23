@@ -18,6 +18,7 @@ add_library(fakecc_core
     src/domtree.c
     src/mem2reg.c
     src/scalar_opt.c
+    src/regalloc.c
     src/opt.c
     src/codegen.c
     src/emit.c

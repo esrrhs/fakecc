@@ -55,6 +55,8 @@ typedef struct {
     IRInstArray insts;
     int next_value_id; /* SSA id counter, incremented by lower_expr */
     SourceLoc loc;
+    void *ra;         /* RAResult*, set by reg_alloc, consumed by codegen.
+                         NULL until register allocation runs. */
 } IRFunction;
 
 typedef struct {

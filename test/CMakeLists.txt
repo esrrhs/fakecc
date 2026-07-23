@@ -46,6 +46,10 @@ add_executable(test_renaming unit/test_renaming.c)
 target_link_libraries(test_renaming PRIVATE fakecc_core test_framework)
 add_test(NAME test_renaming COMMAND test_renaming)
 
+add_executable(test_regalloc unit/test_regalloc.c)
+target_link_libraries(test_regalloc PRIVATE fakecc_core test_framework)
+add_test(NAME test_regalloc COMMAND test_regalloc)
+
 add_executable(test_mem2reg unit/test_mem2reg.c)
 target_link_libraries(test_mem2reg PRIVATE fakecc_core test_framework)
 add_test(NAME test_mem2reg COMMAND test_mem2reg)

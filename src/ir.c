@@ -20,6 +20,12 @@ void ir_module_free(IRModule *m) {
     for (size_t i = 0; i < m->functions.len; i++) {
         free(m->functions.data[i].name);
         free(m->functions.data[i].insts.data);
+        /* Free register allocation result if present. */
+        /* ra_result_free is declared in regalloc.h but we avoid the
+         * header dependency by forward-declaring inline. */
+        extern void ra_result_free(void *ra);
+        if (m->functions.data[i].ra)
+            ra_result_free(m->functions.data[i].ra);
     }
     free(m->functions.data);
     m->functions.data = NULL;
