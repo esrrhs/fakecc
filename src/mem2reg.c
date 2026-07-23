@@ -2,32 +2,11 @@
 #include "fakecc/cfg.h"
 #include "fakecc/domtree.h"
 #include "fakecc/mem2reg.h"
+#include "fakecc/common.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* ================================================================== */
-/* Small generic helpers (FakeCC style: malloc + exit(1) on failure)   */
-/* ================================================================== */
-
-static void *xmalloc(size_t n) {
-    void *p = malloc(n);
-    if (!p) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    return p;
-}
-
-static void *xrealloc(void *p, size_t n) {
-    void *q = realloc(p, n);
-    if (!q) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    return q;
-}
 
 /* ================================================================== */
 /* Block φ helpers                                                      */

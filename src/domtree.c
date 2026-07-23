@@ -1,30 +1,8 @@
 #include "fakecc/domtree.h"
+#include "fakecc/common.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* ------------------------------------------------------------------ */
-/* Small generic helpers                                               */
-/* ------------------------------------------------------------------ */
-
-static void *xmalloc(size_t n) {
-    void *p = malloc(n);
-    if (!p) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    return p;
-}
-
-static void *xrealloc(void *p, size_t n) {
-    void *q = realloc(p, n);
-    if (!q) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    return q;
-}
 
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */

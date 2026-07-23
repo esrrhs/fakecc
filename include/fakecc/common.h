@@ -25,6 +25,10 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 /* C99-compatible strdup */
 char *xstrdup(const char *s);
 
+/* Checked malloc/realloc — exits on OOM */
+void *xmalloc(size_t n);
+void *xrealloc(void *p, size_t n);
+
 /* Error reporting — prints to stderr and exits with code 1 */
 void die_at(const char *file, int line, int col, const char *fmt, ...);
 

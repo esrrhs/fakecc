@@ -50,6 +50,10 @@ add_executable(test_mem2reg unit/test_mem2reg.c)
 target_link_libraries(test_mem2reg PRIVATE fakecc_core test_framework)
 add_test(NAME test_mem2reg COMMAND test_mem2reg)
 
+add_executable(test_opt unit/test_opt.c)
+target_link_libraries(test_opt PRIVATE fakecc_core test_framework)
+add_test(NAME test_opt COMMAND test_opt)
+
 # --- e2e tests ---
 
 add_test(NAME e2e

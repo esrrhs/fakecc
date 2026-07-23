@@ -63,6 +63,28 @@ void buffer_appendf(Buffer *b, const char *fmt, ...) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Checked malloc/realloc                                              */
+/* ------------------------------------------------------------------ */
+
+void *xmalloc(size_t n) {
+    void *p = malloc(n);
+    if (!p) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
+    return p;
+}
+
+void *xrealloc(void *p, size_t n) {
+    void *q = realloc(p, n);
+    if (!q) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
+    return q;
+}
+
+/* ------------------------------------------------------------------ */
 /* C99-compatible strdup                                               */
 /* ------------------------------------------------------------------ */
 
