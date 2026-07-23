@@ -55,6 +55,7 @@ static void ir_inst_array_push(IRInstArray *a, IRInst inst) {
 /* ------------------------------------------------------------------ */
 
 static void ir_func_array_push(IRFunctionArray *a, IRFunction fn) {
+    fn.ra = NULL;  /* No register allocation yet. */
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 4;
         a->data = realloc(a->data, new_cap * sizeof(IRFunction));
