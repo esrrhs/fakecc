@@ -2,6 +2,7 @@
 #include "fakecc/cfg.h"
 #include "fakecc/domtree.h"
 #include "fakecc/phi.h"
+#include "fakecc/mem2reg.h"
 #include "fakecc/common.h"
 
 #include <stdio.h>
@@ -248,47 +249,6 @@ static void opt_renumber(IRFunction *fn) {
 /*   4. Rebuild instruction array without dead instructions             */
 /* ================================================================== */
 
-/* φ helper — add an argument (value from predecessor `pred`) */
-static void phi_add_arg(IRPhi *phi, IRValue val, int pred) {
-    if (phi->num_args >= phi->cap_args) {
-        phi->cap_args = phi->cap_args ? phi->cap_args * 2 : 4;
-        phi->args = xrealloc(phi->args, phi->cap_args * sizeof(PhiArg));
-    }
-    phi->args[phi->num_args].val = val;
-    phi->args[phi->num_args].pred = pred;
-    phi->num_args++;
-}
-
-/* Per-alloca renaming stack */
-typedef struct {
-    IRValue *vals;  /* stack of reaching values */
-    size_t len, cap;
-} RenameStack;
-
-static void rstack_init(RenameStack *s) { s->vals = NULL; s->len = 0; s->cap = 0; }
-static void rstack_push(RenameStack *s, IRValue v) {
-    if (s->len >= s->cap) { s->cap = s->cap ? s->cap * 2 : 4; s->vals = xrealloc(s->vals, s->cap * sizeof(IRValue)); }
-    s->vals[s->len++] = v;
-}
-static IRValue rstack_top(RenameStack *s) { return s->len > 0 ? s->vals[s->len - 1] : -1; }
-static void rstack_pop(RenameStack *s) { if (s->len > 0) s->len--; }
-static void rstack_free(RenameStack *s) { free(s->vals); s->vals = NULL; s->len = 0; s->cap = 0; }
-
-/* Dominator-tree DFS order (children = blocks whose idom == parent) */
-static void domtree_children(const DomTree *dt, int parent, int **children,
-                              size_t *nchildren, size_t *ccap) {
-    *nchildren = 0;
-    for (size_t i = 0; i < dt->n; i++) {
-        if (dt->idom[i] == parent) {
-            if (*nchildren >= *ccap) {
-                *ccap = *ccap ? *ccap * 2 : 8;
-                *children = xrealloc(*children, *ccap * sizeof(int));
-            }
-            (*children)[(*nchildren)++] = (int)i;
-        }
-    }
-}
-
 static void opt_mem2reg(IRFunction *fn) {
     (void)domtree_dominates; /* used in future dominator queries */
     CFG cfg;
@@ -318,14 +278,6 @@ static void opt_mem2reg(IRFunction *fn) {
     }
     if (num_alloca == 0) { free(block_phis); domtree_free(&dt); cfg_free(&cfg); return; }
 
-    /* dead[] marks instructions to skip during write-back */
-    char *dead = xmalloc(insts->len * sizeof(char));
-    memset(dead, 0, insts->len * sizeof(char));
-
-    /* Mark each ALLOCA dead initially; it survives only if not promotable */
-    for (size_t i = 0; i < insts->len; i++)
-        if (insts->data[i].op == IR_ALLOCA) dead[i] = 1;
-
     /* ---- 2. φ placement ---- */
     /* Build block_stores bitmap: block_stores[bi][ai] = has store? */
     char **block_stores = xmalloc(cfg.num * sizeof(char *));
@@ -335,10 +287,8 @@ static void opt_mem2reg(IRFunction *fn) {
     }
     for (size_t i = 0; i < insts->len; i++) {
         if (insts->data[i].op != IR_STORE) continue;
-        /* Find which alloca slot this store targets */
         for (size_t ai = 0; ai < num_alloca; ai++) {
             if (insts->data[i].a == alloca_slots[ai]) {
-                /* Find which block this instruction is in */
                 for (size_t bi = 0; bi < cfg.num; bi++) {
                     if (i >= cfg.blocks[bi].start && i < cfg.blocks[bi].end) {
                         block_stores[bi][ai] = 1;
@@ -363,169 +313,9 @@ static void opt_mem2reg(IRFunction *fn) {
     free(block_phis);
     block_phis = bp;
 
-    /* ---- 3. Rename (dominator-tree DFS) ---- */
-    /* stacks[ai] = rename stack for alloca_slots[ai] */
-    RenameStack *stacks = xmalloc(num_alloca * sizeof(RenameStack));
-    for (size_t ai = 0; ai < num_alloca; ai++) rstack_init(&stacks[ai]);
-
-    /* We need a writable copy of instructions (for in-place LOAD→COPY/CONST) */
-    /* Since we already have fn->insts which is writable, we modify in-place. */
-    /* But we access via `insts` pointer which was set before. After in-place
-     * modifications, the data is still valid. */
-    /* Let's just work directly with fn->insts.data from here. */
-
-    /* Recursive DFS over dominator tree */
-    int *dt_children = NULL; size_t dt_nch = 0, dt_cch = 0;
-
-    /* We implement DFS iteratively to avoid stack overflow */
-    /* Stack of (block_id, child_index) pairs */
-    typedef struct { int block; size_t child_idx; } DFSFrame;
-    DFSFrame *dfs = NULL; size_t dfs_len = 0, dfs_cap = 0;
-
-    /* Push entry block */
-    #define DFS_PUSH(b, ci) do { \
-        if (dfs_len >= dfs_cap) { dfs_cap = dfs_cap ? dfs_cap * 2 : 32; \
-            dfs = xrealloc(dfs, dfs_cap * sizeof(DFSFrame)); } \
-        dfs[dfs_len].block = (b); dfs[dfs_len].child_idx = (ci); dfs_len++; \
-    } while(0)
-
-    /* We need to track pops per block to undo stack pushes. Use a simple
-     * approach: for each block, record how many values were pushed onto each
-     * alloca's rename stack, then pop that many on exit. */
-    /* push_count[bi][ai] = number of pushes for alloca ai in block bi */
-    size_t **push_count = xmalloc(cfg.num * sizeof(size_t *));
-    for (size_t bi = 0; bi < cfg.num; bi++) {
-        push_count[bi] = xmalloc(num_alloca * sizeof(size_t));
-        memset(push_count[bi], 0, num_alloca * sizeof(size_t));
-    }
-
-    /* Iterative DFS: we process each block, then push its children.
-     * On return from a block (when all children done), we pop its pushes.
-     * Use a two-phase approach: first visit all blocks in dom-tree preorder
-     * (collecting the order), then process each block in that order.
-     * Simpler: recursive emulation with explicit stack. */
-
-    /* Phase A: compute dom-tree preorder */
-    int *preorder = NULL; size_t n_preorder = 0, cap_preorder = 0;
-    DFS_PUSH(cfg.entry, 0);
-    while (dfs_len > 0) {
-        DFSFrame top = dfs[--dfs_len];
-        int b = top.block;
-        if (top.child_idx == 0) {
-            /* first visit: record in preorder */
-            if (n_preorder >= cap_preorder) { cap_preorder = cap_preorder ? cap_preorder * 2 : 16; preorder = xrealloc(preorder, cap_preorder * sizeof(int)); }
-            preorder[n_preorder++] = b;
-        }
-        /* get children */
-        domtree_children(&dt, b, &dt_children, &dt_nch, &dt_cch);
-        if (top.child_idx < dt_nch) {
-            /* push self with next child index, then push the child */
-            DFS_PUSH(b, top.child_idx + 1);
-            DFS_PUSH(dt_children[top.child_idx], 0);
-        }
-    }
-    free(dfs); dfs = NULL; dfs_len = 0; dfs_cap = 0;
-
-    /* Phase B: process blocks in preorder — rename variables */
-    for (size_t pi = 0; pi < n_preorder; pi++) {
-        int b = preorder[pi];
-        CFGBlock *blk = &cfg.blocks[b];
-
-        /* Process φ nodes at block start: push φ results onto stacks */
-        for (size_t phi_i = 0; phi_i < block_phis[b].num_phis; phi_i++) {
-            IRPhi *phi = &block_phis[b].phis[phi_i];
-            /* find which alloca this φ is for */
-            size_t ai;
-            for (ai = 0; ai < num_alloca; ai++)
-                if (alloca_slots[ai] == phi->alloca_slot) break;
-            if (ai < num_alloca) {
-                rstack_push(&stacks[ai], phi->dst);
-                push_count[b][ai]++;
-            }
-        }
-
-        /* Process instructions in this block */
-        for (size_t i = blk->start; i < blk->end; i++) {
-            IRInst *inst = &fn->insts.data[i];
-            if (inst->op == IR_LOAD) {
-                /* Is this a load from a promotable alloca? */
-                size_t ai;
-                for (ai = 0; ai < num_alloca; ai++)
-                    if (alloca_slots[ai] == inst->a) break;
-                if (ai < num_alloca) {
-                    IRValue reaching = rstack_top(&stacks[ai]);
-                    if (reaching >= 0) {
-                        /* Replace LOAD with COPY dst=reaching */
-                        inst->op = IR_COPY;
-                        inst->a = reaching;
-                    } else {
-                        /* Uninitialized read (UB in C): replace with CONST 0 */
-                        inst->op = IR_CONST;
-                        inst->a = -1;
-                        inst->b = -1;
-                        inst->imm = 0;
-                    }
-                }
-            } else if (inst->op == IR_STORE) {
-                size_t ai;
-                for (ai = 0; ai < num_alloca; ai++)
-                    if (alloca_slots[ai] == inst->a) break;
-                if (ai < num_alloca) {
-                    rstack_push(&stacks[ai], inst->b);
-                    push_count[b][ai]++;
-                    dead[i] = 1;  /* store is dead (value now in SSA) */
-                }
-            }
-        }
-
-        /* Fill φ args for each successor: for each successor S, for each φ
-         * in S, set the arg from this predecessor to the current stack top. */
-        for (size_t si = 0; si < blk->num_succs; si++) {
-            int s = blk->succs[si];
-            for (size_t phi_i = 0; phi_i < block_phis[s].num_phis; phi_i++) {
-                IRPhi *phi = &block_phis[s].phis[phi_i];
-                size_t ai;
-                for (ai = 0; ai < num_alloca; ai++)
-                    if (alloca_slots[ai] == phi->alloca_slot) break;
-                if (ai < num_alloca) {
-                    IRValue val = rstack_top(&stacks[ai]);
-                    if (val < 0) val = 0; /* undef → 0 */
-                    phi_add_arg(phi, val, b);
-                }
-            }
-        }
-    }
-
-    /* Pop stacks in reverse preorder (LIFO) to restore state */
-    for (int pi = (int)n_preorder - 1; pi >= 0; pi--) {
-        int b = preorder[pi];
-        /* Pop φ pushes */
-        for (size_t phi_i = 0; phi_i < block_phis[b].num_phis; phi_i++) {
-            IRPhi *phi = &block_phis[b].phis[phi_i];
-            size_t ai;
-            for (ai = 0; ai < num_alloca; ai++)
-                if (alloca_slots[ai] == phi->alloca_slot) break;
-            if (ai < num_alloca) rstack_pop(&stacks[ai]);
-        }
-        /* Pop store pushes: we need to know how many stores were in this block.
-         * Use push_count which tracked total pushes (φ + store). We already
-         * popped φ. Pop the remaining = push_count - num_phis_for_this_alloca. */
-        /* Actually, push_count[b][ai] counts all pushes (φ + store).
-         * We already popped the φ pushes (one per φ). Pop the rest. */
-        for (size_t ai = 0; ai < num_alloca; ai++) {
-            /* Count φ pushes for this alloca in this block */
-            size_t phi_pushes = 0;
-            for (size_t phi_i = 0; phi_i < block_phis[b].num_phis; phi_i++)
-                if (block_phis[b].phis[phi_i].alloca_slot == alloca_slots[ai]) phi_pushes++;
-            size_t store_pushes = push_count[b][ai] - phi_pushes;
-            for (size_t s = 0; s < store_pushes; s++) rstack_pop(&stacks[ai]);
-        }
-    }
-    free(preorder);
-    for (size_t bi = 0; bi < cfg.num; bi++) free(push_count[bi]);
-    free(push_count);
-
-    /* ---- 4. Write-back: rebuild instruction array ---- */
+    /* ---- 3. Rename (delegated to mem2reg module) ---- */
+    char *dead = NULL;
+    mem2reg_rename(fn, &cfg, &dt, alloca_slots, num_alloca, block_phis, &dead);
     /* For each block in order:
      *   - emit non-dead instructions
      *   - before the block's terminator, emit φ-resolution COPYs
@@ -583,8 +373,6 @@ static void opt_mem2reg(IRFunction *fn) {
     }
 
     /* Cleanup */
-    for (size_t ai = 0; ai < num_alloca; ai++) rstack_free(&stacks[ai]);
-    free(stacks);
     for (size_t bi = 0; bi < cfg.num; bi++) {
         for (size_t j = 0; j < block_phis[bi].num_phis; j++)
             free(block_phis[bi].phis[j].args);
@@ -593,7 +381,6 @@ static void opt_mem2reg(IRFunction *fn) {
     free(block_phis);
     free(alloca_slots);
     free(dead);
-    free(dt_children);
     domtree_free(&dt);
     cfg_free(&cfg);
 }

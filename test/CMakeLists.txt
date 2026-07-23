@@ -42,6 +42,10 @@ add_executable(test_phi unit/test_phi.c)
 target_link_libraries(test_phi PRIVATE fakecc_core test_framework)
 add_test(NAME test_phi COMMAND test_phi)
 
+add_executable(test_renaming unit/test_renaming.c)
+target_link_libraries(test_renaming PRIVATE fakecc_core test_framework)
+add_test(NAME test_renaming COMMAND test_renaming)
+
 # --- e2e tests ---
 
 add_test(NAME e2e
