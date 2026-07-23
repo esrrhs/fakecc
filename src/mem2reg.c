@@ -149,6 +149,93 @@ void block_phi_info_free(BlockPhiInfo *bp, size_t num_blocks) {
 }
 
 /* ================================================================== */
+/* IRInstArray helpers (rebuild for writeback)                          */
+/* ================================================================== */
+
+static void inst_array_init(IRInstArray *a) {
+    a->data = NULL; a->len = 0; a->cap = 0;
+}
+
+static void inst_array_push(IRInstArray *a, IRInst inst) {
+    if (a->len >= a->cap) {
+        a->cap = a->cap ? a->cap * 2 : 16;
+        a->data = xrealloc(a->data, a->cap * sizeof(IRInst));
+    }
+    a->data[a->len++] = inst;
+}
+
+static void inst_array_free_contents(IRInstArray *a) {
+    free(a->data);
+    a->data = NULL; a->len = 0; a->cap = 0;
+}
+
+/* ================================================================== */
+/* Writeback — resolve φ to COPYs and rebuild flat IR                  */
+/* ================================================================== */
+
+void mem2reg_writeback(
+    IRFunction *fn,
+    const CFG *cfg,
+    BlockPhiInfo *block_phi_info,
+    char *dead)
+{
+    IRInstArray out;
+    inst_array_init(&out);
+
+    for (size_t bi = 0; bi < cfg->num; bi++) {
+        const CFGBlock *blk = &cfg->blocks[bi];
+
+        /* Identify the terminator (last instruction if BR/CBR/RETURN). */
+        size_t term_idx = blk->end;
+        if (blk->end > blk->start) {
+            IROpcode last_op = fn->insts.data[blk->end - 1].op;
+            if (last_op == IR_BR || last_op == IR_CBR || last_op == IR_RETURN)
+                term_idx = blk->end - 1;
+        }
+
+        /* Emit non-dead body instructions (everything before the terminator). */
+        for (size_t i = blk->start; i < term_idx; i++) {
+            if (!dead[i])
+                inst_array_push(&out, fn->insts.data[i]);
+        }
+
+        /* Emit φ-resolution COPYs for each successor.
+         * φ(B3: v0 = merge(v1 from B1, v2 from B2)) becomes:
+         *   in B1: v0 = COPY v1
+         *   in B2: v0 = COPY v2
+         * COPYs are placed before the terminator. */
+        for (size_t si = 0; si < blk->num_succs; si++) {
+            int s = blk->succs[si];
+            for (size_t phi_i = 0; phi_i < block_phi_info[s].num_phis; phi_i++) {
+                IRPhi *phi = &block_phi_info[s].phis[phi_i];
+                /* Find the argument coming from this predecessor block. */
+                for (size_t ai = 0; ai < phi->num_args; ai++) {
+                    if (phi->args[ai].pred == (int)bi) {
+                        IRInst copy;
+                        copy.op = IR_COPY;
+                        copy.dst = phi->dst;
+                        copy.a = phi->args[ai].val;
+                        copy.b = -1;
+                        copy.imm = 0;
+                        copy.loc = phi->loc;
+                        inst_array_push(&out, copy);
+                        break;
+                    }
+                }
+            }
+        }
+
+        /* Emit the terminator (if it exists and isn't dead). */
+        if (term_idx < blk->end && !dead[term_idx])
+            inst_array_push(&out, fn->insts.data[term_idx]);
+    }
+
+    /* Replace the function's instruction array. */
+    inst_array_free_contents(&fn->insts);
+    fn->insts = out;
+}
+
+/* ================================================================== */
 /* Rename — dominator-tree DFS (Cytron et al., 1991, Section 5)        */
 /* ================================================================== */
 
@@ -389,4 +476,96 @@ void mem2reg_rename(
     free(push_count);
     for (size_t ai = 0; ai < num_alloca; ai++) rstack_free(&stacks[ai]);
     free(stacks);
+}
+
+/* ================================================================== */
+/* opt_mem2reg — full mem2reg pass (φ placement → rename → writeback)  */
+/*                                                                      */
+/* Classic algorithm:                                                    */
+/*   1. Build CFG + dominator tree + dominance frontiers                */
+/*   2. For each promotable alloca:                                     */
+/*        a. Insert φ at DF of blocks containing stores                  */
+/*        b. Rename: dominator-tree DFS, replace LOAD with COPY,        */
+/*           mark STORE/ALLOCA dead, push/pop reaching values            */
+/*   3. Resolve φ → COPY in predecessors (mem2reg_writeback)            */
+/*   4. Rebuild instruction array without dead instructions             */
+/*                                                                      */
+/* Returns: number of alloca variables promoted.                        */
+/* ================================================================== */
+
+int opt_mem2reg(IRFunction *fn)
+{
+    CFG cfg;
+    cfg_build(&cfg, &fn->insts);
+
+    DomTree dt;
+    domtree_build(&dt, &cfg);
+
+    const IRInstArray *insts = &fn->insts;
+
+    /* ---- 1. Identify promotable alloca slots ---- */
+    int *alloca_slots = NULL;
+    size_t num_alloca = 0, cap_alloca = 0;
+    for (size_t i = 0; i < insts->len; i++) {
+        if (insts->data[i].op == IR_ALLOCA) {
+            if (num_alloca >= cap_alloca) {
+                cap_alloca = cap_alloca ? cap_alloca * 2 : 8;
+                alloca_slots = xrealloc(alloca_slots, cap_alloca * sizeof(int));
+            }
+            alloca_slots[num_alloca++] = insts->data[i].dst;
+        }
+    }
+
+    if (num_alloca == 0) {
+        free(alloca_slots);
+        domtree_free(&dt);
+        cfg_free(&cfg);
+        return 0;
+    }
+
+    /* ---- 2. Build block_stores bitmap ---- */
+    char **block_stores = xmalloc(cfg.num * sizeof(char *));
+    for (size_t bi = 0; bi < cfg.num; bi++) {
+        block_stores[bi] = xmalloc(num_alloca * sizeof(char));
+        memset(block_stores[bi], 0, num_alloca * sizeof(char));
+    }
+    for (size_t i = 0; i < insts->len; i++) {
+        if (insts->data[i].op != IR_STORE) continue;
+        for (size_t ai = 0; ai < num_alloca; ai++) {
+            if (insts->data[i].a == alloca_slots[ai]) {
+                for (size_t bi = 0; bi < cfg.num; bi++) {
+                    if (i >= cfg.blocks[bi].start && i < cfg.blocks[bi].end) {
+                        block_stores[bi][ai] = 1;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    /* ---- 3. φ placement ---- */
+    BlockPhiInfo *bp = mem2reg_place_phis(
+        &cfg, &dt, alloca_slots, num_alloca,
+        (const char **)block_stores, &fn->next_value_id);
+
+    /* Free block_stores (no longer needed). */
+    for (size_t bi = 0; bi < cfg.num; bi++) free(block_stores[bi]);
+    free(block_stores);
+
+    /* ---- 4. Rename ---- */
+    char *dead = NULL;
+    mem2reg_rename(fn, &cfg, &dt, alloca_slots, num_alloca, bp, &dead);
+
+    /* ---- 5. Writeback (rebuild flat IR, resolve φ → COPY) ---- */
+    mem2reg_writeback(fn, &cfg, bp, dead);
+
+    /* ---- 6. Cleanup ---- */
+    block_phi_info_free(bp, cfg.num);
+    free(alloca_slots);
+    free(dead);
+    domtree_free(&dt);
+    cfg_free(&cfg);
+
+    return (int)num_alloca;
 }

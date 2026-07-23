@@ -35,4 +35,40 @@ void mem2reg_rename(
     BlockPhiInfo *block_phi_info,
     char **dead);
 
+/* ------------------------------------------------------------------ */
+/* mem2reg — writeback phase                                           */
+/* ------------------------------------------------------------------ */
+
+/* Rebuild the flat instruction array, removing dead instructions and
+ * resolving φ nodes into COPY instructions in predecessor blocks.
+ *
+ * For each φ `B3: v0 = merge(v1 from B1, v2 from B2)`:
+ *   - In B1, before its terminator: emit `v0 = COPY v1`
+ *   - In B2, before its terminator: emit `v0 = COPY v2`
+ *
+ * The rebuilt array replaces fn->insts.  The caller still owns
+ * `block_phi_info` and `dead` and must free them after the call.
+ */
+void mem2reg_writeback(
+    IRFunction *fn,
+    const CFG *cfg,
+    BlockPhiInfo *block_phi_info,
+    char *dead);
+
+/* ------------------------------------------------------------------ */
+/* mem2reg — full pass (convenience entry point)                       */
+/* ------------------------------------------------------------------ */
+
+/* Promote stack-allocated variables to SSA registers.
+ *
+ * Runs the complete mem2reg pipeline:
+ *   1. Build CFG + dominator tree
+ *   2. Identify promotable alloca slots
+ *   3. Place φ nodes at dominance frontiers (mem2reg_place_phis)
+ *   4. Rename variables via dominator-tree DFS (mem2reg_rename)
+ *   5. Resolve φ → COPY and rebuild flat IR (mem2reg_writeback)
+ *
+ * Returns: number of alloca variables promoted (0 if none). */
+int opt_mem2reg(IRFunction *fn);
+
 #endif /* FAKECC_MEM2REG_H */
