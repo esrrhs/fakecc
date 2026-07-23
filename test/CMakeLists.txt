@@ -38,6 +38,10 @@ add_executable(test_domtree unit/test_domtree.c)
 target_link_libraries(test_domtree PRIVATE fakecc_core test_framework)
 add_test(NAME test_domtree COMMAND test_domtree)
 
+add_executable(test_phi unit/test_phi.c)
+target_link_libraries(test_phi PRIVATE fakecc_core test_framework)
+add_test(NAME test_phi COMMAND test_phi)
+
 # --- e2e tests ---
 
 add_test(NAME e2e

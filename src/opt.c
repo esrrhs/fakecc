@@ -1,6 +1,7 @@
 #include "fakecc/opt.h"
 #include "fakecc/cfg.h"
 #include "fakecc/domtree.h"
+#include "fakecc/phi.h"
 #include "fakecc/common.h"
 
 #include <stdio.h>
@@ -39,59 +40,6 @@ static void *xrealloc(void *p, size_t n) {
         exit(1);
     }
     return q;
-}
-
-/* ================================================================== */
-/* SSA φ nodes — exist only during mem2reg, never written to flat IR   */
-/* ================================================================== */
-
-/* φ node — exists only during mem2reg, never written to the flat IR. */
-typedef struct { IRValue val; int pred; } PhiArg;
-typedef struct {
-    IRValue dst;          /* φ result value */
-    int alloca_slot;      /* which alloca this φ merges */
-    PhiArg *args; size_t num, cap;
-    SourceLoc loc;
-} IRPhi;
-
-/* Per-block φ storage, indexed by CFG block id.  The CFG module
- * (cfg.h) does not know about φ nodes, so we keep them here. */
-typedef struct {
-    IRPhi *phis;
-    size_t num_phis, cap_phis;
-} BlockPhi;
-
-/* Helper: add a φ to a block's phi list. */
-static IRPhi *block_add_phi(BlockPhi *bp, IRValue dst, int alloca_slot, SourceLoc loc) {
-    if (bp->num_phis >= bp->cap_phis) {
-        bp->cap_phis = bp->cap_phis ? bp->cap_phis * 2 : 4;
-        bp->phis = xrealloc(bp->phis, bp->cap_phis * sizeof(IRPhi));
-    }
-    IRPhi *phi = &bp->phis[bp->num_phis++];
-    phi->dst = dst;
-    phi->alloca_slot = alloca_slot;
-    phi->args = NULL;
-    phi->num = 0;
-    phi->cap = 0;
-    phi->loc = loc;
-    return phi;
-}
-
-static void phi_add_arg(IRPhi *phi, IRValue val, int pred) {
-    if (phi->num >= phi->cap) {
-        phi->cap = phi->cap ? phi->cap * 2 : 4;
-        phi->args = xrealloc(phi->args, phi->cap * sizeof(PhiArg));
-    }
-    phi->args[phi->num].val = val;
-    phi->args[phi->num].pred = pred;
-    phi->num++;
-}
-
-/* Does this block already have a φ for the given alloca slot? */
-static int block_has_phi(BlockPhi *bp, int alloca_slot) {
-    for (size_t i = 0; i < bp->num_phis; i++)
-        if (bp->phis[i].alloca_slot == alloca_slot) return 1;
-    return 0;
 }
 
 /* ================================================================== */
@@ -300,6 +248,17 @@ static void opt_renumber(IRFunction *fn) {
 /*   4. Rebuild instruction array without dead instructions             */
 /* ================================================================== */
 
+/* φ helper — add an argument (value from predecessor `pred`) */
+static void phi_add_arg(IRPhi *phi, IRValue val, int pred) {
+    if (phi->num_args >= phi->cap_args) {
+        phi->cap_args = phi->cap_args ? phi->cap_args * 2 : 4;
+        phi->args = xrealloc(phi->args, phi->cap_args * sizeof(PhiArg));
+    }
+    phi->args[phi->num_args].val = val;
+    phi->args[phi->num_args].pred = pred;
+    phi->num_args++;
+}
+
 /* Per-alloca renaming stack */
 typedef struct {
     IRValue *vals;  /* stack of reaching values */
@@ -336,8 +295,8 @@ static void opt_mem2reg(IRFunction *fn) {
     cfg_build(&cfg, &fn->insts);
 
     /* Per-block φ storage — the CFG module does not carry φ nodes. */
-    BlockPhi *block_phis = xmalloc(cfg.num * sizeof(BlockPhi));
-    memset(block_phis, 0, cfg.num * sizeof(BlockPhi));
+    BlockPhiInfo *block_phis = xmalloc(cfg.num * sizeof(BlockPhiInfo));
+    memset(block_phis, 0, cfg.num * sizeof(BlockPhiInfo));
 
     DomTree dt;
     domtree_build(&dt, &cfg);
@@ -368,63 +327,41 @@ static void opt_mem2reg(IRFunction *fn) {
         if (insts->data[i].op == IR_ALLOCA) dead[i] = 1;
 
     /* ---- 2. φ placement ---- */
-    /* For each alloca, find blocks with stores, then place φ at DF. */
-    for (size_t ai = 0; ai < num_alloca; ai++) {
-        int slot = alloca_slots[ai];
-        /* blocks containing a store to this alloca */
-        int *def_blocks = NULL; size_t num_def = 0, cap_def = 0;
-        for (size_t i = 0; i < insts->len; i++) {
-            if (insts->data[i].op == IR_STORE && insts->data[i].a == slot) {
-                /* find which block this instruction is in */
+    /* Build block_stores bitmap: block_stores[bi][ai] = has store? */
+    char **block_stores = xmalloc(cfg.num * sizeof(char *));
+    for (size_t bi = 0; bi < cfg.num; bi++) {
+        block_stores[bi] = xmalloc(num_alloca * sizeof(char));
+        memset(block_stores[bi], 0, num_alloca * sizeof(char));
+    }
+    for (size_t i = 0; i < insts->len; i++) {
+        if (insts->data[i].op != IR_STORE) continue;
+        /* Find which alloca slot this store targets */
+        for (size_t ai = 0; ai < num_alloca; ai++) {
+            if (insts->data[i].a == alloca_slots[ai]) {
+                /* Find which block this instruction is in */
                 for (size_t bi = 0; bi < cfg.num; bi++) {
                     if (i >= cfg.blocks[bi].start && i < cfg.blocks[bi].end) {
-                        int found = 0;
-                        for (size_t k = 0; k < num_def; k++) if (def_blocks[k] == (int)bi) { found = 1; break; }
-                        if (!found) {
-                            if (num_def >= cap_def) { cap_def = cap_def ? cap_def * 2 : 4; def_blocks = xrealloc(def_blocks, cap_def * sizeof(int)); }
-                            def_blocks[num_def++] = (int)bi;
-                        }
+                        block_stores[bi][ai] = 1;
                         break;
                     }
                 }
+                break;
             }
         }
-        /* worklist: for each def block, add its DF members that don't have a φ yet */
-        int *wl = NULL; size_t wl_len = 0, wl_cap = 0;
-        for (size_t d = 0; d < num_def; d++) {
-            if (wl_len >= wl_cap) { wl_cap = wl_cap ? wl_cap * 2 : 4; wl = xrealloc(wl, wl_cap * sizeof(int)); }
-            wl[wl_len++] = def_blocks[d];
-        }
-        while (wl_len > 0) {
-            int X = wl[--wl_len];
-            for (size_t di = 0; di < dt.df_len[X]; di++) {
-                int Y = dt.df[X][di];
-                if (!block_has_phi(&block_phis[Y], slot)) {
-                    /* create a new SSA value for the φ result */
-                    IRValue phi_dst = fn->next_value_id++;
-                    /* find a source loc from the alloca */
-                    SourceLoc phi_loc = {NULL, 0, 0};
-                    for (size_t i = 0; i < insts->len; i++)
-                        if (insts->data[i].op == IR_ALLOCA && insts->data[i].dst == slot)
-                            { phi_loc = insts->data[i].loc; break; }
-                    block_add_phi(&block_phis[Y], phi_dst, slot, phi_loc);
-                    /* If Y has predecessors that aren't in def_blocks (i.e. Y
-                     * is reachable from non-def blocks), add Y to worklist
-                     * so φ propagates further. Simplified: always add. */
-                    int already = 0;
-                    for (size_t k = 0; k < num_def; k++) if (def_blocks[k] == Y) { already = 1; break; }
-                    if (!already) {
-                        if (num_def >= cap_def) { cap_def = cap_def ? cap_def * 2 : 4; def_blocks = xrealloc(def_blocks, cap_def * sizeof(int)); }
-                        def_blocks[num_def++] = Y;
-                        if (wl_len >= wl_cap) { wl_cap = wl_cap ? wl_cap * 2 : 4; wl = xrealloc(wl, wl_cap * sizeof(int)); }
-                        wl[wl_len++] = Y;
-                    }
-                }
-            }
-        }
-        free(wl);
-        free(def_blocks);
     }
+
+    /* Call mem2reg_place_phis to insert φ nodes at dominance frontiers. */
+    BlockPhiInfo *bp = mem2reg_place_phis(
+        &cfg, &dt, alloca_slots, num_alloca,
+        (const char **)block_stores, &fn->next_value_id);
+
+    /* Free block_stores (no longer needed). */
+    for (size_t bi = 0; bi < cfg.num; bi++) free(block_stores[bi]);
+    free(block_stores);
+
+    /* Replace block_phis with the result from mem2reg_place_phis. */
+    free(block_phis);
+    block_phis = bp;
 
     /* ---- 3. Rename (dominator-tree DFS) ---- */
     /* stacks[ai] = rename stack for alloca_slots[ai] */
@@ -619,7 +556,7 @@ static void opt_mem2reg(IRFunction *fn) {
                 for (size_t phi_i = 0; phi_i < block_phis[s].num_phis; phi_i++) {
                     IRPhi *phi = &block_phis[s].phis[phi_i];
                     /* Find the arg for predecessor b */
-                    for (size_t ai = 0; ai < phi->num; ai++) {
+                    for (size_t ai = 0; ai < phi->num_args; ai++) {
                         if (phi->args[ai].pred == (int)bi) {
                             IRInst copy;
                             copy.op = IR_COPY;
