@@ -22,6 +22,13 @@ typedef enum {
     IR_DIV,         /* dst = a / b  (signed) */
     IR_MOD,         /* dst = a % b  (signed) */
     IR_NEG,         /* dst = -a */
+    IR_ALLOCA,      /* dst = stack slot for a variable (codegen no-op) */
+    IR_LOAD,        /* dst = [a]   — read variable slot a → dst */
+    IR_STORE,       /* [a] = b    — write b into variable slot a; dst unused */
+    IR_COPY,        /* dst = a    — simple move (mem2reg / φ resolution product) */
+    IR_LABEL,       /* imm = label_id — basic-block marker */
+    IR_BR,          /* imm = target_label — unconditional branch */
+    IR_CBR,         /* a = cond, imm = true_label, b = false_label — conditional branch */
     IR_RETURN,      /* return a */
 } IROpcode;
 
