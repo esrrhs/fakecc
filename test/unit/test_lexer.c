@@ -208,6 +208,33 @@ static void test_slash_not_comment(void) {
     token_array_free(&a);
 }
 
+/* ---- Slice 3: assignment operator ---- */
+
+static void test_assign_token(void) {
+    /* "x = 5" → IDENT ASSIGN INT EOF */
+    TokenArray a = lex_str("x = 5");
+    T_ASSERT_EQ_INT((int)a.len, 4);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_STR_EQ(a.data[0].text, "x");
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_ASSIGN);
+    T_ASSERT_STR_EQ(a.data[1].text, "=");
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_double_assign_is_two_tokens(void) {
+    /* "a==b" → IDENT ASSIGN ASSIGN IDENT EOF (no "==" token) */
+    TokenArray a = lex_str("a==b");
+    T_ASSERT_EQ_INT((int)a.len, 5);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_ASSIGN);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_ASSIGN);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -228,5 +255,7 @@ int main(void) {
     test_paren_expr_tokens();
     test_comment_with_arith();
     test_slash_not_comment();
+    test_assign_token();
+    test_double_assign_is_two_tokens();
     return t_finalize();
 }

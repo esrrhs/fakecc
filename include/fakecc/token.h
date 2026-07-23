@@ -21,6 +21,7 @@ typedef enum {
     TK_STAR,             /* * */
     TK_SLASH,            /* / */
     TK_PERCENT,          /* % */
+    TK_ASSIGN,           /* = */
     TK_EOF,
 } TokenKind;
 

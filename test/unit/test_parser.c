@@ -30,22 +30,24 @@ static void test_valid_program(void) {
     T_ASSERT_STR_EQ(tu.package.name, "main");
     T_ASSERT_EQ_INT((int)tu.functions.len, 1);
     T_ASSERT_STR_EQ(tu.functions.data[0].name, "main");
-    /* ReturnStmt.value is now Expr* */
-    T_ASSERT(tu.functions.data[0].body.value != NULL);
-    T_ASSERT_EQ_INT((int)tu.functions.data[0].body.value->kind, (int)EX_INT_LIT);
-    T_ASSERT_EQ_INT(tu.functions.data[0].body.value->u.int_val, 42);
+    /* body is now StmtArray; first stmt is ST_RETURN */
+    T_ASSERT_EQ_INT((int)tu.functions.data[0].body.len, 1);
+    T_ASSERT_EQ_INT((int)tu.functions.data[0].body.data[0].kind, (int)ST_RETURN);
+    T_ASSERT(tu.functions.data[0].body.data[0].u.value != NULL);
+    T_ASSERT_EQ_INT((int)tu.functions.data[0].body.data[0].u.value->kind, (int)EX_INT_LIT);
+    T_ASSERT_EQ_INT(tu.functions.data[0].body.data[0].u.value->u.int_val, 42);
     tu_free(&tu);
 }
 
 static void test_return_zero(void) {
     TranslationUnit tu = lex_parse("package main; int main() { return 0; }");
-    T_ASSERT_EQ_INT(tu.functions.data[0].body.value->u.int_val, 0);
+    T_ASSERT_EQ_INT(tu.functions.data[0].body.data[0].u.value->u.int_val, 0);
     tu_free(&tu);
 }
 
 static void test_return_255(void) {
     TranslationUnit tu = lex_parse("package main; int main() { return 255; }");
-    T_ASSERT_EQ_INT(tu.functions.data[0].body.value->u.int_val, 255);
+    T_ASSERT_EQ_INT(tu.functions.data[0].body.data[0].u.value->u.int_val, 255);
     tu_free(&tu);
 }
 
@@ -109,7 +111,7 @@ static void test_return_without_int_dies(void) {
 static void test_add_expr(void) {
     /* return 1+2; → BOP_ADD(INT_LIT(1), INT_LIT(2)) */
     TranslationUnit tu = lex_parse("package main; int main() { return 1+2; }");
-    Expr *e = tu.functions.data[0].body.value;
+    Expr *e = tu.functions.data[0].body.data[0].u.value;
     T_ASSERT_EQ_INT((int)e->kind, (int)EX_BINOP);
     T_ASSERT_EQ_INT((int)e->u.bin.op, (int)BOP_ADD);
     T_ASSERT_EQ_INT((int)e->u.bin.l->kind, (int)EX_INT_LIT);
@@ -122,7 +124,7 @@ static void test_add_expr(void) {
 static void test_mul_priority(void) {
     /* return 1+2*3; → BOP_ADD(1, BOP_MUL(2, 3)) */
     TranslationUnit tu = lex_parse("package main; int main() { return 1+2*3; }");
-    Expr *e = tu.functions.data[0].body.value;
+    Expr *e = tu.functions.data[0].body.data[0].u.value;
     T_ASSERT_EQ_INT((int)e->kind, (int)EX_BINOP);
     T_ASSERT_EQ_INT((int)e->u.bin.op, (int)BOP_ADD);
     T_ASSERT_EQ_INT((int)e->u.bin.r->kind, (int)EX_BINOP);
@@ -133,7 +135,7 @@ static void test_mul_priority(void) {
 static void test_paren_expr(void) {
     /* return (1+2)*3; → BOP_MUL(BOP_ADD(1,2), 3) */
     TranslationUnit tu = lex_parse("package main; int main() { return (1+2)*3; }");
-    Expr *e = tu.functions.data[0].body.value;
+    Expr *e = tu.functions.data[0].body.data[0].u.value;
     T_ASSERT_EQ_INT((int)e->kind, (int)EX_BINOP);
     T_ASSERT_EQ_INT((int)e->u.bin.op, (int)BOP_MUL);
     T_ASSERT_EQ_INT((int)e->u.bin.l->kind, (int)EX_BINOP);
@@ -144,7 +146,7 @@ static void test_paren_expr(void) {
 static void test_left_assoc_sub(void) {
     /* return 1-2-3; → BOP_SUB(BOP_SUB(1,2), 3) */
     TranslationUnit tu = lex_parse("package main; int main() { return 1-2-3; }");
-    Expr *e = tu.functions.data[0].body.value;
+    Expr *e = tu.functions.data[0].body.data[0].u.value;
     T_ASSERT_EQ_INT((int)e->kind, (int)EX_BINOP);
     T_ASSERT_EQ_INT((int)e->u.bin.op, (int)BOP_SUB);
     T_ASSERT_EQ_INT((int)e->u.bin.l->kind, (int)EX_BINOP);
@@ -155,7 +157,7 @@ static void test_left_assoc_sub(void) {
 static void test_unary_neg(void) {
     /* return -5; → EX_UNARY(UOP_NEG, INT_LIT(5)) */
     TranslationUnit tu = lex_parse("package main; int main() { return -5; }");
-    Expr *e = tu.functions.data[0].body.value;
+    Expr *e = tu.functions.data[0].body.data[0].u.value;
     T_ASSERT_EQ_INT((int)e->kind, (int)EX_UNARY);
     T_ASSERT_EQ_INT((int)e->u.un.op, (int)UOP_NEG);
     T_ASSERT_EQ_INT((int)e->u.un.operand->kind, (int)EX_INT_LIT);
@@ -166,10 +168,83 @@ static void test_unary_neg(void) {
 static void test_unary_pos(void) {
     /* return +5; → EX_UNARY(UOP_POS, INT_LIT(5)) */
     TranslationUnit tu = lex_parse("package main; int main() { return +5; }");
-    Expr *e = tu.functions.data[0].body.value;
+    Expr *e = tu.functions.data[0].body.data[0].u.value;
     T_ASSERT_EQ_INT((int)e->kind, (int)EX_UNARY);
     T_ASSERT_EQ_INT((int)e->u.un.op, (int)UOP_POS);
     T_ASSERT_EQ_INT(e->u.un.operand->u.int_val, 5);
+    tu_free(&tu);
+}
+
+/* ---- Slice 3: variables / assignment ---- */
+
+static void test_decl_assign_var(void) {
+    /* int x; x = 42; return x;
+     * → ST_DECL(x, init=NULL); ST_EXPR(EX_ASSIGN(EX_VAR x, INT 42)); ST_RETURN(EX_VAR x) */
+    TranslationUnit tu = lex_parse(
+        "package main; int main() { int x; x = 42; return x; }");
+    T_ASSERT_EQ_INT((int)tu.functions.data[0].body.len, 3);
+
+    Stmt *s0 = &tu.functions.data[0].body.data[0];
+    T_ASSERT_EQ_INT((int)s0->kind, (int)ST_DECL);
+    T_ASSERT_STR_EQ(s0->u.decl.name, "x");
+    T_ASSERT(s0->u.decl.init == NULL);
+
+    Stmt *s1 = &tu.functions.data[0].body.data[1];
+    T_ASSERT_EQ_INT((int)s1->kind, (int)ST_EXPR);
+    T_ASSERT_EQ_INT((int)s1->u.expr->kind, (int)EX_ASSIGN);
+    T_ASSERT_EQ_INT((int)s1->u.expr->u.assign.lvalue->kind, (int)EX_VAR);
+    T_ASSERT_STR_EQ(s1->u.expr->u.assign.lvalue->u.var.name, "x");
+    T_ASSERT_EQ_INT((int)s1->u.expr->u.assign.rvalue->kind, (int)EX_INT_LIT);
+    T_ASSERT_EQ_INT(s1->u.expr->u.assign.rvalue->u.int_val, 42);
+
+    Stmt *s2 = &tu.functions.data[0].body.data[2];
+    T_ASSERT_EQ_INT((int)s2->kind, (int)ST_RETURN);
+    T_ASSERT_EQ_INT((int)s2->u.value->kind, (int)EX_VAR);
+    T_ASSERT_STR_EQ(s2->u.value->u.var.name, "x");
+    tu_free(&tu);
+}
+
+static void test_chained_assign_right_assoc(void) {
+    /* return x = y = 1; → EX_ASSIGN(EX_VAR x, EX_ASSIGN(EX_VAR y, INT 1)) */
+    TranslationUnit tu = lex_parse(
+        "package main; int main() { return x = y = 1; }");
+    Expr *e = tu.functions.data[0].body.data[0].u.value;
+    T_ASSERT_EQ_INT((int)e->kind, (int)EX_ASSIGN);
+    T_ASSERT_EQ_INT((int)e->u.assign.lvalue->kind, (int)EX_VAR);
+    T_ASSERT_STR_EQ(e->u.assign.lvalue->u.var.name, "x");
+    T_ASSERT_EQ_INT((int)e->u.assign.rvalue->kind, (int)EX_ASSIGN);
+    T_ASSERT_EQ_INT((int)e->u.assign.rvalue->u.assign.lvalue->kind, (int)EX_VAR);
+    T_ASSERT_STR_EQ(e->u.assign.rvalue->u.assign.lvalue->u.var.name, "y");
+    T_ASSERT_EQ_INT((int)e->u.assign.rvalue->u.assign.rvalue->kind, (int)EX_INT_LIT);
+    T_ASSERT_EQ_INT(e->u.assign.rvalue->u.assign.rvalue->u.int_val, 1);
+    tu_free(&tu);
+}
+
+static void test_var_in_binop(void) {
+    /* return x + 1; → EX_BINOP(EX_VAR x, INT 1) */
+    TranslationUnit tu = lex_parse(
+        "package main; int main() { return x + 1; }");
+    Expr *e = tu.functions.data[0].body.data[0].u.value;
+    T_ASSERT_EQ_INT((int)e->kind, (int)EX_BINOP);
+    T_ASSERT_EQ_INT((int)e->u.bin.op, (int)BOP_ADD);
+    T_ASSERT_EQ_INT((int)e->u.bin.l->kind, (int)EX_VAR);
+    T_ASSERT_STR_EQ(e->u.bin.l->u.var.name, "x");
+    T_ASSERT_EQ_INT((int)e->u.bin.r->kind, (int)EX_INT_LIT);
+    T_ASSERT_EQ_INT(e->u.bin.r->u.int_val, 1);
+    tu_free(&tu);
+}
+
+static void test_decl_with_init(void) {
+    /* int x = 1 + 2; → ST_DECL with init->kind == EX_BINOP */
+    TranslationUnit tu = lex_parse(
+        "package main; int main() { int x = 1 + 2; return x; }");
+    T_ASSERT_EQ_INT((int)tu.functions.data[0].body.len, 2);
+    Stmt *s0 = &tu.functions.data[0].body.data[0];
+    T_ASSERT_EQ_INT((int)s0->kind, (int)ST_DECL);
+    T_ASSERT_STR_EQ(s0->u.decl.name, "x");
+    T_ASSERT(s0->u.decl.init != NULL);
+    T_ASSERT_EQ_INT((int)s0->u.decl.init->kind, (int)EX_BINOP);
+    T_ASSERT_EQ_INT((int)s0->u.decl.init->u.bin.op, (int)BOP_ADD);
     tu_free(&tu);
 }
 
@@ -190,5 +265,9 @@ int main(void) {
     test_left_assoc_sub();
     test_unary_neg();
     test_unary_pos();
+    test_decl_assign_var();
+    test_chained_assign_right_assoc();
+    test_var_in_binop();
+    test_decl_with_init();
     return t_finalize();
 }

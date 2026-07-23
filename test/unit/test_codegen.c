@@ -80,6 +80,24 @@ static void test_prologue_present(void) {
     emit_module_free(&em);
 }
 
+/* ---- Slice 3: variable codegen tests ---- */
+
+static void test_var_codegen(void) {
+    /* int x; x = 42; return x; — non-empty code + correct prologue */
+    EmitModule em = compile_to_code(
+        "package main; int main() { int x; x = 42; return x; }");
+    T_ASSERT_EQ_INT((int)em.num_symbols, 1);
+    T_ASSERT_STR_EQ(em.symbols[0].name, "main");
+    T_ASSERT(em.symbols[0].size > 0);
+    T_ASSERT(em.code.len > 0);
+    /* prologue still intact */
+    T_ASSERT((unsigned char)em.code.data[0] == 0x55);
+    T_ASSERT((unsigned char)em.code.data[1] == 0x48);
+    T_ASSERT((unsigned char)em.code.data[2] == 0x89);
+    T_ASSERT((unsigned char)em.code.data[3] == 0xe5);
+    emit_module_free(&em);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -87,5 +105,6 @@ int main(void) {
     test_return_42();
     test_return_255();
     test_prologue_present();
+    test_var_codegen();
     return t_finalize();
 }

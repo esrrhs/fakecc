@@ -186,6 +186,42 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 break;
             }
 
+            case IR_ALLOCA:
+                /* no-op: the slot is already reserved by the prologue's
+                 * sub $N,%rsp (N = 8*next_value_id, 16-aligned). */
+                break;
+
+            case IR_LOAD: {
+                /* load slot→%rax, store %rax→dst slot */
+                emit_load_rax(&out->code, inst->a);
+                emit_store_rax(&out->code, inst->dst);
+                break;
+            }
+
+            case IR_STORE: {
+                /* load value→%rax, store %rax→slot */
+                emit_load_rax(&out->code, inst->b);
+                emit_store_rax(&out->code, inst->a);
+                break;
+            }
+
+            case IR_COPY: {
+                /* load a→%rax, store %rax→dst slot (same as IR_LOAD shape) */
+                emit_load_rax(&out->code, inst->a);
+                emit_store_rax(&out->code, inst->dst);
+                break;
+            }
+
+            case IR_LABEL:
+            case IR_BR:
+            case IR_CBR:
+                /* Control-flow codegen not yet supported (Slice 4).
+                 * The current frontend never produces these opcodes;
+                 * hitting this means a logic error elsewhere. */
+                die_at(inst->loc.file, inst->loc.line, inst->loc.col,
+                       "control-flow codegen not yet supported (Slice 4)");
+                break;
+
             case IR_RETURN: {
                 /* load value→%rax, restore stack, pop %rbp, ret */
                 emit_load_rax(&out->code, inst->a);

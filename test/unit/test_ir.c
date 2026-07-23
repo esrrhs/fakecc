@@ -116,6 +116,38 @@ static void test_div_mod_ir(void) {
     ir_module_free(&ir2);
 }
 
+/* ---- Slice 3: variable IR tests ---- */
+
+static void test_var_ir_sequence(void) {
+    /* int x; x = 42; return x;
+     * → ALLOCA v0; CONST v1=42; STORE a=v0,b=v1; LOAD v2=v0; RETURN v2 */
+    IRModule ir = compile_to_ir(
+        "package main; int main() { int x; x = 42; return x; }");
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.len, 5);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[0].op, (int)IR_ALLOCA);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[1].op, (int)IR_CONST);
+    T_ASSERT_EQ_INT(ir.functions.data[0].insts.data[1].imm, 42);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[2].op, (int)IR_STORE);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[3].op, (int)IR_LOAD);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[4].op, (int)IR_RETURN);
+    ir_module_free(&ir);
+}
+
+static void test_decl_init_ir(void) {
+    /* int x = 5; return x;
+     * → ALLOCA v0; CONST v1=5; STORE a=v0,b=v1; LOAD v2=v0; RETURN v2 */
+    IRModule ir = compile_to_ir(
+        "package main; int main() { int x = 5; return x; }");
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.len, 5);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[0].op, (int)IR_ALLOCA);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[1].op, (int)IR_CONST);
+    T_ASSERT_EQ_INT(ir.functions.data[0].insts.data[1].imm, 5);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[2].op, (int)IR_STORE);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[3].op, (int)IR_LOAD);
+    T_ASSERT_EQ_INT((int)ir.functions.data[0].insts.data[4].op, (int)IR_RETURN);
+    ir_module_free(&ir);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -128,5 +160,7 @@ int main(void) {
     test_neg_ir();
     test_mul_ir();
     test_div_mod_ir();
+    test_var_ir_sequence();
+    test_decl_init_ir();
     return t_finalize();
 }

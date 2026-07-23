@@ -3,6 +3,7 @@
 #include "fakecc/emit.h"
 #include "fakecc/ir.h"
 #include "fakecc/lexer.h"
+#include "fakecc/opt.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
 #include "fakecc/token.h"
@@ -68,6 +69,9 @@ int main(int argc, char **argv) {
     IRModule ir;
     ir_module_init(&ir);
     ir_generate(&tu, &ir);
+
+    /* 5.5. Optimize IR */
+    opt(&ir);
 
     /* 6. Generate machine code */
     EmitModule em;

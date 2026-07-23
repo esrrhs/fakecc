@@ -37,28 +37,49 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 /*
  * translation-unit  = package-decl function-decl EOF
  * package-decl      = "package" IDENT ";"
- * function-decl     = "int" IDENT "(" ")" "{" return-stmt "}"
+ * function-decl     = "int" IDENT "(" ")" "{" stmt-list "}"
+ * stmt-list         = { stmt }
+ * stmt              = decl-stmt
+ *                   | return-stmt
+ *                   | expr-stmt
+ * decl-stmt         = "int" IDENT [ "=" expr ] ";"
  * return-stmt       = "return" expr ";"
+ * expr-stmt         = expr ";"
  *
- * expr              = add-expr
+ * expr              = assign-expr
+ * assign-expr       = add-expr [ "=" assign-expr ]        (* right-assoc *)
  * add-expr          = mul-expr { ("+" | "-") mul-expr }
  * mul-expr          = unary-expr { ("*" | "/" | "%") unary-expr }
  * unary-expr        = ("+" | "-") unary-expr
  *                   | primary-expr
  * primary-expr      = INT_LITERAL
+ *                   | IDENT
  *                   | "(" expr ")"
  */
 
 /* ---- expression parsing (forward declarations) ---- */
 
 static Expr *parse_expr(Parser *p);
+static Expr *parse_assign(Parser *p);
 static Expr *parse_add(Parser *p);
 static Expr *parse_mul(Parser *p);
 static Expr *parse_unary(Parser *p);
 static Expr *parse_primary(Parser *p);
 
 static Expr *parse_expr(Parser *p) {
-    return parse_add(p);
+    return parse_assign(p);
+}
+
+/* assign-expr = add-expr [ "=" assign-expr ]  -- right associative */
+static Expr *parse_assign(Parser *p) {
+    Expr *lhs = parse_add(p);
+    if (peek(p)->kind == TK_ASSIGN) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_assign(p);   /* recursive → right associative */
+        return expr_new_assign(lhs, rhs, loc);
+    }
+    return lhs;
 }
 
 /* add-expr = mul-expr { ("+" | "-") mul-expr }  -- left associative */
@@ -109,11 +130,16 @@ static Expr *parse_unary(Parser *p) {
     return parse_primary(p);
 }
 
-/* primary-expr = INT_LITERAL | "(" expr ")" */
+/* primary-expr = INT_LITERAL | IDENT | "(" expr ")" */
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
         Expr *e = expr_new_int(atoi(t->text), t->loc);
+        advance(p);
+        return e;
+    }
+    if (t->kind == TK_IDENT) {
+        Expr *e = expr_new_var(t->text, t->loc);
         advance(p);
         return e;
     }
@@ -128,18 +154,67 @@ static Expr *parse_primary(Parser *p) {
     return NULL; /* unreachable */
 }
 
-static ReturnStmt parse_return_stmt(Parser *p) {
-    const Token *kw = peek(p);
-    expect_kind(p, TK_KW_RETURN, "'return'");
+/* ---- statement parsing (forward declarations) ---- */
 
-    Expr *e = parse_expr(p);
+static void parse_stmt_list(Parser *p, StmtArray *out);
+static Stmt parse_stmt(Parser *p);
 
+/* stmt-list = { stmt } until '}' */
+static void parse_stmt_list(Parser *p, StmtArray *out) {
+    while (peek(p)->kind != TK_RBRACE) {
+        const Token *t = peek(p);
+        if (t->kind == TK_EOF) {
+            die_at(t->loc.file, t->loc.line, t->loc.col,
+                   "expected '}' but got end of file");
+        }
+        stmt_array_push(out, parse_stmt(p));
+    }
+}
+
+/* stmt = decl-stmt | return-stmt | expr-stmt */
+static Stmt parse_stmt(Parser *p) {
+    TokenKind k = peek(p)->kind;
+    if (k == TK_KW_INT) {
+        /* decl-stmt: "int" IDENT ["=" expr] ";" */
+        const Token *int_kw = peek(p);
+        advance(p);  /* consume "int" */
+        const Token *name = peek(p);
+        if (name->kind != TK_IDENT) {
+            die_at(name->loc.file, name->loc.line, name->loc.col,
+                   "expected variable name but got '%s'", name->text);
+        }
+        advance(p);
+        Stmt s;
+        s.kind = ST_DECL;
+        s.loc = int_kw->loc;
+        s.u.decl.name = xstrdup(name->text);
+        s.u.decl.init = NULL;
+        if (peek(p)->kind == TK_ASSIGN) {
+            advance(p);  /* consume "=" */
+            s.u.decl.init = parse_expr(p);
+        }
+        expect_kind(p, TK_SEMICOLON, "';'");
+        return s;
+    }
+    if (k == TK_KW_RETURN) {
+        /* return-stmt */
+        const Token *kw = peek(p);
+        advance(p);  /* consume "return" */
+        Stmt s;
+        s.kind = ST_RETURN;
+        s.loc = kw->loc;
+        s.u.value = parse_expr(p);
+        expect_kind(p, TK_SEMICOLON, "';'");
+        return s;
+    }
+    /* expr-stmt */
+    const Token *t = peek(p);
+    Stmt s;
+    s.kind = ST_EXPR;
+    s.loc = t->loc;
+    s.u.expr = parse_expr(p);
     expect_kind(p, TK_SEMICOLON, "';'");
-
-    ReturnStmt rs;
-    rs.value = e;
-    rs.loc = kw->loc;
-    return rs;
+    return s;
 }
 
 static FunctionDecl parse_function_decl(Parser *p) {
@@ -157,14 +232,15 @@ static FunctionDecl parse_function_decl(Parser *p) {
     expect_kind(p, TK_RPAREN, "')'");
     expect_kind(p, TK_LBRACE, "'{'");
 
-    ReturnStmt body = parse_return_stmt(p);
+    FunctionDecl fn;
+    fn.name = xstrdup(name->text);
+    stmt_array_init(&fn.body);
+    fn.loc = int_kw->loc;
+
+    parse_stmt_list(p, &fn.body);
 
     expect_kind(p, TK_RBRACE, "'}'");
 
-    FunctionDecl fn;
-    fn.name = xstrdup(name->text);
-    fn.body = body;
-    fn.loc = int_kw->loc;
     return fn;
 }
 

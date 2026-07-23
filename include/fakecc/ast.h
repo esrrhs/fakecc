@@ -12,6 +12,8 @@ typedef enum {
     EX_INT_LIT,
     EX_BINOP,
     EX_UNARY,
+    EX_VAR,     /* variable reference: name */
+    EX_ASSIGN,  /* lvalue = rvalue; result is the assigned value */
 } ExprKind;
 
 typedef enum {
@@ -32,9 +34,11 @@ struct Expr {
     ExprKind kind;
     SourceLoc loc;
     union {
-        int int_val;                       /* EX_INT_LIT */
-        struct { BinOp op; Expr *l, *r; } bin;   /* EX_BINOP */
-        struct { UnaryOp op; Expr *operand; } un;/* EX_UNARY */
+        int int_val;                                   /* EX_INT_LIT */
+        struct { BinOp op; Expr *l, *r; } bin;        /* EX_BINOP */
+        struct { UnaryOp op; Expr *operand; } un;     /* EX_UNARY */
+        struct { char *name; } var;                    /* EX_VAR */
+        struct { Expr *lvalue; Expr *rvalue; } assign;/* EX_ASSIGN */
     } u;
 };
 
@@ -42,16 +46,40 @@ struct Expr {
 Expr *expr_new_int(int v, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
+Expr *expr_new_var(const char *name, SourceLoc loc);
+Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
 void  expr_free(Expr *e);
 
 /* ------------------------------------------------------------------ */
-/* Return statement                                                    */
+/* Statement                                                           */
 /* ------------------------------------------------------------------ */
 
+typedef enum {
+    ST_DECL,     /* int x;  or  int x = expr;  */
+    ST_EXPR,     /* expr;  (typical: x = 5;) */
+    ST_RETURN,   /* return expr; */
+} StmtKind;
+
 typedef struct {
-    Expr *value;      /* was: int value; now: arbitrary expression */
+    StmtKind kind;
     SourceLoc loc;
-} ReturnStmt;
+    union {
+        struct { char *name; Expr *init; } decl;   /* ST_DECL: init may be NULL */
+        Expr *expr;                                 /* ST_EXPR */
+        Expr *value;                                /* ST_RETURN */
+    } u;
+} Stmt;
+
+typedef struct {
+    Stmt *data;
+    size_t len;
+    size_t cap;
+} StmtArray;
+
+void stmt_array_init(StmtArray *a);
+void stmt_array_push(StmtArray *a, Stmt s);
+void stmt_array_free(StmtArray *a);
+void stmt_free(Stmt *s);
 
 /* ------------------------------------------------------------------ */
 /* Function & package declarations                                     */
@@ -59,7 +87,7 @@ typedef struct {
 
 typedef struct {
     char *name;         /* strdup'd */
-    ReturnStmt body;
+    StmtArray body;     /* was: ReturnStmt body; */
     SourceLoc loc;
 } FunctionDecl;
 
