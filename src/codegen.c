@@ -19,37 +19,52 @@ static void emit_int32(Buffer *b, int32_t val) {
     buffer_append(b, (const char *)&val, 4);
 }
 
-/* Emit a ModRM byte: (mod << 6) | (reg << 3) | rm */
+/* Emit a ModRM byte: (mod << 6) | (reg << 3) | rm — uses low 3 bits.
+ * REX.R and REX.B (bit 3 of reg / rm) must be encoded in the preceding
+ * REX prefix by callers via emit_rex_wrb(). */
 static void emit_modrm(Buffer *b, int mod, int reg, int rm) {
     emit_byte(b, (uint8_t)(((mod & 3) << 6) | ((reg & 7) << 3) | (rm & 7)));
 }
 
+/* Emit REX prefix: 0x40 | (W<<3) | (R<<2) | (X<<1) | B.
+ * R comes from the top bit of the ModRM.reg field's register.
+ * B comes from the top bit of the ModRM.rm  field's register (or the
+ * opcode-embedded register).
+ * For 64-bit operations always pass W=1. */
+static void emit_rex_wrb(Buffer *b, int w, int r_reg, int rm_reg) {
+    int R = (r_reg >> 3) & 1;
+    int B = (rm_reg >> 3) & 1;
+    emit_byte(b, (uint8_t)(0x40 | (w << 3) | (R << 2) | B));
+}
+
+/* Compat shim — legacy call sites that already handle no-high-reg cases.
+ * Prefer emit_rex_wrb for new code. */
 static void emit_rex_w(Buffer *b) { emit_byte(b, 0x48); }
 
-/* mov %src, %dst   →  48 89 [ModRM: reg=src, rm=dst, mod=11] */
+/* mov %src, %dst   →  REX 89 [ModRM: reg=src, rm=dst, mod=11] */
 static void emit_mov_rr(Buffer *b, int dst, int src) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, src, dst);
     emit_byte(b, 0x89);
     emit_modrm(b, 3, src, dst);
 }
 
-/* add %src, %dst  →  48 01 [ModRM: reg=src, rm=dst, mod=11] */
+/* add %src, %dst  →  REX 01 [ModRM: reg=src, rm=dst, mod=11] */
 static void emit_add_rr(Buffer *b, int dst, int src) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, src, dst);
     emit_byte(b, 0x01);
     emit_modrm(b, 3, src, dst);
 }
 
-/* sub %src, %dst  →  48 29 [ModRM: reg=src, rm=dst, mod=11] */
+/* sub %src, %dst  →  REX 29 [ModRM: reg=src, rm=dst, mod=11] */
 static void emit_sub_rr(Buffer *b, int dst, int src) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, src, dst);
     emit_byte(b, 0x29);
     emit_modrm(b, 3, src, dst);
 }
 
-/* imul %src, %dst →  48 0F AF [ModRM: reg=dst, rm=src, mod=11] */
+/* imul %src, %dst →  REX 0F AF [ModRM: reg=dst, rm=src, mod=11] */
 static void emit_imul_rr(Buffer *b, int dst, int src) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, dst, src);
     emit_byte(b, 0x0F);
     emit_byte(b, 0xAF);
     emit_modrm(b, 3, dst, src);
@@ -57,7 +72,7 @@ static void emit_imul_rr(Buffer *b, int dst, int src) {
 
 /* mov $imm32, %dst */
 static void emit_mov_imm(Buffer *b, int dst_reg, int32_t imm) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, 0, dst_reg);
     emit_byte(b, 0xC7);
     emit_modrm(b, 3, 0, dst_reg);
     emit_int32(b, imm);
@@ -65,7 +80,7 @@ static void emit_mov_imm(Buffer *b, int dst_reg, int32_t imm) {
 
 /* neg %dst */
 static void emit_neg_r(Buffer *b, int dst_reg) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, 0, dst_reg);
     emit_byte(b, 0xF7);
     emit_modrm(b, 3, 3, dst_reg);
 }
@@ -80,16 +95,16 @@ static void emit_idiv_rcx(Buffer *b) {
     emit_byte(b, 0xF9);
 }
 
-/* cmp %src, %dst  →  48 39 [ModRM: reg=src, rm=dst, mod=11] (computes dst - src) */
+/* cmp %src, %dst  →  REX 39 [ModRM: reg=src, rm=dst, mod=11] */
 static void emit_cmp_rr(Buffer *b, int dst, int src) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, src, dst);
     emit_byte(b, 0x39);
     emit_modrm(b, 3, src, dst);
 }
 
-/* test %r, %r  →  48 85 [ModRM: reg=r, rm=r, mod=11] — sets ZF if r == 0 */
+/* test %r, %r  →  REX 85 [ModRM: reg=r, rm=r, mod=11] — sets ZF if r == 0 */
 static void emit_test_rr(Buffer *b, int r) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, r, r);
     emit_byte(b, 0x85);
     emit_modrm(b, 3, r, r);
 }
@@ -117,9 +132,9 @@ static void emit_movzx_r8(Buffer *b, int dst, int src) {
 }
 #endif
 
-/* xor %r, %r  →  48 31 [ModRM: reg=r, rm=r, mod=11] — zero r */
+/* xor %r, %r  →  REX 31 [ModRM: reg=r, rm=r, mod=11] — zero r */
 static void emit_xor_rr(Buffer *b, int r) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, r, r);
     emit_byte(b, 0x31);
     emit_modrm(b, 3, r, r);
 }
@@ -149,7 +164,7 @@ static int spill_offset(int slot) { return -8 * (slot + 1); }
 
 /* mov [rbp+off], %reg */
 static void emit_store_spill(Buffer *b, int reg, int off) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, reg, REG_RBP);
     emit_byte(b, 0x89);
     if (off >= -128 && off <= 127) {
         emit_modrm(b, 1, reg, REG_RBP);
@@ -162,7 +177,7 @@ static void emit_store_spill(Buffer *b, int reg, int off) {
 
 /* mov [rbp+off], %reg → load from spill slot */
 static void emit_load_spill(Buffer *b, int reg, int off) {
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, reg, REG_RBP);
     emit_byte(b, 0x8B);
     if (off >= -128 && off <= 127) {
         emit_modrm(b, 1, reg, REG_RBP);
@@ -181,7 +196,7 @@ static int old_slot(int v) { return -(8 * (v + 1)); }
 
 static void old_load(Buffer *b, int v, int reg) {
     int off = old_slot(v);
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, reg, REG_RBP);
     emit_byte(b, 0x8B);
     if (off >= -128 && off <= 127) {
         emit_modrm(b, 1, reg, REG_RBP);
@@ -194,7 +209,7 @@ static void old_load(Buffer *b, int v, int reg) {
 
 static void old_store(Buffer *b, int v, int reg) {
     int off = old_slot(v);
-    emit_rex_w(b);
+    emit_rex_wrb(b, 1, reg, REG_RBP);
     emit_byte(b, 0x89);
     if (off >= -128 && off <= 127) {
         emit_modrm(b, 1, reg, REG_RBP);
@@ -341,44 +356,34 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_ADD: {
-                if (dr >= 0) {
-                    ensure_reg(&out->code, inst->a, dr, ra);
-                    ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                    emit_add_rr(&out->code, dr, REG_RCX);
-                } else {
-                    old_load(&out->code, inst->a, REG_RAX);
-                    old_load(&out->code, inst->b, REG_RCX);
-                    emit_add_rr(&out->code, REG_RAX, REG_RCX);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
-                }
+                /* Stage both operands into scratch (rax = a, rcx = b) so that
+                 * loading `a` into `dr` can't clobber `b` if reg[b] == dr. */
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                ensure_reg(&out->code, inst->b, REG_RCX, ra);
+                emit_add_rr(&out->code, REG_RAX, REG_RCX);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
 
             case IR_SUB: {
-                if (dr >= 0) {
-                    ensure_reg(&out->code, inst->a, dr, ra);
-                    ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                    emit_sub_rr(&out->code, dr, REG_RCX);
-                } else {
-                    old_load(&out->code, inst->a, REG_RAX);
-                    old_load(&out->code, inst->b, REG_RCX);
-                    emit_sub_rr(&out->code, REG_RAX, REG_RCX);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
-                }
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                ensure_reg(&out->code, inst->b, REG_RCX, ra);
+                emit_sub_rr(&out->code, REG_RAX, REG_RCX);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
 
             case IR_MUL: {
-                if (dr >= 0) {
-                    ensure_reg(&out->code, inst->a, dr, ra);
-                    ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                    emit_imul_rr(&out->code, dr, REG_RCX);
-                } else {
-                    old_load(&out->code, inst->a, REG_RAX);
-                    old_load(&out->code, inst->b, REG_RCX);
-                    emit_imul_rr(&out->code, REG_RAX, REG_RCX);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
-                }
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                ensure_reg(&out->code, inst->b, REG_RCX, ra);
+                emit_imul_rr(&out->code, REG_RAX, REG_RCX);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
 
@@ -403,14 +408,11 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_NEG: {
-                if (dr >= 0) {
-                    ensure_reg(&out->code, inst->a, dr, ra);
-                    emit_neg_r(&out->code, dr);
-                } else {
-                    old_load(&out->code, inst->a, REG_RAX);
-                    emit_neg_r(&out->code, REG_RAX);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
-                }
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                emit_neg_r(&out->code, REG_RAX);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
 

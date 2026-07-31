@@ -101,6 +101,21 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 5 — CFG-aware regalloc（循环也能寄存器分配）
+
+删掉 Slice 4 中"含控制流走栈式回退"的技术债。现有的基于区间的 SSA chordal 分配器只对直线代码正确——在循环里，一个跨回边的值的活跃区间会环绕，简单的 `[first_def, last_use]` 完全 undercount。改造为标准的迭代式数据流分析：
+
+- **use[b] / def[b]** 每块 upwards-exposed 使用与写入集合，用位图存储
+- **live-in / live-out 定点迭代**：`in[b] = use[b] ∪ (out[b] \ def[b])`，`out[b] = ⋃ in[s]`，反向按块序迭代到收敛。循环回边就是普通后继边，自然把值从 body 的 out 带回 head 的 in
+- **干扰图**：对每块反向扫描，起始 live = out[b]；每条指令，dst 与当前 live 集合中所有值互相干扰，然后 dst 出 live、use 入 live
+- 沿用现有 MCS + 贪心染色
+
+同步修了几个此前被 undercount 掩盖的机器码 bug：
+- `emit_mov_rr/add/sub/cmp/xor/test` 等一直只发 REX.W（0x48），从未编码 REX.R/REX.B，导致分配到 R8..R15 的值被指令按低 8 寄存器编码 → 静默错乱。改造出统一的 `emit_rex_wrb(w, r_reg, rm_reg)`
+- x86 两操作数指令 `dst = a op b` 中 `a` 与 `dst` 共用位置，如果 `reg[b] == dr` 则 `ensure_reg(a, dr)` 会先破坏 b。改为固定用 RAX/RCX 作暂存，最后 `mov dr, RAX`；配合把 RAX/RCX/RDX 从分配池里移出（专职暂存/ABI）
+
+现在 `while` / 嵌套循环 / 阶乘 全部走寄存器分配路径。
+
 ### Slice 4 — 控制流与比较运算符
 
 引入完整的 C 控制流骨架：`if/else`、`while`、块语句 `{...}`，以及六个比较运算符 `< <= > >= == !=`（按 C 优先级：`equality < relational < additive`）。
@@ -124,7 +139,8 @@ int main() {
 - **Sema** 支持嵌套作用域（`ST_BLOCK` 引入新的 scope-mark），块内变量互不干扰
 - **IR** 引入 `IR_EQ/NE/LT/LE/GT/GE`；`if` 下降为 `CBR → label`，`while` 下降为 `head/body/exit` 三块结构 + 回边
 - **Codegen** 直接编码 `cmp/setcc/xor/test/jmp/jcc` 机器码，函数末尾用 rel32 patch 表回填标签偏移
-- **regalloc 暂时回退**：现有基于区间的 SSA chordal 分配器不支持循环回边导致的多次定义。含控制流的函数暂走栈式 codegen 回退路径，语义正确但性能次优；下一步需改成基于 CFG 的活跃性分析
+
+（Slice 4 结束时，含循环的函数临时走栈式 codegen；Slice 5 把 regalloc 改造为 CFG 感知，回退路径已删除。）
 
 ### Slice 3 — 局部变量与赋值
 

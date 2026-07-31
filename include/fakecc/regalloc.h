@@ -33,13 +33,23 @@ typedef enum {
 } Reg;
 
 /* Registers available for allocation.
- * Excludes REG_RSP (stack pointer), REG_RBP (frame pointer),
- * REG_R14/R15 (reserved for future extension). */
-#define REG_ALLOCATABLE  12
+ *
+ * Excluded (reserved for codegen scratch / ABI / frame):
+ *   RAX  — return value + comparison/arith staging
+ *   RCX  — 2nd operand staging + shift count
+ *   RDX  — division high / comparison output staging
+ *   RSP  — stack pointer
+ *   RBP  — frame pointer
+ *   R14/R15 — reserved for future extension
+ *
+ * By keeping RAX/RCX/RDX out of the allocation pool we guarantee that
+ * codegen's two-source register staging can never collide with an
+ * allocated value's home register. */
+#define REG_ALLOCATABLE  9
 
 /* The subset of allocatable registers that the allocator actually uses. */
 static const int ALLOCATABLE_REGS[REG_ALLOCATABLE] = {
-    REG_RAX, REG_RCX, REG_RDX, REG_RSI, REG_RDI,
+    REG_RSI, REG_RDI,
     REG_R8,  REG_R9,  REG_R10, REG_R11,
     REG_RBX, REG_R12, REG_R13
 };

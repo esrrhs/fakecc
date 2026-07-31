@@ -140,25 +140,218 @@ static void ig_add_edge(InterfGraph *g, int u, int v) {
     vn->neighbors[vn->degree++] = u;
 }
 
-/* Build the interference graph from liveness information.
- * Two values interfere if their live ranges overlap. */
-static void build_interf_graph(const LiveInfo *liv, int n, InterfGraph *g) {
-    ig_init(g, n);
+/* ================================================================== */
+/* CFG-aware liveness + interference (correct across loop back edges)  */
+/* ================================================================== */
 
-    for (int v1 = 0; v1 < n; v1++) {
-        if (liv[v1].def_point < 0 && liv[v1].num_uses == 0) continue; /* unused */
-        for (int v2 = v1 + 1; v2 < n; v2++) {
-            if (liv[v2].def_point < 0 && liv[v2].num_uses == 0) continue;
+/* Bit-set helpers over an nv-bit vector (packed into 64-bit words). */
+typedef struct {
+    uint64_t *w;         /* words[num_words] */
+    int nv;
+    int num_words;
+} BitSet;
 
-            /* No overlap? */
-            if (liv[v1].live_end < liv[v2].live_start) continue;
-            if (liv[v2].live_end < liv[v1].live_start) continue;
+static void bs_init(BitSet *b, int nv) {
+    b->nv = nv;
+    b->num_words = (nv + 63) / 64;
+    b->w = xmalloc((size_t)b->num_words * sizeof(uint64_t));
+    memset(b->w, 0, (size_t)b->num_words * sizeof(uint64_t));
+}
 
-            /* Overlapping live ranges → interfere. */
-            ig_add_edge(g, v1, v2);
+static void bs_free(BitSet *b) {
+    free(b->w);
+    b->w = NULL;
+}
+
+static void bs_clear(BitSet *b) {
+    memset(b->w, 0, (size_t)b->num_words * sizeof(uint64_t));
+}
+
+static int bs_test(const BitSet *b, int v) {
+    return (int)((b->w[v >> 6] >> (v & 63)) & 1);
+}
+
+static void bs_set(BitSet *b, int v) {
+    b->w[v >> 6] |= ((uint64_t)1 << (v & 63));
+}
+
+static void bs_clr(BitSet *b, int v) {
+    b->w[v >> 6] &= ~((uint64_t)1 << (v & 63));
+}
+
+/* dst |= src. Returns 1 if dst changed. */
+static int bs_or_changed(BitSet *dst, const BitSet *src) {
+    int changed = 0;
+    for (int i = 0; i < dst->num_words; i++) {
+        uint64_t before = dst->w[i];
+        uint64_t after = before | src->w[i];
+        if (after != before) changed = 1;
+        dst->w[i] = after;
+    }
+    return changed;
+}
+
+/* dst = src. */
+static void bs_copy(BitSet *dst, const BitSet *src) {
+    memcpy(dst->w, src->w, (size_t)dst->num_words * sizeof(uint64_t));
+}
+
+/* Iterate set bits: for each set bit, invoke fn(v). */
+#define BS_FOREACH(bs, v)  \
+    for (int _wi = 0; _wi < (bs)->num_words; _wi++) \
+        for (uint64_t _w = (bs)->w[_wi], v; _w && ((v = _wi * 64 + __builtin_ctzll(_w)), 1); _w &= _w - 1)
+
+/* Compute per-block use[b] and def[b] sets.
+ *
+ * use[b]  = values read in b before being (re)defined in b
+ * def[b]  = values written anywhere in b
+ *
+ * Note: for a value that is both defined and used in b (e.g., x = x + 1),
+ * we treat the use as "before def" iff the read appears strictly before
+ * the write in the block's instruction order — the standard dataflow
+ * definition of upwards-exposed uses. */
+static void compute_use_def(const IRFunction *fn, const CFG *cfg,
+                            BitSet *use_b, BitSet *def_b) {
+    for (size_t bi = 0; bi < cfg->num; bi++) {
+        bs_clear(&use_b[bi]);
+        bs_clear(&def_b[bi]);
+        const CFGBlock *blk = &cfg->blocks[bi];
+        for (size_t i = blk->start; i < blk->end; i++) {
+            const IRInst *inst = &fn->insts.data[i];
+            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+
+            /* Uses come before def within a single instruction. */
+            if (inst->a >= 0 && inst->a < use_b[bi].nv) {
+                if (!bs_test(&def_b[bi], inst->a))
+                    bs_set(&use_b[bi], inst->a);
+            }
+            if (inst->op != IR_CBR &&
+                inst->b >= 0 && inst->b < use_b[bi].nv) {
+                if (!bs_test(&def_b[bi], inst->b))
+                    bs_set(&use_b[bi], inst->b);
+            }
+            if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
+                bs_set(&def_b[bi], inst->dst);
+            }
         }
     }
 }
+
+/* Fixed-point compute in[b] / out[b]:
+ *   in[b]  = use[b] ∪ (out[b] \ def[b])
+ *   out[b] = ⋃_{s ∈ succs(b)} in[s]
+ *
+ * Iterate blocks in reverse order until nothing changes.  This handles
+ * loops naturally: the back edge carries values from body's out to head's in. */
+static void compute_live_in_out(const CFG *cfg,
+                                const BitSet *use_b, const BitSet *def_b,
+                                BitSet *in_b, BitSet *out_b) {
+    int changed = 1;
+    BitSet tmp;
+    bs_init(&tmp, use_b[0].nv);
+
+    while (changed) {
+        changed = 0;
+        /* Process in reverse block order — decent starting heuristic for
+         * forward CFGs since terminators come last. */
+        for (int bi = (int)cfg->num - 1; bi >= 0; bi--) {
+            const CFGBlock *blk = &cfg->blocks[bi];
+
+            /* out[b] = union of in[s] for each succ s */
+            bs_clear(&out_b[bi]);
+            for (size_t si = 0; si < blk->num_succs; si++) {
+                bs_or_changed(&out_b[bi], &in_b[blk->succs[si]]);
+            }
+
+            /* in[b] = use[b] ∪ (out[b] \ def[b]) */
+            bs_copy(&tmp, &out_b[bi]);
+            /* tmp = out \ def */
+            for (int wi = 0; wi < tmp.num_words; wi++) {
+                tmp.w[wi] &= ~def_b[bi].w[wi];
+            }
+            /* tmp |= use */
+            for (int wi = 0; wi < tmp.num_words; wi++) {
+                tmp.w[wi] |= use_b[bi].w[wi];
+            }
+
+            /* Did in[bi] change? */
+            for (int wi = 0; wi < tmp.num_words; wi++) {
+                if (tmp.w[wi] != in_b[bi].w[wi]) {
+                    changed = 1;
+                    break;
+                }
+            }
+            bs_copy(&in_b[bi], &tmp);
+        }
+    }
+    bs_free(&tmp);
+}
+
+/* Build interference graph by walking each block backwards, maintaining
+ * the live-set.  At each instruction, dst interferes with every value
+ * currently live-out (i.e., in `live` before removing dst).  Then remove
+ * dst, add uses. */
+static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
+                                    int nv, InterfGraph *g) {
+    ig_init(g, nv);
+
+    BitSet *use_b = xmalloc(cfg->num * sizeof(BitSet));
+    BitSet *def_b = xmalloc(cfg->num * sizeof(BitSet));
+    BitSet *in_b  = xmalloc(cfg->num * sizeof(BitSet));
+    BitSet *out_b = xmalloc(cfg->num * sizeof(BitSet));
+    for (size_t bi = 0; bi < cfg->num; bi++) {
+        bs_init(&use_b[bi], nv);
+        bs_init(&def_b[bi], nv);
+        bs_init(&in_b[bi], nv);
+        bs_init(&out_b[bi], nv);
+    }
+
+    compute_use_def(fn, cfg, use_b, def_b);
+    compute_live_in_out(cfg, use_b, def_b, in_b, out_b);
+
+    /* Walk blocks, maintain a live-set (start = out[b]), step backward. */
+    BitSet live;
+    bs_init(&live, nv);
+
+    for (size_t bi = 0; bi < cfg->num; bi++) {
+        const CFGBlock *blk = &cfg->blocks[bi];
+        bs_copy(&live, &out_b[bi]);
+
+        /* Walk instructions backwards. */
+        for (size_t i = blk->end; i > blk->start; i--) {
+            const IRInst *inst = &fn->insts.data[i - 1];
+            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+
+            /* dst interferes with every currently-live value.
+             * Exception: dst does NOT interfere with a source operand it
+             * copies from (would be pointless for COPY etc.), but keeping
+             * that edge is harmless — coloring will still find a good result. */
+            if (inst->dst >= 0 && inst->dst < nv) {
+                BS_FOREACH(&live, other) {
+                    if ((int)other != inst->dst) {
+                        ig_add_edge(g, inst->dst, (int)other);
+                    }
+                }
+                bs_clr(&live, inst->dst);
+            }
+
+            /* Uses become live *before* this instruction. */
+            if (inst->a >= 0 && inst->a < nv) bs_set(&live, inst->a);
+            if (inst->op != IR_CBR &&
+                inst->b >= 0 && inst->b < nv) bs_set(&live, inst->b);
+        }
+    }
+
+    bs_free(&live);
+    for (size_t bi = 0; bi < cfg->num; bi++) {
+        bs_free(&use_b[bi]);
+        bs_free(&def_b[bi]);
+        bs_free(&in_b[bi]);
+        bs_free(&out_b[bi]);
+    }
+    free(use_b); free(def_b); free(in_b); free(out_b);
+}
+
 
 /* ================================================================== */
 /* MCS — Maximum Cardinality Search                                    */
@@ -363,13 +556,14 @@ RAResult *reg_alloc(const IRFunction *fn) {
     LiveInfo *liv = compute_liveness(fn);
     if (!liv) return NULL;
 
-    /* Build CFG (for spill-cost loop-depth heuristic). */
+    /* Build CFG (for spill-cost loop-depth heuristic AND CFG-aware liveness). */
     CFG cfg;
     cfg_build(&cfg, &fn->insts);
 
-    /* Build interference graph. */
+    /* Build interference graph using CFG-aware backward walk.
+     * Correct across loop back edges; supersedes the interval-based scheme. */
     InterfGraph g;
-    build_interf_graph(liv, nv, &g);
+    build_interf_graph_cfg(fn, &cfg, nv, &g);
 
     /* Compute MCS ordering (reverse = PEO for chordal graph). */
     int *order = compute_mcs_order(&g);

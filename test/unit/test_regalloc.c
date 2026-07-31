@@ -187,6 +187,67 @@ static void test_ra_empty(void) {
     inst_array_data_free(&fn.insts);
 }
 
+/* ================================================================ */
+/* Test: loop-carried value interferes with itself across back edge  */
+/*                                                                    */
+/* This exercises CFG-aware liveness. In a diamond with a back edge:  */
+/*                                                                    */
+/*   entry:                                                            */
+/*     v0 = CONST 1                                                    */
+/*     v1 = CONST 0                                                    */
+/*     BR L_head                                                       */
+/*   L_head:                                                           */
+/*     v2 = CBR-cond (from previous body iteration or from entry)      */
+/*     CBR v2 → L_body, L_exit                                         */
+/*   L_body:                                                           */
+/*     v3 = ADD v0 v1  (uses v0 which was defined pre-loop)            */
+/*     BR L_head                                                       */
+/*   L_exit:                                                           */
+/*     RETURN v0                                                       */
+/*                                                                    */
+/* v0 must remain live across the back edge (used in body AND after   */
+/* exit).  Interval liveness would say v0 dies after the last linear  */
+/* use, but CFG liveness must keep it live throughout.                */
+/* ================================================================ */
+
+static void test_ra_loop_carried_liveness(void) {
+    IRFunction fn;
+    fn.name = NULL;
+    fn.insts.data = NULL; fn.insts.len = 0; fn.insts.cap = 0;
+    fn.next_value_id = 4;
+    fn.next_label_id = 3;
+    fn.loc = (SourceLoc){NULL, 0, 0};
+    fn.ra = NULL;
+
+    /* pre-loop */
+    push_inst(&fn.insts, IR_CONST, 0, -1, -1, 1);   /* v0 = 1 */
+    push_inst(&fn.insts, IR_CONST, 1, -1, -1, 0);   /* v1 = 0 */
+    push_inst(&fn.insts, IR_BR,   -1, -1, -1, 0);   /* → L0 head */
+    push_inst(&fn.insts, IR_LABEL,-1, -1, -1, 0);   /* L0: head */
+    push_inst(&fn.insts, IR_CONST, 2, -1, -1, 1);   /* v2 = 1 (cond) */
+    push_inst(&fn.insts, IR_CBR,  -1,  2,  2, 1);   /* if v2 → L1 else L2 */
+    push_inst(&fn.insts, IR_LABEL,-1, -1, -1, 1);   /* L1: body */
+    push_inst(&fn.insts, IR_ADD,   3,  0,  1, 0);   /* v3 = v0 + v1  ← uses v0 */
+    push_inst(&fn.insts, IR_BR,   -1, -1, -1, 0);   /* back to L0 */
+    push_inst(&fn.insts, IR_LABEL,-1, -1, -1, 2);   /* L2: exit */
+    push_inst(&fn.insts, IR_RETURN,-1, 0, -1, 0);   /* return v0 */
+
+    RAResult *ra = reg_alloc(&fn);
+    T_ASSERT(ra != NULL);
+
+    /* Key invariant: v0's register must NOT alias v3's register.
+     * If interval liveness were used, v0's last linear use is the RETURN,
+     * and v3's live range is confined to the body — the interval builder
+     * would say they don't overlap.  But v0 must be preserved across the
+     * back edge every iteration, so it interferes with v3. */
+    if (ra->reg[0] >= 0 && ra->reg[3] >= 0) {
+        T_ASSERT(ra->reg[0] != ra->reg[3]);
+    }
+
+    ra_result_free(ra);
+    inst_array_data_free(&fn.insts);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -195,5 +256,6 @@ int main(void) {
     test_ra_interfering_pair();
     test_ra_after_mem2reg();
     test_ra_empty();
+    test_ra_loop_carried_liveness();
     return t_finalize();
 }
