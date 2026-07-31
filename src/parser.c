@@ -61,6 +61,8 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 
 static Expr *parse_expr(Parser *p);
 static Expr *parse_assign(Parser *p);
+static Expr *parse_equality(Parser *p);
+static Expr *parse_relational(Parser *p);
 static Expr *parse_add(Parser *p);
 static Expr *parse_mul(Parser *p);
 static Expr *parse_unary(Parser *p);
@@ -70,14 +72,50 @@ static Expr *parse_expr(Parser *p) {
     return parse_assign(p);
 }
 
-/* assign-expr = add-expr [ "=" assign-expr ]  -- right associative */
+/* assign-expr = equality-expr [ "=" assign-expr ]  -- right associative */
 static Expr *parse_assign(Parser *p) {
-    Expr *lhs = parse_add(p);
+    Expr *lhs = parse_equality(p);
     if (peek(p)->kind == TK_ASSIGN) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
         Expr *rhs = parse_assign(p);   /* recursive → right associative */
         return expr_new_assign(lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* equality-expr = relational-expr { ("==" | "!=") relational-expr } */
+static Expr *parse_equality(Parser *p) {
+    Expr *lhs = parse_relational(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_EQ && k != TK_NE) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_relational(p);
+        BinOp op = (k == TK_EQ) ? BOP_EQ : BOP_NE;
+        lhs = expr_new_binop(op, lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* relational-expr = add-expr { ("<" | "<=" | ">" | ">=") add-expr } */
+static Expr *parse_relational(Parser *p) {
+    Expr *lhs = parse_add(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_LT && k != TK_LE && k != TK_GT && k != TK_GE) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_add(p);
+        BinOp op;
+        switch (k) {
+        case TK_LT: op = BOP_LT; break;
+        case TK_LE: op = BOP_LE; break;
+        case TK_GT: op = BOP_GT; break;
+        default:    op = BOP_GE; break;
+        }
+        lhs = expr_new_binop(op, lhs, rhs, loc);
     }
     return lhs;
 }
@@ -171,7 +209,7 @@ static void parse_stmt_list(Parser *p, StmtArray *out) {
     }
 }
 
-/* stmt = decl-stmt | return-stmt | expr-stmt */
+/* stmt = decl-stmt | return-stmt | if-stmt | while-stmt | block | expr-stmt */
 static Stmt parse_stmt(Parser *p) {
     TokenKind k = peek(p)->kind;
     if (k == TK_KW_INT) {
@@ -205,6 +243,57 @@ static Stmt parse_stmt(Parser *p) {
         s.loc = kw->loc;
         s.u.value = parse_expr(p);
         expect_kind(p, TK_SEMICOLON, "';'");
+        return s;
+    }
+    if (k == TK_KW_IF) {
+        const Token *kw = peek(p);
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        Expr *cond = parse_expr(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        Stmt then_s = parse_stmt(p);
+        Stmt *then_ptr = stmt_alloc();
+        *then_ptr = then_s;
+        Stmt *else_ptr = NULL;
+        if (peek(p)->kind == TK_KW_ELSE) {
+            advance(p);
+            Stmt else_s = parse_stmt(p);
+            else_ptr = stmt_alloc();
+            *else_ptr = else_s;
+        }
+        Stmt s;
+        s.kind = ST_IF;
+        s.loc = kw->loc;
+        s.u.if_s.cond = cond;
+        s.u.if_s.then_s = then_ptr;
+        s.u.if_s.else_s = else_ptr;
+        return s;
+    }
+    if (k == TK_KW_WHILE) {
+        const Token *kw = peek(p);
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        Expr *cond = parse_expr(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        Stmt body = parse_stmt(p);
+        Stmt *body_ptr = stmt_alloc();
+        *body_ptr = body;
+        Stmt s;
+        s.kind = ST_WHILE;
+        s.loc = kw->loc;
+        s.u.while_s.cond = cond;
+        s.u.while_s.body = body_ptr;
+        return s;
+    }
+    if (k == TK_LBRACE) {
+        const Token *lb = peek(p);
+        advance(p);
+        Stmt s;
+        s.kind = ST_BLOCK;
+        s.loc = lb->loc;
+        stmt_array_init(&s.u.block);
+        parse_stmt_list(p, &s.u.block);
+        expect_kind(p, TK_RBRACE, "'}'");
         return s;
     }
     /* expr-stmt */

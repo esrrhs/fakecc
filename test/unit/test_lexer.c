@@ -224,14 +224,42 @@ static void test_assign_token(void) {
 }
 
 static void test_double_assign_is_two_tokens(void) {
-    /* "a==b" → IDENT ASSIGN ASSIGN IDENT EOF (no "==" token) */
+    /* "a==b" → IDENT EQ IDENT EOF ("==" is a single token now) */
     TokenArray a = lex_str("a==b");
-    T_ASSERT_EQ_INT((int)a.len, 5);
+    T_ASSERT_EQ_INT((int)a.len, 4);
     T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
-    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_ASSIGN);
-    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_ASSIGN);
-    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_IDENT);
-    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_EOF);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_EQ);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+/* ---- Comparison operators & control-flow keywords ---- */
+
+static void test_compare_op_tokens(void) {
+    /* "a<b<=c==d!=e>=f>g" → IDENT LT IDENT LE IDENT EQ IDENT NE IDENT GE IDENT GT IDENT EOF */
+    TokenArray a = lex_str("a<b<=c==d!=e>=f>g");
+    T_ASSERT_EQ_INT((int)a.data[0].kind,  (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind,  (int)TK_LT);
+    T_ASSERT_EQ_INT((int)a.data[2].kind,  (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind,  (int)TK_LE);
+    T_ASSERT_EQ_INT((int)a.data[4].kind,  (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[5].kind,  (int)TK_EQ);
+    T_ASSERT_EQ_INT((int)a.data[6].kind,  (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[7].kind,  (int)TK_NE);
+    T_ASSERT_EQ_INT((int)a.data[8].kind,  (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[9].kind,  (int)TK_GE);
+    T_ASSERT_EQ_INT((int)a.data[10].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[11].kind, (int)TK_GT);
+    T_ASSERT_EQ_INT((int)a.data[12].kind, (int)TK_IDENT);
+    token_array_free(&a);
+}
+
+static void test_control_flow_keywords(void) {
+    TokenArray a = lex_str("if else while");
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_KW_IF);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_KW_ELSE);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_KW_WHILE);
     token_array_free(&a);
 }
 
@@ -257,5 +285,7 @@ int main(void) {
     test_slash_not_comment();
     test_assign_token();
     test_double_assign_is_two_tokens();
+    test_compare_op_tokens();
+    test_control_flow_keywords();
     return t_finalize();
 }

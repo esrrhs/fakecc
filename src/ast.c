@@ -112,7 +112,34 @@ void stmt_free(Stmt *s) {
     case ST_RETURN:
         expr_free(s->u.value);
         break;
+    case ST_IF:
+        expr_free(s->u.if_s.cond);
+        stmt_free_ptr(s->u.if_s.then_s);
+        stmt_free_ptr(s->u.if_s.else_s);
+        break;
+    case ST_WHILE:
+        expr_free(s->u.while_s.cond);
+        stmt_free_ptr(s->u.while_s.body);
+        break;
+    case ST_BLOCK:
+        stmt_array_free(&s->u.block);
+        break;
     }
+}
+
+Stmt *stmt_alloc(void) {
+    Stmt *s = malloc(sizeof(Stmt));
+    if (!s) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
+    return s;
+}
+
+void stmt_free_ptr(Stmt *s) {
+    if (!s) return;
+    stmt_free(s);
+    free(s);
 }
 
 void stmt_array_init(StmtArray *a) {

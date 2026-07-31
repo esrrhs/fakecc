@@ -8,17 +8,27 @@
 /* Pipeline order (per function):                                       */
 /*   opt_mem2reg  →  scalar_cleanup  →  reg_alloc                       */
 /*                                                                      */
-/*   scalar_cleanup runs constfold, peephole, and dce iteratively       */
-/*   to a fixed point, then renumbers value ids.                        */
-/*   reg_alloc uses SSA chordal-graph optimal coloring to assign        */
-/*   x86-64 registers; codegen reads the result to emit efficient       */
-/*   register-to-register instructions.                                 */
+/*   The chordal SSA regalloc assumes straight-line (loop-free) IR      */
+/*   after mem2reg lowers φ to copies.  Once control flow (if/while)    */
+/*   is present, φ-resolution introduces multi-def values and cyclic    */
+/*   live ranges the interval-based liveness cannot see, so we fall    */
+/*   back to the stack-slot codegen path for functions with labels.   */
+
+static int has_control_flow(const IRFunction *fn) {
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        IROpcode op = fn->insts.data[i].op;
+        if (op == IR_LABEL || op == IR_BR || op == IR_CBR) return 1;
+    }
+    return 0;
+}
 
 void opt(IRModule *ir) {
     for (size_t i = 0; i < ir->functions.len; i++) {
         IRFunction *fn = &ir->functions.data[i];
         opt_mem2reg(fn);
         scalar_cleanup(fn);
-        fn->ra = reg_alloc(fn);
+        if (!has_control_flow(fn)) {
+            fn->ra = reg_alloc(fn);
+        }
     }
 }

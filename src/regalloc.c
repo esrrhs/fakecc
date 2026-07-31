@@ -56,6 +56,9 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         const IRInst *inst = &fn->insts.data[i];
 
+        /* LABEL/BR carry no value operands.  CBR's `b` is a label id. */
+        if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+
         /* Definition */
         if (inst->dst >= 0 && inst->dst < nv) {
             liv[inst->dst].def_point = (int)i;
@@ -63,7 +66,8 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
 
         /* Uses */
         if (inst->a >= 0 && inst->a < nv) liv_add_use(&liv[inst->a], (int)i);
-        if (inst->b >= 0 && inst->b < nv) liv_add_use(&liv[inst->b], (int)i);
+        if (inst->op != IR_CBR &&
+            inst->b >= 0 && inst->b < nv) liv_add_use(&liv[inst->b], (int)i);
     }
 
     /* Compute live_start / live_end for each value. */

@@ -8,6 +8,9 @@ typedef enum {
     TK_KW_IMPORT,        /* "import" — Slice 1: recognized but not allowed */
     TK_KW_INT,           /* "int" */
     TK_KW_RETURN,        /* "return" */
+    TK_KW_IF,            /* "if" */
+    TK_KW_ELSE,          /* "else" */
+    TK_KW_WHILE,         /* "while" */
     TK_IDENT,
     TK_INT_LITERAL,
     TK_STRING_LITERAL,   /* Slice 1: reserved for import, not consumed */
@@ -22,6 +25,12 @@ typedef enum {
     TK_SLASH,            /* / */
     TK_PERCENT,          /* % */
     TK_ASSIGN,           /* = */
+    TK_EQ,               /* == */
+    TK_NE,               /* != */
+    TK_LT,               /* < */
+    TK_LE,               /* <= */
+    TK_GT,               /* > */
+    TK_GE,               /* >= */
     TK_EOF,
 } TokenKind;
 

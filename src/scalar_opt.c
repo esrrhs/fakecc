@@ -24,9 +24,12 @@ static int const_value(const IRInstArray *insts, IRValue v, int *found) {
 }
 
 /* A value-producing instruction is dead if its result is never used and
- * it has no side effects.  Side-effectful: RETURN, STORE, BR, CBR. */
+ * it has no side effects.  Side-effectful: RETURN, STORE, BR, CBR, LABEL,
+ * ALLOCA (mem2reg-invariant marker, preserved as no-op codegen). */
 static int has_side_effect(IROpcode op) {
-    return op == IR_RETURN || op == IR_STORE || op == IR_BR || op == IR_CBR;
+    return op == IR_RETURN || op == IR_STORE ||
+           op == IR_BR || op == IR_CBR || op == IR_LABEL ||
+           op == IR_ALLOCA;
 }
 
 /* ================================================================== */
@@ -86,13 +89,17 @@ int scalar_constfold(IRFunction *fn) {
 /* ================================================================== */
 
 int scalar_dce(IRFunction *fn) {
-    /* Mark which dst values are used as a source operand. */
+    /* Mark which dst values are used as a source operand.
+     * IR_CBR's `b` field is a label id, not a value; IR_LABEL/IR_BR have
+     * no value operands at all. */
     char *used = xmalloc(fn->next_value_id * sizeof(char));
     memset(used, 0, fn->next_value_id * sizeof(char));
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
-        if (inst->a >= 0) used[inst->a] = 1;
-        if (inst->b >= 0) used[inst->b] = 1;
+        if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->a >= 0 && inst->a < fn->next_value_id) used[inst->a] = 1;
+        if (inst->op != IR_CBR &&
+            inst->b >= 0 && inst->b < fn->next_value_id) used[inst->b] = 1;
     }
 
     /* Rebuild dropping unused side-effect-free instructions. */
@@ -161,24 +168,28 @@ void scalar_renumber(IRFunction *fn) {
     int *map = xmalloc(fn->next_value_id * sizeof(int));
     for (int i = 0; i < fn->next_value_id; i++) map[i] = -1;
 
-    /* Assign new ids in first-seen order. */
+    /* Assign new ids in first-seen order.
+     * Note: IR_CBR's `b` field is a label id (not a value); IR_LABEL/IR_BR
+     * carry no value operands.  Skip these when walking. */
     int next = 0;
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
+        if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
         if (inst->dst >= 0 && map[inst->dst] == -1)
             map[inst->dst] = next++;
         if (inst->a >= 0 && map[inst->a] == -1)
             map[inst->a] = next++;
-        if (inst->b >= 0 && map[inst->b] == -1)
+        if (inst->op != IR_CBR && inst->b >= 0 && map[inst->b] == -1)
             map[inst->b] = next++;
     }
 
-    /* Rewrite. */
+    /* Rewrite (skipping label/branch operand fields). */
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
+        if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
         if (inst->dst >= 0) inst->dst = map[inst->dst];
         if (inst->a >= 0) inst->a = map[inst->a];
-        if (inst->b >= 0) inst->b = map[inst->b];
+        if (inst->op != IR_CBR && inst->b >= 0) inst->b = map[inst->b];
     }
     fn->next_value_id = next;
     free(map);

@@ -101,6 +101,31 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 4 — 控制流与比较运算符
+
+引入完整的 C 控制流骨架：`if/else`、`while`、块语句 `{...}`，以及六个比较运算符 `< <= > >= == !=`（按 C 优先级：`equality < relational < additive`）。
+
+```c
+package main;
+int main() {
+    int i = 1;
+    int sum = 0;
+    while (i <= 10) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;   // 55
+}
+```
+
+实现要点：
+- **Lexer** 双字符前瞻识别 `== != <= >=`；新增关键字 `if` / `else` / `while`
+- **AST** 新增 `ST_IF` / `ST_WHILE` / `ST_BLOCK` 与 `BOP_EQ..BOP_GE`
+- **Sema** 支持嵌套作用域（`ST_BLOCK` 引入新的 scope-mark），块内变量互不干扰
+- **IR** 引入 `IR_EQ/NE/LT/LE/GT/GE`；`if` 下降为 `CBR → label`，`while` 下降为 `head/body/exit` 三块结构 + 回边
+- **Codegen** 直接编码 `cmp/setcc/xor/test/jmp/jcc` 机器码，函数末尾用 rel32 patch 表回填标签偏移
+- **regalloc 暂时回退**：现有基于区间的 SSA chordal 分配器不支持循环回边导致的多次定义。含控制流的函数暂走栈式 codegen 回退路径，语义正确但性能次优；下一步需改成基于 CFG 的活跃性分析
+
 ### Slice 3 — 局部变量与赋值
 
 函数体从单条 `return` 语句扩展为**语句序列**，引入局部变量声明、赋值和变量引用。支持：

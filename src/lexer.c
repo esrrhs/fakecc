@@ -48,10 +48,16 @@ void token_array_push(TokenArray *a, Token t) {
 static TokenKind keyword_kind(const char *s, size_t len) {
     switch (len) {
     case 2:
-        if (memcmp(s, "if", 2) == 0) return TK_KW_INT; /* not a keyword we use, but 'if' is 2 — skip */
+        if (memcmp(s, "if", 2) == 0) return TK_KW_IF;
         break;
     case 3:
         if (memcmp(s, "int", 3) == 0) return TK_KW_INT;
+        break;
+    case 4:
+        if (memcmp(s, "else", 4) == 0) return TK_KW_ELSE;
+        break;
+    case 5:
+        if (memcmp(s, "while", 5) == 0) return TK_KW_WHILE;
         break;
     case 6:
         if (memcmp(s, "import", 6) == 0) return TK_KW_IMPORT;
@@ -217,6 +223,56 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename;
             t.loc.line = start_line;
             t.loc.col = start_col;
+            token_array_push(out, t);
+            continue;
+        }
+
+        /* two-char operators & comparisons */
+        if (c == '=' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_EQ;
+            t.text = xstrdup("==");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '!' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_NE;
+            t.text = xstrdup("!=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '<') {
+            Token t;
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            if (source[pos + 1] == '=') {
+                t.kind = TK_LE;
+                t.text = xstrdup("<=");
+                pos += 2; col += 2;
+            } else {
+                t.kind = TK_LT;
+                t.text = xstrdup("<");
+                pos++; col++;
+            }
+            token_array_push(out, t);
+            continue;
+        }
+        if (c == '>') {
+            Token t;
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            if (source[pos + 1] == '=') {
+                t.kind = TK_GE;
+                t.text = xstrdup(">=");
+                pos += 2; col += 2;
+            } else {
+                t.kind = TK_GT;
+                t.text = xstrdup(">");
+                pos++; col++;
+            }
             token_array_push(out, t);
             continue;
         }

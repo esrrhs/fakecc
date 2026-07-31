@@ -22,6 +22,12 @@ typedef enum {
     BOP_MUL,     /* * */
     BOP_DIV,     /* / */
     BOP_MOD,     /* % */
+    BOP_EQ,      /* == */
+    BOP_NE,      /* != */
+    BOP_LT,      /* <  */
+    BOP_LE,      /* <= */
+    BOP_GT,      /* >  */
+    BOP_GE,      /* >= */
 } BinOp;
 
 typedef enum {
@@ -58,28 +64,39 @@ typedef enum {
     ST_DECL,     /* int x;  or  int x = expr;  */
     ST_EXPR,     /* expr;  (typical: x = 5;) */
     ST_RETURN,   /* return expr; */
+    ST_IF,       /* if (cond) then_stmt [else else_stmt] */
+    ST_WHILE,    /* while (cond) body */
+    ST_BLOCK,    /* { stmt* } — introduces a new scope */
 } StmtKind;
 
-typedef struct {
+typedef struct Stmt Stmt;
+typedef struct StmtArray {
+    Stmt *data;
+    size_t len;
+    size_t cap;
+} StmtArray;
+
+struct Stmt {
     StmtKind kind;
     SourceLoc loc;
     union {
         struct { char *name; Expr *init; } decl;   /* ST_DECL: init may be NULL */
         Expr *expr;                                 /* ST_EXPR */
         Expr *value;                                /* ST_RETURN */
+        struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */
+        struct { Expr *cond; Stmt *body; } while_s;              /* ST_WHILE */
+        StmtArray block;                             /* ST_BLOCK — owns its statements */
     } u;
-} Stmt;
-
-typedef struct {
-    Stmt *data;
-    size_t len;
-    size_t cap;
-} StmtArray;
+};
 
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
 void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
+
+/* Heap-allocated statement helpers used by if/while (which own sub-stmts) */
+Stmt *stmt_alloc(void);
+void  stmt_free_ptr(Stmt *s);
 
 /* ------------------------------------------------------------------ */
 /* Function & package declarations                                     */

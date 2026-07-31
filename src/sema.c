@@ -6,12 +6,12 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
-/* Symbol table — flat, function-level scope (Slice 3)                 */
+/* Symbol table — supports nested scopes via a "scope-mark" stack      */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    char *name;      /* xstrdup'd */
-    SourceLoc loc;   /* declaration site, for error reporting */
+    char *name;      /* xstrdup'd; NULL indicates a scope-boundary marker */
+    SourceLoc loc;
 } Sym;
 
 typedef struct {
@@ -46,15 +46,36 @@ static void symtable_push(SymTable *st, const char *name, SourceLoc loc) {
         }
         st->cap = new_cap;
     }
-    st->data[st->len].name = xstrdup(name);
+    st->data[st->len].name = name ? xstrdup(name) : NULL;
     st->data[st->len].loc = loc;
     st->len++;
 }
 
-/* Linear lookup; variables are few. Returns 1 if found. */
+static size_t symtable_enter_scope(SymTable *st) {
+    return st->len;
+}
+
+static void symtable_leave_scope(SymTable *st, size_t mark) {
+    while (st->len > mark) {
+        st->len--;
+        free(st->data[st->len].name);
+    }
+}
+
+/* Look up a variable anywhere in the current scope stack. */
 static int symtable_has(const SymTable *st, const char *name) {
     for (size_t i = 0; i < st->len; i++) {
-        if (strcmp(st->data[i].name, name) == 0) {
+        if (st->data[i].name && strcmp(st->data[i].name, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Was `name` declared in the current innermost scope (since `mark`)? */
+static int symtable_has_since(const SymTable *st, const char *name, size_t mark) {
+    for (size_t i = mark; i < st->len; i++) {
+        if (st->data[i].name && strcmp(st->data[i].name, name) == 0) {
             return 1;
         }
     }
@@ -84,7 +105,6 @@ static void check_expr(const Expr *e, const SymTable *st) {
         }
         break;
     case EX_ASSIGN:
-        /* Only variables are assignable in Slice 3. */
         if (e->u.assign.lvalue->kind != EX_VAR) {
             die_at(e->u.assign.lvalue->loc.file,
                    e->u.assign.lvalue->loc.line,
@@ -104,60 +124,86 @@ static void check_expr(const Expr *e, const SymTable *st) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Statement checker                                                   */
+/* ------------------------------------------------------------------ */
+
+static void check_stmt(const Stmt *s, SymTable *st, size_t scope_mark,
+                       int *has_return);
+
+static void check_stmt_list(const StmtArray *body, SymTable *st, int *has_return) {
+    size_t mark = symtable_enter_scope(st);
+    for (size_t i = 0; i < body->len; i++) {
+        check_stmt(&body->data[i], st, mark, has_return);
+    }
+    symtable_leave_scope(st, mark);
+}
+
+static void check_stmt(const Stmt *s, SymTable *st, size_t scope_mark,
+                       int *has_return) {
+    switch (s->kind) {
+    case ST_DECL:
+        if (symtable_has_since(st, s->u.decl.name, scope_mark)) {
+            die_at(s->loc.file, s->loc.line, s->loc.col,
+                   "redeclaration of '%s'", s->u.decl.name);
+        }
+        symtable_push(st, s->u.decl.name, s->loc);
+        if (s->u.decl.init) {
+            check_expr(s->u.decl.init, st);
+        }
+        break;
+    case ST_EXPR:
+        check_expr(s->u.expr, st);
+        break;
+    case ST_RETURN:
+        check_expr(s->u.value, st);
+        *has_return = 1;
+        break;
+    case ST_IF:
+        check_expr(s->u.if_s.cond, st);
+        check_stmt(s->u.if_s.then_s, st, scope_mark, has_return);
+        if (s->u.if_s.else_s) {
+            check_stmt(s->u.if_s.else_s, st, scope_mark, has_return);
+        }
+        break;
+    case ST_WHILE:
+        check_expr(s->u.while_s.cond, st);
+        check_stmt(s->u.while_s.body, st, scope_mark, has_return);
+        break;
+    case ST_BLOCK:
+        check_stmt_list(&s->u.block, st, has_return);
+        break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Semantic checks                                                      */
 /* ------------------------------------------------------------------ */
 
 void sema_check(const TranslationUnit *tu) {
-    /* package must be "main" */
     if (tu->package.name == NULL || strcmp(tu->package.name, "main") != 0) {
         die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
                "package must be 'main'");
     }
 
-    /* must have exactly one function */
     if (tu->functions.len != 1) {
         die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
                "expected exactly one function");
     }
 
-    /* function must be named "main" */
     const FunctionDecl *fn = &tu->functions.data[0];
     if (strcmp(fn->name, "main") != 0) {
         die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                "function must be 'main'");
     }
 
-    /* walk the statement list with a flat symbol table */
     SymTable st;
     symtable_init(&st);
 
     int has_return = 0;
-    for (size_t i = 0; i < fn->body.len; i++) {
-        const Stmt *s = &fn->body.data[i];
-        switch (s->kind) {
-        case ST_DECL:
-            if (symtable_has(&st, s->u.decl.name)) {
-                die_at(s->loc.file, s->loc.line, s->loc.col,
-                       "redeclaration of '%s'", s->u.decl.name);
-            }
-            symtable_push(&st, s->u.decl.name, s->loc);
-            if (s->u.decl.init) {
-                check_expr(s->u.decl.init, &st);
-            }
-            break;
-        case ST_EXPR:
-            check_expr(s->u.expr, &st);
-            break;
-        case ST_RETURN:
-            check_expr(s->u.value, &st);
-            has_return = 1;
-            break;
-        }
-    }
+    check_stmt_list(&fn->body, &st, &has_return);
 
     symtable_free(&st);
 
-    /* function must have at least one return statement */
     if (!has_return) {
         die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                "function must have a return statement");

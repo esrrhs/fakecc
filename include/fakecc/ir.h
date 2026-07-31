@@ -22,6 +22,12 @@ typedef enum {
     IR_DIV,         /* dst = a / b  (signed) */
     IR_MOD,         /* dst = a % b  (signed) */
     IR_NEG,         /* dst = -a */
+    IR_EQ,          /* dst = (a == b) ? 1 : 0 */
+    IR_NE,          /* dst = (a != b) ? 1 : 0 */
+    IR_LT,          /* dst = (a <  b) ? 1 : 0 (signed) */
+    IR_LE,          /* dst = (a <= b) ? 1 : 0 (signed) */
+    IR_GT,          /* dst = (a >  b) ? 1 : 0 (signed) */
+    IR_GE,          /* dst = (a >= b) ? 1 : 0 (signed) */
     IR_ALLOCA,      /* dst = stack slot for a variable (codegen no-op) */
     IR_LOAD,        /* dst = [a]   — read variable slot a → dst */
     IR_STORE,       /* [a] = b    — write b into variable slot a; dst unused */
@@ -54,6 +60,7 @@ typedef struct {
     char *name;       /* function name, xstrdup'd */
     IRInstArray insts;
     int next_value_id; /* SSA id counter, incremented by lower_expr */
+    int next_label_id; /* label id counter, used by control-flow lowering */
     SourceLoc loc;
     void *ra;         /* RAResult*, set by reg_alloc, consumed by codegen.
                          NULL until register allocation runs. */

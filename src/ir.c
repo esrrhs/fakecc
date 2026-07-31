@@ -183,6 +183,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         case BOP_MUL: op = IR_MUL; break;
         case BOP_DIV: op = IR_DIV; break;
         case BOP_MOD: op = IR_MOD; break;
+        case BOP_EQ:  op = IR_EQ;  break;
+        case BOP_NE:  op = IR_NE;  break;
+        case BOP_LT:  op = IR_LT;  break;
+        case BOP_LE:  op = IR_LE;  break;
+        case BOP_GT:  op = IR_GT;  break;
+        case BOP_GE:  op = IR_GE;  break;
         default: op = IR_ADD; break; /* unreachable */
         }
         return emit_bin(fn, op, l, r, e->loc);
@@ -205,6 +211,28 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     return -1;
 }
 
+/* Allocate a fresh label id. */
+static int new_label(IRFunction *fn) {
+    return fn->next_label_id++;
+}
+
+/* Emit a LABEL pseudo-instruction. */
+static void emit_label(IRFunction *fn, int label, SourceLoc loc) {
+    emit_inst(fn, IR_LABEL, -1, -1, -1, label, loc);
+}
+
+/* Emit unconditional branch. */
+static void emit_br(IRFunction *fn, int label, SourceLoc loc) {
+    emit_inst(fn, IR_BR, -1, -1, -1, label, loc);
+}
+
+/* Emit conditional branch: if cond true jump to t_label else f_label. */
+static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
+                     SourceLoc loc) {
+    /* CBR encoding: a=cond, imm=t_label, b=f_label */
+    emit_inst(fn, IR_CBR, -1, cond, f_label, t_label, loc);
+}
+
 /* Lower a single statement, emitting instructions as needed. */
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s) {
     switch (s->kind) {
@@ -219,12 +247,49 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s) {
         break;
     }
     case ST_EXPR:
-        /* evaluate for side effects (e.g. assignment store), discard result */
         lower_expr(fn, st, s->u.expr);
         break;
     case ST_RETURN: {
         IRValue v = lower_expr(fn, st, s->u.value);
         emit_inst(fn, IR_RETURN, -1, v, -1, 0, s->loc);
+        break;
+    }
+    case ST_IF: {
+        IRValue cond = lower_expr(fn, st, s->u.if_s.cond);
+        int L_then = new_label(fn);
+        int L_end  = new_label(fn);
+        int L_else = s->u.if_s.else_s ? new_label(fn) : L_end;
+        emit_cbr(fn, cond, L_then, L_else, s->loc);
+        emit_label(fn, L_then, s->loc);
+        lower_stmt(fn, st, s->u.if_s.then_s);
+        if (s->u.if_s.else_s) {
+            emit_br(fn, L_end, s->loc);
+            emit_label(fn, L_else, s->loc);
+            lower_stmt(fn, st, s->u.if_s.else_s);
+        }
+        emit_label(fn, L_end, s->loc);
+        break;
+    }
+    case ST_WHILE: {
+        int L_head = new_label(fn);
+        int L_body = new_label(fn);
+        int L_exit = new_label(fn);
+        emit_br(fn, L_head, s->loc);
+        emit_label(fn, L_head, s->loc);
+        IRValue cond = lower_expr(fn, st, s->u.while_s.cond);
+        emit_cbr(fn, cond, L_body, L_exit, s->loc);
+        emit_label(fn, L_body, s->loc);
+        lower_stmt(fn, st, s->u.while_s.body);
+        emit_br(fn, L_head, s->loc);
+        emit_label(fn, L_exit, s->loc);
+        break;
+    }
+    case ST_BLOCK: {
+        size_t mark = st->len;
+        for (size_t i = 0; i < s->u.block.len; i++) {
+            lower_stmt(fn, st, &s->u.block.data[i]);
+        }
+        st->len = mark;  /* pop block-local names; slots keep their IR ids */
         break;
     }
     }
@@ -241,6 +306,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.insts.len = 0;
         irfn.insts.cap = 0;
         irfn.next_value_id = 0;
+        irfn.next_label_id = 0;
 
         IRSymTable st;
         irsymtable_init(&st);
