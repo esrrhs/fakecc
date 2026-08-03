@@ -570,10 +570,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
             break;
         }
-        if (fn.params.len > 6) {
+        if (fn.params.len > 16) {
             die_at(fn.loc.file, fn.loc.line, fn.loc.col,
-                   "more than 6 parameters not yet supported "
-                   "(stack args come later)");
+                   "more than 16 parameters not supported");
         }
     }
 

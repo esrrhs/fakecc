@@ -9,7 +9,7 @@ typedef struct {
     const char *name;
     int arity;
     Type ret_type;
-    Type param_types[6];
+    Type param_types[16];
     SourceLoc loc;
 } FunSig;
 
@@ -33,7 +33,7 @@ static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     s->arity = (int)fn->params.len;
     s->ret_type = fn->ret_type;
     s->loc = fn->loc;
-    for (int i = 0; i < s->arity && i < 6; i++)
+    for (int i = 0; i < s->arity && i < 16; i++)
         s->param_types[i] = fn->params.data[i].type;
 }
 

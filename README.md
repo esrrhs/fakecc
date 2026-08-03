@@ -101,6 +101,22 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 10 — >6 参数走栈
+
+参数数量上限从 6 提升到 16。前 6 个走 SysV 寄存器（rdi/rsi/rdx/rcx/r8/r9），第 7 个及以上按 SysV 约定右到左压栈，callee 通过 `[rbp + 16 + 8*(k-6)]` 读取。
+
+```c
+int sum16(int a, ..., int p) { return a+...+p; }
+int main() { return sum16(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16); }  // 136
+```
+
+- **`IR_CALL_MAX_ARGS`** 6 → 16
+- **Parser/Sema** 参数上限、`FunSig.param_types` 数组同步扩容
+- **Codegen — call site**：`nstack = max(0, nargs-6)`；先按倒序（arg N-1 → arg 6）压栈参数，再照旧对前 6 个做 push-then-pop 舞蹈进 arg regs；对齐算式：需 `nstack % 2 != 0` 时额外 `sub rsp, 8`；调用后 `add rsp, nstack*8 + pad` 回收
+- **Codegen — 被调方 prologue**：前 6 个 param 走原有 push-pop 舞蹈；第 7 个及以上 `mov home, [rbp+16+8*(k-6)]`
+
+新增 4 个 e2e：`call_8args / call_10args / call_16args / call_stack_recurse`。
+
 ### Slice 9 — for / break / continue
 
 ```c

@@ -47,9 +47,10 @@ typedef enum {
     IR_GADDR,       /* dst = &global; global name in call_name.  Result is 8-byte ptr. */
 } IROpcode;
 
-/* Maximum arguments to IR_CALL — matches Slice 6 restriction of 6 params
- * (System V AMD64 first six int-class regs: rdi rsi rdx rcx r8 r9). */
-#define IR_CALL_MAX_ARGS 6
+/* Maximum arguments to IR_CALL — Slice 10 raises this from 6 to 16.
+ * Args 0..5 go in SysV integer arg regs; args 6..15 pushed on the stack
+ * right-to-left before the call. */
+#define IR_CALL_MAX_ARGS 16
 
 typedef struct {
     IROpcode op;

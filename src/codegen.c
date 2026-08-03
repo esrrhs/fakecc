@@ -712,12 +712,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
             if (fn->insts.data[j].op == IR_PARAM) nparams++;
             else break;  /* IR_PARAMs are contiguous at function start */
         }
-        /* Push args in REVERSE order (so arg 0 ends up on top). */
-        for (int p = nparams - 1; p >= 0; p--) {
+        int nreg_params = nparams > 6 ? 6 : nparams;
+        /* Push register args in REVERSE order (so arg 0 ends up on top). */
+        for (int p = nreg_params - 1; p >= 0; p--) {
             emit_push_r(&out->code, SYSV_ARG_REGS[p]);
         }
         /* Pop into each param's allocated home (or spill slot) in order. */
-        for (int p = 0; p < nparams; p++) {
+        for (int p = 0; p < nreg_params; p++) {
             const IRInst *pi = &fn->insts.data[p];
             int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
                       ? ra->reg[pi->dst] : -1;
@@ -725,6 +726,19 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 emit_pop_r(&out->code, pdr);
             } else {
                 emit_pop_r(&out->code, REG_RAX);
+                spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
+            }
+        }
+        /* Load stack-passed args from [rbp + 16 + 8*(k-6)] into their homes. */
+        for (int p = 6; p < nparams; p++) {
+            const IRInst *pi = &fn->insts.data[p];
+            int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
+                      ? ra->reg[pi->dst] : -1;
+            int off = 16 + 8 * (p - 6);
+            if (pdr >= 0) {
+                emit_load_spill(&out->code, pdr, off);
+            } else {
+                emit_load_spill(&out->code, REG_RAX, off);
                 spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
             }
         }
@@ -1036,20 +1050,33 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 break;
 
             case IR_CALL: {
-                /* Materialize each arg on the stack, then pop into the SysV
-                 * arg registers.  This avoids any move-ordering pitfalls when
-                 * one arg's value currently lives in another's target reg. */
                 int nargs = inst->call_nargs;
-                int need_pad = ((nargs & 1) != 0);  /* keep rsp 16-aligned across call */
+                int nreg  = nargs > 6 ? 6 : nargs;
+                int nstack = nargs > 6 ? nargs - 6 : 0;
+                /* Alignment: at call time rsp must be 16-aligned.  Function
+                 * prologue keeps rsp 16-aligned in the body; each 8-byte
+                 * push we do here shifts it by 8.  Total pushes we do
+                 * before the call: nstack (for stack args). The 6 reg
+                 * arg pushes are balanced by 6 pops.  So we need to
+                 * pad iff (nstack % 2) != 0. */
+                int need_pad = (nstack & 1);
                 if (need_pad) emit_sub_rsp_imm32(&out->code, 8);
 
-                for (int k = 0; k < nargs; k++) {
+                /* Push stack args right-to-left (arg N-1 first → arg 6 on top
+                 * closest to callee's rbp+16). */
+                for (int k = nargs - 1; k >= 6; k--) {
                     ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
                     emit_push_r(&out->code, REG_RAX);
                 }
-                /* Top of stack now holds args[nargs-1]; pop into the last
-                 * arg reg first, then work backward. */
-                for (int k = nargs - 1; k >= 0; k--) {
+
+                /* Register args: push all in order (arg 0 first), then pop
+                 * into arg regs in reverse. This gives the push-then-pop
+                 * dance behaviour that dodges clobbers. */
+                for (int k = 0; k < nreg; k++) {
+                    ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
+                    emit_push_r(&out->code, REG_RAX);
+                }
+                for (int k = nreg - 1; k >= 0; k--) {
                     emit_pop_r(&out->code, SYSV_ARG_REGS[k]);
                 }
 
@@ -1066,7 +1093,9 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 call_patches[num_call_patches].after_off = aft;
                 num_call_patches++;
 
-                if (need_pad) emit_add_rsp_imm32(&out->code, 8);
+                /* Tear down stack args + padding. */
+                int cleanup = nstack * 8 + (need_pad ? 8 : 0);
+                if (cleanup > 0) emit_add_rsp_imm32(&out->code, cleanup);
 
                 /* Result is in RAX; move to dst home (or spill). */
                 if (dr >= 0) {
