@@ -46,6 +46,8 @@ typedef enum {
     TK_TILDE,            /* ~ — bitwise NOT (unary) */
     TK_SHL,              /* << — left shift (binary) */
     TK_SHR,              /* >> — right shift (binary) */
+    TK_INC,              /* ++ — increment */
+    TK_DEC,              /* -- — decrement */
     TK_QUESTION,         /* ? */
     TK_COLON,            /* : */
     TK_DOT,              /* . */

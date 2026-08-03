@@ -351,6 +351,12 @@ static Expr *parse_unary(Parser *p) {
         advance(p);
         return expr_new_unary(UOP_BITNOT, parse_unary(p), loc);
     }
+    if (k == TK_INC || k == TK_DEC) {
+        SourceLoc loc = peek(p)->loc;
+        int is_inc = (k == TK_INC);
+        advance(p);
+        return expr_new_inc_dec(parse_unary(p), is_inc, 1 /* prefix */, loc);
+    }
     if (k == TK_AMP) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
@@ -414,6 +420,14 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
             /* Desugar `p->x` to `(*p).x`. */
             Expr *deref = expr_new_deref(lhs, loc);
             lhs = expr_new_member(deref, mn->text, loc);
+            continue;
+        }
+        if (peek(p)->kind == TK_INC || peek(p)->kind == TK_DEC) {
+            /* Postfix ++ / -- : binds tighter than prefix, so handle here. */
+            SourceLoc loc = peek(p)->loc;
+            int is_inc = (peek(p)->kind == TK_INC);
+            advance(p);
+            lhs = expr_new_inc_dec(lhs, is_inc, 0 /* postfix */, loc);
             continue;
         }
         break;

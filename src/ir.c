@@ -201,6 +201,8 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
         return expr_takes_addr_of(e->u.tern.cond, name)
             || expr_takes_addr_of(e->u.tern.then, name)
             || expr_takes_addr_of(e->u.tern.else_, name);
+    case EX_INC_DEC:
+        return expr_takes_addr_of(e->u.incdec.operand, name);
     }
     return 0;
 }
@@ -812,6 +814,46 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int dw = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int du = e->type.kind == TY_PTR ? 1 : e->type.is_unsigned;
         return coerce(fn, x, sw, su, dw, du, e->loc);
+    }
+    case EX_INC_DEC: {
+        /* ++lvalue / --lvalue (prefix or postfix).
+         * Sema guarantees operand is an lvalue of int or pointer type.
+         * Step = 1 for int, sizeof(pointee) for pointer. */
+        Expr *lv = e->u.incdec.operand;
+        int is_inc = e->u.incdec.is_inc;
+        int is_prefix = e->u.incdec.is_prefix;
+        int is_ptr = (lv->type.kind == TY_PTR);
+        int step = is_ptr ? type_size(*lv->type.pointee) : 1;
+        int lw = is_ptr ? 8 : (lv->type.width ? lv->type.width : 4);
+        int lu = is_ptr ? 1 : lv->type.is_unsigned;
+
+        /* Promotable path: simple non-pinned, non-global scalar variable.
+         * Use IR_LOAD/IR_STORE on the slot so mem2reg can still promote it. */
+        if (lv->kind == EX_VAR) {
+            const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
+            if (entry && !entry->is_global && !entry->pinned) {
+                IRValue old = new_value(fn);
+                emit_inst_w(fn, IR_LOAD, old, entry->slot, -1, 0, lw, lu, e->loc);
+                IRValue s = new_value(fn);
+                emit_inst_w(fn, IR_CONST, s, -1, -1, step, lw, lu, e->loc);
+                IRValue neu = emit_bin_w(fn, is_inc ? IR_ADD : IR_SUB,
+                                         old, s, lw, lu, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, entry->slot, neu, 0, lw, lu, e->loc);
+                return is_prefix ? neu : old;
+            }
+        }
+
+        /* General path (pinned var, global, deref, index, member): go
+         * through the address so the store side-effect reaches memory. */
+        IRValue addr = lower_lvalue_addr(fn, st, lv);
+        IRValue old = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
+        IRValue s = new_value(fn);
+        emit_inst_w(fn, IR_CONST, s, -1, -1, step, lw, lu, e->loc);
+        IRValue neu = emit_bin_w(fn, is_inc ? IR_ADD : IR_SUB,
+                                 old, s, lw, lu, e->loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, addr, neu, 0, lw, lu, e->loc);
+        return is_prefix ? neu : old;
     }
     case EX_SIZEOF_TYPE: {
         IRValue v = new_value(fn);

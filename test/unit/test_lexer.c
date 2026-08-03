@@ -380,6 +380,29 @@ static void test_bitor_not_confused_with_oror(void) {
     token_array_free(&a);
 }
 
+static void test_inc_dec_tokens(void) {
+    /* "a++ + ++b" → IDENT INC PLUS INC IDENT EOF */
+    TokenArray a = lex_str("a++ + ++b");
+    T_ASSERT_EQ_INT((int)a.len, 6);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_INC);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_PLUS);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_INC);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_dec_not_confused_with_arrow(void) {
+    /* "---" should lex as DEC + MINUS + EOF (-- then -), NOT arrow. */
+    TokenArray a = lex_str("---");
+    T_ASSERT_EQ_INT((int)a.len, 3);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_DEC);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_MINUS);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
 static void test_question_and_colon_tokens(void) {
     /* "a ? b : c" → IDENT QUESTION IDENT COLON IDENT EOF */
     TokenArray a = lex_str("a ? b : c");
@@ -443,5 +466,7 @@ int main(void) {
     test_shl_shr_tokens();
     test_shl_not_confused_with_lt();
     test_bitor_not_confused_with_oror();
+    test_inc_dec_tokens();
+    test_dec_not_confused_with_arrow();
     return t_finalize();
 }

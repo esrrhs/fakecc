@@ -330,6 +330,11 @@ Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc) {
     Expr *e = expr_alloc(EX_TERNARY, loc);
     e->u.tern.cond = cond; e->u.tern.then = then; e->u.tern.else_ = else_; return e;
 }
+Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_INC_DEC, loc);
+    e->u.incdec.operand = operand; e->u.incdec.is_inc = is_inc;
+    e->u.incdec.is_prefix = is_prefix; return e;
+}
 
 void expr_free(Expr *e) {
     if (!e) return;
@@ -379,6 +384,9 @@ void expr_free(Expr *e) {
         expr_free(e->u.tern.cond);
         expr_free(e->u.tern.then);
         expr_free(e->u.tern.else_);
+        break;
+    case EX_INC_DEC:
+        expr_free(e->u.incdec.operand);
         break;
     }
     type_free(&e->type);

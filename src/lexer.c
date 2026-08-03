@@ -295,6 +295,24 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             pos += 2; col += 2;
             continue;
         }
+        if (c == '+' && source[pos + 1] == '+') {
+            Token t;
+            t.kind = TK_INC;
+            t.text = xstrdup("++");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '-' && source[pos + 1] == '-') {
+            Token t;
+            t.kind = TK_DEC;
+            t.text = xstrdup("--");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
         if (c == '-' && source[pos + 1] == '>') {
             Token t;
             t.kind = TK_ARROW;

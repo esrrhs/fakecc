@@ -360,6 +360,31 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         set_type(e, type_clone(m->type));
         return type_clone(e->type);
     }
+    case EX_INC_DEC: {
+        /* ++lvalue / --lvalue (prefix or postfix). */
+        Expr *op = e->u.incdec.operand;
+        if (op->kind != EX_VAR && op->kind != EX_DEREF &&
+            op->kind != EX_INDEX && op->kind != EX_MEMBER)
+            die_at(op->loc.file, op->loc.line, op->loc.col,
+                   "operand of '%s' must be an lvalue",
+                   e->u.incdec.is_inc ? "++" : "--");
+        Type ot = check_expr(op, st, ft);
+        if (ot.kind != TY_INT && ot.kind != TY_PTR)
+            die_at(op->loc.file, op->loc.line, op->loc.col,
+                   "operand of '%s' must be int or pointer",
+                   e->u.incdec.is_inc ? "++" : "--");
+        type_free(&ot);
+        /* Result type is the operand type (before increment). For both prefix
+         * and postfix, e->type is the same as the operand's declared type. */
+        Type res;
+        if (op->type.kind == TY_PTR)
+            res = type_clone(op->type);
+        else
+            res = type_make_int(op->type.width ? op->type.width : 4,
+                                op->type.is_unsigned);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
     case EX_TERNARY: {
         /* cond ? then : else
          * Condition must be scalar (int or pointer).  Result type follows
