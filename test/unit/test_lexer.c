@@ -114,6 +114,42 @@ static void test_string_literal(void) {
     token_array_free(&a);
 }
 
+static void test_char_literal_simple(void) {
+    TokenArray a = lex_str("'A'");
+    T_ASSERT_EQ_INT((int)a.len, 2);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_CHAR_LITERAL);
+    T_ASSERT_STR_EQ(a.data[0].text, "'A'");
+    token_array_free(&a);
+}
+
+static void test_char_literal_escape_n(void) {
+    TokenArray a = lex_str("'\\n'");
+    T_ASSERT_EQ_INT((int)a.len, 2);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_CHAR_LITERAL);
+    T_ASSERT_STR_EQ(a.data[0].text, "'\\n'");
+    token_array_free(&a);
+}
+
+static void test_char_literal_escape_backslash(void) {
+    TokenArray a = lex_str("'\\\\'");
+    T_ASSERT_EQ_INT((int)a.len, 2);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_CHAR_LITERAL);
+    T_ASSERT_STR_EQ(a.data[0].text, "'\\\\'");
+    token_array_free(&a);
+}
+
+static void test_char_literal_in_expr(void) {
+    /* 'A'+1 → CHAR_LITERAL PLUS INT_LITERAL EOF */
+    TokenArray a = lex_str("'A'+1");
+    T_ASSERT_EQ_INT((int)a.len, 4);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_CHAR_LITERAL);
+    T_ASSERT_STR_EQ(a.data[0].text, "'A'");
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_PLUS);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_STR_EQ(a.data[2].text, "1");
+    token_array_free(&a);
+}
+
 static void test_keyword_import(void) {
     TokenArray a = lex_str("import");
     T_ASSERT_EQ_INT((int)a.len, 2);
@@ -276,6 +312,10 @@ int main(void) {
     test_block_comment();
     test_position_tracking();
     test_string_literal();
+    test_char_literal_simple();
+    test_char_literal_escape_n();
+    test_char_literal_escape_backslash();
+    test_char_literal_in_expr();
     test_keyword_import();
     test_unknown_char_dies();
     test_preprocessor_rejected();

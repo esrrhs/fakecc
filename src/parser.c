@@ -310,7 +310,25 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
     return lhs;
 }
 
-/* primary-expr = INT_LITERAL | IDENT [ "(" arg-list? ")" ]  | "(" (type ")" unary | expr ")" ) | ... */
+/* Decode a char-literal token's text (e.g. "'A'" or "'\\n'") to its int value.
+ * Caller guarantees text starts and ends with a single quote. */
+static int char_literal_value(const char *text) {
+    /* text[0] == '\'' */
+    if (text[1] == '\\') {
+        switch (text[2]) {
+        case 'n': return '\n';
+        case 't': return '\t';
+        case 'r': return '\r';
+        case '\\': return '\\';
+        case '\'': return '\'';
+        case '0': return '\0';
+        default:  return text[2];  /* unknown escape: use the char as-is */
+        }
+    }
+    return (unsigned char)text[1];
+}
+
+/* primary-expr = INT_LITERAL | CHAR_LITERAL | IDENT [ "(" arg-list? ")" ]  | "(" (type ")" unary | expr ")" ) | ... */
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
@@ -351,6 +369,11 @@ static Expr *parse_primary(Parser *p) {
         free(buf);
         advance(p);
         return parse_postfix(p, e);
+    }
+    if (t->kind == TK_CHAR_LITERAL) {
+        Expr *e = expr_new_int(char_literal_value(t->text), t->loc);
+        advance(p);
+        return e;
     }
     if (t->kind == TK_IDENT) {
         const Token *ident = t;

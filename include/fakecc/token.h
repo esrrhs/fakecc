@@ -23,6 +23,7 @@ typedef enum {
     TK_KW_STRUCT,        /* "struct" */
     TK_IDENT,
     TK_INT_LITERAL,
+    TK_CHAR_LITERAL,     /* 'A', '\n', etc. */
     TK_STRING_LITERAL,   /* Slice 1: reserved for import, not consumed */
     TK_LPAREN,           /* ( */
     TK_RPAREN,           /* ) */

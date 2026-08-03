@@ -158,6 +158,52 @@ void lex(const char *source, const char *filename, TokenArray *out) {
 
         line_start = 0;
 
+        /* character literal: 'A', '\n', '\\', '\'', '\0' */
+        if (c == '\'') {
+            int start_line = line;
+            int start_col = col;
+            size_t start = pos;
+            pos++;  /* skip opening quote */
+            col++;
+
+            /* must have at least one char (body or escape) */
+            if (source[pos] == '\0' || source[pos] == '\n') {
+                die_at(filename, start_line, start_col,
+                       "unterminated character literal");
+            }
+
+            /* escape sequence */
+            if (source[pos] == '\\') {
+                pos++; col++;  /* skip backslash */
+                if (source[pos] == '\0' || source[pos] == '\n') {
+                    die_at(filename, start_line, start_col,
+                           "unterminated character literal");
+                }
+                pos++; col++;  /* skip escaped char */
+            } else {
+                pos++; col++;  /* skip single char */
+            }
+
+            /* closing quote */
+            if (source[pos] != '\'') {
+                die_at(filename, start_line, start_col,
+                       "missing closing quote in character literal");
+            }
+            pos++; col++;  /* skip closing quote */
+
+            size_t len = pos - start;
+            Token t;
+            t.kind = TK_CHAR_LITERAL;
+            t.text = malloc(len + 1);
+            memcpy(t.text, source + start, len);
+            t.text[len] = '\0';
+            t.loc.file = filename;
+            t.loc.line = start_line;
+            t.loc.col = start_col;
+            token_array_push(out, t);
+            continue;
+        }
+
         /* string literal */
         if (c == '"') {
             int start_line = line;
