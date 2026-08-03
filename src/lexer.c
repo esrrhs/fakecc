@@ -66,6 +66,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "import", 6) == 0) return TK_KW_IMPORT;
         if (memcmp(s, "return", 6) == 0) return TK_KW_RETURN;
         if (memcmp(s, "signed", 6) == 0) return TK_KW_SIGNED;
+        if (memcmp(s, "sizeof", 6) == 0) return TK_KW_SIZEOF;
         break;
     case 7:
         if (memcmp(s, "package", 7) == 0) return TK_KW_PACKAGE;
@@ -290,6 +291,8 @@ void lex(const char *source, const char *filename, TokenArray *out) {
         case ')':
         case '{':
         case '}':
+        case '[':
+        case ']':
         case ';':
         case ',':
         case '+':
@@ -297,6 +300,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
         case '*':
         case '/':
         case '%':
+        case '&':
         case '=': {
             Token t;
             switch (c) {
@@ -304,6 +308,8 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             case ')': t.kind = TK_RPAREN; break;
             case '{': t.kind = TK_LBRACE; break;
             case '}': t.kind = TK_RBRACE; break;
+            case '[': t.kind = TK_LBRACKET; break;
+            case ']': t.kind = TK_RBRACKET; break;
             case ';': t.kind = TK_SEMICOLON; break;
             case ',': t.kind = TK_COMMA; break;
             case '+': t.kind = TK_PLUS; break;
@@ -311,6 +317,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             case '*': t.kind = TK_STAR; break;
             case '/': t.kind = TK_SLASH; break;
             case '%': t.kind = TK_PERCENT; break;
+            case '&': t.kind = TK_AMP; break;
             case '=': t.kind = TK_ASSIGN; break;
             default:  t.kind = TK_EOF; break; /* unreachable */
             }

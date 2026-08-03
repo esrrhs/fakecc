@@ -28,9 +28,12 @@ typedef enum {
     IR_LE,          /* dst = (a <= b) ? 1 : 0 (signed) */
     IR_GT,          /* dst = (a >  b) ? 1 : 0 (signed) */
     IR_GE,          /* dst = (a >= b) ? 1 : 0 (signed) */
-    IR_ALLOCA,      /* dst = stack slot for a variable (codegen no-op) */
-    IR_LOAD,        /* dst = [a]   — read variable slot a → dst */
-    IR_STORE,       /* [a] = b    — write b into variable slot a; dst unused */
+    IR_ALLOCA,      /* dst = stack slot for a variable (codegen no-op unless pinned) */
+    IR_LOAD,        /* dst = [a]   — read variable slot a → dst (mem2reg-promotable) */
+    IR_STORE,       /* [a] = b     — write b into variable slot a; dst unused */
+    IR_ADDR,        /* dst = &alloca_a — a is an alloca-value id; result is 8-byte pointer */
+    IR_LOAD_PTR,    /* dst = *a    — a is a pointer-valued SSA; not mem2reg-promoted */
+    IR_STORE_PTR,   /* *a = b      — a is a pointer-valued SSA */
     IR_COPY,        /* dst = a    — simple move (mem2reg / φ resolution product) */
     IR_LABEL,       /* imm = label_id — basic-block marker */
     IR_BR,          /* imm = target_label — unconditional branch */
@@ -62,6 +65,10 @@ typedef struct {
      *   for LOAD/STORE/ALLOCA/PARAM.  0 for control-flow (BR/CBR/LABEL/RETURN). */
     int      width;
     int      is_unsigned;   /* signedness — governs sext vs zext, sdiv vs udiv */
+    /* Slice 7b/c: for IR_ALLOCA only. Total bytes reserved on the stack when
+     * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
+     * mem2reg promotes get 0 here (they never reach codegen anyway). */
+    int      alloca_bytes;
 } IRInst;
 
 /* ------------------------------------------------------------------ */

@@ -55,14 +55,22 @@ static Type parse_type(Parser *p) {
     case TK_KW_INT:   advance(p); width = 4; break;
     case TK_KW_LONG:  advance(p); width = 8; break;
     default:
-        if (saw_sign) { width = 4; /* bare "signed"/"unsigned" == int */ break; }
+        if (saw_sign) { width = 4; break; }
         {
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col,
                    "expected type but got '%s'", t->text);
         }
     }
-    return type_make_int(width, is_unsigned);
+    Type t = type_make_int(width, is_unsigned);
+    /* Postfix: zero-or-more `*` → wrap in TY_PTR. */
+    while (peek(p)->kind == TK_STAR) {
+        advance(p);
+        Type wrapped = type_make_ptr(t);
+        type_free(&t);
+        t = wrapped;
+    }
+    return t;
 }
 
 /* ------------------------------------------------------------------ */
@@ -101,6 +109,7 @@ static Expr *parse_relational(Parser *p);
 static Expr *parse_add(Parser *p);
 static Expr *parse_mul(Parser *p);
 static Expr *parse_unary(Parser *p);
+static Expr *parse_postfix(Parser *p, Expr *lhs);
 static Expr *parse_primary(Parser *p);
 
 static Expr *parse_expr(Parser *p) {
@@ -190,7 +199,7 @@ static Expr *parse_mul(Parser *p) {
     return lhs;
 }
 
-/* unary-expr = ("+" | "-") unary-expr | primary-expr */
+/* unary-expr = ("+"|"-"|"&"|"*") unary-expr | sizeof unary-or-type | primary { postfix } */
 static Expr *parse_unary(Parser *p) {
     TokenKind k = peek(p)->kind;
     if (k == TK_PLUS || k == TK_MINUS) {
@@ -200,22 +209,62 @@ static Expr *parse_unary(Parser *p) {
         UnaryOp op = (k == TK_MINUS) ? UOP_NEG : UOP_POS;
         return expr_new_unary(op, operand, loc);
     }
+    if (k == TK_AMP) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        return expr_new_addr(parse_unary(p), loc);
+    }
+    if (k == TK_STAR) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        return expr_new_deref(parse_unary(p), loc);
+    }
+    if (k == TK_KW_SIZEOF) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        /* sizeof(T) or sizeof(expr) or sizeof expr. */
+        if (peek(p)->kind == TK_LPAREN && is_type_start(p->tokens->data[p->pos + 1].kind)) {
+            advance(p);
+            Type t = parse_type(p);
+            expect_kind(p, TK_RPAREN, "')'");
+            Expr *e = expr_new_sizeof_type(t, loc);
+            type_free(&t);
+            return e;
+        }
+        return expr_new_sizeof_expr(parse_unary(p), loc);
+    }
     return parse_primary(p);
 }
 
-/* primary-expr = INT_LITERAL | IDENT [ "(" arg-list? ")" ]  | "(" expr ")" */
+/* Attach postfix operators (call `[i]` etc.) after any primary that
+ * returned a valid expr.  Called from parse_primary. */
+static Expr *parse_postfix(Parser *p, Expr *lhs) {
+    for (;;) {
+        if (peek(p)->kind == TK_LBRACKET) {
+            SourceLoc loc = peek(p)->loc;
+            advance(p);
+            Expr *idx = parse_expr(p);
+            expect_kind(p, TK_RBRACKET, "']'");
+            lhs = expr_new_index(lhs, idx, loc);
+            continue;
+        }
+        break;
+    }
+    return lhs;
+}
+
+/* primary-expr = INT_LITERAL | IDENT [ "(" arg-list? ")" ]  | "(" (type ")" unary | expr ")" ) | ... */
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
         Expr *e = expr_new_int(atoi(t->text), t->loc);
         advance(p);
-        return e;
+        return parse_postfix(p, e);
     }
     if (t->kind == TK_IDENT) {
         const Token *ident = t;
         advance(p);
         if (peek(p)->kind == TK_LPAREN) {
-            /* Function call. */
             advance(p);
             Expr *call = expr_new_call(ident->text, ident->loc);
             if (peek(p)->kind != TK_RPAREN) {
@@ -227,15 +276,25 @@ static Expr *parse_primary(Parser *p) {
                 }
             }
             expect_kind(p, TK_RPAREN, "')'");
-            return call;
+            return parse_postfix(p, call);
         }
-        return expr_new_var(ident->text, ident->loc);
+        return parse_postfix(p, expr_new_var(ident->text, ident->loc));
     }
     if (t->kind == TK_LPAREN) {
+        /* Cast?  (Type) unary   vs.   (expr) */
+        if (is_type_start(p->tokens->data[p->pos + 1].kind)) {
+            SourceLoc loc = peek(p)->loc;
+            advance(p);
+            Type ty = parse_type(p);
+            expect_kind(p, TK_RPAREN, "')'");
+            Expr *e = expr_new_cast(ty, parse_unary(p), loc);
+            type_free(&ty);
+            return parse_postfix(p, e);
+        }
         advance(p);
         Expr *e = parse_expr(p);
         expect_kind(p, TK_RPAREN, "')'");
-        return e;
+        return parse_postfix(p, e);
     }
     die_at(t->loc.file, t->loc.line, t->loc.col,
            "expected expression but got '%s'", t->text);
@@ -263,7 +322,7 @@ static void parse_stmt_list(Parser *p, StmtArray *out) {
 static Stmt parse_stmt(Parser *p) {
     TokenKind k = peek(p)->kind;
     if (is_type_start(k)) {
-        /* decl-stmt: type IDENT ["=" expr] ";" */
+        /* decl-stmt: type IDENT [ "[" N "]" ]* ["=" expr] ";" */
         SourceLoc decl_loc = peek(p)->loc;
         Type ty = parse_type(p);
         const Token *name = peek(p);
@@ -272,6 +331,34 @@ static Stmt parse_stmt(Parser *p) {
                    "expected variable name but got '%s'", name->text);
         }
         advance(p);
+        /* Array declarator postfix: collect all "[N]" then wrap right-to-left
+         * so `int a[3][2]` becomes array-of-3-of-array-of-2-of-int. */
+        int dims[8];
+        int ndims = 0;
+        while (peek(p)->kind == TK_LBRACKET) {
+            advance(p);
+            const Token *nt = peek(p);
+            if (nt->kind != TK_INT_LITERAL) {
+                die_at(nt->loc.file, nt->loc.line, nt->loc.col,
+                       "expected integer array length but got '%s'", nt->text);
+            }
+            int len = atoi(nt->text);
+            if (len <= 0) {
+                die_at(nt->loc.file, nt->loc.line, nt->loc.col,
+                       "array length must be positive");
+            }
+            advance(p);
+            expect_kind(p, TK_RBRACKET, "']'");
+            if (ndims >= 8) die_at(nt->loc.file, nt->loc.line, nt->loc.col,
+                                   "too many array dimensions");
+            dims[ndims++] = len;
+        }
+        /* Wrap right-to-left. */
+        for (int i = ndims - 1; i >= 0; i--) {
+            Type wrapped = type_make_array(ty, dims[i]);
+            type_free(&ty);
+            ty = wrapped;
+        }
         Stmt s;
         s.kind = ST_DECL;
         s.loc = decl_loc;
@@ -279,7 +366,7 @@ static Stmt parse_stmt(Parser *p) {
         s.u.decl.type = ty;
         s.u.decl.init = NULL;
         if (peek(p)->kind == TK_ASSIGN) {
-            advance(p);  /* consume "=" */
+            advance(p);
             s.u.decl.init = parse_expr(p);
         }
         expect_kind(p, TK_SEMICOLON, "';'");
@@ -392,6 +479,16 @@ static FunctionDecl parse_function_decl(Parser *p) {
                        "expected parameter name but got '%s'", pname->text);
             }
             advance(p);
+            /* Array parameter postfix `[N]` or `[]` — normalized to pointer. */
+            if (peek(p)->kind == TK_LBRACKET) {
+                advance(p);
+                /* accept optional length, ignore it: array param decays to ptr */
+                if (peek(p)->kind == TK_INT_LITERAL) advance(p);
+                expect_kind(p, TK_RBRACKET, "']'");
+                Type wrapped = type_make_ptr(pty);
+                type_free(&pty);
+                pty = wrapped;
+            }
             param_array_push(&fn.params, pname->text, pty, pname->loc);
             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
             break;

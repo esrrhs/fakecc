@@ -306,9 +306,16 @@ void mem2reg_rename(
     }
     char *d = *dead;
 
-    /* Mark all ALLOCA instructions dead. */
-    for (size_t i = 0; i < ninst; i++)
-        if (fn->insts.data[i].op == IR_ALLOCA) d[i] = 1;
+    /* Mark ALLOCA instructions dead — but only ones actually being promoted
+     * (pinned allocas must stay for codegen to see their alloca_bytes). */
+    for (size_t i = 0; i < ninst; i++) {
+        if (fn->insts.data[i].op != IR_ALLOCA) continue;
+        int slot = fn->insts.data[i].dst;
+        int is_promotable = 0;
+        for (size_t ai = 0; ai < num_alloca; ai++)
+            if (alloca_slots[ai] == slot) { is_promotable = 1; break; }
+        if (is_promotable) d[i] = 1;
+    }
 
     if (num_alloca == 0) return;
 
@@ -486,18 +493,32 @@ int opt_mem2reg(IRFunction *fn)
 
     const IRInstArray *insts = &fn->insts;
 
-    /* ---- 1. Identify promotable alloca slots ---- */
+    /* ---- 1. Identify promotable alloca slots ----
+     * Pin (skip) any alloca whose id appears as an operand of IR_ADDR,
+     * IR_LOAD_PTR, or IR_STORE_PTR, OR whose declared size is > 0 (arrays). */
+    char *pinned = xmalloc(fn->next_value_id * sizeof(char));
+    memset(pinned, 0, fn->next_value_id * sizeof(char));
+    for (size_t i = 0; i < insts->len; i++) {
+        const IRInst *ii = &insts->data[i];
+        if (ii->op == IR_ALLOCA && ii->alloca_bytes > 0 && ii->dst >= 0)
+            pinned[ii->dst] = 1;
+        if (ii->op == IR_ADDR && ii->a >= 0 && ii->a < fn->next_value_id)
+            pinned[ii->a] = 1;
+    }
     int *alloca_slots = NULL;
     size_t num_alloca = 0, cap_alloca = 0;
     for (size_t i = 0; i < insts->len; i++) {
         if (insts->data[i].op == IR_ALLOCA) {
+            int slot = insts->data[i].dst;
+            if (slot >= 0 && pinned[slot]) continue;
             if (num_alloca >= cap_alloca) {
                 cap_alloca = cap_alloca ? cap_alloca * 2 : 8;
                 alloca_slots = xrealloc(alloca_slots, cap_alloca * sizeof(int));
             }
-            alloca_slots[num_alloca++] = insts->data[i].dst;
+            alloca_slots[num_alloca++] = slot;
         }
     }
+    free(pinned);
 
     if (num_alloca == 0) {
         free(alloca_slots);

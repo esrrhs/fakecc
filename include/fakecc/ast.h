@@ -5,23 +5,47 @@
 #include <stddef.h>
 
 /* ------------------------------------------------------------------ */
-/* Type — Slice 7a: integer types with signedness                      */
+/* Type — 7a: integer types; 7b/c: pointers + arrays                    */
 /* ------------------------------------------------------------------ */
 
 typedef enum {
-    TY_INT,   /* only kind for 7a; will grow: TY_PTR, TY_ARRAY, ... */
+    TY_INT,     /* char/short/int/long × signed/unsigned */
+    TY_PTR,     /* T*  — pointee owned via heap allocation */
+    TY_ARRAY,   /* T[N] — elem_type owned via heap; length is a positive int */
 } TypeKind;
 
-typedef struct {
+typedef struct Type Type;
+struct Type {
     TypeKind kind;
-    int width;         /* 1, 2, 4, 8 bytes */
-    int is_unsigned;   /* 0 = signed, 1 = unsigned */
-} Type;
+    int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. */
+    int is_unsigned;   /* TY_INT only */
+    Type *pointee;     /* TY_PTR only: malloc'd */
+    Type *elem_type;   /* TY_ARRAY only: malloc'd */
+    int length;        /* TY_ARRAY only */
+};
 
 static inline Type type_make_int(int width, int is_unsigned) {
-    Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned; return t;
+    Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
+
+/* Deep-clone a Type (recursing into pointee/elem_type). */
+Type type_clone(Type t);
+/* Free heap-owned sub-types (no-op for TY_INT). Does NOT free `t` itself. */
+void type_free(Type *t);
+/* Total byte size of a Type: sizeof for scalars, N*elem for arrays. */
+int  type_size(Type t);
+/* T*  → owning-Type wrapper. `pointee` is deep-cloned. */
+Type type_make_ptr(Type pointee);
+/* T[N] — elem is deep-cloned. */
+Type type_make_array(Type elem, int length);
+/* Array→pointer decay: TY_ARRAY(E) → TY_PTR(E); otherwise identity clone. */
+Type type_decay(Type t);
+/* True iff t is TY_PTR or TY_ARRAY. */
+int  type_is_ptr_or_array(Type t);
+/* Element type for a pointer-or-array — cloned. */
+Type type_pointee_or_elem(Type t);
 
 /* ------------------------------------------------------------------ */
 /* Expression — Slice 2 introduces arithmetic expressions              */
@@ -34,6 +58,12 @@ typedef enum {
     EX_VAR,     /* variable reference: name */
     EX_ASSIGN,  /* lvalue = rvalue; result is the assigned value */
     EX_CALL,    /* callee(arg1, arg2, ...) */
+    EX_ADDR,    /* &lvalue */
+    EX_DEREF,   /* *ptr — lvalue */
+    EX_INDEX,   /* a[i]  — lvalue; desugars to *(a+i) in IR */
+    EX_CAST,    /* (T)expr */
+    EX_SIZEOF_TYPE,  /* sizeof(T)     — compile-time integer */
+    EX_SIZEOF_EXPR,  /* sizeof(expr)  — compile-time integer */
 } ExprKind;
 
 typedef enum {
@@ -75,6 +105,12 @@ struct Expr {
         struct { char *name; } var;                    /* EX_VAR */
         struct { Expr *lvalue; Expr *rvalue; } assign;/* EX_ASSIGN */
         struct { char *callee; ExprArray args; } call;/* EX_CALL — owns callee + args */
+        struct { Expr *operand; } addr;                /* EX_ADDR */
+        struct { Expr *operand; } deref;               /* EX_DEREF */
+        struct { Expr *array;  Expr *index; } idx;    /* EX_INDEX */
+        struct { Type target; Expr *operand; } cast;  /* EX_CAST — owns target sub-types */
+        struct { Type target; } sizeof_t;              /* EX_SIZEOF_TYPE */
+        struct { Expr *operand; } sizeof_e;            /* EX_SIZEOF_EXPR */
     } u;
 };
 
@@ -85,8 +121,16 @@ Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
 Expr *expr_new_call(const char *callee, SourceLoc loc);
+Expr *expr_new_addr(Expr *operand, SourceLoc loc);
+Expr *expr_new_deref(Expr *operand, SourceLoc loc);
+Expr *expr_new_index(Expr *array, Expr *index, SourceLoc loc);
+Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
+Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
+Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_free(Expr *e);
+/* Set an Expr's type, freeing the old (owning) type first; takes ownership of t. */
+void  expr_set_type(Expr *e, Type t);
 
 /* ------------------------------------------------------------------ */
 /* Statement                                                           */

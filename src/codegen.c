@@ -229,6 +229,101 @@ static void emit_load_spill(Buffer *b, int reg, int off) {
     }
 }
 
+/* lea dst_reg, [rbp+off]  →  REX 8D [ModRM: reg=dst, rm=rbp, mod=disp] */
+static void emit_lea_rbp(Buffer *b, int dst, int off) {
+    emit_rex_wrb(b, 1, dst, REG_RBP);
+    emit_byte(b, 0x8D);
+    if (off >= -128 && off <= 127) {
+        emit_modrm(b, 1, dst, REG_RBP);
+        emit_byte(b, (uint8_t)(off & 0xFF));
+    } else {
+        emit_modrm(b, 2, dst, REG_RBP);
+        emit_int32(b, off);
+    }
+}
+
+/* Emit ModRM for `[reg]` addressing where `reg` is a full 4-bit register id
+ * (0..15).  Handles the two x86 special cases:
+ *   - rbp (reg&7 == 5): mod=00 rm=5 means [disp32], not [rbp]. Use mod=01 disp8=0.
+ *   - rsp (reg&7 == 4): rm=4 means SIB follows.  Emit SIB=0x24 (base=rsp, no idx, no scale).
+ */
+static void emit_modrm_indirect(Buffer *b, int reg_field, int base) {
+    int rm = base & 7;
+    if (rm == 4) {
+        emit_modrm(b, 0, reg_field & 7, 4);
+        emit_byte(b, 0x24);  /* SIB: scale=0, index=none(4), base=rsp(4) */
+    } else if (rm == 5) {
+        emit_modrm(b, 1, reg_field & 7, 5);
+        emit_byte(b, 0);
+    } else {
+        emit_modrm(b, 0, reg_field & 7, rm);
+    }
+}
+
+/* mov [ptr_reg], src_reg — store `width` low bytes of src to memory pointed by ptr. */
+static void emit_store_via_ptr(Buffer *b, int ptr, int src, int width) {
+    switch (width) {
+    case 1: {
+        uint8_t rex = 0x40 | ((src & 8) >> 1) | ((ptr & 8) >> 3);
+        emit_byte(b, rex);
+        emit_byte(b, 0x88);
+        emit_modrm_indirect(b, src, ptr);
+        break;
+    }
+    case 2:
+        emit_byte(b, 0x66);
+        emit_rex_wrb(b, 0, src, ptr);
+        emit_byte(b, 0x89);
+        emit_modrm_indirect(b, src, ptr);
+        break;
+    case 4:
+        if (src >= 8 || ptr >= 8) emit_rex_wrb(b, 0, src, ptr);
+        emit_byte(b, 0x89);
+        emit_modrm_indirect(b, src, ptr);
+        break;
+    case 8:
+    default:
+        emit_rex_wrb(b, 1, src, ptr);
+        emit_byte(b, 0x89);
+        emit_modrm_indirect(b, src, ptr);
+        break;
+    }
+}
+
+/* Load from [ptr_reg] into dst_reg. If width < 8, sign/zero-extend. */
+static void emit_load_via_ptr(Buffer *b, int dst, int ptr, int width, int is_unsigned) {
+    switch (width) {
+    case 1:
+        emit_rex_wrb(b, 1, dst, ptr);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
+        emit_modrm_indirect(b, dst, ptr);
+        break;
+    case 2:
+        emit_rex_wrb(b, 1, dst, ptr);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
+        emit_modrm_indirect(b, dst, ptr);
+        break;
+    case 4:
+        if (is_unsigned) {
+            if (dst >= 8 || ptr >= 8) emit_rex_wrb(b, 0, dst, ptr);
+            emit_byte(b, 0x8B);
+        } else {
+            emit_rex_wrb(b, 1, dst, ptr);
+            emit_byte(b, 0x63);
+        }
+        emit_modrm_indirect(b, dst, ptr);
+        break;
+    case 8:
+    default:
+        emit_rex_wrb(b, 1, dst, ptr);
+        emit_byte(b, 0x8B);
+        emit_modrm_indirect(b, dst, ptr);
+        break;
+    }
+}
+
 /* ---- Width-aware load/store to [rbp+off] ----
  * Currently unused: mem2reg promotes every scalar alloca, so IR_LOAD/STORE
  * never survives to codegen for Slice 7a. Kept for future non-scalar support. */
@@ -541,13 +636,30 @@ void codegen(const IRModule *ir, EmitModule *out) {
         int cs_used[3];
         collect_callee_saved(ra, cs_used);
 
-        int stack_size = ra ? ra->stack_size : 8 * fn->next_value_id;
+        /* Compute pinned-alloca frame area: byte-offset from rbp for each
+         * IR_ALLOCA with alloca_bytes > 0.  Offsets are placed above spill
+         * area (further from rbp, i.e. more negative). */
+        int *alloca_off = xmalloc(fn->next_value_id * sizeof(int));
+        for (int i = 0; i < fn->next_value_id; i++) alloca_off[i] = 0;
+        int spill_area = ra ? ra->stack_size : 0;
+        int pinned_area = 0;
+        for (size_t j = 0; j < fn->insts.len; j++) {
+            const IRInst *inst = &fn->insts.data[j];
+            if (inst->op == IR_ALLOCA && inst->alloca_bytes > 0 && inst->dst >= 0) {
+                int bytes = inst->alloca_bytes;
+                if (bytes % 8 != 0) bytes += 8 - (bytes % 8);
+                pinned_area += bytes;
+                alloca_off[inst->dst] = -(spill_area + pinned_area);
+            }
+        }
+
+        int stack_size = spill_area + pinned_area;
+        if (!ra && stack_size == 0) stack_size = 8 * fn->next_value_id;
         if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
 
         /* Alignment invariant: on entry rsp % 16 == 8 (call pushed ret).
          * After "push rbp" rsp % 16 == 0.  Each callee-saved push adds 8;
-         * if odd count, we need one extra bump to keep rsp aligned.  We
-         * fold that into stack_size. */
+         * if odd count, we need one extra bump to keep rsp aligned. */
         int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
         if (((cs_count) & 1) != 0) stack_size += 8;
 
@@ -806,6 +918,45 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 break;
             }
 
+            case IR_ADDR: {
+                /* dst = &alloca_slot.  Get alloca's byte-offset from rbp. */
+                int off = 0;
+                if (inst->a >= 0 && inst->a < fn->next_value_id)
+                    off = alloca_off[inst->a];
+                if (off == 0) {
+                    /* Alloca wasn't laid out as pinned — this is a bug in IR-gen
+                     * (should have set alloca_bytes>0). */
+                    fprintf(stderr, "fakecc: IR_ADDR on non-pinned alloca %d\n", inst->a);
+                    exit(1);
+                }
+                if (dr >= 0) {
+                    emit_lea_rbp(&out->code, dr, off);
+                } else {
+                    emit_lea_rbp(&out->code, REG_RAX, off);
+                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                }
+                break;
+            }
+
+            case IR_LOAD_PTR: {
+                /* dst = *ptr.  ptr = inst->a. */
+                ensure_reg(&out->code, inst->a, REG_RCX, ra);
+                emit_load_via_ptr(&out->code,
+                                  dr >= 0 ? dr : REG_RAX,
+                                  REG_RCX, inst->width, inst->is_unsigned);
+                if (dr < 0)
+                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                break;
+            }
+
+            case IR_STORE_PTR: {
+                /* *ptr = val.  ptr = inst->a, val = inst->b. */
+                ensure_reg(&out->code, inst->a, REG_RCX, ra);
+                ensure_reg(&out->code, inst->b, REG_RAX, ra);
+                emit_store_via_ptr(&out->code, REG_RCX, REG_RAX, inst->width);
+                break;
+            }
+
             case IR_LABEL: {
                 if (inst->imm >= 0 && inst->imm < nlabels) {
                     label_off[inst->imm] = out->code.len;
@@ -910,6 +1061,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
         }
         free(patches);
         free(label_off);
+        free(alloca_off);
 
         size_t fn_size = out->code.len - start_offset;
         emit_module_add_symbol(out, fn->name, start_offset, fn_size);

@@ -101,6 +101,46 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 7b+7c — 指针、数组、cast、sizeof
+
+从"只有整型"进入到"可以操纵内存"。支持任意多级指针（`int**`）、取址 `&`、解引用 `*`、任意固定长度数组含多维（`int a[M][N]`）、下标 `a[i]`、指针算术（按元素大小自动缩放）、数组到指针衰减、显式 cast `(T)expr`、`sizeof(T)` 与 `sizeof(expr)`。
+
+```c
+package main;
+int swap(int *a, int *b) {
+    int t = *a; *a = *b; *b = t;
+    return 0;
+}
+int main() {
+    int a[3][3];
+    int i = 0;
+    while (i < 3) {
+        int j = 0;
+        while (j < 3) { a[i][j] = i * 3 + j; j = j + 1; }
+        i = i + 1;
+    }
+    return a[2][2] + a[1][0];   // 8 + 3 = 11
+}
+```
+
+**类型系统**：`Type` 变成递归结构——`TY_PTR` 携带堆分配的 `Type *pointee`，`TY_ARRAY` 携带 `Type *elem_type` 与 `int length`。所有拷贝、free、size 计算都走 `type_clone / type_free / type_size` 三个 API，避免共享堆指针导致 double-free。
+
+**前端**：
+- **Lexer** 新增 `& [ ]` 与 `sizeof` 关键字
+- **Parser** `parse_type` 后缀 `*` 折叠成 `TY_PTR`；声明子后缀 `[N]` 折叠成 `TY_ARRAY`（右到左，支持多维）；`int f(int a[])` 直接解糖为 `int *`。`parse_unary` 新增 `&`/`*` 前缀与 `sizeof`；`parse_primary` 用 lookahead 区分 `(T)expr` 与 `(expr)`；数组下标 `[i]` 走 postfix loop
+- **Sema** 新增 `EX_ADDR/DEREF/INDEX/CAST/SIZEOF_TYPE/SIZEOF_EXPR` 类型检查；lvalue 集合扩充到 `EX_VAR | EX_DEREF | EX_INDEX`；binop 里 `p + i / p - i` 自动识别指针操作数
+
+**中/后端**：
+- **IR** 新增三条 opcode：`IR_ADDR`（`dst = &alloca_slot`，走 LEA）、`IR_LOAD_PTR`（`dst = *ptr`）、`IR_STORE_PTR`（`*ptr = val`）。老的 `IR_LOAD/STORE`（拿 alloca id 的）保留给可 promote 的标量；这样 mem2reg 对老路径无侵入
+- **IR-gen** 做一遍"取址分析"：扫描函数体，如果某局部变量出现 `&name`，就把它标记为 **pinned**——它的 `IR_ALLOCA` 带 `alloca_bytes > 0`，后续读写走 `IR_ADDR + IR_LOAD_PTR/IR_STORE_PTR`。数组类型永远 pinned。指针算术按 `sizeof(pointee)` 缩放：`p + i` 下降为 `IR_ADD(p, IR_MUL(i8, esize))`
+- **mem2reg** 加两条 pin 判据：`alloca_bytes > 0` 或 `dst 出现在 IR_ADDR 的操作数里`。被 pin 的 alloca 不再被 promote，其 `IR_ALLOCA` 指令保留下来供 codegen 读取 `alloca_bytes` 布局栈帧
+- **scalar_opt** 把 `IR_STORE_PTR` 加入 side-effect 列表；`IR_ADDR / IR_LOAD_PTR / IR_TRUNC` 走单操作数分支自然处理
+- **Codegen** 新增 `emit_lea_rbp`、`emit_load_via_ptr`（宽度感知 movsx/movzx/mov/movsxd）、`emit_store_via_ptr`（`mov byte/word/dword/qword ptr [reg], src`）；prologue 里新增 pinned-alloca 布局阶段：扫描 `IR_ALLOCA` 收集 `alloca_bytes`，按 8 字节对齐后追加到 spill area 之后；`IR_ADDR` 编码 `lea dst, [rbp+off]`
+
+**同期修复**：mem2reg 之前对 *所有* `IR_ALLOCA` 一刀切标记为 dead——加了 pin 判据之后，pinned 的必须保留下来（否则 codegen 拿不到 `alloca_bytes`）。
+
+新增 15 个 e2e：`ptr_basic / ptr_write_thru / ptr_swap / ptr_multilevel`；`arr_basic / arr_loop_sum / arr_char / arr_2d / arr_decay / param_array`；`cast_narrow / cast_ptr`；`sizeof_int / sizeof_ptr / sizeof_arr`；`bad_addr_rvalue / bad_deref_int`。
+
 ### Slice 7a — 整型类型系统 + 隐式转换
 
 从"一切都是 int"扩展到完整的整型类型系统：`char / short / int / long` × `signed / unsigned`，以及 C 标准的 usual arithmetic conversions（§6.3.1.8）。

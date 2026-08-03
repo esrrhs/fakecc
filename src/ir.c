@@ -110,6 +110,73 @@ static int get_value_is_unsigned(const IRFunction *fn, IRValue v) {
     return fn->value_is_unsigned[v];
 }
 
+/* ---- Address-taken analysis: does `name` have `&name` anywhere in expr? ---- */
+static int expr_takes_addr_of(const Expr *e, const char *name);
+static int stmt_takes_addr_of(const Stmt *s, const char *name);
+
+static int expr_takes_addr_of(const Expr *e, const char *name) {
+    if (!e) return 0;
+    switch (e->kind) {
+    case EX_INT_LIT: return 0;
+    case EX_BINOP:
+        return expr_takes_addr_of(e->u.bin.l, name)
+            || expr_takes_addr_of(e->u.bin.r, name);
+    case EX_UNARY: return expr_takes_addr_of(e->u.un.operand, name);
+    case EX_VAR: return 0;
+    case EX_ASSIGN:
+        return expr_takes_addr_of(e->u.assign.lvalue, name)
+            || expr_takes_addr_of(e->u.assign.rvalue, name);
+    case EX_CALL: {
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            if (expr_takes_addr_of(e->u.call.args.data[i], name)) return 1;
+        return 0;
+    }
+    case EX_ADDR:
+        if (e->u.addr.operand->kind == EX_VAR &&
+            strcmp(e->u.addr.operand->u.var.name, name) == 0) return 1;
+        return expr_takes_addr_of(e->u.addr.operand, name);
+    case EX_DEREF: return expr_takes_addr_of(e->u.deref.operand, name);
+    case EX_INDEX:
+        return expr_takes_addr_of(e->u.idx.array, name)
+            || expr_takes_addr_of(e->u.idx.index, name);
+    case EX_CAST: return expr_takes_addr_of(e->u.cast.operand, name);
+    case EX_SIZEOF_TYPE: return 0;
+    case EX_SIZEOF_EXPR: return expr_takes_addr_of(e->u.sizeof_e.operand, name);
+    }
+    return 0;
+}
+
+static int stmt_takes_addr_of(const Stmt *s, const char *name) {
+    if (!s) return 0;
+    switch (s->kind) {
+    case ST_DECL:   return s->u.decl.init && expr_takes_addr_of(s->u.decl.init, name);
+    case ST_EXPR:   return expr_takes_addr_of(s->u.expr, name);
+    case ST_RETURN: return expr_takes_addr_of(s->u.value, name);
+    case ST_IF:
+        if (expr_takes_addr_of(s->u.if_s.cond, name)) return 1;
+        if (stmt_takes_addr_of(s->u.if_s.then_s, name)) return 1;
+        return s->u.if_s.else_s && stmt_takes_addr_of(s->u.if_s.else_s, name);
+    case ST_WHILE:
+        return expr_takes_addr_of(s->u.while_s.cond, name)
+            || stmt_takes_addr_of(s->u.while_s.body, name);
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            if (stmt_takes_addr_of(&s->u.block.data[i], name)) return 1;
+        return 0;
+    }
+    return 0;
+}
+
+/* Is `name` pinned in the given function body? True iff array-typed
+ * (its decl is TY_ARRAY, or param would be TY_PTR — the latter is fine) or
+ * `&name` appears anywhere in the function. */
+static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) {
+    if (ty.kind == TY_ARRAY) return 1;
+    for (size_t i = 0; i < fd->body.len; i++)
+        if (stmt_takes_addr_of(&fd->body.data[i], name)) return 1;
+    return 0;
+}
+
 /* Push an instruction with the given fields (width + signedness). */
 static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
                         int imm, int width, int is_unsigned, SourceLoc loc) {
@@ -124,6 +191,7 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     inst.call_nargs = 0;
     inst.width = width;
     inst.is_unsigned = is_unsigned;
+    inst.alloca_bytes = 0;
     ir_inst_array_push(&fn->insts, inst);
     if (dst >= 0) set_value_type(fn, dst, width ? width : 4, is_unsigned);
 }
@@ -142,10 +210,25 @@ static IRValue emit_bin_w(IRFunction *fn, IROpcode op, IRValue a, IRValue b,
     return v;
 }
 
+/* Emit an IR_ALLOCA with a total-byte size (for pinned allocas: arrays or
+ * address-taken variables). */
+static IRValue emit_alloca(IRFunction *fn, int total_bytes, int width,
+                           int is_unsigned, SourceLoc loc) {
+    IRValue v = new_value(fn);
+    emit_inst_w(fn, IR_ALLOCA, v, -1, -1, 0, width, is_unsigned, loc);
+    fn->insts.data[fn->insts.len - 1].alloca_bytes = total_bytes;
+    return v;
+}
+
 /* IR symbol table: variable name → slot (an IRValue, i.e. a stack slot). */
 typedef struct {
     const char *name;
     IRValue slot;
+    int pinned;            /* 1 = address-taken or array; slot is a real memory home */
+    int width;             /* width of the underlying scalar (for LOAD/STORE) */
+    int is_unsigned;
+    Type ty;               /* full type (borrowed from AST, but pointee/elem_type
+                            * shared with AST — do NOT free) */
 } IRSlot;
 
 typedef struct {
@@ -167,7 +250,8 @@ static void irsymtable_free(IRSymTable *st) {
     st->cap = 0;
 }
 
-static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot) {
+static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
+                            int pinned, Type ty) {
     if (st->len >= st->cap) {
         size_t new_cap = st->cap ? st->cap * 2 : 8;
         st->data = realloc(st->data, new_cap * sizeof(IRSlot));
@@ -177,19 +261,33 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot) {
         }
         st->cap = new_cap;
     }
-    st->data[st->len].name = name;   /* borrows the AST's name pointer */
+    st->data[st->len].name = name;
     st->data[st->len].slot = slot;
+    st->data[st->len].pinned = pinned;
+    st->data[st->len].width = ty.kind == TY_ARRAY
+        ? type_size(*ty.elem_type)   /* not really used for array */
+        : (ty.width ? ty.width : 4);
+    st->data[st->len].is_unsigned = ty.is_unsigned;
+    st->data[st->len].ty = ty;   /* borrowed */
     st->len++;
 }
 
 /* Look up a variable's slot. Sema guarantees the name exists. */
+#if 0
 static IRValue irsymtable_get(const IRSymTable *st, const char *name) {
     for (size_t i = 0; i < st->len; i++) {
         if (strcmp(st->data[i].name, name) == 0) {
             return st->data[i].slot;
         }
     }
-    return -1; /* unreachable: sema ensures declared */
+    return -1;
+}
+#endif
+
+static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
+    for (size_t i = st->len; i > 0; i--)
+        if (strcmp(st->data[i-1].name, name) == 0) return &st->data[i-1];
+    return NULL;
 }
 
 /* Coerce a value to a target (width, is_unsigned) — emits SEXT/ZEXT/TRUNC
@@ -225,16 +323,47 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue x = lower_expr(fn, st, e->u.un.operand);
             int sw = get_value_width(fn, x);
             int su = get_value_is_unsigned(fn, x);
-            IRValue px = coerce(fn, x, sw, su, e->type.width, e->type.is_unsigned, e->loc);
-            return emit_bin_w(fn, IR_NEG, px, -1,
-                              e->type.width, e->type.is_unsigned, e->loc);
+            int rw = e->type.width ? e->type.width : 4;
+            int ru = e->type.is_unsigned;
+            IRValue px = coerce(fn, x, sw, su, rw, ru, e->loc);
+            return emit_bin_w(fn, IR_NEG, px, -1, rw, ru, e->loc);
         }
         case UOP_POS:
-            /* no-op */
             return lower_expr(fn, st, e->u.un.operand);
         }
         break; /* unreachable */
     case EX_BINOP: {
+        /* Pointer arithmetic: p+i, i+p, p-i, p-q.
+         * Sema has already decayed array operands to pointer types on both
+         * l and r; check the l/r Expr's type to know. */
+        Type lt = e->u.bin.l->type, rt = e->u.bin.r->type;
+        int l_is_ptr = (lt.kind == TY_PTR);
+        int r_is_ptr = (rt.kind == TY_PTR);
+        BinOp bop = e->u.bin.op;
+        if ((bop == BOP_ADD || bop == BOP_SUB) && (l_is_ptr || r_is_ptr)) {
+            IRValue lv = lower_expr(fn, st, e->u.bin.l);
+            IRValue rv = lower_expr(fn, st, e->u.bin.r);
+            if (bop == BOP_SUB && l_is_ptr && r_is_ptr) {
+                /* ptrdiff: (p - q) / sizeof(*p). */
+                int esize = type_size(*lt.pointee);
+                IRValue diff = emit_bin_w(fn, IR_SUB, lv, rv, 8, 0, e->loc);
+                IRValue esv = new_value(fn);
+                emit_inst_w(fn, IR_CONST, esv, -1, -1, esize, 8, 0, e->loc);
+                return emit_bin_w(fn, IR_DIV, diff, esv, 8, 0, e->loc);
+            }
+            /* pointer +/- int : scale int by sizeof(pointee). */
+            IRValue pv = l_is_ptr ? lv : rv;
+            IRValue iv = l_is_ptr ? rv : lv;
+            Type pty = l_is_ptr ? lt : rt;
+            int esize = type_size(*pty.pointee);
+            int iw = get_value_width(fn, iv), iu = get_value_is_unsigned(fn, iv);
+            IRValue iv8 = coerce(fn, iv, iw, iu, 8, 0, e->loc);
+            IRValue esv = new_value(fn);
+            emit_inst_w(fn, IR_CONST, esv, -1, -1, esize, 8, 1, e->loc);
+            IRValue off = emit_bin_w(fn, IR_MUL, iv8, esv, 8, 1, e->loc);
+            IROpcode op = (bop == BOP_ADD) ? IR_ADD : IR_SUB;
+            return emit_bin_w(fn, op, pv, off, 8, 1, e->loc);
+        }
         IRValue l = lower_expr(fn, st, e->u.bin.l);
         IRValue r = lower_expr(fn, st, e->u.bin.r);
         int lw = get_value_width(fn, l), lu = get_value_is_unsigned(fn, l);
@@ -256,7 +385,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 else { op_w = sw; op_u = 0; }
             }
         } else {
-            op_w = e->type.width;
+            op_w = e->type.width ? e->type.width : 4;
             op_u = e->type.is_unsigned;
         }
         IRValue pl = coerce(fn, l, lw, lu, op_w, op_u, e->loc);
@@ -291,20 +420,62 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return result;
     }
     case EX_VAR: {
-        IRValue slot = irsymtable_get(st, e->u.var.name);
+        const IRSlot *entry = irsymtable_find(st, e->u.var.name);
+        if (!entry) return -1;
+        if (entry->ty.kind == TY_ARRAY) {
+            /* Array-lvalue: value is the address of first element (decay). */
+            return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+        }
+        if (entry->pinned) {
+            IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
+                        entry->width, entry->is_unsigned, e->loc);
+            return v;
+        }
         IRValue v = new_value(fn);
-        emit_inst_w(fn, IR_LOAD, v, slot, -1, 0,
+        emit_inst_w(fn, IR_LOAD, v, entry->slot, -1, 0,
                     e->type.width, e->type.is_unsigned, e->loc);
         return v;
     }
     case EX_ASSIGN: {
-        IRValue slot = irsymtable_get(st, e->u.assign.lvalue->u.var.name);
+        Expr *lv = e->u.assign.lvalue;
         IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
         int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-        int lw = e->u.assign.lvalue->type.width;
-        int lu = e->u.assign.lvalue->type.is_unsigned;
+        int lw = lv->type.kind == TY_PTR ? 8 : (lv->type.width ? lv->type.width : 4);
+        int lu = lv->type.is_unsigned;
         IRValue coerced = coerce(fn, rv, rw, ru, lw, lu, e->loc);
-        emit_inst_w(fn, IR_STORE, -1, slot, coerced, 0, lw, lu, e->loc);
+        if (lv->kind == EX_VAR) {
+            const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
+            if (!entry) return -1;
+            if (entry->pinned) {
+                IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
+            } else {
+                emit_inst_w(fn, IR_STORE, -1, entry->slot, coerced, 0, lw, lu, e->loc);
+            }
+            return coerced;
+        } else if (lv->kind == EX_DEREF) {
+            IRValue ptr = lower_expr(fn, st, lv->u.deref.operand);
+            emit_inst_w(fn, IR_STORE_PTR, -1, ptr, coerced, 0, lw, lu, e->loc);
+            return coerced;
+        } else if (lv->kind == EX_INDEX) {
+            /* Compute address = base + i * sizeof(elem). base already decayed
+             * to pointer by sema. */
+            IRValue base = lower_expr(fn, st, lv->u.idx.array);
+            IRValue idx  = lower_expr(fn, st, lv->u.idx.index);
+            /* Element type is lv->type. */
+            int esize = type_size(lv->type);
+            IRValue esize_v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, esize_v, -1, -1, esize, 8, 1, e->loc);
+            /* Coerce idx to 8-byte for pointer math. */
+            int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
+            IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
+            IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
+            return coerced;
+        }
         return coerced;
     }
     case EX_CALL: {
@@ -328,6 +499,78 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.is_unsigned = e->type.is_unsigned;
         ir_inst_array_push(&fn->insts, inst);
         set_value_type(fn, v, inst.width, inst.is_unsigned);
+        return v;
+    }
+    case EX_ADDR: {
+        Expr *op = e->u.addr.operand;
+        if (op->kind == EX_VAR) {
+            const IRSlot *entry = irsymtable_find(st, op->u.var.name);
+            return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+        }
+        if (op->kind == EX_DEREF) {
+            /* &*p == p */
+            return lower_expr(fn, st, op->u.deref.operand);
+        }
+        if (op->kind == EX_INDEX) {
+            /* &a[i] == a + i*sizeof(elem) */
+            IRValue base = lower_expr(fn, st, op->u.idx.array);
+            IRValue idx  = lower_expr(fn, st, op->u.idx.index);
+            int esize = type_size(op->type);
+            IRValue esize_v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, esize_v, -1, -1, esize, 8, 1, e->loc);
+            int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
+            IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
+            IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
+            return emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+        }
+        return -1;
+    }
+    case EX_DEREF: {
+        IRValue ptr = lower_expr(fn, st, e->u.deref.operand);
+        int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+        int u = e->type.is_unsigned;
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, ptr, -1, 0, w, u, e->loc);
+        return v;
+    }
+    case EX_INDEX: {
+        /* Same as *(a + i*sizeof(elem)) for rvalue use. */
+        IRValue base = lower_expr(fn, st, e->u.idx.array);
+        IRValue idx  = lower_expr(fn, st, e->u.idx.index);
+        int esize = type_size(e->type);
+        IRValue esize_v = new_value(fn);
+        emit_inst_w(fn, IR_CONST, esize_v, -1, -1, esize, 8, 1, e->loc);
+        int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
+        IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
+        IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
+        IRValue addr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+        int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+        int u = e->type.is_unsigned;
+        /* If the element type is itself an array, `a[i]` yields an array
+         * value; sema will have decayed the surrounding usage to pointer,
+         * so returning the address is correct. */
+        if (e->type.kind == TY_ARRAY) return addr;
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        return v;
+    }
+    case EX_CAST: {
+        IRValue x = lower_expr(fn, st, e->u.cast.operand);
+        int sw = get_value_width(fn, x), su = get_value_is_unsigned(fn, x);
+        int dw = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+        int du = e->type.kind == TY_PTR ? 1 : e->type.is_unsigned;
+        return coerce(fn, x, sw, su, dw, du, e->loc);
+    }
+    case EX_SIZEOF_TYPE: {
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_CONST, v, -1, -1, type_size(e->u.sizeof_t.target),
+                    8, 1, e->loc);
+        return v;
+    }
+    case EX_SIZEOF_EXPR: {
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_CONST, v, -1, -1, type_size(e->u.sizeof_e.operand->type),
+                    8, 1, e->loc);
         return v;
     }
     }
@@ -358,18 +601,38 @@ static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
 }
 
 /* Lower a single statement, emitting instructions as needed. */
-static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s) {
+static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
+                       const FunctionDecl *cur_fd);
+
+static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
+                       const FunctionDecl *cur_fd) {
     switch (s->kind) {
     case ST_DECL: {
-        IRValue v = new_value(fn);
-        int dw = s->u.decl.type.width, du = s->u.decl.type.is_unsigned;
-        emit_inst_w(fn, IR_ALLOCA, v, -1, -1, 0, dw, du, s->loc);
-        irsymtable_push(st, s->u.decl.name, v);
+        Type dty = s->u.decl.type;
+        int pinned = is_pinned_in_body(cur_fd, s->u.decl.name, dty);
+        int dw = dty.kind == TY_ARRAY ? type_size(*dty.elem_type)
+                : (dty.kind == TY_PTR ? 8 : dty.width);
+        int du = dty.is_unsigned;
+        IRValue v;
+        if (pinned) {
+            int total = type_size(dty);
+            v = emit_alloca(fn, total, dw, du, s->loc);
+        } else {
+            v = new_value(fn);
+            emit_inst_w(fn, IR_ALLOCA, v, -1, -1, 0, dw, du, s->loc);
+        }
+        irsymtable_push(st, s->u.decl.name, v, pinned, dty);
         if (s->u.decl.init) {
             IRValue rv = lower_expr(fn, st, s->u.decl.init);
             int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
             IRValue coerced = coerce(fn, rv, rw, ru, dw, du, s->loc);
-            emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
+            if (pinned) {
+                /* Get address, then store through pointer. */
+                IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, dw, du, s->loc);
+            } else {
+                emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
+            }
         }
         break;
     }
@@ -391,11 +654,11 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s) {
         int L_else = s->u.if_s.else_s ? new_label(fn) : L_end;
         emit_cbr(fn, cond, L_then, L_else, s->loc);
         emit_label(fn, L_then, s->loc);
-        lower_stmt(fn, st, s->u.if_s.then_s);
+        lower_stmt(fn, st, s->u.if_s.then_s, cur_fd);
         if (s->u.if_s.else_s) {
             emit_br(fn, L_end, s->loc);
             emit_label(fn, L_else, s->loc);
-            lower_stmt(fn, st, s->u.if_s.else_s);
+            lower_stmt(fn, st, s->u.if_s.else_s, cur_fd);
         }
         emit_label(fn, L_end, s->loc);
         break;
@@ -409,7 +672,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s) {
         IRValue cond = lower_expr(fn, st, s->u.while_s.cond);
         emit_cbr(fn, cond, L_body, L_exit, s->loc);
         emit_label(fn, L_body, s->loc);
-        lower_stmt(fn, st, s->u.while_s.body);
+        lower_stmt(fn, st, s->u.while_s.body, cur_fd);
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_exit, s->loc);
         break;
@@ -417,7 +680,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s) {
     case ST_BLOCK: {
         size_t mark = st->len;
         for (size_t i = 0; i < s->u.block.len; i++) {
-            lower_stmt(fn, st, &s->u.block.data[i]);
+            lower_stmt(fn, st, &s->u.block.data[i], cur_fd);
         }
         st->len = mark;
         break;
@@ -447,22 +710,36 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irsymtable_init(&st);
 
         for (size_t p = 0; p < fd->params.len; p++) {
-            int pw = fd->params.data[p].type.width;
-            int pu = fd->params.data[p].type.is_unsigned;
+            Type pty = fd->params.data[p].type;
+            int pw = pty.kind == TY_PTR ? 8 : (pty.width ? pty.width : 4);
+            int pu = pty.kind == TY_PTR ? 1 : pty.is_unsigned;
+            const char *pname = fd->params.data[p].name;
+            int pinned = is_pinned_in_body(fd, pname, pty);
+
             IRValue param_v = new_value(&irfn);
             emit_inst_w(&irfn, IR_PARAM, param_v, -1, -1, (int)p, pw, pu,
                         fd->params.data[p].loc);
 
-            IRValue slot = new_value(&irfn);
-            emit_inst_w(&irfn, IR_ALLOCA, slot, -1, -1, 0, pw, pu,
-                        fd->params.data[p].loc);
-            emit_inst_w(&irfn, IR_STORE, -1, slot, param_v, 0, pw, pu,
-                        fd->params.data[p].loc);
-            irsymtable_push(&st, fd->params.data[p].name, slot);
+            IRValue slot;
+            if (pinned) {
+                int total = type_size(pty);
+                slot = emit_alloca(&irfn, total, pw, pu, fd->params.data[p].loc);
+                IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1,
+                                          fd->params.data[p].loc);
+                emit_inst_w(&irfn, IR_STORE_PTR, -1, addr, param_v, 0, pw, pu,
+                            fd->params.data[p].loc);
+            } else {
+                slot = new_value(&irfn);
+                emit_inst_w(&irfn, IR_ALLOCA, slot, -1, -1, 0, pw, pu,
+                            fd->params.data[p].loc);
+                emit_inst_w(&irfn, IR_STORE, -1, slot, param_v, 0, pw, pu,
+                            fd->params.data[p].loc);
+            }
+            irsymtable_push(&st, pname, slot, pinned, pty);
         }
 
         for (size_t j = 0; j < fd->body.len; j++) {
-            lower_stmt(&irfn, &st, &fd->body.data[j]);
+            lower_stmt(&irfn, &st, &fd->body.data[j], fd);
         }
 
         irsymtable_free(&st);

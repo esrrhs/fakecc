@@ -5,6 +5,86 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
+/* Type — recursive helpers                                            */
+/* ------------------------------------------------------------------ */
+
+Type type_clone(Type t) {
+    Type r = t;
+    if (t.kind == TY_PTR && t.pointee) {
+        r.pointee = malloc(sizeof(Type));
+        if (!r.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        *r.pointee = type_clone(*t.pointee);
+    } else {
+        r.pointee = NULL;
+    }
+    if (t.kind == TY_ARRAY && t.elem_type) {
+        r.elem_type = malloc(sizeof(Type));
+        if (!r.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        *r.elem_type = type_clone(*t.elem_type);
+    } else {
+        r.elem_type = NULL;
+    }
+    return r;
+}
+
+void type_free(Type *t) {
+    if (!t) return;
+    if (t->pointee) { type_free(t->pointee); free(t->pointee); t->pointee = NULL; }
+    if (t->elem_type) { type_free(t->elem_type); free(t->elem_type); t->elem_type = NULL; }
+}
+
+int type_size(Type t) {
+    switch (t.kind) {
+    case TY_INT:   return t.width;
+    case TY_PTR:   return 8;
+    case TY_ARRAY: return type_size(*t.elem_type) * t.length;
+    }
+    return 0;
+}
+
+Type type_make_ptr(Type pointee) {
+    Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
+    t.elem_type = NULL; t.length = 0;
+    t.pointee = malloc(sizeof(Type));
+    if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    *t.pointee = type_clone(pointee);
+    return t;
+}
+
+Type type_make_array(Type elem, int length) {
+    Type t; t.kind = TY_ARRAY; t.width = elem.width;
+    t.is_unsigned = elem.is_unsigned; t.length = length; t.pointee = NULL;
+    t.elem_type = malloc(sizeof(Type));
+    if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    *t.elem_type = type_clone(elem);
+    return t;
+}
+
+Type type_decay(Type t) {
+    if (t.kind == TY_ARRAY) {
+        Type r = type_make_ptr(*t.elem_type);
+        return r;
+    }
+    return type_clone(t);
+}
+
+int type_is_ptr_or_array(Type t) {
+    return t.kind == TY_PTR || t.kind == TY_ARRAY;
+}
+
+Type type_pointee_or_elem(Type t) {
+    if (t.kind == TY_PTR)   return type_clone(*t.pointee);
+    if (t.kind == TY_ARRAY) return type_clone(*t.elem_type);
+    return type_default_int();  /* caller should have checked */
+}
+
+void expr_set_type(Expr *e, Type t) {
+    if (!e) { type_free(&t); return; }
+    type_free(&e->type);
+    e->type = t;   /* takes ownership of the arg (no additional clone) */
+}
+
+/* ------------------------------------------------------------------ */
 /* Expr constructors & destructor                                       */
 /* ------------------------------------------------------------------ */
 
@@ -103,6 +183,36 @@ void expr_call_push_arg(Expr *e, Expr *arg) {
     a->data[a->len++] = arg;
 }
 
+static Expr *expr_alloc(ExprKind k, SourceLoc loc) {
+    Expr *e = malloc(sizeof(Expr));
+    if (!e) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    e->kind = k; e->loc = loc; e->type = type_default_int();
+    return e;
+}
+
+Expr *expr_new_addr(Expr *operand, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_ADDR, loc); e->u.addr.operand = operand; return e;
+}
+Expr *expr_new_deref(Expr *operand, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_DEREF, loc); e->u.deref.operand = operand; return e;
+}
+Expr *expr_new_index(Expr *array, Expr *index, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_INDEX, loc);
+    e->u.idx.array = array; e->u.idx.index = index; return e;
+}
+Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_CAST, loc);
+    e->u.cast.target = type_clone(target); e->u.cast.operand = operand; return e;
+}
+Expr *expr_new_sizeof_type(Type t, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_SIZEOF_TYPE, loc);
+    e->u.sizeof_t.target = type_clone(t); return e;
+}
+Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_SIZEOF_EXPR, loc);
+    e->u.sizeof_e.operand = operand; return e;
+}
+
 void expr_free(Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -128,7 +238,20 @@ void expr_free(Expr *e) {
             expr_free(e->u.call.args.data[i]);
         free(e->u.call.args.data);
         break;
+    case EX_ADDR:  expr_free(e->u.addr.operand); break;
+    case EX_DEREF: expr_free(e->u.deref.operand); break;
+    case EX_INDEX:
+        expr_free(e->u.idx.array); expr_free(e->u.idx.index); break;
+    case EX_CAST:
+        type_free(&e->u.cast.target);
+        expr_free(e->u.cast.operand);
+        break;
+    case EX_SIZEOF_TYPE:
+        type_free(&e->u.sizeof_t.target); break;
+    case EX_SIZEOF_EXPR:
+        expr_free(e->u.sizeof_e.operand); break;
     }
+    type_free(&e->type);
     free(e);
 }
 
@@ -141,6 +264,7 @@ void stmt_free(Stmt *s) {
     switch (s->kind) {
     case ST_DECL:
         free(s->u.decl.name);
+        type_free(&s->u.decl.type);
         expr_free(s->u.decl.init);
         break;
     case ST_EXPR:
@@ -226,6 +350,7 @@ void tu_free(TranslationUnit *tu) {
     free(tu->package.name);
     for (size_t i = 0; i < tu->functions.len; i++) {
         free(tu->functions.data[i].name);
+        type_free(&tu->functions.data[i].ret_type);
         param_array_free(&tu->functions.data[i].params);
         stmt_array_free(&tu->functions.data[i].body);
     }
@@ -249,7 +374,10 @@ void param_array_push(ParamArray *a, const char *name, Type type, SourceLoc loc)
 }
 
 void param_array_free(ParamArray *a) {
-    for (size_t i = 0; i < a->len; i++) free(a->data[i].name);
+    for (size_t i = 0; i < a->len; i++) {
+        free(a->data[i].name);
+        type_free(&a->data[i].type);
+    }
     free(a->data);
     a->data = NULL; a->len = 0; a->cap = 0;
 }

@@ -58,7 +58,10 @@ typedef struct {
 static void symtable_init(SymTable *st) { st->data = NULL; st->len = 0; st->cap = 0; }
 
 static void symtable_free(SymTable *st) {
-    for (size_t i = 0; i < st->len; i++) free(st->data[i].name);
+    for (size_t i = 0; i < st->len; i++) {
+        free(st->data[i].name);
+        type_free(&st->data[i].type);
+    }
     free(st->data);
     st->data = NULL; st->len = 0; st->cap = 0;
 }
@@ -70,7 +73,7 @@ static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc l
         if (!st->data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     }
     st->data[st->len].name = name ? xstrdup(name) : NULL;
-    st->data[st->len].type = type;
+    st->data[st->len].type = type_clone(type);   /* own our copy */
     st->data[st->len].loc = loc;
     st->len++;
 }
@@ -81,6 +84,7 @@ static void symtable_leave_scope(SymTable *st, size_t mark) {
     while (st->len > mark) {
         st->len--;
         free(st->data[st->len].name);
+        type_free(&st->data[st->len].type);
     }
 }
 
@@ -115,28 +119,55 @@ static Type usual_arith_conv(Type a, Type b) {
     return s;
 }
 
+/* Set an expr's type (frees previous). Convenience wrapper. */
+static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
+
+/* Annotate e->type via type-checking; also returns a clone for use in callers. */
 static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     if (!e) return type_default_int();
     switch (e->kind) {
     case EX_INT_LIT:
-        e->type = type_default_int();
-        return e->type;
+        set_type(e, type_default_int());
+        return type_clone(e->type);
     case EX_BINOP: {
         Type lt = check_expr(e->u.bin.l, st, ft);
         Type rt = check_expr(e->u.bin.r, st, ft);
-        BinOp op = e->u.bin.op;
-        if (op >= BOP_EQ && op <= BOP_GE) {
-            (void)usual_arith_conv(lt, rt);
-            e->type = type_make_int(4, 0);
-        } else {
-            e->type = usual_arith_conv(lt, rt);
+        /* Array-to-pointer decay for operands (except & / sizeof handled elsewhere). */
+        if (lt.kind == TY_ARRAY) {
+            Type d = type_decay(lt); type_free(&lt); lt = d;
+            /* Also update the child's e->type to reflect decay so IR-gen sees it. */
+            set_type(e->u.bin.l, type_clone(lt));
         }
-        return e->type;
+        if (rt.kind == TY_ARRAY) {
+            Type d = type_decay(rt); type_free(&rt); rt = d;
+            set_type(e->u.bin.r, type_clone(rt));
+        }
+        BinOp op = e->u.bin.op;
+        Type res;
+        if (op >= BOP_EQ && op <= BOP_GE) {
+            res = type_make_int(4, 0);
+        } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) {
+            /* Pointer arithmetic: p+int, int+p, p-int → pointer; p-q → int. */
+            if (op == BOP_SUB && lt.kind == TY_PTR && rt.kind == TY_PTR) {
+                res = type_make_int(8, 0);   /* ptrdiff — use long */
+            } else if (lt.kind == TY_PTR) {
+                res = type_clone(lt);
+            } else {
+                res = type_clone(rt);
+            }
+        } else {
+            res = usual_arith_conv(lt, rt);
+        }
+        type_free(&lt); type_free(&rt);
+        set_type(e, res);
+        return type_clone(e->type);
     }
     case EX_UNARY: {
         Type ot = check_expr(e->u.un.operand, st, ft);
-        e->type = integer_promote(ot);
-        return e->type;
+        Type res = integer_promote(ot);
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
     }
     case EX_VAR: {
         const Sym *sym = symtable_find(st, e->u.var.name);
@@ -144,20 +175,24 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "use of undeclared variable '%s'", e->u.var.name);
         }
-        e->type = sym->type;
-        return e->type;
+        set_type(e, type_clone(sym->type));
+        return type_clone(e->type);
     }
     case EX_ASSIGN: {
-        if (e->u.assign.lvalue->kind != EX_VAR) {
+        if (e->u.assign.lvalue->kind != EX_VAR &&
+            e->u.assign.lvalue->kind != EX_DEREF &&
+            e->u.assign.lvalue->kind != EX_INDEX) {
             die_at(e->u.assign.lvalue->loc.file,
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "expression is not assignable");
         }
         Type lt = check_expr(e->u.assign.lvalue, st, ft);
-        (void)check_expr(e->u.assign.rvalue, st, ft);
-        e->type = lt;
-        return e->type;
+        Type rt = check_expr(e->u.assign.rvalue, st, ft);
+        (void)rt;
+        type_free(&rt);
+        set_type(e, lt);
+        return type_clone(e->type);
     }
     case EX_CALL: {
         const FunSig *sig = ftab_find(ft, e->u.call.callee);
@@ -171,10 +206,80 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                    e->u.call.callee, sig->arity,
                    sig->arity == 1 ? "" : "s", e->u.call.args.len);
         }
-        for (size_t i = 0; i < e->u.call.args.len; i++)
-            (void)check_expr(e->u.call.args.data[i], st, ft);
-        e->type = sig->ret_type;
-        return e->type;
+        for (size_t i = 0; i < e->u.call.args.len; i++) {
+            Type at = check_expr(e->u.call.args.data[i], st, ft);
+            type_free(&at);
+        }
+        set_type(e, type_clone(sig->ret_type));
+        return type_clone(e->type);
+    }
+    case EX_ADDR: {
+        Type ot = check_expr(e->u.addr.operand, st, ft);
+        /* operand must be lvalue */
+        ExprKind ok = e->u.addr.operand->kind;
+        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "cannot take address of rvalue");
+        }
+        Type res = type_make_ptr(ot);
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+    case EX_DEREF: {
+        Type ot = check_expr(e->u.deref.operand, st, ft);
+        if (ot.kind == TY_ARRAY) {
+            Type d = type_decay(ot); type_free(&ot); ot = d;
+            set_type(e->u.deref.operand, type_clone(ot));
+        }
+        if (ot.kind != TY_PTR) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "cannot dereference non-pointer");
+        }
+        Type res = type_clone(*ot.pointee);
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+    case EX_INDEX: {
+        /* a[i] — a must be ptr or array; result = pointee/elem. */
+        Type at = check_expr(e->u.idx.array, st, ft);
+        Type it = check_expr(e->u.idx.index, st, ft);
+        (void)it;
+        type_free(&it);
+        Type base = at;
+        if (base.kind == TY_ARRAY) {
+            /* Decay to pointer *locally* for typing.  Do NOT overwrite the
+             * subexpression's type — IR-gen needs to see the original array
+             * type to decide whether to return an address (for nested a[i][j]
+             * where inner a[i] is another array) or to load a value. */
+            Type d = type_decay(base); type_free(&base); base = d;
+        }
+        if (base.kind != TY_PTR) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "subscript on non-pointer/non-array");
+        }
+        Type res = type_clone(*base.pointee);
+        type_free(&base);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+    case EX_CAST: {
+        Type ot = check_expr(e->u.cast.operand, st, ft);
+        type_free(&ot);
+        /* Result type is the cast target already stored on the expr;
+         * we also mirror it on e->type. */
+        set_type(e, type_clone(e->u.cast.target));
+        return type_clone(e->type);
+    }
+    case EX_SIZEOF_TYPE:
+    case EX_SIZEOF_EXPR: {
+        if (e->kind == EX_SIZEOF_EXPR) {
+            Type ot = check_expr(e->u.sizeof_e.operand, st, ft);
+            type_free(&ot);
+        }
+        set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
+        return type_clone(e->type);
     }
     }
     return type_default_int();
@@ -193,6 +298,7 @@ static void check_stmt_list(StmtArray *body, SymTable *st,
 
 static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
                        size_t scope_mark, int *has_return) {
+    Type discard;
     switch (s->kind) {
     case ST_DECL:
         if (symtable_has_since(st, s->u.decl.name, scope_mark)) {
@@ -200,22 +306,22 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
                    "redeclaration of '%s'", s->u.decl.name);
         }
         symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
-        if (s->u.decl.init) (void)check_expr(s->u.decl.init, st, ft);
+        if (s->u.decl.init) { discard = check_expr(s->u.decl.init, st, ft); type_free(&discard); }
         break;
     case ST_EXPR:
-        (void)check_expr(s->u.expr, st, ft);
+        discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
     case ST_RETURN:
-        (void)check_expr(s->u.value, st, ft);
+        discard = check_expr(s->u.value, st, ft); type_free(&discard);
         *has_return = 1;
         break;
     case ST_IF:
-        (void)check_expr(s->u.if_s.cond, st, ft);
+        discard = check_expr(s->u.if_s.cond, st, ft); type_free(&discard);
         check_stmt(s->u.if_s.then_s, st, ft, scope_mark, has_return);
         if (s->u.if_s.else_s) check_stmt(s->u.if_s.else_s, st, ft, scope_mark, has_return);
         break;
     case ST_WHILE:
-        (void)check_expr(s->u.while_s.cond, st, ft);
+        discard = check_expr(s->u.while_s.cond, st, ft); type_free(&discard);
         check_stmt(s->u.while_s.body, st, ft, scope_mark, has_return);
         break;
     case ST_BLOCK:
