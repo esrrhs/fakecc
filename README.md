@@ -101,6 +101,37 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 6 — 函数调用与 System V AMD64 ABI
+
+从"单函数玩具"跃迁到"能写真实程序"。支持多函数定义、任意函数调用、递归、相互递归、最多 6 个 `int` 参数。
+
+```c
+package main;
+int fib(int n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+int main() { return fib(10); }   // 55
+```
+
+前端：
+- **Parser** 参数列表 `int a, int b, ...`（最多 6 个）；`IDENT "(" args ")"` 后缀调用；一个 TU 里多个函数
+- **Sema** 建立模块级函数表，检查调用点 callee 存在且 arity 一致；相互递归自动支持（不需要前向声明）
+- **AST** 新增 `EX_CALL`（callee 名 + `ExprArray`），`FunctionDecl` 加 `ParamArray`
+
+中/后端：
+- **IR** 新增 `IR_CALL`（callee 名 + up-to-6 SSA 参数值）和 `IR_PARAM`（imm = 参数位）；`IRInst` 增加 `call_name`/`call_args`/`call_nargs` 字段
+- **Regalloc** 把 `call_args` 纳入 use 集合；在每个 CALL 处，凡是活到调用之后的值都禁止分配到 caller-saved 寄存器（RSI/RDI/R8/R9/R10/R11）——用一个 `forbid_mask[v]` 位图强制
+- **Codegen**
+  - Prologue：push 三个 callee-saved（rbx/r12/r13，按需）；对参数做 push-then-pop 舞蹈——先按倒序 push 所有传入 arg reg，再按正序 pop 到分配的家寄存器，彻底避免 arg-reg 之间的写-读依赖
+  - `IR_CALL`：同样的 push-pop 舞蹈把参数放入 rdi/rsi/rdx/rcx/r8/r9；`call rel32` 带 patch；调用后从 rax 取返回值
+  - 跨函数调用：整个 module 编译完后统一 patch，用 `EmitModule` 的符号表解析
+  - Epilogue：反序 pop callee-saved 后 `ret`
+
+栈对齐：每个函数入口处已对齐到 16 字节，push/pop 顺序确保 `call` 指令时 rsp 满足 SysV 要求。
+
+**同期修复**：`ir_module_free` 会走每条指令 free `call_name`；mem2reg 写回的 COPY 指令必须显式初始化 `call_name = NULL`（栈变量的野指针会段错误）。
+
 ### Slice 5 — CFG-aware regalloc（循环也能寄存器分配）
 
 删掉 Slice 4 中"含控制流走栈式回退"的技术债。现有的基于区间的 SSA chordal 分配器只对直线代码正确——在循环里，一个跨回边的值的活跃区间会环绕，简单的 `[first_def, last_use]` 完全 undercount。改造为标准的迭代式数据流分析：

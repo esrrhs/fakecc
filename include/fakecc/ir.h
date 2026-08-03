@@ -35,15 +35,25 @@ typedef enum {
     IR_LABEL,       /* imm = label_id — basic-block marker */
     IR_BR,          /* imm = target_label — unconditional branch */
     IR_CBR,         /* a = cond, imm = true_label, b = false_label — conditional branch */
+    IR_PARAM,       /* dst = incoming param; imm = param_index (0..5) */
+    IR_CALL,        /* dst = callee(call.args[0..nargs-1]); callee name in call.name */
     IR_RETURN,      /* return a */
 } IROpcode;
 
+/* Maximum arguments to IR_CALL — matches Slice 6 restriction of 6 params
+ * (System V AMD64 first six int-class regs: rdi rsi rdx rcx r8 r9). */
+#define IR_CALL_MAX_ARGS 6
+
 typedef struct {
     IROpcode op;
-    IRValue  dst;      /* meaningless for IR_RETURN, fill -1 */
+    IRValue  dst;      /* meaningless for IR_RETURN/IR_BR/IR_LABEL, fill -1 */
     IRValue  a, b;     /* source operands; IR_CONST only uses imm */
-    int      imm;      /* only for IR_CONST */
+    int      imm;      /* CONST value, LABEL id, BR/CBR target, PARAM index */
     SourceLoc loc;
+    /* IR_CALL only: callee name + argument SSA values.  NULL for other ops. */
+    char    *call_name;
+    IRValue  call_args[IR_CALL_MAX_ARGS];
+    int      call_nargs;
 } IRInst;
 
 /* ------------------------------------------------------------------ */

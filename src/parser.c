@@ -168,7 +168,7 @@ static Expr *parse_unary(Parser *p) {
     return parse_primary(p);
 }
 
-/* primary-expr = INT_LITERAL | IDENT | "(" expr ")" */
+/* primary-expr = INT_LITERAL | IDENT [ "(" arg-list? ")" ]  | "(" expr ")" */
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
@@ -177,9 +177,24 @@ static Expr *parse_primary(Parser *p) {
         return e;
     }
     if (t->kind == TK_IDENT) {
-        Expr *e = expr_new_var(t->text, t->loc);
+        const Token *ident = t;
         advance(p);
-        return e;
+        if (peek(p)->kind == TK_LPAREN) {
+            /* Function call. */
+            advance(p);
+            Expr *call = expr_new_call(ident->text, ident->loc);
+            if (peek(p)->kind != TK_RPAREN) {
+                for (;;) {
+                    Expr *arg = parse_expr(p);
+                    expr_call_push_arg(call, arg);
+                    if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                    break;
+                }
+            }
+            expect_kind(p, TK_RPAREN, "')'");
+            return call;
+        }
+        return expr_new_var(ident->text, ident->loc);
     }
     if (t->kind == TK_LPAREN) {
         advance(p);
@@ -318,13 +333,36 @@ static FunctionDecl parse_function_decl(Parser *p) {
     advance(p);
 
     expect_kind(p, TK_LPAREN, "'('");
-    expect_kind(p, TK_RPAREN, "')'");
-    expect_kind(p, TK_LBRACE, "'{'");
 
     FunctionDecl fn;
     fn.name = xstrdup(name->text);
+    param_array_init(&fn.params);
     stmt_array_init(&fn.body);
     fn.loc = int_kw->loc;
+
+    /* Parameter list: "int" IDENT ("," "int" IDENT)* — or empty. */
+    if (peek(p)->kind != TK_RPAREN) {
+        for (;;) {
+            expect_kind(p, TK_KW_INT, "'int' for parameter type");
+            const Token *pname = peek(p);
+            if (pname->kind != TK_IDENT) {
+                die_at(pname->loc.file, pname->loc.line, pname->loc.col,
+                       "expected parameter name but got '%s'", pname->text);
+            }
+            advance(p);
+            param_array_push(&fn.params, pname->text, pname->loc);
+            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+            break;
+        }
+        if (fn.params.len > 6) {
+            die_at(fn.loc.file, fn.loc.line, fn.loc.col,
+                   "more than 6 parameters not yet supported "
+                   "(stack args come later)");
+        }
+    }
+
+    expect_kind(p, TK_RPAREN, "')'");
+    expect_kind(p, TK_LBRACE, "'{'");
 
     parse_stmt_list(p, &fn.body);
 
@@ -370,23 +408,19 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
     if (peek(&p)->kind == TK_KW_IMPORT) {
         const Token *t = peek(&p);
         die_at(t->loc.file, t->loc.line, t->loc.col,
-               "'import' is not supported in Slice 1");
+               "'import' is not supported yet");
     }
 
-    FunctionDecl fn = parse_function_decl(&p);
+    /* One or more function definitions. */
+    while (peek(&p)->kind != TK_EOF) {
+        FunctionDecl fn = parse_function_decl(&p);
 
-    /* grow function array */
-    if (tu->functions.len >= tu->functions.cap) {
-        size_t new_cap = tu->functions.cap ? tu->functions.cap * 2 : 4;
-        tu->functions.data = realloc(tu->functions.data, new_cap * sizeof(FunctionDecl));
-        tu->functions.cap = new_cap;
-    }
-    tu->functions.data[tu->functions.len++] = fn;
-
-    /* expect EOF */
-    const Token *eof = peek(&p);
-    if (eof->kind != TK_EOF) {
-        die_at(eof->loc.file, eof->loc.line, eof->loc.col,
-               "expected end of file but got '%s'", eof->text);
+        if (tu->functions.len >= tu->functions.cap) {
+            size_t new_cap = tu->functions.cap ? tu->functions.cap * 2 : 4;
+            tu->functions.data = realloc(tu->functions.data,
+                                         new_cap * sizeof(FunctionDecl));
+            tu->functions.cap = new_cap;
+        }
+        tu->functions.data[tu->functions.len++] = fn;
     }
 }

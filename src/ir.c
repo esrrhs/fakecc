@@ -19,10 +19,10 @@ void ir_module_init(IRModule *m) {
 void ir_module_free(IRModule *m) {
     for (size_t i = 0; i < m->functions.len; i++) {
         free(m->functions.data[i].name);
+        for (size_t j = 0; j < m->functions.data[i].insts.len; j++)
+            free(m->functions.data[i].insts.data[j].call_name);
         free(m->functions.data[i].insts.data);
         /* Free register allocation result if present. */
-        /* ra_result_free is declared in regalloc.h but we avoid the
-         * header dependency by forward-declaring inline. */
         extern void ra_result_free(void *ra);
         if (m->functions.data[i].ra)
             ra_result_free(m->functions.data[i].ra);
@@ -87,6 +87,8 @@ static IRValue emit_bin(IRFunction *fn, IROpcode op, IRValue a, IRValue b, Sourc
     inst.b = b;
     inst.imm = 0;
     inst.loc = loc;
+    inst.call_name = NULL;
+    inst.call_nargs = 0;
     ir_inst_array_push(&fn->insts, inst);
     return v;
 }
@@ -151,6 +153,8 @@ static void emit_inst(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRVal
     inst.b = b;
     inst.imm = imm;
     inst.loc = loc;
+    inst.call_name = NULL;
+    inst.call_nargs = 0;
     ir_inst_array_push(&fn->insts, inst);
 }
 
@@ -205,6 +209,25 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
         emit_inst(fn, IR_STORE, -1, slot, rv, 0, e->loc);
         return rv;   /* assignment yields the assigned value, no extra load */
+    }
+    case EX_CALL: {
+        IRValue arg_vals[IR_CALL_MAX_ARGS];
+        int nargs = (int)e->u.call.args.len;
+        for (int i = 0; i < nargs; i++)
+            arg_vals[i] = lower_expr(fn, st, e->u.call.args.data[i]);
+        IRValue v = new_value(fn);
+        IRInst inst;
+        inst.op = IR_CALL;
+        inst.dst = v;
+        inst.a = -1;
+        inst.b = -1;
+        inst.imm = 0;
+        inst.loc = e->loc;
+        inst.call_name = xstrdup(e->u.call.callee);
+        inst.call_nargs = nargs;
+        for (int i = 0; i < nargs; i++) inst.call_args[i] = arg_vals[i];
+        ir_inst_array_push(&fn->insts, inst);
+        return v;
     }
     }
     /* unreachable */
@@ -310,6 +333,20 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
 
         IRSymTable st;
         irsymtable_init(&st);
+
+        /* Materialize incoming parameters. Each parameter gets:
+         *   1. An IR_PARAM defining its incoming SSA value (imm = position).
+         *   2. An IR_ALLOCA + IR_STORE so the body can treat it as a normal
+         *      writable local; mem2reg will fold the store when possible. */
+        for (size_t p = 0; p < fd->params.len; p++) {
+            IRValue param_v = new_value(&irfn);
+            emit_inst(&irfn, IR_PARAM, param_v, -1, -1, (int)p, fd->params.data[p].loc);
+
+            IRValue slot = new_value(&irfn);
+            emit_inst(&irfn, IR_ALLOCA, slot, -1, -1, 0, fd->params.data[p].loc);
+            emit_inst(&irfn, IR_STORE, -1, slot, param_v, 0, fd->params.data[p].loc);
+            irsymtable_push(&st, fd->params.data[p].name, slot);
+        }
 
         /* Lower each statement in the body in order. */
         for (size_t j = 0; j < fd->body.len; j++) {

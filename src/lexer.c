@@ -284,6 +284,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
         case '{':
         case '}':
         case ';':
+        case ',':
         case '+':
         case '-':
         case '*':
@@ -297,6 +298,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             case '{': t.kind = TK_LBRACE; break;
             case '}': t.kind = TK_RBRACE; break;
             case ';': t.kind = TK_SEMICOLON; break;
+            case ',': t.kind = TK_COMMA; break;
             case '+': t.kind = TK_PLUS; break;
             case '-': t.kind = TK_MINUS; break;
             case '*': t.kind = TK_STAR; break;

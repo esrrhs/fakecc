@@ -72,6 +72,31 @@ Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
     return e;
 }
 
+Expr *expr_new_call(const char *callee, SourceLoc loc) {
+    Expr *e = malloc(sizeof(Expr));
+    if (!e) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
+    e->kind = EX_CALL;
+    e->loc = loc;
+    e->u.call.callee = xstrdup(callee);
+    e->u.call.args.data = NULL;
+    e->u.call.args.len = 0;
+    e->u.call.args.cap = 0;
+    return e;
+}
+
+void expr_call_push_arg(Expr *e, Expr *arg) {
+    ExprArray *a = &e->u.call.args;
+    if (a->len >= a->cap) {
+        a->cap = a->cap ? a->cap * 2 : 4;
+        a->data = realloc(a->data, a->cap * sizeof(Expr *));
+        if (!a->data) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+    }
+    a->data[a->len++] = arg;
+}
+
 void expr_free(Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -90,6 +115,12 @@ void expr_free(Expr *e) {
     case EX_ASSIGN:
         expr_free(e->u.assign.lvalue);
         expr_free(e->u.assign.rvalue);
+        break;
+    case EX_CALL:
+        free(e->u.call.callee);
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            expr_free(e->u.call.args.data[i]);
+        free(e->u.call.args.data);
         break;
     }
     free(e);
@@ -189,7 +220,29 @@ void tu_free(TranslationUnit *tu) {
     free(tu->package.name);
     for (size_t i = 0; i < tu->functions.len; i++) {
         free(tu->functions.data[i].name);
+        param_array_free(&tu->functions.data[i].params);
         stmt_array_free(&tu->functions.data[i].body);
     }
     free(tu->functions.data);
+}
+
+void param_array_init(ParamArray *a) {
+    a->data = NULL; a->len = 0; a->cap = 0;
+}
+
+void param_array_push(ParamArray *a, const char *name, SourceLoc loc) {
+    if (a->len >= a->cap) {
+        a->cap = a->cap ? a->cap * 2 : 4;
+        a->data = realloc(a->data, a->cap * sizeof(Param));
+        if (!a->data) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+    }
+    a->data[a->len].name = xstrdup(name);
+    a->data[a->len].loc = loc;
+    a->len++;
+}
+
+void param_array_free(ParamArray *a) {
+    for (size_t i = 0; i < a->len; i++) free(a->data[i].name);
+    free(a->data);
+    a->data = NULL; a->len = 0; a->cap = 0;
 }

@@ -68,6 +68,14 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
         if (inst->a >= 0 && inst->a < nv) liv_add_use(&liv[inst->a], (int)i);
         if (inst->op != IR_CBR &&
             inst->b >= 0 && inst->b < nv) liv_add_use(&liv[inst->b], (int)i);
+
+        /* IR_CALL: each call_args[k] is a use. */
+        if (inst->op == IR_CALL) {
+            for (int k = 0; k < inst->call_nargs; k++) {
+                IRValue av = inst->call_args[k];
+                if (av >= 0 && av < nv) liv_add_use(&liv[av], (int)i);
+            }
+        }
     }
 
     /* Compute live_start / live_end for each value. */
@@ -230,6 +238,14 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 if (!bs_test(&def_b[bi], inst->b))
                     bs_set(&use_b[bi], inst->b);
             }
+            if (inst->op == IR_CALL) {
+                for (int k = 0; k < inst->call_nargs; k++) {
+                    IRValue av = inst->call_args[k];
+                    if (av >= 0 && av < use_b[bi].nv &&
+                        !bs_test(&def_b[bi], av))
+                        bs_set(&use_b[bi], av);
+                }
+            }
             if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
                 bs_set(&def_b[bi], inst->dst);
             }
@@ -290,10 +306,16 @@ static void compute_live_in_out(const CFG *cfg,
 /* Build interference graph by walking each block backwards, maintaining
  * the live-set.  At each instruction, dst interferes with every value
  * currently live-out (i.e., in `live` before removing dst).  Then remove
- * dst, add uses. */
+ * dst, add uses.
+ *
+ * `forbid_mask[v]` (output, k bits wide): OR of color indices this value
+ * must NOT be colored to.  Currently set only for values live across an
+ * IR_CALL — which cannot occupy a caller-saved register. */
 static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
-                                    int nv, InterfGraph *g) {
+                                    int nv, InterfGraph *g,
+                                    int *forbid_mask) {
     ig_init(g, nv);
+    for (int v = 0; v < nv; v++) forbid_mask[v] = 0;
 
     BitSet *use_b = xmalloc(cfg->num * sizeof(BitSet));
     BitSet *def_b = xmalloc(cfg->num * sizeof(BitSet));
@@ -322,6 +344,28 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             const IRInst *inst = &fn->insts.data[i - 1];
             if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
 
+            /* Before defining dst — if this is a CALL, every value that
+             * is live AFTER the call (i.e. in `live` right now, minus dst
+             * itself, since dst is being redefined) must survive the call.
+             * A caller-saved register would be clobbered, so forbid those
+             * colors for such values. */
+            if (inst->op == IR_CALL) {
+                int caller_saved_mask = 0;
+                for (int ci = 0; ci < REG_ALLOCATABLE; ci++) {
+                    int rr = ALLOCATABLE_REGS[ci];
+                    if (rr == REG_RSI || rr == REG_RDI ||
+                        rr == REG_R8  || rr == REG_R9  ||
+                        rr == REG_R10 || rr == REG_R11) {
+                        caller_saved_mask |= (1 << ci);
+                    }
+                }
+                BS_FOREACH(&live, over) {
+                    if ((int)over != inst->dst) {
+                        forbid_mask[over] |= caller_saved_mask;
+                    }
+                }
+            }
+
             /* dst interferes with every currently-live value.
              * Exception: dst does NOT interfere with a source operand it
              * copies from (would be pointless for COPY etc.), but keeping
@@ -339,6 +383,12 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             if (inst->a >= 0 && inst->a < nv) bs_set(&live, inst->a);
             if (inst->op != IR_CBR &&
                 inst->b >= 0 && inst->b < nv) bs_set(&live, inst->b);
+            if (inst->op == IR_CALL) {
+                for (int k = 0; k < inst->call_nargs; k++) {
+                    IRValue av = inst->call_args[k];
+                    if (av >= 0 && av < nv) bs_set(&live, av);
+                }
+            }
         }
     }
 
@@ -466,6 +516,7 @@ static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg) {
 
 static void greedy_color(const InterfGraph *g, const int *order,
                          const LiveInfo *liv, const CFG *cfg,
+                         const int *forbid_mask,
                          int *colors, int *spill_slots, int *num_spills) {
     int n = g->n;
     int k = REG_ALLOCATABLE;
@@ -490,8 +541,9 @@ static void greedy_color(const InterfGraph *g, const int *order,
             continue;
         }
 
-        /* Find which colors are used by already-colored neighbors. */
-        int used = 0; /* bitmask of used registers (up to REG_ALLOCATABLE bits) */
+        /* Find which colors are used by already-colored neighbors, plus
+         * any colors this value has been forbidden from. */
+        int used = forbid_mask[v];
         for (size_t j = 0; j < g->nodes[v].degree; j++) {
             int w = g->nodes[v].neighbors[j];
             if (colors[w] >= 0 && colors[w] < k)
@@ -563,7 +615,8 @@ RAResult *reg_alloc(const IRFunction *fn) {
     /* Build interference graph using CFG-aware backward walk.
      * Correct across loop back edges; supersedes the interval-based scheme. */
     InterfGraph g;
-    build_interf_graph_cfg(fn, &cfg, nv, &g);
+    int *forbid_mask = xmalloc(nv * sizeof(int));
+    build_interf_graph_cfg(fn, &cfg, nv, &g, forbid_mask);
 
     /* Compute MCS ordering (reverse = PEO for chordal graph). */
     int *order = compute_mcs_order(&g);
@@ -573,7 +626,9 @@ RAResult *reg_alloc(const IRFunction *fn) {
     int *spill_slots = xmalloc(nv * sizeof(int));
     memset(spill_slots, 0, nv * sizeof(int));
     int num_spills = 0;
-    greedy_color(&g, order, liv, &cfg, colors, spill_slots, &num_spills);
+    greedy_color(&g, order, liv, &cfg, forbid_mask,
+                 colors, spill_slots, &num_spills);
+    free(forbid_mask);
 
     /* Map color indices (0..REG_ALLOCATABLE-1) to actual x86-64
      * register encodings that codegen uses for ModRM. */

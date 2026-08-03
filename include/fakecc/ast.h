@@ -14,6 +14,7 @@ typedef enum {
     EX_UNARY,
     EX_VAR,     /* variable reference: name */
     EX_ASSIGN,  /* lvalue = rvalue; result is the assigned value */
+    EX_CALL,    /* callee(arg1, arg2, ...) */
 } ExprKind;
 
 typedef enum {
@@ -36,6 +37,14 @@ typedef enum {
 } UnaryOp;
 
 typedef struct Expr Expr;
+
+/* Argument-list holder used by EX_CALL — grows as arguments are parsed. */
+typedef struct {
+    Expr **data;    /* Expr* per argument; owns each pointer */
+    size_t len;
+    size_t cap;
+} ExprArray;
+
 struct Expr {
     ExprKind kind;
     SourceLoc loc;
@@ -45,6 +54,7 @@ struct Expr {
         struct { UnaryOp op; Expr *operand; } un;     /* EX_UNARY */
         struct { char *name; } var;                    /* EX_VAR */
         struct { Expr *lvalue; Expr *rvalue; } assign;/* EX_ASSIGN */
+        struct { char *callee; ExprArray args; } call;/* EX_CALL — owns callee + args */
     } u;
 };
 
@@ -54,6 +64,8 @@ Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
+Expr *expr_new_call(const char *callee, SourceLoc loc);
+void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_free(Expr *e);
 
 /* ------------------------------------------------------------------ */
@@ -104,7 +116,23 @@ void  stmt_free_ptr(Stmt *s);
 
 typedef struct {
     char *name;         /* strdup'd */
-    StmtArray body;     /* was: ReturnStmt body; */
+    SourceLoc loc;
+} Param;
+
+typedef struct {
+    Param *data;
+    size_t len;
+    size_t cap;
+} ParamArray;
+
+void param_array_init(ParamArray *a);
+void param_array_push(ParamArray *a, const char *name, SourceLoc loc);
+void param_array_free(ParamArray *a);
+
+typedef struct {
+    char *name;         /* strdup'd */
+    ParamArray params;  /* Slice 6: all int */
+    StmtArray body;
     SourceLoc loc;
 } FunctionDecl;
 

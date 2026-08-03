@@ -25,11 +25,12 @@ static int const_value(const IRInstArray *insts, IRValue v, int *found) {
 
 /* A value-producing instruction is dead if its result is never used and
  * it has no side effects.  Side-effectful: RETURN, STORE, BR, CBR, LABEL,
- * ALLOCA (mem2reg-invariant marker, preserved as no-op codegen). */
+ * ALLOCA (mem2reg-invariant marker, preserved as no-op codegen), CALL
+ * (may have arbitrary side effects). */
 static int has_side_effect(IROpcode op) {
     return op == IR_RETURN || op == IR_STORE ||
            op == IR_BR || op == IR_CBR || op == IR_LABEL ||
-           op == IR_ALLOCA;
+           op == IR_ALLOCA || op == IR_CALL;
 }
 
 /* ================================================================== */
@@ -91,7 +92,7 @@ int scalar_constfold(IRFunction *fn) {
 int scalar_dce(IRFunction *fn) {
     /* Mark which dst values are used as a source operand.
      * IR_CBR's `b` field is a label id, not a value; IR_LABEL/IR_BR have
-     * no value operands at all. */
+     * no value operands at all.  IR_CALL has additional args in call_args. */
     char *used = xmalloc(fn->next_value_id * sizeof(char));
     memset(used, 0, fn->next_value_id * sizeof(char));
     for (size_t i = 0; i < fn->insts.len; i++) {
@@ -100,6 +101,12 @@ int scalar_dce(IRFunction *fn) {
         if (inst->a >= 0 && inst->a < fn->next_value_id) used[inst->a] = 1;
         if (inst->op != IR_CBR &&
             inst->b >= 0 && inst->b < fn->next_value_id) used[inst->b] = 1;
+        if (inst->op == IR_CALL) {
+            for (int k = 0; k < inst->call_nargs; k++) {
+                int v = inst->call_args[k];
+                if (v >= 0 && v < fn->next_value_id) used[v] = 1;
+            }
+        }
     }
 
     /* Rebuild dropping unused side-effect-free instructions. */
@@ -170,7 +177,8 @@ void scalar_renumber(IRFunction *fn) {
 
     /* Assign new ids in first-seen order.
      * Note: IR_CBR's `b` field is a label id (not a value); IR_LABEL/IR_BR
-     * carry no value operands.  Skip these when walking. */
+     * carry no value operands.  IR_CALL has additional value uses in
+     * call_args.  Skip these when walking. */
     int next = 0;
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
@@ -181,6 +189,12 @@ void scalar_renumber(IRFunction *fn) {
             map[inst->a] = next++;
         if (inst->op != IR_CBR && inst->b >= 0 && map[inst->b] == -1)
             map[inst->b] = next++;
+        if (inst->op == IR_CALL) {
+            for (int k = 0; k < inst->call_nargs; k++) {
+                int v = inst->call_args[k];
+                if (v >= 0 && map[v] == -1) map[v] = next++;
+            }
+        }
     }
 
     /* Rewrite (skipping label/branch operand fields). */
@@ -190,6 +204,12 @@ void scalar_renumber(IRFunction *fn) {
         if (inst->dst >= 0) inst->dst = map[inst->dst];
         if (inst->a >= 0) inst->a = map[inst->a];
         if (inst->op != IR_CBR && inst->b >= 0) inst->b = map[inst->b];
+        if (inst->op == IR_CALL) {
+            for (int k = 0; k < inst->call_nargs; k++) {
+                int v = inst->call_args[k];
+                if (v >= 0) inst->call_args[k] = map[v];
+            }
+        }
     }
     fn->next_value_id = next;
     free(map);

@@ -156,6 +156,47 @@ static size_t emit_jcc_rel32(Buffer *b, uint8_t cc_opcode) {
     return patch;
 }
 
+/* push %r  →  50+r  (with REX.B for r8-r15) */
+static void emit_push_r(Buffer *b, int r) {
+    if (r >= 8) emit_byte(b, 0x41);  /* REX.B */
+    emit_byte(b, (uint8_t)(0x50 | (r & 7)));
+}
+
+/* pop %r  →  58+r  (with REX.B for r8-r15) */
+static void emit_pop_r(Buffer *b, int r) {
+    if (r >= 8) emit_byte(b, 0x41);
+    emit_byte(b, (uint8_t)(0x58 | (r & 7)));
+}
+
+/* sub $imm32, %rsp — used for alignment padding */
+static void emit_sub_rsp_imm32(Buffer *b, int32_t imm) {
+    emit_rex_w(b);
+    emit_byte(b, 0x81);
+    emit_byte(b, 0xEC);
+    emit_int32(b, imm);
+}
+
+/* add $imm32, %rsp */
+static void emit_add_rsp_imm32(Buffer *b, int32_t imm) {
+    emit_rex_w(b);
+    emit_byte(b, 0x81);
+    emit_byte(b, 0xC4);
+    emit_int32(b, imm);
+}
+
+/* call rel32  →  E8 rel32.  Returns offset of the rel32 field for patching. */
+static size_t emit_call_rel32(Buffer *b) {
+    emit_byte(b, 0xE8);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
+/* SysV AMD64: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9. */
+static const int SYSV_ARG_REGS[6] = {
+    REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9
+};
+
 /* ================================================================== */
 /* Stack-frame helpers                                                 */
 /* ================================================================== */
@@ -295,24 +336,96 @@ typedef struct {
                              used as base for rel32 = target - after */
 } Patch;
 
+/* Cross-function call patch: the callee is referenced by name; its code
+ * offset only becomes known once all functions have been laid out. */
+typedef struct {
+    size_t patch_off;
+    char  *callee;        /* xstrdup'd */
+    size_t after_off;
+} CallPatch;
+
+/* Compute which callee-saved registers this function actually uses.
+ * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 (0 or 1). */
+static void collect_callee_saved(const RAResult *ra, int used[3]) {
+    used[0] = used[1] = used[2] = 0;
+    if (!ra) return;
+    for (int v = 0; v < ra->num_values; v++) {
+        int r = ra->reg[v];
+        if (r == REG_RBX) used[0] = 1;
+        else if (r == REG_R12) used[1] = 1;
+        else if (r == REG_R13) used[2] = 1;
+    }
+}
+
+/* Emit epilogue: restore callee-saved (reverse order), tear down frame, ret. */
+static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
+    emit_add_rsp_imm32(b, stack_size);
+    if (cs_used[2]) emit_pop_r(b, REG_R13);
+    if (cs_used[1]) emit_pop_r(b, REG_R12);
+    if (cs_used[0]) emit_pop_r(b, REG_RBX);
+    emit_byte(b, 0x5D);   /* pop %rbp */
+    emit_byte(b, 0xC3);   /* ret */
+}
+
 void codegen(const IRModule *ir, EmitModule *out) {
+    /* Cross-function call patches (accumulated across every function). */
+    CallPatch *call_patches = NULL;
+    size_t num_call_patches = 0, cap_call_patches = 0;
+
     for (size_t i = 0; i < ir->functions.len; i++) {
         const IRFunction *fn = &ir->functions.data[i];
         const RAResult *ra = (const RAResult *)fn->ra;
         size_t start_offset = out->code.len;
 
         /* ---- Prologue ---- */
+        int cs_used[3];
+        collect_callee_saved(ra, cs_used);
+
         int stack_size = ra ? ra->stack_size : 8 * fn->next_value_id;
         if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
+
+        /* Alignment invariant: on entry rsp % 16 == 8 (call pushed ret).
+         * After "push rbp" rsp % 16 == 0.  Each callee-saved push adds 8;
+         * if odd count, we need one extra bump to keep rsp aligned.  We
+         * fold that into stack_size. */
+        int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
+        if (((cs_count) & 1) != 0) stack_size += 8;
 
         emit_byte(&out->code, 0x55);              /* pushq %rbp */
         emit_rex_w(&out->code);
         emit_byte(&out->code, 0x89);
         emit_byte(&out->code, 0xE5);              /* movq %rsp, %rbp */
-        emit_rex_w(&out->code);
-        emit_byte(&out->code, 0x81);
-        emit_byte(&out->code, 0xEC);
-        emit_int32(&out->code, stack_size);       /* sub $N, %rsp */
+
+        if (cs_used[0]) emit_push_r(&out->code, REG_RBX);
+        if (cs_used[1]) emit_push_r(&out->code, REG_R12);
+        if (cs_used[2]) emit_push_r(&out->code, REG_R13);
+
+        /* Materialize incoming SysV arg registers into their allocated
+         * homes.  Use a push-then-pop dance so no arg-reg clobber can
+         * lose data even when a param's home is another param's src reg. */
+        int nparams = 0;
+        for (size_t j = 0; j < fn->insts.len; j++) {
+            if (fn->insts.data[j].op == IR_PARAM) nparams++;
+            else break;  /* IR_PARAMs are contiguous at function start */
+        }
+        /* Push args in REVERSE order (so arg 0 ends up on top). */
+        for (int p = nparams - 1; p >= 0; p--) {
+            emit_push_r(&out->code, SYSV_ARG_REGS[p]);
+        }
+        /* Pop into each param's allocated home (or spill slot) in order. */
+        for (int p = 0; p < nparams; p++) {
+            const IRInst *pi = &fn->insts.data[p];
+            int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
+                      ? ra->reg[pi->dst] : -1;
+            if (pdr >= 0) {
+                emit_pop_r(&out->code, pdr);
+            } else {
+                emit_pop_r(&out->code, REG_RAX);
+                spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
+            }
+        }
+
+        emit_sub_rsp_imm32(&out->code, stack_size); /* sub $N, %rsp */
 
         /* ---- Per-function label + patch tables ---- */
         /* label_off[label_id] = absolute code offset where the label lands,
@@ -502,16 +615,56 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 break;
             }
 
+            case IR_PARAM:
+                /* Already handled during prologue (push-then-pop dance).
+                 * Skip here.  */
+                break;
+
+            case IR_CALL: {
+                /* Materialize each arg on the stack, then pop into the SysV
+                 * arg registers.  This avoids any move-ordering pitfalls when
+                 * one arg's value currently lives in another's target reg. */
+                int nargs = inst->call_nargs;
+                int need_pad = ((nargs & 1) != 0);  /* keep rsp 16-aligned across call */
+                if (need_pad) emit_sub_rsp_imm32(&out->code, 8);
+
+                for (int k = 0; k < nargs; k++) {
+                    ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
+                    emit_push_r(&out->code, REG_RAX);
+                }
+                /* Top of stack now holds args[nargs-1]; pop into the last
+                 * arg reg first, then work backward. */
+                for (int k = nargs - 1; k >= 0; k--) {
+                    emit_pop_r(&out->code, SYSV_ARG_REGS[k]);
+                }
+
+                /* Emit call rel32 with a cross-function patch. */
+                size_t poff = emit_call_rel32(&out->code);
+                size_t aft = out->code.len;
+                if (num_call_patches >= cap_call_patches) {
+                    cap_call_patches = cap_call_patches ? cap_call_patches * 2 : 8;
+                    call_patches = xrealloc(call_patches,
+                                             cap_call_patches * sizeof(CallPatch));
+                }
+                call_patches[num_call_patches].patch_off = poff;
+                call_patches[num_call_patches].callee = xstrdup(inst->call_name);
+                call_patches[num_call_patches].after_off = aft;
+                num_call_patches++;
+
+                if (need_pad) emit_add_rsp_imm32(&out->code, 8);
+
+                /* Result is in RAX; move to dst home (or spill). */
+                if (dr >= 0) {
+                    if (dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                } else {
+                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                }
+                break;
+            }
+
             case IR_RETURN: {
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
-
-                /* Epilogue */
-                emit_rex_w(&out->code);
-                emit_byte(&out->code, 0x81);
-                emit_byte(&out->code, 0xC4);
-                emit_int32(&out->code, stack_size);
-                emit_byte(&out->code, 0x5D);
-                emit_byte(&out->code, 0xC3);
+                emit_epilogue(&out->code, stack_size, cs_used);
                 break;
             }
 
@@ -540,4 +693,30 @@ void codegen(const IRModule *ir, EmitModule *out) {
         size_t fn_size = out->code.len - start_offset;
         emit_module_add_symbol(out, fn->name, start_offset, fn_size);
     }
+
+    /* ---- Resolve cross-function call patches ---- */
+    for (size_t pi = 0; pi < num_call_patches; pi++) {
+        CallPatch *cp = &call_patches[pi];
+        /* Look up the callee's start offset in the module's symbol table. */
+        size_t target = (size_t)-1;
+        for (size_t si = 0; si < out->num_symbols; si++) {
+            if (strcmp(out->symbols[si].name, cp->callee) == 0) {
+                target = out->symbols[si].offset;
+                break;
+            }
+        }
+        if (target == (size_t)-1) {
+            fprintf(stderr, "fakecc: unresolved call to '%s'\n", cp->callee);
+            exit(1);
+        }
+        int64_t rel = (int64_t)target - (int64_t)cp->after_off;
+        if (rel < INT32_MIN || rel > INT32_MAX) {
+            fprintf(stderr, "fakecc: call displacement out of range\n");
+            exit(1);
+        }
+        int32_t rel32 = (int32_t)rel;
+        memcpy(out->code.data + cp->patch_off, &rel32, 4);
+        free(cp->callee);
+    }
+    free(call_patches);
 }
