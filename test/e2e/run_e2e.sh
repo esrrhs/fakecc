@@ -20,7 +20,7 @@ for src in test/e2e/*.c; do
     expect=$(sed -n 's/^\/\/ expect: \([0-9]*\)/\1/p' "$src" | head -1)
     "$FAKECC" "$src" -o /tmp/fakecc_e2e.out
     got=0
-    /tmp/fakecc_e2e.out || got=$?
+    /tmp/fakecc_e2e.out > /dev/null 2>&1 || got=$?
     if [ "$got" = "$expect" ]; then
         echo "PASS $src"
     else

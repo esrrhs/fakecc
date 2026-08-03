@@ -101,6 +101,34 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 12 — 系统调用桥：真实 I/O
+
+引入内置 intrinsic `__syscall(num, a0..a5)` 直接发射 Linux x86-64 syscall 指令。无需 libc、无需动态链接——直接跟内核对话。
+
+```c
+package main;
+int strlen(char *s) {
+    int n = 0;
+    while (s[n] != 0) { n = n + 1; }
+    return n;
+}
+int main() {
+    char *msg = "Hello from FakeCC!\n";
+    __syscall(1, 1, msg, strlen(msg));   // write(stdout, msg, len)
+    return 0;
+}
+```
+
+- **Sema** 识别 `__syscall` 名字，跳过 FunTable 查找；接受 1..7 个参数（syscall 号 + 最多 6 个）；返回类型固定 `long`
+- **Codegen** 在 IR_CALL 里拦截 `__syscall` 调用：走 push-then-pop 舞蹈把 arg[0..6] 装载到 Linux syscall ABI 寄存器（`rax=num, rdi/rsi/rdx/r10/r8/r9=a0..a5`——注意用 r10 不是 rcx，跟 SysV 函数调用规约不同），发射 `0F 05`（syscall），结果按常规从 rax 取
+- **runner** 顺手把子进程 stdout 重定向到 `/dev/null`，避免和 e2e 检查输出串场
+
+新增 3 个 e2e：`syscall_write / syscall_getuid / syscall_write_strlen`。104 个 e2e 全绿。
+
+**Slice 12 的意义**：FakeCC 生成的可执行文件现在能真正写 stdout、读 stdin、退出——所有 POSIX syscall 都能触发。搭配 Slice 8 的字符串字面量和 Slice 11 的 struct，可以写出真实的命令行工具（不含格式化 printf 但能自己实现 `itoa + write`）。
+
+**未来（Slice 13+ 候选）**：完整动态链接（PLT/GOT/DT_NEEDED）以调用 libc；`printf` 内部实现；文件读写辅助库；错误处理路径（stderr、错误码传播）。
+
 ### Slice 11 — struct + `.` + `->`
 
 支持 `struct Foo { ... };` 定义、`struct Foo x;` 变量、`s.x` 成员访问、`p->x` 箭头（自动解糖为 `(*p).x`）、`sizeof(struct Foo)`、struct 里嵌套数组和指针成员。

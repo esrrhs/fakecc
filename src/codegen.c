@@ -1050,6 +1050,35 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 break;
 
             case IR_CALL: {
+                /* __syscall(num, a0..a5) — emit a raw `syscall` instruction.
+                 * Linux x86-64 syscall ABI: rax = num, args in rdi/rsi/rdx/r10/r8/r9.
+                 * We use the same push-then-pop dance to load args safely. */
+                if (inst->call_name && strcmp(inst->call_name, "__syscall") == 0) {
+                    static const int SYS_ARG_REGS[7] = {
+                        REG_RAX, REG_RDI, REG_RSI, REG_RDX,
+                        REG_R10, REG_R8, REG_R9
+                    };
+                    int nargs = inst->call_nargs;
+                    /* Push args in reverse order */
+                    for (int k = 0; k < nargs; k++) {
+                        ensure_reg(&out->code, inst->call_args[k], REG_RCX, ra);
+                        emit_push_r(&out->code, REG_RCX);
+                    }
+                    /* Pop into syscall arg regs in reverse (arg 0 = num → RAX) */
+                    for (int k = nargs - 1; k >= 0; k--) {
+                        emit_pop_r(&out->code, SYS_ARG_REGS[k]);
+                    }
+                    /* Emit `syscall` — 0F 05 */
+                    emit_byte(&out->code, 0x0F);
+                    emit_byte(&out->code, 0x05);
+                    /* Result in RAX; move to dst or spill. */
+                    if (dr >= 0) {
+                        if (dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                    } else {
+                        spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    }
+                    break;
+                }
                 int nargs = inst->call_nargs;
                 int nreg  = nargs > 6 ? 6 : nargs;
                 int nstack = nargs > 6 ? nargs - 6 : 0;

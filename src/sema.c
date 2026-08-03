@@ -199,6 +199,21 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_CALL: {
+        /* Recognize the __syscall intrinsic: it takes 1..7 int args (syscall
+         * number + up to 6 arguments) and returns long.  Type-check its
+         * operands but skip the FunTable lookup. */
+        if (strcmp(e->u.call.callee, "__syscall") == 0) {
+            if (e->u.call.args.len < 1 || e->u.call.args.len > 7) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__syscall takes 1 to 7 arguments (syscall num + up to 6 args)");
+            }
+            for (size_t i = 0; i < e->u.call.args.len; i++) {
+                Type at = check_expr(e->u.call.args.data[i], st, ft);
+                type_free(&at);
+            }
+            set_type(e, type_make_int(8, 0));
+            return type_clone(e->type);
+        }
         const FunSig *sig = ftab_find(ft, e->u.call.callee);
         if (!sig) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
