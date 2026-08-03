@@ -20,6 +20,7 @@ typedef enum {
     TK_KW_FOR,           /* "for" */
     TK_KW_BREAK,         /* "break" */
     TK_KW_CONTINUE,      /* "continue" */
+    TK_KW_STRUCT,        /* "struct" */
     TK_IDENT,
     TK_INT_LITERAL,
     TK_STRING_LITERAL,   /* Slice 1: reserved for import, not consumed */
@@ -37,6 +38,8 @@ typedef enum {
     TK_SLASH,            /* / */
     TK_PERCENT,          /* % */
     TK_AMP,              /* & */
+    TK_DOT,              /* . */
+    TK_ARROW,            /* -> */
     TK_ASSIGN,           /* = */
     TK_EQ,               /* == */
     TK_NE,               /* != */

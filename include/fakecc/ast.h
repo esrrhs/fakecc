@@ -12,21 +12,23 @@ typedef enum {
     TY_INT,     /* char/short/int/long × signed/unsigned */
     TY_PTR,     /* T*  — pointee owned via heap allocation */
     TY_ARRAY,   /* T[N] — elem_type owned via heap; length is a positive int */
+    TY_STRUCT,  /* struct Name — layout looked up in module StructRegistry */
 } TypeKind;
 
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. */
+    int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. */
     int is_unsigned;   /* TY_INT only */
     Type *pointee;     /* TY_PTR only: malloc'd */
     Type *elem_type;   /* TY_ARRAY only: malloc'd */
     int length;        /* TY_ARRAY only */
+    char *tag;         /* TY_STRUCT only: xstrdup'd tag name */
 };
 
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; return t;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL; return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
 
@@ -34,17 +36,14 @@ static inline Type type_default_int(void) { return type_make_int(4, 0); }
 Type type_clone(Type t);
 /* Free heap-owned sub-types (no-op for TY_INT). Does NOT free `t` itself. */
 void type_free(Type *t);
-/* Total byte size of a Type: sizeof for scalars, N*elem for arrays. */
+/* Total byte size of a Type: sizeof for scalars, N*elem for arrays,
+ * width for structs (which is stashed at parse-time via layout). */
 int  type_size(Type t);
-/* T*  → owning-Type wrapper. `pointee` is deep-cloned. */
 Type type_make_ptr(Type pointee);
-/* T[N] — elem is deep-cloned. */
 Type type_make_array(Type elem, int length);
-/* Array→pointer decay: TY_ARRAY(E) → TY_PTR(E); otherwise identity clone. */
+Type type_make_struct(const char *tag, int size);
 Type type_decay(Type t);
-/* True iff t is TY_PTR or TY_ARRAY. */
 int  type_is_ptr_or_array(Type t);
-/* Element type for a pointer-or-array — cloned. */
 Type type_pointee_or_elem(Type t);
 
 /* ------------------------------------------------------------------ */
@@ -62,6 +61,7 @@ typedef enum {
     EX_ADDR,    /* &lvalue */
     EX_DEREF,   /* *ptr — lvalue */
     EX_INDEX,   /* a[i]  — lvalue; desugars to *(a+i) in IR */
+    EX_MEMBER,  /* s.x   — lvalue; requires s.type to be TY_STRUCT */
     EX_CAST,    /* (T)expr */
     EX_SIZEOF_TYPE,  /* sizeof(T)     — compile-time integer */
     EX_SIZEOF_EXPR,  /* sizeof(expr)  — compile-time integer */
@@ -110,6 +110,7 @@ struct Expr {
         struct { Expr *operand; } addr;                /* EX_ADDR */
         struct { Expr *operand; } deref;               /* EX_DEREF */
         struct { Expr *array;  Expr *index; } idx;    /* EX_INDEX */
+        struct { Expr *obj; char *name; } member;     /* EX_MEMBER — s.name (or (*p).name after arrow rewrite) */
         struct { Type target; Expr *operand; } cast;  /* EX_CAST — owns target sub-types */
         struct { Type target; } sizeof_t;              /* EX_SIZEOF_TYPE */
         struct { Expr *operand; } sizeof_e;            /* EX_SIZEOF_EXPR */
@@ -127,6 +128,7 @@ Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
 Expr *expr_new_addr(Expr *operand, SourceLoc loc);
 Expr *expr_new_deref(Expr *operand, SourceLoc loc);
 Expr *expr_new_index(Expr *array, Expr *index, SourceLoc loc);
+Expr *expr_new_member(Expr *obj, const char *name, SourceLoc loc);
 Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
 Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
@@ -215,6 +217,41 @@ typedef struct {
     SourceLoc loc;
 } PackageDecl;
 
+/* Struct definition: tag + ordered member list.  Each member has a name,
+ * a Type (owned), a computed byte offset within the struct, and a size. */
+typedef struct {
+    char *name;
+    Type type;
+    int  offset;
+} StructMember;
+
+typedef struct {
+    char *tag;            /* xstrdup'd */
+    StructMember *members;
+    int num_members;
+    int cap_members;
+    int size;             /* total size in bytes (already aligned) */
+    SourceLoc loc;
+} StructDef;
+
+typedef struct {
+    StructDef *data;
+    size_t len;
+    size_t cap;
+} StructRegistry;
+
+void struct_registry_init(StructRegistry *r);
+void struct_registry_free(StructRegistry *r);
+/* Register a new struct; returns pointer into registry.  Fails/duplicates
+ * are caller's problem — sema checks before calling. */
+StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc);
+/* Find a struct by tag; NULL if absent. */
+StructDef *struct_registry_find(StructRegistry *r, const char *tag);
+/* Const variant. */
+const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
+/* Append a member to a struct definition; computes offset (naturally aligned). */
+void struct_def_push_member(StructDef *sd, const char *name, Type ty);
+
 typedef struct {
     FunctionDecl *data;
     size_t len;
@@ -225,6 +262,7 @@ typedef struct {
     PackageDecl package;
     StmtArray globals;   /* ST_DECL at file scope (globals) */
     FunctionArray functions;
+    StructRegistry structs;
 } TranslationUnit;
 
 void tu_init(TranslationUnit *tu);

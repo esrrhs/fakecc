@@ -11,6 +11,7 @@
  * ir_generate; cleared at the end. */
 IRModule *g_ir_module = NULL;
 int g_str_counter = 0;
+const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 
 /* Loop-stack: (continue_label, break_label).  Pushed on entry to every
  * loop-lowering block; popped on exit.  ST_BREAK / ST_CONTINUE consult the
@@ -191,6 +192,8 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
     case EX_INDEX:
         return expr_takes_addr_of(e->u.idx.array, name)
             || expr_takes_addr_of(e->u.idx.index, name);
+    case EX_MEMBER:
+        return expr_takes_addr_of(e->u.member.obj, name);
     case EX_CAST: return expr_takes_addr_of(e->u.cast.operand, name);
     case EX_SIZEOF_TYPE: return 0;
     case EX_SIZEOF_EXPR: return expr_takes_addr_of(e->u.sizeof_e.operand, name);
@@ -232,6 +235,7 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
  * `&name` appears anywhere in the function. */
 static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) {
     if (ty.kind == TY_ARRAY) return 1;
+    if (ty.kind == TY_STRUCT) return 1;
     for (size_t i = 0; i < fd->body.len; i++)
         if (stmt_takes_addr_of(&fd->body.data[i], name)) return 1;
     return 0;
@@ -364,6 +368,10 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
     return NULL;
 }
 
+/* Forward decl. */
+static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
+static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
+
 /* Coerce a value to a target (width, is_unsigned) — emits SEXT/ZEXT/TRUNC
  * as needed. `imm` on the conversion op holds the SOURCE width so codegen
  * knows how to extend/mask. Returns the coerced SSA value id. */
@@ -378,6 +386,45 @@ static IRValue coerce(IRFunction *fn, IRValue v, int src_w, int src_u,
     emit_inst_w(fn, op, res, v, -1, src_w /* imm carries src width */,
                 dst_w, dst_u, loc);
     return res;
+}
+
+/* Compute the address of an lvalue expression (EX_VAR/EX_DEREF/EX_INDEX/EX_MEMBER).
+ * Returns a pointer-typed SSA value. */
+static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    switch (e->kind) {
+    case EX_VAR: {
+        const IRSlot *entry = irsymtable_find(st, e->u.var.name);
+        if (entry->is_global) return emit_gaddr(fn, entry->name, e->loc);
+        return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+    }
+    case EX_DEREF:
+        return lower_expr(fn, st, e->u.deref.operand);
+    case EX_INDEX: {
+        IRValue base = lower_expr(fn, st, e->u.idx.array);
+        IRValue idx  = lower_expr(fn, st, e->u.idx.index);
+        int esize = type_size(e->type);
+        IRValue esize_v = new_value(fn);
+        emit_inst_w(fn, IR_CONST, esize_v, -1, -1, esize, 8, 1, e->loc);
+        int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
+        IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
+        IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
+        return emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+    }
+    case EX_MEMBER: {
+        IRValue base = lower_lvalue_addr(fn, st, e->u.member.obj);
+        const StructDef *sd = struct_registry_find_c(g_ir_structs,
+                                                     e->u.member.obj->type.tag);
+        int off = 0;
+        for (int i = 0; i < sd->num_members; i++)
+            if (strcmp(sd->members[i].name, e->u.member.name) == 0)
+                { off = sd->members[i].offset; break; }
+        IRValue off_v = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off_v, -1, -1, off, 8, 1, e->loc);
+        return emit_bin_w(fn, IR_ADD, base, off_v, 8, 1, e->loc);
+    }
+    default: break;
+    }
+    return -1;
 }
 
 /* Lower an expression to a value id, emitting instructions as needed.
@@ -511,13 +558,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (!entry) return -1;
         if (entry->is_global) {
             IRValue addr = emit_gaddr(fn, entry->name, e->loc);
-            if (entry->ty.kind == TY_ARRAY) return addr;
+            if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT) return addr;
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                         entry->width, entry->is_unsigned, e->loc);
             return v;
         }
-        if (entry->ty.kind == TY_ARRAY) {
+        if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT) {
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         }
         if (entry->pinned) {
@@ -556,20 +603,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue ptr = lower_expr(fn, st, lv->u.deref.operand);
             emit_inst_w(fn, IR_STORE_PTR, -1, ptr, coerced, 0, lw, lu, e->loc);
             return coerced;
-        } else if (lv->kind == EX_INDEX) {
-            /* Compute address = base + i * sizeof(elem). base already decayed
-             * to pointer by sema. */
-            IRValue base = lower_expr(fn, st, lv->u.idx.array);
-            IRValue idx  = lower_expr(fn, st, lv->u.idx.index);
-            /* Element type is lv->type. */
-            int esize = type_size(lv->type);
-            IRValue esize_v = new_value(fn);
-            emit_inst_w(fn, IR_CONST, esize_v, -1, -1, esize, 8, 1, e->loc);
-            /* Coerce idx to 8-byte for pointer math. */
-            int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
-            IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
-            IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
-            IRValue addr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+        } else if (lv->kind == EX_INDEX || lv->kind == EX_MEMBER) {
+            IRValue addr = lower_lvalue_addr(fn, st, lv);
             emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
             return coerced;
         }
@@ -609,22 +644,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             /* &*p == p */
             return lower_expr(fn, st, op->u.deref.operand);
         }
-        if (op->kind == EX_INDEX) {
-            /* &a[i] == a + i*sizeof(elem) */
-            IRValue base = lower_expr(fn, st, op->u.idx.array);
-            IRValue idx  = lower_expr(fn, st, op->u.idx.index);
-            int esize = type_size(op->type);
-            IRValue esize_v = new_value(fn);
-            emit_inst_w(fn, IR_CONST, esize_v, -1, -1, esize, 8, 1, e->loc);
-            int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
-            IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
-            IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
-            return emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+        if (op->kind == EX_INDEX || op->kind == EX_MEMBER) {
+            return lower_lvalue_addr(fn, st, op);
         }
         return -1;
     }
     case EX_DEREF: {
         IRValue ptr = lower_expr(fn, st, e->u.deref.operand);
+        if (e->type.kind == TY_STRUCT || e->type.kind == TY_ARRAY) return ptr;
         int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int u = e->type.is_unsigned;
         IRValue v = new_value(fn);
@@ -644,10 +671,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue addr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
         int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int u = e->type.is_unsigned;
-        /* If the element type is itself an array, `a[i]` yields an array
-         * value; sema will have decayed the surrounding usage to pointer,
-         * so returning the address is correct. */
         if (e->type.kind == TY_ARRAY) return addr;
+        if (e->type.kind == TY_STRUCT) return addr;
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        return v;
+    }
+    case EX_MEMBER: {
+        IRValue addr = lower_lvalue_addr(fn, st, e);
+        /* Struct/array members: return address (decay). Scalar/pointer: load. */
+        if (e->type.kind == TY_STRUCT) return addr;
+        if (e->type.kind == TY_ARRAY)  return addr;
+        int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+        int u = e->type.is_unsigned;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
         return v;
@@ -709,7 +745,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         Type dty = s->u.decl.type;
         int pinned = is_pinned_in_body(cur_fd, s->u.decl.name, dty);
         int dw = dty.kind == TY_ARRAY ? type_size(*dty.elem_type)
-                : (dty.kind == TY_PTR ? 8 : dty.width);
+                : (dty.kind == TY_PTR ? 8
+                   : (dty.kind == TY_STRUCT ? 8 : dty.width));
         int du = dty.is_unsigned;
         IRValue v;
         if (pinned) {
@@ -721,11 +758,14 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         }
         irsymtable_push(st, s->u.decl.name, v, pinned, dty);
         if (s->u.decl.init) {
+            if (dty.kind == TY_STRUCT || dty.kind == TY_ARRAY) {
+                fprintf(stderr, "fakecc: struct/array initializers not supported in this slice\n");
+                exit(1);
+            }
             IRValue rv = lower_expr(fn, st, s->u.decl.init);
             int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
             IRValue coerced = coerce(fn, rv, rw, ru, dw, du, s->loc);
             if (pinned) {
-                /* Get address, then store through pointer. */
                 IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
                 emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, dw, du, s->loc);
             } else {
@@ -835,6 +875,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
     /* Publish module + reset string counter for lower_expr's use. */
     g_ir_module = ir;
     g_str_counter = 0;
+    g_ir_structs = &tu->structs;
 
     /* Register named globals from tu->globals.  Populate initializer bytes
      * for scalar globals from a simple compile-time integer literal (or 0

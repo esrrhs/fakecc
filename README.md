@@ -101,6 +101,32 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 11 — struct + `.` + `->`
+
+支持 `struct Foo { ... };` 定义、`struct Foo x;` 变量、`s.x` 成员访问、`p->x` 箭头（自动解糖为 `(*p).x`）、`sizeof(struct Foo)`、struct 里嵌套数组和指针成员。
+
+```c
+struct Node { int val; struct Node *next; };
+int main() {
+    struct Node a, b;
+    a.val = 1; a.next = &b;
+    b.val = 2; b.next = 0;
+    return a.val + a.next->val;
+}
+```
+
+- **Lexer** 新增 `struct` 关键字、`.` (TK_DOT)、`->` (TK_ARROW)
+- **AST** `TypeKind` 新增 `TY_STRUCT`；`Type` 加 `char *tag`；新加 `StructRegistry`/`StructDef`/`StructMember`；`TranslationUnit.structs` 挂在 module 上；`Expr` 新增 `EX_MEMBER`
+- **Parser** 顶层识别 `struct Foo { ... };` 定义（先注册到 registry，再解析成员算 offset）；解析类型时 `struct Foo` 查 registry 拿 size；postfix 支持 `.name` 和 `->name`（arrow 桥接为 `(*obj).name`）
+- **Sema** 新增 file-scope `StructRegistry*` 指针；`EX_MEMBER` 校验对象是 TY_STRUCT、成员存在，结果类型是成员的 Type；lvalue 集合加入 EX_MEMBER
+- **IR-gen** 新增 `lower_lvalue_addr` 统一算 lvalue 地址（EX_VAR/DEREF/INDEX/MEMBER 递归调用自己 + 加成员 offset）；struct 变量强制 pinned，`sizeof(struct)` 从 registry 拿 size；rvalue 用 `.` 或 `->` 取 struct 成员：标量 → LOAD_PTR，array/struct → 直接返回地址（衰减）
+
+**布局**：自然对齐——char@1, short@2, int@4, long/ptr@8；每个成员先按对齐 pad 到边界，结构末尾再 pad 到 8 字节。`type_align` 是新的内部辅助函数。
+
+**边界**：struct 值传参/返回、初始化器列表 `{1,2,3}`、位域、匿名 struct、union 都留到未来。
+
+新增 5 个 e2e：`struct_basic / struct_arrow / struct_arr_member / struct_ptr_param / struct_sizeof`。101 个 e2e 全绿。
+
 ### Slice 10 — >6 参数走栈
 
 参数数量上限从 6 提升到 16。前 6 个走 SysV 寄存器（rdi/rsi/rdx/rcx/r8/r9），第 7 个及以上按 SysV 约定右到左压栈，callee 通过 `[rbp + 16 + 8*(k-6)]` 读取。

@@ -69,6 +69,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "return", 6) == 0) return TK_KW_RETURN;
         if (memcmp(s, "signed", 6) == 0) return TK_KW_SIGNED;
         if (memcmp(s, "sizeof", 6) == 0) return TK_KW_SIZEOF;
+        if (memcmp(s, "struct", 6) == 0) return TK_KW_STRUCT;
         break;
     case 7:
         if (memcmp(s, "package", 7) == 0) return TK_KW_PACKAGE;
@@ -248,6 +249,15 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             pos += 2; col += 2;
             continue;
         }
+        if (c == '-' && source[pos + 1] == '>') {
+            Token t;
+            t.kind = TK_ARROW;
+            t.text = xstrdup("->");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
         if (c == '!' && source[pos + 1] == '=') {
             Token t;
             t.kind = TK_NE;
@@ -298,6 +308,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
         case ']':
         case ';':
         case ',':
+        case '.':
         case '+':
         case '-':
         case '*':
@@ -315,6 +326,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             case ']': t.kind = TK_RBRACKET; break;
             case ';': t.kind = TK_SEMICOLON; break;
             case ',': t.kind = TK_COMMA; break;
+            case '.': t.kind = TK_DOT; break;
             case '+': t.kind = TK_PLUS; break;
             case '-': t.kind = TK_MINUS; break;
             case '*': t.kind = TK_STAR; break;

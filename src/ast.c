@@ -24,6 +24,7 @@ Type type_clone(Type t) {
     } else {
         r.elem_type = NULL;
     }
+    r.tag = t.tag ? xstrdup(t.tag) : NULL;
     return r;
 }
 
@@ -31,6 +32,7 @@ void type_free(Type *t) {
     if (!t) return;
     if (t->pointee) { type_free(t->pointee); free(t->pointee); t->pointee = NULL; }
     if (t->elem_type) { type_free(t->elem_type); free(t->elem_type); t->elem_type = NULL; }
+    if (t->tag) { free(t->tag); t->tag = NULL; }
 }
 
 int type_size(Type t) {
@@ -38,13 +40,14 @@ int type_size(Type t) {
     case TY_INT:   return t.width;
     case TY_PTR:   return 8;
     case TY_ARRAY: return type_size(*t.elem_type) * t.length;
+    case TY_STRUCT: return t.width;  /* precomputed at struct-def time */
     }
     return 0;
 }
 
 Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
-    t.elem_type = NULL; t.length = 0;
+    t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.pointee = malloc(sizeof(Type));
     if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.pointee = type_clone(pointee);
@@ -53,10 +56,17 @@ Type type_make_ptr(Type pointee) {
 
 Type type_make_array(Type elem, int length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
-    t.is_unsigned = elem.is_unsigned; t.length = length; t.pointee = NULL;
+    t.is_unsigned = elem.is_unsigned; t.length = length; t.pointee = NULL; t.tag = NULL;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.elem_type = type_clone(elem);
+    return t;
+}
+
+Type type_make_struct(const char *tag, int size) {
+    Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0;
+    t.tag = xstrdup(tag);
     return t;
 }
 
@@ -81,7 +91,90 @@ Type type_pointee_or_elem(Type t) {
 void expr_set_type(Expr *e, Type t) {
     if (!e) { type_free(&t); return; }
     type_free(&e->type);
-    e->type = t;   /* takes ownership of the arg (no additional clone) */
+    e->type = t;
+}
+
+/* ------------------------------------------------------------------ */
+/* Struct registry                                                     */
+/* ------------------------------------------------------------------ */
+
+void struct_registry_init(StructRegistry *r) {
+    r->data = NULL; r->len = 0; r->cap = 0;
+}
+
+void struct_registry_free(StructRegistry *r) {
+    for (size_t i = 0; i < r->len; i++) {
+        StructDef *sd = &r->data[i];
+        free(sd->tag);
+        for (int j = 0; j < sd->num_members; j++) {
+            free(sd->members[j].name);
+            type_free(&sd->members[j].type);
+        }
+        free(sd->members);
+    }
+    free(r->data);
+    r->data = NULL; r->len = 0; r->cap = 0;
+}
+
+StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc) {
+    if (r->len >= r->cap) {
+        size_t nc = r->cap ? r->cap * 2 : 4;
+        r->data = realloc(r->data, nc * sizeof(StructDef));
+        if (!r->data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        r->cap = nc;
+    }
+    StructDef *sd = &r->data[r->len++];
+    sd->tag = xstrdup(tag);
+    sd->members = NULL; sd->num_members = 0; sd->cap_members = 0;
+    sd->size = 0; sd->loc = loc;
+    return sd;
+}
+
+StructDef *struct_registry_find(StructRegistry *r, const char *tag) {
+    for (size_t i = 0; i < r->len; i++)
+        if (strcmp(r->data[i].tag, tag) == 0) return &r->data[i];
+    return NULL;
+}
+
+const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag) {
+    return struct_registry_find((StructRegistry *)r, tag);
+}
+
+/* Round up x to a multiple of align. */
+static int align_up(int x, int align) {
+    if (align <= 1) return x;
+    return (x + align - 1) & ~(align - 1);
+}
+
+/* Natural alignment of a type: 1/2/4/8 for scalars, elem's alignment for
+ * arrays, max member alignment for structs. */
+static int type_align(Type t) {
+    switch (t.kind) {
+    case TY_INT:   return t.width;
+    case TY_PTR:   return 8;
+    case TY_ARRAY: return type_align(*t.elem_type);
+    case TY_STRUCT: return 8;   /* conservative — structs align to 8 */
+    }
+    return 1;
+}
+
+void struct_def_push_member(StructDef *sd, const char *name, Type ty) {
+    if (sd->num_members >= sd->cap_members) {
+        int nc = sd->cap_members ? sd->cap_members * 2 : 4;
+        sd->members = realloc(sd->members, nc * sizeof(StructMember));
+        if (!sd->members) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        sd->cap_members = nc;
+    }
+    int a = type_align(ty);
+    int sz = type_size(ty);
+    int off = align_up(sd->size, a);
+    sd->members[sd->num_members].name = xstrdup(name);
+    sd->members[sd->num_members].type = type_clone(ty);
+    sd->members[sd->num_members].offset = off;
+    sd->num_members++;
+    sd->size = off + sz;
+    /* pad struct to 8-byte boundary at end */
+    sd->size = align_up(sd->size, 8);
 }
 
 /* ------------------------------------------------------------------ */
@@ -215,6 +308,12 @@ Expr *expr_new_index(Expr *array, Expr *index, SourceLoc loc) {
     Expr *e = expr_alloc(EX_INDEX, loc);
     e->u.idx.array = array; e->u.idx.index = index; return e;
 }
+Expr *expr_new_member(Expr *obj, const char *name, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_MEMBER, loc);
+    e->u.member.obj = obj;
+    e->u.member.name = xstrdup(name);
+    return e;
+}
 Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc) {
     Expr *e = expr_alloc(EX_CAST, loc);
     e->u.cast.target = type_clone(target); e->u.cast.operand = operand; return e;
@@ -260,6 +359,10 @@ void expr_free(Expr *e) {
     case EX_DEREF: expr_free(e->u.deref.operand); break;
     case EX_INDEX:
         expr_free(e->u.idx.array); expr_free(e->u.idx.index); break;
+    case EX_MEMBER:
+        expr_free(e->u.member.obj);
+        free(e->u.member.name);
+        break;
     case EX_CAST:
         type_free(&e->u.cast.target);
         expr_free(e->u.cast.operand);
@@ -372,6 +475,7 @@ void tu_init(TranslationUnit *tu) {
     tu->functions.data = NULL;
     tu->functions.len = 0;
     tu->functions.cap = 0;
+    struct_registry_init(&tu->structs);
 }
 
 void tu_free(TranslationUnit *tu) {
@@ -384,6 +488,7 @@ void tu_free(TranslationUnit *tu) {
         stmt_array_free(&tu->functions.data[i].body);
     }
     free(tu->functions.data);
+    struct_registry_free(&tu->structs);
 }
 
 void param_array_init(ParamArray *a) {

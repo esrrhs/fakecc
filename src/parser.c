@@ -11,6 +11,7 @@
 typedef struct {
     const TokenArray *tokens;
     size_t pos;
+    TranslationUnit *tu;   /* backing TU — parser writes structs directly */
 } Parser;
 
 static const Token *peek(const Parser *p) {
@@ -36,10 +37,40 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
  * Returns Type; emits a diagnostic if no type keyword is present. */
 static int is_type_start(TokenKind k) {
     return k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
-        || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED;
+        || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED
+        || k == TK_KW_STRUCT;
 }
 
 static Type parse_type(Parser *p) {
+    /* struct Name — must be already defined by a `struct` definition earlier
+     * OR later; we defer size lookup to sema/IR-gen time by consulting the
+     * registry now.  Since ordering matters for parsing (need to know the
+     * size for arrays of struct, etc.), we require struct defs precede
+     * uses — enforce by looking up in the registry now. */
+    if (peek(p)->kind == TK_KW_STRUCT) {
+        advance(p);
+        const Token *tag = peek(p);
+        if (tag->kind != TK_IDENT) {
+            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                   "expected struct tag but got '%s'", tag->text);
+        }
+        advance(p);
+        StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
+        int size = sd ? sd->size : 0;
+        if (!sd) {
+            /* forward declaration — legal only when we're followed by `*`
+             * (pointer to incomplete type).  Otherwise error. */
+            /* Note: sema will re-check size once all types settle. */
+        }
+        Type t = type_make_struct(tag->text, size);
+        while (peek(p)->kind == TK_STAR) {
+            advance(p);
+            Type w = type_make_ptr(t);
+            type_free(&t);
+            t = w;
+        }
+        return t;
+    }
     int is_unsigned = 0;
     int saw_sign = 0;
     int width = -1;
@@ -246,6 +277,32 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
             Expr *idx = parse_expr(p);
             expect_kind(p, TK_RBRACKET, "']'");
             lhs = expr_new_index(lhs, idx, loc);
+            continue;
+        }
+        if (peek(p)->kind == TK_DOT) {
+            SourceLoc loc = peek(p)->loc;
+            advance(p);
+            const Token *mn = peek(p);
+            if (mn->kind != TK_IDENT) {
+                die_at(mn->loc.file, mn->loc.line, mn->loc.col,
+                       "expected member name after '.'");
+            }
+            advance(p);
+            lhs = expr_new_member(lhs, mn->text, loc);
+            continue;
+        }
+        if (peek(p)->kind == TK_ARROW) {
+            SourceLoc loc = peek(p)->loc;
+            advance(p);
+            const Token *mn = peek(p);
+            if (mn->kind != TK_IDENT) {
+                die_at(mn->loc.file, mn->loc.line, mn->loc.col,
+                       "expected member name after '->'");
+            }
+            advance(p);
+            /* Desugar `p->x` to `(*p).x`. */
+            Expr *deref = expr_new_deref(lhs, loc);
+            lhs = expr_new_member(deref, mn->text, loc);
             continue;
         }
         break;
@@ -609,6 +666,7 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
     Parser p;
     p.tokens = tokens;
     p.pos = 0;
+    p.tu = tu;
 
     /* must start with package declaration */
     if (peek(&p)->kind != TK_KW_PACKAGE) {
@@ -626,13 +684,64 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
                "'import' is not supported yet");
     }
 
-    /* At file scope: each top-level declaration starts with a type.
-     *   type IDENT "("  → function definition
-     *   type IDENT { "[" N "]" }* [ "=" expr ] ";"  → global variable
-     * We disambiguate by scanning past the type + IDENT + zero-or-more `[N]`
-     * to see whether the next token is `(`.  Types include a trailing chain
-     * of `*` so we skip those too. */
+    /* At file scope: each top-level declaration starts with a type OR
+     * with `struct TAG { ... };` — a struct definition (no variable). */
     while (peek(&p)->kind != TK_EOF) {
+        /* Struct definition: `struct TAG { type NAME [ [N] ]* ; ... };`
+         * Distinguish from `struct TAG x;` global by lookahead — after
+         * `struct TAG` we expect `{` for a definition. */
+        if (peek(&p)->kind == TK_KW_STRUCT) {
+            size_t save = p.pos;
+            advance(&p);
+            const Token *tag = peek(&p);
+            if (tag->kind == TK_IDENT) advance(&p);
+            if (peek(&p)->kind == TK_LBRACE) {
+                /* Struct definition. */
+                if (struct_registry_find(&tu->structs, tag->text)) {
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                           "redefinition of struct '%s'", tag->text);
+                }
+                StructDef *sd = struct_registry_add(&tu->structs, tag->text, tag->loc);
+                advance(&p);  /* consume `{` */
+                while (peek(&p)->kind != TK_RBRACE) {
+                    Type mty = parse_type(&p);
+                    const Token *mn = peek(&p);
+                    if (mn->kind != TK_IDENT) {
+                        die_at(mn->loc.file, mn->loc.line, mn->loc.col,
+                               "expected member name");
+                    }
+                    advance(&p);
+                    /* Array dims. */
+                    int dims[8]; int ndims = 0;
+                    while (peek(&p)->kind == TK_LBRACKET) {
+                        advance(&p);
+                        const Token *nt = peek(&p);
+                        if (nt->kind != TK_INT_LITERAL) {
+                            die_at(nt->loc.file, nt->loc.line, nt->loc.col,
+                                   "expected integer array length");
+                        }
+                        int len = atoi(nt->text);
+                        advance(&p);
+                        expect_kind(&p, TK_RBRACKET, "']'");
+                        dims[ndims++] = len;
+                    }
+                    for (int i = ndims - 1; i >= 0; i--) {
+                        Type w = type_make_array(mty, dims[i]);
+                        type_free(&mty); mty = w;
+                    }
+                    expect_kind(&p, TK_SEMICOLON, "';'");
+                    struct_def_push_member(sd, mn->text, mty);
+                    type_free(&mty);
+                }
+                expect_kind(&p, TK_RBRACE, "'}'");
+                expect_kind(&p, TK_SEMICOLON, "';'");
+                continue;
+            } else {
+                /* Not a definition — reset and fall through to declaration. */
+                p.pos = save;
+            }
+        }
+
         /* Save position, look ahead to find kind. */
         size_t save = p.pos;
         /* Skip signed/unsigned prefix */
@@ -642,6 +751,9 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
         if (peek(&p)->kind == TK_KW_INT || peek(&p)->kind == TK_KW_CHAR
             || peek(&p)->kind == TK_KW_SHORT || peek(&p)->kind == TK_KW_LONG) {
             advance(&p);
+        } else if (peek(&p)->kind == TK_KW_STRUCT) {
+            advance(&p);
+            if (peek(&p)->kind == TK_IDENT) advance(&p);
         }
         /* Skip pointer stars */
         while (peek(&p)->kind == TK_STAR) advance(&p);

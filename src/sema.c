@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Set by sema_check; provides the module StructRegistry for member lookups. */
+static const StructRegistry *g_sema_structs = NULL;
+
 typedef struct {
     const char *name;
     int arity;
@@ -181,7 +184,8 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     case EX_ASSIGN: {
         if (e->u.assign.lvalue->kind != EX_VAR &&
             e->u.assign.lvalue->kind != EX_DEREF &&
-            e->u.assign.lvalue->kind != EX_INDEX) {
+            e->u.assign.lvalue->kind != EX_INDEX &&
+            e->u.assign.lvalue->kind != EX_MEMBER) {
             die_at(e->u.assign.lvalue->loc.file,
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
@@ -226,7 +230,7 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         Type ot = check_expr(e->u.addr.operand, st, ft);
         /* operand must be lvalue */
         ExprKind ok = e->u.addr.operand->kind;
-        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX) {
+        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "cannot take address of rvalue");
         }
@@ -271,6 +275,29 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         Type res = type_clone(*base.pointee);
         type_free(&base);
         set_type(e, res);
+        return type_clone(e->type);
+    }
+    case EX_MEMBER: {
+        Type ot = check_expr(e->u.member.obj, st, ft);
+        if (ot.kind != TY_STRUCT) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "member access '.%s' on non-struct", e->u.member.name);
+        }
+        const StructDef *sd = struct_registry_find_c(g_sema_structs, ot.tag);
+        if (!sd) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "unknown struct 'struct %s'", ot.tag);
+        }
+        const StructMember *m = NULL;
+        for (int i = 0; i < sd->num_members; i++)
+            if (strcmp(sd->members[i].name, e->u.member.name) == 0)
+                { m = &sd->members[i]; break; }
+        if (!m) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "struct '%s' has no member '%s'", ot.tag, e->u.member.name);
+        }
+        type_free(&ot);
+        set_type(e, type_clone(m->type));
         return type_clone(e->type);
     }
     case EX_CAST: {
@@ -370,6 +397,7 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
 
 void sema_check(const TranslationUnit *tu_const) {
     TranslationUnit *tu = (TranslationUnit *)tu_const;
+    g_sema_structs = &tu->structs;
 
     if (tu->package.name == NULL || strcmp(tu->package.name, "main") != 0) {
         die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
