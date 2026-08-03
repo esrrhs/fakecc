@@ -138,8 +138,12 @@ static Expr *parse_assign(Parser *p);
 static Expr *parse_ternary(Parser *p);
 static Expr *parse_or(Parser *p);
 static Expr *parse_and(Parser *p);
+static Expr *parse_bitor(Parser *p);
+static Expr *parse_xor(Parser *p);
+static Expr *parse_bitand(Parser *p);
 static Expr *parse_equality(Parser *p);
 static Expr *parse_relational(Parser *p);
+static Expr *parse_shift(Parser *p);
 static Expr *parse_add(Parser *p);
 static Expr *parse_mul(Parser *p);
 static Expr *parse_unary(Parser *p);
@@ -190,16 +194,58 @@ static Expr *parse_or(Parser *p) {
     return lhs;
 }
 
-/* and-expr = equality-expr { "&&" equality-expr }  -- left associative */
+/* and-expr = bitor-expr { "&&" bitor-expr }  -- left associative */
 static Expr *parse_and(Parser *p) {
-    Expr *lhs = parse_equality(p);
+    Expr *lhs = parse_bitor(p);
     for (;;) {
         TokenKind k = peek(p)->kind;
         if (k != TK_ANDAND) break;
         SourceLoc loc = peek(p)->loc;
         advance(p);
-        Expr *rhs = parse_equality(p);
+        Expr *rhs = parse_bitor(p);
         lhs = expr_new_binop(BOP_AND, lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* bitor-expr = xor-expr { "|" xor-expr }  -- left associative */
+static Expr *parse_bitor(Parser *p) {
+    Expr *lhs = parse_xor(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_BITOR) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_xor(p);
+        lhs = expr_new_binop(BOP_BITOR, lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* xor-expr = bitand-expr { "^" bitand-expr }  -- left associative */
+static Expr *parse_xor(Parser *p) {
+    Expr *lhs = parse_bitand(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_XOR) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_bitand(p);
+        lhs = expr_new_binop(BOP_BITXOR, lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* bitand-expr = equality-expr { "&" equality-expr }  -- left associative */
+static Expr *parse_bitand(Parser *p) {
+    Expr *lhs = parse_equality(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_AMP) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_equality(p);
+        lhs = expr_new_binop(BOP_BITAND, lhs, rhs, loc);
     }
     return lhs;
 }
@@ -219,15 +265,15 @@ static Expr *parse_equality(Parser *p) {
     return lhs;
 }
 
-/* relational-expr = add-expr { ("<" | "<=" | ">" | ">=") add-expr } */
+/* relational-expr = shift-expr { ("<" | "<=" | ">" | ">=") shift-expr } */
 static Expr *parse_relational(Parser *p) {
-    Expr *lhs = parse_add(p);
+    Expr *lhs = parse_shift(p);
     for (;;) {
         TokenKind k = peek(p)->kind;
         if (k != TK_LT && k != TK_LE && k != TK_GT && k != TK_GE) break;
         SourceLoc loc = peek(p)->loc;
         advance(p);
-        Expr *rhs = parse_add(p);
+        Expr *rhs = parse_shift(p);
         BinOp op;
         switch (k) {
         case TK_LT: op = BOP_LT; break;
@@ -235,6 +281,21 @@ static Expr *parse_relational(Parser *p) {
         case TK_GT: op = BOP_GT; break;
         default:    op = BOP_GE; break;
         }
+        lhs = expr_new_binop(op, lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* shift-expr = add-expr { ("<<" | ">>") add-expr }  -- left associative */
+static Expr *parse_shift(Parser *p) {
+    Expr *lhs = parse_add(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_SHL && k != TK_SHR) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_add(p);
+        BinOp op = (k == TK_SHL) ? BOP_SHL : BOP_SHR;
         lhs = expr_new_binop(op, lhs, rhs, loc);
     }
     return lhs;
@@ -275,7 +336,7 @@ static Expr *parse_mul(Parser *p) {
     return lhs;
 }
 
-/* unary-expr = ("+"|"-"|"&"|"*") unary-expr | sizeof unary-or-type | primary { postfix } */
+/* unary-expr = ("+"|"-"|"&"|"*"|"~") unary-expr | sizeof unary-or-type | primary { postfix } */
 static Expr *parse_unary(Parser *p) {
     TokenKind k = peek(p)->kind;
     if (k == TK_PLUS || k == TK_MINUS) {
@@ -284,6 +345,11 @@ static Expr *parse_unary(Parser *p) {
         Expr *operand = parse_unary(p);
         UnaryOp op = (k == TK_MINUS) ? UOP_NEG : UOP_POS;
         return expr_new_unary(op, operand, loc);
+    }
+    if (k == TK_TILDE) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        return expr_new_unary(UOP_BITNOT, parse_unary(p), loc);
     }
     if (k == TK_AMP) {
         SourceLoc loc = peek(p)->loc;

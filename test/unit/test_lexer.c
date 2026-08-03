@@ -321,6 +321,65 @@ static void test_andand_not_confused_with_amp(void) {
     token_array_free(&a);
 }
 
+static void test_bitwise_op_tokens(void) {
+    /* "a|b^c&d" → IDENT BITOR IDENT XOR IDENT AMP IDENT EOF (= 8) */
+    TokenArray a = lex_str("a|b^c&d");
+    T_ASSERT_EQ_INT((int)a.len, 8);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_BITOR);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_XOR);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_AMP);
+    T_ASSERT_EQ_INT((int)a.data[6].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[7].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_tilde_not_confused(void) {
+    /* "~x" → TILDE IDENT EOF */
+    TokenArray a = lex_str("~x");
+    T_ASSERT_EQ_INT((int)a.len, 3);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_TILDE);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_shl_shr_tokens(void) {
+    /* "a<<b>>c" → IDENT SHL IDENT SHR IDENT EOF */
+    TokenArray a = lex_str("a<<b>>c");
+    T_ASSERT_EQ_INT((int)a.len, 6);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_SHL);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_SHR);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_shl_not_confused_with_lt(void) {
+    /* "<<<<" should lex as SHL + SHL + EOF */
+    TokenArray a = lex_str("<<<<");
+    T_ASSERT_EQ_INT((int)a.len, 3);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_SHL);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_SHL);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_bitor_not_confused_with_oror(void) {
+    /* "|||" → the lexer greedily matches "||" first, then "|":
+     * OROR + BITOR + EOF. This confirms single | is a distinct token. */
+    TokenArray a = lex_str("|||");
+    T_ASSERT_EQ_INT((int)a.len, 3);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_OROR);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_BITOR);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
 static void test_question_and_colon_tokens(void) {
     /* "a ? b : c" → IDENT QUESTION IDENT COLON IDENT EOF */
     TokenArray a = lex_str("a ? b : c");
@@ -379,5 +438,10 @@ int main(void) {
     test_andand_not_confused_with_amp();
     test_question_and_colon_tokens();
     test_question_colon_no_spaces();
+    test_bitwise_op_tokens();
+    test_tilde_not_confused();
+    test_shl_shr_tokens();
+    test_shl_not_confused_with_lt();
+    test_bitor_not_confused_with_oror();
     return t_finalize();
 }

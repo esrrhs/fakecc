@@ -38,9 +38,14 @@ typedef enum {
     TK_STAR,             /* * */
     TK_SLASH,            /* / */
     TK_PERCENT,          /* % */
-    TK_AMP,              /* & */
+    TK_AMP,              /* & — address-of (unary) or bitwise AND (binary) */
     TK_ANDAND,           /* && */
     TK_OROR,             /* || */
+    TK_BITOR,            /* | — bitwise OR (binary) */
+    TK_XOR,              /* ^ — bitwise XOR (binary) */
+    TK_TILDE,            /* ~ — bitwise NOT (unary) */
+    TK_SHL,              /* << — left shift (binary) */
+    TK_SHR,              /* >> — right shift (binary) */
     TK_QUESTION,         /* ? */
     TK_COLON,            /* : */
     TK_DOT,              /* . */

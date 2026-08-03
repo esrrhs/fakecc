@@ -170,6 +170,29 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             } else {
                 res = type_clone(rt);
             }
+        } else if (op == BOP_BITAND || op == BOP_BITOR || op == BOP_BITXOR) {
+            /* Bitwise & | ^: both operands must be integer; result = UAC. */
+            if (lt.kind != TY_INT)
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "left operand of '%s' must be integer",
+                       op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
+            if (rt.kind != TY_INT)
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "right operand of '%s' must be integer",
+                       op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
+            res = usual_arith_conv(lt, rt);
+        } else if (op == BOP_SHL || op == BOP_SHR) {
+            /* Shift << >>: both operands must be integer; result type is the
+             * promoted type of the LEFT operand (C §6.5.7). */
+            if (lt.kind != TY_INT)
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "left operand of '%s' must be integer",
+                       op == BOP_SHL ? "<<" : ">>");
+            if (rt.kind != TY_INT)
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "right operand of '%s' must be integer",
+                       op == BOP_SHL ? "<<" : ">>");
+            res = integer_promote(lt);
         } else {
             res = usual_arith_conv(lt, rt);
         }
@@ -179,6 +202,16 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     }
     case EX_UNARY: {
         Type ot = check_expr(e->u.un.operand, st, ft);
+        if (ot.kind == TY_ARRAY) {
+            Type d = type_decay(ot); type_free(&ot); ot = d;
+            set_type(e->u.un.operand, type_clone(ot));
+        }
+        /* Bitwise NOT requires an integer operand; +/- allow pointer (no —
+         * actually +/- on pointer is handled in BOP). Here all current unary
+         * ops (-, +, ~) require scalar integer; reject pointer. */
+        if (e->u.un.op == UOP_BITNOT && ot.kind != TY_INT)
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "bitwise NOT requires an integer operand");
         Type res = integer_promote(ot);
         type_free(&ot);
         set_type(e, res);

@@ -22,6 +22,12 @@ typedef enum {
     IR_DIV,         /* dst = a / b  (signed) */
     IR_MOD,         /* dst = a % b  (signed) */
     IR_NEG,         /* dst = -a */
+    IR_BAND,        /* dst = a & b  (bitwise AND) */
+    IR_BOR,         /* dst = a | b  (bitwise OR) */
+    IR_BXOR,        /* dst = a ^ b  (bitwise XOR) */
+    IR_BNOT,        /* dst = ~a    (bitwise NOT) */
+    IR_SHL,         /* dst = a << b (left shift) */
+    IR_SHR,         /* dst = a >> b (arithmetic if signed, logical if unsigned) */
     IR_EQ,          /* dst = (a == b) ? 1 : 0 */
     IR_NE,          /* dst = (a != b) ? 1 : 0 */
     IR_LT,          /* dst = (a <  b) ? 1 : 0 (signed) */

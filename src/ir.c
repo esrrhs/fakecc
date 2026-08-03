@@ -475,6 +475,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         case UOP_POS:
             return lower_expr(fn, st, e->u.un.operand);
+        case UOP_BITNOT: {
+            IRValue x = lower_expr(fn, st, e->u.un.operand);
+            int sw = get_value_width(fn, x);
+            int su = get_value_is_unsigned(fn, x);
+            int rw = e->type.width ? e->type.width : 4;
+            int ru = e->type.is_unsigned;
+            IRValue px = coerce(fn, x, sw, su, rw, ru, e->loc);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_BNOT, v, px, -1, 0, rw, ru, e->loc);
+            return v;
+        }
         }
         break; /* unreachable */
     case EX_BINOP: {
@@ -594,17 +605,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue pr = coerce(fn, r, rw, ru, op_w, op_u, e->loc);
         IROpcode op;
         switch (e->u.bin.op) {
-        case BOP_ADD: op = IR_ADD; break;
-        case BOP_SUB: op = IR_SUB; break;
-        case BOP_MUL: op = IR_MUL; break;
-        case BOP_DIV: op = IR_DIV; break;
-        case BOP_MOD: op = IR_MOD; break;
-        case BOP_EQ:  op = IR_EQ;  break;
-        case BOP_NE:  op = IR_NE;  break;
-        case BOP_LT:  op = IR_LT;  break;
-        case BOP_LE:  op = IR_LE;  break;
-        case BOP_GT:  op = IR_GT;  break;
-        case BOP_GE:  op = IR_GE;  break;
+        case BOP_ADD:     op = IR_ADD;  break;
+        case BOP_SUB:     op = IR_SUB;  break;
+        case BOP_MUL:     op = IR_MUL;  break;
+        case BOP_DIV:     op = IR_DIV;  break;
+        case BOP_MOD:     op = IR_MOD;  break;
+        case BOP_EQ:      op = IR_EQ;   break;
+        case BOP_NE:      op = IR_NE;   break;
+        case BOP_LT:      op = IR_LT;   break;
+        case BOP_LE:      op = IR_LE;   break;
+        case BOP_GT:      op = IR_GT;   break;
+        case BOP_GE:      op = IR_GE;   break;
+        case BOP_BITAND:  op = IR_BAND; break;
+        case BOP_BITOR:   op = IR_BOR;  break;
+        case BOP_BITXOR:  op = IR_BXOR; break;
+        case BOP_SHL:     op = IR_SHL;  break;
+        case BOP_SHR:     op = IR_SHR;  break;
         default: op = IR_ADD; break;
         }
         int rw_res = is_cmp ? 4 : op_w;

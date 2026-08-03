@@ -46,18 +46,33 @@ int scalar_constfold(IRFunction *fn) {
         case IR_SUB:
         case IR_MUL:
         case IR_DIV:
-        case IR_MOD: {
+        case IR_MOD:
+        case IR_BAND:
+        case IR_BOR:
+        case IR_BXOR:
+        case IR_SHL:
+        case IR_SHR: {
             int lf, rf;
             int lv = const_value(&fn->insts, inst->a, &lf);
             int rv = const_value(&fn->insts, inst->b, &rf);
             if (!lf || !rf) break;
+            /* Avoid UB in constant folding: shift by negative or >= width,
+             * and division/modulo by zero. */
+            if (inst->op == IR_SHL || inst->op == IR_SHR) {
+                if (rv < 0 || rv >= 32) continue;
+            }
             int result;
             switch (inst->op) {
-            case IR_ADD: result = lv + rv; break;
-            case IR_SUB: result = lv - rv; break;
-            case IR_MUL: result = lv * rv; break;
-            case IR_DIV: if (rv == 0) continue; result = lv / rv; break;
-            case IR_MOD: if (rv == 0) continue; result = lv % rv; break;
+            case IR_ADD:  result = lv + rv; break;
+            case IR_SUB:  result = lv - rv; break;
+            case IR_MUL:  result = lv * rv; break;
+            case IR_DIV:  if (rv == 0) continue; result = lv / rv; break;
+            case IR_MOD:  if (rv == 0) continue; result = lv % rv; break;
+            case IR_BAND: result = lv & rv; break;
+            case IR_BOR:  result = lv | rv; break;
+            case IR_BXOR: result = lv ^ rv; break;
+            case IR_SHL:  result = lv << rv; break;
+            case IR_SHR:  result = lv >> rv; break;
             default: continue;
             }
             inst->op = IR_CONST;
@@ -67,14 +82,16 @@ int scalar_constfold(IRFunction *fn) {
             changed = 1;
             break;
         }
-        case IR_NEG: {
+        case IR_NEG:
+        case IR_BNOT: {
             int f;
             int v = const_value(&fn->insts, inst->a, &f);
             if (!f) break;
+            int is_neg = (inst->op == IR_NEG);
             inst->op = IR_CONST;
             inst->a = -1;
             inst->b = -1;
-            inst->imm = -v;
+            inst->imm = is_neg ? -v : ~v;
             changed = 1;
             break;
         }

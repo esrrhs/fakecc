@@ -82,11 +82,17 @@ typedef enum {
     BOP_GE,      /* >= */
     BOP_AND,     /* && — logical AND, short-circuit */
     BOP_OR,      /* || — logical OR, short-circuit */
+    BOP_BITAND,  /* &  — bitwise AND */
+    BOP_BITOR,   /* |  — bitwise OR */
+    BOP_BITXOR,  /* ^  — bitwise XOR */
+    BOP_SHL,     /* << — left shift */
+    BOP_SHR,     /* >> — right shift (arithmetic if signed, logical if unsigned) */
 } BinOp;
 
 typedef enum {
     UOP_NEG,     /* -x */
     UOP_POS,     /* +x — no-op */
+    UOP_BITNOT,  /* ~x — bitwise NOT */
 } UnaryOp;
 
 typedef struct Expr Expr;

@@ -85,6 +85,55 @@ static void emit_neg_r(Buffer *b, int dst_reg) {
     emit_modrm(b, 3, 3, dst_reg);
 }
 
+/* not %dst  →  REX F7 [ModRM: /2, mod=11, rm=dst] */
+static void emit_not_r(Buffer *b, int dst_reg) {
+    emit_rex_wrb(b, 1, 0, dst_reg);
+    emit_byte(b, 0xF7);
+    emit_modrm(b, 3, 2, dst_reg);
+}
+
+/* and %src, %dst  →  REX 21 [ModRM: reg=src, rm=dst, mod=11] */
+static void emit_and_rr(Buffer *b, int dst, int src) {
+    emit_rex_wrb(b, 1, src, dst);
+    emit_byte(b, 0x21);
+    emit_modrm(b, 3, src, dst);
+}
+
+/* or %src, %dst  →  REX 09 [ModRM: reg=src, rm=dst, mod=11] */
+static void emit_or_rr(Buffer *b, int dst, int src) {
+    emit_rex_wrb(b, 1, src, dst);
+    emit_byte(b, 0x09);
+    emit_modrm(b, 3, src, dst);
+}
+
+/* xor %src, %dst  →  REX 31 [ModRM: reg=src, rm=dst, mod=11] */
+static void emit_bitxor_rr(Buffer *b, int dst, int src) {
+    emit_rex_wrb(b, 1, src, dst);
+    emit_byte(b, 0x31);
+    emit_modrm(b, 3, src, dst);
+}
+
+/* shl %cl, %dst  →  REX D3 [ModRM: /4, mod=11, rm=dst] (count must be in cl) */
+static void emit_shl_rcx(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, 0, dst);
+    emit_byte(b, 0xD3);
+    emit_modrm(b, 3, 4, dst);
+}
+
+/* shr %cl, %dst (logical)  →  REX D3 [ModRM: /5, mod=11, rm=dst] */
+static void emit_shr_rcx(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, 0, dst);
+    emit_byte(b, 0xD3);
+    emit_modrm(b, 3, 5, dst);
+}
+
+/* sar %cl, %dst (arithmetic)  →  REX D3 [ModRM: /7, mod=11, rm=dst] */
+static void emit_sar_rcx(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, 0, dst);
+    emit_byte(b, 0xD3);
+    emit_modrm(b, 3, 7, dst);
+}
+
 /* cqto */
 static void emit_cqto(Buffer *b) { emit_rex_w(b); emit_byte(b, 0x99); }
 
@@ -855,6 +904,54 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_NEG: {
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
                 emit_neg_r(&out->code, REG_RAX);
+                mask_to_width(&out->code, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
+                break;
+            }
+
+            case IR_BNOT: {
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                emit_not_r(&out->code, REG_RAX);
+                mask_to_width(&out->code, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
+                break;
+            }
+
+            case IR_BAND:
+            case IR_BOR:
+            case IR_BXOR: {
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                ensure_reg(&out->code, inst->b, REG_RCX, ra);
+                if (inst->op == IR_BAND)
+                    emit_and_rr(&out->code, REG_RAX, REG_RCX);
+                else if (inst->op == IR_BOR)
+                    emit_or_rr(&out->code, REG_RAX, REG_RCX);
+                else
+                    emit_bitxor_rr(&out->code, REG_RAX, REG_RCX);
+                mask_to_width(&out->code, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
+                break;
+            }
+
+            case IR_SHL:
+            case IR_SHR: {
+                /* Shift count must be in cl. Ensure b into rcx FIRST (before
+                 * a into rax) only if a isn't bound to rcx — but ensure_reg
+                 * for a uses rax, so order is safe: a→rax, b→rcx. */
+                ensure_reg(&out->code, inst->b, REG_RCX, ra);
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                if (inst->op == IR_SHL)
+                    emit_shl_rcx(&out->code, REG_RAX);
+                else if (inst->is_unsigned)
+                    emit_shr_rcx(&out->code, REG_RAX);
+                else
+                    emit_sar_rcx(&out->code, REG_RAX);
                 mask_to_width(&out->code, REG_RAX, inst->width);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
                 spill_if_needed(&out->code, inst->dst,

@@ -331,6 +331,24 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             pos += 2; col += 2;
             continue;
         }
+        if (c == '<' && source[pos + 1] == '<') {
+            Token t;
+            t.kind = TK_SHL;
+            t.text = xstrdup("<<");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '>' && source[pos + 1] == '>') {
+            Token t;
+            t.kind = TK_SHR;
+            t.text = xstrdup(">>");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
         if (c == '<') {
             Token t;
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
@@ -379,6 +397,9 @@ void lex(const char *source, const char *filename, TokenArray *out) {
         case '/':
         case '%':
         case '&':
+        case '|':
+        case '^':
+        case '~':
         case '=':
         case '?':
         case ':': {
@@ -399,6 +420,9 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             case '/': t.kind = TK_SLASH; break;
             case '%': t.kind = TK_PERCENT; break;
             case '&': t.kind = TK_AMP; break;
+            case '|': t.kind = TK_BITOR; break;
+            case '^': t.kind = TK_XOR; break;
+            case '~': t.kind = TK_TILDE; break;
             case '=': t.kind = TK_ASSIGN; break;
             case '?': t.kind = TK_QUESTION; break;
             case ':': t.kind = TK_COLON; break;
