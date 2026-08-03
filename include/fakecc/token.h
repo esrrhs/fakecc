@@ -17,6 +17,9 @@ typedef enum {
     TK_KW_IF,            /* "if" */
     TK_KW_ELSE,          /* "else" */
     TK_KW_WHILE,         /* "while" */
+    TK_KW_FOR,           /* "for" */
+    TK_KW_BREAK,         /* "break" */
+    TK_KW_CONTINUE,      /* "continue" */
     TK_IDENT,
     TK_INT_LITERAL,
     TK_STRING_LITERAL,   /* Slice 1: reserved for import, not consumed */

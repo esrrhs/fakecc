@@ -52,6 +52,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         break;
     case 3:
         if (memcmp(s, "int", 3) == 0) return TK_KW_INT;
+        if (memcmp(s, "for", 3) == 0) return TK_KW_FOR;
         break;
     case 4:
         if (memcmp(s, "else", 4) == 0) return TK_KW_ELSE;
@@ -61,6 +62,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
     case 5:
         if (memcmp(s, "while", 5) == 0) return TK_KW_WHILE;
         if (memcmp(s, "short", 5) == 0) return TK_KW_SHORT;
+        if (memcmp(s, "break", 5) == 0) return TK_KW_BREAK;
         break;
     case 6:
         if (memcmp(s, "import", 6) == 0) return TK_KW_IMPORT;
@@ -73,6 +75,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         break;
     case 8:
         if (memcmp(s, "unsigned", 8) == 0) return TK_KW_UNSIGNED;
+        if (memcmp(s, "continue", 8) == 0) return TK_KW_CONTINUE;
         break;
     default:
         break;

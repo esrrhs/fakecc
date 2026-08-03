@@ -300,6 +300,15 @@ void stmt_free(Stmt *s) {
         expr_free(s->u.while_s.cond);
         stmt_free_ptr(s->u.while_s.body);
         break;
+    case ST_FOR:
+        stmt_free_ptr(s->u.for_s.init);
+        expr_free(s->u.for_s.cond);
+        expr_free(s->u.for_s.step);
+        stmt_free_ptr(s->u.for_s.body);
+        break;
+    case ST_BREAK:
+    case ST_CONTINUE:
+        break;
     case ST_BLOCK:
         stmt_array_free(&s->u.block);
         break;

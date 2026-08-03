@@ -12,6 +12,22 @@
 IRModule *g_ir_module = NULL;
 int g_str_counter = 0;
 
+/* Loop-stack: (continue_label, break_label).  Pushed on entry to every
+ * loop-lowering block; popped on exit.  ST_BREAK / ST_CONTINUE consult the
+ * top entry.  Depth guarded by sema — this stack never underflows. */
+typedef struct {
+    int cont_label;
+    int break_label;
+} LoopFrame;
+static LoopFrame g_loops[32];
+static int g_loop_depth = 0;
+static void push_loop(int cont, int brk) {
+    g_loops[g_loop_depth].cont_label = cont;
+    g_loops[g_loop_depth].break_label = brk;
+    g_loop_depth++;
+}
+static void pop_loop(void) { g_loop_depth--; }
+
 /* ------------------------------------------------------------------ */
 /* IRModule lifetime                                                   */
 /* ------------------------------------------------------------------ */
@@ -195,6 +211,14 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
     case ST_WHILE:
         return expr_takes_addr_of(s->u.while_s.cond, name)
             || stmt_takes_addr_of(s->u.while_s.body, name);
+    case ST_FOR:
+        if (s->u.for_s.init && stmt_takes_addr_of(s->u.for_s.init, name)) return 1;
+        if (s->u.for_s.cond && expr_takes_addr_of(s->u.for_s.cond, name)) return 1;
+        if (s->u.for_s.step && expr_takes_addr_of(s->u.for_s.step, name)) return 1;
+        return stmt_takes_addr_of(s->u.for_s.body, name);
+    case ST_BREAK:
+    case ST_CONTINUE:
+        return 0;
     case ST_BLOCK:
         for (size_t i = 0; i < s->u.block.len; i++)
             if (stmt_takes_addr_of(&s->u.block.data[i], name)) return 1;
@@ -746,11 +770,56 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         IRValue cond = lower_expr(fn, st, s->u.while_s.cond);
         emit_cbr(fn, cond, L_body, L_exit, s->loc);
         emit_label(fn, L_body, s->loc);
+        push_loop(L_head, L_exit);
         lower_stmt(fn, st, s->u.while_s.body, cur_fd);
+        pop_loop();
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_exit, s->loc);
         break;
     }
+    case ST_FOR: {
+        /* Lowering:
+         *   [init]
+         *   L_head: [cond ? goto L_body : goto L_exit]  (or unconditional
+         *           goto L_body if cond absent)
+         *   L_body: body
+         *   L_step: [step]
+         *           goto L_head
+         *   L_exit:
+         * continue → L_step, break → L_exit. */
+        size_t mark = st->len;
+        if (s->u.for_s.init)
+            lower_stmt(fn, st, s->u.for_s.init, cur_fd);
+        int L_head = new_label(fn);
+        int L_body = new_label(fn);
+        int L_step = new_label(fn);
+        int L_exit = new_label(fn);
+        emit_br(fn, L_head, s->loc);
+        emit_label(fn, L_head, s->loc);
+        if (s->u.for_s.cond) {
+            IRValue cond = lower_expr(fn, st, s->u.for_s.cond);
+            emit_cbr(fn, cond, L_body, L_exit, s->loc);
+        } else {
+            emit_br(fn, L_body, s->loc);
+        }
+        emit_label(fn, L_body, s->loc);
+        push_loop(L_step, L_exit);
+        lower_stmt(fn, st, s->u.for_s.body, cur_fd);
+        pop_loop();
+        emit_br(fn, L_step, s->loc);
+        emit_label(fn, L_step, s->loc);
+        if (s->u.for_s.step) lower_expr(fn, st, s->u.for_s.step);
+        emit_br(fn, L_head, s->loc);
+        emit_label(fn, L_exit, s->loc);
+        st->len = mark;
+        break;
+    }
+    case ST_BREAK:
+        emit_br(fn, g_loops[g_loop_depth - 1].break_label, s->loc);
+        break;
+    case ST_CONTINUE:
+        emit_br(fn, g_loops[g_loop_depth - 1].cont_label, s->loc);
+        break;
     case ST_BLOCK: {
         size_t mark = st->len;
         for (size_t i = 0; i < s->u.block.len; i++) {

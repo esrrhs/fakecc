@@ -297,6 +297,8 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
 static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
                        size_t scope_mark, int *has_return);
 
+static int g_sema_loop_depth = 0;
+
 static void check_stmt_list(StmtArray *body, SymTable *st,
                             const FunTable *ft, int *has_return) {
     size_t mark = symtable_enter_scope(st);
@@ -331,7 +333,34 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
         break;
     case ST_WHILE:
         discard = check_expr(s->u.while_s.cond, st, ft); type_free(&discard);
+        g_sema_loop_depth++;
         check_stmt(s->u.while_s.body, st, ft, scope_mark, has_return);
+        g_sema_loop_depth--;
+        break;
+    case ST_FOR: {
+        /* for-loop introduces its own scope for the init decl (if any). */
+        size_t mark = symtable_enter_scope(st);
+        if (s->u.for_s.init) {
+            check_stmt(s->u.for_s.init, st, ft, mark, has_return);
+        }
+        if (s->u.for_s.cond) {
+            discard = check_expr(s->u.for_s.cond, st, ft); type_free(&discard);
+        }
+        if (s->u.for_s.step) {
+            discard = check_expr(s->u.for_s.step, st, ft); type_free(&discard);
+        }
+        g_sema_loop_depth++;
+        check_stmt(s->u.for_s.body, st, ft, mark, has_return);
+        g_sema_loop_depth--;
+        symtable_leave_scope(st, mark);
+        break;
+    }
+    case ST_BREAK:
+    case ST_CONTINUE:
+        if (g_sema_loop_depth == 0) {
+            die_at(s->loc.file, s->loc.line, s->loc.col,
+                   "'%s' outside of loop", s->kind == ST_BREAK ? "break" : "continue");
+        }
         break;
     case ST_BLOCK:
         check_stmt_list(&s->u.block, st, ft, has_return);

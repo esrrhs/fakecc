@@ -145,6 +145,9 @@ typedef enum {
     ST_RETURN,   /* return expr; */
     ST_IF,       /* if (cond) then_stmt [else else_stmt] */
     ST_WHILE,    /* while (cond) body */
+    ST_FOR,      /* for (init? ; cond? ; step?) body — init/step are Stmt* / Expr* */
+    ST_BREAK,    /* break; */
+    ST_CONTINUE, /* continue; */
     ST_BLOCK,    /* { stmt* } — introduces a new scope */
 } StmtKind;
 
@@ -164,6 +167,8 @@ struct Stmt {
         Expr *value;                                /* ST_RETURN */
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */
         struct { Expr *cond; Stmt *body; } while_s;              /* ST_WHILE */
+        /* ST_FOR: init (may be Stmt or NULL), cond (may be NULL), step (may be NULL). */
+        struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
         StmtArray block;                             /* ST_BLOCK — owns its statements */
     } u;
 };

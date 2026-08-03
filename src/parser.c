@@ -457,6 +457,49 @@ static Stmt parse_stmt(Parser *p) {
         s.u.while_s.body = body_ptr;
         return s;
     }
+    if (k == TK_KW_FOR) {
+        const Token *kw = peek(p);
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        /* init: either a decl-stmt, an expr-stmt, or empty (just `;`). */
+        Stmt *init_ptr = NULL;
+        if (peek(p)->kind != TK_SEMICOLON) {
+            Stmt is = parse_stmt(p);   /* consumes trailing `;` */
+            init_ptr = stmt_alloc();
+            *init_ptr = is;
+        } else {
+            advance(p);  /* consume `;` */
+        }
+        Expr *cond = NULL;
+        if (peek(p)->kind != TK_SEMICOLON) cond = parse_expr(p);
+        expect_kind(p, TK_SEMICOLON, "';'");
+        Expr *step = NULL;
+        if (peek(p)->kind != TK_RPAREN) step = parse_expr(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        Stmt body = parse_stmt(p);
+        Stmt *body_ptr = stmt_alloc();
+        *body_ptr = body;
+        Stmt s;
+        s.kind = ST_FOR;
+        s.loc = kw->loc;
+        s.u.for_s.init = init_ptr;
+        s.u.for_s.cond = cond;
+        s.u.for_s.step = step;
+        s.u.for_s.body = body_ptr;
+        return s;
+    }
+    if (k == TK_KW_BREAK) {
+        const Token *kw = peek(p);
+        advance(p);
+        expect_kind(p, TK_SEMICOLON, "';'");
+        Stmt s; s.kind = ST_BREAK; s.loc = kw->loc; return s;
+    }
+    if (k == TK_KW_CONTINUE) {
+        const Token *kw = peek(p);
+        advance(p);
+        expect_kind(p, TK_SEMICOLON, "';'");
+        Stmt s; s.kind = ST_CONTINUE; s.loc = kw->loc; return s;
+    }
     if (k == TK_LBRACE) {
         const Token *lb = peek(p);
         advance(p);

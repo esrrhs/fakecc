@@ -101,6 +101,28 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 9 — for / break / continue
+
+```c
+package main;
+int main() {
+    int s = 0;
+    for (int i = 1; i <= 100; i = i + 1) {
+        if (i % 2 == 0) { continue; }
+        if (i > 20) { break; }
+        s = s + i;
+    }
+    return s;
+}
+```
+
+- **Lexer/Parser** 新增关键字 `for`/`break`/`continue`；`for (init? ; cond? ; step?) body`——三段都可以为空；`init` 可以是 decl 也可以是 expr
+- **AST** 新增 `ST_FOR / ST_BREAK / ST_CONTINUE`；for 的 init 是 `Stmt*`（允许 decl），cond/step 是 `Expr*`
+- **Sema** 全局 `loop_depth` 计数器，`break`/`continue` 在深度为 0 时报错；`for` 引入自己的作用域给 init 里的 decl
+- **IR-gen** for 下降为 `head → cond → body → step → head` 结构；`push_loop(cont=L_step, brk=L_exit)` 供内层 break/continue 查询；while 也复用同一栈；栈是文件作用域数组，深度上限 32
+
+新增 7 个 e2e：`for_basic / for_break_continue / for_nested_break / for_continue_odd / for_infinite / while_break / bad_break_toplevel`。
+
 ### Slice 8 — 全局变量 + 字符串字面量
 
 从"只有栈变量"到"能持久保存状态"。文件作用域声明 `int x = 42;`；字符串字面量 `"hello"` 编译期入 rodata 全局；两者都通过 `lea r, [rip+disp32]` 定位。ELF 输出扩展为两个 PT_LOAD 段（`R+X` 的 code / `R+W` 的 data）。
