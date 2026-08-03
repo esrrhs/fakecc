@@ -203,6 +203,11 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
             || expr_takes_addr_of(e->u.tern.else_, name);
     case EX_INC_DEC:
         return expr_takes_addr_of(e->u.incdec.operand, name);
+    case EX_COMPOUND_ASSIGN:
+        return expr_takes_addr_of(e->u.comp.lvalue, name);
+    case EX_COMMA:
+        return expr_takes_addr_of(e->u.comma.lhs, name)
+            || expr_takes_addr_of(e->u.comma.rhs, name);
     }
     return 0;
 }
@@ -401,6 +406,48 @@ static IRValue coerce(IRFunction *fn, IRValue v, int src_w, int src_u,
     return res;
 }
 
+/* Map a BinOp (AST) to the matching IROpcode (IR). */
+static IROpcode bop_to_ir(BinOp op) {
+    switch (op) {
+    case BOP_ADD:    return IR_ADD;
+    case BOP_SUB:    return IR_SUB;
+    case BOP_MUL:    return IR_MUL;
+    case BOP_DIV:    return IR_DIV;
+    case BOP_MOD:    return IR_MOD;
+    case BOP_EQ:     return IR_EQ;
+    case BOP_NE:     return IR_NE;
+    case BOP_LT:     return IR_LT;
+    case BOP_LE:     return IR_LE;
+    case BOP_GT:     return IR_GT;
+    case BOP_GE:     return IR_GE;
+    case BOP_BITAND: return IR_BAND;
+    case BOP_BITOR:  return IR_BOR;
+    case BOP_BITXOR: return IR_BXOR;
+    case BOP_SHL:    return IR_SHL;
+    case BOP_SHR:    return IR_SHR;
+    default:         return IR_ADD;
+    }
+}
+
+/* Prepare the right-hand side of a compound assignment: for pointer += / -=,
+ * scale the integer rvalue by sizeof(pointee); otherwise coerce it to the
+ * lvalue's (width, is_unsigned). */
+static IRValue scale_rhs(IRFunction *fn, IRValue rhs, int is_ptr, Type lv_ty,
+                         BinOp op, SourceLoc loc) {
+    int rw = get_value_width(fn, rhs), ru = get_value_is_unsigned(fn, rhs);
+    if (is_ptr && (op == BOP_ADD || op == BOP_SUB)) {
+        /* Scale integer rvalue by sizeof(pointee), in 8-byte unsigned. */
+        IRValue r8 = coerce(fn, rhs, rw, ru, 8, 1, loc);
+        int esize = type_size(*lv_ty.pointee);
+        IRValue ev = new_value(fn);
+        emit_inst_w(fn, IR_CONST, ev, -1, -1, esize, 8, 1, loc);
+        return emit_bin_w(fn, IR_MUL, r8, ev, 8, 1, loc);
+    }
+    int lw = is_ptr ? 8 : (lv_ty.width ? lv_ty.width : 4);
+    int lu = is_ptr ? 1 : lv_ty.is_unsigned;
+    return coerce(fn, rhs, rw, ru, lw, lu, loc);
+}
+
 /* Compute the address of an lvalue expression (EX_VAR/EX_DEREF/EX_INDEX/EX_MEMBER).
  * Returns a pointer-typed SSA value. */
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
@@ -477,6 +524,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         case UOP_POS:
             return lower_expr(fn, st, e->u.un.operand);
+        case UOP_NOT: {
+            /* Logical NOT: !x → (x == 0). Result is int 0/1. */
+            IRValue x = lower_expr(fn, st, e->u.un.operand);
+            int xw = get_value_width(fn, x), xu = get_value_is_unsigned(fn, x);
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, xw, xu, e->loc);
+            IRValue cmp = emit_bin_w(fn, IR_EQ, x, zero, xw, xu, e->loc);
+            /* Retag result to int(4,signed). */
+            set_value_type(fn, cmp, 4, 0);
+            return cmp;
+        }
         case UOP_BITNOT: {
             IRValue x = lower_expr(fn, st, e->u.un.operand);
             int sw = get_value_width(fn, x);
@@ -854,6 +912,46 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                                  old, s, lw, lu, e->loc);
         emit_inst_w(fn, IR_STORE_PTR, -1, addr, neu, 0, lw, lu, e->loc);
         return is_prefix ? neu : old;
+    }
+    case EX_COMPOUND_ASSIGN: {
+        /* lvalue op= rvalue  →  read lvalue, compute lvalue op rvalue, store
+         * back. The lvalue address is evaluated once. For pointers, += / -=
+         * scale the rvalue by sizeof(pointee). */
+        Expr *lv = e->u.comp.lvalue;
+        BinOp op = e->u.comp.op;
+        int is_ptr = (lv->type.kind == TY_PTR);
+        int lw = is_ptr ? 8 : (lv->type.width ? lv->type.width : 4);
+        int lu = is_ptr ? 1 : lv->type.is_unsigned;
+        IROpcode ir_op = bop_to_ir(op);
+
+        /* Promotable path: simple non-pinned, non-global scalar variable. */
+        if (lv->kind == EX_VAR) {
+            const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
+            if (entry && !entry->is_global && !entry->pinned) {
+                IRValue old = new_value(fn);
+                emit_inst_w(fn, IR_LOAD, old, entry->slot, -1, 0, lw, lu, e->loc);
+                IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
+                IRValue scaled = scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc);
+                IRValue neu = emit_bin_w(fn, ir_op, old, scaled, lw, lu, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, entry->slot, neu, 0, lw, lu, e->loc);
+                return neu;
+            }
+        }
+
+        /* General path (pinned var, global, deref, index, member). */
+        IRValue addr = lower_lvalue_addr(fn, st, lv);
+        IRValue old = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
+        IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
+        IRValue scaled = scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc);
+        IRValue neu = emit_bin_w(fn, ir_op, old, scaled, lw, lu, e->loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, addr, neu, 0, lw, lu, e->loc);
+        return neu;
+    }
+    case EX_COMMA: {
+        /* a, b: evaluate a for side effects (discard result), then b. */
+        lower_expr(fn, st, e->u.comma.lhs);
+        return lower_expr(fn, st, e->u.comma.rhs);
     }
     case EX_SIZEOF_TYPE: {
         IRValue v = new_value(fn);

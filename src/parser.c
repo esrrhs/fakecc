@@ -134,6 +134,7 @@ static Type parse_type(Parser *p) {
 /* ---- expression parsing (forward declarations) ---- */
 
 static Expr *parse_expr(Parser *p);
+static Expr *parse_comma(Parser *p);
 static Expr *parse_assign(Parser *p);
 static Expr *parse_ternary(Parser *p);
 static Expr *parse_or(Parser *p);
@@ -151,17 +152,59 @@ static Expr *parse_postfix(Parser *p, Expr *lhs);
 static Expr *parse_primary(Parser *p);
 
 static Expr *parse_expr(Parser *p) {
-    return parse_assign(p);
+    return parse_comma(p);
 }
 
-/* assign-expr = ternary-expr [ "=" assign-expr ]  -- right associative */
+/* comma-expr = assign-expr { "," assign-expr }  -- left associative, lowest
+ * precedence. The result is the rightmost operand. */
+static Expr *parse_comma(Parser *p) {
+    Expr *lhs = parse_assign(p);
+    while (peek(p)->kind == TK_COMMA) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_assign(p);
+        lhs = expr_new_comma(lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* Map a compound-assignment token to its underlying binary op.
+ * Returns 1 if `k` is a compound-assignment token (op is filled), else 0. */
+static int compound_op(TokenKind k, BinOp *op) {
+    switch (k) {
+    case TK_PLUS_EQ:    *op = BOP_ADD;     break;
+    case TK_MINUS_EQ:   *op = BOP_SUB;     break;
+    case TK_STAR_EQ:    *op = BOP_MUL;     break;
+    case TK_SLASH_EQ:   *op = BOP_DIV;     break;
+    case TK_PERCENT_EQ: *op = BOP_MOD;     break;
+    case TK_AMP_EQ:     *op = BOP_BITAND;  break;
+    case TK_BITOR_EQ:   *op = BOP_BITOR;   break;
+    case TK_XOR_EQ:     *op = BOP_BITXOR;  break;
+    case TK_SHL_EQ:     *op = BOP_SHL;     break;
+    case TK_SHR_EQ:     *op = BOP_SHR;     break;
+    default: return 0;
+    }
+    return 1;
+}
+
+/* assign-expr = ternary-expr [ ( "=" | op "=" ) assign-expr ]  -- right
+ * associative. Compound assignment (e.g. a += b) is right-associative too:
+ * a += b += c  ==  a += (b += c). */
 static Expr *parse_assign(Parser *p) {
     Expr *lhs = parse_ternary(p);
-    if (peek(p)->kind == TK_ASSIGN) {
+    TokenKind k = peek(p)->kind;
+    if (k == TK_ASSIGN) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
         Expr *rhs = parse_assign(p);   /* recursive → right associative */
         return expr_new_assign(lhs, rhs, loc);
+    }
+    BinOp op;
+    if (compound_op(k, &op)) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_assign(p);
+        return expr_new_compound_assign(lhs, rhs, op, loc);
     }
     return lhs;
 }
@@ -351,6 +394,11 @@ static Expr *parse_unary(Parser *p) {
         advance(p);
         return expr_new_unary(UOP_BITNOT, parse_unary(p), loc);
     }
+    if (k == TK_NOT) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        return expr_new_unary(UOP_NOT, parse_unary(p), loc);
+    }
     if (k == TK_INC || k == TK_DEC) {
         SourceLoc loc = peek(p)->loc;
         int is_inc = (k == TK_INC);
@@ -508,7 +556,10 @@ static Expr *parse_primary(Parser *p) {
             Expr *call = expr_new_call(ident->text, ident->loc);
             if (peek(p)->kind != TK_RPAREN) {
                 for (;;) {
-                    Expr *arg = parse_expr(p);
+                    /* Arguments are assignment-expressions, NOT
+                     * comma-expressions — so a comma here is always an
+                     * argument separator, never the comma operator. */
+                    Expr *arg = parse_assign(p);
                     expr_call_push_arg(call, arg);
                     if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
                     break;

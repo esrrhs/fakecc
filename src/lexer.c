@@ -349,6 +349,96 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             pos += 2; col += 2;
             continue;
         }
+        if (c == '+' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_PLUS_EQ;
+            t.text = xstrdup("+=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '-' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_MINUS_EQ;
+            t.text = xstrdup("-=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '*' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_STAR_EQ;
+            t.text = xstrdup("*=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '/' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_SLASH_EQ;
+            t.text = xstrdup("/=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '%' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_PERCENT_EQ;
+            t.text = xstrdup("%=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '&' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_AMP_EQ;
+            t.text = xstrdup("&=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '|' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_BITOR_EQ;
+            t.text = xstrdup("|=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '^' && source[pos + 1] == '=') {
+            Token t;
+            t.kind = TK_XOR_EQ;
+            t.text = xstrdup("^=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 2; col += 2;
+            continue;
+        }
+        if (c == '<' && source[pos + 1] == '<' && source[pos + 2] == '=') {
+            Token t;
+            t.kind = TK_SHL_EQ;
+            t.text = xstrdup("<<=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 3; col += 3;
+            continue;
+        }
+        if (c == '>' && source[pos + 1] == '>' && source[pos + 2] == '=') {
+            Token t;
+            t.kind = TK_SHR_EQ;
+            t.text = xstrdup(">>=");
+            t.loc.file = filename; t.loc.line = line; t.loc.col = col;
+            token_array_push(out, t);
+            pos += 3; col += 3;
+            continue;
+        }
         if (c == '<' && source[pos + 1] == '<') {
             Token t;
             t.kind = TK_SHL;
@@ -419,6 +509,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
         case '^':
         case '~':
         case '=':
+        case '!':
         case '?':
         case ':': {
             Token t;
@@ -441,6 +532,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             case '|': t.kind = TK_BITOR; break;
             case '^': t.kind = TK_XOR; break;
             case '~': t.kind = TK_TILDE; break;
+            case '!': t.kind = TK_NOT; break;
             case '=': t.kind = TK_ASSIGN; break;
             case '?': t.kind = TK_QUESTION; break;
             case ':': t.kind = TK_COLON; break;

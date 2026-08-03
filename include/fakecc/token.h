@@ -44,8 +44,19 @@ typedef enum {
     TK_BITOR,            /* | — bitwise OR (binary) */
     TK_XOR,              /* ^ — bitwise XOR (binary) */
     TK_TILDE,            /* ~ — bitwise NOT (unary) */
+    TK_NOT,              /* ! — logical NOT (unary) */
     TK_SHL,              /* << — left shift (binary) */
     TK_SHR,              /* >> — right shift (binary) */
+    TK_SHL_EQ,           /* <<= */
+    TK_SHR_EQ,           /* >>= */
+    TK_PLUS_EQ,          /* += */
+    TK_MINUS_EQ,         /* -= */
+    TK_STAR_EQ,          /* *= */
+    TK_SLASH_EQ,         /* /= */
+    TK_PERCENT_EQ,       /* %= */
+    TK_AMP_EQ,           /* &= */
+    TK_BITOR_EQ,         /* |= */
+    TK_XOR_EQ,           /* ^= */
     TK_INC,              /* ++ — increment */
     TK_DEC,              /* -- — decrement */
     TK_QUESTION,         /* ? */

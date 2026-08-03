@@ -206,13 +206,22 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
             set_type(e->u.un.operand, type_clone(ot));
         }
-        /* Bitwise NOT requires an integer operand; +/- allow pointer (no —
-         * actually +/- on pointer is handled in BOP). Here all current unary
-         * ops (-, +, ~) require scalar integer; reject pointer. */
-        if (e->u.un.op == UOP_BITNOT && ot.kind != TY_INT)
+        /* Bitwise NOT requires an integer operand; +/- on pointer is handled
+         * in BOP. Here -, +, ~ require scalar integer; reject pointer. */
+        if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT)
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "bitwise NOT requires an integer operand");
-        Type res = integer_promote(ot);
+        Type res;
+        if (e->u.un.op == UOP_NOT) {
+            /* Logical NOT: operand must be scalar (int or pointer); result is
+             * always int 0 or 1. */
+            if (ot.kind != TY_INT && ot.kind != TY_PTR)
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "logical NOT requires a scalar operand");
+            res = type_make_int(4, 0);
+        } else {
+            res = integer_promote(ot);
+        }
         type_free(&ot);
         set_type(e, res);
         return type_clone(e->type);
@@ -239,6 +248,39 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         Type lt = check_expr(e->u.assign.lvalue, st, ft);
         Type rt = check_expr(e->u.assign.rvalue, st, ft);
         (void)rt;
+        type_free(&rt);
+        set_type(e, lt);
+        return type_clone(e->type);
+    }
+    case EX_COMPOUND_ASSIGN: {
+        /* lvalue op= rvalue. The lvalue must be assignable. Type rules follow
+         * the underlying binary op: +=/-= allow pointer += int; the rest
+         * require integer operands. Result type is the lvalue's type. */
+        Expr *lv = e->u.comp.lvalue;
+        if (lv->kind != EX_VAR && lv->kind != EX_DEREF &&
+            lv->kind != EX_INDEX && lv->kind != EX_MEMBER)
+            die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                   "left operand of '%s' must be an lvalue",
+                   "compound assign");
+        Type lt = check_expr(lv, st, ft);
+        Type rt = check_expr(e->u.comp.rvalue, st, ft);
+        BinOp op = e->u.comp.op;
+        if (op == BOP_ADD || op == BOP_SUB) {
+            /* Pointer arithmetic: p += n, p -= n (n must be int). */
+            if (lt.kind == TY_PTR && rt.kind != TY_INT)
+                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                       "pointer %s requires an integer right operand",
+                       op == BOP_ADD ? "+=" : "-=");
+        } else {
+            if (lt.kind != TY_INT)
+                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                       "left operand of '%s' must be integer",
+                       "compound assign");
+            if (rt.kind != TY_INT)
+                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                       "right operand of '%s' must be integer",
+                       "compound assign");
+        }
         type_free(&rt);
         set_type(e, lt);
         return type_clone(e->type);
@@ -383,6 +425,14 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             res = type_make_int(op->type.width ? op->type.width : 4,
                                 op->type.is_unsigned);
         set_type(e, res);
+        return type_clone(e->type);
+    }
+    case EX_COMMA: {
+        /* a, b: evaluate a (discard result), result is b. */
+        Type lt = check_expr(e->u.comma.lhs, st, ft);
+        type_free(&lt);
+        Type rt = check_expr(e->u.comma.rhs, st, ft);
+        set_type(e, rt);
         return type_clone(e->type);
     }
     case EX_TERNARY: {

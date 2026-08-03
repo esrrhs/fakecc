@@ -335,6 +335,14 @@ Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc) 
     e->u.incdec.operand = operand; e->u.incdec.is_inc = is_inc;
     e->u.incdec.is_prefix = is_prefix; return e;
 }
+Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_COMPOUND_ASSIGN, loc);
+    e->u.comp.lvalue = lvalue; e->u.comp.rvalue = rvalue; e->u.comp.op = op; return e;
+}
+Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_COMMA, loc);
+    e->u.comma.lhs = l; e->u.comma.rhs = r; return e;
+}
 
 void expr_free(Expr *e) {
     if (!e) return;
@@ -387,6 +395,14 @@ void expr_free(Expr *e) {
         break;
     case EX_INC_DEC:
         expr_free(e->u.incdec.operand);
+        break;
+    case EX_COMPOUND_ASSIGN:
+        expr_free(e->u.comp.lvalue);
+        expr_free(e->u.comp.rvalue);
+        break;
+    case EX_COMMA:
+        expr_free(e->u.comma.lhs);
+        expr_free(e->u.comma.rhs);
         break;
     }
     type_free(&e->type);

@@ -67,6 +67,8 @@ typedef enum {
     EX_SIZEOF_EXPR,  /* sizeof(expr)  — compile-time integer */
     EX_TERNARY, /* cond ? then : else — right associative, lower than || */
     EX_INC_DEC, /* ++lvalue / --lvalue (prefix or postfix) */
+    EX_COMPOUND_ASSIGN, /* lvalue op= rvalue */
+    EX_COMMA, /* a, b — evaluate a (discard), result is b */
 } ExprKind;
 
 typedef enum {
@@ -94,6 +96,7 @@ typedef enum {
     UOP_NEG,     /* -x */
     UOP_POS,     /* +x — no-op */
     UOP_BITNOT,  /* ~x — bitwise NOT */
+    UOP_NOT,     /* !x — logical NOT */
 } UnaryOp;
 
 typedef struct Expr Expr;
@@ -126,6 +129,8 @@ struct Expr {
         struct { Expr *operand; } sizeof_e;            /* EX_SIZEOF_EXPR */
         struct { Expr *cond; Expr *then; Expr *else_; } tern; /* EX_TERNARY */
         struct { Expr *operand; int is_inc; int is_prefix; } incdec; /* EX_INC_DEC */
+        struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp; /* EX_COMPOUND_ASSIGN */
+        struct { Expr *lhs; Expr *rhs; } comma; /* EX_COMMA */
     } u;
 };
 
@@ -146,6 +151,8 @@ Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
+Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
+Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_free(Expr *e);
 /* Set an Expr's type, freeing the old (owning) type first; takes ownership of t. */

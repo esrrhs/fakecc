@@ -299,6 +299,27 @@ static void test_control_flow_keywords(void) {
     token_array_free(&a);
 }
 
+static void test_not_token(void) {
+    /* "!x" → NOT IDENT EOF */
+    TokenArray a = lex_str("!x");
+    T_ASSERT_EQ_INT((int)a.len, 3);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_NOT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_not_not_confused_with_ne(void) {
+    /* "!==": the lexer matches "!=" first (TK_NE), leaving "=" (TK_ASSIGN).
+     * Confirms != is a single token and ! does NOT combine with == . */
+    TokenArray a = lex_str("!==");
+    T_ASSERT_EQ_INT((int)a.len, 3);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_NE);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_ASSIGN);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
 static void test_logical_op_tokens(void) {
     TokenArray a = lex_str("a && b || c");
     T_ASSERT_EQ_INT((int)a.len, 6);
@@ -376,6 +397,40 @@ static void test_bitor_not_confused_with_oror(void) {
     T_ASSERT_EQ_INT((int)a.len, 3);
     T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_OROR);
     T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_BITOR);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_compound_assign_tokens(void) {
+    /* "a+=b" → IDENT PLUS_EQ IDENT EOF (= 4) */
+    TokenArray a = lex_str("a+=b");
+    T_ASSERT_EQ_INT((int)a.len, 4);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_PLUS_EQ);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_shift_compound_tokens(void) {
+    /* "a<<=b>>=c" → IDENT SHL_EQ IDENT SHR_EQ IDENT EOF (= 6) */
+    TokenArray a = lex_str("a<<=b>>=c");
+    T_ASSERT_EQ_INT((int)a.len, 6);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_SHL_EQ);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_SHR_EQ);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_compound_not_confused(void) {
+    /* "++=" should lex as INC + ASSIGN, not a single token. */
+    TokenArray a = lex_str("++=");
+    T_ASSERT_EQ_INT((int)a.len, 3);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_INC);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_ASSIGN);
     T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
     token_array_free(&a);
 }
@@ -459,6 +514,8 @@ int main(void) {
     test_control_flow_keywords();
     test_logical_op_tokens();
     test_andand_not_confused_with_amp();
+    test_not_token();
+    test_not_not_confused_with_ne();
     test_question_and_colon_tokens();
     test_question_colon_no_spaces();
     test_bitwise_op_tokens();
@@ -468,5 +525,8 @@ int main(void) {
     test_bitor_not_confused_with_oror();
     test_inc_dec_tokens();
     test_dec_not_confused_with_arrow();
+    test_compound_assign_tokens();
+    test_shift_compound_tokens();
+    test_compound_not_confused();
     return t_finalize();
 }
