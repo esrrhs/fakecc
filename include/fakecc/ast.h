@@ -20,6 +20,7 @@ struct Type {
     TypeKind kind;
     int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. */
     int is_unsigned;   /* TY_INT only */
+    int is_const;      /* 1 = const-qualified (assignment forbidden) */
     Type *pointee;     /* TY_PTR only: malloc'd */
     Type *elem_type;   /* TY_ARRAY only: malloc'd */
     int length;        /* TY_ARRAY only */
@@ -28,6 +29,7 @@ struct Type {
 
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
+    t.is_const = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL; return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
@@ -172,6 +174,10 @@ typedef enum {
     ST_BREAK,    /* break; */
     ST_CONTINUE, /* continue; */
     ST_BLOCK,    /* { stmt* } — introduces a new scope */
+    ST_DO_WHILE, /* do body while (cond); — body executes at least once */
+    ST_GOTO,     /* goto label; */
+    ST_LABEL,    /* label: stmt */
+    ST_SWITCH,   /* switch (expr) { case/default ... } */
 } StmtKind;
 
 typedef struct Stmt Stmt;
@@ -180,6 +186,14 @@ typedef struct StmtArray {
     size_t len;
     size_t cap;
 } StmtArray;
+
+/* One case arm of a switch.  `is_default` marks the default arm; otherwise
+ * `value` is the constant case value.  `stmts` owns the arm's statements. */
+typedef struct {
+    int is_default;
+    int value;          /* case value (valid when !is_default) */
+    StmtArray stmts;    /* statements in this arm */
+} SwitchCase;
 
 struct Stmt {
     StmtKind kind;
@@ -190,9 +204,13 @@ struct Stmt {
         Expr *value;                                /* ST_RETURN */
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */
         struct { Expr *cond; Stmt *body; } while_s;              /* ST_WHILE */
+        struct { Expr *cond; Stmt *body; } do_s;                 /* ST_DO_WHILE */
         /* ST_FOR: init (may be Stmt or NULL), cond (may be NULL), step (may be NULL). */
         struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
         StmtArray block;                             /* ST_BLOCK — owns its statements */
+        struct { char *target; } goto_s;             /* ST_GOTO */
+        struct { char *name; Stmt *stmt; } label_s;   /* ST_LABEL — owns stmt */
+        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s; /* ST_SWITCH */
     } u;
 };
 
@@ -204,6 +222,9 @@ void stmt_free(Stmt *s);
 /* Heap-allocated statement helpers used by if/while (which own sub-stmts) */
 Stmt *stmt_alloc(void);
 void  stmt_free_ptr(Stmt *s);
+
+/* Switch helper: append a case arm (default if is_default) to a ST_SWITCH. */
+void switch_push_case(Stmt *s, int is_default, int value);
 
 /* ------------------------------------------------------------------ */
 /* Function & package declarations                                     */
@@ -248,6 +269,7 @@ typedef struct {
 
 typedef struct {
     char *tag;            /* xstrdup'd */
+    int   is_union;       /* 1 = union (members overlap at offset 0) */
     StructMember *members;
     int num_members;
     int cap_members;
@@ -279,11 +301,49 @@ typedef struct {
     size_t cap;
 } FunctionArray;
 
+/* Enum constant: a name → int value.  Owned by an EnumDef. */
+typedef struct {
+    char *name;     /* xstrdup'd */
+    int  value;
+} EnumConstant;
+
+/* Enum definition: tag + ordered constant list.  `tag` is NULL for anonymous
+ * enums (allowed but cannot be used as a type). */
+typedef struct {
+    char *tag;              /* xstrdup'd, or NULL */
+    EnumConstant *constants;
+    int num_constants;
+    int cap_constants;
+    SourceLoc loc;
+} EnumDef;
+
+typedef struct {
+    EnumDef *data;
+    size_t len;
+    size_t cap;
+} EnumRegistry;
+
+void enum_registry_init(EnumRegistry *r);
+void enum_registry_free(EnumRegistry *r);
+/* Register a new enum; returns pointer into registry. */
+EnumDef *enum_registry_add(EnumRegistry *r, const char *tag, SourceLoc loc);
+/* Find an enum by tag; NULL if absent. */
+EnumDef *enum_registry_find(EnumRegistry *r, const char *tag);
+/* Append a constant to an enum, computing its value: explicit if `has_value`
+ * (value given), else prev+1 (or 0 if first). Returns the assigned value. */
+int  enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
+                            int value, SourceLoc loc);
+/* Look up an enum constant by name across ALL enums; returns pointer to the
+ * EnumConstant, or NULL if not found. */
+const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
+                                                const char *name);
+
 typedef struct {
     PackageDecl package;
     StmtArray globals;   /* ST_DECL at file scope (globals) */
     FunctionArray functions;
     StructRegistry structs;
+    EnumRegistry enums;
 } TranslationUnit;
 
 void tu_init(TranslationUnit *tu);

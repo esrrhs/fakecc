@@ -225,6 +225,20 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
     case ST_WHILE:
         return expr_takes_addr_of(s->u.while_s.cond, name)
             || stmt_takes_addr_of(s->u.while_s.body, name);
+    case ST_DO_WHILE:
+        return expr_takes_addr_of(s->u.do_s.cond, name)
+            || stmt_takes_addr_of(s->u.do_s.body, name);
+    case ST_GOTO:
+        return 0;
+    case ST_LABEL:
+        return stmt_takes_addr_of(s->u.label_s.stmt, name);
+    case ST_SWITCH:
+        if (expr_takes_addr_of(s->u.switch_s.cond, name)) return 1;
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                if (stmt_takes_addr_of(&s->u.switch_s.cases[i].stmts.data[j], name))
+                    return 1;
+        return 0;
     case ST_FOR:
         if (s->u.for_s.init && stmt_takes_addr_of(s->u.for_s.init, name)) return 1;
         if (s->u.for_s.cond && expr_takes_addr_of(s->u.for_s.cond, name)) return 1;
@@ -992,6 +1006,80 @@ static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
     emit_inst(fn, IR_CBR, -1, cond, f_label, t_label, loc);
 }
 
+/* Label map: label name → IR label id.  Populated by a pre-pass over the
+ * function body so forward gotos resolve to ids assigned before lowering. */
+typedef struct {
+    char **names;
+    int   *ids;
+    size_t len;
+    size_t cap;
+} LabelMap;
+
+static void labelmap_init(LabelMap *lm) {
+    lm->names = NULL; lm->ids = NULL; lm->len = 0; lm->cap = 0;
+}
+
+static void labelmap_free(LabelMap *lm) {
+    for (size_t i = 0; i < lm->len; i++) free(lm->names[i]);
+    free(lm->names); free(lm->ids);
+    lm->names = NULL; lm->ids = NULL; lm->len = 0; lm->cap = 0;
+}
+
+static int labelmap_find(const LabelMap *lm, const char *name) {
+    for (size_t i = 0; i < lm->len; i++)
+        if (strcmp(lm->names[i], name) == 0) return lm->ids[i];
+    return -1;
+}
+
+static void labelmap_add(LabelMap *lm, const char *name, int id) {
+    if (lm->len >= lm->cap) {
+        lm->cap = lm->cap ? lm->cap * 2 : 8;
+        lm->names = realloc(lm->names, lm->cap * sizeof(char *));
+        lm->ids   = realloc(lm->ids, lm->cap * sizeof(int));
+        if (!lm->names || !lm->ids) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    lm->names[lm->len] = xstrdup(name);
+    lm->ids[lm->len] = id;
+    lm->len++;
+}
+
+/* Recursively assign a label id to every ST_LABEL in a statement. */
+static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s) {
+    if (!s) return;
+    switch (s->kind) {
+    case ST_LABEL: {
+        int id = new_label(fn);
+        labelmap_add(lm, s->u.label_s.name, id);
+        assign_label_ids(fn, lm, s->u.label_s.stmt);
+        break;
+    }
+    case ST_IF:
+        assign_label_ids(fn, lm, s->u.if_s.then_s);
+        if (s->u.if_s.else_s) assign_label_ids(fn, lm, s->u.if_s.else_s);
+        break;
+    case ST_WHILE:
+        assign_label_ids(fn, lm, s->u.while_s.body);
+        break;
+    case ST_DO_WHILE:
+        assign_label_ids(fn, lm, s->u.do_s.body);
+        break;
+    case ST_FOR:
+        if (s->u.for_s.init) assign_label_ids(fn, lm, s->u.for_s.init);
+        assign_label_ids(fn, lm, s->u.for_s.body);
+        break;
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            assign_label_ids(fn, lm, &s->u.block.data[i]);
+        break;
+    default:
+        break;
+    }
+}
+
+/* File-scope pointer to the current function's label map, consulted by
+ * lower_stmt when lowering ST_LABEL / ST_GOTO. */
+static LabelMap *g_ir_label_map = NULL;
+
 /* Lower a single statement, emitting instructions as needed. */
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                        const FunctionDecl *cur_fd);
@@ -1075,6 +1163,30 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         emit_label(fn, L_exit, s->loc);
         break;
     }
+    case ST_DO_WHILE: {
+        /* Lowering:
+         *   L_body: body
+         *           goto L_cond
+         *   L_cond: [cond ? goto L_body : goto L_exit]
+         *   L_exit:
+         * continue → L_cond, break → L_exit. */
+        int L_body = new_label(fn);
+        int L_cond = new_label(fn);
+        int L_exit = new_label(fn);
+        emit_br(fn, L_body, s->loc);
+        emit_label(fn, L_body, s->loc);
+        /* Body is its own block (the loop header) so mem2reg places φ
+         * nodes here; the back-edge from L_cond merges into it. */
+        push_loop(L_cond, L_exit);
+        lower_stmt(fn, st, s->u.do_s.body, cur_fd);
+        pop_loop();
+        emit_br(fn, L_cond, s->loc);
+        emit_label(fn, L_cond, s->loc);
+        IRValue cond = lower_expr(fn, st, s->u.do_s.cond);
+        emit_cbr(fn, cond, L_body, L_exit, s->loc);
+        emit_label(fn, L_exit, s->loc);
+        break;
+    }
     case ST_FOR: {
         /* Lowering:
          *   [init]
@@ -1124,6 +1236,106 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             lower_stmt(fn, st, &s->u.block.data[i], cur_fd);
         }
         st->len = mark;
+        break;
+    }
+    case ST_GOTO: {
+        int id = labelmap_find(g_ir_label_map, s->u.goto_s.target);
+        if (id < 0) {
+            fprintf(stderr, "fakecc: goto to unknown label '%s'\n",
+                    s->u.goto_s.target);
+            exit(1);
+        }
+        emit_br(fn, id, s->loc);
+        break;
+    }
+    case ST_LABEL: {
+        int id = labelmap_find(g_ir_label_map, s->u.label_s.name);
+        if (id < 0) {
+            fprintf(stderr, "fakecc: label '%s' has no assigned id\n",
+                    s->u.label_s.name);
+            exit(1);
+        }
+        emit_label(fn, id, s->loc);
+        lower_stmt(fn, st, s->u.label_s.stmt, cur_fd);
+        break;
+    }
+    case ST_SWITCH: {
+        /* Lowering (fall-through semantics):
+         *   v = <cond>
+         *   if (v == val_0) goto L_body_0
+         *   if (v == val_1) goto L_body_1
+         *   ...
+         *   goto L_default_or_exit        // no case matched
+         *   L_body_0: <body 0>            // falls through to L_body_1
+         *   L_body_1: <body 1>
+         *   ...
+         *   L_default: <default body>     (only if a default arm exists)
+         *   L_exit:
+         * break → L_exit.  Bodies are laid out sequentially so a missing
+         * break falls through to the next arm. */
+        IRValue v = lower_expr(fn, st, s->u.switch_s.cond);
+        int vw = get_value_width(fn, v), vu = get_value_is_unsigned(fn, v);
+
+        int n = s->u.switch_s.num_cases;
+        int has_default = 0;
+        for (int i = 0; i < n; i++)
+            if (s->u.switch_s.cases[i].is_default) { has_default = 1; break; }
+
+        /* Pre-create a body label for every arm. */
+        int *body_label = xmalloc(n * sizeof(int));
+        for (int i = 0; i < n; i++) body_label[i] = new_label(fn);
+        int exit_label = new_label(fn);
+
+        /* Collect the non-default arm indices and create a "check" label for
+         * each, forming a chain: L_check_i does the comparison and on miss
+         * falls through to L_check_{i+1}. */
+        int ndispatch = 0;
+        for (int i = 0; i < n; i++)
+            if (!s->u.switch_s.cases[i].is_default) ndispatch++;
+
+        int *check_label = xmalloc(ndispatch * sizeof(int));
+        int *check_case = xmalloc(ndispatch * sizeof(int)); // arm index
+        int dc = 0;
+        for (int i = 0; i < n; i++) {
+            if (s->u.switch_s.cases[i].is_default) continue;
+            check_label[dc] = new_label(fn);
+            check_case[dc] = i;
+            dc++;
+        }
+        /* The label to jump to when no case matches. */
+        int fallthrough_label = has_default ? -1 : exit_label;
+        if (has_default) {
+            for (int i = 0; i < n; i++)
+                if (s->u.switch_s.cases[i].is_default) { fallthrough_label = body_label[i]; break; }
+        }
+
+        /* Emit the dispatch chain. */
+        for (int c = 0; c < ndispatch; c++) {
+            int arm_idx = check_case[c];
+            SwitchCase *arm = &s->u.switch_s.cases[arm_idx];
+            emit_label(fn, check_label[c], s->loc);
+            IRValue cmp_val = new_value(fn);
+            emit_inst_w(fn, IR_CONST, cmp_val, -1, -1, arm->value, vw, vu, s->loc);
+            IRValue eq = emit_bin_w(fn, IR_EQ, v, cmp_val, vw, vu, s->loc);
+            int next = (c + 1 < ndispatch) ? check_label[c + 1] : fallthrough_label;
+            emit_cbr(fn, eq, body_label[arm_idx], next, s->loc);
+        }
+
+        /* Bodies, laid out sequentially for fall-through.  Push a loop
+         * frame so `break` inside any arm jumps to the exit label. */
+        push_loop(/*cont*/ exit_label, /*brk*/ exit_label);
+        for (int i = 0; i < n; i++) {
+            SwitchCase *arm = &s->u.switch_s.cases[i];
+            emit_label(fn, body_label[i], s->loc);
+            for (size_t j = 0; j < arm->stmts.len; j++)
+                lower_stmt(fn, st, &arm->stmts.data[j], cur_fd);
+        }
+        pop_loop();
+
+        emit_label(fn, exit_label, s->loc);
+        free(body_label);
+        free(check_label);
+        free(check_case);
         break;
     }
     }
@@ -1222,9 +1434,20 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
             irsymtable_push(&st, pname, slot, pinned, pty);
         }
 
+        /* Pre-pass: assign label ids to every label in this function so
+         * forward gotos resolve. */
+        LabelMap lm;
+        labelmap_init(&lm);
+        g_ir_label_map = &lm;
+        for (size_t j = 0; j < fd->body.len; j++)
+            assign_label_ids(&irfn, &lm, &fd->body.data[j]);
+
         for (size_t j = 0; j < fd->body.len; j++) {
             lower_stmt(&irfn, &st, &fd->body.data[j], fd);
         }
+
+        g_ir_label_map = NULL;
+        labelmap_free(&lm);
 
         irsymtable_free(&st);
         ir_func_array_push(&ir->functions, irfn);

@@ -46,6 +46,71 @@ static const FunSig *ftab_find(const FunTable *t, const char *name) {
     return NULL;
 }
 
+/* ------------------------------------------------------------------ */
+/* Label set — tracks goto targets within one function for validation. */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char **names;      /* xstrdup'd label names */
+    size_t len;
+    size_t cap;
+} LabelSet;
+
+static void labelset_init(LabelSet *ls) { ls->names = NULL; ls->len = 0; ls->cap = 0; }
+
+static void labelset_free(LabelSet *ls) {
+    for (size_t i = 0; i < ls->len; i++) free(ls->names[i]);
+    free(ls->names);
+    ls->names = NULL; ls->len = 0; ls->cap = 0;
+}
+
+static void labelset_add(LabelSet *ls, const char *name) {
+    if (ls->len >= ls->cap) {
+        ls->cap = ls->cap ? ls->cap * 2 : 8;
+        ls->names = realloc(ls->names, ls->cap * sizeof(char *));
+        if (!ls->names) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    ls->names[ls->len++] = xstrdup(name);
+}
+
+static int labelset_has(const LabelSet *ls, const char *name) {
+    for (size_t i = 0; i < ls->len; i++)
+        if (strcmp(ls->names[i], name) == 0) return 1;
+    return 0;
+}
+
+/* Recursively collect every ST_LABEL name in a statement (forward goto must
+ * be able to target labels that appear later in the function). */
+static void collect_labels(LabelSet *ls, const Stmt *s) {
+    if (!s) return;
+    switch (s->kind) {
+    case ST_LABEL:
+        labelset_add(ls, s->u.label_s.name);
+        collect_labels(ls, s->u.label_s.stmt);
+        break;
+    case ST_IF:
+        collect_labels(ls, s->u.if_s.then_s);
+        if (s->u.if_s.else_s) collect_labels(ls, s->u.if_s.else_s);
+        break;
+    case ST_WHILE:
+        collect_labels(ls, s->u.while_s.body);
+        break;
+    case ST_DO_WHILE:
+        collect_labels(ls, s->u.do_s.body);
+        break;
+    case ST_FOR:
+        if (s->u.for_s.init) collect_labels(ls, s->u.for_s.init);
+        collect_labels(ls, s->u.for_s.body);
+        break;
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            collect_labels(ls, &s->u.block.data[i]);
+        break;
+    default:
+        break;
+    }
+}
+
 typedef struct {
     char *name;
     Type type;
@@ -246,6 +311,11 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                    "expression is not assignable");
         }
         Type lt = check_expr(e->u.assign.lvalue, st, ft);
+        if (lt.is_const)
+            die_at(e->u.assign.lvalue->loc.file,
+                   e->u.assign.lvalue->loc.line,
+                   e->u.assign.lvalue->loc.col,
+                   "assignment of read-only variable");
         Type rt = check_expr(e->u.assign.rvalue, st, ft);
         (void)rt;
         type_free(&rt);
@@ -263,6 +333,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                    "left operand of '%s' must be an lvalue",
                    "compound assign");
         Type lt = check_expr(lv, st, ft);
+        if (lt.is_const)
+            die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                   "compound assignment of read-only variable");
         Type rt = check_expr(e->u.comp.rvalue, st, ft);
         BinOp op = e->u.comp.op;
         if (op == BOP_ADD || op == BOP_SUB) {
@@ -411,6 +484,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                    "operand of '%s' must be an lvalue",
                    e->u.incdec.is_inc ? "++" : "--");
         Type ot = check_expr(op, st, ft);
+        if (ot.is_const)
+            die_at(op->loc.file, op->loc.line, op->loc.col,
+                   "cannot increment/decrement a read-only variable");
         if (ot.kind != TY_INT && ot.kind != TY_PTR)
             die_at(op->loc.file, op->loc.line, op->loc.col,
                    "operand of '%s' must be int or pointer",
@@ -496,6 +572,7 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
                        size_t scope_mark, int *has_return);
 
 static int g_sema_loop_depth = 0;
+static LabelSet *g_sema_labels = NULL;
 
 static void check_stmt_list(StmtArray *body, SymTable *st,
                             const FunTable *ft, int *has_return) {
@@ -535,6 +612,47 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
         check_stmt(s->u.while_s.body, st, ft, scope_mark, has_return);
         g_sema_loop_depth--;
         break;
+    case ST_DO_WHILE:
+        /* Condition must be scalar (int or pointer). */
+        discard = check_expr(s->u.do_s.cond, st, ft);
+        if (discard.kind != TY_INT && discard.kind != TY_PTR)
+            die_at(s->loc.file, s->loc.line, s->loc.col,
+                   "do-while condition must be scalar");
+        type_free(&discard);
+        g_sema_loop_depth++;
+        check_stmt(s->u.do_s.body, st, ft, scope_mark, has_return);
+        g_sema_loop_depth--;
+        break;
+    case ST_GOTO:
+        if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
+            die_at(s->loc.file, s->loc.line, s->loc.col,
+                   "use of undeclared label '%s'", s->u.goto_s.target);
+        }
+        break;
+    case ST_LABEL:
+        /* Validate the wrapped statement; the label name itself was
+         * registered during the collect_labels pre-pass. */
+        check_stmt(s->u.label_s.stmt, st, ft, scope_mark, has_return);
+        break;
+    case ST_SWITCH: {
+        /* Condition must be integer. */
+        Type ct = check_expr(s->u.switch_s.cond, st, ft);
+        if (ct.kind != TY_INT)
+            die_at(s->u.switch_s.cond->loc.file,
+                   s->u.switch_s.cond->loc.line,
+                   s->u.switch_s.cond->loc.col,
+                   "switch condition must be integer");
+        type_free(&ct);
+        /* Switch introduces a breakable scope. */
+        g_sema_loop_depth++;
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            SwitchCase *arm = &s->u.switch_s.cases[i];
+            for (size_t j = 0; j < arm->stmts.len; j++)
+                check_stmt(&arm->stmts.data[j], st, ft, scope_mark, has_return);
+        }
+        g_sema_loop_depth--;
+        break;
+    }
     case ST_FOR: {
         /* for-loop introduces its own scope for the init decl (if any). */
         size_t mark = symtable_enter_scope(st);
@@ -648,10 +766,21 @@ void sema_check(const TranslationUnit *tu_const) {
                           fn->params.data[j].type, fn->params.data[j].loc);
         }
 
+        /* Pre-pass: collect every label in the function so forward gotos
+         * resolve. */
+        LabelSet ls;
+        labelset_init(&ls);
+        g_sema_labels = &ls;
+        for (size_t j = 0; j < fn->body.len; j++)
+            collect_labels(&ls, &fn->body.data[j]);
+
         int has_return = 0;
         check_stmt_list(&fn->body, &st, &ft, &has_return);
         symtable_leave_scope(&st, mark);
         symtable_free(&st);
+
+        g_sema_labels = NULL;
+        labelset_free(&ls);
 
         if (!has_return) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,

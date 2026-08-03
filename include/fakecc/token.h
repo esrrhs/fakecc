@@ -18,8 +18,16 @@ typedef enum {
     TK_KW_ELSE,          /* "else" */
     TK_KW_WHILE,         /* "while" */
     TK_KW_FOR,           /* "for" */
+    TK_KW_GOTO,          /* "goto" */
+    TK_KW_SWITCH,        /* "switch" */
+    TK_KW_CASE,          /* "case" */
+    TK_KW_DEFAULT,       /* "default" */
     TK_KW_BREAK,         /* "break" */
     TK_KW_CONTINUE,      /* "continue" */
+    TK_KW_CONST,         /* "const" */
+    TK_KW_UNION,         /* "union" */
+    TK_KW_DO,            /* "do" */
+    TK_KW_ENUM,          /* "enum" */
     TK_KW_STRUCT,        /* "struct" */
     TK_IDENT,
     TK_INT_LITERAL,

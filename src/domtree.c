@@ -95,7 +95,7 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
         if (b->num_preds < 2) continue;
         for (size_t i = 0; i < b->num_preds; i++) {
             int runner = b->preds[i];
-            while (runner != -1 && runner != dt->idom[bi] && runner != (int)bi) {
+            while (runner != -1 && runner != dt->idom[bi]) {
                 /* Add (int)bi to df[runner] if not already present */
                 int found = 0;
                 for (size_t k = 0; k < dt->df_len[runner]; k++)

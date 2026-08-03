@@ -38,10 +38,19 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 static int is_type_start(TokenKind k) {
     return k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
         || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED
-        || k == TK_KW_STRUCT;
+        || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
+        || k == TK_KW_CONST;
 }
 
 static Type parse_type(Parser *p) {
+    /* const qualifier — flag the resulting type as read-only.  `const` can
+     * prefix any type (`const int`, `const int *`, `int * const` is parsed
+     * here as a const pointer; pointer-to-const is beyond this slice). */
+    int is_const = 0;
+    if (peek(p)->kind == TK_KW_CONST) {
+        is_const = 1;
+        advance(p);
+    }
     /* struct Name — must be already defined by a `struct` definition earlier
      * OR later; we defer size lookup to sema/IR-gen time by consulting the
      * registry now.  Since ordering matters for parsing (need to know the
@@ -69,6 +78,46 @@ static Type parse_type(Parser *p) {
             type_free(&t);
             t = w;
         }
+        t.is_const = is_const;
+        return t;
+    }
+    /* union Name — same representation as struct in the type system; layout
+     * (overlapping members) is tracked by the is_union flag in StructDef. */
+    if (peek(p)->kind == TK_KW_UNION) {
+        advance(p);
+        const Token *tag = peek(p);
+        if (tag->kind != TK_IDENT) {
+            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                   "expected union tag but got '%s'", tag->text);
+        }
+        advance(p);
+        StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
+        int size = sd ? sd->size : 0;
+        Type t = type_make_struct(tag->text, size);
+        while (peek(p)->kind == TK_STAR) {
+            advance(p);
+            Type w = type_make_ptr(t);
+            type_free(&t);
+            t = w;
+        }
+        t.is_const = is_const;
+        return t;
+    }
+    /* enum Tag — treated as int for the type system.  The tag must match a
+     * previously (or forward) defined enum; sema validates the tag exists. */
+    if (peek(p)->kind == TK_KW_ENUM) {
+        advance(p);
+        const Token *tag = peek(p);
+        if (tag->kind != TK_IDENT) {
+            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                   "expected enum tag but got '%s'", tag->text);
+        }
+        advance(p);
+        if (!enum_registry_find(&p->tu->enums, tag->text)) {
+            /* forward reference — sema will re-check once all enums settle. */
+        }
+        Type t = type_default_int();
+        t.is_const = is_const;
         return t;
     }
     int is_unsigned = 0;
@@ -101,6 +150,7 @@ static Type parse_type(Parser *p) {
         type_free(&t);
         t = wrapped;
     }
+    t.is_const = is_const;
     return t;
 }
 
@@ -568,6 +618,13 @@ static Expr *parse_primary(Parser *p) {
             expect_kind(p, TK_RPAREN, "')'");
             return parse_postfix(p, call);
         }
+        /* Enum constant?  Resolve to an int literal at parse time. */
+        {
+            const EnumConstant *ec =
+                enum_registry_find_constant(&p->tu->enums, ident->text);
+            if (ec)
+                return expr_new_int(ec->value, ident->loc);
+        }
         return parse_postfix(p, expr_new_var(ident->text, ident->loc));
     }
     if (t->kind == TK_LPAREN) {
@@ -595,6 +652,7 @@ static Expr *parse_primary(Parser *p) {
 
 static void parse_stmt_list(Parser *p, StmtArray *out);
 static Stmt parse_stmt(Parser *p);
+static Stmt parse_switch(Parser *p);
 
 /* stmt-list = { stmt } until '}' */
 static void parse_stmt_list(Parser *p, StmtArray *out) {
@@ -713,6 +771,23 @@ static Stmt parse_stmt(Parser *p) {
         s.u.while_s.body = body_ptr;
         return s;
     }
+    if (k == TK_KW_DO) {
+        const Token *kw = peek(p);
+        advance(p);  /* consume "do" */
+        Stmt body = parse_stmt(p);
+        expect_kind(p, TK_KW_WHILE, "'while'");
+        expect_kind(p, TK_LPAREN, "'('");
+        Expr *cond = parse_expr(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        expect_kind(p, TK_SEMICOLON, "';'");
+        Stmt s;
+        s.kind = ST_DO_WHILE;
+        s.loc = kw->loc;
+        s.u.do_s.body = stmt_alloc();
+        *s.u.do_s.body = body;
+        s.u.do_s.cond = cond;
+        return s;
+    }
     if (k == TK_KW_FOR) {
         const Token *kw = peek(p);
         advance(p);
@@ -756,6 +831,22 @@ static Stmt parse_stmt(Parser *p) {
         expect_kind(p, TK_SEMICOLON, "';'");
         Stmt s; s.kind = ST_CONTINUE; s.loc = kw->loc; return s;
     }
+    if (k == TK_KW_GOTO) {
+        const Token *kw = peek(p);
+        advance(p);  /* consume "goto" */
+        const Token *label = peek(p);
+        if (label->kind != TK_IDENT) {
+            die_at(label->loc.file, label->loc.line, label->loc.col,
+                   "expected label name after 'goto' but got '%s'", label->text);
+        }
+        advance(p);
+        expect_kind(p, TK_SEMICOLON, "';'");
+        Stmt s;
+        s.kind = ST_GOTO;
+        s.loc = kw->loc;
+        s.u.goto_s.target = xstrdup(label->text);
+        return s;
+    }
     if (k == TK_LBRACE) {
         const Token *lb = peek(p);
         advance(p);
@@ -767,6 +858,23 @@ static Stmt parse_stmt(Parser *p) {
         expect_kind(p, TK_RBRACE, "'}'");
         return s;
     }
+    /* label: stmt — an identifier followed by ':' is a label. */
+    if (k == TK_IDENT && p->tokens->data[p->pos + 1].kind == TK_COLON) {
+        const Token *name = peek(p);
+        advance(p);          /* consume label name */
+        advance(p);          /* consume ':' */
+        Stmt inner = parse_stmt(p);
+        Stmt s;
+        s.kind = ST_LABEL;
+        s.loc = name->loc;
+        s.u.label_s.name = xstrdup(name->text);
+        s.u.label_s.stmt = stmt_alloc();
+        *s.u.label_s.stmt = inner;
+        return s;
+    }
+    if (k == TK_KW_SWITCH) {
+        return parse_switch(p);
+    }
     /* expr-stmt */
     const Token *t = peek(p);
     Stmt s;
@@ -774,6 +882,83 @@ static Stmt parse_stmt(Parser *p) {
     s.loc = t->loc;
     s.u.expr = parse_expr(p);
     expect_kind(p, TK_SEMICOLON, "';'");
+    return s;
+}
+
+/* Evaluate a compile-time integer constant for a case label: an int literal
+ * or a previously defined enum constant.  Returns the value; dies on error.
+ * `name` is the case label name for error messages. */
+static int case_constant_value(Parser *p, const char *text) {
+    if (text[0] >= '0' && text[0] <= '9') {
+        return atoi(text);
+    }
+    const EnumConstant *ec =
+        enum_registry_find_constant(&p->tu->enums, text);
+    if (ec) return ec->value;
+    {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "case label '%s' is not a constant", text);
+    }
+    return 0; /* unreachable */
+}
+
+/* Parse a switch statement:
+ *   switch (expr) { case CONST: stmts ... default: stmts }
+ * Statements belong to the most recent case/default label (fall-through). */
+static Stmt parse_switch(Parser *p) {
+    const Token *kw = peek(p);
+    advance(p);  /* consume "switch" */
+    expect_kind(p, TK_LPAREN, "'('");
+    Expr *cond = parse_expr(p);
+    expect_kind(p, TK_RPAREN, "')'");
+    expect_kind(p, TK_LBRACE, "'{'");
+
+    Stmt s;
+    s.kind = ST_SWITCH;
+    s.loc = kw->loc;
+    s.u.switch_s.cond = cond;
+    s.u.switch_s.cases = NULL;
+    s.u.switch_s.num_cases = 0;
+    s.u.switch_s.cap_cases = 0;
+
+    while (peek(p)->kind != TK_RBRACE) {
+        TokenKind k = peek(p)->kind;
+        if (k == TK_KW_CASE) {
+            advance(p);  /* consume "case" */
+            const Token *cv = peek(p);
+            int value;
+            if (cv->kind == TK_INT_LITERAL) {
+                value = atoi(cv->text);
+                advance(p);
+            } else if (cv->kind == TK_IDENT) {
+                value = case_constant_value(p, cv->text);
+                advance(p);
+            } else if (cv->kind == TK_CHAR_LITERAL) {
+                value = char_literal_value(cv->text);
+                advance(p);
+            } else {
+                die_at(cv->loc.file, cv->loc.line, cv->loc.col,
+                       "expected constant case label but got '%s'", cv->text);
+            }
+            expect_kind(p, TK_COLON, "':'");
+            switch_push_case(&s, 0, value);
+        } else if (k == TK_KW_DEFAULT) {
+            advance(p);  /* consume "default" */
+            expect_kind(p, TK_COLON, "':'");
+            switch_push_case(&s, 1, 0);
+        } else {
+            /* A statement — attach to the most recent case arm. */
+            if (s.u.switch_s.num_cases == 0) {
+                die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
+                       "statement before any case label in switch");
+            }
+            Stmt stmt = parse_stmt(p);
+            SwitchCase *arm = &s.u.switch_s.cases[s.u.switch_s.num_cases - 1];
+            stmt_array_push(&arm->stmts, stmt);
+        }
+    }
+    expect_kind(p, TK_RBRACE, "'}'");
     return s;
 }
 
@@ -941,6 +1126,127 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
             }
         }
 
+        /* Union definition: `union TAG { type NAME [ [N] ]* ; ... };`
+         * Distinguish from `union TAG var;` global by lookahead — after
+         * `union TAG` we expect `{` for a definition. */
+        if (peek(&p)->kind == TK_KW_UNION) {
+            size_t save = p.pos;
+            advance(&p);
+            const Token *tag = peek(&p);
+            if (tag->kind == TK_IDENT) advance(&p);
+            if (peek(&p)->kind == TK_LBRACE) {
+                /* Union definition. */
+                if (tag->kind != TK_IDENT) {
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                           "expected union tag but got '%s'", tag->text);
+                }
+                if (struct_registry_find(&tu->structs, tag->text)) {
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                           "redefinition of '%s'", tag->text);
+                }
+                StructDef *sd = struct_registry_add(&tu->structs, tag->text, tag->loc);
+                sd->is_union = 1;
+                advance(&p);  /* consume `{` */
+                while (peek(&p)->kind != TK_RBRACE) {
+                    Type mty = parse_type(&p);
+                    const Token *mn = peek(&p);
+                    if (mn->kind != TK_IDENT) {
+                        die_at(mn->loc.file, mn->loc.line, mn->loc.col,
+                               "expected member name");
+                    }
+                    advance(&p);
+                    /* Array dims. */
+                    int dims[8]; int ndims = 0;
+                    while (peek(&p)->kind == TK_LBRACKET) {
+                        advance(&p);
+                        const Token *nt = peek(&p);
+                        if (nt->kind != TK_INT_LITERAL) {
+                            die_at(nt->loc.file, nt->loc.line, nt->loc.col,
+                                   "expected integer array length");
+                        }
+                        int len = atoi(nt->text);
+                        advance(&p);
+                        expect_kind(&p, TK_RBRACKET, "']'");
+                        dims[ndims++] = len;
+                    }
+                    for (int i = ndims - 1; i >= 0; i--) {
+                        Type w = type_make_array(mty, dims[i]);
+                        type_free(&mty); mty = w;
+                    }
+                    expect_kind(&p, TK_SEMICOLON, "';'");
+                    struct_def_push_member(sd, mn->text, mty);
+                    type_free(&mty);
+                }
+                expect_kind(&p, TK_RBRACE, "'}'");
+                expect_kind(&p, TK_SEMICOLON, "';'");
+                continue;
+            } else {
+                /* Not a definition — reset and fall through to declaration. */
+                p.pos = save;
+            }
+        }
+
+        /* Enum definition: `enum TAG { IDENT [= expr], ... };`
+         * Distinguish from `enum TAG var;` global by lookahead — after
+         * `enum TAG` we expect `{` for a definition. */
+        if (peek(&p)->kind == TK_KW_ENUM) {
+            size_t save = p.pos;
+            advance(&p);
+            const Token *tag = peek(&p);
+            if (tag->kind == TK_IDENT) advance(&p);
+            if (peek(&p)->kind == TK_LBRACE) {
+                /* Enum definition. */
+                if (tag->kind != TK_IDENT) {
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                           "expected enum tag but got '%s'", tag->text);
+                }
+                if (enum_registry_find(&tu->enums, tag->text)) {
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                           "redefinition of enum '%s'", tag->text);
+                }
+                EnumDef *ed = enum_registry_add(&tu->enums, tag->text, tag->loc);
+                advance(&p);  /* consume `{` */
+                while (peek(&p)->kind != TK_RBRACE) {
+                    const Token *cn = peek(&p);
+                    if (cn->kind != TK_IDENT) {
+                        die_at(cn->loc.file, cn->loc.line, cn->loc.col,
+                               "expected enum constant name but got '%s'", cn->text);
+                    }
+                    advance(&p);
+                    int has_value = 0, value = 0;
+                    if (peek(&p)->kind == TK_ASSIGN) {
+                        advance(&p);
+                        /* Compile-time constant expression: int literal or a
+                         * previously defined enum constant in THIS enum. */
+                        const Token *v = peek(&p);
+                        if (v->kind == TK_INT_LITERAL) {
+                            has_value = 1; value = atoi(v->text); advance(&p);
+                        } else if (v->kind == TK_IDENT) {
+                            const EnumConstant *ec =
+                                enum_registry_find_constant(&tu->enums, v->text);
+                            if (!ec) {
+                                die_at(v->loc.file, v->loc.line, v->loc.col,
+                                       "enum value '%s' is not a constant", v->text);
+                            }
+                            has_value = 1; value = ec->value; advance(&p);
+                        } else {
+                            die_at(v->loc.file, v->loc.line, v->loc.col,
+                                   "expected integer value for enum constant '%s'",
+                                   cn->text);
+                        }
+                    }
+                    enum_def_push_constant(ed, cn->text, has_value, value, cn->loc);
+                    if (peek(&p)->kind == TK_COMMA) advance(&p);
+                }
+                expect_kind(&p, TK_RBRACE, "'}'");
+                expect_kind(&p, TK_SEMICOLON, "';'");
+                continue;
+            } else {
+                /* Not a definition — reset and fall through to declaration. */
+                p.pos = save;
+            }
+        }
+
         /* Save position, look ahead to find kind. */
         size_t save = p.pos;
         /* Skip signed/unsigned prefix */
@@ -950,7 +1256,8 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
         if (peek(&p)->kind == TK_KW_INT || peek(&p)->kind == TK_KW_CHAR
             || peek(&p)->kind == TK_KW_SHORT || peek(&p)->kind == TK_KW_LONG) {
             advance(&p);
-        } else if (peek(&p)->kind == TK_KW_STRUCT) {
+        } else if (peek(&p)->kind == TK_KW_STRUCT
+                   || peek(&p)->kind == TK_KW_UNION) {
             advance(&p);
             if (peek(&p)->kind == TK_IDENT) advance(&p);
         }

@@ -47,6 +47,7 @@ int type_size(Type t) {
 
 Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
+    t.is_const = 0;
     t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.pointee = malloc(sizeof(Type));
     if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
@@ -56,7 +57,8 @@ Type type_make_ptr(Type pointee) {
 
 Type type_make_array(Type elem, int length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
-    t.is_unsigned = elem.is_unsigned; t.length = length; t.pointee = NULL; t.tag = NULL;
+    t.is_unsigned = elem.is_unsigned; t.is_const = 0; t.length = length;
+    t.pointee = NULL; t.tag = NULL;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.elem_type = type_clone(elem);
@@ -65,6 +67,7 @@ Type type_make_array(Type elem, int length) {
 
 Type type_make_struct(const char *tag, int size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
+    t.is_const = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0;
     t.tag = xstrdup(tag);
     return t;
@@ -125,6 +128,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
     }
     StructDef *sd = &r->data[r->len++];
     sd->tag = xstrdup(tag);
+    sd->is_union = 0;
     sd->members = NULL; sd->num_members = 0; sd->cap_members = 0;
     sd->size = 0; sd->loc = loc;
     return sd;
@@ -167,14 +171,118 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty) {
     }
     int a = type_align(ty);
     int sz = type_size(ty);
-    int off = align_up(sd->size, a);
+    int off;
+    if (sd->is_union) {
+        /* Union members all start at offset 0; total size is the max. */
+        off = 0;
+    } else {
+        off = align_up(sd->size, a);
+    }
     sd->members[sd->num_members].name = xstrdup(name);
     sd->members[sd->num_members].type = type_clone(ty);
     sd->members[sd->num_members].offset = off;
     sd->num_members++;
-    sd->size = off + sz;
-    /* pad struct to 8-byte boundary at end */
-    sd->size = align_up(sd->size, 8);
+    if (sd->is_union) {
+        /* Size grows to the largest member (aligned at the end). */
+        if (sz > sd->size) sd->size = sz;
+        sd->size = align_up(sd->size, 8);
+    } else {
+        sd->size = off + sz;
+        /* pad struct to 8-byte boundary at end */
+        sd->size = align_up(sd->size, 8);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Switch case helper                                                    */
+/* ------------------------------------------------------------------ */
+
+void switch_push_case(Stmt *s, int is_default, int value) {
+    if (s->u.switch_s.num_cases >= s->u.switch_s.cap_cases) {
+        int nc = s->u.switch_s.cap_cases ? s->u.switch_s.cap_cases * 2 : 4;
+        s->u.switch_s.cases = realloc(s->u.switch_s.cases,
+                                      nc * sizeof(SwitchCase));
+        if (!s->u.switch_s.cases) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        s->u.switch_s.cap_cases = nc;
+    }
+    SwitchCase *c = &s->u.switch_s.cases[s->u.switch_s.num_cases++];
+    c->is_default = is_default;
+    c->value = value;
+    stmt_array_init(&c->stmts);
+}
+
+/* ------------------------------------------------------------------ */
+/* Enum registry                                                        */
+/* ------------------------------------------------------------------ */
+
+void enum_registry_init(EnumRegistry *r) {
+    r->data = NULL; r->len = 0; r->cap = 0;
+}
+
+void enum_registry_free(EnumRegistry *r) {
+    for (size_t i = 0; i < r->len; i++) {
+        EnumDef *ed = &r->data[i];
+        free(ed->tag);
+        for (int j = 0; j < ed->num_constants; j++)
+            free(ed->constants[j].name);
+        free(ed->constants);
+    }
+    free(r->data);
+    r->data = NULL; r->len = 0; r->cap = 0;
+}
+
+EnumDef *enum_registry_add(EnumRegistry *r, const char *tag, SourceLoc loc) {
+    if (r->len >= r->cap) {
+        size_t nc = r->cap ? r->cap * 2 : 4;
+        r->data = realloc(r->data, nc * sizeof(EnumDef));
+        if (!r->data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        r->cap = nc;
+    }
+    EnumDef *ed = &r->data[r->len++];
+    ed->tag = tag ? xstrdup(tag) : NULL;
+    ed->constants = NULL; ed->num_constants = 0; ed->cap_constants = 0;
+    ed->loc = loc;
+    return ed;
+}
+
+EnumDef *enum_registry_find(EnumRegistry *r, const char *tag) {
+    if (!tag) return NULL;
+    for (size_t i = 0; i < r->len; i++)
+        if (r->data[i].tag && strcmp(r->data[i].tag, tag) == 0) return &r->data[i];
+    return NULL;
+}
+
+int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
+                           int value, SourceLoc loc) {
+    (void)loc;
+    if (ed->num_constants >= ed->cap_constants) {
+        int nc = ed->cap_constants ? ed->cap_constants * 2 : 4;
+        ed->constants = realloc(ed->constants, nc * sizeof(EnumConstant));
+        if (!ed->constants) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        ed->cap_constants = nc;
+    }
+    int assigned;
+    if (has_value) {
+        assigned = value;
+    } else {
+        assigned = (ed->num_constants > 0)
+            ? ed->constants[ed->num_constants - 1].value + 1 : 0;
+    }
+    ed->constants[ed->num_constants].name = xstrdup(name);
+    ed->constants[ed->num_constants].value = assigned;
+    ed->num_constants++;
+    return assigned;
+}
+
+const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
+                                                const char *name) {
+    for (size_t i = 0; i < r->len; i++) {
+        const EnumDef *ed = &r->data[i];
+        for (int j = 0; j < ed->num_constants; j++)
+            if (strcmp(ed->constants[j].name, name) == 0)
+                return &ed->constants[j];
+    }
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -436,6 +544,23 @@ void stmt_free(Stmt *s) {
         expr_free(s->u.while_s.cond);
         stmt_free_ptr(s->u.while_s.body);
         break;
+    case ST_DO_WHILE:
+        expr_free(s->u.do_s.cond);
+        stmt_free_ptr(s->u.do_s.body);
+        break;
+    case ST_GOTO:
+        free(s->u.goto_s.target);
+        break;
+    case ST_LABEL:
+        free(s->u.label_s.name);
+        stmt_free_ptr(s->u.label_s.stmt);
+        break;
+    case ST_SWITCH:
+        expr_free(s->u.switch_s.cond);
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            stmt_array_free(&s->u.switch_s.cases[i].stmts);
+        free(s->u.switch_s.cases);
+        break;
     case ST_FOR:
         stmt_free_ptr(s->u.for_s.init);
         expr_free(s->u.for_s.cond);
@@ -509,6 +634,7 @@ void tu_init(TranslationUnit *tu) {
     tu->functions.len = 0;
     tu->functions.cap = 0;
     struct_registry_init(&tu->structs);
+    enum_registry_init(&tu->enums);
 }
 
 void tu_free(TranslationUnit *tu) {
@@ -522,6 +648,7 @@ void tu_free(TranslationUnit *tu) {
     }
     free(tu->functions.data);
     struct_registry_free(&tu->structs);
+    enum_registry_free(&tu->enums);
 }
 
 void param_array_init(ParamArray *a) {
