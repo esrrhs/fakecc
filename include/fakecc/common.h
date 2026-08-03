@@ -3,6 +3,13 @@
 
 #include <stddef.h>
 
+/* noreturn attribute for compilers that don't recognize C11 <stdnoreturn.h> */
+#if defined(__GNUC__) || defined(__clang__)
+#define FAKECC_NORETURN __attribute__((noreturn))
+#else
+#define FAKECC_NORETURN
+#endif
+
 /* Source location — shared by tokens, AST, IR, and error reporting */
 typedef struct {
     const char *file;    /* pointer to long-lived filename string */
@@ -29,7 +36,8 @@ char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
 
-/* Error reporting — prints to stderr and exits with code 1 */
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+/* Error reporting — prints to stderr and exits with code 1 (never returns) */
+void die_at(const char *file, int line, int col, const char *fmt, ...)
+    FAKECC_NORETURN;
 
 #endif /* FAKECC_COMMON_H */
