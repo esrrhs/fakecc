@@ -5,6 +5,25 @@
 #include <stddef.h>
 
 /* ------------------------------------------------------------------ */
+/* Type — Slice 7a: integer types with signedness                      */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+    TY_INT,   /* only kind for 7a; will grow: TY_PTR, TY_ARRAY, ... */
+} TypeKind;
+
+typedef struct {
+    TypeKind kind;
+    int width;         /* 1, 2, 4, 8 bytes */
+    int is_unsigned;   /* 0 = signed, 1 = unsigned */
+} Type;
+
+static inline Type type_make_int(int width, int is_unsigned) {
+    Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned; return t;
+}
+static inline Type type_default_int(void) { return type_make_int(4, 0); }
+
+/* ------------------------------------------------------------------ */
 /* Expression — Slice 2 introduces arithmetic expressions              */
 /* ------------------------------------------------------------------ */
 
@@ -48,6 +67,7 @@ typedef struct {
 struct Expr {
     ExprKind kind;
     SourceLoc loc;
+    Type type;   /* populated by sema; default-initialized to int */
     union {
         int int_val;                                   /* EX_INT_LIT */
         struct { BinOp op; Expr *l, *r; } bin;        /* EX_BINOP */
@@ -92,7 +112,7 @@ struct Stmt {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Expr *init; } decl;   /* ST_DECL: init may be NULL */
+        struct { char *name; Type type; Expr *init; } decl;   /* ST_DECL: init may be NULL */
         Expr *expr;                                 /* ST_EXPR */
         Expr *value;                                /* ST_RETURN */
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */
@@ -116,6 +136,7 @@ void  stmt_free_ptr(Stmt *s);
 
 typedef struct {
     char *name;         /* strdup'd */
+    Type type;          /* declared parameter type */
     SourceLoc loc;
 } Param;
 
@@ -126,12 +147,13 @@ typedef struct {
 } ParamArray;
 
 void param_array_init(ParamArray *a);
-void param_array_push(ParamArray *a, const char *name, SourceLoc loc);
+void param_array_push(ParamArray *a, const char *name, Type type, SourceLoc loc);
 void param_array_free(ParamArray *a);
 
 typedef struct {
     char *name;         /* strdup'd */
-    ParamArray params;  /* Slice 6: all int */
+    Type ret_type;      /* declared return type */
+    ParamArray params;
     StmtArray body;
     SourceLoc loc;
 } FunctionDecl;

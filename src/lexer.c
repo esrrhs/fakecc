@@ -55,16 +55,23 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         break;
     case 4:
         if (memcmp(s, "else", 4) == 0) return TK_KW_ELSE;
+        if (memcmp(s, "char", 4) == 0) return TK_KW_CHAR;
+        if (memcmp(s, "long", 4) == 0) return TK_KW_LONG;
         break;
     case 5:
         if (memcmp(s, "while", 5) == 0) return TK_KW_WHILE;
+        if (memcmp(s, "short", 5) == 0) return TK_KW_SHORT;
         break;
     case 6:
         if (memcmp(s, "import", 6) == 0) return TK_KW_IMPORT;
         if (memcmp(s, "return", 6) == 0) return TK_KW_RETURN;
+        if (memcmp(s, "signed", 6) == 0) return TK_KW_SIGNED;
         break;
     case 7:
         if (memcmp(s, "package", 7) == 0) return TK_KW_PACKAGE;
+        break;
+    case 8:
+        if (memcmp(s, "unsigned", 8) == 0) return TK_KW_UNSIGNED;
         break;
     default:
         break;

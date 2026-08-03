@@ -38,6 +38,9 @@ typedef enum {
     IR_PARAM,       /* dst = incoming param; imm = param_index (0..5) */
     IR_CALL,        /* dst = callee(call.args[0..nargs-1]); callee name in call.name */
     IR_RETURN,      /* return a */
+    IR_SEXT,        /* dst = signext(a) — a is smaller width; result is `width` */
+    IR_ZEXT,        /* dst = zeroext(a) — a is smaller width; result is `width` */
+    IR_TRUNC,       /* dst = trunc(a) to `width` — no-op at register level */
 } IROpcode;
 
 /* Maximum arguments to IR_CALL — matches Slice 6 restriction of 6 params
@@ -54,6 +57,11 @@ typedef struct {
     char    *call_name;
     IRValue  call_args[IR_CALL_MAX_ARGS];
     int      call_nargs;
+    /* Slice 7a: width of the result (or the storage for LOAD/STORE/ALLOCA).
+     *   1, 2, 4, or 8 bytes.  Meaningful for all operand-producing ops and
+     *   for LOAD/STORE/ALLOCA/PARAM.  0 for control-flow (BR/CBR/LABEL/RETURN). */
+    int      width;
+    int      is_unsigned;   /* signedness — governs sext vs zext, sdiv vs udiv */
 } IRInst;
 
 /* ------------------------------------------------------------------ */
@@ -74,6 +82,16 @@ typedef struct {
     SourceLoc loc;
     void *ra;         /* RAResult*, set by reg_alloc, consumed by codegen.
                          NULL until register allocation runs. */
+    /* Slice 7a: per-value width and signedness (indexed by SSA id).
+     * Populated by IR-gen; consulted by codegen when a use needs to know
+     * the defining op's type. `NULL` on functions built by test helpers
+     * that don't need type info. */
+    int  *value_width;
+    int  *value_is_unsigned;
+    int   value_meta_cap;
+    /* Slice 7a: declared return type (width & signedness). */
+    int   ret_width;
+    int   ret_is_unsigned;
 } IRFunction;
 
 typedef struct {

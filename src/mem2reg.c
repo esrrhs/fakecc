@@ -199,6 +199,8 @@ void mem2reg_writeback(
                         copy.loc = phi->loc;
                         copy.call_name = NULL;
                         copy.call_nargs = 0;
+                        copy.width = 8;
+                        copy.is_unsigned = 0;
                         inst_array_push(&out, copy);
                         break;
                     }

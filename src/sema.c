@@ -5,13 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* Function table (module-level)                                       */
-/* ------------------------------------------------------------------ */
-
 typedef struct {
-    const char *name;   /* borrows from FunctionDecl */
+    const char *name;
     int arity;
+    Type ret_type;
+    Type param_types[6];
     SourceLoc loc;
 } FunSig;
 
@@ -24,16 +22,19 @@ typedef struct {
 static void ftab_init(FunTable *t) { t->data = NULL; t->len = 0; t->cap = 0; }
 static void ftab_free(FunTable *t) { free(t->data); t->data = NULL; t->len = 0; t->cap = 0; }
 
-static void ftab_push(FunTable *t, const char *name, int arity, SourceLoc loc) {
+static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     if (t->len >= t->cap) {
         t->cap = t->cap ? t->cap * 2 : 8;
         t->data = realloc(t->data, t->cap * sizeof(FunSig));
         if (!t->data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     }
-    t->data[t->len].name = name;
-    t->data[t->len].arity = arity;
-    t->data[t->len].loc = loc;
-    t->len++;
+    FunSig *s = &t->data[t->len++];
+    s->name = fn->name;
+    s->arity = (int)fn->params.len;
+    s->ret_type = fn->ret_type;
+    s->loc = fn->loc;
+    for (int i = 0; i < s->arity && i < 6; i++)
+        s->param_types[i] = fn->params.data[i].type;
 }
 
 static const FunSig *ftab_find(const FunTable *t, const char *name) {
@@ -42,12 +43,9 @@ static const FunSig *ftab_find(const FunTable *t, const char *name) {
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* Symbol table — supports nested scopes via a scope-mark stack       */
-/* ------------------------------------------------------------------ */
-
 typedef struct {
-    char *name;      /* xstrdup'd; NULL indicates a scope-boundary marker */
+    char *name;
+    Type type;
     SourceLoc loc;
 } Sym;
 
@@ -65,13 +63,14 @@ static void symtable_free(SymTable *st) {
     st->data = NULL; st->len = 0; st->cap = 0;
 }
 
-static void symtable_push(SymTable *st, const char *name, SourceLoc loc) {
+static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc loc) {
     if (st->len >= st->cap) {
         st->cap = st->cap ? st->cap * 2 : 8;
         st->data = realloc(st->data, st->cap * sizeof(Sym));
         if (!st->data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     }
     st->data[st->len].name = name ? xstrdup(name) : NULL;
+    st->data[st->len].type = type;
     st->data[st->len].loc = loc;
     st->len++;
 }
@@ -85,10 +84,12 @@ static void symtable_leave_scope(SymTable *st, size_t mark) {
     }
 }
 
-static int symtable_has(const SymTable *st, const char *name) {
-    for (size_t i = 0; i < st->len; i++)
-        if (st->data[i].name && strcmp(st->data[i].name, name) == 0) return 1;
-    return 0;
+static const Sym *symtable_find(const SymTable *st, const char *name) {
+    for (size_t i = st->len; i > 0; i--) {
+        const Sym *e = &st->data[i - 1];
+        if (e->name && strcmp(e->name, name) == 0) return e;
+    }
+    return NULL;
 }
 
 static int symtable_has_since(const SymTable *st, const char *name, size_t mark) {
@@ -97,44 +98,67 @@ static int symtable_has_since(const SymTable *st, const char *name, size_t mark)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Expression checker                                                  */
-/* ------------------------------------------------------------------ */
+/* Usual arithmetic conversions (C §6.3.1.8), rank approximated by width. */
+static Type integer_promote(Type t) {
+    if (t.width < 4) return type_make_int(4, 0);
+    return t;
+}
 
-static void check_expr(const Expr *e, const SymTable *st, const FunTable *ft) {
-    if (!e) return;
+static Type usual_arith_conv(Type a, Type b) {
+    a = integer_promote(a);
+    b = integer_promote(b);
+    if (a.width == b.width && a.is_unsigned == b.is_unsigned) return a;
+    if (a.is_unsigned == b.is_unsigned) return a.width > b.width ? a : b;
+    Type u = a.is_unsigned ? a : b;
+    Type s = a.is_unsigned ? b : a;
+    if (u.width >= s.width) return u;
+    return s;
+}
+
+static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
+    if (!e) return type_default_int();
     switch (e->kind) {
     case EX_INT_LIT:
-        break;
-    case EX_BINOP:
-        check_expr(e->u.bin.l, st, ft);
-        check_expr(e->u.bin.r, st, ft);
-        break;
-    case EX_UNARY:
-        check_expr(e->u.un.operand, st, ft);
-        break;
-    case EX_VAR:
-        if (!symtable_has(st, e->u.var.name)) {
+        e->type = type_default_int();
+        return e->type;
+    case EX_BINOP: {
+        Type lt = check_expr(e->u.bin.l, st, ft);
+        Type rt = check_expr(e->u.bin.r, st, ft);
+        BinOp op = e->u.bin.op;
+        if (op >= BOP_EQ && op <= BOP_GE) {
+            (void)usual_arith_conv(lt, rt);
+            e->type = type_make_int(4, 0);
+        } else {
+            e->type = usual_arith_conv(lt, rt);
+        }
+        return e->type;
+    }
+    case EX_UNARY: {
+        Type ot = check_expr(e->u.un.operand, st, ft);
+        e->type = integer_promote(ot);
+        return e->type;
+    }
+    case EX_VAR: {
+        const Sym *sym = symtable_find(st, e->u.var.name);
+        if (!sym) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "use of undeclared variable '%s'", e->u.var.name);
         }
-        break;
-    case EX_ASSIGN:
+        e->type = sym->type;
+        return e->type;
+    }
+    case EX_ASSIGN: {
         if (e->u.assign.lvalue->kind != EX_VAR) {
             die_at(e->u.assign.lvalue->loc.file,
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "expression is not assignable");
         }
-        if (!symtable_has(st, e->u.assign.lvalue->u.var.name)) {
-            die_at(e->u.assign.lvalue->loc.file,
-                   e->u.assign.lvalue->loc.line,
-                   e->u.assign.lvalue->loc.col,
-                   "use of undeclared variable '%s'",
-                   e->u.assign.lvalue->u.var.name);
-        }
-        check_expr(e->u.assign.rvalue, st, ft);
-        break;
+        Type lt = check_expr(e->u.assign.lvalue, st, ft);
+        (void)check_expr(e->u.assign.rvalue, st, ft);
+        e->type = lt;
+        return e->type;
+    }
     case EX_CALL: {
         const FunSig *sig = ftab_find(ft, e->u.call.callee);
         if (!sig) {
@@ -148,20 +172,18 @@ static void check_expr(const Expr *e, const SymTable *st, const FunTable *ft) {
                    sig->arity == 1 ? "" : "s", e->u.call.args.len);
         }
         for (size_t i = 0; i < e->u.call.args.len; i++)
-            check_expr(e->u.call.args.data[i], st, ft);
-        break;
+            (void)check_expr(e->u.call.args.data[i], st, ft);
+        e->type = sig->ret_type;
+        return e->type;
     }
     }
+    return type_default_int();
 }
 
-/* ------------------------------------------------------------------ */
-/* Statement checker                                                   */
-/* ------------------------------------------------------------------ */
-
-static void check_stmt(const Stmt *s, SymTable *st, const FunTable *ft,
+static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
                        size_t scope_mark, int *has_return);
 
-static void check_stmt_list(const StmtArray *body, SymTable *st,
+static void check_stmt_list(StmtArray *body, SymTable *st,
                             const FunTable *ft, int *has_return) {
     size_t mark = symtable_enter_scope(st);
     for (size_t i = 0; i < body->len; i++)
@@ -169,7 +191,7 @@ static void check_stmt_list(const StmtArray *body, SymTable *st,
     symtable_leave_scope(st, mark);
 }
 
-static void check_stmt(const Stmt *s, SymTable *st, const FunTable *ft,
+static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
                        size_t scope_mark, int *has_return) {
     switch (s->kind) {
     case ST_DECL:
@@ -177,23 +199,23 @@ static void check_stmt(const Stmt *s, SymTable *st, const FunTable *ft,
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "redeclaration of '%s'", s->u.decl.name);
         }
-        symtable_push(st, s->u.decl.name, s->loc);
-        if (s->u.decl.init) check_expr(s->u.decl.init, st, ft);
+        symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
+        if (s->u.decl.init) (void)check_expr(s->u.decl.init, st, ft);
         break;
     case ST_EXPR:
-        check_expr(s->u.expr, st, ft);
+        (void)check_expr(s->u.expr, st, ft);
         break;
     case ST_RETURN:
-        check_expr(s->u.value, st, ft);
+        (void)check_expr(s->u.value, st, ft);
         *has_return = 1;
         break;
     case ST_IF:
-        check_expr(s->u.if_s.cond, st, ft);
+        (void)check_expr(s->u.if_s.cond, st, ft);
         check_stmt(s->u.if_s.then_s, st, ft, scope_mark, has_return);
         if (s->u.if_s.else_s) check_stmt(s->u.if_s.else_s, st, ft, scope_mark, has_return);
         break;
     case ST_WHILE:
-        check_expr(s->u.while_s.cond, st, ft);
+        (void)check_expr(s->u.while_s.cond, st, ft);
         check_stmt(s->u.while_s.body, st, ft, scope_mark, has_return);
         break;
     case ST_BLOCK:
@@ -202,27 +224,24 @@ static void check_stmt(const Stmt *s, SymTable *st, const FunTable *ft,
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Whole-TU check                                                       */
-/* ------------------------------------------------------------------ */
+void sema_check(const TranslationUnit *tu_const) {
+    TranslationUnit *tu = (TranslationUnit *)tu_const;
 
-void sema_check(const TranslationUnit *tu) {
     if (tu->package.name == NULL || strcmp(tu->package.name, "main") != 0) {
         die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
                "package must be 'main'");
     }
 
-    /* Build function table; enforce no duplicates. */
     FunTable ft;
     ftab_init(&ft);
     int has_main = 0;
     for (size_t i = 0; i < tu->functions.len; i++) {
-        const FunctionDecl *fn = &tu->functions.data[i];
+        FunctionDecl *fn = &tu->functions.data[i];
         if (ftab_find(&ft, fn->name)) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "redefinition of function '%s'", fn->name);
         }
-        ftab_push(&ft, fn->name, (int)fn->params.len, fn->loc);
+        ftab_push(&ft, fn);
         if (strcmp(fn->name, "main") == 0) has_main = 1;
     }
     if (!has_main) {
@@ -230,11 +249,9 @@ void sema_check(const TranslationUnit *tu) {
                "no 'main' function defined");
     }
 
-    /* Check each function body. */
     for (size_t i = 0; i < tu->functions.len; i++) {
-        const FunctionDecl *fn = &tu->functions.data[i];
+        FunctionDecl *fn = &tu->functions.data[i];
 
-        /* main must be nullary (Slice 6 restriction). */
         if (strcmp(fn->name, "main") == 0 && fn->params.len != 0) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "'main' must take no parameters");
@@ -243,10 +260,8 @@ void sema_check(const TranslationUnit *tu) {
         SymTable st;
         symtable_init(&st);
 
-        /* Push params as innermost scope. */
         size_t mark = symtable_enter_scope(&st);
         for (size_t j = 0; j < fn->params.len; j++) {
-            /* Detect duplicate parameter names within one signature. */
             if (symtable_has_since(&st, fn->params.data[j].name, mark)) {
                 die_at(fn->params.data[j].loc.file,
                        fn->params.data[j].loc.line,
@@ -254,7 +269,8 @@ void sema_check(const TranslationUnit *tu) {
                        "duplicate parameter name '%s'",
                        fn->params.data[j].name);
             }
-            symtable_push(&st, fn->params.data[j].name, fn->params.data[j].loc);
+            symtable_push(&st, fn->params.data[j].name,
+                          fn->params.data[j].type, fn->params.data[j].loc);
         }
 
         int has_return = 0;

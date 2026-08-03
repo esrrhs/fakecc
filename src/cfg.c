@@ -189,10 +189,12 @@ int *cfg_rpo(const CFG *g) {
 
     /* Build RPO: rpo[block_id] = position in reverse-postorder traversal.
      * Entry block (last in postorder) gets RPO 0 — required by domtree
-     * intersect (idom must have a smaller RPO). */
+     * intersect (idom must have a smaller RPO).
+     * Unreachable blocks get RPO = INT_MAX so any comparison sorts them last. */
     int *rpo = xmalloc(n * sizeof(int));
-    for (size_t i = 0; i < n; i++)
-        rpo[postorder[n - 1 - i]] = (int)i;
+    for (size_t i = 0; i < n; i++) rpo[i] = 0x7fffffff;
+    for (size_t i = 0; i < po_len; i++)
+        rpo[postorder[po_len - 1 - i]] = (int)i;
     free(postorder);
 
     return rpo;

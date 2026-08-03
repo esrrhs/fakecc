@@ -30,6 +30,41 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     advance(p);
 }
 
+/* Recognize an integer type at the current position.
+ *   [signed|unsigned] (char|short|int|long)
+ * Also accepts bare "signed" / "unsigned" (= int).
+ * Returns Type; emits a diagnostic if no type keyword is present. */
+static int is_type_start(TokenKind k) {
+    return k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
+        || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED;
+}
+
+static Type parse_type(Parser *p) {
+    int is_unsigned = 0;
+    int saw_sign = 0;
+    int width = -1;
+
+    TokenKind k = peek(p)->kind;
+    if (k == TK_KW_SIGNED)    { is_unsigned = 0; saw_sign = 1; advance(p); }
+    else if (k == TK_KW_UNSIGNED) { is_unsigned = 1; saw_sign = 1; advance(p); }
+
+    k = peek(p)->kind;
+    switch (k) {
+    case TK_KW_CHAR:  advance(p); width = 1; break;
+    case TK_KW_SHORT: advance(p); width = 2; break;
+    case TK_KW_INT:   advance(p); width = 4; break;
+    case TK_KW_LONG:  advance(p); width = 8; break;
+    default:
+        if (saw_sign) { width = 4; /* bare "signed"/"unsigned" == int */ break; }
+        {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col,
+                   "expected type but got '%s'", t->text);
+        }
+    }
+    return type_make_int(width, is_unsigned);
+}
+
 /* ------------------------------------------------------------------ */
 /* Grammar                                                             */
 /* ------------------------------------------------------------------ */
@@ -227,10 +262,10 @@ static void parse_stmt_list(Parser *p, StmtArray *out) {
 /* stmt = decl-stmt | return-stmt | if-stmt | while-stmt | block | expr-stmt */
 static Stmt parse_stmt(Parser *p) {
     TokenKind k = peek(p)->kind;
-    if (k == TK_KW_INT) {
-        /* decl-stmt: "int" IDENT ["=" expr] ";" */
-        const Token *int_kw = peek(p);
-        advance(p);  /* consume "int" */
+    if (is_type_start(k)) {
+        /* decl-stmt: type IDENT ["=" expr] ";" */
+        SourceLoc decl_loc = peek(p)->loc;
+        Type ty = parse_type(p);
         const Token *name = peek(p);
         if (name->kind != TK_IDENT) {
             die_at(name->loc.file, name->loc.line, name->loc.col,
@@ -239,8 +274,9 @@ static Stmt parse_stmt(Parser *p) {
         advance(p);
         Stmt s;
         s.kind = ST_DECL;
-        s.loc = int_kw->loc;
+        s.loc = decl_loc;
         s.u.decl.name = xstrdup(name->text);
+        s.u.decl.type = ty;
         s.u.decl.init = NULL;
         if (peek(p)->kind == TK_ASSIGN) {
             advance(p);  /* consume "=" */
@@ -322,8 +358,8 @@ static Stmt parse_stmt(Parser *p) {
 }
 
 static FunctionDecl parse_function_decl(Parser *p) {
-    const Token *int_kw = peek(p);
-    expect_kind(p, TK_KW_INT, "'int'");
+    SourceLoc fn_loc = peek(p)->loc;
+    Type ret_ty = parse_type(p);
 
     const Token *name = peek(p);
     if (name->kind != TK_IDENT) {
@@ -336,21 +372,27 @@ static FunctionDecl parse_function_decl(Parser *p) {
 
     FunctionDecl fn;
     fn.name = xstrdup(name->text);
+    fn.ret_type = ret_ty;
     param_array_init(&fn.params);
     stmt_array_init(&fn.body);
-    fn.loc = int_kw->loc;
+    fn.loc = fn_loc;
 
-    /* Parameter list: "int" IDENT ("," "int" IDENT)* — or empty. */
+    /* Parameter list: type IDENT ("," type IDENT)* — or empty. */
     if (peek(p)->kind != TK_RPAREN) {
         for (;;) {
-            expect_kind(p, TK_KW_INT, "'int' for parameter type");
+            if (!is_type_start(peek(p)->kind)) {
+                const Token *t = peek(p);
+                die_at(t->loc.file, t->loc.line, t->loc.col,
+                       "expected type for parameter but got '%s'", t->text);
+            }
+            Type pty = parse_type(p);
             const Token *pname = peek(p);
             if (pname->kind != TK_IDENT) {
                 die_at(pname->loc.file, pname->loc.line, pname->loc.col,
                        "expected parameter name but got '%s'", pname->text);
             }
             advance(p);
-            param_array_push(&fn.params, pname->text, pname->loc);
+            param_array_push(&fn.params, pname->text, pty, pname->loc);
             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
             break;
         }

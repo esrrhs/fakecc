@@ -229,6 +229,153 @@ static void emit_load_spill(Buffer *b, int reg, int off) {
     }
 }
 
+/* ---- Width-aware load/store to [rbp+off] ----
+ * Currently unused: mem2reg promotes every scalar alloca, so IR_LOAD/STORE
+ * never survives to codegen for Slice 7a. Kept for future non-scalar support. */
+#if 0
+static void emit_store_narrow(Buffer *b, int reg, int off, int width) {
+    switch (width) {
+    case 1: {
+        /* mov byte ptr [rbp+off], reg8 — need REX (0x40) for reg 4-7 low byte,
+         * REX.R for r8-r15. */
+        uint8_t rex = 0x40 | ((reg & 8) >> 1);   /* REX.R = bit 2, reg>>3 */
+        emit_byte(b, rex);
+        emit_byte(b, 0x88);
+        int mod = (off >= -128 && off <= 127) ? 1 : 2;
+        emit_modrm(b, mod, reg & 7, REG_RBP);
+        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+        else emit_int32(b, off);
+        break;
+    }
+    case 2: {
+        /* 0x66 prefix + mov word ptr [rbp+off], reg16 */
+        emit_byte(b, 0x66);
+        emit_rex_wrb(b, 0, reg, REG_RBP);
+        emit_byte(b, 0x89);
+        int mod = (off >= -128 && off <= 127) ? 1 : 2;
+        emit_modrm(b, mod, reg, REG_RBP);
+        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+        else emit_int32(b, off);
+        break;
+    }
+    case 4: {
+        /* mov dword ptr [rbp+off], reg32 — REX (no W) for r8-r15, otherwise no REX */
+        if (reg >= 8) emit_rex_wrb(b, 0, reg, REG_RBP);
+        emit_byte(b, 0x89);
+        int mod = (off >= -128 && off <= 127) ? 1 : 2;
+        emit_modrm(b, mod, reg, REG_RBP);
+        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+        else emit_int32(b, off);
+        break;
+    }
+    default:
+        emit_store_spill(b, reg, off);
+        break;
+    }
+}
+
+/* Load `width` bytes from [rbp+off] into `reg`, sign- or zero-extending to 64. */
+static void emit_load_narrow(Buffer *b, int reg, int off, int width, int is_unsigned) {
+    switch (width) {
+    case 1: {
+        /* movsx/movzx reg64, byte ptr [rbp+off] */
+        emit_rex_wrb(b, 1, reg, REG_RBP);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
+        int mod = (off >= -128 && off <= 127) ? 1 : 2;
+        emit_modrm(b, mod, reg, REG_RBP);
+        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+        else emit_int32(b, off);
+        break;
+    }
+    case 2: {
+        emit_rex_wrb(b, 1, reg, REG_RBP);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
+        int mod = (off >= -128 && off <= 127) ? 1 : 2;
+        emit_modrm(b, mod, reg, REG_RBP);
+        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+        else emit_int32(b, off);
+        break;
+    }
+    case 4: {
+        if (is_unsigned) {
+            /* mov reg32, dword ptr [rbp+off] — auto zero-extends to 64. */
+            if (reg >= 8) emit_rex_wrb(b, 0, reg, REG_RBP);
+            emit_byte(b, 0x8B);
+            int mod = (off >= -128 && off <= 127) ? 1 : 2;
+            emit_modrm(b, mod, reg, REG_RBP);
+            if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+            else emit_int32(b, off);
+        } else {
+            /* movsxd reg64, dword ptr [rbp+off] */
+            emit_rex_wrb(b, 1, reg, REG_RBP);
+            emit_byte(b, 0x63);
+            int mod = (off >= -128 && off <= 127) ? 1 : 2;
+            emit_modrm(b, mod, reg, REG_RBP);
+            if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+            else emit_int32(b, off);
+        }
+        break;
+    }
+    default:
+        emit_load_spill(b, reg, off);
+        break;
+    }
+}
+#endif
+
+/* movsx reg64, reg_small — sign-extend a register's low `src_w` bytes. */
+static void emit_movsx_rr(Buffer *b, int dst, int src, int src_w) {
+    if (src_w == 4) {
+        /* movsxd dst64, src32 */
+        emit_rex_wrb(b, 1, dst, src);
+        emit_byte(b, 0x63);
+        emit_modrm(b, 3, dst, src);
+    } else if (src_w == 2) {
+        emit_rex_wrb(b, 1, dst, src);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0xBF);
+        emit_modrm(b, 3, dst, src);
+    } else if (src_w == 1) {
+        emit_rex_wrb(b, 1, dst, src);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0xBE);
+        emit_modrm(b, 3, dst, src);
+    } else {
+        /* No-op: already 64-bit. */
+        if (dst != src) emit_mov_rr(b, dst, src);
+    }
+}
+
+/* movzx reg64, reg_small — zero-extend. */
+static void emit_movzx_rr(Buffer *b, int dst, int src, int src_w) {
+    if (src_w == 4) {
+        /* mov dst32, src32 — auto zero-extends to 64. */
+        if (dst >= 8 || src >= 8) emit_rex_wrb(b, 0, src, dst);
+        emit_byte(b, 0x89);
+        emit_modrm(b, 3, src, dst);
+    } else if (src_w == 2) {
+        emit_rex_wrb(b, 1, dst, src);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0xB7);
+        emit_modrm(b, 3, dst, src);
+    } else if (src_w == 1) {
+        emit_rex_wrb(b, 1, dst, src);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0xB6);
+        emit_modrm(b, 3, dst, src);
+    } else {
+        if (dst != src) emit_mov_rr(b, dst, src);
+    }
+}
+
+/* Mask (zero-extend) a register's low `width` bytes; no-op for width==8. */
+static void mask_to_width(Buffer *b, int reg, int width) {
+    if (width >= 8 || width <= 0) return;
+    emit_movzx_rr(b, reg, reg, width);
+}
+
 /* ================================================================== */
 /* Old-style stack-slot helpers (ra == NULL fallback)                  */
 /* ================================================================== */
@@ -309,17 +456,30 @@ static void emit_cmp_produce(Buffer *b, int a_reg, int b_reg, int dst_reg,
     emit_setcc_r(b, cc_opcode, dst_reg);
 }
 
-/* Map an IR comparison opcode to the setcc/Jcc suffix byte.  We use signed
- * variants: sete/setne/setl/setle/setg/setge. */
-static uint8_t ir_cmp_to_setcc(int ir_op) {
-    switch (ir_op) {
-    case IR_EQ: return 0x94;   /* sete  */
-    case IR_NE: return 0x95;   /* setne */
-    case IR_LT: return 0x9C;   /* setl  */
-    case IR_LE: return 0x9E;   /* setle */
-    case IR_GT: return 0x9F;   /* setg  */
-    case IR_GE: return 0x9D;   /* setge */
-    default:    return 0x94;
+/* Map an IR comparison opcode to the setcc opcode byte.
+ *   signed:   sete/setne/setl/setle/setg/setge  (0x94..)
+ *   unsigned: sete/setne/setb/setbe/seta/setae  (0x94/95/92/96/97/93) */
+static uint8_t ir_cmp_to_setcc(int ir_op, int is_unsigned) {
+    if (!is_unsigned) {
+        switch (ir_op) {
+        case IR_EQ: return 0x94;
+        case IR_NE: return 0x95;
+        case IR_LT: return 0x9C;
+        case IR_LE: return 0x9E;
+        case IR_GT: return 0x9F;
+        case IR_GE: return 0x9D;
+        default:    return 0x94;
+        }
+    } else {
+        switch (ir_op) {
+        case IR_EQ: return 0x94;
+        case IR_NE: return 0x95;
+        case IR_LT: return 0x92;   /* setb */
+        case IR_LE: return 0x96;   /* setbe */
+        case IR_GT: return 0x97;   /* seta */
+        case IR_GE: return 0x93;   /* setae */
+        default:    return 0x94;
+        }
     }
 }
 
@@ -474,6 +634,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
                 ensure_reg(&out->code, inst->b, REG_RCX, ra);
                 emit_add_rr(&out->code, REG_RAX, REG_RCX);
+                mask_to_width(&out->code, REG_RAX, inst->width);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
                 spill_if_needed(&out->code, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -484,6 +645,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
                 ensure_reg(&out->code, inst->b, REG_RCX, ra);
                 emit_sub_rr(&out->code, REG_RAX, REG_RCX);
+                mask_to_width(&out->code, REG_RAX, inst->width);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
                 spill_if_needed(&out->code, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -494,6 +656,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
                 ensure_reg(&out->code, inst->b, REG_RCX, ra);
                 emit_imul_rr(&out->code, REG_RAX, REG_RCX);
+                mask_to_width(&out->code, REG_RAX, inst->width);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
                 spill_if_needed(&out->code, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -504,14 +667,25 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_MOD: {
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
                 ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                emit_cqto(&out->code);
-                emit_idiv_rcx(&out->code);
+                if (inst->is_unsigned) {
+                    /* Unsigned: zero-extend rax into rdx then div. */
+                    emit_xor_rr(&out->code, REG_RDX);
+                    /* div %rcx: F7 /6 */
+                    emit_rex_w(&out->code);
+                    emit_byte(&out->code, 0xF7);
+                    emit_byte(&out->code, 0xF1);
+                } else {
+                    emit_cqto(&out->code);
+                    emit_idiv_rcx(&out->code);
+                }
                 if (inst->op == IR_DIV) {
+                    mask_to_width(&out->code, REG_RAX, inst->width);
                     if (dr >= 0 && dr != REG_RAX)
                         emit_mov_rr(&out->code, dr, REG_RAX);
                     spill_if_needed(&out->code, inst->dst,
                                     dr >= 0 ? dr : REG_RAX, ra);
                 } else {
+                    mask_to_width(&out->code, REG_RDX, inst->width);
                     if (dr >= 0)
                         emit_mov_rr(&out->code, dr, REG_RDX);
                     spill_if_needed(&out->code, inst->dst,
@@ -523,6 +697,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_NEG: {
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
                 emit_neg_r(&out->code, REG_RAX);
+                mask_to_width(&out->code, REG_RAX, inst->width);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
                 spill_if_needed(&out->code, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -540,7 +715,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                  * to avoid clobbering rax/rcx before/during cmp. */
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
                 ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                uint8_t cc = ir_cmp_to_setcc(inst->op);
+                uint8_t cc = ir_cmp_to_setcc(inst->op, inst->is_unsigned);
                 emit_cmp_produce(&out->code, REG_RAX, REG_RCX, REG_RDX, cc);
                 if (dr >= 0) {
                     if (dr != REG_RDX) emit_mov_rr(&out->code, dr, REG_RDX);
@@ -553,15 +728,61 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_ALLOCA:
                 break;
 
-            case IR_LOAD:
             case IR_COPY: {
                 if (ra && inst->a >= 0 && inst->a < ra->num_values &&
                     inst->dst >= 0 && inst->dst < ra->num_values &&
                     ra->reg[inst->dst] == ra->reg[inst->a] &&
                     ra->reg[inst->dst] >= 0) {
-                    /* Coalesced: same register → no-op. */
                     break;
                 }
+                if (dr >= 0) {
+                    ensure_reg(&out->code, inst->a, dr, ra);
+                } else {
+                    old_load(&out->code, inst->a, REG_RAX);
+                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                }
+                break;
+            }
+
+            case IR_SEXT:
+            case IR_ZEXT: {
+                /* imm = source width */
+                int src_w = inst->imm;
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                if (inst->op == IR_SEXT)
+                    emit_movsx_rr(&out->code, REG_RAX, REG_RAX, src_w);
+                else
+                    emit_movzx_rr(&out->code, REG_RAX, REG_RAX, src_w);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
+                break;
+            }
+
+            case IR_TRUNC: {
+                /* No-op at register level: SSA values live in 64-bit regs;
+                 * narrower uses (stores, cmp width) will mask via width field.
+                 * Copy value if regs differ. */
+                if (ra && inst->a >= 0 && inst->a < ra->num_values &&
+                    inst->dst >= 0 && inst->dst < ra->num_values &&
+                    ra->reg[inst->dst] == ra->reg[inst->a] &&
+                    ra->reg[inst->dst] >= 0) {
+                    break;
+                }
+                if (dr >= 0) {
+                    ensure_reg(&out->code, inst->a, dr, ra);
+                } else {
+                    old_load(&out->code, inst->a, REG_RAX);
+                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                }
+                break;
+            }
+
+            case IR_LOAD: {
+                /* Rarely reached: mem2reg usually eliminates LOAD.  If a LOAD
+                 * survives, treat it as a copy of the alloca's spill slot
+                 * with narrow-width sign/zero-extend semantics.  We reuse
+                 * the same copy fast-path since spill layout is 8B/slot. */
                 if (dr >= 0) {
                     ensure_reg(&out->code, inst->a, dr, ra);
                 } else {

@@ -7,6 +7,11 @@ typedef enum {
     TK_KW_PACKAGE,       /* "package" */
     TK_KW_IMPORT,        /* "import" — Slice 1: recognized but not allowed */
     TK_KW_INT,           /* "int" */
+    TK_KW_CHAR,          /* "char" */
+    TK_KW_SHORT,         /* "short" */
+    TK_KW_LONG,          /* "long" */
+    TK_KW_SIGNED,        /* "signed" */
+    TK_KW_UNSIGNED,      /* "unsigned" */
     TK_KW_RETURN,        /* "return" */
     TK_KW_IF,            /* "if" */
     TK_KW_ELSE,          /* "else" */

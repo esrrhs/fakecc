@@ -16,6 +16,7 @@ Expr *expr_new_int(int v, SourceLoc loc) {
     }
     e->kind = EX_INT_LIT;
     e->loc = loc;
+    e->type = type_default_int();
     e->u.int_val = v;
     return e;
 }
@@ -28,6 +29,7 @@ Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc) {
     }
     e->kind = EX_BINOP;
     e->loc = loc;
+    e->type = type_default_int();
     e->u.bin.op = op;
     e->u.bin.l = l;
     e->u.bin.r = r;
@@ -42,6 +44,7 @@ Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc) {
     }
     e->kind = EX_UNARY;
     e->loc = loc;
+    e->type = type_default_int();
     e->u.un.op = op;
     e->u.un.operand = operand;
     return e;
@@ -55,6 +58,7 @@ Expr *expr_new_var(const char *name, SourceLoc loc) {
     }
     e->kind = EX_VAR;
     e->loc = loc;
+    e->type = type_default_int();
     e->u.var.name = xstrdup(name);
     return e;
 }
@@ -67,6 +71,7 @@ Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
     }
     e->kind = EX_ASSIGN;
     e->loc = loc;
+    e->type = type_default_int();
     e->u.assign.lvalue = lvalue;
     e->u.assign.rvalue = rvalue;
     return e;
@@ -80,6 +85,7 @@ Expr *expr_new_call(const char *callee, SourceLoc loc) {
     }
     e->kind = EX_CALL;
     e->loc = loc;
+    e->type = type_default_int();
     e->u.call.callee = xstrdup(callee);
     e->u.call.args.data = NULL;
     e->u.call.args.len = 0;
@@ -230,13 +236,14 @@ void param_array_init(ParamArray *a) {
     a->data = NULL; a->len = 0; a->cap = 0;
 }
 
-void param_array_push(ParamArray *a, const char *name, SourceLoc loc) {
+void param_array_push(ParamArray *a, const char *name, Type type, SourceLoc loc) {
     if (a->len >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
         a->data = realloc(a->data, a->cap * sizeof(Param));
         if (!a->data) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
     }
     a->data[a->len].name = xstrdup(name);
+    a->data[a->len].type = type;
     a->data[a->len].loc = loc;
     a->len++;
 }

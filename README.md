@@ -101,6 +101,36 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 7a — 整型类型系统 + 隐式转换
+
+从"一切都是 int"扩展到完整的整型类型系统：`char / short / int / long` × `signed / unsigned`，以及 C 标准的 usual arithmetic conversions（§6.3.1.8）。
+
+```c
+package main;
+int main() {
+    unsigned int x = 4000000000;
+    unsigned int y = x + 1000000000;
+    if (y == 705032704) { return 1; }   // 无符号回绕
+    return 0;
+}
+```
+
+**设计**："i64 抽象机 + 显式宽度标注"。SSA 值在 64 位寄存器里流动；`Type = {kind, width∈{1,2,4,8}, is_unsigned}` 挂在 `Expr / Param / Stmt.decl / FunctionDecl.ret_type` 上；IR-gen 按 UAC 规则插入 `IR_SEXT / IR_ZEXT / IR_TRUNC` 归一化操作数；codegen 用宽度感知发射：算术后 `movzx` 掩到 `width` 字节，比较按 `is_unsigned` 选 `setb/seta/…` 或 `setl/setg/…`，除法按 signed 走 `cqto/idiv`、unsigned 走 `xor rdx / div`。
+
+**前端**：
+- **Lexer** 新增 `char / short / long / signed / unsigned` 关键字
+- **AST** 新增 `Type` 结构；`FunctionDecl.ret_type`、`Param.type`、`Stmt.decl.type`、`Expr.type`（后者由 sema 填充）
+- **Parser** 抽出 `parse_type()`——`[signed|unsigned] (char|short|int|long)`；替换掉原先三处硬编码 `expect_kind(TK_KW_INT)`
+- **Sema** 每个 Expr 都标注类型；二元运算按 UAC 求结果类型；比较结果永远是 `int`；赋值/返回/传参处允许隐式收窄，语义与 C 一致
+
+**中/后端**：
+- **IR** `IRInst` 增加 `width` / `is_unsigned` 字段；新 opcode `IR_SEXT / IR_ZEXT / IR_TRUNC`（imm = 源宽度）；`IRFunction` 加 `value_width[]` / `ret_width` 表让 IR-gen 决定何时插入转换
+- **Codegen** 引入 `emit_movsx_rr` / `emit_movzx_rr` / `mask_to_width`；算术、除法、比较都按 `inst->width` / `inst->is_unsigned` 分派
+
+**同期修复**：`cfg_rpo` 里潜藏的越界读——`postorder[]` 只有 `po_len` 个有效项但循环 `n` 次；老代码靠"未初始化内存恰好是零"侥幸通过，7a 加类型系统扰动了栈内存后就崩了。改为只迭代 `po_len` 次并把不可达块标为 `INT_MAX` 排在最后。
+
+新增 12 个 e2e：`type_char_basic` / `type_char_signed_ext` / `type_uchar_zero_ext` / `type_char_promotion` / `type_short_arith` / `type_uint_wrap`（无符号回绕验证）/ `type_return_narrow` / `type_long_arith` / `type_signed_unsigned_cmp`（C 混合比较语义）/ `type_param_narrow` / `type_signed_kw` / `bad_type_unknown`。
+
 ### Slice 6 — 函数调用与 System V AMD64 ABI
 
 从"单函数玩具"跃迁到"能写真实程序"。支持多函数定义、任意函数调用、递归、相互递归、最多 6 个 `int` 参数。
