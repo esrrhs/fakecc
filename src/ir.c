@@ -372,6 +372,13 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 
+/* Control-flow helpers used by short-circuit lowering (defined below lower_stmt). */
+static int  new_label(IRFunction *fn);
+static void emit_label(IRFunction *fn, int label, SourceLoc loc);
+static void emit_br(IRFunction *fn, int label, SourceLoc loc);
+static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
+                     SourceLoc loc);
+
 /* Coerce a value to a target (width, is_unsigned) — emits SEXT/ZEXT/TRUNC
  * as needed. `imm` on the conversion op holds the SOURCE width so codegen
  * knows how to extend/mask. Returns the coerced SSA value id. */
@@ -474,6 +481,63 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int l_is_ptr = (lt.kind == TY_PTR);
         int r_is_ptr = (rt.kind == TY_PTR);
         BinOp bop = e->u.bin.op;
+        if (bop == BOP_AND || bop == BOP_OR) {
+            /* Short-circuit logical operators: lower to control flow writing a
+             * temporary alloca, then let mem2reg promote it into a φ-merged
+             * SSA value (no IR_PHI opcode needed).
+             *   a && b  →  t = a; if (!t) goto L_false; t = (b != 0);
+             *              goto L_done; L_false: t = 0; L_done: ... t
+             *   a || b  →  t = a; if (t) goto L_true; t = (b != 0);
+             *              goto L_done; L_true: t = 1; L_done: ... t */
+            IRValue slot = new_value(fn);
+            emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, 4, 0, e->loc);
+
+            int L_true  = new_label(fn);
+            int L_false = new_label(fn);
+            int L_done  = new_label(fn);
+
+            IRValue lv = lower_expr(fn, st, e->u.bin.l);
+            emit_cbr(fn, lv, L_true, L_false, e->loc);
+
+            emit_label(fn, L_true, e->loc);
+            IRValue true_val;
+            if (bop == BOP_OR) {
+                /* a != 0 → result is 1, b not evaluated (short-circuit). */
+                true_val = new_value(fn);
+                emit_inst_w(fn, IR_CONST, true_val, -1, -1, 1, 4, 0, e->loc);
+            } else {
+                IRValue rv = lower_expr(fn, st, e->u.bin.r);
+                int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+                IRValue ri = coerce(fn, rv, rw, ru, 4, 0, e->loc);
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
+                true_val = emit_bin_w(fn, IR_NE, ri, zero, 4, 0, e->loc);
+            }
+            emit_inst_w(fn, IR_STORE, -1, slot, true_val, 0, 4, 0, e->loc);
+            emit_br(fn, L_done, e->loc);
+
+            emit_label(fn, L_false, e->loc);
+            IRValue false_val;
+            if (bop == BOP_AND) {
+                /* a == 0 → result is 0, b not evaluated (short-circuit). */
+                false_val = new_value(fn);
+                emit_inst_w(fn, IR_CONST, false_val, -1, -1, 0, 4, 0, e->loc);
+            } else {
+                IRValue rv = lower_expr(fn, st, e->u.bin.r);
+                int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+                IRValue ri = coerce(fn, rv, rw, ru, 4, 0, e->loc);
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
+                false_val = emit_bin_w(fn, IR_NE, ri, zero, 4, 0, e->loc);
+            }
+            emit_inst_w(fn, IR_STORE, -1, slot, false_val, 0, 4, 0, e->loc);
+            emit_br(fn, L_done, e->loc);
+
+            emit_label(fn, L_done, e->loc);
+            IRValue result = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, 4, 0, e->loc);
+            return result;
+        }
         if ((bop == BOP_ADD || bop == BOP_SUB) && (l_is_ptr || r_is_ptr)) {
             IRValue lv = lower_expr(fn, st, e->u.bin.l);
             IRValue rv = lower_expr(fn, st, e->u.bin.r);

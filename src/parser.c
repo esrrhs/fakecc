@@ -135,6 +135,8 @@ static Type parse_type(Parser *p) {
 
 static Expr *parse_expr(Parser *p);
 static Expr *parse_assign(Parser *p);
+static Expr *parse_or(Parser *p);
+static Expr *parse_and(Parser *p);
 static Expr *parse_equality(Parser *p);
 static Expr *parse_relational(Parser *p);
 static Expr *parse_add(Parser *p);
@@ -147,14 +149,42 @@ static Expr *parse_expr(Parser *p) {
     return parse_assign(p);
 }
 
-/* assign-expr = equality-expr [ "=" assign-expr ]  -- right associative */
+/* assign-expr = or-expr [ "=" assign-expr ]  -- right associative */
 static Expr *parse_assign(Parser *p) {
-    Expr *lhs = parse_equality(p);
+    Expr *lhs = parse_or(p);
     if (peek(p)->kind == TK_ASSIGN) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
         Expr *rhs = parse_assign(p);   /* recursive → right associative */
         return expr_new_assign(lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* or-expr = and-expr { "||" and-expr }  -- left associative, lower than && */
+static Expr *parse_or(Parser *p) {
+    Expr *lhs = parse_and(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_OROR) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_and(p);
+        lhs = expr_new_binop(BOP_OR, lhs, rhs, loc);
+    }
+    return lhs;
+}
+
+/* and-expr = equality-expr { "&&" equality-expr }  -- left associative */
+static Expr *parse_and(Parser *p) {
+    Expr *lhs = parse_equality(p);
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k != TK_ANDAND) break;
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *rhs = parse_equality(p);
+        lhs = expr_new_binop(BOP_AND, lhs, rhs, loc);
     }
     return lhs;
 }

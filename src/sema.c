@@ -147,7 +147,19 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         }
         BinOp op = e->u.bin.op;
         Type res;
-        if (op >= BOP_EQ && op <= BOP_GE) {
+        if (op == BOP_AND || op == BOP_OR) {
+            /* Logical && / ||: both operands must be scalar (int or pointer).
+             * Result is always int 0 or 1. */
+            if (lt.kind != TY_INT && lt.kind != TY_PTR)
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "left operand of '%s' must be scalar",
+                       op == BOP_AND ? "&&" : "||");
+            if (rt.kind != TY_INT && rt.kind != TY_PTR)
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "right operand of '%s' must be scalar",
+                       op == BOP_AND ? "&&" : "||");
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ && op <= BOP_GE) {
             res = type_make_int(4, 0);
         } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) {
             /* Pointer arithmetic: p+int, int+p, p-int → pointer; p-q → int. */

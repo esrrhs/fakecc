@@ -299,6 +299,28 @@ static void test_control_flow_keywords(void) {
     token_array_free(&a);
 }
 
+static void test_logical_op_tokens(void) {
+    TokenArray a = lex_str("a && b || c");
+    T_ASSERT_EQ_INT((int)a.len, 6);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_ANDAND);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_OROR);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_andand_not_confused_with_amp(void) {
+    /* "&&&" should lex as TK_ANDAND followed by TK_AMP (address-of). */
+    TokenArray a = lex_str("&&&");
+    T_ASSERT_EQ_INT((int)a.len, 3);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_ANDAND);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_AMP);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -327,5 +349,7 @@ int main(void) {
     test_double_assign_is_two_tokens();
     test_compare_op_tokens();
     test_control_flow_keywords();
+    test_logical_op_tokens();
+    test_andand_not_confused_with_amp();
     return t_finalize();
 }

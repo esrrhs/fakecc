@@ -79,6 +79,8 @@ typedef enum {
     BOP_LE,      /* <= */
     BOP_GT,      /* >  */
     BOP_GE,      /* >= */
+    BOP_AND,     /* && — logical AND, short-circuit */
+    BOP_OR,      /* || — logical OR, short-circuit */
 } BinOp;
 
 typedef enum {
