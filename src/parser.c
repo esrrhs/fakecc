@@ -135,6 +135,7 @@ static Type parse_type(Parser *p) {
 
 static Expr *parse_expr(Parser *p);
 static Expr *parse_assign(Parser *p);
+static Expr *parse_ternary(Parser *p);
 static Expr *parse_or(Parser *p);
 static Expr *parse_and(Parser *p);
 static Expr *parse_equality(Parser *p);
@@ -149,9 +150,9 @@ static Expr *parse_expr(Parser *p) {
     return parse_assign(p);
 }
 
-/* assign-expr = or-expr [ "=" assign-expr ]  -- right associative */
+/* assign-expr = ternary-expr [ "=" assign-expr ]  -- right associative */
 static Expr *parse_assign(Parser *p) {
-    Expr *lhs = parse_or(p);
+    Expr *lhs = parse_ternary(p);
     if (peek(p)->kind == TK_ASSIGN) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
@@ -159,6 +160,20 @@ static Expr *parse_assign(Parser *p) {
         return expr_new_assign(lhs, rhs, loc);
     }
     return lhs;
+}
+
+/* ternary-expr = or-expr [ "?" expr ":" ternary-expr ]  -- right associative.
+ * The middle operand is a full expr (allows e.g. `c ? a = b : d`);
+ * the else branch is ternary-expr so right-associativity chains naturally. */
+static Expr *parse_ternary(Parser *p) {
+    Expr *cond = parse_or(p);
+    if (peek(p)->kind != TK_QUESTION) return cond;
+    SourceLoc loc = peek(p)->loc;
+    advance(p);  /* consume '?' */
+    Expr *then = parse_expr(p);
+    expect_kind(p, TK_COLON, "':'");
+    Expr *else_ = parse_ternary(p);
+    return expr_new_ternary(cond, then, else_, loc);
 }
 
 /* or-expr = and-expr { "||" and-expr }  -- left associative, lower than && */

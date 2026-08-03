@@ -65,6 +65,7 @@ typedef enum {
     EX_CAST,    /* (T)expr */
     EX_SIZEOF_TYPE,  /* sizeof(T)     — compile-time integer */
     EX_SIZEOF_EXPR,  /* sizeof(expr)  — compile-time integer */
+    EX_TERNARY, /* cond ? then : else — right associative, lower than || */
 } ExprKind;
 
 typedef enum {
@@ -116,6 +117,7 @@ struct Expr {
         struct { Type target; Expr *operand; } cast;  /* EX_CAST — owns target sub-types */
         struct { Type target; } sizeof_t;              /* EX_SIZEOF_TYPE */
         struct { Expr *operand; } sizeof_e;            /* EX_SIZEOF_EXPR */
+        struct { Expr *cond; Expr *then; Expr *else_; } tern; /* EX_TERNARY */
     } u;
 };
 
@@ -134,6 +136,7 @@ Expr *expr_new_member(Expr *obj, const char *name, SourceLoc loc);
 Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
 Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
+Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_free(Expr *e);
 /* Set an Expr's type, freeing the old (owning) type first; takes ownership of t. */

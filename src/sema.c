@@ -327,6 +327,42 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         set_type(e, type_clone(m->type));
         return type_clone(e->type);
     }
+    case EX_TERNARY: {
+        /* cond ? then : else
+         * Condition must be scalar (int or pointer).  Result type follows
+         * C §6.5.15: arithmetic operands → UAC; both pointers → that pointer
+         * type; one pointer + null pointer constant (integer 0) → pointer type. */
+        Type ct = check_expr(e->u.tern.cond, st, ft);
+        if (ct.kind != TY_INT && ct.kind != TY_PTR)
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "ternary condition must be scalar");
+        type_free(&ct);
+        Type tt = check_expr(e->u.tern.then, st, ft);
+        Type et = check_expr(e->u.tern.else_, st, ft);
+        int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
+                               && e->u.tern.then->kind == EX_INT_LIT
+                               && e->u.tern.then->u.int_val == 0);
+        int e_is_null_const = (et.kind == TY_INT && et.width == 4
+                               && e->u.tern.else_->kind == EX_INT_LIT
+                               && e->u.tern.else_->u.int_val == 0);
+        Type res;
+        if (tt.kind == TY_INT && et.kind == TY_INT) {
+            res = usual_arith_conv(tt, et);
+        } else if (tt.kind == TY_PTR && et.kind == TY_PTR) {
+            res = type_clone(tt);
+        } else if (tt.kind == TY_PTR && e_is_null_const) {
+            res = type_clone(tt);
+        } else if (et.kind == TY_PTR && t_is_null_const) {
+            res = type_clone(et);
+        } else {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "ternary branches must both be int, both be pointer, "
+                   "or pointer with null constant");
+        }
+        type_free(&tt); type_free(&et);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
     case EX_CAST: {
         Type ot = check_expr(e->u.cast.operand, st, ft);
         type_free(&ot);

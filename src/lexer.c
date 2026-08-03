@@ -379,7 +379,9 @@ void lex(const char *source, const char *filename, TokenArray *out) {
         case '/':
         case '%':
         case '&':
-        case '=': {
+        case '=':
+        case '?':
+        case ':': {
             Token t;
             switch (c) {
             case '(': t.kind = TK_LPAREN; break;
@@ -398,6 +400,8 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             case '%': t.kind = TK_PERCENT; break;
             case '&': t.kind = TK_AMP; break;
             case '=': t.kind = TK_ASSIGN; break;
+            case '?': t.kind = TK_QUESTION; break;
+            case ':': t.kind = TK_COLON; break;
             default:  t.kind = TK_EOF; break; /* unreachable */
             }
             t.text = malloc(2);

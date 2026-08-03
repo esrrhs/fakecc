@@ -41,6 +41,8 @@ typedef enum {
     TK_AMP,              /* & */
     TK_ANDAND,           /* && */
     TK_OROR,             /* || */
+    TK_QUESTION,         /* ? */
+    TK_COLON,            /* : */
     TK_DOT,              /* . */
     TK_ARROW,            /* -> */
     TK_ASSIGN,           /* = */

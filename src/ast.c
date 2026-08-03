@@ -326,6 +326,10 @@ Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc) {
     Expr *e = expr_alloc(EX_SIZEOF_EXPR, loc);
     e->u.sizeof_e.operand = operand; return e;
 }
+Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_TERNARY, loc);
+    e->u.tern.cond = cond; e->u.tern.then = then; e->u.tern.else_ = else_; return e;
+}
 
 void expr_free(Expr *e) {
     if (!e) return;
@@ -371,6 +375,11 @@ void expr_free(Expr *e) {
         type_free(&e->u.sizeof_t.target); break;
     case EX_SIZEOF_EXPR:
         expr_free(e->u.sizeof_e.operand); break;
+    case EX_TERNARY:
+        expr_free(e->u.tern.cond);
+        expr_free(e->u.tern.then);
+        expr_free(e->u.tern.else_);
+        break;
     }
     type_free(&e->type);
     free(e);

@@ -321,6 +321,32 @@ static void test_andand_not_confused_with_amp(void) {
     token_array_free(&a);
 }
 
+static void test_question_and_colon_tokens(void) {
+    /* "a ? b : c" → IDENT QUESTION IDENT COLON IDENT EOF */
+    TokenArray a = lex_str("a ? b : c");
+    T_ASSERT_EQ_INT((int)a.len, 6);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_QUESTION);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_COLON);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
+static void test_question_colon_no_spaces(void) {
+    /* "a?b:c" → IDENT QUESTION IDENT COLON IDENT EOF */
+    TokenArray a = lex_str("a?b:c");
+    T_ASSERT_EQ_INT((int)a.len, 6);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_QUESTION);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_COLON);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_IDENT);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_EOF);
+    token_array_free(&a);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -351,5 +377,7 @@ int main(void) {
     test_control_flow_keywords();
     test_logical_op_tokens();
     test_andand_not_confused_with_amp();
+    test_question_and_colon_tokens();
+    test_question_colon_no_spaces();
     return t_finalize();
 }

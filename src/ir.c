@@ -197,6 +197,10 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
     case EX_CAST: return expr_takes_addr_of(e->u.cast.operand, name);
     case EX_SIZEOF_TYPE: return 0;
     case EX_SIZEOF_EXPR: return expr_takes_addr_of(e->u.sizeof_e.operand, name);
+    case EX_TERNARY:
+        return expr_takes_addr_of(e->u.tern.cond, name)
+            || expr_takes_addr_of(e->u.tern.then, name)
+            || expr_takes_addr_of(e->u.tern.else_, name);
     }
     return 0;
 }
@@ -615,6 +619,40 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             /* Retag the result's own SSA width to int(4,signed). */
             set_value_type(fn, result, rw_res, ru_res);
         }
+        return result;
+    }
+    case EX_TERNARY: {
+        /* Lower cond ? then : else to control flow writing a temporary
+         * alloca, then let mem2reg promote it into a φ-merged SSA value
+         * (no IR_PHI opcode needed).
+         *   c ? t : e  →  slot = alloca; if (c) goto L_then; goto L_else;
+         *                  L_then: store slot = t; goto L_done;
+         *                  L_else: store slot = e; goto L_done;
+         *                  L_done: result = load slot */
+        int rw = e->type.width ? e->type.width : 4;
+        int ru = e->type.is_unsigned;
+        IRValue slot = new_value(fn);
+        emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, rw, ru, e->loc);
+        int L_then = new_label(fn);
+        int L_else = new_label(fn);
+        int L_done = new_label(fn);
+        IRValue cond = lower_expr(fn, st, e->u.tern.cond);
+        emit_cbr(fn, cond, L_then, L_else, e->loc);
+        emit_label(fn, L_then, e->loc);
+        IRValue tv = lower_expr(fn, st, e->u.tern.then);
+        int tw = get_value_width(fn, tv), tu = get_value_is_unsigned(fn, tv);
+        IRValue tc = coerce(fn, tv, tw, tu, rw, ru, e->loc);
+        emit_inst_w(fn, IR_STORE, -1, slot, tc, 0, rw, ru, e->loc);
+        emit_br(fn, L_done, e->loc);
+        emit_label(fn, L_else, e->loc);
+        IRValue ev = lower_expr(fn, st, e->u.tern.else_);
+        int ew = get_value_width(fn, ev), eu = get_value_is_unsigned(fn, ev);
+        IRValue ec = coerce(fn, ev, ew, eu, rw, ru, e->loc);
+        emit_inst_w(fn, IR_STORE, -1, slot, ec, 0, rw, ru, e->loc);
+        emit_br(fn, L_done, e->loc);
+        emit_label(fn, L_done, e->loc);
+        IRValue result = new_value(fn);
+        emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, rw, ru, e->loc);
         return result;
     }
     case EX_VAR: {
