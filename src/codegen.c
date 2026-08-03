@@ -242,6 +242,17 @@ static void emit_lea_rbp(Buffer *b, int dst, int off) {
     }
 }
 
+/* lea dst_reg, [rip + disp32]  →  REX.W 8D [ModRM: mod=00 reg=dst rm=5] disp32.
+ * Returns the file offset of the rel32 slot (caller records for later patch). */
+static size_t emit_lea_rip(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, dst, 0 /* B doesn't matter — rm=5 encodes RIP */);
+    emit_byte(b, 0x8D);
+    emit_modrm(b, 0, dst & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
 /* Emit ModRM for `[reg]` addressing where `reg` is a full 4-bit register id
  * (0..15).  Handles the two x86 special cases:
  *   - rbp (reg&7 == 5): mod=00 rm=5 means [disp32], not [rbp]. Use mod=01 disp8=0.
@@ -623,6 +634,27 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
 }
 
 void codegen(const IRModule *ir, EmitModule *out) {
+    /* Emit globals into the data buffer.  Each global is written as its
+     * initializer bytes (or zeros if no init) and registered by name. */
+    for (size_t gi = 0; gi < ir->globals.len; gi++) {
+        const IRGlobal *g = &ir->globals.data[gi];
+        size_t off = out->data.len;
+        if (g->init_bytes) buffer_append(&out->data, g->init_bytes, g->size);
+        else {
+            /* Zero-fill. */
+            for (int b = 0; b < g->size; b++) {
+                char z = 0;
+                buffer_append(&out->data, &z, 1);
+            }
+        }
+        emit_module_add_global(out, g->name, off, g->size, g->is_readonly);
+        /* Pad to 8-byte boundary so the next global is aligned. */
+        while (out->data.len & 7) {
+            char z = 0;
+            buffer_append(&out->data, &z, 1);
+        }
+    }
+
     /* Cross-function call patches (accumulated across every function). */
     CallPatch *call_patches = NULL;
     size_t num_call_patches = 0, cap_call_patches = 0;
@@ -935,6 +967,17 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     emit_lea_rbp(&out->code, REG_RAX, off);
                     spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
                 }
+                break;
+            }
+
+            case IR_GADDR: {
+                /* dst = &global; target name in inst->call_name.  Emit
+                 * `lea r, [rip+0]` and register a fixup for post-layout patching. */
+                int target = dr >= 0 ? dr : REG_RAX;
+                size_t patch = emit_lea_rip(&out->code, target);
+                emit_module_add_reloc(out, patch, inst->call_name);
+                if (dr < 0)
+                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
                 break;
             }
 

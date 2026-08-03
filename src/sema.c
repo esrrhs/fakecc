@@ -213,6 +213,15 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         set_type(e, type_clone(sig->ret_type));
         return type_clone(e->type);
     }
+    case EX_STR: {
+        /* Type: char[len+1] — but immediately decayed to `char*` in the
+         * value context. Since decay happens on read at operand sites, we
+         * store the pointer type here directly. */
+        Type ct = type_make_int(1, 0);   /* char */
+        set_type(e, type_make_ptr(ct));
+        type_free(&ct);
+        return type_clone(e->type);
+    }
     case EX_ADDR: {
         Type ot = check_expr(e->u.addr.operand, st, ft);
         /* operand must be lvalue */
@@ -355,6 +364,33 @@ void sema_check(const TranslationUnit *tu_const) {
                "no 'main' function defined");
     }
 
+    /* Type-check global variable declarations.  Store their names in a
+     * long-lived symbol table so functions can see them.  Enforce no
+     * duplicates against each other or against function names. */
+    SymTable globals;
+    symtable_init(&globals);
+    for (size_t i = 0; i < tu->globals.len; i++) {
+        Stmt *s = &tu->globals.data[i];
+        if (s->kind != ST_DECL) continue;
+        if (symtable_has_since(&globals, s->u.decl.name, 0)) {
+            die_at(s->loc.file, s->loc.line, s->loc.col,
+                   "redefinition of global '%s'", s->u.decl.name);
+        }
+        if (ftab_find(&ft, s->u.decl.name)) {
+            die_at(s->loc.file, s->loc.line, s->loc.col,
+                   "global '%s' conflicts with a function of the same name",
+                   s->u.decl.name);
+        }
+        symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc);
+        /* Type-check initializer, if any.  For 7-tier scope, sema doesn't
+         * validate that the initializer is a compile-time constant — codegen
+         * will diagnose. */
+        if (s->u.decl.init) {
+            Type dt = check_expr(s->u.decl.init, &globals, &ft);
+            type_free(&dt);
+        }
+    }
+
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
 
@@ -365,6 +401,11 @@ void sema_check(const TranslationUnit *tu_const) {
 
         SymTable st;
         symtable_init(&st);
+        /* Import globals (as a fixed lower scope). */
+        for (size_t g = 0; g < globals.len; g++) {
+            symtable_push(&st, globals.data[g].name, globals.data[g].type,
+                          globals.data[g].loc);
+        }
 
         size_t mark = symtable_enter_scope(&st);
         for (size_t j = 0; j < fn->params.len; j++) {
@@ -391,4 +432,5 @@ void sema_check(const TranslationUnit *tu_const) {
     }
 
     ftab_free(&ft);
+    symtable_free(&globals);
 }

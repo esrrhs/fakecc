@@ -13,34 +13,68 @@
 
 void emit_module_init(EmitModule *m) {
     buffer_init(&m->code);
-    m->symbols = NULL;
-    m->num_symbols = 0;
-    m->cap_symbols = 0;
+    buffer_init(&m->data);
+    m->symbols = NULL; m->num_symbols = 0; m->cap_symbols = 0;
+    m->globals = NULL; m->num_globals = 0; m->cap_globals = 0;
+    m->relocs  = NULL; m->num_relocs  = 0; m->cap_relocs  = 0;
 }
 
 void emit_module_free(EmitModule *m) {
-    for (size_t i = 0; i < m->num_symbols; i++) {
-        free(m->symbols[i].name);
-    }
+    for (size_t i = 0; i < m->num_symbols; i++) free(m->symbols[i].name);
     free(m->symbols);
+    for (size_t i = 0; i < m->num_globals; i++) free(m->globals[i].name);
+    free(m->globals);
+    for (size_t i = 0; i < m->num_relocs; i++) free(m->relocs[i].target_name);
+    free(m->relocs);
     buffer_free(&m->code);
+    buffer_free(&m->data);
 }
 
-/* Push a symbol into the table */
 void emit_module_add_symbol(EmitModule *m, const char *name, size_t offset, size_t size) {
     if (m->num_symbols >= m->cap_symbols) {
         size_t new_cap = m->cap_symbols ? m->cap_symbols * 2 : 8;
         m->symbols = realloc(m->symbols, new_cap * sizeof(EmitSymbol));
-        if (!m->symbols) {
-            fprintf(stderr, "fakecc: out of memory\n");
-            exit(1);
-        }
+        if (!m->symbols) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         m->cap_symbols = new_cap;
     }
     m->symbols[m->num_symbols].name = xstrdup(name);
     m->symbols[m->num_symbols].offset = offset;
     m->symbols[m->num_symbols].size = size;
     m->num_symbols++;
+}
+
+void emit_module_add_global(EmitModule *m, const char *name, size_t offset,
+                            size_t size, int is_readonly) {
+    if (m->num_globals >= m->cap_globals) {
+        size_t nc = m->cap_globals ? m->cap_globals * 2 : 8;
+        m->globals = realloc(m->globals, nc * sizeof(EmitGlobal));
+        if (!m->globals) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_globals = nc;
+    }
+    m->globals[m->num_globals].name = xstrdup(name);
+    m->globals[m->num_globals].offset = offset;
+    m->globals[m->num_globals].size = size;
+    m->globals[m->num_globals].is_readonly = is_readonly;
+    m->num_globals++;
+}
+
+void emit_module_add_reloc(EmitModule *m, size_t patch_off, const char *target_name) {
+    if (m->num_relocs >= m->cap_relocs) {
+        size_t nc = m->cap_relocs ? m->cap_relocs * 2 : 8;
+        m->relocs = realloc(m->relocs, nc * sizeof(EmitGlobalReloc));
+        if (!m->relocs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_relocs = nc;
+    }
+    m->relocs[m->num_relocs].patch_off = patch_off;
+    m->relocs[m->num_relocs].target_name = xstrdup(target_name);
+    m->num_relocs++;
+}
+
+/* Find a global by name; returns index or -1. */
+static int find_global(const EmitModule *m, const char *name) {
+    for (size_t i = 0; i < m->num_globals; i++)
+        if (strcmp(m->globals[i].name, name) == 0) return (int)i;
+    return -1;
 }
 
 /* Find a symbol by name, return index or -1 */
@@ -64,6 +98,7 @@ static int find_symbol(const EmitModule *m, const char *name) {
 
 #define PT_LOAD         1
 #define PF_X            1
+#define PF_W            2
 #define PF_R            4
 
 #define ELF_BASE        0x400000
@@ -198,41 +233,69 @@ void emit_elf(const EmitModule *m, const char *output_path) {
         exit(1);
     }
 
-    /* Compute layout:
-     *   ELF header:    64 bytes  (offset 0)
-     *   Program header: 56 bytes (offset 64)
-     *   _start stub:   14 bytes  (offset 120 = 0x78)
-     *   function code: follows   (offset 134 = 0x86)
+    int has_data = m->data.len > 0;
+
+    /* Layout:
+     *   ELF header:      64 bytes  (offset 0)
+     *   Program headers: 56 bytes × phnum (offset 64)
+     *   _start stub:     14 bytes  (right after headers)
+     *   function code:   follows
+     *   [padding to page-aligned vaddr, then]  data segment
      */
-    size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE;
+    uint16_t phnum = has_data ? 2 : 1;
+    size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum;
     size_t start_offset = hdr_size;
     size_t code_offset = start_offset + START_SIZE;
-
-    /* Adjust main symbol offset: originally relative to code buffer start,
-     * now shifted by _start size */
     size_t main_file_offset = code_offset + m->symbols[main_idx].offset;
     size_t total_code_size = START_SIZE + m->code.len;
-    size_t total_file_size = hdr_size + total_code_size;
+    size_t code_end = hdr_size + total_code_size;
+
+    /* Data segment: aligned to the next page inside the file AND same
+     * congruence class modulo PAGE_SIZE for vaddr.  Simplest: pad file
+     * offset up to PAGE_SIZE boundary, place data at
+     * data_vaddr = base + data_file_offset (same page-aligned value). */
+    size_t data_file_offset = code_end;
+    if (has_data && (data_file_offset & (PAGE_SIZE - 1)) != 0)
+        data_file_offset = (data_file_offset + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
 
     uint64_t base = ELF_BASE;
     uint64_t entry = base + start_offset;
+    uint64_t data_vaddr = base + data_file_offset;
 
-    /* Build the ELF file in a buffer */
+    /* Resolve global relocations: patch code buffer's rel32 slots so
+     * disp = target_vaddr - (patch_vaddr + 4).
+     * patch_vaddr = base + code_offset + m->relocs[i].patch_off. */
+    for (size_t i = 0; i < m->num_relocs; i++) {
+        int gi = find_global(m, m->relocs[i].target_name);
+        if (gi < 0) {
+            fprintf(stderr, "fakecc: unresolved global '%s'\n",
+                    m->relocs[i].target_name);
+            exit(1);
+        }
+        uint64_t target = data_vaddr + m->globals[gi].offset;
+        uint64_t patch_vaddr = base + code_offset + m->relocs[i].patch_off;
+        int32_t disp = (int32_t)((int64_t)target - (int64_t)(patch_vaddr + 4));
+        /* Write to code buffer.  Cast away const — the emitter treats the
+         * code buffer as mutable during ELF finalize; caller passes const
+         * only by convention. */
+        char *dst = ((Buffer *)&m->code)->data + m->relocs[i].patch_off;
+        memcpy(dst, &disp, 4);
+    }
+
     Buffer elf;
     buffer_init(&elf);
 
     /* 1. ELF header */
-    write_ehdr(&elf, entry, ELF64_EHDR_SIZE, 1);
+    write_ehdr(&elf, entry, ELF64_EHDR_SIZE, phnum);
 
-    /* 2. Program header — load entire file as one readable+executable segment */
-    write_phdr(&elf,
-               PT_LOAD,                            /* type */
-               PF_R | PF_X,                        /* flags */
-               0,                                   /* offset */
-               base,                                /* vaddr */
-               total_file_size,                     /* filesz */
-               total_file_size,                     /* memsz */
-               PAGE_SIZE);                          /* align */
+    /* 2. Program headers */
+    write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base,
+               code_end, code_end, PAGE_SIZE);
+    if (has_data) {
+        write_phdr(&elf, PT_LOAD, PF_R | PF_W /* rw */,
+                   data_file_offset, data_vaddr,
+                   m->data.len, m->data.len, PAGE_SIZE);
+    }
 
     /* 3. _start stub */
     gen_start(&elf, start_offset, main_file_offset);
@@ -240,7 +303,15 @@ void emit_elf(const EmitModule *m, const char *output_path) {
     /* 4. Function machine code */
     buffer_append(&elf, m->code.data, m->code.len);
 
-    /* Write to file */
+    /* 5. Pad + data segment (if any) */
+    if (has_data) {
+        while (elf.len < data_file_offset) {
+            char zero = 0;
+            buffer_append(&elf, &zero, 1);
+        }
+        buffer_append(&elf, m->data.data, m->data.len);
+    }
+
     FILE *f = fopen(output_path, "wb");
     if (!f) {
         fprintf(stderr, "fakecc: cannot write '%s'\n", output_path);
@@ -248,9 +319,6 @@ void emit_elf(const EmitModule *m, const char *output_path) {
     }
     fwrite(elf.data, 1, elf.len, f);
     fclose(f);
-
-    /* Make executable */
     chmod(output_path, 0755);
-
     buffer_free(&elf);
 }

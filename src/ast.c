@@ -173,6 +173,21 @@ Expr *expr_new_call(const char *callee, SourceLoc loc) {
     return e;
 }
 
+Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
+    Expr *e = malloc(sizeof(Expr));
+    if (!e) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    e->kind = EX_STR;
+    e->loc = loc;
+    /* type is set by sema: char[len+1] initially, decays to char* on use */
+    e->type = type_default_int();
+    e->u.str.bytes = malloc(len + 1);
+    if (!e->u.str.bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    memcpy(e->u.str.bytes, bytes, len);
+    e->u.str.bytes[len] = '\0';
+    e->u.str.len = len;
+    return e;
+}
+
 void expr_call_push_arg(Expr *e, Expr *arg) {
     ExprArray *a = &e->u.call.args;
     if (a->len >= a->cap) {
@@ -237,6 +252,9 @@ void expr_free(Expr *e) {
         for (size_t i = 0; i < e->u.call.args.len; i++)
             expr_free(e->u.call.args.data[i]);
         free(e->u.call.args.data);
+        break;
+    case EX_STR:
+        free(e->u.str.bytes);
         break;
     case EX_ADDR:  expr_free(e->u.addr.operand); break;
     case EX_DEREF: expr_free(e->u.deref.operand); break;
@@ -341,6 +359,7 @@ void tu_init(TranslationUnit *tu) {
     tu->package.loc.file = NULL;
     tu->package.loc.line = 0;
     tu->package.loc.col = 0;
+    stmt_array_init(&tu->globals);
     tu->functions.data = NULL;
     tu->functions.len = 0;
     tu->functions.cap = 0;
@@ -348,6 +367,7 @@ void tu_init(TranslationUnit *tu) {
 
 void tu_free(TranslationUnit *tu) {
     free(tu->package.name);
+    stmt_array_free(&tu->globals);
     for (size_t i = 0; i < tu->functions.len; i++) {
         free(tu->functions.data[i].name);
         type_free(&tu->functions.data[i].ret_type);

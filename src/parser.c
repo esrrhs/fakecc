@@ -261,6 +261,40 @@ static Expr *parse_primary(Parser *p) {
         advance(p);
         return parse_postfix(p, e);
     }
+    if (t->kind == TK_STRING_LITERAL) {
+        /* Token text includes surrounding quotes; strip and process escapes. */
+        const char *src = t->text;
+        size_t slen = strlen(src);
+        /* strip leading `"` and trailing `"` (lexer guarantees a leading `"`
+         * but the trailing one might be missing on EOF — tolerate that). */
+        if (slen >= 1 && src[0] == '"') { src++; slen--; }
+        if (slen >= 1 && src[slen-1] == '"') slen--;
+        /* Decode escape sequences into a temporary buffer. */
+        char *buf = malloc(slen + 1);
+        int blen = 0;
+        for (size_t i = 0; i < slen; i++) {
+            char c = src[i];
+            if (c == '\\' && i + 1 < slen) {
+                i++;
+                switch (src[i]) {
+                case 'n':  buf[blen++] = '\n'; break;
+                case 't':  buf[blen++] = '\t'; break;
+                case 'r':  buf[blen++] = '\r'; break;
+                case '0':  buf[blen++] = '\0'; break;
+                case '\\': buf[blen++] = '\\'; break;
+                case '"':  buf[blen++] = '"'; break;
+                case '\'': buf[blen++] = '\''; break;
+                default:   buf[blen++] = src[i]; break;
+                }
+            } else {
+                buf[blen++] = c;
+            }
+        }
+        Expr *e = expr_new_str(buf, blen, t->loc);
+        free(buf);
+        advance(p);
+        return parse_postfix(p, e);
+    }
     if (t->kind == TK_IDENT) {
         const Token *ident = t;
         advance(p);
@@ -550,16 +584,54 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
                "'import' is not supported yet");
     }
 
-    /* One or more function definitions. */
+    /* At file scope: each top-level declaration starts with a type.
+     *   type IDENT "("  → function definition
+     *   type IDENT { "[" N "]" }* [ "=" expr ] ";"  → global variable
+     * We disambiguate by scanning past the type + IDENT + zero-or-more `[N]`
+     * to see whether the next token is `(`.  Types include a trailing chain
+     * of `*` so we skip those too. */
     while (peek(&p)->kind != TK_EOF) {
-        FunctionDecl fn = parse_function_decl(&p);
-
-        if (tu->functions.len >= tu->functions.cap) {
-            size_t new_cap = tu->functions.cap ? tu->functions.cap * 2 : 4;
-            tu->functions.data = realloc(tu->functions.data,
-                                         new_cap * sizeof(FunctionDecl));
-            tu->functions.cap = new_cap;
+        /* Save position, look ahead to find kind. */
+        size_t save = p.pos;
+        /* Skip signed/unsigned prefix */
+        if (peek(&p)->kind == TK_KW_SIGNED || peek(&p)->kind == TK_KW_UNSIGNED)
+            advance(&p);
+        /* Skip type keyword */
+        if (peek(&p)->kind == TK_KW_INT || peek(&p)->kind == TK_KW_CHAR
+            || peek(&p)->kind == TK_KW_SHORT || peek(&p)->kind == TK_KW_LONG) {
+            advance(&p);
         }
-        tu->functions.data[tu->functions.len++] = fn;
+        /* Skip pointer stars */
+        while (peek(&p)->kind == TK_STAR) advance(&p);
+        /* Skip identifier */
+        if (peek(&p)->kind == TK_IDENT) advance(&p);
+        /* Skip array dims [N] */
+        while (peek(&p)->kind == TK_LBRACKET) {
+            advance(&p);
+            while (peek(&p)->kind != TK_RBRACKET && peek(&p)->kind != TK_EOF)
+                advance(&p);
+            if (peek(&p)->kind == TK_RBRACKET) advance(&p);
+        }
+        int is_func = (peek(&p)->kind == TK_LPAREN);
+        p.pos = save;
+
+        if (is_func) {
+            FunctionDecl fn = parse_function_decl(&p);
+            if (tu->functions.len >= tu->functions.cap) {
+                size_t new_cap = tu->functions.cap ? tu->functions.cap * 2 : 4;
+                tu->functions.data = realloc(tu->functions.data,
+                                             new_cap * sizeof(FunctionDecl));
+                tu->functions.cap = new_cap;
+            }
+            tu->functions.data[tu->functions.len++] = fn;
+        } else {
+            /* Global variable: reuse the decl-stmt parser via parse_stmt. */
+            Stmt s = parse_stmt(&p);
+            if (s.kind != ST_DECL) {
+                die_at(s.loc.file, s.loc.line, s.loc.col,
+                       "only variable declarations allowed at file scope");
+            }
+            stmt_array_push(&tu->globals, s);
+        }
     }
 }

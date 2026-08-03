@@ -44,6 +44,7 @@ typedef enum {
     IR_SEXT,        /* dst = signext(a) — a is smaller width; result is `width` */
     IR_ZEXT,        /* dst = zeroext(a) — a is smaller width; result is `width` */
     IR_TRUNC,       /* dst = trunc(a) to `width` — no-op at register level */
+    IR_GADDR,       /* dst = &global; global name in call_name.  Result is 8-byte ptr. */
 } IROpcode;
 
 /* Maximum arguments to IR_CALL — matches Slice 6 restriction of 6 params
@@ -107,8 +108,25 @@ typedef struct {
     size_t cap;
 } IRFunctionArray;
 
+/* Module-level global variable.  Codegen places these in the .data section
+ * (or .bss when init_bytes == NULL).  `init_bytes` owns `size` bytes. */
+typedef struct {
+    char *name;         /* xstrdup'd */
+    int   size;         /* bytes in .data/.bss */
+    char *init_bytes;   /* NULL → zero-init (bss).  Otherwise owns `size` bytes. */
+    int   is_readonly;  /* 1 = string literal → rodata; 0 = mutable → data */
+    SourceLoc loc;
+} IRGlobal;
+
+typedef struct {
+    IRGlobal *data;
+    size_t len;
+    size_t cap;
+} IRGlobalArray;
+
 typedef struct {
     IRFunctionArray functions;
+    IRGlobalArray   globals;
 } IRModule;
 
 void ir_module_init(IRModule *m);

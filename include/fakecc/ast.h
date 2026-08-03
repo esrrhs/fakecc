@@ -58,6 +58,7 @@ typedef enum {
     EX_VAR,     /* variable reference: name */
     EX_ASSIGN,  /* lvalue = rvalue; result is the assigned value */
     EX_CALL,    /* callee(arg1, arg2, ...) */
+    EX_STR,     /* "hello" — anonymous global char array; value is const char* */
     EX_ADDR,    /* &lvalue */
     EX_DEREF,   /* *ptr — lvalue */
     EX_INDEX,   /* a[i]  — lvalue; desugars to *(a+i) in IR */
@@ -105,6 +106,7 @@ struct Expr {
         struct { char *name; } var;                    /* EX_VAR */
         struct { Expr *lvalue; Expr *rvalue; } assign;/* EX_ASSIGN */
         struct { char *callee; ExprArray args; } call;/* EX_CALL — owns callee + args */
+        struct { char *bytes; int len; } str;         /* EX_STR — bytes owns strdup'd data, len excludes trailing NUL */
         struct { Expr *operand; } addr;                /* EX_ADDR */
         struct { Expr *operand; } deref;               /* EX_DEREF */
         struct { Expr *array;  Expr *index; } idx;    /* EX_INDEX */
@@ -121,6 +123,7 @@ Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
 Expr *expr_new_call(const char *callee, SourceLoc loc);
+Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
 Expr *expr_new_addr(Expr *operand, SourceLoc loc);
 Expr *expr_new_deref(Expr *operand, SourceLoc loc);
 Expr *expr_new_index(Expr *array, Expr *index, SourceLoc loc);
@@ -215,6 +218,7 @@ typedef struct {
 
 typedef struct {
     PackageDecl package;
+    StmtArray globals;   /* ST_DECL at file scope (globals) */
     FunctionArray functions;
 } TranslationUnit;
 

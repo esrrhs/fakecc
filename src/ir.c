@@ -6,6 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* File-scope handles used by lower_expr when it needs to allocate a new
+ * anonymous rodata global for a string literal.  Set at the start of
+ * ir_generate; cleared at the end. */
+IRModule *g_ir_module = NULL;
+int g_str_counter = 0;
+
 /* ------------------------------------------------------------------ */
 /* IRModule lifetime                                                   */
 /* ------------------------------------------------------------------ */
@@ -14,6 +20,9 @@ void ir_module_init(IRModule *m) {
     m->functions.data = NULL;
     m->functions.len = 0;
     m->functions.cap = 0;
+    m->globals.data = NULL;
+    m->globals.len = 0;
+    m->globals.cap = 0;
 }
 
 void ir_module_free(IRModule *m) {
@@ -30,9 +39,35 @@ void ir_module_free(IRModule *m) {
             ra_result_free(m->functions.data[i].ra);
     }
     free(m->functions.data);
+    for (size_t i = 0; i < m->globals.len; i++) {
+        free(m->globals.data[i].name);
+        free(m->globals.data[i].init_bytes);
+    }
+    free(m->globals.data);
     m->functions.data = NULL;
     m->functions.len = 0;
     m->functions.cap = 0;
+    m->globals.data = NULL;
+    m->globals.len = 0;
+    m->globals.cap = 0;
+}
+
+static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
+                                       int size, char *init_bytes,
+                                       int is_readonly, SourceLoc loc) {
+    if (m->globals.len >= m->globals.cap) {
+        size_t nc = m->globals.cap ? m->globals.cap * 2 : 4;
+        m->globals.data = realloc(m->globals.data, nc * sizeof(IRGlobal));
+        if (!m->globals.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->globals.cap = nc;
+    }
+    IRGlobal *g = &m->globals.data[m->globals.len++];
+    g->name = xstrdup(name);
+    g->size = size;
+    g->init_bytes = init_bytes;   /* takes ownership */
+    g->is_readonly = is_readonly;
+    g->loc = loc;
+    return g;
 }
 
 /* ------------------------------------------------------------------ */
@@ -118,6 +153,7 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
     if (!e) return 0;
     switch (e->kind) {
     case EX_INT_LIT: return 0;
+    case EX_STR: return 0;
     case EX_BINOP:
         return expr_takes_addr_of(e->u.bin.l, name)
             || expr_takes_addr_of(e->u.bin.r, name);
@@ -220,15 +256,23 @@ static IRValue emit_alloca(IRFunction *fn, int total_bytes, int width,
     return v;
 }
 
+/* Emit `dst = &global-with-name`. */
+static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc) {
+    IRValue v = new_value(fn);
+    emit_inst_w(fn, IR_GADDR, v, -1, -1, 0, 8, 1, loc);
+    fn->insts.data[fn->insts.len - 1].call_name = xstrdup(name);
+    return v;
+}
+
 /* IR symbol table: variable name → slot (an IRValue, i.e. a stack slot). */
 typedef struct {
     const char *name;
-    IRValue slot;
-    int pinned;            /* 1 = address-taken or array; slot is a real memory home */
-    int width;             /* width of the underlying scalar (for LOAD/STORE) */
+    IRValue slot;         /* alloca-value id (locals) or -1 (globals) */
+    int pinned;
+    int width;
     int is_unsigned;
-    Type ty;               /* full type (borrowed from AST, but pointee/elem_type
-                            * shared with AST — do NOT free) */
+    int is_global;        /* 1 = refers to a module-level global */
+    Type ty;
 } IRSlot;
 
 typedef struct {
@@ -265,11 +309,17 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
     st->data[st->len].slot = slot;
     st->data[st->len].pinned = pinned;
     st->data[st->len].width = ty.kind == TY_ARRAY
-        ? type_size(*ty.elem_type)   /* not really used for array */
-        : (ty.width ? ty.width : 4);
+        ? type_size(*ty.elem_type)
+        : (ty.kind == TY_PTR ? 8 : (ty.width ? ty.width : 4));
     st->data[st->len].is_unsigned = ty.is_unsigned;
-    st->data[st->len].ty = ty;   /* borrowed */
+    st->data[st->len].is_global = 0;
+    st->data[st->len].ty = ty;
     st->len++;
+}
+
+static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty) {
+    irsymtable_push(st, name, -1, 1, ty);
+    st->data[st->len - 1].is_global = 1;
 }
 
 /* Look up a variable's slot. Sema guarantees the name exists. */
@@ -316,6 +366,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     e->type.width ? e->type.width : 4,
                     e->type.is_unsigned, e->loc);
         return v;
+    }
+    case EX_STR: {
+        /* Register a rodata global holding the bytes, then produce its
+         * address via IR_GADDR. */
+        extern IRModule *g_ir_module;   /* set by ir_generate */
+        extern int g_str_counter;
+        char name[32];
+        snprintf(name, sizeof name, "__str.%d", g_str_counter++);
+        int bytes = e->u.str.len + 1;
+        char *init = malloc(bytes);
+        memcpy(init, e->u.str.bytes, bytes);
+        ir_module_push_global(g_ir_module, name, bytes, init, 1, e->loc);
+        return emit_gaddr(fn, name, e->loc);
     }
     case EX_UNARY:
         switch (e->u.un.op) {
@@ -422,8 +485,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     case EX_VAR: {
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) return -1;
+        if (entry->is_global) {
+            IRValue addr = emit_gaddr(fn, entry->name, e->loc);
+            if (entry->ty.kind == TY_ARRAY) return addr;
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
+                        entry->width, entry->is_unsigned, e->loc);
+            return v;
+        }
         if (entry->ty.kind == TY_ARRAY) {
-            /* Array-lvalue: value is the address of first element (decay). */
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         }
         if (entry->pinned) {
@@ -448,7 +518,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (lv->kind == EX_VAR) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
             if (!entry) return -1;
-            if (entry->pinned) {
+            if (entry->is_global) {
+                IRValue addr = emit_gaddr(fn, entry->name, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
+            } else if (entry->pinned) {
                 IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
                 emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
             } else {
@@ -505,6 +578,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         Expr *op = e->u.addr.operand;
         if (op->kind == EX_VAR) {
             const IRSlot *entry = irsymtable_find(st, op->u.var.name);
+            if (entry->is_global) return emit_gaddr(fn, entry->name, e->loc);
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         }
         if (op->kind == EX_DEREF) {
@@ -689,6 +763,41 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
 }
 
 void ir_generate(const TranslationUnit *tu, IRModule *ir) {
+    /* Publish module + reset string counter for lower_expr's use. */
+    g_ir_module = ir;
+    g_str_counter = 0;
+
+    /* Register named globals from tu->globals.  Populate initializer bytes
+     * for scalar globals from a simple compile-time integer literal (or 0
+     * if no init).  Complex initializers (arrays, non-const exprs) are
+     * left to a future slice — for 8 we accept `int x = 42;` style. */
+    for (size_t i = 0; i < tu->globals.len; i++) {
+        const Stmt *s = &tu->globals.data[i];
+        if (s->kind != ST_DECL) continue;
+        int sz = type_size(s->u.decl.type);
+        if (sz <= 0) sz = 8;
+        char *bytes = calloc(sz, 1);
+        if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        if (s->u.decl.init) {
+            Expr *ie = s->u.decl.init;
+            if (ie->kind == EX_INT_LIT) {
+                long long v = ie->u.int_val;
+                for (int b = 0; b < sz && b < 8; b++)
+                    bytes[b] = (char)((v >> (8 * b)) & 0xff);
+            } else if (ie->kind == EX_UNARY && ie->u.un.op == UOP_NEG
+                       && ie->u.un.operand->kind == EX_INT_LIT) {
+                long long v = -(long long)ie->u.un.operand->u.int_val;
+                for (int b = 0; b < sz && b < 8; b++)
+                    bytes[b] = (char)((v >> (8 * b)) & 0xff);
+            } else {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "global '%s' initializer must be an integer literal (Slice 8 limit)",
+                       s->u.decl.name);
+            }
+        }
+        ir_module_push_global(ir, s->u.decl.name, sz, bytes, 0, s->loc);
+    }
+
     for (size_t i = 0; i < tu->functions.len; i++) {
         const FunctionDecl *fd = &tu->functions.data[i];
 
@@ -708,6 +817,13 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
 
         IRSymTable st;
         irsymtable_init(&st);
+
+        /* Bind globals so function-body EX_VAR lookups find them. */
+        for (size_t g = 0; g < tu->globals.len; g++) {
+            const Stmt *gs = &tu->globals.data[g];
+            if (gs->kind == ST_DECL)
+                irsymtable_push_global(&st, gs->u.decl.name, gs->u.decl.type);
+        }
 
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;

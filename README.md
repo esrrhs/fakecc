@@ -101,6 +101,39 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
+### Slice 8 — 全局变量 + 字符串字面量
+
+从"只有栈变量"到"能持久保存状态"。文件作用域声明 `int x = 42;`；字符串字面量 `"hello"` 编译期入 rodata 全局；两者都通过 `lea r, [rip+disp32]` 定位。ELF 输出扩展为两个 PT_LOAD 段（`R+X` 的 code / `R+W` 的 data）。
+
+```c
+package main;
+int counter = 0;
+int bump() { counter = counter + 1; return counter; }
+int main() {
+    bump(); bump(); bump();
+    return counter;   // 3
+}
+```
+
+**前端**：
+- **Lexer** 已有 `TK_STRING_LITERAL`，现在解析：strip 引号并处理 `\n \t \r \0 \\ \" \'` 转义
+- **AST** 新增 `EX_STR`（bytes + len），`TranslationUnit.globals: StmtArray` 持有文件作用域 `ST_DECL`
+- **Parser** 顶层用 lookahead 区分函数（`type IDENT (`）和全局（`type IDENT [ = expr ] ;`）；识别全局的 `[N]` 数组维度
+- **Sema** 全局符号存到一个长生命期的 `SymTable`，函数体开始时导入到局部作用域底部；重复全局名和函数名冲突诊断；字符串字面量类型为 `char*`（衰减后）
+
+**中/后端**：
+- **IR** 新增 opcode `IR_GADDR`（`dst = &global`，name 存 `call_name`）；`IRModule.globals: IRGlobalArray` 持有 `{name, size, init_bytes, is_readonly}` 
+- **IR-gen** 顶层扫 `tu->globals`，把标量初始化字面量转成 raw bytes 存进 `IRGlobal.init_bytes`；每个 EX_STR 分配 `__str.N` 匿名 rodata 全局；EX_VAR/EX_ADDR/EX_ASSIGN 在 IRSlot 打上 `is_global` 标志时走 IR_GADDR 路径
+- **Codegen** 新增 `emit_lea_rip`（`REX.W 8D <mod=00 reg=dst rm=5> disp32=0`），emit 完后把 `{patch_off, target_name}` 塞入 `EmitModule.relocs`
+- **ELF writer**：
+  - `EmitModule` 加 `Buffer data` + `EmitGlobal[]` + `EmitGlobalReloc[]`
+  - `emit_elf` 现在写两个 PT_LOAD：code 段（`PF_R|PF_X`，从 base 起）和 data 段（`PF_R|PF_W`，file 偏移和 vaddr 对齐到 `PAGE_SIZE`）
+  - 最后一遍解析 relocs：`disp32 = data_vaddr + global.offset − (base + code_offset + patch_off + 4)`，直接改写 code buffer
+
+**边界**：初始化器只允许整型字面量（`int x = 42;` / `int x = -7;`）；`char buf[16]` 之类的数组只支持零初始化；复合字面量、非常量表达式、`int a[3] = {1,2,3}` 留到未来 slice。
+
+新增 7 个 e2e：`global_int / global_mutate / global_array / global_cross_fn / string_chars / string_len / string_addr`。85 个 e2e 全部通过。
+
 ### Slice 7b+7c — 指针、数组、cast、sizeof
 
 从"只有整型"进入到"可以操纵内存"。支持任意多级指针（`int**`）、取址 `&`、解引用 `*`、任意固定长度数组含多维（`int a[M][N]`）、下标 `a[i]`、指针算术（按元素大小自动缩放）、数组到指针衰减、显式 cast `(T)expr`、`sizeof(T)` 与 `sizeof(expr)`。
