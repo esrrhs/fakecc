@@ -1223,17 +1223,22 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 int cleanup = nstack * 8 + (need_pad ? 8 : 0);
                 if (cleanup > 0) emit_add_rsp_imm32(&out->code, cleanup);
 
-                /* Result is in RAX; move to dst home (or spill). */
-                if (dr >= 0) {
-                    if (dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                } else {
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                /* Result is in RAX; move to dst home (or spill).  A void call
+                 * has dst == -1 (no result) — leave RAX alone. */
+                if (inst->dst >= 0) {
+                    if (dr >= 0) {
+                        if (dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                    } else {
+                        spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    }
                 }
                 break;
             }
 
             case IR_RETURN: {
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                /* Void function: bare `return;` — no value in a. */
+                if (inst->a != -1)
+                    ensure_reg(&out->code, inst->a, REG_RAX, ra);
                 emit_epilogue(&out->code, stack_size, cs_used);
                 break;
             }

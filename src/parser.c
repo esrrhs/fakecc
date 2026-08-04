@@ -35,11 +35,18 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
  *   [signed|unsigned] (char|short|int|long)
  * Also accepts bare "signed" / "unsigned" (= int).
  * Returns Type; emits a diagnostic if no type keyword is present. */
-static int is_type_start(TokenKind k) {
-    return k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
+static int is_type_start(const Parser *p, size_t pos) {
+    TokenKind k = p->tokens->data[pos].kind;
+    if (k == TK_KW_VOID || k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
         || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
-        || k == TK_KW_CONST;
+        || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN)
+        return 1;
+    /* A typedef name looks like an ordinary identifier. */
+    if (k == TK_IDENT
+        && typedef_registry_find(&p->tu->typedefs, p->tokens->data[pos].text))
+        return 1;
+    return 0;
 }
 
 static Type parse_type(Parser *p) {
@@ -50,6 +57,20 @@ static Type parse_type(Parser *p) {
     if (peek(p)->kind == TK_KW_CONST) {
         is_const = 1;
         advance(p);
+    }
+    /* void — only meaningful as a return type or as void* (pointer to void).
+     * A lone `void` variable is rejected later in sema. */
+    if (peek(p)->kind == TK_KW_VOID) {
+        advance(p);
+        Type t = type_make_void();
+        while (peek(p)->kind == TK_STAR) {
+            advance(p);
+            Type w = type_make_ptr(t);
+            type_free(&t);
+            t = w;
+        }
+        t.is_const = is_const;
+        return t;
     }
     /* struct Name — must be already defined by a `struct` definition earlier
      * OR later; we defer size lookup to sema/IR-gen time by consulting the
@@ -119,6 +140,23 @@ static Type parse_type(Parser *p) {
         Type t = type_default_int();
         t.is_const = is_const;
         return t;
+    }
+    /* typedef name — resolve to the aliased type.  The name must match a
+     * previously defined typedef (typedefs are not forward-referenced). */
+    if (peek(p)->kind == TK_IDENT) {
+        const Type *alias = typedef_registry_find(&p->tu->typedefs, peek(p)->text);
+        if (alias) {
+            advance(p);
+            Type t = type_clone(*alias);
+            while (peek(p)->kind == TK_STAR) {
+                advance(p);
+                Type w = type_make_ptr(t);
+                type_free(&t);
+                t = w;
+            }
+            t.is_const = is_const;
+            return t;
+        }
     }
     int is_unsigned = 0;
     int saw_sign = 0;
@@ -200,6 +238,7 @@ static Expr *parse_mul(Parser *p);
 static Expr *parse_unary(Parser *p);
 static Expr *parse_postfix(Parser *p, Expr *lhs);
 static Expr *parse_primary(Parser *p);
+static Expr *parse_init_list(Parser *p);
 
 static Expr *parse_expr(Parser *p) {
     return parse_comma(p);
@@ -469,7 +508,7 @@ static Expr *parse_unary(Parser *p) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
         /* sizeof(T) or sizeof(expr) or sizeof expr. */
-        if (peek(p)->kind == TK_LPAREN && is_type_start(p->tokens->data[p->pos + 1].kind)) {
+        if (peek(p)->kind == TK_LPAREN && is_type_start(p, p->pos + 1)) {
             advance(p);
             Type t = parse_type(p);
             expect_kind(p, TK_RPAREN, "')'");
@@ -629,7 +668,7 @@ static Expr *parse_primary(Parser *p) {
     }
     if (t->kind == TK_LPAREN) {
         /* Cast?  (Type) unary   vs.   (expr) */
-        if (is_type_start(p->tokens->data[p->pos + 1].kind)) {
+        if (is_type_start(p, p->pos + 1)) {
             SourceLoc loc = peek(p)->loc;
             advance(p);
             Type ty = parse_type(p);
@@ -648,10 +687,50 @@ static Expr *parse_primary(Parser *p) {
     return NULL; /* unreachable */
 }
 
+/* init-list = "{" { init-list | assign-expr } [ "," ] "}"
+ * Parsed only as a declarator initializer (`int a[] = {1,2,3}`).  Each element
+ * is either a nested brace list (`{{1,2},{3,4}}`) or an assignment-expression.
+ * A trailing comma is tolerated.  The result is an EX_INIT_LIST expression. */
+static Expr *parse_init_list(Parser *p) {
+    SourceLoc loc = peek(p)->loc;
+    expect_kind(p, TK_LBRACE, "'{'");
+    Expr **elements = NULL;
+    int num = 0, cap = 0;
+    while (peek(p)->kind != TK_RBRACE) {
+        if (peek(p)->kind == TK_EOF) {
+            die_at(loc.file, loc.line, loc.col,
+                   "unterminated initializer list");
+        }
+        Expr *elem;
+        if (peek(p)->kind == TK_LBRACE) {
+            elem = parse_init_list(p);
+        } else {
+            elem = parse_assign(p);
+        }
+        if (num >= cap) {
+            cap = cap ? cap * 2 : 8;
+            elements = realloc(elements, cap * sizeof(Expr *));
+        }
+        elements[num++] = elem;
+        if (peek(p)->kind == TK_COMMA) {
+            advance(p);
+            if (peek(p)->kind == TK_RBRACE) break; /* trailing comma */
+        } else if (peek(p)->kind != TK_RBRACE) {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col,
+                   "expected ',' or '}' in initializer list but got '%s'",
+                   t->text);
+        }
+    }
+    expect_kind(p, TK_RBRACE, "'}'");
+    return expr_new_init_list(elements, num, loc);
+}
+
 /* ---- statement parsing (forward declarations) ---- */
 
 static void parse_stmt_list(Parser *p, StmtArray *out);
 static Stmt parse_stmt(Parser *p);
+static Stmt parse_typedef_stmt(Parser *p);
 static Stmt parse_switch(Parser *p);
 
 /* stmt-list = { stmt } until '}' */
@@ -669,9 +748,25 @@ static void parse_stmt_list(Parser *p, StmtArray *out) {
 /* stmt = decl-stmt | return-stmt | if-stmt | while-stmt | block | expr-stmt */
 static Stmt parse_stmt(Parser *p) {
     TokenKind k = peek(p)->kind;
-    if (is_type_start(k)) {
-        /* decl-stmt: type IDENT [ "[" N "]" ]* ["=" expr] ";" */
+    /* `typedef` at block scope is parsed as a decl-stmt whose init is NULL;
+     * sema registers the alias.  A leading typedef-name identifier is treated
+     * as a type start (declaration), matching C's "lexer hack" resolution. */
+    if (k == TK_KW_TYPEDEF || is_type_start(p, p->pos)) {
+        /* decl-stmt: [typedef] type IDENT [ "[" N "]" ]* ["=" expr] ";" */
+        if (k == TK_KW_TYPEDEF) {
+            return parse_typedef_stmt(p);
+        }
         SourceLoc decl_loc = peek(p)->loc;
+        /* Storage class: `static` (persistent) / `extern` (declaration only).
+         * `const` is handled inside parse_type. */
+        int storage_class = 0; /* 0=default, 1=static, 2=extern */
+        if (peek(p)->kind == TK_KW_STATIC) {
+            storage_class = 1;
+            advance(p);
+        } else if (peek(p)->kind == TK_KW_EXTERN) {
+            storage_class = 2;
+            advance(p);
+        }
         Type ty = parse_type(p);
         const Token *name = peek(p);
         if (name->kind != TK_IDENT) {
@@ -687,13 +782,21 @@ static Stmt parse_stmt(Parser *p) {
             advance(p);
             const Token *nt = peek(p);
             if (nt->kind != TK_INT_LITERAL) {
+                /* Empty `[]` is allowed only when followed by `=` and an
+                 * initializer list — the length is inferred from the list
+                 * in sema.  Accept it here as a zero-length dimension. */
+                if (nt->kind == TK_RBRACKET) {
+                    dims[ndims++] = 0;
+                    advance(p);
+                    continue;
+                }
                 die_at(nt->loc.file, nt->loc.line, nt->loc.col,
                        "expected integer array length but got '%s'", nt->text);
             }
             int len = atoi(nt->text);
-            if (len <= 0) {
+            if (len < 0) {
                 die_at(nt->loc.file, nt->loc.line, nt->loc.col,
-                       "array length must be positive");
+                       "array length must be non-negative");
             }
             advance(p);
             expect_kind(p, TK_RBRACKET, "']'");
@@ -712,22 +815,37 @@ static Stmt parse_stmt(Parser *p) {
         s.loc = decl_loc;
         s.u.decl.name = xstrdup(name->text);
         s.u.decl.type = ty;
+        s.u.decl.storage_class = storage_class;
         s.u.decl.init = NULL;
         if (peek(p)->kind == TK_ASSIGN) {
             advance(p);
-            s.u.decl.init = parse_expr(p);
+            /* `extern` may not have an initializer. */
+            if (storage_class == 2) {
+                die_at(s.loc.file, s.loc.line, s.loc.col,
+                       "cannot initialize an 'extern' variable");
+            }
+            if (peek(p)->kind == TK_LBRACE) {
+                s.u.decl.init = parse_init_list(p);
+            } else {
+                s.u.decl.init = parse_expr(p);
+            }
         }
         expect_kind(p, TK_SEMICOLON, "';'");
         return s;
     }
     if (k == TK_KW_RETURN) {
-        /* return-stmt */
+        /* return-stmt — bare `return;` (value==NULL) is allowed for void
+         * functions; sema enforces the void/non-void mismatch rules. */
         const Token *kw = peek(p);
         advance(p);  /* consume "return" */
         Stmt s;
         s.kind = ST_RETURN;
         s.loc = kw->loc;
-        s.u.value = parse_expr(p);
+        if (peek(p)->kind == TK_SEMICOLON) {
+            s.u.value = NULL;
+        } else {
+            s.u.value = parse_expr(p);
+        }
         expect_kind(p, TK_SEMICOLON, "';'");
         return s;
     }
@@ -885,6 +1003,36 @@ static Stmt parse_stmt(Parser *p) {
     return s;
 }
 
+/* typedef-stmt = "typedef" type IDENT ";"
+ * Registers the alias in the TU-level typedef registry.  A typedef occupies
+ * no runtime statement, so we return an empty ST_BLOCK no-op — the caller
+ * (parse_stmt_list or the file-scope loop) just moves on. */
+static Stmt parse_typedef_stmt(Parser *p) {
+    const Token *kw = peek(p);
+    advance(p);  /* consume "typedef" */
+    Type ty = parse_type(p);
+    const Token *name = peek(p);
+    if (name->kind != TK_IDENT) {
+        die_at(name->loc.file, name->loc.line, name->loc.col,
+               "expected typedef name but got '%s'", name->text);
+    }
+    advance(p);
+    /* Reject a collision with an existing typedef. */
+    if (typedef_registry_find(&p->tu->typedefs, name->text)) {
+        die_at(name->loc.file, name->loc.line, name->loc.col,
+               "redefinition of typedef '%s'", name->text);
+    }
+    typedef_registry_add(&p->tu->typedefs, name->text, ty);
+    /* registry took ownership of `ty` (and its heap sub-types) — do NOT
+     * type_free it. */
+    expect_kind(p, TK_SEMICOLON, "';'");
+    Stmt s;
+    s.kind = ST_BLOCK;
+    s.loc = kw->loc;
+    stmt_array_init(&s.u.block);
+    return s;
+}
+
 /* Evaluate a compile-time integer constant for a case label: an int literal
  * or a previously defined enum constant.  Returns the value; dies on error.
  * `name` is the case label name for error messages. */
@@ -982,10 +1130,14 @@ static FunctionDecl parse_function_decl(Parser *p) {
     stmt_array_init(&fn.body);
     fn.loc = fn_loc;
 
-    /* Parameter list: type IDENT ("," type IDENT)* — or empty. */
-    if (peek(p)->kind != TK_RPAREN) {
+    /* Parameter list: type IDENT ("," type IDENT)* — or empty.  The special
+     * form `(void)` means "no parameters" (standard C). */
+    if (peek(p)->kind == TK_KW_VOID
+        && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+        advance(p);  /* consume `void` */
+    } else if (peek(p)->kind != TK_RPAREN) {
         for (;;) {
-            if (!is_type_start(peek(p)->kind)) {
+            if (!is_type_start(p, p->pos)) {
                 const Token *t = peek(p);
                 die_at(t->loc.file, t->loc.line, t->loc.col,
                        "expected type for parameter but got '%s'", t->text);
@@ -1247,23 +1399,42 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
             }
         }
 
+        /* Typedef at file scope: `typedef <type> <name>;`.  parse_typedef_stmt
+         * registers the alias and returns an empty no-op ST_BLOCK, which we
+         * simply discard here (it carries no runtime meaning). */
+        if (peek(&p)->kind == TK_KW_TYPEDEF) {
+            Stmt s = parse_typedef_stmt(&p);
+            stmt_free(&s);
+            continue;
+        }
+
         /* Save position, look ahead to find kind. */
         size_t save = p.pos;
-        /* Skip signed/unsigned prefix */
-        if (peek(&p)->kind == TK_KW_SIGNED || peek(&p)->kind == TK_KW_UNSIGNED)
+        /* Skip storage-class / qualifier / sign prefix tokens. */
+        while (peek(&p)->kind == TK_KW_CONST || peek(&p)->kind == TK_KW_STATIC
+               || peek(&p)->kind == TK_KW_EXTERN
+               || peek(&p)->kind == TK_KW_SIGNED || peek(&p)->kind == TK_KW_UNSIGNED)
             advance(&p);
-        /* Skip type keyword */
-        if (peek(&p)->kind == TK_KW_INT || peek(&p)->kind == TK_KW_CHAR
-            || peek(&p)->kind == TK_KW_SHORT || peek(&p)->kind == TK_KW_LONG) {
+        /* Skip type keyword. */
+        if (peek(&p)->kind == TK_KW_VOID || peek(&p)->kind == TK_KW_INT
+            || peek(&p)->kind == TK_KW_CHAR || peek(&p)->kind == TK_KW_SHORT
+            || peek(&p)->kind == TK_KW_LONG) {
             advance(&p);
         } else if (peek(&p)->kind == TK_KW_STRUCT
                    || peek(&p)->kind == TK_KW_UNION) {
             advance(&p);
             if (peek(&p)->kind == TK_IDENT) advance(&p);
+        } else if (peek(&p)->kind == TK_KW_ENUM) {
+            advance(&p);
+            if (peek(&p)->kind == TK_IDENT) advance(&p);
+        } else if (peek(&p)->kind == TK_IDENT
+                   && typedef_registry_find(&tu->typedefs, peek(&p)->text)) {
+            /* typedef name used as a type. */
+            advance(&p);
         }
         /* Skip pointer stars */
         while (peek(&p)->kind == TK_STAR) advance(&p);
-        /* Skip identifier */
+        /* Skip identifier (the declared name) */
         if (peek(&p)->kind == TK_IDENT) advance(&p);
         /* Skip array dims [N] */
         while (peek(&p)->kind == TK_LBRACKET) {

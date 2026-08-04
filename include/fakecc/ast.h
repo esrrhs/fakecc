@@ -9,6 +9,7 @@
 /* ------------------------------------------------------------------ */
 
 typedef enum {
+    TY_VOID,    /* void — only valid as a function return type */
     TY_INT,     /* char/short/int/long × signed/unsigned */
     TY_PTR,     /* T*  — pointee owned via heap allocation */
     TY_ARRAY,   /* T[N] — elem_type owned via heap; length is a positive int */
@@ -33,6 +34,11 @@ static inline Type type_make_int(int width, int is_unsigned) {
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL; return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
+static inline Type type_make_void(void) {
+    Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
+    t.is_const = 0;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL; return t;
+}
 
 /* Deep-clone a Type (recursing into pointee/elem_type). */
 Type type_clone(Type t);
@@ -71,6 +77,7 @@ typedef enum {
     EX_INC_DEC, /* ++lvalue / --lvalue (prefix or postfix) */
     EX_COMPOUND_ASSIGN, /* lvalue op= rvalue */
     EX_COMMA, /* a, b — evaluate a (discard), result is b */
+    EX_INIT_LIST, /* { e1, e2, ... } — array/struct initializer; valid only as decl.init */
 } ExprKind;
 
 typedef enum {
@@ -133,6 +140,7 @@ struct Expr {
         struct { Expr *operand; int is_inc; int is_prefix; } incdec; /* EX_INC_DEC */
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp; /* EX_COMPOUND_ASSIGN */
         struct { Expr *lhs; Expr *rhs; } comma; /* EX_COMMA */
+        struct { Expr **elements; int num_elements; } init_list; /* EX_INIT_LIST — owns each element */
     } u;
 };
 
@@ -155,6 +163,7 @@ Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
 Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
 Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
+Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_free(Expr *e);
 /* Set an Expr's type, freeing the old (owning) type first; takes ownership of t. */
@@ -199,7 +208,7 @@ struct Stmt {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; } decl;   /* ST_DECL: init may be NULL */
+        struct { char *name; Type type; Expr *init; int storage_class; } decl;   /* ST_DECL: init may be NULL; storage_class: 0=default, 1=static, 2=extern */
         Expr *expr;                                 /* ST_EXPR */
         Expr *value;                                /* ST_RETURN */
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */
@@ -338,12 +347,34 @@ int  enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
 const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
                                                 const char *name);
 
+/* Typedef: a name → Type alias.  The aliased Type is fully owned (heap
+ * pointee/elem types and strdup'd tag are cloned on insert). */
+typedef struct {
+    char *name;     /* xstrdup'd */
+    Type type;      /* the aliased type, owned */
+} TypedefEntry;
+
+typedef struct {
+    TypedefEntry *data;
+    size_t len;
+    size_t cap;
+} TypedefRegistry;
+
+void typedef_registry_init(TypedefRegistry *r);
+void typedef_registry_free(TypedefRegistry *r);
+/* Register a typedef; returns pointer into registry.  Caller must not already
+ * have an entry with the same name (sema checks first). */
+TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type);
+/* Find a typedef by name; NULL if absent. */
+const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
+
 typedef struct {
     PackageDecl package;
     StmtArray globals;   /* ST_DECL at file scope (globals) */
     FunctionArray functions;
     StructRegistry structs;
     EnumRegistry enums;
+    TypedefRegistry typedefs;
 } TranslationUnit;
 
 void tu_init(TranslationUnit *tu);

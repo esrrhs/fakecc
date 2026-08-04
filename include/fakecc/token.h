@@ -6,6 +6,7 @@
 typedef enum {
     TK_KW_PACKAGE,       /* "package" */
     TK_KW_IMPORT,        /* "import" — Slice 1: recognized but not allowed */
+    TK_KW_VOID,          /* "void" */
     TK_KW_INT,           /* "int" */
     TK_KW_CHAR,          /* "char" */
     TK_KW_SHORT,         /* "short" */
@@ -29,6 +30,9 @@ typedef enum {
     TK_KW_DO,            /* "do" */
     TK_KW_ENUM,          /* "enum" */
     TK_KW_STRUCT,        /* "struct" */
+    TK_KW_TYPEDEF,       /* "typedef" */
+    TK_KW_STATIC,        /* "static" */
+    TK_KW_EXTERN,        /* "extern" */
     TK_IDENT,
     TK_INT_LITERAL,
     TK_CHAR_LITERAL,     /* 'A', '\n', etc. */

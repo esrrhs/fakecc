@@ -1,6 +1,7 @@
 #include "fakecc/ast.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
+#include "fakecc/sema.h"
 #include "fakecc/token.h"
 #include "test_framework.h"
 
@@ -96,12 +97,29 @@ static void test_missing_semicolon_dies(void) {
 }
 
 static void test_return_without_int_dies(void) {
+    /* A bare `return;` is syntactically valid (the parser accepts it and
+     * produces ST_RETURN with value==NULL); sema rejects it for a non-void
+     * function.  We verify the parser accepts it and sema then dies. */
     int pid = fork();
     if (pid == 0) {
         lex_parse("package main; int main() { return ; }");
         _exit(0);
     }
     int status;
+    waitpid(pid, &status, 0);
+    T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    pid = fork();
+    if (pid == 0) {
+        TokenArray arr;
+        token_array_init(&arr);
+        lex("package main; int main() { return ; }", "test.c", &arr);
+        TranslationUnit tu;
+        tu_init(&tu);
+        parse(&arr, &tu);
+        sema_check(&tu);
+        _exit(0);
+    }
     waitpid(pid, &status, 0);
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
 }

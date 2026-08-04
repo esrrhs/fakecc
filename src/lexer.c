@@ -62,6 +62,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "enum", 4) == 0) return TK_KW_ENUM;
         if (memcmp(s, "goto", 4) == 0) return TK_KW_GOTO;
         if (memcmp(s, "case", 4) == 0) return TK_KW_CASE;
+        if (memcmp(s, "void", 4) == 0) return TK_KW_VOID;
         break;
     case 5:
         if (memcmp(s, "while", 5) == 0) return TK_KW_WHILE;
@@ -75,12 +76,15 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "return", 6) == 0) return TK_KW_RETURN;
         if (memcmp(s, "signed", 6) == 0) return TK_KW_SIGNED;
         if (memcmp(s, "sizeof", 6) == 0) return TK_KW_SIZEOF;
+        if (memcmp(s, "static", 6) == 0) return TK_KW_STATIC;
         if (memcmp(s, "struct", 6) == 0) return TK_KW_STRUCT;
         if (memcmp(s, "switch", 6) == 0) return TK_KW_SWITCH;
+        if (memcmp(s, "extern", 6) == 0) return TK_KW_EXTERN;
         break;
     case 7:
         if (memcmp(s, "package", 7) == 0) return TK_KW_PACKAGE;
         if (memcmp(s, "default", 7) == 0) return TK_KW_DEFAULT;
+        if (memcmp(s, "typedef", 7) == 0) return TK_KW_TYPEDEF;
         break;
     case 8:
         if (memcmp(s, "unsigned", 8) == 0) return TK_KW_UNSIGNED;

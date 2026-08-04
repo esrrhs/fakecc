@@ -8,6 +8,10 @@
 /* Set by sema_check; provides the module StructRegistry for member lookups. */
 static const StructRegistry *g_sema_structs = NULL;
 
+/* Return type of the function currently being type-checked.  Set per-function
+ * before check_stmt_list so ST_RETURN can enforce the void/non-void rules. */
+static Type g_sema_ret_type;
+
 typedef struct {
     const char *name;
     int arity;
@@ -564,6 +568,20 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
         return type_clone(e->type);
     }
+    case EX_INIT_LIST: {
+        /* An initializer list is valid only as a declarator initializer.  We
+         * type-check every element; the count / layout validation against the
+         * target type happens in check_stmt(ST_DECL).  The list's own type is
+         * the target type, which the caller knows — here we just return a
+         * benign int so a stray use in an expression context degrades gracefully
+         * (it is rejected upstream anyway). */
+        for (int i = 0; i < e->u.init_list.num_elements; i++) {
+            Type et = check_expr(e->u.init_list.elements[i], st, ft);
+            type_free(&et);
+        }
+        set_type(e, type_default_int());
+        return type_clone(e->type);
+    }
     }
     return type_default_int();
 }
@@ -582,23 +600,137 @@ static void check_stmt_list(StmtArray *body, SymTable *st,
     symtable_leave_scope(st, mark);
 }
 
+/* Is `e` a compile-time constant suitable for initializing a global?  Integer
+ * literals and nested initializer lists of constants qualify. */
+static int is_const_init(const Expr *e) {
+    if (!e) return 1;
+    if (e->kind == EX_INT_LIT) return 1;
+    if (e->kind == EX_INIT_LIST) {
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            if (!is_const_init(e->u.init_list.elements[i])) return 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* Validate an initializer list's shape against the target type: element count
+ * must not exceed the array length / struct member count, and nested lists
+ * recurse.  A scalar target tolerates a single-element brace list (e.g.
+ * `int x = {5}`).  Dies on mismatch. */
+static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) {
+    int n = list->u.init_list.num_elements;
+    switch (target.kind) {
+    case TY_ARRAY:
+        if (target.length > 0 && n > target.length)
+            die_at(loc.file, loc.line, loc.col,
+                   "too many initializers for array (expected %d, got %d)",
+                   target.length, n);
+        for (int i = 0; i < n; i++) {
+            const Expr *elem = list->u.init_list.elements[i];
+            if (elem->kind == EX_INIT_LIST && target.elem_type)
+                check_init_list_shape(*target.elem_type, elem, elem->loc);
+        }
+        break;
+    case TY_STRUCT: {
+        const StructDef *sd = struct_registry_find_c(g_sema_structs, target.tag);
+        if (!sd)
+            die_at(loc.file, loc.line, loc.col,
+                   "unknown struct 'struct %s'", target.tag);
+        if (n > sd->num_members)
+            die_at(loc.file, loc.line, loc.col,
+                   "too many initializers for struct '%s' (expected %d, got %d)",
+                   target.tag, sd->num_members, n);
+        for (int i = 0; i < n; i++) {
+            const Expr *elem = list->u.init_list.elements[i];
+            if (elem->kind == EX_INIT_LIST && i < sd->num_members)
+                check_init_list_shape(sd->members[i].type, elem, elem->loc);
+        }
+        break;
+    }
+    default:
+        /* Scalar target: brace list with a single element is allowed. */
+        if (n > 1)
+            die_at(loc.file, loc.line, loc.col,
+                   "scalar initializer requires at most one element");
+        break;
+    }
+}
+
 static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
                        size_t scope_mark, int *has_return) {
     Type discard;
     switch (s->kind) {
-    case ST_DECL:
+    case ST_DECL: {
         if (symtable_has_since(st, s->u.decl.name, scope_mark)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "redeclaration of '%s'", s->u.decl.name);
         }
+        /* A variable may not have type `void` (but `void*` is fine — that is a
+         * pointer, TY_PTR). */
+        if (s->u.decl.type.kind == TY_VOID)
+            die_at(s->loc.file, s->loc.line, s->loc.col,
+                   "cannot declare variable of type void");
+        /* `extern` is a file-scope-only declaration; a local `extern` has no
+         * storage to bind to in this single-TU model.  check_stmt is only
+         * reached for function-locals, so any `extern` here is an error. */
+        if (s->u.decl.storage_class == 2)
+            die_at(s->loc.file, s->loc.line, s->loc.col,
+                   "'extern' is not allowed at block scope");
+        /* Infer array length from an empty `[]` declarator when followed by an
+         * initializer: `int a[] = {1,2,3}` → length 3, or
+         * `char s[] = "hi"` → length strlen+1. */
+        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
+            && s->u.decl.init) {
+            if (s->u.decl.init->kind == EX_INIT_LIST) {
+                s->u.decl.type.length = s->u.decl.init->u.init_list.num_elements;
+            } else if (s->u.decl.init->kind == EX_STR
+                       && s->u.decl.type.elem_type
+                       && s->u.decl.type.elem_type->width == 1) {
+                s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
+            }
+        }
+        /* A string literal initializing a `char[]` is lowered as a per-byte
+         * copy, not a pointer store — convert it to an init list of char
+         * literals so it flows through the array-init path. */
+        if (s->u.decl.init && s->u.decl.init->kind == EX_STR
+            && s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.elem_type
+            && s->u.decl.type.elem_type->width == 1) {
+            Expr *str = s->u.decl.init;
+            int n = str->u.str.len + 1;   /* include trailing NUL */
+            Expr **elems = malloc(n * sizeof(Expr *));
+            for (int i = 0; i < n - 1; i++)
+                elems[i] = expr_new_int((unsigned char)str->u.str.bytes[i],
+                                        str->loc);
+            elems[n - 1] = expr_new_int(0, str->loc);   /* NUL terminator */
+            Expr *list = expr_new_init_list(elems, n, str->loc);
+            expr_free(str);
+            s->u.decl.init = list;
+        }
         symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
-        if (s->u.decl.init) { discard = check_expr(s->u.decl.init, st, ft); type_free(&discard); }
+        if (s->u.decl.init) {
+            if (s->u.decl.init->kind == EX_INIT_LIST)
+                check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
+            discard = check_expr(s->u.decl.init, st, ft); type_free(&discard);
+        }
         break;
+    }
     case ST_EXPR:
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
     case ST_RETURN:
-        discard = check_expr(s->u.value, st, ft); type_free(&discard);
+        /* Bare `return;` (value==NULL) is allowed only in a void function;
+         * `return expr;` is forbidden in a void function.  Otherwise type-check
+         * the returned expression as usual. */
+        if (s->u.value == NULL) {
+            if (g_sema_ret_type.kind != TY_VOID)
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "non-void function must return a value");
+        } else {
+            if (g_sema_ret_type.kind == TY_VOID)
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "void function cannot return a value");
+            discard = check_expr(s->u.value, st, ft); type_free(&discard);
+        }
         *has_return = 1;
         break;
     case ST_IF:
@@ -727,11 +859,28 @@ void sema_check(const TranslationUnit *tu_const) {
                    "global '%s' conflicts with a function of the same name",
                    s->u.decl.name);
         }
+        /* Infer array length from an empty `[]` declarator when followed by an
+         * initializer: `int a[] = {1,2,3}` → length 3, or
+         * `char s[] = "hi"` → length strlen+1. */
+        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
+            && s->u.decl.init) {
+            if (s->u.decl.init->kind == EX_INIT_LIST) {
+                s->u.decl.type.length = s->u.decl.init->u.init_list.num_elements;
+            } else if (s->u.decl.init->kind == EX_STR
+                       && s->u.decl.type.elem_type
+                       && s->u.decl.type.elem_type->width == 1) {
+                s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
+            }
+        }
         symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc);
-        /* Type-check initializer, if any.  For 7-tier scope, sema doesn't
-         * validate that the initializer is a compile-time constant — codegen
-         * will diagnose. */
         if (s->u.decl.init) {
+            /* Validate the initializer list shape against the declared type. */
+            if (s->u.decl.init->kind == EX_INIT_LIST)
+                check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
+            /* A global's initializer must be a compile-time constant. */
+            if (!is_const_init(s->u.decl.init))
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "global initializer must be a constant");
             Type dt = check_expr(s->u.decl.init, &globals, &ft);
             type_free(&dt);
         }
@@ -774,6 +923,7 @@ void sema_check(const TranslationUnit *tu_const) {
         for (size_t j = 0; j < fn->body.len; j++)
             collect_labels(&ls, &fn->body.data[j]);
 
+        g_sema_ret_type = fn->ret_type;
         int has_return = 0;
         check_stmt_list(&fn->body, &st, &ft, &has_return);
         symtable_leave_scope(&st, mark);
@@ -782,7 +932,9 @@ void sema_check(const TranslationUnit *tu_const) {
         g_sema_labels = NULL;
         labelset_free(&ls);
 
-        if (!has_return) {
+        /* A void function need not return a value; a non-void function must
+         * have a return statement. */
+        if (!has_return && fn->ret_type.kind != TY_VOID) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "function '%s' must have a return statement", fn->name);
         }

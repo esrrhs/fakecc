@@ -208,6 +208,10 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
     case EX_COMMA:
         return expr_takes_addr_of(e->u.comma.lhs, name)
             || expr_takes_addr_of(e->u.comma.rhs, name);
+    case EX_INIT_LIST:
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            if (expr_takes_addr_of(e->u.init_list.elements[i], name)) return 1;
+        return 0;
     }
     return 0;
 }
@@ -320,6 +324,9 @@ static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc) {
 /* IR symbol table: variable name → slot (an IRValue, i.e. a stack slot). */
 typedef struct {
     const char *name;
+    const char *global_name; /* non-NULL only for static locals: the mangled
+                              * global (fn.name) that backs this variable.
+                              * emit_gaddr uses this instead of `name`. */
     IRValue slot;         /* alloca-value id (locals) or -1 (globals) */
     int pinned;
     int width;
@@ -359,6 +366,7 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
         st->cap = new_cap;
     }
     st->data[st->len].name = name;
+    st->data[st->len].global_name = NULL;
     st->data[st->len].slot = slot;
     st->data[st->len].pinned = pinned;
     st->data[st->len].width = ty.kind == TY_ARRAY
@@ -373,6 +381,23 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
 static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty) {
     irsymtable_push(st, name, -1, 1, ty);
     st->data[st->len - 1].is_global = 1;
+}
+
+/* Push a static local: it is backed by a mangled global `global_name`
+ * (fn.name " . " varname) but bound in the symbol table under its C name so
+ * ordinary EX_VAR lookups find it.  The global path in lower_expr handles the
+ * load/store via the mangled name. */
+static void irsymtable_push_static_local(IRSymTable *st, const char *name,
+                                         const char *global_name, Type ty) {
+    irsymtable_push(st, name, -1, 1, ty);
+    st->data[st->len - 1].is_global = 1;
+    st->data[st->len - 1].global_name = xstrdup(global_name);
+}
+
+/* The global name a global/static-local slot refers to.  For ordinary globals
+ * this is the C name; for static locals it is the mangled fn.varname. */
+static const char *slot_global_name(const IRSlot *entry) {
+    return entry->global_name ? entry->global_name : entry->name;
 }
 
 /* Look up a variable's slot. Sema guarantees the name exists. */
@@ -396,6 +421,12 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 /* Forward decl. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
+
+/* Initializer-list lowering (defined after ir_generate). */
+static void pack_init(const Type *ty, const Expr *e, char *bytes, int sz,
+                      const char *ctx, SourceLoc loc);
+static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
+                            const Type *ty, const Expr *e, SourceLoc loc);
 
 /* Control-flow helpers used by short-circuit lowering (defined below lower_stmt). */
 static int  new_label(IRFunction *fn);
@@ -468,7 +499,7 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     switch (e->kind) {
     case EX_VAR: {
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
-        if (entry->is_global) return emit_gaddr(fn, entry->name, e->loc);
+        if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc);
         return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
     }
     case EX_DEREF:
@@ -749,7 +780,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) return -1;
         if (entry->is_global) {
-            IRValue addr = emit_gaddr(fn, entry->name, e->loc);
+            IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
             if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT) return addr;
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
@@ -782,7 +813,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
             if (!entry) return -1;
             if (entry->is_global) {
-                IRValue addr = emit_gaddr(fn, entry->name, e->loc);
+                IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
                 emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
             } else if (entry->pinned) {
                 IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
@@ -808,7 +839,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int nargs = (int)e->u.call.args.len;
         for (int i = 0; i < nargs; i++)
             arg_vals[i] = lower_expr(fn, st, e->u.call.args.data[i]);
-        IRValue v = new_value(fn);
+        /* Void call: no result value (width 0).  Still emit the call for its
+         * side effects; dst=-1 marks "no result". */
+        int is_void = (e->type.width == 0);
+        IRValue v = is_void ? -1 : new_value(fn);
         IRInst inst;
         inst.op = IR_CALL;
         inst.dst = v;
@@ -819,17 +853,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.call_name = xstrdup(e->u.call.callee);
         inst.call_nargs = nargs;
         for (int i = 0; i < nargs; i++) inst.call_args[i] = arg_vals[i];
-        inst.width = e->type.width ? e->type.width : 4;
+        inst.width = is_void ? 0 : (e->type.width ? e->type.width : 4);
         inst.is_unsigned = e->type.is_unsigned;
         ir_inst_array_push(&fn->insts, inst);
-        set_value_type(fn, v, inst.width, inst.is_unsigned);
+        if (!is_void) set_value_type(fn, v, inst.width, inst.is_unsigned);
         return v;
     }
     case EX_ADDR: {
         Expr *op = e->u.addr.operand;
         if (op->kind == EX_VAR) {
             const IRSlot *entry = irsymtable_find(st, op->u.var.name);
-            if (entry->is_global) return emit_gaddr(fn, entry->name, e->loc);
+            if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc);
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         }
         if (op->kind == EX_DEREF) {
@@ -979,6 +1013,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     8, 1, e->loc);
         return v;
     }
+    default: break;   /* EX_INIT_LIST is lowered in ST_DECL, not here */
     }
     /* unreachable */
     return -1;
@@ -1089,11 +1124,30 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
     switch (s->kind) {
     case ST_DECL: {
         Type dty = s->u.decl.type;
-        int pinned = is_pinned_in_body(cur_fd, s->u.decl.name, dty);
         int dw = dty.kind == TY_ARRAY ? type_size(*dty.elem_type)
                 : (dty.kind == TY_PTR ? 8
                    : (dty.kind == TY_STRUCT ? 8 : dty.width));
         int du = dty.is_unsigned;
+
+        /* static local → allocate in static storage via a mangled global
+         * `fn.varname`.  Reads/writes resolve through the global_name path. */
+        if (s->u.decl.storage_class == 1) {
+            int sz = type_size(dty);
+            if (sz <= 0) sz = 8;
+            char *bytes = calloc(sz, 1);
+            if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            if (s->u.decl.init)
+                pack_init(&dty, s->u.decl.init, bytes, sz,
+                          s->u.decl.name, s->loc);
+            char mangled[256];
+            snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
+                     s->u.decl.name);
+            ir_module_push_global(g_ir_module, mangled, sz, bytes, 0, s->loc);
+            irsymtable_push_static_local(st, s->u.decl.name, mangled, dty);
+            break;
+        }
+
+        int pinned = is_pinned_in_body(cur_fd, s->u.decl.name, dty);
         IRValue v;
         if (pinned) {
             int total = type_size(dty);
@@ -1104,18 +1158,34 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         }
         irsymtable_push(st, s->u.decl.name, v, pinned, dty);
         if (s->u.decl.init) {
-            if (dty.kind == TY_STRUCT || dty.kind == TY_ARRAY) {
-                fprintf(stderr, "fakecc: struct/array initializers not supported in this slice\n");
-                exit(1);
-            }
-            IRValue rv = lower_expr(fn, st, s->u.decl.init);
-            int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-            IRValue coerced = coerce(fn, rv, rw, ru, dw, du, s->loc);
-            if (pinned) {
-                IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, dw, du, s->loc);
+            if (s->u.decl.init->kind == EX_INIT_LIST) {
+                if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT) {
+                    IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
+                    lower_init_list(fn, st, addr, &dty, s->u.decl.init, s->loc);
+                } else {
+                    /* Scalar target with a single-element brace list
+                     * (`int x = {5}`): store element[0]. */
+                    IRValue rv = lower_expr(fn, st,
+                                            s->u.decl.init->u.init_list.elements[0]);
+                    int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+                    IRValue coerced = coerce(fn, rv, rw, ru, dw, du, s->loc);
+                    if (pinned) {
+                        IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, dw, du, s->loc);
+                    } else {
+                        emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
+                    }
+                }
             } else {
-                emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
+                IRValue rv = lower_expr(fn, st, s->u.decl.init);
+                int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+                IRValue coerced = coerce(fn, rv, rw, ru, dw, du, s->loc);
+                if (pinned) {
+                    IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, dw, du, s->loc);
+                } else {
+                    emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
+                }
             }
         }
         break;
@@ -1124,11 +1194,16 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         lower_expr(fn, st, s->u.expr);
         break;
     case ST_RETURN: {
-        IRValue v = lower_expr(fn, st, s->u.value);
-        int vw = get_value_width(fn, v), vu = get_value_is_unsigned(fn, v);
-        IRValue coerced = coerce(fn, v, vw, vu, fn->ret_width, fn->ret_is_unsigned, s->loc);
-        emit_inst_w(fn, IR_RETURN, -1, coerced, -1, 0,
-                    fn->ret_width, fn->ret_is_unsigned, s->loc);
+        if (fn->ret_width == 0) {
+            /* void function: bare `return;` — no value. */
+            emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
+        } else {
+            IRValue v = lower_expr(fn, st, s->u.value);
+            int vw = get_value_width(fn, v), vu = get_value_is_unsigned(fn, v);
+            IRValue coerced = coerce(fn, v, vw, vu, fn->ret_width, fn->ret_is_unsigned, s->loc);
+            emit_inst_w(fn, IR_RETURN, -1, coerced, -1, 0,
+                        fn->ret_width, fn->ret_is_unsigned, s->loc);
+        }
         break;
     }
     case ST_IF: {
@@ -1341,40 +1416,138 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
     }
 }
 
+/* Pack a compile-time constant initializer into `bytes` (size `sz`) for a
+ * global of type `ty`.  Handles integer literals, negated literals, nested
+ * initializer lists (positional, per-element/per-member offset), and string
+ * literals for `char[]="..."`.  Sema guarantees every element is constant. */
+static void pack_init(const Type *ty, const Expr *e, char *bytes, int sz,
+                      const char *ctx, SourceLoc loc) {
+    if (e->kind == EX_INIT_LIST) {
+        int n = e->u.init_list.num_elements;
+        switch (ty->kind) {
+        case TY_ARRAY: {
+            int esz = type_size(*ty->elem_type);
+            for (int i = 0; i < n; i++)
+                pack_init(ty->elem_type, e->u.init_list.elements[i],
+                          bytes + i * esz, esz, ctx, loc);
+            break;
+        }
+        case TY_STRUCT: {
+            const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
+            if (!sd) die_at(loc.file, loc.line, loc.col,
+                            "unknown struct 'struct %s'", ty->tag);
+            for (int i = 0; i < n; i++)
+                pack_init(&sd->members[i].type, e->u.init_list.elements[i],
+                          bytes + sd->members[i].offset,
+                          type_size(sd->members[i].type), ctx, loc);
+            break;
+        }
+        default:
+            /* Scalar with a single-element brace list: `int x = {5}`. */
+            pack_init(ty, e->u.init_list.elements[0], bytes, sz, ctx, loc);
+            break;
+        }
+        return;
+    }
+    if (e->kind == EX_INT_LIT) {
+        long long v = e->u.int_val;
+        for (int b = 0; b < sz && b < 8; b++)
+            bytes[b] = (char)((v >> (8 * b)) & 0xff);
+        return;
+    }
+    if (e->kind == EX_UNARY && e->u.un.op == UOP_NEG
+        && e->u.un.operand->kind == EX_INT_LIT) {
+        long long v = -(long long)e->u.un.operand->u.int_val;
+        for (int b = 0; b < sz && b < 8; b++)
+            bytes[b] = (char)((v >> (8 * b)) & 0xff);
+        return;
+    }
+    if (e->kind == EX_STR && ty->kind == TY_ARRAY && ty->elem_type
+        && ty->elem_type->width == 1) {
+        /* char[] = "..." — copy bytes (excluding the lexer's implicit NUL,
+         * which we re-add) and NUL-terminate. */
+        int n = e->u.str.len;
+        if (n > sz - 1) n = sz - 1;
+        memcpy(bytes, e->u.str.bytes, n);
+        bytes[n] = '\0';
+        return;
+    }
+    die_at(loc.file, loc.line, loc.col,
+           "global '%s' initializer must be a compile-time constant", ctx);
+}
+
+/* Recursively assign concrete byte offsets for a (possibly nested) scalar
+ * initializer list element when the target is an array/struct.  Used by the
+ * local (non-global) ST_DECL lowering to emit per-element stores.  `base` is
+ * the pointer value to the object; each element is stored at base+offset. */
+static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
+                            const Type *ty, const Expr *e, SourceLoc loc) {
+    if (e->kind == EX_INIT_LIST) {
+        int n = e->u.init_list.num_elements;
+        switch (ty->kind) {
+        case TY_ARRAY: {
+            int esz = type_size(*ty->elem_type);
+            for (int i = 0; i < n; i++) {
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, i * esz, 8, 1, loc);
+                IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
+                lower_init_list(fn, st, ptr, ty->elem_type,
+                                e->u.init_list.elements[i], loc);
+            }
+            break;
+        }
+        case TY_STRUCT: {
+            const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
+            if (!sd) die_at(loc.file, loc.line, loc.col,
+                            "unknown struct 'struct %s'", ty->tag);
+            for (int i = 0; i < n; i++) {
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1,
+                            sd->members[i].offset, 8, 1, loc);
+                IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
+                lower_init_list(fn, st, ptr, &sd->members[i].type,
+                                e->u.init_list.elements[i], loc);
+            }
+            break;
+        }
+        default:
+            lower_init_list(fn, st, base, ty, e->u.init_list.elements[0], loc);
+            break;
+        }
+        return;
+    }
+    /* Scalar element: lower, coerce to the target width, store via pointer. */
+    IRValue rv = lower_expr(fn, st, e);
+    int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+    int sw = ty->kind == TY_PTR ? 8 : (ty->width ? ty->width : 4);
+    int su = ty->is_unsigned;
+    IRValue coerced = coerce(fn, rv, rw, ru, sw, su, loc);
+    emit_inst_w(fn, IR_STORE_PTR, -1, base, coerced, 0, sw, su, loc);
+}
+
 void ir_generate(const TranslationUnit *tu, IRModule *ir) {
     /* Publish module + reset string counter for lower_expr's use. */
     g_ir_module = ir;
     g_str_counter = 0;
     g_ir_structs = &tu->structs;
 
-    /* Register named globals from tu->globals.  Populate initializer bytes
-     * for scalar globals from a simple compile-time integer literal (or 0
-     * if no init).  Complex initializers (arrays, non-const exprs) are
-     * left to a future slice — for 8 we accept `int x = 42;` style. */
+    /* Register named globals from tu->globals.  `extern` globals are
+     * declarations only — no storage, no emission (single-TU model: they can
+     * never be defined, so any use is an unresolved symbol).  `static` globals
+     * are emitted normally here (linkage has no effect in a single-TU static
+     * ELF, but the storage + initializer are real). */
     for (size_t i = 0; i < tu->globals.len; i++) {
         const Stmt *s = &tu->globals.data[i];
         if (s->kind != ST_DECL) continue;
+        /* extern → declaration only: skip emission entirely. */
+        if (s->u.decl.storage_class == 2) continue;
         int sz = type_size(s->u.decl.type);
         if (sz <= 0) sz = 8;
         char *bytes = calloc(sz, 1);
         if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-        if (s->u.decl.init) {
-            Expr *ie = s->u.decl.init;
-            if (ie->kind == EX_INT_LIT) {
-                long long v = ie->u.int_val;
-                for (int b = 0; b < sz && b < 8; b++)
-                    bytes[b] = (char)((v >> (8 * b)) & 0xff);
-            } else if (ie->kind == EX_UNARY && ie->u.un.op == UOP_NEG
-                       && ie->u.un.operand->kind == EX_INT_LIT) {
-                long long v = -(long long)ie->u.un.operand->u.int_val;
-                for (int b = 0; b < sz && b < 8; b++)
-                    bytes[b] = (char)((v >> (8 * b)) & 0xff);
-            } else {
-                die_at(s->loc.file, s->loc.line, s->loc.col,
-                       "global '%s' initializer must be an integer literal (Slice 8 limit)",
-                       s->u.decl.name);
-            }
-        }
+        if (s->u.decl.init)
+            pack_init(&s->u.decl.type, s->u.decl.init, bytes, sz,
+                      s->u.decl.name, s->loc);
         ir_module_push_global(ir, s->u.decl.name, sz, bytes, 0, s->loc);
     }
 

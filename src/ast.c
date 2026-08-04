@@ -37,9 +37,10 @@ void type_free(Type *t) {
 
 int type_size(Type t) {
     switch (t.kind) {
-    case TY_INT:   return t.width;
-    case TY_PTR:   return 8;
-    case TY_ARRAY: return type_size(*t.elem_type) * t.length;
+    case TY_VOID:   return 0;
+    case TY_INT:    return t.width;
+    case TY_PTR:    return 8;
+    case TY_ARRAY:  return type_size(*t.elem_type) * t.length;
     case TY_STRUCT: return t.width;  /* precomputed at struct-def time */
     }
     return 0;
@@ -154,6 +155,7 @@ static int align_up(int x, int align) {
  * arrays, max member alignment for structs. */
 static int type_align(Type t) {
     switch (t.kind) {
+    case TY_VOID:  return 1;    /* void has no size; alignment is a no-op */
     case TY_INT:   return t.width;
     case TY_PTR:   return 8;
     case TY_ARRAY: return type_align(*t.elem_type);
@@ -282,6 +284,42 @@ const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
             if (strcmp(ed->constants[j].name, name) == 0)
                 return &ed->constants[j];
     }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* Typedef registry                                                     */
+/* ------------------------------------------------------------------ */
+
+void typedef_registry_init(TypedefRegistry *r) {
+    r->data = NULL; r->len = 0; r->cap = 0;
+}
+
+void typedef_registry_free(TypedefRegistry *r) {
+    for (size_t i = 0; i < r->len; i++) {
+        free(r->data[i].name);
+        type_free(&r->data[i].type);
+    }
+    free(r->data);
+    r->data = NULL; r->len = 0; r->cap = 0;
+}
+
+TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type) {
+    if (r->len >= r->cap) {
+        size_t nc = r->cap ? r->cap * 2 : 4;
+        r->data = realloc(r->data, nc * sizeof(TypedefEntry));
+        if (!r->data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        r->cap = nc;
+    }
+    TypedefEntry *e = &r->data[r->len++];
+    e->name = xstrdup(name);
+    e->type = type; /* takes ownership */
+    return e;
+}
+
+const Type *typedef_registry_find(const TypedefRegistry *r, const char *name) {
+    for (size_t i = 0; i < r->len; i++)
+        if (strcmp(r->data[i].name, name) == 0) return &r->data[i].type;
     return NULL;
 }
 
@@ -451,6 +489,12 @@ Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc) {
     Expr *e = expr_alloc(EX_COMMA, loc);
     e->u.comma.lhs = l; e->u.comma.rhs = r; return e;
 }
+Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_INIT_LIST, loc);
+    e->u.init_list.elements = elements;
+    e->u.init_list.num_elements = num_elements;
+    return e;
+}
 
 void expr_free(Expr *e) {
     if (!e) return;
@@ -512,6 +556,12 @@ void expr_free(Expr *e) {
         expr_free(e->u.comma.lhs);
         expr_free(e->u.comma.rhs);
         break;
+    case EX_INIT_LIST: {
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            expr_free(e->u.init_list.elements[i]);
+        free(e->u.init_list.elements);
+        break;
+    }
     }
     type_free(&e->type);
     free(e);
@@ -635,6 +685,7 @@ void tu_init(TranslationUnit *tu) {
     tu->functions.cap = 0;
     struct_registry_init(&tu->structs);
     enum_registry_init(&tu->enums);
+    typedef_registry_init(&tu->typedefs);
 }
 
 void tu_free(TranslationUnit *tu) {
@@ -649,6 +700,7 @@ void tu_free(TranslationUnit *tu) {
     free(tu->functions.data);
     struct_registry_free(&tu->structs);
     enum_registry_free(&tu->enums);
+    typedef_registry_free(&tu->typedefs);
 }
 
 void param_array_init(ParamArray *a) {
