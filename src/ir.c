@@ -12,6 +12,7 @@
 IRModule *g_ir_module = NULL;
 int g_str_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
+const TranslationUnit *g_ir_tu = NULL;      /* set by ir_generate */
 
 /* Loop-stack: (continue_label, break_label).  Pushed on entry to every
  * loop-lowering block; popped on exit.  ST_BREAK / ST_CONTINUE consult the
@@ -778,7 +779,23 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     }
     case EX_VAR: {
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
-        if (!entry) return -1;
+        if (!entry) {
+            /* Not a variable — is it a function name?  A function lvalue
+             * (e.g. `add` used as a value, or `&add`) decays to a function
+             * pointer; emit an FADDR so the function's address is loaded
+             * (patched against the code symbol table, not .data). */
+            if (g_ir_tu) {
+                for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
+                    if (strcmp(g_ir_tu->functions.data[i].name, e->u.var.name) == 0) {
+                        IRValue v = new_value(fn);
+                        emit_inst_w(fn, IR_FADDR, v, -1, -1, 0, 8, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].call_name = xstrdup(e->u.var.name);
+                        return v;
+                    }
+                }
+            }
+            return -1;
+        }
         if (entry->is_global) {
             IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
             if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT) return addr;
@@ -834,7 +851,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return coerced;
     }
     case EX_CALL: {
-        const FunctionDecl *unused = NULL; (void)unused;
         IRValue arg_vals[IR_CALL_MAX_ARGS];
         int nargs = (int)e->u.call.args.len;
         for (int i = 0; i < nargs; i++)
@@ -850,7 +866,40 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.b = -1;
         inst.imm = 0;
         inst.loc = e->loc;
-        inst.call_name = xstrdup(e->u.call.callee);
+        inst.call_name = NULL;
+        inst.call_callee = -1;
+        /* Direct named call: callee is `EX_VAR` whose name is a known function
+         * in the TU (matches sema's direct-call path).  Otherwise it's an
+         * indirect call through a function pointer. */
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *cname = e->u.call.callee->u.var.name;
+            /* `__syscall` is an intrinsic — treat it as a named call so codegen
+             * emits the raw `syscall` instruction.  It is not in the function
+             * table, so the direct-call lookup below would miss it. */
+            if (strcmp(cname, "__syscall") == 0) {
+                inst.call_name = xstrdup(cname);
+            } else {
+                int is_direct = 0;
+                if (g_ir_tu) {
+                    for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
+                        if (strcmp(g_ir_tu->functions.data[i].name, cname) == 0) {
+                            is_direct = 1;
+                            break;
+                        }
+                    }
+                }
+                if (is_direct) {
+                    inst.call_name = xstrdup(cname);
+                } else {
+                    /* Function-pointer variable: the callee is loaded from a slot.
+                     * lower_expr returns the loaded SSA value. */
+                    inst.call_callee = lower_expr(fn, st, e->u.call.callee);
+                }
+            }
+        } else {
+            /* Indirect call: lower the callee expression to an SSA value. */
+            inst.call_callee = lower_expr(fn, st, e->u.call.callee);
+        }
         inst.call_nargs = nargs;
         for (int i = 0; i < nargs; i++) inst.call_args[i] = arg_vals[i];
         inst.width = is_void ? 0 : (e->type.width ? e->type.width : 4);
@@ -863,6 +912,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         Expr *op = e->u.addr.operand;
         if (op->kind == EX_VAR) {
             const IRSlot *entry = irsymtable_find(st, op->u.var.name);
+            if (!entry) {
+                /* Not a variable — must be a function name (`&func`).  Emit an
+                 * FADDR so the function's address is loaded into a register
+                 * (patched against the code symbol table, not .data). */
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_FADDR, v, -1, -1, 0, 8, 1, e->loc);
+                fn->insts.data[fn->insts.len - 1].call_name = xstrdup(op->u.var.name);
+                return v;
+            }
             if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc);
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         }
@@ -878,6 +936,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     case EX_DEREF: {
         IRValue ptr = lower_expr(fn, st, e->u.deref.operand);
         if (e->type.kind == TY_STRUCT || e->type.kind == TY_ARRAY) return ptr;
+        /* Function lvalue (`*fp` where fp : ptr(func)): no load — the function
+         * pointer value IS the caldehyde; it decays at the call site. */
+        if (e->type.kind == TY_FUNC) return ptr;
         int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int u = e->type.is_unsigned;
         IRValue v = new_value(fn);
@@ -1148,6 +1209,11 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         }
 
         int pinned = is_pinned_in_body(cur_fd, s->u.decl.name, dty);
+        /* Function-pointer variables are always pinned: their value must
+         * survive in memory so indirect calls can load them.  Without this,
+         * mem2reg promotes them and the store/load chain breaks. */
+        if (dty.kind == TY_PTR && dty.pointee && dty.pointee->kind == TY_FUNC)
+            pinned = 1;
         IRValue v;
         if (pinned) {
             int total = type_size(dty);
@@ -1530,6 +1596,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
     g_ir_module = ir;
     g_str_counter = 0;
     g_ir_structs = &tu->structs;
+    g_ir_tu = tu;
 
     /* Register named globals from tu->globals.  `extern` globals are
      * declarations only — no storage, no emission (single-TU model: they can

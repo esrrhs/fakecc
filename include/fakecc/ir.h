@@ -51,6 +51,7 @@ typedef enum {
     IR_ZEXT,        /* dst = zeroext(a) — a is smaller width; result is `width` */
     IR_TRUNC,       /* dst = trunc(a) to `width` — no-op at register level */
     IR_GADDR,       /* dst = &global; global name in call_name.  Result is 8-byte ptr. */
+    IR_FADDR,       /* dst = &function; function name in call_name.  Result is 8-byte ptr. */
 } IROpcode;
 
 /* Maximum arguments to IR_CALL — Slice 10 raises this from 6 to 16.
@@ -68,6 +69,9 @@ typedef struct {
     char    *call_name;
     IRValue  call_args[IR_CALL_MAX_ARGS];
     int      call_nargs;
+    /* IR_CALL only: for indirect calls, the SSA value holding the function
+     * pointer (lowered from the callee expression).  -1 for named calls. */
+    IRValue  call_callee;
     /* Slice 7a: width of the result (or the storage for LOAD/STORE/ALLOCA).
      *   1, 2, 4, or 8 bytes.  Meaningful for all operand-producing ops and
      *   for LOAD/STORE/ALLOCA/PARAM.  0 for control-flow (BR/CBR/LABEL/RETURN). */

@@ -14,30 +14,36 @@ typedef enum {
     TY_PTR,     /* T*  — pointee owned via heap allocation */
     TY_ARRAY,   /* T[N] — elem_type owned via heap; length is a positive int */
     TY_STRUCT,  /* struct Name — layout looked up in module StructRegistry */
+    TY_FUNC,    /* function type: ret(params...). Carried as pointee of a TY_PTR. */
 } TypeKind;
 
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. */
+    int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. TY_FUNC: 0. */
     int is_unsigned;   /* TY_INT only */
     int is_const;      /* 1 = const-qualified (assignment forbidden) */
     Type *pointee;     /* TY_PTR only: malloc'd */
     Type *elem_type;   /* TY_ARRAY only: malloc'd */
     int length;        /* TY_ARRAY only */
     char *tag;         /* TY_STRUCT only: xstrdup'd tag name */
+    Type *func_ret;    /* TY_FUNC only: malloc'd return type */
+    Type *func_params; /* TY_FUNC only: malloc'd array of param types (nparams long) */
+    int   func_nparams;/* TY_FUNC only */
 };
 
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL; return t;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL; return t;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
 }
 
 /* Deep-clone a Type (recursing into pointee/elem_type). */
@@ -50,9 +56,11 @@ int  type_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);
+Type type_make_func(Type ret, const Type *params, int nparams);
 Type type_decay(Type t);
 int  type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
+int  type_funcs_equal(Type a, Type b);  /* true if ret + all params match */
 
 /* ------------------------------------------------------------------ */
 /* Expression — Slice 2 introduces arithmetic expressions              */
@@ -127,7 +135,7 @@ struct Expr {
         struct { UnaryOp op; Expr *operand; } un;     /* EX_UNARY */
         struct { char *name; } var;                    /* EX_VAR */
         struct { Expr *lvalue; Expr *rvalue; } assign;/* EX_ASSIGN */
-        struct { char *callee; ExprArray args; } call;/* EX_CALL — owns callee + args */
+        struct { Expr *callee; ExprArray args; } call;/* EX_CALL — owns callee expr + args */
         struct { char *bytes; int len; } str;         /* EX_STR — bytes owns strdup'd data, len excludes trailing NUL */
         struct { Expr *operand; } addr;                /* EX_ADDR */
         struct { Expr *operand; } deref;               /* EX_DEREF */
@@ -150,7 +158,7 @@ Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
-Expr *expr_new_call(const char *callee, SourceLoc loc);
+Expr *expr_new_call(Expr *callee, SourceLoc loc);
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
 Expr *expr_new_addr(Expr *operand, SourceLoc loc);
 Expr *expr_new_deref(Expr *operand, SourceLoc loc);
@@ -165,6 +173,7 @@ Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc l
 Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
+void  expr_call_set_callee(Expr *e, Expr *callee); /* takes ownership, frees old */
 void  expr_free(Expr *e);
 /* Set an Expr's type, freeing the old (owning) type first; takes ownership of t. */
 void  expr_set_type(Expr *e, Type t);

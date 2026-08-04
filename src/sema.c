@@ -297,12 +297,30 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     }
     case EX_VAR: {
         const Sym *sym = symtable_find(st, e->u.var.name);
-        if (!sym) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "use of undeclared variable '%s'", e->u.var.name);
+        if (sym) {
+            set_type(e, type_clone(sym->type));
+            return type_clone(e->type);
         }
-        set_type(e, type_clone(sym->type));
-        return type_clone(e->type);
+        /* Not a variable — is it a function name?  A function lvalue decays
+         * to a pointer to its type (so `add` and &add both yield `ptr(func)`). */
+        const FunSig *sig = ftab_find(ft, e->u.var.name);
+        if (sig) {
+            Type *ptys = NULL;
+            if (sig->arity > 0) {
+                ptys = malloc(sig->arity * sizeof(Type));
+                if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                for (int i = 0; i < sig->arity; i++)
+                    ptys[i] = sig->param_types[i];
+            }
+            Type fn = type_make_func(sig->ret_type, ptys, sig->arity);
+            if (ptys) free(ptys);
+            Type fp = type_make_ptr(fn);
+            type_free(&fn);
+            set_type(e, fp);
+            return type_clone(e->type);
+        }
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "use of undeclared variable '%s'", e->u.var.name);
     }
     case EX_ASSIGN: {
         if (e->u.assign.lvalue->kind != EX_VAR &&
@@ -363,10 +381,12 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_CALL: {
-        /* Recognize the __syscall intrinsic: it takes 1..7 int args (syscall
-         * number + up to 6 arguments) and returns long.  Type-check its
-         * operands but skip the FunTable lookup. */
-        if (strcmp(e->u.call.callee, "__syscall") == 0) {
+        /* Recognize the __syscall intrinsic FIRST — before type-checking the
+         * callee, because `__syscall` is not a real variable/function and would
+         * otherwise fail the EX_VAR lookup.  It takes 1..7 int args and returns
+         * long. */
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__syscall") == 0) {
             if (e->u.call.args.len < 1 || e->u.call.args.len > 7) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__syscall takes 1 to 7 arguments (syscall num + up to 6 args)");
@@ -378,22 +398,53 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             set_type(e, type_make_int(8, 0));
             return type_clone(e->type);
         }
-        const FunSig *sig = ftab_find(ft, e->u.call.callee);
-        if (!sig) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "call to undeclared function '%s'", e->u.call.callee);
+        /* Type-check the callee expression. */
+        Type callee_ty = check_expr(e->u.call.callee, st, ft);
+        /* Direct call: callee is `EX_VAR` naming a known function. */
+        if (e->u.call.callee->kind == EX_VAR) {
+            const FunSig *sig = ftab_find(ft, e->u.call.callee->u.var.name);
+            if (sig) {
+                type_free(&callee_ty);
+                if ((int)e->u.call.args.len != sig->arity) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "function '%s' takes %d argument%s but %zu given",
+                           e->u.call.callee->u.var.name, sig->arity,
+                           sig->arity == 1 ? "" : "s", e->u.call.args.len);
+                }
+                for (size_t i = 0; i < e->u.call.args.len; i++) {
+                    Type at = check_expr(e->u.call.args.data[i], st, ft);
+                    type_free(&at);
+                }
+                set_type(e, type_clone(sig->ret_type));
+                return type_clone(e->type);
+            }
         }
-        if ((int)e->u.call.args.len != sig->arity) {
+        /* Indirect call: callee type must be pointer-to-function or bare
+         * function (a function lvalue such as `*fp` decays to a pointer). */
+        Type fn_ty = callee_ty;
+        if (fn_ty.kind == TY_PTR && fn_ty.pointee && fn_ty.pointee->kind == TY_FUNC) {
+            fn_ty = type_clone(*fn_ty.pointee);
+            type_free(&callee_ty);
+        } else if (fn_ty.kind == TY_FUNC) {
+            /* Bare function lvalue — keep as-is. */
+            fn_ty = type_clone(callee_ty);
+            type_free(&callee_ty);
+        } else {
             die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "function '%s' takes %d argument%s but %zu given",
-                   e->u.call.callee, sig->arity,
-                   sig->arity == 1 ? "" : "s", e->u.call.args.len);
+                   "call to non-function (callee type must be a function or function pointer)");
+        }
+        if ((int)e->u.call.args.len != fn_ty.func_nparams) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "function pointer expects %d argument%s but %zu given",
+                   fn_ty.func_nparams,
+                   fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
         }
         for (size_t i = 0; i < e->u.call.args.len; i++) {
             Type at = check_expr(e->u.call.args.data[i], st, ft);
             type_free(&at);
         }
-        set_type(e, type_clone(sig->ret_type));
+        set_type(e, type_clone(*fn_ty.func_ret));
+        type_free(&fn_ty);
         return type_clone(e->type);
     }
     case EX_STR: {
@@ -412,6 +463,13 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "cannot take address of rvalue");
+        }
+        /* `&function` is a no-op in C -- the result is the same function
+         * pointer that the function lvalue already decayed to.  If the operand
+         * is already a function pointer (from decay), just return it. */
+        if (ot.kind == TY_PTR && ot.pointee && ot.pointee->kind == TY_FUNC) {
+            set_type(e, ot);  /* takes ownership of ot */
+            return type_clone(e->type);
         }
         Type res = type_make_ptr(ot);
         type_free(&ot);
@@ -911,8 +969,15 @@ void sema_check(const TranslationUnit *tu_const) {
                        "duplicate parameter name '%s'",
                        fn->params.data[j].name);
             }
+            /* Normalize unsized array parameters (`int a[]`) to pointers,
+             * matching standard C parameter adjustment. */
+            Type pty = fn->params.data[j].type;
+            if (pty.kind == TY_ARRAY && pty.length == 0) {
+                pty = type_make_ptr(*pty.elem_type);
+            }
             symtable_push(&st, fn->params.data[j].name,
-                          fn->params.data[j].type, fn->params.data[j].loc);
+                          pty, fn->params.data[j].loc);
+            if (pty.kind == TY_PTR) type_free(&pty);
         }
 
         /* Pre-pass: collect every label in the function so forward gotos

@@ -241,6 +241,14 @@ static size_t emit_call_rel32(Buffer *b) {
     return patch;
 }
 
+/* call *%reg  →  FF /2 [ModRM: mod=11, reg=2, rm=reg].  Indirect call through
+ * a register holding a function pointer.  REX.B (0x41) for reg >= 8. */
+static void emit_indirect_call(Buffer *b, int reg) {
+    if (reg >= 8) emit_byte(b, 0x41);  /* REX.B */
+    emit_byte(b, 0xFF);
+    emit_modrm(b, 3, 2, reg & 7);
+}
+
 /* SysV AMD64: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9. */
 static const int SYSV_ARG_REGS[6] = {
     REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9
@@ -659,6 +667,13 @@ typedef struct {
     size_t after_off;
 } CallPatch;
 
+/* Function-address load patch: `lea r, [rip+0]` where the target is a function
+ * (e.g. `&add` or a function lvalue).  Resolved against the symbol table. */
+typedef struct {
+    size_t patch_off;
+    char  *fn_name;       /* xstrdup'd function name */
+} FnAddrPatch;
+
 /* Compute which callee-saved registers this function actually uses.
  * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 (0 or 1). */
 static void collect_callee_saved(const RAResult *ra, int used[3]) {
@@ -707,6 +722,9 @@ void codegen(const IRModule *ir, EmitModule *out) {
     /* Cross-function call patches (accumulated across every function). */
     CallPatch *call_patches = NULL;
     size_t num_call_patches = 0, cap_call_patches = 0;
+    /* Function-address load patches (`&func` / function lvalue). */
+    FnAddrPatch *fnaddr_patches = NULL;
+    size_t num_fnaddr_patches = 0, cap_fnaddr_patches = 0;
 
     for (size_t i = 0; i < ir->functions.len; i++) {
         const IRFunction *fn = &ir->functions.data[i];
@@ -1092,6 +1110,25 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 break;
             }
 
+            case IR_FADDR: {
+                /* dst = &function; function name in inst->call_name.  Emit
+                 * `lea r, [rip+0]` and record an FnAddrPatch resolved against
+                 * the code symbol table (functions live in .code, not .data). */
+                int target = dr >= 0 ? dr : REG_RAX;
+                size_t patch = emit_lea_rip(&out->code, target);
+                if (num_fnaddr_patches >= cap_fnaddr_patches) {
+                    cap_fnaddr_patches = cap_fnaddr_patches ? cap_fnaddr_patches * 2 : 8;
+                    fnaddr_patches = xrealloc(fnaddr_patches,
+                                               cap_fnaddr_patches * sizeof(FnAddrPatch));
+                }
+                fnaddr_patches[num_fnaddr_patches].patch_off = patch;
+                fnaddr_patches[num_fnaddr_patches].fn_name = xstrdup(inst->call_name);
+                num_fnaddr_patches++;
+                if (dr < 0)
+                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                break;
+            }
+
             case IR_LOAD_PTR: {
                 /* dst = *ptr.  ptr = inst->a. */
                 ensure_reg(&out->code, inst->a, REG_RCX, ra);
@@ -1188,6 +1225,12 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 int need_pad = (nstack & 1);
                 if (need_pad) emit_sub_rsp_imm32(&out->code, 8);
 
+                /* For indirect calls, load the callee into R11 BEFORE the arg
+                 * dance so it survives the push/pop clobbers.  R11 is
+                 * caller-saved and not a SysV arg reg. */
+                if (!inst->call_name)
+                    ensure_reg(&out->code, inst->call_callee, REG_R11, ra);
+
                 /* Push stack args right-to-left (arg N-1 first → arg 6 on top
                  * closest to callee's rbp+16). */
                 for (int k = nargs - 1; k >= 6; k--) {
@@ -1206,18 +1249,24 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     emit_pop_r(&out->code, SYSV_ARG_REGS[k]);
                 }
 
-                /* Emit call rel32 with a cross-function patch. */
-                size_t poff = emit_call_rel32(&out->code);
-                size_t aft = out->code.len;
-                if (num_call_patches >= cap_call_patches) {
-                    cap_call_patches = cap_call_patches ? cap_call_patches * 2 : 8;
-                    call_patches = xrealloc(call_patches,
-                                             cap_call_patches * sizeof(CallPatch));
+                if (inst->call_name) {
+                    /* Direct named call: emit call rel32 with a cross-function patch. */
+                    size_t poff = emit_call_rel32(&out->code);
+                    size_t aft = out->code.len;
+                    if (num_call_patches >= cap_call_patches) {
+                        cap_call_patches = cap_call_patches ? cap_call_patches * 2 : 8;
+                        call_patches = xrealloc(call_patches,
+                                                 cap_call_patches * sizeof(CallPatch));
+                    }
+                    call_patches[num_call_patches].patch_off = poff;
+                    call_patches[num_call_patches].callee = xstrdup(inst->call_name);
+                    call_patches[num_call_patches].after_off = aft;
+                    num_call_patches++;
+                } else {
+                    /* Indirect call: the callee is already in R11.  Emit
+                     * `call *%r11` (FF /2). */
+                    emit_indirect_call(&out->code, REG_R11);
                 }
-                call_patches[num_call_patches].patch_off = poff;
-                call_patches[num_call_patches].callee = xstrdup(inst->call_name);
-                call_patches[num_call_patches].after_off = aft;
-                num_call_patches++;
 
                 /* Tear down stack args + padding. */
                 int cleanup = nstack * 8 + (need_pad ? 8 : 0);
@@ -1295,4 +1344,33 @@ void codegen(const IRModule *ir, EmitModule *out) {
         free(cp->callee);
     }
     free(call_patches);
+
+    /* ---- Resolve function-address load patches ---- */
+    for (size_t pi = 0; pi < num_fnaddr_patches; pi++) {
+        FnAddrPatch *fp = &fnaddr_patches[pi];
+        /* Look up the function's start offset in the symbol table. */
+        size_t target = (size_t)-1;
+        for (size_t si = 0; si < out->num_symbols; si++) {
+            if (strcmp(out->symbols[si].name, fp->fn_name) == 0) {
+                target = out->symbols[si].offset;
+                break;
+            }
+        }
+        if (target == (size_t)-1) {
+            fprintf(stderr, "fakecc: unresolved function address '%s'\n", fp->fn_name);
+            exit(1);
+        }
+        /* lea r, [rip+disp32]: disp32 = target - (rip_next) where both are
+         * absolute addresses.  target = ELF_BASE + symbol_offset;
+         * rip_next = ELF_BASE + patch_off + 4.  The ELF_BASE cancels: */
+        int64_t rel = (int64_t)target - (int64_t)(fp->patch_off + 4);
+        if (rel < INT32_MIN || rel > INT32_MAX) {
+            fprintf(stderr, "fakecc: function address displacement out of range\n");
+            exit(1);
+        }
+        int32_t rel32 = (int32_t)rel;
+        memcpy(out->code.data + fp->patch_off, &rel32, 4);
+        free(fp->fn_name);
+    }
+    free(fnaddr_patches);
 }

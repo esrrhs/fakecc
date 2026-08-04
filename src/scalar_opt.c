@@ -123,6 +123,9 @@ int scalar_dce(IRFunction *fn) {
                 int v = inst->call_args[k];
                 if (v >= 0 && v < fn->next_value_id) used[v] = 1;
             }
+            /* Indirect calls use call_callee — keep it alive. */
+            if (inst->call_callee >= 0 && inst->call_callee < fn->next_value_id)
+                used[inst->call_callee] = 1;
         }
     }
 

@@ -25,6 +25,21 @@ Type type_clone(Type t) {
         r.elem_type = NULL;
     }
     r.tag = t.tag ? xstrdup(t.tag) : NULL;
+    if (t.kind == TY_FUNC && t.func_ret) {
+        r.func_ret = malloc(sizeof(Type));
+        if (!r.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        *r.func_ret = type_clone(*t.func_ret);
+    } else {
+        r.func_ret = NULL;
+    }
+    if (t.kind == TY_FUNC && t.func_nparams > 0 && t.func_params) {
+        r.func_params = malloc(t.func_nparams * sizeof(Type));
+        if (!r.func_params) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        for (int i = 0; i < t.func_nparams; i++)
+            r.func_params[i] = type_clone(t.func_params[i]);
+    } else {
+        r.func_params = NULL;
+    }
     return r;
 }
 
@@ -33,6 +48,11 @@ void type_free(Type *t) {
     if (t->pointee) { type_free(t->pointee); free(t->pointee); t->pointee = NULL; }
     if (t->elem_type) { type_free(t->elem_type); free(t->elem_type); t->elem_type = NULL; }
     if (t->tag) { free(t->tag); t->tag = NULL; }
+    if (t->func_ret) { type_free(t->func_ret); free(t->func_ret); t->func_ret = NULL; }
+    if (t->func_params) {
+        for (int i = 0; i < t->func_nparams; i++) type_free(&t->func_params[i]);
+        free(t->func_params); t->func_params = NULL;
+    }
 }
 
 int type_size(Type t) {
@@ -42,6 +62,7 @@ int type_size(Type t) {
     case TY_PTR:    return 8;
     case TY_ARRAY:  return type_size(*t.elem_type) * t.length;
     case TY_STRUCT: return t.width;  /* precomputed at struct-def time */
+    case TY_FUNC:   return 0;        /* sizeof a function is undefined */
     }
     return 0;
 }
@@ -50,6 +71,7 @@ Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
     t.is_const = 0;
     t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.pointee = malloc(sizeof(Type));
     if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.pointee = type_clone(pointee);
@@ -60,6 +82,7 @@ Type type_make_array(Type elem, int length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
     t.is_unsigned = elem.is_unsigned; t.is_const = 0; t.length = length;
     t.pointee = NULL; t.tag = NULL;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.elem_type = type_clone(elem);
@@ -70,8 +93,51 @@ Type type_make_struct(const char *tag, int size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
     t.is_const = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.tag = xstrdup(tag);
     return t;
+}
+
+Type type_make_func(Type ret, const Type *params, int nparams) {
+    Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.func_ret = malloc(sizeof(Type));
+    if (!t.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    *t.func_ret = type_clone(ret);
+    t.func_nparams = nparams;
+    if (nparams > 0) {
+        t.func_params = malloc(nparams * sizeof(Type));
+        if (!t.func_params) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        for (int i = 0; i < nparams; i++)
+            t.func_params[i] = type_clone(params[i]);
+    } else {
+        t.func_params = NULL;
+    }
+    return t;
+}
+
+static int types_equal(Type a, Type b);  /* forward */
+
+int type_funcs_equal(Type a, Type b) {
+    if (a.kind != TY_FUNC || b.kind != TY_FUNC) return 0;
+    if (!types_equal(*a.func_ret, *b.func_ret)) return 0;
+    if (a.func_nparams != b.func_nparams) return 0;
+    for (int i = 0; i < a.func_nparams; i++)
+        if (!types_equal(a.func_params[i], b.func_params[i])) return 0;
+    return 1;
+}
+
+static int types_equal(Type a, Type b) {
+    if (a.kind != b.kind) return 0;
+    switch (a.kind) {
+    case TY_VOID: return 1;
+    case TY_INT: return a.width == b.width && a.is_unsigned == b.is_unsigned;
+    case TY_PTR: return types_equal(*a.pointee, *b.pointee);
+    case TY_ARRAY: return a.length == b.length && types_equal(*a.elem_type, *b.elem_type);
+    case TY_STRUCT: return a.tag && b.tag && strcmp(a.tag, b.tag) == 0;
+    case TY_FUNC: return type_funcs_equal(a, b);
+    }
+    return 0;
 }
 
 Type type_decay(Type t) {
@@ -160,6 +226,7 @@ static int type_align(Type t) {
     case TY_PTR:   return 8;
     case TY_ARRAY: return type_align(*t.elem_type);
     case TY_STRUCT: return 8;   /* conservative — structs align to 8 */
+    case TY_FUNC:  return 1;    /* bare function has no size */
     }
     return 1;
 }
@@ -396,7 +463,7 @@ Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
     return e;
 }
 
-Expr *expr_new_call(const char *callee, SourceLoc loc) {
+Expr *expr_new_call(Expr *callee, SourceLoc loc) {
     Expr *e = malloc(sizeof(Expr));
     if (!e) {
         fprintf(stderr, "fakecc: out of memory\n");
@@ -405,11 +472,17 @@ Expr *expr_new_call(const char *callee, SourceLoc loc) {
     e->kind = EX_CALL;
     e->loc = loc;
     e->type = type_default_int();
-    e->u.call.callee = xstrdup(callee);
+    e->u.call.callee = callee;   /* takes ownership */
     e->u.call.args.data = NULL;
     e->u.call.args.len = 0;
     e->u.call.args.cap = 0;
     return e;
+}
+
+void expr_call_set_callee(Expr *e, Expr *callee) {
+    if (!e || e->kind != EX_CALL) return;
+    if (e->u.call.callee) expr_free(e->u.call.callee);
+    e->u.call.callee = callee;   /* takes ownership */
 }
 
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
@@ -516,7 +589,7 @@ void expr_free(Expr *e) {
         expr_free(e->u.assign.rvalue);
         break;
     case EX_CALL:
-        free(e->u.call.callee);
+        expr_free(e->u.call.callee);
         for (size_t i = 0; i < e->u.call.args.len; i++)
             expr_free(e->u.call.args.data[i]);
         free(e->u.call.args.data);
