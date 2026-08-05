@@ -14,7 +14,7 @@ static void push_inst(IRInstArray *a, IROpcode op, IRValue dst,
         a->data = realloc(a->data, a->cap * sizeof(IRInst));
         if (!a->data) exit(1);
     }
-    IRInst inst = {op, dst, arg1, arg2, imm, {NULL, 0, 0}, NULL, {0}, 0, 8, 0, 0, -1};
+    IRInst inst = {op, dst, arg1, arg2, imm, {NULL, 0, 0}, NULL, {0}, 0, 8, 0, 0, -1, 0, 0};
     a->data[a->len++] = inst;
 }
 
@@ -42,6 +42,9 @@ static void test_ra_single_const(void) {
     fn.next_value_id = 2;
     fn.loc = (SourceLoc){NULL, 0, 0};
     fn.ra = NULL;
+    fn.value_is_float = NULL;
+    fn.value_meta_cap = 0;
+    fn.ra_xmm = NULL;
 
     /* CONST 0 = 42; RETURN 0 */
     push_inst(&fn.insts, IR_CONST,  0, -1, -1, 42);
@@ -72,6 +75,9 @@ static void test_ra_two_independent(void) {
     fn.next_value_id = 3;
     fn.loc = (SourceLoc){NULL, 0, 0};
     fn.ra = NULL;
+    fn.value_is_float = NULL;
+    fn.value_meta_cap = 0;
+    fn.ra_xmm = NULL;
 
     /* v0 = CONST 1; v1 = CONST 2; RETURN v0
      * v0 and v1 are independent (no interference — they never overlap in use). */
@@ -103,6 +109,9 @@ static void test_ra_interfering_pair(void) {
     fn.next_value_id = 4;
     fn.loc = (SourceLoc){NULL, 0, 0};
     fn.ra = NULL;
+    fn.value_is_float = NULL;
+    fn.value_meta_cap = 0;
+    fn.ra_xmm = NULL;
 
     /* v0 = CONST 3; v1 = CONST 4; v2 = ADD v0, v1; RETURN v2
      * v0 and v1 are both live at the ADD instruction → they interfere. */
@@ -134,6 +143,9 @@ static void test_ra_after_mem2reg(void) {
     fn.next_value_id = 3;
     fn.loc = (SourceLoc){NULL, 0, 0};
     fn.ra = NULL;
+    fn.value_is_float = NULL;
+    fn.value_meta_cap = 0;
+    fn.ra_xmm = NULL;
 
     /* int x = 5; return x;
      *   ALLOCA 0; CONST 1=5; STORE 0,1; LOAD 2,0; RETURN 2 */
@@ -173,6 +185,9 @@ static void test_ra_empty(void) {
     fn.next_value_id = 1;
     fn.loc = (SourceLoc){NULL, 0, 0};
     fn.ra = NULL;
+    fn.value_is_float = NULL;
+    fn.value_meta_cap = 0;
+    fn.ra_xmm = NULL;
 
     /* Just RETURN with no prior defs (next_value_id = 1, but no CONST). */
     push_inst(&fn.insts, IR_RETURN, -1, 0, -1, 0);
@@ -218,6 +233,9 @@ static void test_ra_loop_carried_liveness(void) {
     fn.next_label_id = 3;
     fn.loc = (SourceLoc){NULL, 0, 0};
     fn.ra = NULL;
+    fn.value_is_float = NULL;
+    fn.value_meta_cap = 0;
+    fn.ra_xmm = NULL;
 
     /* pre-loop */
     push_inst(&fn.insts, IR_CONST, 0, -1, -1, 1);   /* v0 = 1 */

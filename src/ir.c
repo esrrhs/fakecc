@@ -51,10 +51,13 @@ void ir_module_free(IRModule *m) {
         free(m->functions.data[i].insts.data);
         free(m->functions.data[i].value_width);
         free(m->functions.data[i].value_is_unsigned);
-        /* Free register allocation result if present. */
+        free(m->functions.data[i].value_is_float);
+        /* Free register allocation results if present. */
         extern void ra_result_free(void *ra);
         if (m->functions.data[i].ra)
             ra_result_free(m->functions.data[i].ra);
+        if (m->functions.data[i].ra_xmm)
+            ra_result_free(m->functions.data[i].ra_xmm);
     }
     free(m->functions.data);
     for (size_t i = 0; i < m->globals.len; i++) {
@@ -141,12 +144,14 @@ static void set_value_type(IRFunction *fn, IRValue v, int width, int is_unsigned
         while (new_cap <= v) new_cap *= 2;
         fn->value_width = realloc(fn->value_width, new_cap * sizeof(int));
         fn->value_is_unsigned = realloc(fn->value_is_unsigned, new_cap * sizeof(int));
-        if (!fn->value_width || !fn->value_is_unsigned) {
+        fn->value_is_float = realloc(fn->value_is_float, new_cap * sizeof(int));
+        if (!fn->value_width || !fn->value_is_unsigned || !fn->value_is_float) {
             fprintf(stderr, "fakecc: OOM\n"); exit(1);
         }
         for (int i = old_cap; i < new_cap; i++) {
             fn->value_width[i] = 4;
             fn->value_is_unsigned[i] = 0;
+            fn->value_is_float[i] = 0;
         }
         fn->value_meta_cap = new_cap;
     }
@@ -158,6 +163,7 @@ static int get_value_width(const IRFunction *fn, IRValue v) {
     if (v < 0 || v >= fn->value_meta_cap) return 4;
     return fn->value_width[v];
 }
+
 static int get_value_is_unsigned(const IRFunction *fn, IRValue v) {
     if (v < 0 || v >= fn->value_meta_cap) return 0;
     return fn->value_is_unsigned[v];
@@ -171,6 +177,7 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
     if (!e) return 0;
     switch (e->kind) {
     case EX_INT_LIT: return 0;
+    case EX_FLOAT_LIT: return 0;
     case EX_STR: return 0;
     case EX_BINOP:
         return expr_takes_addr_of(e->u.bin.l, name)
@@ -271,6 +278,22 @@ static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) 
     return 0;
 }
 
+/* Record float-ness for value `v`. */
+static void set_value_float(IRFunction *fn, IRValue v, int is_float) {
+    if (v < 0) return;
+    if (v >= fn->value_meta_cap) {
+        /* Ensure meta arrays are allocated (set_value_type would do this, but
+         * a pure-float value may never pass through set_value_type). */
+        set_value_type(fn, v, 4, 0);
+    }
+    if (fn->value_is_float)
+        fn->value_is_float[v] = is_float;
+}
+static int get_value_is_float(const IRFunction *fn, IRValue v) {
+    if (v < 0 || v >= fn->value_meta_cap || !fn->value_is_float) return 0;
+    return fn->value_is_float[v];
+}
+
 /* Push an instruction with the given fields (width + signedness). */
 static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
                         int imm, int width, int is_unsigned, SourceLoc loc) {
@@ -286,8 +309,31 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     inst.width = width;
     inst.is_unsigned = is_unsigned;
     inst.alloca_bytes = 0;
+    inst.float_imm = 0;
+    inst.is_float = 0;
     ir_inst_array_push(&fn->insts, inst);
     if (dst >= 0) set_value_type(fn, dst, width ? width : 4, is_unsigned);
+}
+
+/* Push a float-typed instruction. */
+static void emit_inst_f(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
+                        int width, SourceLoc loc) {
+    emit_inst_w(fn, op, dst, a, b, 0, width, 0, loc);
+    if (dst >= 0) {
+        set_value_float(fn, dst, 1);
+        fn->insts.data[fn->insts.len - 1].is_float = 1;
+    }
+}
+
+/* Emit a float constant (bit pattern in `bits`). */
+static IRValue emit_float_const(IRFunction *fn, int width, int64_t bits, SourceLoc loc) {
+    IRValue v = new_value(fn);
+    emit_inst_w(fn, IR_CONST, v, -1, -1, 0, width, 0, loc);
+    IRInst *inst = &fn->insts.data[fn->insts.len - 1];
+    inst->is_float = 1;
+    inst->float_imm = bits;
+    set_value_float(fn, v, 1);
+    return v;
 }
 
 /* Push an instruction (width/signedness default 4/signed). */
@@ -452,6 +498,36 @@ static IRValue coerce(IRFunction *fn, IRValue v, int src_w, int src_u,
     return res;
 }
 
+/* Convert value `v` between float and int domains (or resize float↔double).
+ *   to_float: 1 → convert int→float (SITOFP); 0 → float→int (FPTOSI).
+ *   For float↔float, FPEXT (widen) or FPTRUNC (narrow).
+ * Returns the (possibly new) value id, with value_is_float set appropriately. */
+static IRValue convert_numeric(IRFunction *fn, IRValue v,
+                               int src_w, int dst_w, int dst_u,
+                               int to_float, SourceLoc loc) {
+    int src_float = get_value_is_float(fn, v);
+    IRValue res = new_value(fn);
+    IROpcode op;
+    if (src_float && to_float) {
+        /* float → float (width change). */
+        op = (dst_w > src_w) ? IR_FPEXT : IR_FPTRUNC;
+        emit_inst_f(fn, op, res, v, -1, dst_w, loc);
+        return res;
+    }
+    if (src_float && !to_float) {
+        /* float → int. */
+        op = IR_FPTOSI;
+        emit_inst_w(fn, op, res, v, -1, src_w, dst_w, dst_u, loc);
+        set_value_float(fn, res, 0);
+        return res;
+    }
+    /* int → float. */
+    op = IR_SITOFP;
+    emit_inst_w(fn, op, res, v, -1, src_w, dst_w, 0, loc);
+    set_value_float(fn, res, 1);
+    return res;
+}
+
 /* Map a BinOp (AST) to the matching IROpcode (IR). */
 static IROpcode bop_to_ir(BinOp op) {
     switch (op) {
@@ -544,6 +620,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     e->type.is_unsigned, e->loc);
         return v;
     }
+    case EX_FLOAT_LIT: {
+        /* Bit-cast the IEEE-754 value into an int64 constant payload. */
+        int w = e->type.width ? e->type.width : 8;
+        int64_t bits = 0;
+        if (w == 4) { float f = (float)e->u.float_lit; bits = 0; *(float*)&bits = f; }
+        else { double d = e->u.float_lit; *(double*)&bits = d; }
+        return emit_float_const(fn, w, bits, e->loc);
+    }
     case EX_STR: {
         /* Register a rodata global holding the bytes, then produce its
          * address via IR_GADDR. */
@@ -563,8 +647,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue x = lower_expr(fn, st, e->u.un.operand);
             int sw = get_value_width(fn, x);
             int su = get_value_is_unsigned(fn, x);
+            int sf = get_value_is_float(fn, x);
             int rw = e->type.width ? e->type.width : 4;
             int ru = e->type.is_unsigned;
+            if (sf) {
+                /* Float negation: -x = 0.0 - x. */
+                IRValue zero = emit_float_const(fn, rw, 0, e->loc);
+                IRValue neg = emit_bin_w(fn, IR_FSUB, zero, x, rw, 0, e->loc);
+                set_value_float(fn, neg, 1);
+                return neg;
+            }
             IRValue px = coerce(fn, x, sw, su, rw, ru, e->loc);
             return emit_bin_w(fn, IR_NEG, px, -1, rw, ru, e->loc);
         }
@@ -687,15 +779,23 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue r = lower_expr(fn, st, e->u.bin.r);
         int lw = get_value_width(fn, l), lu = get_value_is_unsigned(fn, l);
         int rw = get_value_width(fn, r), ru = get_value_is_unsigned(fn, r);
+        int lf = get_value_is_float(fn, l), rf = get_value_is_float(fn, r);
 
         int is_cmp = (e->u.bin.op >= BOP_EQ && e->u.bin.op <= BOP_GE);
+        /* For arithmetic the result type follows e->type; for comparisons the
+         * result is always int, but a float comparison (either operand float)
+         * must lower to IR_FCMP, not integer IR_GT/etc. */
+        int res_float = (e->type.kind == TY_FLOAT) || (is_cmp && (lf || rf));
         /* Operand width for the op = e->type for arith; UAC result for cmp. */
         int op_w, op_u;
         if (is_cmp) {
             /* Reapply UAC to operand types to know cmp width/signedness. */
-            int aw = lw < 4 ? 4 : lw, au = lw < 4 ? 0 : lu;
-            int bw = rw < 4 ? 4 : rw, bu = rw < 4 ? 0 : ru;
-            if (aw == bw && au == bu) { op_w = aw; op_u = au; }
+            int aw = lf ? lw : (lw < 4 ? 4 : lw), au = lf ? 0 : (lw < 4 ? 0 : lu);
+            int bw = rf ? rw : (rw < 4 ? 4 : rw), bu = rf ? 0 : (rw < 4 ? 0 : ru);
+            if (lf || rf) {
+                /* Float comparison: width = max float width, neither signed. */
+                op_w = aw > bw ? aw : bw; op_u = 0;
+            } else if (aw == bw && au == bu) { op_w = aw; op_u = au; }
             else if (au == bu) { op_w = aw > bw ? aw : bw; op_u = au; }
             else {
                 int uw = au ? aw : bw; int uu = 1;
@@ -707,36 +807,68 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             op_w = e->type.width ? e->type.width : 4;
             op_u = e->type.is_unsigned;
         }
-        IRValue pl = coerce(fn, l, lw, lu, op_w, op_u, e->loc);
-        IRValue pr = coerce(fn, r, rw, ru, op_w, op_u, e->loc);
+        IRValue pl, pr;
+        if (res_float) {
+            /* Coerce both operands to the result float width. */
+            pl = lf ? (lw == op_w ? l : convert_numeric(fn, l, lw, op_w, 0, 1, e->loc))
+                    : convert_numeric(fn, l, lw, op_w, 0, 1, e->loc);
+            pr = rf ? (rw == op_w ? r : convert_numeric(fn, r, rw, op_w, 0, 1, e->loc))
+                    : convert_numeric(fn, r, rw, op_w, 0, 1, e->loc);
+        } else {
+            pl = coerce(fn, l, lw, lu, op_w, op_u, e->loc);
+            pr = coerce(fn, r, rw, ru, op_w, op_u, e->loc);
+        }
         IROpcode op;
-        switch (e->u.bin.op) {
-        case BOP_ADD:     op = IR_ADD;  break;
-        case BOP_SUB:     op = IR_SUB;  break;
-        case BOP_MUL:     op = IR_MUL;  break;
-        case BOP_DIV:     op = IR_DIV;  break;
-        case BOP_MOD:     op = IR_MOD;  break;
-        case BOP_EQ:      op = IR_EQ;   break;
-        case BOP_NE:      op = IR_NE;   break;
-        case BOP_LT:      op = IR_LT;   break;
-        case BOP_LE:      op = IR_LE;   break;
-        case BOP_GT:      op = IR_GT;   break;
-        case BOP_GE:      op = IR_GE;   break;
-        case BOP_BITAND:  op = IR_BAND; break;
-        case BOP_BITOR:   op = IR_BOR;  break;
-        case BOP_BITXOR:  op = IR_BXOR; break;
-        case BOP_SHL:     op = IR_SHL;  break;
-        case BOP_SHR:     op = IR_SHR;  break;
-        default: op = IR_ADD; break;
+        if (res_float && !is_cmp) {
+            switch (e->u.bin.op) {
+            case BOP_ADD: op = IR_FADD; break;
+            case BOP_SUB: op = IR_FSUB; break;
+            case BOP_MUL: op = IR_FMUL; break;
+            case BOP_DIV: op = IR_FDIV; break;
+            default:      op = IR_FADD; break;
+            }
+        } else {
+            switch (e->u.bin.op) {
+            case BOP_ADD:     op = IR_ADD;  break;
+            case BOP_SUB:     op = IR_SUB;  break;
+            case BOP_MUL:     op = IR_MUL;  break;
+            case BOP_DIV:     op = IR_DIV;  break;
+            case BOP_MOD:     op = IR_MOD;  break;
+            case BOP_EQ:      op = IR_EQ;   break;
+            case BOP_NE:      op = IR_NE;   break;
+            case BOP_LT:      op = IR_LT;   break;
+            case BOP_LE:      op = IR_LE;   break;
+            case BOP_GT:      op = IR_GT;   break;
+            case BOP_GE:      op = IR_GE;   break;
+            case BOP_BITAND:  op = IR_BAND; break;
+            case BOP_BITOR:   op = IR_BOR;  break;
+            case BOP_BITXOR:  op = IR_BXOR; break;
+            case BOP_SHL:     op = IR_SHL;  break;
+            case BOP_SHR:     op = IR_SHR;  break;
+            default: op = IR_ADD; break;
+            }
         }
         int rw_res = is_cmp ? 4 : op_w;
         int ru_res = is_cmp ? 0 : op_u;
+        IRValue result;
+        if (is_cmp && res_float) {
+            /* Float comparison — emit IR_FCMP with the comparison encoded in
+             * is_unsigned (0=LT 1=LE 2=GT 3=GE 4=EQ 5=NE). */
+            static const unsigned char cmp_enc[] = {0,1,2,3,4,5};
+            unsigned char enc = cmp_enc[e->u.bin.op - BOP_EQ];
+            result = new_value(fn);
+            emit_inst_f(fn, IR_FCMP, result, pl, pr, op_w, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_unsigned = enc;
+            set_value_float(fn, result, 0);  /* result is int 0/1 */
+            set_value_type(fn, result, 4, 0);
+            return result;
+        }
         /* Comparison ops carry operand width/signedness for codegen — we
          * encode it as the instruction's own width for cmps too (used only
          * by cmp encoding). Result value's width/signedness recorded via
          * emit_bin_w's set_value_type. */
-        IRValue result = emit_bin_w(fn, op, pl, pr, is_cmp ? op_w : op_w,
-                                    is_cmp ? op_u : op_u, e->loc);
+        result = emit_bin_w(fn, op, pl, pr, op_w, op_u, e->loc);
+        if (res_float) set_value_float(fn, result, 1);
         if (is_cmp) {
             /* Retag the result's own SSA width to int(4,signed). */
             set_value_type(fn, result, rw_res, ru_res);
@@ -812,6 +944,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                         entry->width, entry->is_unsigned, e->loc);
+            if (entry->ty.kind == TY_FLOAT) set_value_float(fn, v, 1);
             return v;
         }
         IRValue v = new_value(fn);
@@ -823,9 +956,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         Expr *lv = e->u.assign.lvalue;
         IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
         int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+        int rf = get_value_is_float(fn, rv);
         int lw = lv->type.kind == TY_PTR ? 8 : (lv->type.width ? lv->type.width : 4);
         int lu = lv->type.is_unsigned;
-        IRValue coerced = coerce(fn, rv, rw, ru, lw, lu, e->loc);
+        int lf = (lv->type.kind == TY_FLOAT);
+        IRValue coerced;
+        if (rf != lf)
+            coerced = convert_numeric(fn, rv, rw, lw, lu, lf, e->loc);
+        else if (lf)
+            coerced = (rw == lw) ? rv : convert_numeric(fn, rv, rw, lw, lu, 1, e->loc);
+        else
+            coerced = coerce(fn, rv, rw, ru, lw, lu, e->loc);
         if (lv->kind == EX_VAR) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
             if (!entry) return -1;
@@ -978,8 +1119,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     case EX_CAST: {
         IRValue x = lower_expr(fn, st, e->u.cast.operand);
         int sw = get_value_width(fn, x), su = get_value_is_unsigned(fn, x);
+        int sf = get_value_is_float(fn, x);
         int dw = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int du = e->type.kind == TY_PTR ? 1 : e->type.is_unsigned;
+        int df = (e->type.kind == TY_FLOAT);
+        if (sf != df) {
+            /* Cross-domain cast: float ↔ int (SITOFP / FPTOSI). */
+            return convert_numeric(fn, x, sw, dw, du, df, e->loc);
+        }
+        if (df) {
+            /* float ↔ float width change (float ↔ double). */
+            if (sw == dw) return x;
+            return convert_numeric(fn, x, sw, dw, du, 1, e->loc);
+        }
         return coerce(fn, x, sw, su, dw, du, e->loc);
     }
     case EX_INC_DEC: {
@@ -1214,6 +1366,12 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
          * mem2reg promotes them and the store/load chain breaks. */
         if (dty.kind == TY_PTR && dty.pointee && dty.pointee->kind == TY_FUNC)
             pinned = 1;
+        /* Float variables are always pinned too: their SSA values live in the
+         * XMM register file (separate from the GP file the scalar regalloc
+         * targets), so mem2reg must not promote them.  Codegen loads/stores
+         * through the pinned slot on every use. */
+        if (dty.kind == TY_FLOAT)
+            pinned = 1;
         IRValue v;
         if (pinned) {
             int total = type_size(dty);
@@ -1245,7 +1403,15 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             } else {
                 IRValue rv = lower_expr(fn, st, s->u.decl.init);
                 int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                IRValue coerced = coerce(fn, rv, rw, ru, dw, du, s->loc);
+                int rf = get_value_is_float(fn, rv);
+                int df = (dty.kind == TY_FLOAT);
+                IRValue coerced;
+                if (rf != df)
+                    coerced = convert_numeric(fn, rv, rw, dw, du, df, s->loc);
+                else if (df)
+                    coerced = (rw == dw) ? rv : convert_numeric(fn, rv, rw, dw, du, 1, s->loc);
+                else
+                    coerced = coerce(fn, rv, rw, ru, dw, du, s->loc);
                 if (pinned) {
                     IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
                     emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, dw, du, s->loc);
@@ -1260,15 +1426,24 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         lower_expr(fn, st, s->u.expr);
         break;
     case ST_RETURN: {
-        if (fn->ret_width == 0) {
+        if (fn->ret_width == 0 && !fn->ret_is_float) {
             /* void function: bare `return;` — no value. */
             emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
         } else {
             IRValue v = lower_expr(fn, st, s->u.value);
             int vw = get_value_width(fn, v), vu = get_value_is_unsigned(fn, v);
-            IRValue coerced = coerce(fn, v, vw, vu, fn->ret_width, fn->ret_is_unsigned, s->loc);
+            int vf = get_value_is_float(fn, v);
+            int dw = fn->ret_width, du = fn->ret_is_unsigned;
+            int df = fn->ret_is_float;
+            IRValue coerced;
+            if (vf != df)
+                coerced = convert_numeric(fn, v, vw, dw, du, df, s->loc);
+            else if (df)
+                coerced = (vw == dw) ? v : convert_numeric(fn, v, vw, dw, du, 1, s->loc);
+            else
+                coerced = coerce(fn, v, vw, vu, dw, du, s->loc);
             emit_inst_w(fn, IR_RETURN, -1, coerced, -1, 0,
-                        fn->ret_width, fn->ret_is_unsigned, s->loc);
+                        dw, du, s->loc);
         }
         break;
     }
@@ -1631,9 +1806,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.next_label_id = 0;
         irfn.value_width = NULL;
         irfn.value_is_unsigned = NULL;
+        irfn.value_is_float = NULL;
         irfn.value_meta_cap = 0;
         irfn.ret_width = fd->ret_type.width;
         irfn.ret_is_unsigned = fd->ret_type.is_unsigned;
+        irfn.ret_is_float = (fd->ret_type.kind == TY_FLOAT);
 
         IRSymTable st;
         irsymtable_init(&st);
@@ -1645,16 +1822,32 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
                 irsymtable_push_global(&st, gs->u.decl.name, gs->u.decl.type);
         }
 
+        /* Emit all PARAM instructions up front so they stay contiguous at
+         * function start (codegen's prologue relies on this layout).  The
+         * alloca/addr/store chains follow afterward. */
+        IRValue param_vs[64];
+        for (size_t p = 0; p < fd->params.len; p++) {
+            Type pty = fd->params.data[p].type;
+            int pw = pty.kind == TY_PTR ? 8 : (pty.width ? pty.width : 4);
+            int pu = pty.kind == TY_PTR ? 1 : pty.is_unsigned;
+
+            param_vs[p] = new_value(&irfn);
+            emit_inst_w(&irfn, IR_PARAM, param_vs[p], -1, -1, (int)p, pw, pu,
+                        fd->params.data[p].loc);
+            if (pty.kind == TY_FLOAT)
+                set_value_float(&irfn, param_vs[p], 1);
+        }
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
             int pw = pty.kind == TY_PTR ? 8 : (pty.width ? pty.width : 4);
             int pu = pty.kind == TY_PTR ? 1 : pty.is_unsigned;
             const char *pname = fd->params.data[p].name;
             int pinned = is_pinned_in_body(fd, pname, pty);
-
-            IRValue param_v = new_value(&irfn);
-            emit_inst_w(&irfn, IR_PARAM, param_v, -1, -1, (int)p, pw, pu,
-                        fd->params.data[p].loc);
+            /* Float params are always pinned: their SSA value lives in the XMM
+             * register file (separate from the GP file the scalar regalloc
+             * targets), so mem2reg must not promote them. */
+            if (pty.kind == TY_FLOAT)
+                pinned = 1;
 
             IRValue slot;
             if (pinned) {
@@ -1662,13 +1855,13 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
                 slot = emit_alloca(&irfn, total, pw, pu, fd->params.data[p].loc);
                 IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1,
                                           fd->params.data[p].loc);
-                emit_inst_w(&irfn, IR_STORE_PTR, -1, addr, param_v, 0, pw, pu,
+                emit_inst_w(&irfn, IR_STORE_PTR, -1, addr, param_vs[p], 0, pw, pu,
                             fd->params.data[p].loc);
             } else {
                 slot = new_value(&irfn);
                 emit_inst_w(&irfn, IR_ALLOCA, slot, -1, -1, 0, pw, pu,
                             fd->params.data[p].loc);
-                emit_inst_w(&irfn, IR_STORE, -1, slot, param_v, 0, pw, pu,
+                emit_inst_w(&irfn, IR_STORE, -1, slot, param_vs[p], 0, pw, pu,
                             fd->params.data[p].loc);
             }
             irsymtable_push(&st, pname, slot, pinned, pty);

@@ -174,15 +174,34 @@ static int symtable_has_since(const SymTable *st, const char *name, size_t mark)
     return 0;
 }
 
-/* Usual arithmetic conversions (C §6.3.1.8), rank approximated by width. */
+/* Conversion rank proxy: float types outrank integer types (C §6.3.1.8).
+ *   double (108) > float (104) > pointer (50) > long (8) > int (4) > ... */
+static int type_rank(Type t) {
+    if (t.kind == TY_FLOAT) return 100 + t.width;  /* 104 / 108 */
+    if (t.kind == TY_PTR) return 50;
+    return t.width;
+}
+
+/* Integer promotion (C §6.3.1.6): types narrower than int → int.
+ * Float types are NOT integer-promoted — they keep their type. */
 static Type integer_promote(Type t) {
+    if (t.kind == TY_FLOAT) return t;
     if (t.width < 4) return type_make_int(4, 0);
     return t;
 }
 
+/* Usual arithmetic conversions (C §6.3.1.8).
+ *   long double > double > float > (integer ranks) */
 static Type usual_arith_conv(Type a, Type b) {
     a = integer_promote(a);
     b = integer_promote(b);
+    /* Float dominates: if either operand is float, the result is float.
+     * double wins over float (higher width). */
+    if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
+        return type_rank(a) >= type_rank(b) ? a : b;
+    if (a.kind == TY_FLOAT) return a;
+    if (b.kind == TY_FLOAT) return b;
+    /* Otherwise the existing integer rules. */
     if (a.width == b.width && a.is_unsigned == b.is_unsigned) return a;
     if (a.is_unsigned == b.is_unsigned) return a.width > b.width ? a : b;
     Type u = a.is_unsigned ? a : b;
@@ -201,6 +220,10 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     case EX_INT_LIT:
         set_type(e, type_default_int());
         return type_clone(e->type);
+    case EX_FLOAT_LIT:
+        /* Width was stashed in e->type by the parser (4 = float, 8 = double). */
+        set_type(e, type_make_float(e->type.width ? e->type.width : 8));
+        return type_clone(e->type);
     case EX_BINOP: {
         Type lt = check_expr(e->u.bin.l, st, ft);
         Type rt = check_expr(e->u.bin.r, st, ft);
@@ -217,13 +240,13 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         BinOp op = e->u.bin.op;
         Type res;
         if (op == BOP_AND || op == BOP_OR) {
-            /* Logical && / ||: both operands must be scalar (int or pointer).
-             * Result is always int 0 or 1. */
-            if (lt.kind != TY_INT && lt.kind != TY_PTR)
+            /* Logical && / ||: both operands must be scalar (int, float, or
+             * pointer).  Result is always int 0 or 1. */
+            if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR)
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be scalar",
                        op == BOP_AND ? "&&" : "||");
-            if (rt.kind != TY_INT && rt.kind != TY_PTR)
+            if (rt.kind != TY_INT && rt.kind != TY_FLOAT && rt.kind != TY_PTR)
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be scalar",
                        op == BOP_AND ? "&&" : "||");
@@ -263,6 +286,17 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                        op == BOP_SHL ? "<<" : ">>");
             res = integer_promote(lt);
         } else {
+            /* ADD / SUB / MUL / DIV / MOD.  MOD requires integer operands. */
+            if (op == BOP_MOD &&
+                (lt.kind != TY_INT || rt.kind != TY_INT))
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "operands of '%%' must be integer");
+            else if (op != BOP_MOD &&
+                     (lt.kind != TY_INT && lt.kind != TY_FLOAT))
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "left operand of '%s' must be arithmetic",
+                       op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
+                       : op == BOP_MUL ? "*" : "/");
             res = usual_arith_conv(lt, rt);
         }
         type_free(&lt); type_free(&rt);
@@ -282,9 +316,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                    "bitwise NOT requires an integer operand");
         Type res;
         if (e->u.un.op == UOP_NOT) {
-            /* Logical NOT: operand must be scalar (int or pointer); result is
-             * always int 0 or 1. */
-            if (ot.kind != TY_INT && ot.kind != TY_PTR)
+            /* Logical NOT: operand must be scalar (int, float, or pointer);
+             * result is always int 0 or 1. */
+            if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR)
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "logical NOT requires a scalar operand");
             res = type_make_int(4, 0);
@@ -305,15 +339,15 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
          * to a pointer to its type (so `add` and &add both yield `ptr(func)`). */
         const FunSig *sig = ftab_find(ft, e->u.var.name);
         if (sig) {
-            Type *ptys = NULL;
+            const Type **ptys = NULL;
             if (sig->arity > 0) {
-                ptys = malloc(sig->arity * sizeof(Type));
+                ptys = malloc(sig->arity * sizeof(Type *));
                 if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                 for (int i = 0; i < sig->arity; i++)
-                    ptys[i] = sig->param_types[i];
+                    ptys[i] = &sig->param_types[i];
             }
-            Type fn = type_make_func(sig->ret_type, ptys, sig->arity);
-            if (ptys) free(ptys);
+            Type fn = type_make_func(sig->ret_type, (Type **)ptys, sig->arity);
+            free(ptys);
             Type fp = type_make_ptr(fn);
             type_free(&fn);
             set_type(e, fp);
@@ -549,9 +583,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         if (ot.is_const)
             die_at(op->loc.file, op->loc.line, op->loc.col,
                    "cannot increment/decrement a read-only variable");
-        if (ot.kind != TY_INT && ot.kind != TY_PTR)
+        if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR)
             die_at(op->loc.file, op->loc.line, op->loc.col,
-                   "operand of '%s' must be int or pointer",
+                   "operand of '%s' must be arithmetic or pointer",
                    e->u.incdec.is_inc ? "++" : "--");
         type_free(&ot);
         /* Result type is the operand type (before increment). For both prefix
@@ -591,8 +625,10 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         int e_is_null_const = (et.kind == TY_INT && et.width == 4
                                && e->u.tern.else_->kind == EX_INT_LIT
                                && e->u.tern.else_->u.int_val == 0);
+        int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT);
+        int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT);
         Type res;
-        if (tt.kind == TY_INT && et.kind == TY_INT) {
+        if (tt_arith && et_arith) {
             res = usual_arith_conv(tt, et);
         } else if (tt.kind == TY_PTR && et.kind == TY_PTR) {
             res = type_clone(tt);
@@ -602,7 +638,7 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             res = type_clone(et);
         } else {
             die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "ternary branches must both be int, both be pointer, "
+                   "ternary branches must both be arithmetic, both be pointer, "
                    "or pointer with null constant");
         }
         type_free(&tt); type_free(&et);

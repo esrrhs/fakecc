@@ -8,6 +8,8 @@ typedef enum {
     TK_KW_IMPORT,        /* "import" — Slice 1: recognized but not allowed */
     TK_KW_VOID,          /* "void" */
     TK_KW_INT,           /* "int" */
+    TK_KW_FLOAT,         /* "float" */
+    TK_KW_DOUBLE,        /* "double" */
     TK_KW_CHAR,          /* "char" */
     TK_KW_SHORT,         /* "short" */
     TK_KW_LONG,          /* "long" */
@@ -35,6 +37,7 @@ typedef enum {
     TK_KW_EXTERN,        /* "extern" */
     TK_IDENT,
     TK_INT_LITERAL,
+    TK_FLOAT_LITERAL,    /* 1.5, 1.5f, 1e10, .5, 2. — text kept for strtod */
     TK_CHAR_LITERAL,     /* 'A', '\n', etc. */
     TK_STRING_LITERAL,   /* Slice 1: reserved for import, not consumed */
     TK_LPAREN,           /* ( */

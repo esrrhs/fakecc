@@ -3,6 +3,7 @@
 
 #include "fakecc/common.h"
 #include <stddef.h>
+#include <stdint.h>
 
 /* ------------------------------------------------------------------ */
 /* SSA virtual register — grows monotonically per function             */
@@ -30,6 +31,17 @@ typedef enum {
     IR_SHR,         /* dst = a >> b (arithmetic if signed, logical if unsigned) */
     IR_EQ,          /* dst = (a == b) ? 1 : 0 */
     IR_NE,          /* dst = (a != b) ? 1 : 0 */
+    IR_FADD,        /* dst = a + b (float; width 4=float 8=double) */
+    IR_FSUB,        /* dst = a - b (float) */
+    IR_FMUL,        /* dst = a * b (float) */
+    IR_FDIV,        /* dst = a / b (float) */
+    IR_FCMP,        /* dst = (a op b) ? 1 : 0 (float comparison; signedness
+                       encodes the ordered comparison: 0 = LT,1=LE,2=GT,3=GE,
+                       4 = EQ, 5 = NE).  Result width 4 (int). */
+    IR_SITOFP,      /* dst = (float)a — signed int → float; width = target */
+    IR_FPTOSI,      /* dst = (int)a — float → signed int; width = target */
+    IR_FPEXT,       /* dst = (double)(float)a — float → double */
+    IR_FPTRUNC,     /* dst = (float)(double)a — double → float */
     IR_LT,          /* dst = (a <  b) ? 1 : 0 (signed) */
     IR_LE,          /* dst = (a <= b) ? 1 : 0 (signed) */
     IR_GT,          /* dst = (a >  b) ? 1 : 0 (signed) */
@@ -77,6 +89,12 @@ typedef struct {
      *   for LOAD/STORE/ALLOCA/PARAM.  0 for control-flow (BR/CBR/LABEL/RETURN). */
     int      width;
     int      is_unsigned;   /* signedness — governs sext vs zext, sdiv vs udiv */
+    /* For IR_CONST of a float value: the IEEE-754 bit pattern, cast to
+     * int64.  For all other ops (and int CONSTs) this is 0 / unused. */
+    int64_t  float_imm;
+    /* True if this instruction produces a float value (TY_FLOAT).  Lets
+     * codegen pick the XMM register file instead of the GP file. */
+    int      is_float;
     /* Slice 7b/c: for IR_ALLOCA only. Total bytes reserved on the stack when
      * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
      * mem2reg promotes get 0 here (they never reach codegen anyway). */
@@ -99,8 +117,10 @@ typedef struct {
     int next_value_id; /* SSA id counter, incremented by lower_expr */
     int next_label_id; /* label id counter, used by control-flow lowering */
     SourceLoc loc;
-    void *ra;         /* RAResult*, set by reg_alloc, consumed by codegen.
-                         NULL until register allocation runs. */
+    void *ra;         /* RAResult* for GP values, set by reg_alloc. */
+    void *ra_xmm;     /* RAResult* for float values, set by reg_alloc_xmm.
+                         NULL until register allocation runs, and NULL for
+                         functions with no float values. */
     /* Slice 7a: per-value width and signedness (indexed by SSA id).
      * Populated by IR-gen; consulted by codegen when a use needs to know
      * the defining op's type. `NULL` on functions built by test helpers
@@ -108,9 +128,13 @@ typedef struct {
     int  *value_width;
     int  *value_is_unsigned;
     int   value_meta_cap;
+    /* Float support: per-value flag — 1 if the value is TY_FLOAT. */
+    int  *value_is_float;
     /* Slice 7a: declared return type (width & signedness). */
     int   ret_width;
     int   ret_is_unsigned;
+    /* Float support: 1 if the function returns TY_FLOAT. */
+    int   ret_is_float;
 } IRFunction;
 
 typedef struct {

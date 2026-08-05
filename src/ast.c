@@ -59,6 +59,7 @@ int type_size(Type t) {
     switch (t.kind) {
     case TY_VOID:   return 0;
     case TY_INT:    return t.width;
+    case TY_FLOAT:  return t.width;  /* 4 for float, 8 for double */
     case TY_PTR:    return 8;
     case TY_ARRAY:  return type_size(*t.elem_type) * t.length;
     case TY_STRUCT: return t.width;  /* precomputed at struct-def time */
@@ -98,7 +99,7 @@ Type type_make_struct(const char *tag, int size) {
     return t;
 }
 
-Type type_make_func(Type ret, const Type *params, int nparams) {
+Type type_make_func(Type ret, Type * const *params, int nparams) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = malloc(sizeof(Type));
@@ -109,7 +110,7 @@ Type type_make_func(Type ret, const Type *params, int nparams) {
         t.func_params = malloc(nparams * sizeof(Type));
         if (!t.func_params) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         for (int i = 0; i < nparams; i++)
-            t.func_params[i] = type_clone(params[i]);
+            t.func_params[i] = type_clone(*params[i]);
     } else {
         t.func_params = NULL;
     }
@@ -132,6 +133,7 @@ static int types_equal(Type a, Type b) {
     switch (a.kind) {
     case TY_VOID: return 1;
     case TY_INT: return a.width == b.width && a.is_unsigned == b.is_unsigned;
+    case TY_FLOAT: return a.width == b.width;  /* float vs double */
     case TY_PTR: return types_equal(*a.pointee, *b.pointee);
     case TY_ARRAY: return a.length == b.length && types_equal(*a.elem_type, *b.elem_type);
     case TY_STRUCT: return a.tag && b.tag && strcmp(a.tag, b.tag) == 0;
@@ -223,6 +225,7 @@ static int type_align(Type t) {
     switch (t.kind) {
     case TY_VOID:  return 1;    /* void has no size; alignment is a no-op */
     case TY_INT:   return t.width;
+    case TY_FLOAT: return t.width;  /* float aligns to 4, double to 8 */
     case TY_PTR:   return 8;
     case TY_ARRAY: return type_align(*t.elem_type);
     case TY_STRUCT: return 8;   /* conservative — structs align to 8 */
@@ -500,6 +503,16 @@ Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
     return e;
 }
 
+static Expr *expr_alloc(ExprKind k, SourceLoc loc);  /* forward */
+
+Expr *expr_new_float_lit(double val, int width, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_FLOAT_LIT, loc);
+    e->u.float_lit = val;
+    /* type is set by sema, but stash width now so parser-level consumers work */
+    e->type = type_make_float(width);
+    return e;
+}
+
 void expr_call_push_arg(Expr *e, Expr *arg) {
     ExprArray *a = &e->u.call.args;
     if (a->len >= a->cap) {
@@ -635,6 +648,8 @@ void expr_free(Expr *e) {
         free(e->u.init_list.elements);
         break;
     }
+    case EX_FLOAT_LIT:
+        break;
     }
     type_free(&e->type);
     free(e);

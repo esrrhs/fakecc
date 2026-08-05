@@ -70,8 +70,10 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "break", 5) == 0) return TK_KW_BREAK;
         if (memcmp(s, "union", 5) == 0) return TK_KW_UNION;
         if (memcmp(s, "const", 5) == 0) return TK_KW_CONST;
+        if (memcmp(s, "float", 5) == 0) return TK_KW_FLOAT;
         break;
     case 6:
+        if (memcmp(s, "double", 6) == 0) return TK_KW_DOUBLE;
         if (memcmp(s, "import", 6) == 0) return TK_KW_IMPORT;
         if (memcmp(s, "return", 6) == 0) return TK_KW_RETURN;
         if (memcmp(s, "signed", 6) == 0) return TK_KW_SIGNED;
@@ -253,18 +255,77 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             continue;
         }
 
-        /* integer literal */
+        /* numeric literal — integer or floating point.
+         *   123, 123u, 123l, 123ul  (integer)
+         *   1.5, .5, 2., 1e10, 1.5e-3 (floating)
+         *   1.5f, 2.f, .5f            (float suffix)
+         * A decimal point or exponent marker upgrades the token to floating. */
         if (isdigit((unsigned char)c)) {
             int start_line = line;
             int start_col = col;
             size_t start = pos;
-            while (isdigit((unsigned char)source[pos])) {
-                pos++;
-                col++;
+            while (isdigit((unsigned char)source[pos])) { pos++; col++; }
+            int is_float = 0;
+            /* Fractional part: `.` followed by optional digits. Also bare `.`
+             * after digits (e.g. `2.`). */
+            if (source[pos] == '.') {
+                is_float = 1;
+                pos++; col++;
+                while (isdigit((unsigned char)source[pos])) { pos++; col++; }
+            }
+            /* Exponent: e/E followed by optional sign and digits. */
+            if (source[pos] == 'e' || source[pos] == 'E') {
+                is_float = 1;
+                pos++; col++;
+                if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
+                if (!isdigit((unsigned char)source[pos])) {
+                    die_at(filename, line, col,
+                           "exponent has no digits");
+                }
+                while (isdigit((unsigned char)source[pos])) { pos++; col++; }
+            }
+            /* Suffix: f/F = float, l/L = double (long double → treat as double),
+             *         u/U = unsigned integer, l/L = long integer. */
+            if (source[pos] == 'f' || source[pos] == 'F') {
+                is_float = 1;
+                pos++; col++;
+            } else if (source[pos] == 'l' || source[pos] == 'L') {
+                pos++; col++;  /* `l` alone = long int; after a float = double */
+            } else if (source[pos] == 'u' || source[pos] == 'U') {
+                pos++; col++;  /* unsigned integer */
             }
             size_t len = pos - start;
             Token t;
-            t.kind = TK_INT_LITERAL;
+            t.kind = is_float ? TK_FLOAT_LITERAL : TK_INT_LITERAL;
+            t.text = malloc(len + 1);
+            memcpy(t.text, source + start, len);
+            t.text[len] = '\0';
+            t.loc.file = filename;
+            t.loc.line = start_line;
+            t.loc.col = start_col;
+            token_array_push(out, t);
+            continue;
+        }
+
+        /* A leading `.` followed by a digit is a floating literal: .5, .123 */
+        if (c == '.' && isdigit((unsigned char)source[pos + 1])) {
+            int start_line = line;
+            int start_col = col;
+            size_t start = pos;
+            pos++; col++;  /* consume `.` */
+            while (isdigit((unsigned char)source[pos])) { pos++; col++; }
+            if (source[pos] == 'e' || source[pos] == 'E') {
+                pos++; col++;
+                if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
+                if (!isdigit((unsigned char)source[pos])) {
+                    die_at(filename, line, col, "exponent has no digits");
+                }
+                while (isdigit((unsigned char)source[pos])) { pos++; col++; }
+            }
+            if (source[pos] == 'f' || source[pos] == 'F') { pos++; col++; }
+            size_t len = pos - start;
+            Token t;
+            t.kind = TK_FLOAT_LITERAL;
             t.text = malloc(len + 1);
             memcpy(t.text, source + start, len);
             t.text[len] = '\0';

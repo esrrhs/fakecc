@@ -21,7 +21,7 @@ static void push_inst(IRInstArray *a, IROpcode op, IRValue dst,
         a->data = realloc(a->data, a->cap * sizeof(IRInst));
         if (!a->data) exit(1);
     }
-    IRInst inst = {op, dst, arg1, arg2, imm, {NULL, 0, 0}, NULL, {0}, 0, 8, 0, 0, -1};
+    IRInst inst = {op, dst, arg1, arg2, imm, {NULL, 0, 0}, NULL, {0}, 0, 8, 0, 0, -1, 0, 0};
     a->data[a->len++] = inst;
 }
 

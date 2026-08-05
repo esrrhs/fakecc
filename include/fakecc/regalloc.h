@@ -32,7 +32,7 @@ typedef enum {
     REG_NONE = -1,
 } Reg;
 
-/* Registers available for allocation.
+/* Registers available for allocation (GP file).
  *
  * Excluded (reserved for codegen scratch / ABI / frame):
  *   RAX  — return value + comparison/arith staging
@@ -54,6 +54,39 @@ static const int ALLOCATABLE_REGS[REG_ALLOCATABLE] = {
     REG_RBX, REG_R12, REG_R13
 };
 
+/* Caller-saved mask over ALLOCATABLE_REGS indices: RSI/RDI/R8/R9/R10/R11
+ * are indices 0..5. Values live across a call may not occupy these. */
+#define GP_CALLER_SAVED_MASK  0x3Fu
+
+/* ------------------------------------------------------------------ */
+/* XMM register file (SSE/AVX scalar)                                  */
+/*                                                                      */
+/* Encoded 0-15 matching native XMM ModRM register codes (bits 0-2 in  */
+/* ModRM, bit 3 via REX.B / REX.R for xmm8-xmm15). All XMM registers   */
+/* are caller-saved under SysV AMD64, so the forbid-mask forbids every  */
+/* allocatable XMM color for values live across a call — they spill.    */
+/*                                                                      */
+/* XMM14/XMM15 are reserved as codegen scratch (analogous to RAX/RCX   */
+/* for the GP file): the allocator never hands them out, and codegen    */
+/* freely clobbers them when staging SSE operations.                     */
+/* ------------------------------------------------------------------ */
+
+#define REG_XMM_ALLOCATABLE  14
+
+/* Allocatable XMM registers: xmm0 .. xmm13. */
+static const int XMM_ALLOCATABLE_REGS[REG_XMM_ALLOCATABLE] = {
+    /* xmm0 .. xmm13 */
+     0,  1,  2,  3,  4,  5,  6,  7,
+     8,  9, 10, 11, 12, 13
+};
+
+/* Scratch XMM registers used by codegen for staging (never allocated). */
+#define XMM_SCRATCH0  14
+#define XMM_SCRATCH1  15
+
+/* Every allocatable XMM register is caller-saved → forbid all colors. */
+#define XMM_CALLER_SAVED_MASK  ((1u << REG_XMM_ALLOCATABLE) - 1u)
+
 /* ------------------------------------------------------------------ */
 /* Register allocation result                                          */
 /* ------------------------------------------------------------------ */
@@ -71,11 +104,12 @@ typedef struct {
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
-/* Allocate registers for all SSA values in the function.
+/* Allocate GP registers for all non-float SSA values in the function.
  *
- * Runs liveness analysis, builds the SSA interference graph (chordal),
- * computes a perfect elimination ordering via MCS, and greedily colors
- * the graph.  Values that cannot be colored are spilled to the stack.
+ * Runs liveness analysis, builds the SSA interference graph (chordal)
+ * over GP-class values, computes a perfect elimination ordering via MCS,
+ * and greedily colors the graph.  Values that cannot be colored are
+ * spilled to the stack.
  *
  * The function's IR is NOT modified — only a mapping from value ids to
  * registers is produced.  Codegen reads this mapping to emit efficient
@@ -85,7 +119,18 @@ typedef struct {
  *          Returns NULL if the function has no instructions.  */
 RAResult *reg_alloc(const IRFunction *fn);
 
-/* Free a RAResult returned by reg_alloc().  Safe to call with NULL. */
+/* Allocate XMM registers for all float SSA values in the function.
+ *
+ * Same algorithm as reg_alloc but restricted to values flagged
+ * value_is_float==1, colored from the XMM register file.  GP-class
+ * values are ignored (they never occupy XMM regs).  The result is
+ * stored separately (fn->ra_xmm) and consulted by codegen for every
+ * is_float instruction.
+ *
+ * Returns NULL if the function has no float SSA values. */
+RAResult *reg_alloc_xmm(const IRFunction *fn);
+
+/* Free a RAResult returned by reg_alloc() or reg_alloc_xmm(). */
 void ra_result_free(RAResult *ra);
 
 #endif /* FAKECC_REGALLOC_H */

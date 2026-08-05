@@ -11,6 +11,7 @@
 typedef enum {
     TY_VOID,    /* void — only valid as a function return type */
     TY_INT,     /* char/short/int/long × signed/unsigned */
+    TY_FLOAT,   /* float (width 4) / double (width 8) */
     TY_PTR,     /* T*  — pointee owned via heap allocation */
     TY_ARRAY,   /* T[N] — elem_type owned via heap; length is a positive int */
     TY_STRUCT,  /* struct Name — layout looked up in module StructRegistry */
@@ -39,6 +40,12 @@ static inline Type type_make_int(int width, int is_unsigned) {
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
+static inline Type type_make_float(int width) {
+    Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
+    t.is_const = 0;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
+}
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0;
@@ -56,7 +63,7 @@ int  type_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);
-Type type_make_func(Type ret, const Type *params, int nparams);
+Type type_make_func(Type ret, Type * const *params, int nparams);
 Type type_decay(Type t);
 int  type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
@@ -86,6 +93,7 @@ typedef enum {
     EX_COMPOUND_ASSIGN, /* lvalue op= rvalue */
     EX_COMMA, /* a, b — evaluate a (discard), result is b */
     EX_INIT_LIST, /* { e1, e2, ... } — array/struct initializer; valid only as decl.init */
+    EX_FLOAT_LIT, /* 1.5, 1e10, .5 — double value (width selects float vs double) */
 } ExprKind;
 
 typedef enum {
@@ -149,6 +157,7 @@ struct Expr {
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp; /* EX_COMPOUND_ASSIGN */
         struct { Expr *lhs; Expr *rhs; } comma; /* EX_COMMA */
         struct { Expr **elements; int num_elements; } init_list; /* EX_INIT_LIST — owns each element */
+        double float_lit;                                      /* EX_FLOAT_LIT — IEEE-754 value (bit-cast to int_val for width) */
     } u;
 };
 
@@ -172,6 +181,7 @@ Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
 Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
 Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
+Expr *expr_new_float_lit(double val, int width, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_call_set_callee(Expr *e, Expr *callee); /* takes ownership, frees old */
 void  expr_free(Expr *e);

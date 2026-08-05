@@ -16,5 +16,6 @@ void opt(IRModule *ir) {
         opt_mem2reg(fn);
         scalar_cleanup(fn);
         fn->ra = reg_alloc(fn);
+        fn->ra_xmm = reg_alloc_xmm(fn);
     }
 }

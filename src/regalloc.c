@@ -8,6 +8,43 @@
 #include <string.h>
 
 /* ================================================================== */
+/* Register-class abstraction                                           */
+/*                                                                      */
+/* The allocator is run once per register class.  Each class owns a    */
+/* set of allocatable registers and a bitmask describing which of those */
+/* are caller-saved (and so forbidden for values live across a call).   */
+/* ================================================================== */
+
+typedef struct {
+    const int *regs;           /* native register codes, indexed 0..nregs-1 */
+    int        nregs;          /* number of allocatable registers */
+    unsigned   caller_saved;   /* bitmask over regs[] indices */
+} RegClass;
+
+static const RegClass GP_CLASS = {
+    .regs = ALLOCATABLE_REGS,
+    .nregs = REG_ALLOCATABLE,
+    .caller_saved = GP_CALLER_SAVED_MASK,
+};
+
+static const RegClass XMM_CLASS = {
+    .regs = XMM_ALLOCATABLE_REGS,
+    .nregs = REG_XMM_ALLOCATABLE,
+    .caller_saved = XMM_CALLER_SAVED_MASK,
+};
+
+/* True if SSA value `v` belongs to the float class in this function.
+ * When the function has no per-value float metadata (value_is_float is
+ * NULL or value_meta_cap is 0 — e.g. IR hand-built by tests) every value
+ * is treated as GP-class. */
+static int value_is_float_class(const IRFunction *fn, int v) {
+    if (v < 0) return 0;
+    if (!fn->value_is_float || fn->value_meta_cap <= 0) return 0;
+    if (v >= fn->value_meta_cap) return 0;
+    return fn->value_is_float[v];
+}
+
+/* ================================================================== */
 /* Liveness analysis                                                   */
 /* ================================================================== */
 
@@ -313,7 +350,9 @@ static void compute_live_in_out(const CFG *cfg,
  * IR_CALL — which cannot occupy a caller-saved register. */
 static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                                     int nv, InterfGraph *g,
-                                    int *forbid_mask) {
+                                    int *forbid_mask,
+                                    int float_class,
+                                    const RegClass *cls) {
     ig_init(g, nv);
     for (int v = 0; v < nv; v++) forbid_mask[v] = 0;
 
@@ -350,28 +389,21 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
              * A caller-saved register would be clobbered, so forbid those
              * colors for such values. */
             if (inst->op == IR_CALL) {
-                int caller_saved_mask = 0;
-                for (int ci = 0; ci < REG_ALLOCATABLE; ci++) {
-                    int rr = ALLOCATABLE_REGS[ci];
-                    if (rr == REG_RSI || rr == REG_RDI ||
-                        rr == REG_R8  || rr == REG_R9  ||
-                        rr == REG_R10 || rr == REG_R11) {
-                        caller_saved_mask |= (1 << ci);
-                    }
-                }
                 BS_FOREACH(&live, over) {
-                    if ((int)over != inst->dst) {
-                        forbid_mask[over] |= caller_saved_mask;
+                    if ((int)over != inst->dst &&
+                        value_is_float_class(fn, (int)over) == float_class) {
+                        forbid_mask[over] |= cls->caller_saved;
                     }
                 }
             }
 
-            /* dst interferes with every currently-live value.
-             * Exception: dst does NOT interfere with a source operand it
-             * copies from (would be pointless for COPY etc.), but keeping
-             * that edge is harmless — coloring will still find a good result. */
-            if (inst->dst >= 0 && inst->dst < nv) {
+            /* dst interferes with every currently-live value — but only
+             * values in the target class form edges in this graph. */
+            if (inst->dst >= 0 && inst->dst < nv &&
+                value_is_float_class(fn, inst->dst) == float_class) {
                 BS_FOREACH(&live, other) {
+                    if (value_is_float_class(fn, (int)other) != float_class)
+                        continue;
                     if ((int)other != inst->dst) {
                         ig_add_edge(g, inst->dst, (int)other);
                     }
@@ -379,14 +411,21 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 bs_clr(&live, inst->dst);
             }
 
-            /* Uses become live *before* this instruction. */
-            if (inst->a >= 0 && inst->a < nv) bs_set(&live, inst->a);
+            /* Uses become live *before* this instruction — but only
+             * track uses that belong to the target class. */
+            if (inst->a >= 0 && inst->a < nv &&
+                value_is_float_class(fn, inst->a) == float_class)
+                bs_set(&live, inst->a);
             if (inst->op != IR_CBR &&
-                inst->b >= 0 && inst->b < nv) bs_set(&live, inst->b);
+                inst->b >= 0 && inst->b < nv &&
+                value_is_float_class(fn, inst->b) == float_class)
+                bs_set(&live, inst->b);
             if (inst->op == IR_CALL) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
-                    if (av >= 0 && av < nv) bs_set(&live, av);
+                    if (av >= 0 && av < nv &&
+                        value_is_float_class(fn, av) == float_class)
+                        bs_set(&live, av);
                 }
             }
         }
@@ -517,9 +556,10 @@ static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg) {
 static void greedy_color(const InterfGraph *g, const int *order,
                          const LiveInfo *liv, const CFG *cfg,
                          const int *forbid_mask,
-                         int *colors, int *spill_slots, int *num_spills) {
+                         int *colors, int *spill_slots, int *num_spills,
+                         const RegClass *cls) {
     int n = g->n;
-    int k = REG_ALLOCATABLE;
+    int k = cls->nregs;
 
     /* Track spill costs for eviction decisions. */
     int *spill_cost = xmalloc(n * sizeof(int));
@@ -598,12 +638,28 @@ static void coalesce_copies(IRFunction *fn, int *colors) {
 }
 
 /* ================================================================== */
-/* reg_alloc — top-level                                               */
+/* Shared per-class allocation                                         */
 /* ================================================================== */
 
-RAResult *reg_alloc(const IRFunction *fn) {
+/* Run the full allocation pipeline for one register class.  Values not
+ * belonging to `float_class` are ignored (they belong to the other
+ * class's run).  Returns NULL when the function has no values of the
+ * target class — codegen treats a NULL result as "nothing of this class
+ * to allocate". */
+static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
+                                const RegClass *cls) {
     int nv = fn->next_value_id;
     if (nv <= 0) return NULL;
+
+    /* Short-circuit: if the function has no values of this class, don't
+     * bother building a graph.  Keeps ra_xmm NULL for int-only code. */
+    {
+        int any = 0;
+        for (int v = 0; v < nv; v++) {
+            if (value_is_float_class(fn, v) == float_class) { any = 1; break; }
+        }
+        if (!any) return NULL;
+    }
 
     LiveInfo *liv = compute_liveness(fn);
     if (!liv) return NULL;
@@ -612,29 +668,36 @@ RAResult *reg_alloc(const IRFunction *fn) {
     CFG cfg;
     cfg_build(&cfg, &fn->insts);
 
-    /* Build interference graph using CFG-aware backward walk.
-     * Correct across loop back edges; supersedes the interval-based scheme. */
+    /* Build interference graph using CFG-aware backward walk — restricted
+     * to values of the target class.  Correct across loop back edges. */
     InterfGraph g;
     int *forbid_mask = xmalloc(nv * sizeof(int));
-    build_interf_graph_cfg(fn, &cfg, nv, &g, forbid_mask);
+    build_interf_graph_cfg(fn, &cfg, nv, &g, forbid_mask,
+                            float_class, cls);
 
     /* Compute MCS ordering (reverse = PEO for chordal graph). */
     int *order = compute_mcs_order(&g);
 
-    /* Greedy coloring (color = index into ALLOCATABLE_REGS). */
+    /* Greedy coloring (color = index into cls->regs). */
     int *colors = xmalloc(nv * sizeof(int));
     int *spill_slots = xmalloc(nv * sizeof(int));
     memset(spill_slots, 0, nv * sizeof(int));
     int num_spills = 0;
     greedy_color(&g, order, liv, &cfg, forbid_mask,
-                 colors, spill_slots, &num_spills);
+                 colors, spill_slots, &num_spills, cls);
     free(forbid_mask);
 
-    /* Map color indices (0..REG_ALLOCATABLE-1) to actual x86-64
-     * register encodings that codegen uses for ModRM. */
+    /* Map color indices (0..cls->nregs-1) to actual x86-64 register
+     * encodings that codegen uses for ModRM.  Values not in this class
+     * get REG_NONE (their real home is the other class's result). */
     for (int v = 0; v < nv; v++) {
-        if (colors[v] >= 0 && colors[v] < REG_ALLOCATABLE)
-            colors[v] = ALLOCATABLE_REGS[colors[v]];
+        if (value_is_float_class(fn, v) != float_class) {
+            colors[v] = REG_NONE;
+        } else if (colors[v] >= 0 && colors[v] < cls->nregs) {
+            colors[v] = cls->regs[colors[v]];
+        } else {
+            /* Spilled: keep color as-is (negative), spill_slot valid. */
+        }
     }
 
     /* Coalesce COPYs with same-register src/dst. */
@@ -659,6 +722,18 @@ RAResult *reg_alloc(const IRFunction *fn) {
     cfg_free(&cfg);
 
     return ra;
+}
+
+/* ================================================================== */
+/* Top-level entry points                                               */
+/* ================================================================== */
+
+RAResult *reg_alloc(const IRFunction *fn) {
+    return ra_alloc_class(fn, 0, &GP_CLASS);
+}
+
+RAResult *reg_alloc_xmm(const IRFunction *fn) {
+    return ra_alloc_class(fn, 1, &XMM_CLASS);
 }
 
 void ra_result_free(RAResult *ra) {

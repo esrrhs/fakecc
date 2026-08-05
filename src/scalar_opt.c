@@ -231,6 +231,34 @@ void scalar_renumber(IRFunction *fn) {
             }
         }
     }
+
+    /* Remap per-value metadata (width / signedness / float) through the same
+     * map so codegen reads correct type info for the compacted ids. */
+    if (fn->value_meta_cap > 0) {
+        int *old_width = fn->value_width;
+        int *old_unsigned = fn->value_is_unsigned;
+        int *old_float = fn->value_is_float;
+        fn->value_width = xmalloc(next * sizeof(int));
+        fn->value_is_unsigned = xmalloc(next * sizeof(int));
+        fn->value_is_float = xmalloc(next * sizeof(int));
+        fn->value_meta_cap = next;
+        for (int nv = 0; nv < next; nv++) {
+            fn->value_width[nv] = 4;
+            fn->value_is_unsigned[nv] = 0;
+            fn->value_is_float[nv] = 0;
+        }
+        for (int ov = 0; ov < fn->next_value_id; ov++) {
+            int nv = map[ov];
+            if (nv < 0) continue;
+            fn->value_width[nv] = old_width[ov];
+            fn->value_is_unsigned[nv] = old_unsigned[ov];
+            fn->value_is_float[nv] = old_float[ov];
+        }
+        free(old_width);
+        free(old_unsigned);
+        free(old_float);
+    }
+
     fn->next_value_id = next;
     free(map);
 }

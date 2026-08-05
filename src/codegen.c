@@ -188,6 +188,164 @@ static void emit_xor_rr(Buffer *b, int r) {
     emit_modrm(b, 3, r, r);
 }
 
+/* ---- SSE scalar emitters ---------------------------------------- */
+/* XMM register ids are 0-15 (native ModRM codes, REX.B/R extended for   */
+/* xmm8-xmm15).  These mirror the GP emitters but use the F2/F3 0F      */
+/* opcode space.                                                         */
+
+/* movsd xmm_dst, xmm_src  →  F2 0F 10 [ModRM: reg=dst, rm=src, mod=11].
+ * Used for reg-reg XMM moves (copies low 64 bits; zeroes upper bits).
+ * Doubles as the reg-reg move for float values too (low 32 bits hold the
+ * float, bits 32-63 are zero after any movss-producing op). */
+static void emit_sse_mov_rr(Buffer *b, int dst, int src) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, 0, dst, src);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm(b, 3, dst & 7, src & 7);
+}
+
+/* movsd xmm_dst, [rbp+off]  →  F2 0F 10 /r.  Loads 8 bytes (a spill slot
+ * always holds 8 bytes, even for float). */
+static void emit_sse_load_spill(Buffer *b, int dst, int off) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, 0, dst, REG_RBP);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    if (off >= -128 && off <= 127) {
+        emit_modrm(b, 1, dst & 7, REG_RBP);
+        emit_byte(b, (uint8_t)(off & 0xFF));
+    } else {
+        emit_modrm(b, 2, dst & 7, REG_RBP);
+        emit_int32(b, off);
+    }
+}
+
+/* movsd [rbp+off], xmm_src  →  F2 0F 11 /r.  Stores 8 bytes. */
+static void emit_sse_store_spill(Buffer *b, int src, int off) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, 0, src, REG_RBP);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    if (off >= -128 && off <= 127) {
+        emit_modrm(b, 1, src & 7, REG_RBP);
+        emit_byte(b, (uint8_t)(off & 0xFF));
+    } else {
+        emit_modrm(b, 2, src & 7, REG_RBP);
+        emit_int32(b, off);
+    }
+}
+
+/* SSE scalar arithmetic: add/sub/mul/div.
+ *   op: 0x58=add 0x5C=sub 0x59=mul 0x5E=div
+ * is_float (width 4) → single-precision (F3 prefix: addss etc.);
+ * else double-precision (F2 prefix: addsd etc.).
+ * Encoded <prefix> 0F <op> [ModRM: reg=dst, rm=src, mod=11]. */
+static void emit_sse_arith(Buffer *b, int op, int dst, int src, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_wrb(b, 0, dst, src);
+    emit_byte(b, 0x0F);
+    emit_byte(b, op);
+    emit_modrm(b, 3, dst & 7, src & 7);
+}
+
+/* Ordered comparison of two SSE scalars.  is_float → ucomiss (0F 2E /r);
+ * else ucomisd (66 0F 2E /r).  Sets ZF/CF/PF. */
+static void emit_sse_ucomi(Buffer *b, int a, int b_xmm, int is_float) {
+    if (!is_float) emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, a, b_xmm);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x2E);
+    emit_modrm(b, 3, a & 7, b_xmm & 7);
+}
+
+/* cvtsi2sd xmm, r/m64  →  F2 REX.W 0F 2A /r.  Converts a 64-bit (or 32-bit
+ * if !is_64) signed GP integer into a double in xmm. */
+static void emit_sse_cvtsi2sd(Buffer *b, int xmm, int gp, int is_64) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, is_64 ? 1 : 0, xmm, gp);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x2A);
+    emit_modrm(b, 3, xmm & 7, gp & 7);
+}
+
+/* cvttsd2si r/m64, xmm  →  F2 REX.W 0F 2C /r.  Converts a double to a
+ * signed GP integer, TRUNCATING toward zero (C semantics).  Note: the
+ * non-truncating variant cvtsd2si honors the MXCSR rounding mode and would
+ * round 3.5 to 4; cvtt* always truncates regardless. */
+static void emit_sse_cvtsd2si(Buffer *b, int gp, int xmm, int is_64) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, is_64 ? 1 : 0, gp, xmm);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x2C);
+    emit_modrm(b, 3, gp & 7, xmm & 7);
+}
+
+/* cvttss2si r/m64, xmm  →  F3 REX.W 0F 2C /r.  Converts a float to a
+ * signed GP integer, TRUNCATING toward zero (C semantics).  Note: the
+ * non-truncating variant cvtss2si honors the MXCSR rounding mode and would
+ * round 3.5 to 4; cvtt* always truncates regardless. */
+static void emit_sse_cvtss2si(Buffer *b, int gp, int xmm, int is_64) {
+    emit_byte(b, 0xF3);
+    emit_rex_wrb(b, is_64 ? 1 : 0, gp, xmm);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x2C);
+    emit_modrm(b, 3, gp & 7, xmm & 7);
+}
+
+/* cvtss2sd xmm_dst, xmm_src  →  F3 0F 5A /r.  Widens a float (low 32 bits)
+ * to a double in the low 64 bits. */
+static void emit_sse_cvtss2sd(Buffer *b, int dst, int src) {
+    emit_byte(b, 0xF3);
+    emit_rex_wrb(b, 0, dst, src);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x5A);
+    emit_modrm(b, 3, dst & 7, src & 7);
+}
+
+/* cvtsd2ss xmm_dst, xmm_src  →  F2 0F 5A /r.  Narrows a double to a float
+ * in the low 32 bits. */
+static void emit_sse_cvtsd2ss(Buffer *b, int dst, int src) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, 0, dst, src);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x5A);
+    emit_modrm(b, 3, dst & 7, src & 7);
+}
+
+/* movq xmm_dst, gp_src  →  66 REX.W 0F 6E /r.  Loads 64 bits from a GP
+ * register into the low 64 bits of an XMM register (used to materialize
+ * float/double constants: movabs rax, bits; movq xmm, rax). */
+static void emit_movq_xmm_gp(Buffer *b, int xmm, int gp) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 1, xmm, gp);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x6E);
+    emit_modrm(b, 3, xmm & 7, gp & 7);
+}
+
+/* movsd [rsp], xmm_src  →  F2 0F 11 [mod=00 reg=src rm=4 SIB=0x24].  Used in
+ * the prologue push-then-pop dance to push an XMM arg onto the stack. */
+static void emit_sse_store_rsp(Buffer *b, int src) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, 0, src, REG_RSP);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    emit_modrm(b, 0, src & 7, 4);
+    emit_byte(b, 0x24);  /* SIB: base=rsp, index=none */
+}
+
+/* movsd xmm_dst, [rsp]  →  F2 0F 10 [mod=00 reg=dst rm=4 SIB=0x24].  Pops an
+ * XMM arg off the stack in the prologue dance. */
+static void emit_sse_load_rsp(Buffer *b, int dst) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, 0, dst, REG_RSP);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm(b, 0, dst & 7, 4);
+    emit_byte(b, 0x24);  /* SIB: base=rsp, index=none */
+}
+
 /* jmp rel32  →  E9 rel32.  Returns offset of the rel32 field for patching. */
 static size_t emit_jmp_rel32(Buffer *b) {
     emit_byte(b, 0xE9);
@@ -326,6 +484,25 @@ static void emit_modrm_indirect(Buffer *b, int reg_field, int base) {
     } else {
         emit_modrm(b, 0, reg_field & 7, rm);
     }
+}
+
+/* SSE load/store via pointer: movsd/movss xmm, [ptr] and [ptr], xmm.
+ * is_float (width 4) → single-precision (F3 prefix, 4 bytes);
+ * else double-precision (F2 prefix, 8 bytes).  Used for float loads/stores
+ * through a pointer (pinned float variables). */
+static void emit_sse_load_via_ptr(Buffer *b, int dst, int ptr, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_wrb(b, 0, dst, ptr);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm_indirect(b, dst, ptr);
+}
+static void emit_sse_store_via_ptr(Buffer *b, int ptr, int src, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_wrb(b, 0, src, ptr);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    emit_modrm_indirect(b, src, ptr);
 }
 
 /* mov [ptr_reg], src_reg — store `width` low bytes of src to memory pointed by ptr. */
@@ -575,6 +752,16 @@ static void old_store(Buffer *b, int v, int reg) {
 /* RA-aware value helpers                                              */
 /* ================================================================== */
 
+/* True if SSA value `v` is a float (TY_FLOAT) value in this function.  Used
+ * to pick the XMM register file (and XMM ABI slots) for float params, args,
+ * and results.  Mirrors the helper in regalloc.c. */
+static int value_is_float_class(const IRFunction *fn, int v) {
+    if (v < 0) return 0;
+    if (!fn->value_is_float || fn->value_meta_cap <= 0) return 0;
+    if (v >= fn->value_meta_cap) return 0;
+    return fn->value_is_float[v];
+}
+
 /* Ensure value `v` is in `dst_reg`.  Emits mov or load as needed. */
 static void ensure_reg(Buffer *b, int v, int dst_reg, const RAResult *ra) {
     if (!ra || v < 0 || v >= ra->num_values) {
@@ -599,6 +786,53 @@ static void spill_if_needed(Buffer *b, int v, int src_reg, const RAResult *ra) {
     }
     if (ra->reg[v] >= 0 && ra->reg[v] < 16) return;
     emit_store_spill(b, src_reg, spill_offset(ra->spill_slot[v]));
+}
+
+/* XMM spill area sits further from rbp than the GP spill area, so XMM
+ * spill slots don't collide with GP ones.  gp_spill_area is the total
+ * byte-size of the GP spill region (ra_gp->stack_size). */
+static int spill_offset_xmm(int slot, int gp_spill_area) {
+    return -(gp_spill_area + 8 * (slot + 1));
+}
+
+/* Ensure float value `v` is in `dst_xmm`.  Emits movsd or load as needed. */
+static void ensure_reg_xmm(Buffer *b, int v, int dst_xmm, const RAResult *ra_xmm,
+                           int gp_spill_area) {
+    if (!ra_xmm || v < 0 || v >= ra_xmm->num_values) {
+        fprintf(stderr, "fakecc: float value %d has no XMM home\n", v);
+        exit(1);
+    }
+    int vr = ra_xmm->reg[v];
+    if (vr == dst_xmm) return;
+    if (vr >= 0 && vr < 16) {
+        emit_sse_mov_rr(b, dst_xmm, vr);
+    } else {
+        emit_sse_load_spill(b, dst_xmm, spill_offset_xmm(ra_xmm->spill_slot[v],
+                                                          gp_spill_area));
+    }
+}
+
+/* Store to float value v's XMM spill slot if spilled (no-op if in register). */
+static void spill_if_needed_xmm(Buffer *b, int v, int src_xmm,
+                                const RAResult *ra_xmm, int gp_spill_area) {
+    if (!ra_xmm || v < 0 || v >= ra_xmm->num_values) return;
+    if (ra_xmm->reg[v] >= 0 && ra_xmm->reg[v] < 16) return;
+    emit_sse_store_spill(b, src_xmm,
+                         spill_offset_xmm(ra_xmm->spill_slot[v], gp_spill_area));
+}
+
+/* Materialize a float/double constant into xmm_dst.  The IEEE-754 bit
+ * pattern lives in inst->float_imm (an int64).  Load it via RAX:
+ *   movabs rax, <bits>; movq xmm, rax
+ * Works for both float (bits in low 32) and double (all 64 bits). */
+static void emit_float_const(Buffer *b, int xmm_dst, int64_t bits) {
+    /* movabs rax, imm64  →  REX.W B8+0 */
+    emit_rex_w(b);
+    emit_byte(b, 0xB8);
+    for (int i = 0; i < 8; i++)
+        emit_byte(b, (uint8_t)(bits >> (i * 8)));
+    /* movq xmm_dst, rax */
+    emit_movq_xmm_gp(b, xmm_dst, REG_RAX);
 }
 
 /* ================================================================== */
@@ -729,6 +963,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
     for (size_t i = 0; i < ir->functions.len; i++) {
         const IRFunction *fn = &ir->functions.data[i];
         const RAResult *ra = (const RAResult *)fn->ra;
+        const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
         size_t start_offset = out->code.len;
 
         /* ---- Prologue ---- */
@@ -736,11 +971,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
         collect_callee_saved(ra, cs_used);
 
         /* Compute pinned-alloca frame area: byte-offset from rbp for each
-         * IR_ALLOCA with alloca_bytes > 0.  Offsets are placed above spill
-         * area (further from rbp, i.e. more negative). */
+         * IR_ALLOCA with alloca_bytes > 0.  Offsets are placed above the
+         * spill areas (further from rbp, i.e. more negative).  The frame
+         * layout below rbp is: [GP spills][XMM spills][pinned allocas]. */
         int *alloca_off = xmalloc(fn->next_value_id * sizeof(int));
         for (int i = 0; i < fn->next_value_id; i++) alloca_off[i] = 0;
-        int spill_area = ra ? ra->stack_size : 0;
+        int gp_spill_area = ra ? ra->stack_size : 0;
+        int xmm_spill_area = ra_xmm ? ra_xmm->stack_size : 0;
         int pinned_area = 0;
         for (size_t j = 0; j < fn->insts.len; j++) {
             const IRInst *inst = &fn->insts.data[j];
@@ -748,11 +985,11 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 int bytes = inst->alloca_bytes;
                 if (bytes % 8 != 0) bytes += 8 - (bytes % 8);
                 pinned_area += bytes;
-                alloca_off[inst->dst] = -(spill_area + pinned_area);
+                alloca_off[inst->dst] = -(gp_spill_area + xmm_spill_area + pinned_area);
             }
         }
 
-        int stack_size = spill_area + pinned_area;
+        int stack_size = gp_spill_area + xmm_spill_area + pinned_area;
         if (!ra && stack_size == 0) stack_size = 8 * fn->next_value_id;
         if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
 
@@ -772,41 +1009,116 @@ void codegen(const IRModule *ir, EmitModule *out) {
         if (cs_used[2]) emit_push_r(&out->code, REG_R13);
 
         /* Materialize incoming SysV arg registers into their allocated
-         * homes.  Use a push-then-pop dance so no arg-reg clobber can
-         * lose data even when a param's home is another param's src reg. */
+         * homes.  SysV AMD64 passes the first 6 INTEGER-class args in
+         * RDI,RSI,RDX,RCX,R8,R9 and the first 8 SSE-class (float/double)
+         * args in XMM0-XMM7, with the two counters independent.  Args that
+         * don't fit in their class's registers are passed on the stack at
+         * [rbp + 16 + 8*k].
+         *
+         * We first decide, per param, how it arrives (GP reg / XMM reg /
+         * stack).  Then a push-then-pop dance (pushing every used arg
+         * register, GP via `push`, XMM via `sub rsp,8; movsd [rsp],xmm`)
+         * in reverse param order guarantees no clobber can lose data even
+         * when a param's home is another param's source register. */
+        /* Per-param arrival info.  arrive_reg = native register code, or -1
+         * for stack-passed.  arrive_is_xmm tells which file arrive_reg is
+         * in.  stack_off is the [rbp+..] offset for stack-passed args.
+         * PARAMs are contiguous at function start (see ir.c lowering). */
         int nparams = 0;
         for (size_t j = 0; j < fn->insts.len; j++) {
             if (fn->insts.data[j].op == IR_PARAM) nparams++;
-            else break;  /* IR_PARAMs are contiguous at function start */
+            else break;
         }
-        int nreg_params = nparams > 6 ? 6 : nparams;
-        /* Push register args in REVERSE order (so arg 0 ends up on top). */
-        for (int p = nreg_params - 1; p >= 0; p--) {
-            emit_push_r(&out->code, SYSV_ARG_REGS[p]);
-        }
-        /* Pop into each param's allocated home (or spill slot) in order. */
-        for (int p = 0; p < nreg_params; p++) {
+        int arrive_reg[64];
+        int arrive_is_xmm[64];
+        int stack_off[64];
+        int gp_reg_idx = 0, xmm_reg_idx = 0, stack_arg_idx = 0;
+        for (int p = 0; p < nparams; p++) {
             const IRInst *pi = &fn->insts.data[p];
-            int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
-                      ? ra->reg[pi->dst] : -1;
-            if (pdr >= 0) {
-                emit_pop_r(&out->code, pdr);
+            int is_float = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                            value_is_float_class(fn, pi->dst));
+            if (is_float) {
+                if (xmm_reg_idx < 8) {
+                    arrive_reg[p] = xmm_reg_idx; /* native XMM code 0..7 */
+                    arrive_is_xmm[p] = 1;
+                    xmm_reg_idx++;
+                } else {
+                    arrive_reg[p] = -1;
+                    arrive_is_xmm[p] = 0;
+                    stack_off[p] = 16 + 8 * stack_arg_idx++;
+                }
             } else {
-                emit_pop_r(&out->code, REG_RAX);
-                spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
+                if (gp_reg_idx < 6) {
+                    arrive_reg[p] = SYSV_ARG_REGS[gp_reg_idx++];
+                    arrive_is_xmm[p] = 0;
+                } else {
+                    arrive_reg[p] = -1;
+                    arrive_is_xmm[p] = 0;
+                    stack_off[p] = 16 + 8 * stack_arg_idx++;
+                }
             }
         }
-        /* Load stack-passed args from [rbp + 16 + 8*(k-6)] into their homes. */
-        for (int p = 6; p < nparams; p++) {
-            const IRInst *pi = &fn->insts.data[p];
-            int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
-                      ? ra->reg[pi->dst] : -1;
-            int off = 16 + 8 * (p - 6);
-            if (pdr >= 0) {
-                emit_load_spill(&out->code, pdr, off);
+        /* Push every used arg register in REVERSE param order. */
+        for (int p = nparams - 1; p >= 0; p--) {
+            if (arrive_reg[p] < 0) continue;
+            if (arrive_is_xmm[p]) {
+                emit_sub_rsp_imm32(&out->code, 8);
+                emit_sse_store_rsp(&out->code, arrive_reg[p]);
             } else {
-                emit_load_spill(&out->code, REG_RAX, off);
-                spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
+                emit_push_r(&out->code, arrive_reg[p]);
+            }
+        }
+        /* Pop into each param's allocated home (or spill slot) in order. */
+        for (int p = 0; p < nparams; p++) {
+            const IRInst *pi = &fn->insts.data[p];
+            int is_float = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                            value_is_float_class(fn, pi->dst));
+            if (arrive_reg[p] < 0) {
+                /* Stack-passed arg: load from [rbp + stack_off] into home. */
+                if (is_float) {
+                    int pdr_xmm = (ra_xmm && pi->dst >= 0 &&
+                                   pi->dst < ra_xmm->num_values)
+                                  ? ra_xmm->reg[pi->dst] : -1;
+                    if (pdr_xmm >= 0) {
+                        emit_sse_load_spill(&out->code, pdr_xmm, stack_off[p]);
+                    } else {
+                        emit_sse_load_spill(&out->code, XMM_SCRATCH0, stack_off[p]);
+                        spill_if_needed_xmm(&out->code, pi->dst, XMM_SCRATCH0,
+                                             ra_xmm, gp_spill_area);
+                    }
+                } else {
+                    int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
+                              ? ra->reg[pi->dst] : -1;
+                    if (pdr >= 0) {
+                        emit_load_spill(&out->code, pdr, stack_off[p]);
+                    } else {
+                        emit_load_spill(&out->code, REG_RAX, stack_off[p]);
+                        spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
+                    }
+                }
+                continue;
+            }
+            if (is_float) {
+                int pdr_xmm = (ra_xmm && pi->dst >= 0 &&
+                               pi->dst < ra_xmm->num_values)
+                              ? ra_xmm->reg[pi->dst] : -1;
+                if (pdr_xmm >= 0) {
+                    emit_sse_load_rsp(&out->code, pdr_xmm);
+                } else {
+                    emit_sse_load_rsp(&out->code, XMM_SCRATCH0);
+                    spill_if_needed_xmm(&out->code, pi->dst, XMM_SCRATCH0,
+                                         ra_xmm, gp_spill_area);
+                }
+                emit_add_rsp_imm32(&out->code, 8);
+            } else {
+                int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
+                          ? ra->reg[pi->dst] : -1;
+                if (pdr >= 0) {
+                    emit_pop_r(&out->code, pdr);
+                } else {
+                    emit_pop_r(&out->code, REG_RAX);
+                    spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
+                }
             }
         }
 
@@ -838,13 +1150,32 @@ void codegen(const IRModule *ir, EmitModule *out) {
         /* ---- Instruction loop ---- */
         for (size_t j = 0; j < fn->insts.len; j++) {
             const IRInst *inst = &fn->insts.data[j];
-            int dr = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
+            /* Pick the register file by class: float values live in XMM,
+             * everything else in the GP file.  `dr` is the destination's home
+             * register (GP code or XMM code) or -1 if spilled. */
+            int dr;
+            if (value_is_float_class(fn, inst->dst)) {
+                dr = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
+                     ? ra_xmm->reg[inst->dst] : -1;
+            } else {
+                dr = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                      ? ra->reg[inst->dst] : -1;
+            }
 
             switch (inst->op) {
 
             case IR_CONST: {
-                if (dr >= 0) {
+                if (inst->is_float) {
+                    /* Float constant: bit pattern in float_imm.  Materialize via
+                     * RAX (movabs) then movq into the XMM file. */
+                    if (dr >= 0) {
+                        emit_float_const(&out->code, dr, inst->float_imm);
+                    } else {
+                        emit_float_const(&out->code, XMM_SCRATCH0, inst->float_imm);
+                        spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                                            ra_xmm, gp_spill_area);
+                    }
+                } else if (dr >= 0) {
                     emit_mov_imm(&out->code, dr, inst->imm);
                 } else {
                     emit_mov_imm(&out->code, REG_RAX, inst->imm);
@@ -1132,19 +1463,39 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_LOAD_PTR: {
                 /* dst = *ptr.  ptr = inst->a. */
                 ensure_reg(&out->code, inst->a, REG_RCX, ra);
-                emit_load_via_ptr(&out->code,
-                                  dr >= 0 ? dr : REG_RAX,
-                                  REG_RCX, inst->width, inst->is_unsigned);
-                if (dr < 0)
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                if (value_is_float_class(fn, inst->dst)) {
+                    /* Float load: movsd/movss xmm, [ptr]. */
+                    int is_float = (inst->width == 4);
+                    emit_sse_load_via_ptr(&out->code,
+                                          dr >= 0 ? dr : XMM_SCRATCH0,
+                                          REG_RCX, is_float);
+                    if (dr < 0)
+                        spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                                            ra_xmm, gp_spill_area);
+                } else {
+                    emit_load_via_ptr(&out->code,
+                                      dr >= 0 ? dr : REG_RAX,
+                                      REG_RCX, inst->width, inst->is_unsigned);
+                    if (dr < 0)
+                        spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                }
                 break;
             }
 
             case IR_STORE_PTR: {
                 /* *ptr = val.  ptr = inst->a, val = inst->b. */
                 ensure_reg(&out->code, inst->a, REG_RCX, ra);
-                ensure_reg(&out->code, inst->b, REG_RAX, ra);
-                emit_store_via_ptr(&out->code, REG_RCX, REG_RAX, inst->width);
+                if (value_is_float_class(fn, inst->b)) {
+                    /* Float store: movsd/movss [ptr], xmm. */
+                    int is_float = (inst->width == 4);
+                    ensure_reg_xmm(&out->code, inst->b, XMM_SCRATCH0, ra_xmm,
+                                   gp_spill_area);
+                    emit_sse_store_via_ptr(&out->code, REG_RCX, XMM_SCRATCH0,
+                                           is_float);
+                } else {
+                    ensure_reg(&out->code, inst->b, REG_RAX, ra);
+                    emit_store_via_ptr(&out->code, REG_RCX, REG_RAX, inst->width);
+                }
                 break;
             }
 
@@ -1214,15 +1565,42 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     break;
                 }
                 int nargs = inst->call_nargs;
-                int nreg  = nargs > 6 ? 6 : nargs;
-                int nstack = nargs > 6 ? nargs - 6 : 0;
-                /* Alignment: at call time rsp must be 16-aligned.  Function
-                 * prologue keeps rsp 16-aligned in the body; each 8-byte
-                 * push we do here shifts it by 8.  Total pushes we do
-                 * before the call: nstack (for stack args). The 6 reg
-                 * arg pushes are balanced by 6 pops.  So we need to
-                 * pad iff (nstack % 2) != 0. */
-                int need_pad = (nstack & 1);
+                /* SysV AMD64 assigns the first 6 INTEGER-class args to
+                 * RDI,RSI,RDX,RCX,R8,R9 and the first 8 SSE-class (float/
+                 * double) args to XMM0-XMM7, the two counters independent.
+                 * Args that don't fit in their class's registers are passed
+                 * on the stack at [rsp+8], [rsp+16], ...  Decide each arg's
+                 * target up front. */
+                int target_reg[IR_CALL_MAX_ARGS];   /* native reg code, -1=stack */
+                int target_is_xmm[IR_CALL_MAX_ARGS];
+                int n_gp = 0, n_xmm = 0, n_stack = 0;
+                for (int k = 0; k < nargs; k++) {
+                    int is_float = value_is_float_class(fn, inst->call_args[k]);
+                    if (is_float) {
+                        if (n_xmm < 8) {
+                            target_reg[k] = n_xmm; /* XMM0..7 */
+                            target_is_xmm[k] = 1;
+                            n_xmm++;
+                        } else {
+                            target_reg[k] = -1;
+                            target_is_xmm[k] = 0;
+                            n_stack++;
+                        }
+                    } else {
+                        if (n_gp < 6) {
+                            target_reg[k] = SYSV_ARG_REGS[n_gp++];
+                            target_is_xmm[k] = 0;
+                        } else {
+                            target_reg[k] = -1;
+                            target_is_xmm[k] = 0;
+                            n_stack++;
+                        }
+                    }
+                }
+                /* Alignment: at call time rsp must be 16-aligned.  The reg-arg
+                 * dance is balanced (pushes == pops), so only the nstack
+                 * pushes shift alignment.  Pad iff nstack is odd. */
+                int need_pad = (n_stack & 1);
                 if (need_pad) emit_sub_rsp_imm32(&out->code, 8);
 
                 /* For indirect calls, load the callee into R11 BEFORE the arg
@@ -1231,23 +1609,50 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 if (!inst->call_name)
                     ensure_reg(&out->code, inst->call_callee, REG_R11, ra);
 
-                /* Push stack args right-to-left (arg N-1 first → arg 6 on top
-                 * closest to callee's rbp+16). */
-                for (int k = nargs - 1; k >= 6; k--) {
-                    ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
-                    emit_push_r(&out->code, REG_RAX);
+                /* Push stack-passed args right-to-left (highest index first)
+                 * so they end up at [rsp+8], [rsp+16], ... in order. */
+                for (int k = nargs - 1; k >= 0; k--) {
+                    if (target_reg[k] >= 0) continue; /* reg-passed */
+                    if (target_is_xmm[k]) {
+                        ensure_reg_xmm(&out->code, inst->call_args[k],
+                                       XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                        emit_sub_rsp_imm32(&out->code, 8);
+                        emit_sse_store_rsp(&out->code, XMM_SCRATCH0);
+                    } else {
+                        ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
+                        emit_push_r(&out->code, REG_RAX);
+                    }
                 }
 
-                /* Register args: push all in order (arg 0 first), then pop
-                 * into arg regs in reverse. This gives the push-then-pop
-                 * dance behaviour that dodges clobbers. */
-                for (int k = 0; k < nreg; k++) {
-                    ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
-                    emit_push_r(&out->code, REG_RAX);
+                /* Reg-arg dance: push all reg-arg values in reverse order,
+                 * then load them into their targets in forward order.  Saving
+                 * everything to the stack first dodges cross-arg clobbers. */
+                for (int k = nargs - 1; k >= 0; k--) {
+                    if (target_reg[k] < 0) continue; /* stack-passed */
+                    if (target_is_xmm[k]) {
+                        ensure_reg_xmm(&out->code, inst->call_args[k],
+                                       XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                        emit_sub_rsp_imm32(&out->code, 8);
+                        emit_sse_store_rsp(&out->code, XMM_SCRATCH0);
+                    } else {
+                        ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
+                        emit_push_r(&out->code, REG_RAX);
+                    }
                 }
-                for (int k = nreg - 1; k >= 0; k--) {
-                    emit_pop_r(&out->code, SYSV_ARG_REGS[k]);
+                /* Distribute in forward order (arg 0 on top of the dance). */
+                for (int k = 0; k < nargs; k++) {
+                    if (target_reg[k] < 0) continue; /* stack-passed */
+                    if (target_is_xmm[k]) {
+                        emit_sse_load_rsp(&out->code, target_reg[k]);
+                        emit_add_rsp_imm32(&out->code, 8);
+                    } else {
+                        emit_pop_r(&out->code, target_reg[k]);
+                    }
                 }
+                /* AL = number of vector registers used (ABI requirement for
+                 * variadic callees; harmless otherwise). */
+                emit_byte(&out->code, 0xB0 | REG_RAX); /* mov al, imm8 */
+                emit_byte(&out->code, (uint8_t)n_xmm);
 
                 if (inst->call_name) {
                     /* Direct named call: emit call rel32 with a cross-function patch. */
@@ -1269,16 +1674,28 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 }
 
                 /* Tear down stack args + padding. */
-                int cleanup = nstack * 8 + (need_pad ? 8 : 0);
+                int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
                 if (cleanup > 0) emit_add_rsp_imm32(&out->code, cleanup);
 
-                /* Result is in RAX; move to dst home (or spill).  A void call
-                 * has dst == -1 (no result) — leave RAX alone. */
-                if (inst->dst >= 0) {
-                    if (dr >= 0) {
-                        if (dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                    } else {
-                        spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                if (value_is_float_class(fn, inst->dst)) {
+                    /* Float result comes back in XMM0 (SysV float ABI).  Move
+                     * it to dst's XMM home, or spill.  Void: dst == -1. */
+                    if (inst->dst >= 0) {
+                        if (dr >= 0 && dr != 0)
+                            emit_sse_mov_rr(&out->code, dr, 0); /* 0 == XMM0 */
+                        else if (dr < 0)
+                            spill_if_needed_xmm(&out->code, inst->dst, 0,
+                                                ra_xmm, gp_spill_area);
+                    }
+                } else {
+                    /* Result is in RAX; move to dst home (or spill).  A void
+                     * call has dst == -1 (no result) — leave RAX alone. */
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                        }
                     }
                 }
                 break;
@@ -1286,9 +1703,132 @@ void codegen(const IRModule *ir, EmitModule *out) {
 
             case IR_RETURN: {
                 /* Void function: bare `return;` — no value in a. */
-                if (inst->a != -1)
-                    ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                if (inst->a != -1) {
+                    if (value_is_float_class(fn, inst->a))
+                        ensure_reg_xmm(&out->code, inst->a, 0, ra_xmm,
+                                       gp_spill_area); /* XMM0 */
+                    else
+                        ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                }
                 emit_epilogue(&out->code, stack_size, cs_used);
+                break;
+            }
+
+            case IR_FADD:
+            case IR_FSUB:
+            case IR_FMUL:
+            case IR_FDIV: {
+                /* dst = a op b, all float.  Stage both operands into XMM
+                 * scratch regs (never-allocated scratch0/1), compute into
+                 * scratch0, then move to dst home or spill. */
+                int is_float = (inst->width == 4);
+                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                               gp_spill_area);
+                ensure_reg_xmm(&out->code, inst->b, XMM_SCRATCH1, ra_xmm,
+                               gp_spill_area);
+                int op;
+                switch (inst->op) {
+                case IR_FADD: op = 0x58; break;
+                case IR_FSUB: op = 0x5C; break;
+                case IR_FMUL: op = 0x59; break;
+                default:      op = 0x5E; break; /* FDIV */
+                }
+                emit_sse_arith(&out->code, op, XMM_SCRATCH0, XMM_SCRATCH1,
+                               is_float);
+                if (dr >= 0 && dr != XMM_SCRATCH0)
+                    emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
+                spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                                    ra_xmm, gp_spill_area);
+                break;
+            }
+
+            case IR_FCMP: {
+                /* dst (int) = (a op b) ? 1 : 0, a/b float.  The comparison is
+                 * encoded in inst->is_unsigned: 0=LT 1=LE 2=GT 3=GE 4=EQ
+                 * 5=NE.  ucomi sets flags; setcc produces the 0/1 result. */
+                int is_float = (inst->width == 4);
+                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                               gp_spill_area);
+                ensure_reg_xmm(&out->code, inst->b, XMM_SCRATCH1, ra_xmm,
+                               gp_spill_area);
+                emit_sse_ucomi(&out->code, XMM_SCRATCH0, XMM_SCRATCH1,
+                               is_float);
+                /* Map the FCMP ordering to the matching setcc byte. */
+                uint8_t cc;
+                switch (inst->is_unsigned) {
+                case 0: cc = 0x92; break; /* LT → setb */
+                case 1: cc = 0x96; break; /* LE → setbe */
+                case 2: cc = 0x97; break; /* GT → seta */
+                case 3: cc = 0x93; break; /* GE → setae */
+                case 4: cc = 0x94; break; /* EQ → sete */
+                default: cc = 0x95; break; /* NE → setne */
+                }
+                /* setcc needs RDX (a GP scratch not used by the SSE staging).
+                 * Result is int (width 4); dr is a GP register. */
+                emit_xor_rr(&out->code, REG_RDX);
+                emit_setcc_r(&out->code, cc, REG_RDX);
+                if (dr >= 0 && dr != REG_RDX)
+                    emit_mov_rr(&out->code, dr, REG_RDX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RDX, ra);
+                break;
+            }
+
+            case IR_SITOFP: {
+                /* dst (float) = (float)a, a = signed int.  Load a into a GP
+                 * scratch, cvtsi2sd, then optionally narrow to float. */
+                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                int is_64 = (inst->width == 8);
+                emit_sse_cvtsi2sd(&out->code, XMM_SCRATCH0, REG_RAX, is_64);
+                if (inst->width == 4)
+                    emit_sse_cvtsd2ss(&out->code, XMM_SCRATCH0, XMM_SCRATCH0);
+                if (dr >= 0 && dr != XMM_SCRATCH0)
+                    emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
+                spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                                    ra_xmm, gp_spill_area);
+                break;
+            }
+
+            case IR_FPTOSI: {
+                /* dst (int) = (int)a, a = float.  The source float width is
+                 * inst->imm (inst->width is the target int width).  Load a
+                 * into XMM scratch, cvtsd2si/cvtss2si into a GP scratch. */
+                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                               gp_spill_area);
+                int src_float = (inst->imm == 4);
+                int dst_64 = (inst->width == 8);
+                if (src_float)
+                    emit_sse_cvtss2si(&out->code, REG_RAX, XMM_SCRATCH0, dst_64);
+                else
+                    emit_sse_cvtsd2si(&out->code, REG_RAX, XMM_SCRATCH0, dst_64);
+                if (dr >= 0 && dr != REG_RAX)
+                    emit_mov_rr(&out->code, dr, REG_RAX);
+                spill_if_needed(&out->code, inst->dst,
+                                dr >= 0 ? dr : REG_RAX, ra);
+                break;
+            }
+
+            case IR_FPEXT: {
+                /* dst (double) = (double)(float)a.  Widen float→double. */
+                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                               gp_spill_area);
+                emit_sse_cvtss2sd(&out->code, XMM_SCRATCH0, XMM_SCRATCH0);
+                if (dr >= 0 && dr != XMM_SCRATCH0)
+                    emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
+                spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                                    ra_xmm, gp_spill_area);
+                break;
+            }
+
+            case IR_FPTRUNC: {
+                /* dst (float) = (float)(double)a.  Narrow double→float. */
+                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                               gp_spill_area);
+                emit_sse_cvtsd2ss(&out->code, XMM_SCRATCH0, XMM_SCRATCH0);
+                if (dr >= 0 && dr != XMM_SCRATCH0)
+                    emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
+                spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                                    ra_xmm, gp_spill_area);
                 break;
             }
 

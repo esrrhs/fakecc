@@ -40,6 +40,7 @@ static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
     if (k == TK_KW_VOID || k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
         || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED
+        || k == TK_KW_FLOAT || k == TK_KW_DOUBLE
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN)
         return 1;
@@ -102,6 +103,19 @@ static Type parse_specifiers(Parser *p) {
         t.is_const = is_const;
         return t;
     }
+    /* float / double — TY_FLOAT with width 4 or 8. */
+    if (peek(p)->kind == TK_KW_FLOAT) {
+        advance(p);
+        Type t = type_make_float(4);
+        t.is_const = is_const;
+        return t;
+    }
+    if (peek(p)->kind == TK_KW_DOUBLE) {
+        advance(p);
+        Type t = type_make_float(8);
+        t.is_const = is_const;
+        return t;
+    }
     /* enum Tag — treated as int for the type system. */
     if (peek(p)->kind == TK_KW_ENUM) {
         advance(p);
@@ -159,21 +173,23 @@ static Type parse_specifiers(Parser *p) {
 static Type parse_type(Parser *p, char **name_out);  /* forward */
 
 /* Build a function type from a base return type and a ParamArray of params.
- * Consumes (frees) the ParamArray.  type_make_func clones its params, so we
- * hand it pointers to the ParamArray's owned types, then free the array. */
+ * Consumes (frees) the ParamArray.  type_make_func deep-clones the param
+ * types we hand it, so the originals stay owned by the ParamArray and are
+ * freed by param_array_free below.  The ptys array is a shallow list of
+ * *pointers* into the ParamArray — its elements must NOT be type_free'd. */
 static Type make_func_type(Type ret, ParamArray *params) {
-    Type *ptys = NULL;
+    /* Build a shallow array of pointers into the ParamArray's owned types.
+     * type_make_func deep-clones them, so the originals stay owned by the
+     * ParamArray and are freed by param_array_free below. */
+    Type **ptys = NULL;
     if (params->len > 0) {
-        ptys = malloc(params->len * sizeof(Type));
+        ptys = malloc(params->len * sizeof(Type *));
         if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         for (size_t i = 0; i < params->len; i++)
-            ptys[i] = params->data[i].type;
+            ptys[i] = &params->data[i].type;
     }
     Type t = type_make_func(ret, ptys, (int)params->len);
-    if (ptys) {
-        for (size_t i = 0; i < params->len; i++) type_free(&ptys[i]);
-        free(ptys);
-    }
+    free(ptys);
     param_array_free(params);
     return t;
 }
@@ -807,6 +823,19 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
 
 /* Decode a char-literal token's text (e.g. "'A'" or "'\\n'") to its int value.
  * Caller guarantees text starts and ends with a single quote. */
+/* Parse a TK_FLOAT_LITERAL's text into a double and a width (4 = float,
+ * 8 = double).  The `f`/`F` suffix forces width 4; otherwise double.
+ * Uses strtod for the numeric value. */
+static double float_literal_value(const char *text, int *out_width) {
+    /* Detect the `f`/`F` suffix (lexer guarantees it's the last char). */
+    size_t len = strlen(text);
+    int is_float_suffix = 0;
+    if (len > 0 && (text[len - 1] == 'f' || text[len - 1] == 'F'))
+        is_float_suffix = 1;
+    *out_width = is_float_suffix ? 4 : 8;
+    return strtod(text, NULL);
+}
+
 static int char_literal_value(const char *text) {
     /* text[0] == '\'' */
     if (text[1] == '\\') {
@@ -830,6 +859,13 @@ static Expr *parse_primary(Parser *p) {
         Expr *e = expr_new_int(atoi(t->text), t->loc);
         advance(p);
         return parse_postfix(p, e);
+    }
+    if (t->kind == TK_FLOAT_LITERAL) {
+        int width = 8;
+        double val = float_literal_value(t->text, &width);
+        Expr *e = expr_new_float_lit(val, width, t->loc);
+        advance(p);
+        return e;  /* float literal is a primary — no postfix needed */
     }
     if (t->kind == TK_STRING_LITERAL) {
         /* Token text includes surrounding quotes; strip and process escapes. */
