@@ -1804,6 +1804,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.insts.cap = 0;
         irfn.next_value_id = 0;
         irfn.next_label_id = 0;
+        irfn.ra = NULL;
+        irfn.ra_xmm = NULL;
         irfn.value_width = NULL;
         irfn.value_is_unsigned = NULL;
         irfn.value_is_float = NULL;
