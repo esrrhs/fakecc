@@ -135,6 +135,12 @@ typedef struct {
     int   ret_is_unsigned;
     /* Float support: 1 if the function returns TY_FLOAT. */
     int   ret_is_float;
+    /* Slice 13: 1 if the function returns a struct by value (sret ABI). */
+    int   ret_is_struct;
+    /* Slice 13: SSA value of the hidden sret pointer param (param index 0)
+     * when ret_is_struct.  The return statement copies struct bytes into
+     * *sret_value and returns the pointer in RAX (SysV AMD64 struct ABI). */
+    IRValue sret_value;
 } IRFunction;
 
 typedef struct {

@@ -360,6 +360,37 @@ static IRValue emit_alloca(IRFunction *fn, int total_bytes, int width,
     return v;
 }
 
+/* Emit `dst = ptr + delta` where delta is a compile-time byte constant.
+ * Used to form addresses of struct members / copy chunks. */
+static IRValue emit_add_const(IRFunction *fn, IRValue ptr, int delta,
+                              SourceLoc loc) {
+    if (delta == 0) return ptr;
+    IRValue c = new_value(fn);
+    emit_inst_w(fn, IR_CONST, c, -1, -1, delta, 8, 1, loc);
+    return emit_bin_w(fn, IR_ADD, ptr, c, 8, 1, loc);
+}
+
+/* Copy `size` bytes from *src into *dst, one natural-width chunk at a time
+ * (8/4/2/1 bytes).  Implements struct value copy: a struct is represented as
+ * a pointer to its bytes, so every by-value boundary (param bind, return,
+ * assignment) must move the bytes, not the pointer.  Chosen width is always
+ * a power of two no larger than the remaining bytes and no larger than 8, so
+ * it matches a single LOAD_PTR/STORE_PTR on the codegen side. */
+static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
+                              int size, SourceLoc loc) {
+    int off = 0;
+    while (size > 0) {
+        int w = (size >= 8) ? 8 : (size >= 4) ? 4 : (size >= 2) ? 2 : 1;
+        IRValue saddr = emit_add_const(fn, src, off, loc);
+        IRValue daddr = emit_add_const(fn, dst, off, loc);
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, saddr, -1, 0, w, 1, loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, daddr, v, 0, w, 1, loc);
+        off += w;
+        size -= w;
+    }
+}
+
 /* Emit `dst = &global-with-name`. */
 static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc) {
     IRValue v = new_value(fn);
@@ -581,6 +612,13 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     }
     case EX_DEREF:
         return lower_expr(fn, st, e->u.deref.operand);
+    case EX_CALL: {
+        /* A struct call returns a pointer to its bytes (the sret slot address,
+         * or a caller-allocated slot).  That pointer is the base address for
+         * member access — e.g. `make(3,4).a`.  Lower the call to materialize
+         * it (emitting the sret setup), then use the result as the lvalue. */
+        return lower_expr(fn, st, e);
+    }
     case EX_INDEX: {
         IRValue base = lower_expr(fn, st, e->u.idx.array);
         IRValue idx  = lower_expr(fn, st, e->u.idx.index);
@@ -967,6 +1005,27 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             coerced = (rw == lw) ? rv : convert_numeric(fn, rv, rw, lw, lu, 1, e->loc);
         else
             coerced = coerce(fn, rv, rw, ru, lw, lu, e->loc);
+        /* Slice 13 — struct lvalue: both sides are pointers (a struct value is
+         * its byte address), so copy the bytes instead of storing the pointer. */
+        if (lv->type.kind == TY_STRUCT) {
+            IRValue dst;
+            if (lv->kind == EX_VAR) {
+                const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
+                if (!entry) return -1;
+                if (entry->is_global)
+                    dst = emit_gaddr(fn, slot_global_name(entry), e->loc);
+                else
+                    dst = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+            } else if (lv->kind == EX_DEREF) {
+                dst = lower_expr(fn, st, lv->u.deref.operand);
+            } else if (lv->kind == EX_INDEX || lv->kind == EX_MEMBER) {
+                dst = lower_lvalue_addr(fn, st, lv);
+            } else {
+                return coerced;
+            }
+            emit_struct_copy(fn, dst, rv, type_size(lv->type), e->loc);
+            return coerced;
+        }
         if (lv->kind == EX_VAR) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
             if (!entry) return -1;
@@ -999,10 +1058,24 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Void call: no result value (width 0).  Still emit the call for its
          * side effects; dst=-1 marks "no result". */
         int is_void = (e->type.width == 0);
-        IRValue v = is_void ? -1 : new_value(fn);
+        /* Slice 13 — sret: a struct-returning call needs a destination slot.
+         * Allocate it, pass &slot as a hidden arg 0, shift real args up, and
+         * take the slot address as the call's result "value" (a pointer). */
+        int is_ret_struct = (!is_void && e->type.kind == TY_STRUCT);
+        IRValue sret_addr = -1;
+        if (is_ret_struct) {
+            int total = type_size(e->type);
+            IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
+            sret_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        }
+        /* A struct call produces no scalar result (dst=-1): the bytes land in
+         * the slot backing sret_addr, which is also passed as hidden arg 0 and
+         * kept live across the call.  The expression's "value" is sret_addr. */
+        IRValue v = is_ret_struct ? sret_addr : (is_void ? -1 : new_value(fn));
+        int total_nargs = nargs + (is_ret_struct ? 1 : 0);
         IRInst inst;
         inst.op = IR_CALL;
-        inst.dst = v;
+        inst.dst = is_ret_struct ? -1 : v;
         inst.a = -1;
         inst.b = -1;
         inst.imm = 0;
@@ -1041,10 +1114,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             /* Indirect call: lower the callee expression to an SSA value. */
             inst.call_callee = lower_expr(fn, st, e->u.call.callee);
         }
-        inst.call_nargs = nargs;
-        for (int i = 0; i < nargs; i++) inst.call_args[i] = arg_vals[i];
-        inst.width = is_void ? 0 : (e->type.width ? e->type.width : 4);
-        inst.is_unsigned = e->type.is_unsigned;
+        inst.call_nargs = total_nargs;
+        if (is_ret_struct) {
+            inst.call_args[0] = sret_addr;
+            for (int i = 0; i < nargs; i++)
+                inst.call_args[i + 1] = arg_vals[i];
+        } else {
+            for (int i = 0; i < nargs; i++) inst.call_args[i] = arg_vals[i];
+        }
+        /* A struct call's "value" is the destination pointer (width 8). */
+        inst.width = is_ret_struct ? 8
+                      : (is_void ? 0 : (e->type.width ? e->type.width : 4));
+        inst.is_unsigned = is_ret_struct ? 1 : e->type.is_unsigned;
         ir_inst_array_push(&fn->insts, inst);
         if (!is_void) set_value_type(fn, v, inst.width, inst.is_unsigned);
         return v;
@@ -1402,6 +1483,14 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 }
             } else {
                 IRValue rv = lower_expr(fn, st, s->u.decl.init);
+                /* Slice 13 — struct init from an expression (e.g. `struct S r =
+                 * make(3,4)`): both sides are pointers; copy the bytes instead
+                 * of storing the pointer. */
+                if (dty.kind == TY_STRUCT) {
+                    IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
+                    emit_struct_copy(fn, addr, rv, type_size(dty), s->loc);
+                    break;
+                }
                 int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
                 int rf = get_value_is_float(fn, rv);
                 int df = (dty.kind == TY_FLOAT);
@@ -1429,6 +1518,15 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         if (fn->ret_width == 0 && !fn->ret_is_float) {
             /* void function: bare `return;` — no value. */
             emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
+        } else if (fn->ret_is_struct) {
+            /* Slice 13 — sret: the returned expression lowers to a pointer to
+             * the local struct; copy its bytes into the hidden destination
+             * (*sret_value) and return the sret pointer in RAX (SysV AMD64
+             * struct-return convention). */
+            IRValue v = lower_expr(fn, st, s->u.value);
+            emit_struct_copy(fn, fn->sret_value, v, fn->ret_width, s->loc);
+            emit_inst_w(fn, IR_RETURN, -1, fn->sret_value, -1, 0,
+                        8, 1, s->loc);
         } else {
             IRValue v = lower_expr(fn, st, s->u.value);
             int vw = get_value_width(fn, v), vu = get_value_is_unsigned(fn, v);
@@ -1813,6 +1911,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.ret_width = fd->ret_type.width;
         irfn.ret_is_unsigned = fd->ret_type.is_unsigned;
         irfn.ret_is_float = (fd->ret_type.kind == TY_FLOAT);
+        irfn.ret_is_struct = (fd->ret_type.kind == TY_STRUCT);
+        irfn.sret_value = -1;
 
         IRSymTable st;
         irsymtable_init(&st);
@@ -1828,13 +1928,26 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
          * function start (codegen's prologue relies on this layout).  The
          * alloca/addr/store chains follow afterward. */
         IRValue param_vs[64];
+        /* Slice 13 — sret: a struct-returning function receives a hidden
+         * destination pointer as param 0 (in RDI per SysV AMD64).  Real params
+         * are shifted up to indices 1..n. */
+        if (irfn.ret_is_struct) {
+            irfn.sret_value = new_value(&irfn);
+            emit_inst_w(&irfn, IR_PARAM, irfn.sret_value, -1, -1, 0, 8, 1,
+                        fd->loc);
+        }
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
-            int pw = pty.kind == TY_PTR ? 8 : (pty.width ? pty.width : 4);
-            int pu = pty.kind == TY_PTR ? 1 : pty.is_unsigned;
+            /* A struct arrives by reference (caller passes &struct), so the
+             * incoming param is an 8-byte pointer regardless of struct size. */
+            int pw = (pty.kind == TY_PTR || pty.kind == TY_STRUCT) ? 8
+                      : (pty.width ? pty.width : 4);
+            int pu = (pty.kind == TY_PTR || pty.kind == TY_STRUCT) ? 1
+                      : pty.is_unsigned;
+            int pidx = (int)p + (irfn.ret_is_struct ? 1 : 0);
 
             param_vs[p] = new_value(&irfn);
-            emit_inst_w(&irfn, IR_PARAM, param_vs[p], -1, -1, (int)p, pw, pu,
+            emit_inst_w(&irfn, IR_PARAM, param_vs[p], -1, -1, pidx, pw, pu,
                         fd->params.data[p].loc);
             if (pty.kind == TY_FLOAT)
                 set_value_float(&irfn, param_vs[p], 1);
@@ -1857,8 +1970,16 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
                 slot = emit_alloca(&irfn, total, pw, pu, fd->params.data[p].loc);
                 IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1,
                                           fd->params.data[p].loc);
-                emit_inst_w(&irfn, IR_STORE_PTR, -1, addr, param_vs[p], 0, pw, pu,
-                            fd->params.data[p].loc);
+                if (pty.kind == TY_STRUCT) {
+                    /* Struct by value: the incoming param is a pointer to the
+                     * caller's struct — copy the bytes into our local slot
+                     * instead of storing the pointer itself. */
+                    emit_struct_copy(&irfn, addr, param_vs[p], total,
+                                     fd->params.data[p].loc);
+                } else {
+                    emit_inst_w(&irfn, IR_STORE_PTR, -1, addr, param_vs[p], 0, pw, pu,
+                                fd->params.data[p].loc);
+                }
             } else {
                 slot = new_value(&irfn);
                 emit_inst_w(&irfn, IR_ALLOCA, slot, -1, -1, 0, pw, pu,
