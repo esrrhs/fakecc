@@ -210,6 +210,8 @@ void scalar_renumber(IRFunction *fn) {
         if (inst->op != IR_CBR && inst->b >= 0 && map[inst->b] == -1)
             map[inst->b] = next++;
         if (inst->op == IR_CALL) {
+            if (inst->call_callee >= 0 && map[inst->call_callee] == -1)
+                map[inst->call_callee] = next++;
             for (int k = 0; k < inst->call_nargs; k++) {
                 int v = inst->call_args[k];
                 if (v >= 0 && map[v] == -1) map[v] = next++;
@@ -225,6 +227,8 @@ void scalar_renumber(IRFunction *fn) {
         if (inst->a >= 0) inst->a = map[inst->a];
         if (inst->op != IR_CBR && inst->b >= 0) inst->b = map[inst->b];
         if (inst->op == IR_CALL) {
+            if (inst->call_callee >= 0)
+                inst->call_callee = map[inst->call_callee];
             for (int k = 0; k < inst->call_nargs; k++) {
                 int v = inst->call_args[k];
                 if (v >= 0) inst->call_args[k] = map[v];

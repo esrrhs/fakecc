@@ -1006,14 +1006,20 @@ void sema_check(const TranslationUnit *tu_const) {
                        fn->params.data[j].name);
             }
             /* Normalize unsized array parameters (`int a[]`) to pointers,
-             * matching standard C parameter adjustment. */
+             * matching standard C parameter adjustment.  `own_ptr` is true
+             * only when we allocate a fresh ptr type here — freeing `pty`
+             * otherwise would double-free heap pointers shared with
+             * fn->params.data[j].type (e.g. a function-pointer parameter,
+             * whose pointee is freed later by param_array_free in tu_free). */
             Type pty = fn->params.data[j].type;
+            int own_ptr = 0;
             if (pty.kind == TY_ARRAY && pty.length == 0) {
                 pty = type_make_ptr(*pty.elem_type);
+                own_ptr = 1;
             }
             symtable_push(&st, fn->params.data[j].name,
                           pty, fn->params.data[j].loc);
-            if (pty.kind == TY_PTR) type_free(&pty);
+            if (own_ptr) type_free(&pty);
         }
 
         /* Pre-pass: collect every label in the function so forward gotos
