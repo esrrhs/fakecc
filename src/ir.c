@@ -972,6 +972,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                         entry->width, entry->is_unsigned, e->loc);
+            if (entry->ty.kind == TY_FLOAT) set_value_float(fn, v, 1);
             return v;
         }
         if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT) {
@@ -1165,6 +1166,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int u = e->type.is_unsigned;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, ptr, -1, 0, w, u, e->loc);
+        if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
     case EX_INDEX: {
@@ -1184,6 +1186,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (e->type.kind == TY_STRUCT) return addr;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
     case EX_MEMBER: {
@@ -1195,6 +1198,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int u = e->type.is_unsigned;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
     case EX_CAST: {
