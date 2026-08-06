@@ -15,6 +15,7 @@ static Type g_sema_ret_type;
 typedef struct {
     const char *name;
     int arity;
+    int is_variadic;
     Type ret_type;
     Type param_types[16];
     SourceLoc loc;
@@ -38,6 +39,7 @@ static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     FunSig *s = &t->data[t->len++];
     s->name = fn->name;
     s->arity = (int)fn->params.len;
+    s->is_variadic = fn->is_variadic;
     s->ret_type = fn->ret_type;
     s->loc = fn->loc;
     for (int i = 0; i < s->arity && i < 16; i++)
@@ -48,6 +50,11 @@ static const FunSig *ftab_find(const FunTable *t, const char *name) {
     for (size_t i = 0; i < t->len; i++)
         if (strcmp(t->data[i].name, name) == 0) return &t->data[i];
     return NULL;
+}
+
+/* A value has va_list type iff it is the builtin __va_list_tag struct. */
+static int is_va_list_type(const Type *t) {
+    return t->kind == TY_STRUCT && t->tag && strcmp(t->tag, "__va_list_tag") == 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -432,6 +439,68 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             set_type(e, type_make_int(8, 0));
             return type_clone(e->type);
         }
+        /* Recognize the va_start / va_arg / va_end builtins BEFORE the callee
+         * lookup, for the same reason as __syscall: they are not real
+         * variables/functions. They operate on a `va_list` lvalue (the struct
+         * is passed as its address, matching fakecc's struct-as-pointer value
+         * representation). */
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "va_start") == 0) {
+            if (e->u.call.args.len != 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_start takes exactly 2 arguments (va_list, last_param)");
+            }
+            Type list_ty = check_expr(e->u.call.args.data[0], st, ft);
+            if (!is_va_list_type(&list_ty)) {
+                type_free(&list_ty);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_start first argument must be a va_list");
+            }
+            type_free(&list_ty);
+            Type at = check_expr(e->u.call.args.data[1], st, ft);
+            type_free(&at);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "va_arg") == 0) {
+            /* va_arg's second argument is a type, parsed into va_arg_type
+             * (not args), so args holds only the va_list expression. */
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_arg takes exactly 2 arguments (va_list, type)");
+            }
+            Type list_ty = check_expr(e->u.call.args.data[0], st, ft);
+            if (!is_va_list_type(&list_ty)) {
+                type_free(&list_ty);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_arg first argument must be a va_list");
+            }
+            type_free(&list_ty);
+            if (e->va_arg_type.kind == TY_VOID && e->va_arg_type.width == 0
+                && !e->va_arg_type.tag) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_arg second argument must be a type");
+            }
+            set_type(e, type_clone(e->va_arg_type));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "va_end") == 0) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_end takes exactly 1 argument (va_list)");
+            }
+            Type list_ty = check_expr(e->u.call.args.data[0], st, ft);
+            if (!is_va_list_type(&list_ty)) {
+                type_free(&list_ty);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_end argument must be a va_list");
+            }
+            type_free(&list_ty);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
         /* Type-check the callee expression. */
         Type callee_ty = check_expr(e->u.call.callee, st, ft);
         /* Direct call: callee is `EX_VAR` naming a known function. */
@@ -439,7 +508,15 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             const FunSig *sig = ftab_find(ft, e->u.call.callee->u.var.name);
             if (sig) {
                 type_free(&callee_ty);
-                if ((int)e->u.call.args.len != sig->arity) {
+                if (sig->is_variadic) {
+                    /* Variadic function: need at least the named params. */
+                    if ((int)e->u.call.args.len < sig->arity) {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "function '%s' takes at least %d argument%s but %zu given",
+                               e->u.call.callee->u.var.name, sig->arity,
+                               sig->arity == 1 ? "" : "s", e->u.call.args.len);
+                    }
+                } else if ((int)e->u.call.args.len != sig->arity) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "function '%s' takes %d argument%s but %zu given",
                            e->u.call.callee->u.var.name, sig->arity,

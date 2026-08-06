@@ -595,7 +595,22 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             case ']': t.kind = TK_RBRACKET; break;
             case ';': t.kind = TK_SEMICOLON; break;
             case ',': t.kind = TK_COMMA; break;
-            case '.': t.kind = TK_DOT; break;
+            case '.':
+                /* `...` is the variadic ellipsis. The float-literal path
+                 * (`.5`) only consumes a `.` followed by a digit, so a bare
+                 * `...` always reaches this general case. */
+                if (source[pos + 1] == '.' && source[pos + 2] == '.') {
+                    t.kind = TK_ELLIPSIS;
+                    t.text = xstrdup("...");
+                    t.loc.file = filename;
+                    t.loc.line = line;
+                    t.loc.col = col;
+                    token_array_push(out, t);
+                    pos += 3; col += 3;
+                    continue;
+                }
+                t.kind = TK_DOT;
+                break;
             case '+': t.kind = TK_PLUS; break;
             case '-': t.kind = TK_MINUS; break;
             case '*': t.kind = TK_STAR; break;

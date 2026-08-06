@@ -137,6 +137,9 @@ typedef struct {
     int   ret_is_float;
     /* Slice 13: 1 if the function returns a struct by value (sret ABI). */
     int   ret_is_struct;
+    /* Variadic: 1 if the function was defined with a `...` tail.  The prologue
+     * emits a register-save area and the va_* builtins read/write it. */
+    int   is_variadic;
     /* Slice 13: SSA value of the hidden sret pointer param (param index 0)
      * when ret_is_struct.  The return statement copies struct bytes into
      * *sret_value and returns the pointer in RAX (SysV AMD64 struct ABI). */

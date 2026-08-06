@@ -77,6 +77,7 @@ typedef enum {
     TK_QUESTION,         /* ? */
     TK_COLON,            /* : */
     TK_DOT,              /* . */
+    TK_ELLIPSIS,         /* ... — variadic parameter list */
     TK_ARROW,            /* -> */
     TK_ASSIGN,           /* = */
     TK_EQ,               /* == */

@@ -221,7 +221,16 @@ static ParamArray parse_param_list(Parser *p) {
             }
             param_array_push(&params, pname_in, pty, pname->loc);
             free(pname_in);
-            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+            if (peek(p)->kind == TK_COMMA) {
+                advance(p);
+                /* Variadic tail of a function type. The variadic-ness of a
+                 * type is deferred (indirect variadic calls are out of scope);
+                 * here we just consume the `...` so the syntax parses. */
+                if (peek(p)->kind == TK_ELLIPSIS) {
+                    advance(p);
+                }
+                continue;
+            }
             break;
         }
         if (params.len > 16) {
@@ -801,6 +810,10 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
             SourceLoc loc = peek(p)->loc;
             advance(p);  /* '(' */
             Expr *call = expr_new_call(lhs, loc);
+            /* The `va_arg(list, T)` builtin's second argument is a TYPE, not
+             * an expression. Detect it by callee name and parse accordingly. */
+            int is_va_arg = (lhs->kind == EX_VAR
+                             && strcmp(lhs->u.var.name, "va_arg") == 0);
             if (peek(p)->kind != TK_RPAREN) {
                 for (;;) {
                     /* Arguments are assignment-expressions, NOT
@@ -808,7 +821,18 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
                      * argument separator, never the comma operator. */
                     Expr *arg = parse_assign(p);
                     expr_call_push_arg(call, arg);
-                    if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                    if (peek(p)->kind == TK_COMMA) {
+                        advance(p);
+                        if (is_va_arg && call->u.call.args.len == 1) {
+                            /* Second arg of va_arg is the requested type.
+                             * va_arg always has exactly two arguments, so
+                             * parse the type and end the argument list. */
+                            Type t = parse_type_abstract(p);
+                            call->va_arg_type = t;
+                            break;
+                        }
+                        continue;
+                    }
                     break;
                 }
             }
@@ -1363,6 +1387,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     param_array_init(&fn.params);
     stmt_array_init(&fn.body);
     fn.loc = fn_loc;
+    fn.is_variadic = 0;
 
     /* Parameter list: type declarator ("," type declarator)* — or empty.
      * The special form `(void)` means "no parameters" (standard C). */
@@ -1393,13 +1418,28 @@ static FunctionDecl parse_function_decl(Parser *p) {
             }
             param_array_push(&fn.params, pname, pty, peek(p)->loc);
             free(pname);
-            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+            if (peek(p)->kind == TK_COMMA) {
+                advance(p);
+                /* Variadic tail: `...` must be the last thing before ')'.
+                 * Consume it and end the parameter list. */
+                if (peek(p)->kind == TK_ELLIPSIS) {
+                    advance(p);
+                    fn.is_variadic = 1;
+                    break;
+                }
+                continue;
+            }
             break;
         }
         if (fn.params.len > 16) {
             die_at(fn.loc.file, fn.loc.line, fn.loc.col,
                    "more than 16 parameters not supported");
         }
+    }
+
+    if (fn.is_variadic && fn.params.len == 0) {
+        die_at(fn.loc.file, fn.loc.line, fn.loc.col,
+               "'...' must follow a named parameter");
     }
 
     expect_kind(p, TK_RPAREN, "')'");
@@ -1623,7 +1663,8 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
         /* Skip type keyword. */
         if (peek(&p)->kind == TK_KW_VOID || peek(&p)->kind == TK_KW_INT
             || peek(&p)->kind == TK_KW_CHAR || peek(&p)->kind == TK_KW_SHORT
-            || peek(&p)->kind == TK_KW_LONG) {
+            || peek(&p)->kind == TK_KW_LONG || peek(&p)->kind == TK_KW_FLOAT
+            || peek(&p)->kind == TK_KW_DOUBLE) {
             advance(&p);
         } else if (peek(&p)->kind == TK_KW_STRUCT
                    || peek(&p)->kind == TK_KW_UNION) {

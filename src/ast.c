@@ -527,6 +527,7 @@ static Expr *expr_alloc(ExprKind k, SourceLoc loc) {
     Expr *e = malloc(sizeof(Expr));
     if (!e) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     e->kind = k; e->loc = loc; e->type = type_default_int();
+    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     return e;
 }
 
@@ -606,6 +607,7 @@ void expr_free(Expr *e) {
         for (size_t i = 0; i < e->u.call.args.len; i++)
             expr_free(e->u.call.args.data[i]);
         free(e->u.call.args.data);
+        type_free(&e->va_arg_type);
         break;
     case EX_STR:
         free(e->u.str.bytes);
@@ -774,6 +776,18 @@ void tu_init(TranslationUnit *tu) {
     struct_registry_init(&tu->structs);
     enum_registry_init(&tu->enums);
     typedef_registry_init(&tu->typedefs);
+
+    /* Predeclare the `va_list` type used by the va_start/va_arg/va_end
+     * builtins. It mirrors the SysV AMD64 va_list layout so sizeof and field
+     * layout resolve, even though user code never constructs one directly. */
+    SourceLoc vloc = {0};
+    StructDef *va = struct_registry_add(&tu->structs, "__va_list_tag", vloc);
+    struct_def_push_member(va, "gp_offset", type_make_int(4, 1));
+    struct_def_push_member(va, "fp_offset", type_make_int(4, 1));
+    struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()));
+    struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()));
+    Type va_type = type_make_struct("__va_list_tag", va->size);
+    typedef_registry_add(&tu->typedefs, "va_list", va_type);
 }
 
 void tu_free(TranslationUnit *tu) {

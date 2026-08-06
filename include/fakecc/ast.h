@@ -137,6 +137,10 @@ struct Expr {
     ExprKind kind;
     SourceLoc loc;
     Type type;   /* populated by sema; default-initialized to int */
+    /* EX_CALL only, when callee is the `va_arg` builtin: the requested
+     * type T (va_arg's second argument is a type, not an expression).
+     * Kept OUT of the union so it never aliases with EX_CALL::args/callee. */
+    Type va_arg_type;
     union {
         int int_val;                                   /* EX_INT_LIT */
         struct { BinOp op; Expr *l, *r; } bin;        /* EX_BINOP */
@@ -280,6 +284,7 @@ typedef struct {
     ParamArray params;
     StmtArray body;
     SourceLoc loc;
+    int    is_variadic; /* 1 = ends with `...` (variadic function) */
 } FunctionDecl;
 
 typedef struct {

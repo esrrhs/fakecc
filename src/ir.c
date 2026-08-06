@@ -1052,6 +1052,50 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return coerced;
     }
     case EX_CALL: {
+        /* The va_start / va_arg / va_end builtins.  They are lowered to a
+         * named IR_CALL (call_name = the builtin) so codegen can dispatch by
+         * name, exactly like __syscall.  The va_list is already a pointer to
+         * the struct's bytes (fakecc's struct-as-pointer value model), so the
+         * first arg lowers directly to the struct base address. */
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *cname = e->u.call.callee->u.var.name;
+            if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
+                || strcmp(cname, "va_arg") == 0) {
+                IRValue ap = lower_expr(fn, st, e->u.call.args.data[0]);
+                /* va_start's second arg (last named param) must stay live so the
+                 * optimizer doesn't eliminate the param as dead.  Lower it and
+                 * keep it in call_args (codegen ignores it). */
+                IRValue last = -1;
+                if (strcmp(cname, "va_start") == 0
+                    && e->u.call.args.len >= 2)
+                    last = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRInst inst;
+                inst.op = IR_CALL;
+                inst.a = -1; inst.b = -1; inst.imm = 0;
+                inst.loc = e->loc;
+                inst.call_name = xstrdup(cname);
+                inst.call_callee = -1;
+                inst.call_nargs = (last >= 0) ? 2 : 1;
+                inst.call_args[0] = ap;
+                inst.call_args[1] = last;
+                if (strcmp(cname, "va_arg") == 0) {
+                    inst.dst = new_value(fn);
+                    inst.width = e->va_arg_type.width ? e->va_arg_type.width : 4;
+                    inst.is_unsigned = e->va_arg_type.is_unsigned;
+                    inst.is_float = (e->va_arg_type.kind == TY_FLOAT);
+                } else {
+                    inst.dst = -1;   /* void: va_start / va_end */
+                    inst.width = 0;
+                    inst.is_unsigned = 0;
+                    inst.is_float = 0;
+                }
+                ir_inst_array_push(&fn->insts, inst);
+                if (inst.dst >= 0)
+                    set_value_type(fn, inst.dst, inst.width, inst.is_unsigned);
+                if (inst.is_float) set_value_float(fn, inst.dst, 1);
+                return inst.dst;
+            }
+        }
         IRValue arg_vals[IR_CALL_MAX_ARGS];
         int nargs = (int)e->u.call.args.len;
         for (int i = 0; i < nargs; i++)
@@ -1916,6 +1960,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.ret_is_unsigned = fd->ret_type.is_unsigned;
         irfn.ret_is_float = (fd->ret_type.kind == TY_FLOAT);
         irfn.ret_is_struct = (fd->ret_type.kind == TY_STRUCT);
+        irfn.is_variadic = fd->is_variadic;
         irfn.sret_value = -1;
 
         IRSymTable st;

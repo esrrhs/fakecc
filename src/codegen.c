@@ -151,6 +151,29 @@ static void emit_cmp_rr(Buffer *b, int dst, int src) {
     emit_modrm(b, 3, src, dst);
 }
 
+/* cmp $imm32, %reg  →  REX 81 [ModRM: /7, mod=11, rm=reg] imm32 */
+static void emit_cmp_imm32(Buffer *b, int reg, int32_t imm) {
+    emit_rex_wrb(b, 1, 0, reg);
+    emit_byte(b, 0x81);
+    emit_modrm(b, 3, 7, reg);
+    emit_int32(b, imm);
+}
+
+/* add $imm32, %reg  →  REX 81 [ModRM: /0, mod=11, rm=reg] imm32 */
+static void emit_add_imm32(Buffer *b, int reg, int32_t imm) {
+    emit_rex_wrb(b, 1, 0, reg);
+    emit_byte(b, 0x81);
+    emit_modrm(b, 3, 0, reg);
+    emit_int32(b, imm);
+}
+
+/* Patch a rel32 at `patch_off` to jump to `target_off`.  The rel32 is relative
+ * to the byte after the 4-byte field (i.e. patch_off+4). */
+static void patch_rel32(Buffer *b, size_t patch_off, size_t target_off) {
+    int32_t rel = (int32_t)((int64_t)target_off - (int64_t)(patch_off + 4));
+    memcpy(b->data + patch_off, &rel, 4);
+}
+
 /* test %r, %r  →  REX 85 [ModRM: reg=r, rm=r, mod=11] — sets ZF if r == 0 */
 static void emit_test_rr(Buffer *b, int r) {
     emit_rex_wrb(b, 1, r, r);
@@ -324,6 +347,22 @@ static void emit_movq_xmm_gp(Buffer *b, int xmm, int gp) {
     emit_modrm(b, 3, xmm & 7, gp & 7);
 }
 
+/* mov %reg, [rsp+off]  →  REX.W 89 [mod reg rm=4 SIB=0x24] disp.  off must be
+ * non-negative (the save area sits at/below rsp). */
+static void emit_store_rsp_off(Buffer *b, int reg, int off) {
+    emit_rex_wrb(b, 1, reg, REG_RSP);
+    emit_byte(b, 0x89);
+    if (off >= 0 && off <= 127) {
+        emit_modrm(b, 1, reg, 4);
+        emit_byte(b, 0x24);  /* SIB: base=rsp, index=none */
+        emit_byte(b, (uint8_t)off);
+    } else {
+        emit_modrm(b, 2, reg, 4);
+        emit_byte(b, 0x24);
+        emit_int32(b, off);
+    }
+}
+
 /* movsd [rsp], xmm_src  →  F2 0F 11 [mod=00 reg=src rm=4 SIB=0x24].  Used in
  * the prologue push-then-pop dance to push an XMM arg onto the stack. */
 static void emit_sse_store_rsp(Buffer *b, int src) {
@@ -333,6 +372,50 @@ static void emit_sse_store_rsp(Buffer *b, int src) {
     emit_byte(b, 0x11);
     emit_modrm(b, 0, src & 7, 4);
     emit_byte(b, 0x24);  /* SIB: base=rsp, index=none */
+}
+
+/* movaps xmm_dst, [rsp+off]  →  0F 29 [mod dst rm=4 SIB=0x24] disp.  Saves an
+ * FP arg register into the variadic save area (16-byte aligned slots). */
+static void emit_sse_store_rsp_off(Buffer *b, int dst, int off) {
+    emit_rex_wrb(b, 0, dst, REG_RSP);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x29);
+    if (off >= 0 && off <= 127) {
+        emit_modrm(b, 1, dst, 4);
+        emit_byte(b, 0x24);
+        emit_byte(b, (uint8_t)off);
+    } else {
+        emit_modrm(b, 2, dst, 4);
+        emit_byte(b, 0x24);
+        emit_int32(b, off);
+    }
+}
+
+/* movsd xmm_dst, [base+off] (load)  →  F2 0F 10 [mod dst rm=base] disp.
+ * Generic: base is any register (encoding handles [rsp]-style SIB as needed). */
+static void emit_sse_load_base_off(Buffer *b, int dst, int base, int off) {
+    emit_byte(b, 0xF2);
+    emit_rex_wrb(b, 0, dst, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    if (off >= -128 && off <= 127) {
+        if (base == REG_RSP) {
+            emit_modrm(b, 1, dst, 4);
+            emit_byte(b, 0x24);
+            emit_byte(b, (uint8_t)(off & 0xFF));
+        } else {
+            emit_modrm(b, 1, dst, base);
+            emit_byte(b, (uint8_t)(off & 0xFF));
+        }
+    } else {
+        if (base == REG_RSP) {
+            emit_modrm(b, 2, dst, 4);
+            emit_byte(b, 0x24);
+        } else {
+            emit_modrm(b, 2, dst, base);
+        }
+        emit_int32(b, off);
+    }
 }
 
 /* movsd xmm_dst, [rsp]  →  F2 0F 10 [mod=00 reg=dst rm=4 SIB=0x24].  Pops an
@@ -921,6 +1004,144 @@ static void collect_callee_saved(const RAResult *ra, int used[3]) {
     }
 }
 
+/* mov [base+off], %reg  →  REX.W 89 [mod=01/10 reg=src rm=base] disp. */
+static void emit_store_base_off(Buffer *b, int base, int reg, int off) {
+    emit_rex_wrb(b, 1, reg, base);
+    emit_byte(b, 0x89);
+    if (off >= -128 && off <= 127) {
+        emit_modrm(b, 1, reg, base);
+        emit_byte(b, (uint8_t)(off & 0xFF));
+    } else {
+        emit_modrm(b, 2, reg, base);
+        emit_int32(b, off);
+    }
+}
+
+/* mov %reg, [base+off] (load)  →  REX.W 8B [mod=01/10 reg=dst rm=base] disp. */
+static void emit_load_base_off(Buffer *b, int dst, int base, int off) {
+    emit_rex_wrb(b, 1, dst, base);
+    emit_byte(b, 0x8B);
+    if (off >= -128 && off <= 127) {
+        emit_modrm(b, 1, dst, base);
+        emit_byte(b, (uint8_t)(off & 0xFF));
+    } else {
+        emit_modrm(b, 2, dst, base);
+        emit_int32(b, off);
+    }
+}
+
+/* va_list field offsets in our __va_list_tag layout (members padded to 8). */
+#define VA_GP_OFF   0
+#define VA_FP_OFF   8
+#define VA_OV_OFF   16
+#define VA_REG_OFF  24
+
+/* Implement `va_start(ap, last)`: fill the four va_list fields.  The initial
+ * offsets (gp_offset, fp_offset, overflow_arg_off) are passed in; they are
+ * computed once per function from its named-arg layout.  reg_save_area is the
+ * save-area base = rsp (constant after the prologue). */
+static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
+                          int gp_offset, int fp_offset, int overflow_off) {
+    int ap = inst->call_args[0];
+    ensure_reg(b, ap, REG_RAX, ra);
+    int ap_reg = REG_RAX;
+    /* gp_offset @0 */
+    emit_mov_imm(b, REG_RCX, gp_offset);
+    emit_store_base_off(b, ap_reg, REG_RCX, VA_GP_OFF);
+    /* fp_offset @8 */
+    emit_mov_imm(b, REG_RCX, fp_offset);
+    emit_store_base_off(b, ap_reg, REG_RCX, VA_FP_OFF);
+    /* overflow_arg_area @16 = rbp + first stack-passed arg offset */
+    emit_lea_rbp(b, REG_RCX, overflow_off);
+    emit_store_base_off(b, ap_reg, REG_RCX, VA_OV_OFF);
+    /* reg_save_area @24 = rsp (save area base, constant) */
+    emit_mov_rr(b, REG_RCX, REG_RSP);
+    emit_store_base_off(b, ap_reg, REG_RCX, VA_REG_OFF);
+}
+
+/* Load a GP value from [base+index] into dst without SIB addressing: computes
+ * base+index into a scratch via add, then loads from [scratch+0].  Clobbers
+ * R11 and the index reg must not be dst. */
+static void emit_load_gp_viabase(Buffer *b, int dst, int base, int index) {
+    emit_add_rr(b, base, index); /* base += index */
+    emit_load_base_off(b, dst, base, 0);
+}
+
+/* Implement `va_arg(ap, T)`.  Walks the register-save area while the per-class
+ * offset lasts, then falls back to the overflow (stack) area.  Branches on the
+ * requested type class (GP vs FP) using inline-patched forward branches.
+ *
+ * Layout of the save area (addressed as rsp + byte offset, rsp constant):
+ *   [rsp+0..+40]   rdi,rsi,rdx,rcx,r8,r9   (8 bytes each, GP regs)
+ *   [rsp+48..+176] xmm0-xmm7               (16 bytes each, FP regs)
+ * reg_save_area = rsp is filled by va_start. */
+static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
+                        const RAResult *ra_xmm, int gp_spill_area) {
+    int ap = inst->call_args[0];
+    ensure_reg(b, ap, REG_RAX, ra);
+    int ap_reg = REG_RAX;
+    int dst = inst->dst;
+    int is_float = inst->is_float;
+
+    if (!is_float) {
+        /* ---------------- GP class ---------------- */
+        emit_load_base_off(b, REG_RCX, ap_reg, VA_GP_OFF); /* rcx = gp_offset */
+        emit_cmp_imm32(b, REG_RCX, 48);
+        size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
+        /* register path: load from [reg_save_area + gp_offset] */
+        emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF); /* r11 = save_area */
+        emit_load_gp_viabase(b, REG_RDX, REG_R11, REG_RCX);  /* rdx = *[save+gp] */
+        emit_load_base_off(b, REG_RCX, ap_reg, VA_GP_OFF);
+        emit_add_imm32(b, REG_RCX, 8);
+        emit_store_base_off(b, ap_reg, REG_RCX, VA_GP_OFF);
+        size_t jmp_end = emit_jmp_rel32(b);
+        /* overflow_path: load from [overflow_arg_area], advance by 8 */
+        size_t ov_off = b->len;
+        patch_rel32(b, jae_ov, ov_off);
+        emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF); /* r11 = overflow */
+        emit_load_base_off(b, REG_RDX, REG_R11, 0);         /* rdx = *[overflow] */
+        emit_add_imm32(b, REG_R11, 8);
+        emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+        /* end: */
+        patch_rel32(b, jmp_end, b->len);
+        /* move loaded value (RDX) into dst home / spill */
+        if (dst >= 0) {
+            if (ra && dst < ra->num_values && ra->reg[dst] >= 0
+                && ra->reg[dst] < 16) {
+                int dr = ra->reg[dst];
+                if (dr != REG_RDX) emit_mov_rr(b, dr, REG_RDX);
+            } else {
+                spill_if_needed(b, dst, REG_RDX, ra);
+            }
+        }
+    } else {
+        /* ---------------- FP class ---------------- */
+        emit_load_base_off(b, REG_RCX, ap_reg, VA_FP_OFF); /* rcx = fp_offset */
+        emit_cmp_imm32(b, REG_RCX, 176);
+        size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
+        /* register path: load FP from [reg_save_area + fp_offset] */
+        emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF); /* r11 = save_area */
+        emit_add_rr(b, REG_R11, REG_RCX); /* r11 = save_area + fp_offset */
+        emit_sse_load_base_off(b, 0, REG_R11, 0); /* xmm0 = *[r11] (movsd) */
+        emit_load_base_off(b, REG_RCX, ap_reg, VA_FP_OFF);
+        emit_add_imm32(b, REG_RCX, 16);
+        emit_store_base_off(b, ap_reg, REG_RCX, VA_FP_OFF);
+        size_t jmp_end = emit_jmp_rel32(b);
+        /* overflow_path: load FP from [overflow_arg_area], advance by 8 */
+        size_t ov_off = b->len;
+        patch_rel32(b, jae_ov, ov_off);
+        emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF); /* r11 = overflow */
+        emit_sse_load_base_off(b, 0, REG_R11, 0); /* xmm0 = *[overflow] */
+        emit_add_imm32(b, REG_R11, 8);
+        emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+        /* end: */
+        patch_rel32(b, jmp_end, b->len);
+        if (dst >= 0) {
+            spill_if_needed_xmm(b, dst, 0, ra_xmm, gp_spill_area);
+        }
+    }
+}
+
 /* Emit epilogue: restore callee-saved (reverse order), tear down frame, ret. */
 static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
     emit_add_rsp_imm32(b, stack_size);
@@ -993,9 +1214,19 @@ void codegen(const IRModule *ir, EmitModule *out) {
         if (!ra && stack_size == 0) stack_size = 8 * fn->next_value_id;
         if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
 
+        /* Variadic: reserve a 176-byte register-save area at the bottom of the
+         * frame (below the spills/allocas).  48 bytes for rdi,rsi,rdx,rcx,r8,r9
+         * then 128 bytes for xmm0-xmm7.  rsp is constant after the prologue, so
+         * [rsp+off] addresses it stably for the whole function.  The save area
+         * must be 16-byte aligned (movaps stores xmm regs), so the frame bottom
+         * (rsp) must be 16-aligned. */
+        if (fn->is_variadic) stack_size += 176;
+        if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
+
         /* Alignment invariant: on entry rsp % 16 == 8 (call pushed ret).
          * After "push rbp" rsp % 16 == 0.  Each callee-saved push adds 8;
-         * if odd count, we need one extra bump to keep rsp aligned. */
+         * if odd count, we need one extra bump so that rsp (the save-area base)
+         * ends up 16-aligned for the movaps stores. */
         int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
         if (((cs_count) & 1) != 0) stack_size += 8;
 
@@ -1058,6 +1289,45 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 }
             }
         }
+        /* Variadic: compute the initial va_list field values.  The named args
+         * consume the first gp_reg_idx GP and xmm_reg_idx FP register slots, so
+         * the first variadic arg begins at those offsets in the save area.  The
+         * overflow (stack) area starts after the named stack-passed args. */
+        int va_gp_offset = 0, va_fp_offset = 0, va_overflow_off = 16;
+        if (fn->is_variadic) {
+            va_gp_offset = 8 * gp_reg_idx;
+            va_fp_offset = 48 + 16 * xmm_reg_idx;
+            va_overflow_off = 16 + 8 * stack_arg_idx;
+        }
+
+        /* Allocate the frame.  For variadic functions this also reserves the
+         * 176-byte register-save area at the bottom. */
+        emit_sub_rsp_imm32(&out->code, stack_size); /* sub $N, %rsp */
+
+        /* Variadic: save the incoming argument registers into the save area at
+         * the bottom of the frame BEFORE the param dance clobbers them.  The
+         * dance (below) pushes/pops arg regs to move them into their homes,
+         * which would destroy the values we need for the save area.  rsp is
+         * constant from here on, so [rsp+off] addresses the save area stably. */
+        if (fn->is_variadic) {
+            /* GP regs rdi,rsi,rdx,rcx,r8,r9 → [rsp+0..+40]. */
+            emit_store_rsp_off(&out->code, REG_RDI, 0);
+            emit_store_rsp_off(&out->code, REG_RSI, 8);
+            emit_store_rsp_off(&out->code, REG_RDX, 16);
+            emit_store_rsp_off(&out->code, REG_RCX, 24);
+            emit_store_rsp_off(&out->code, REG_R8, 32);
+            emit_store_rsp_off(&out->code, REG_R9, 40);
+            /* FP regs xmm0-xmm7 → [rsp+48..+176] via movaps (16-byte slots). */
+            emit_sse_store_rsp_off(&out->code, 0, 48);
+            emit_sse_store_rsp_off(&out->code, 1, 64);
+            emit_sse_store_rsp_off(&out->code, 2, 80);
+            emit_sse_store_rsp_off(&out->code, 3, 96);
+            emit_sse_store_rsp_off(&out->code, 4, 112);
+            emit_sse_store_rsp_off(&out->code, 5, 128);
+            emit_sse_store_rsp_off(&out->code, 6, 144);
+            emit_sse_store_rsp_off(&out->code, 7, 160);
+        }
+
         /* Push every used arg register in REVERSE param order. */
         for (int p = nparams - 1; p >= 0; p--) {
             if (arrive_reg[p] < 0) continue;
@@ -1121,8 +1391,6 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 }
             }
         }
-
-        emit_sub_rsp_imm32(&out->code, stack_size); /* sub $N, %rsp */
 
         /* ---- Per-function label + patch tables ---- */
         /* label_off[label_id] = absolute code offset where the label lands,
@@ -1562,6 +1830,22 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     } else {
                         spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
                     }
+                    break;
+                }
+                /* va_start / va_arg / va_end — variadic builtins.  They are named
+                 * calls (call_name set) and operate on the va_list pointer that
+                 * was passed as call_args[0].  Dispatch by name. */
+                if (inst->call_name && strcmp(inst->call_name, "va_start") == 0) {
+                    emit_va_start(&out->code, inst, ra, va_gp_offset,
+                                  va_fp_offset, va_overflow_off);
+                    break;
+                }
+                if (inst->call_name && strcmp(inst->call_name, "va_end") == 0) {
+                    /* va_end is a no-op for our ABI. */
+                    break;
+                }
+                if (inst->call_name && strcmp(inst->call_name, "va_arg") == 0) {
+                    emit_va_arg(&out->code, inst, ra, ra_xmm, gp_spill_area);
                     break;
                 }
                 int nargs = inst->call_nargs;
