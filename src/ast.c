@@ -70,7 +70,7 @@ int type_size(Type t) {
 
 Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
-    t.is_const = 0; t.is_bool = 0;
+    t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.pointee = malloc(sizeof(Type));
@@ -81,7 +81,7 @@ Type type_make_ptr(Type pointee) {
 
 Type type_make_array(Type elem, int length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
-    t.is_unsigned = elem.is_unsigned; t.is_const = 0; t.is_bool = 0; t.length = length;
+    t.is_unsigned = elem.is_unsigned; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0; t.length = length;
     t.pointee = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.elem_type = malloc(sizeof(Type));
@@ -92,7 +92,7 @@ Type type_make_array(Type elem, int length) {
 
 Type type_make_struct(const char *tag, int size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
-    t.is_const = 0; t.is_bool = 0;
+    t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.tag = xstrdup(tag);
@@ -100,7 +100,7 @@ Type type_make_struct(const char *tag, int size) {
 }
 
 Type type_make_func(Type ret, Type * const *params, int nparams) {
-    Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_bool = 0;
+    Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = malloc(sizeof(Type));
     if (!t.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
@@ -221,7 +221,7 @@ static int align_up(int x, int align) {
 
 /* Natural alignment of a type: 1/2/4/8 for scalars, elem's alignment for
  * arrays, max member alignment for structs. */
-static int type_align(Type t) {
+int type_align(Type t) {
     switch (t.kind) {
     case TY_VOID:  return 1;    /* void has no size; alignment is a no-op */
     case TY_INT:   return t.width;
@@ -565,6 +565,10 @@ Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc) {
     Expr *e = expr_alloc(EX_SIZEOF_EXPR, loc);
     e->u.sizeof_e.operand = operand; return e;
 }
+Expr *expr_new_alignof_type(Type t, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_ALIGNOF_TYPE, loc);
+    e->u.alignof_t.target = type_clone(t); return e;
+}
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc) {
     Expr *e = expr_alloc(EX_TERNARY, loc);
     e->u.tern.cond = cond; e->u.tern.then = then; e->u.tern.else_ = else_; return e;
@@ -682,6 +686,9 @@ void expr_free(Expr *e) {
     case EX_COMPOUND_LITERAL:
         type_free(&e->u.compound.target_type);
         expr_free(e->u.compound.init);
+        break;
+    case EX_ALIGNOF_TYPE:
+        type_free(&e->u.alignof_t.target);
         break;
     }
     type_free(&e->type);

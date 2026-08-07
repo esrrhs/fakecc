@@ -24,6 +24,8 @@ struct Type {
     int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. TY_FUNC: 0. */
     int is_unsigned;   /* TY_INT only */
     unsigned is_const : 1; /* const-qualified (assignment forbidden) */
+    unsigned is_volatile : 1; /* volatile-qualified (no-op without an optimizer) */
+    unsigned is_restrict : 1; /* restrict-qualified (no-op without an optimizer) */
     unsigned is_bool : 1;  /* _Bool (width-1 unsigned that normalizes to 0/1) */
     Type *pointee;     /* TY_PTR only: malloc'd */
     Type *elem_type;   /* TY_ARRAY only: malloc'd */
@@ -36,7 +38,7 @@ struct Type {
 
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
-    t.is_const = 0; t.is_bool = 0;
+    t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
 }
@@ -48,13 +50,13 @@ static inline Type type_make_bool(void) {
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
 static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
-    t.is_const = 0; t.is_bool = 0;
+    t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
-    t.is_const = 0; t.is_bool = 0;
+    t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
 }
@@ -66,6 +68,7 @@ void type_free(Type *t);
 /* Total byte size of a Type: sizeof for scalars, N*elem for arrays,
  * width for structs (which is stashed at parse-time via layout). */
 int  type_size(Type t);
+int  type_align(Type t); /* natural alignment of a type */
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);
@@ -94,6 +97,7 @@ typedef enum {
     EX_CAST,    /* (T)expr */
     EX_SIZEOF_TYPE,  /* sizeof(T)     — compile-time integer */
     EX_SIZEOF_EXPR,  /* sizeof(expr)  — compile-time integer */
+    EX_ALIGNOF_TYPE, /* _Alignof(T)  — compile-time integer (alignment) */
     EX_TERNARY, /* cond ? then : else — right associative, lower than || */
     EX_INC_DEC, /* ++lvalue / --lvalue (prefix or postfix) */
     EX_COMPOUND_ASSIGN, /* lvalue op= rvalue */
@@ -163,6 +167,7 @@ struct Expr {
         struct { Type target; Expr *operand; } cast;  /* EX_CAST — owns target sub-types */
         struct { Type target; } sizeof_t;              /* EX_SIZEOF_TYPE */
         struct { Expr *operand; } sizeof_e;            /* EX_SIZEOF_EXPR */
+        struct { Type target; } alignof_t;             /* EX_ALIGNOF_TYPE */
         struct { Expr *cond; Expr *then; Expr *else_; } tern; /* EX_TERNARY */
         struct { Expr *operand; int is_inc; int is_prefix; } incdec; /* EX_INC_DEC */
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp; /* EX_COMPOUND_ASSIGN */
@@ -188,6 +193,7 @@ Expr *expr_new_member(Expr *obj, const char *name, SourceLoc loc);
 Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
 Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
+Expr *expr_new_alignof_type(Type t, SourceLoc loc);
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
 Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);

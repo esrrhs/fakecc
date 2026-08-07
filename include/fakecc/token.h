@@ -36,6 +36,10 @@ typedef enum {
     TK_KW_STATIC,        /* "static" */
     TK_KW_EXTERN,        /* "extern" */
     TK_KW_BOOL,          /* "_Bool" */
+    TK_KW_VOLATILE,      /* "volatile" */
+    TK_KW_RESTRICT,      /* "restrict" */
+    TK_KW_INLINE,        /* "inline" */
+    TK_KW_ALIGNOF,       /* "_Alignof" */
     TK_IDENT,
     TK_INT_LITERAL,
     TK_FLOAT_LITERAL,    /* 1.5, 1.5f, 1e10, .5, 2. — text kept for strtod */

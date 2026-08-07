@@ -222,6 +222,8 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
         return 0;
     case EX_COMPOUND_LITERAL:
         return expr_takes_addr_of(e->u.compound.init, name);
+    case EX_ALIGNOF_TYPE:
+        return 0; /* _Alignof(T) references no variable */
     }
     return 0;
 }
@@ -1395,6 +1397,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     case EX_SIZEOF_EXPR: {
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_CONST, v, -1, -1, type_size(e->u.sizeof_e.operand->type),
+                    8, 1, e->loc);
+        return v;
+    }
+    case EX_ALIGNOF_TYPE: {
+        /* _Alignof(T) — compile-time alignment, lowered like sizeof but using
+         * type_align() instead of type_size(). */
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_CONST, v, -1, -1, type_align(e->u.alignof_t.target),
                     8, 1, e->loc);
         return v;
     }

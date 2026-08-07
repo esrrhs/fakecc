@@ -43,7 +43,8 @@ static int is_type_start(const Parser *p, size_t pos) {
         || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED
         || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
-        || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN)
+        || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN
+        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE)
         return 1;
     /* A typedef name looks like an ordinary identifier. */
     if (k == TK_IDENT
@@ -56,18 +57,22 @@ static int is_type_start(const Parser *p, size_t pos) {
  * This is the old `parse_type` minus the trailing `*` chain — pointers and
  * other declarator suffixes are handled separately by `parse_declarator`. */
 static Type parse_specifiers(Parser *p) {
-    /* const qualifier — flag the resulting type as read-only. */
-    int is_const = 0;
-    if (peek(p)->kind == TK_KW_CONST) {
-        is_const = 1;
-        advance(p);
+    /* Type qualifiers — flag the resulting type.  `const` gates assignment in
+     * sema; `volatile`/`restrict` are no-ops without an optimizer (stored for
+     * completeness).  All three may appear in any order (C permits mixing). */
+    int is_const = 0, is_volatile = 0, is_restrict = 0;
+    for (;;) {
+        if (peek(p)->kind == TK_KW_CONST) { is_const = 1; advance(p); }
+        else if (peek(p)->kind == TK_KW_VOLATILE) { is_volatile = 1; advance(p); }
+        else if (peek(p)->kind == TK_KW_RESTRICT) { is_restrict = 1; advance(p); }
+        else break;
     }
     /* void — only meaningful as a return type or as void* (pointer to void).
      * A lone `void` variable is rejected later in sema. */
     if (peek(p)->kind == TK_KW_VOID) {
         advance(p);
         Type t = type_make_void();
-        t.is_const = is_const;
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
     /* struct Name — must be already defined by a `struct` definition earlier
@@ -86,7 +91,7 @@ static Type parse_specifiers(Parser *p) {
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         int size = sd ? sd->size : 0;
         Type t = type_make_struct(tag->text, size);
-        t.is_const = is_const;
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
     /* union Name — same representation as struct in the type system. */
@@ -101,20 +106,20 @@ static Type parse_specifiers(Parser *p) {
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         int size = sd ? sd->size : 0;
         Type t = type_make_struct(tag->text, size);
-        t.is_const = is_const;
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
     /* float / double — TY_FLOAT with width 4 or 8. */
     if (peek(p)->kind == TK_KW_FLOAT) {
         advance(p);
         Type t = type_make_float(4);
-        t.is_const = is_const;
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
     if (peek(p)->kind == TK_KW_DOUBLE) {
         advance(p);
         Type t = type_make_float(8);
-        t.is_const = is_const;
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
     /* enum Tag — treated as int for the type system. */
@@ -127,7 +132,7 @@ static Type parse_specifiers(Parser *p) {
         }
         advance(p);
         Type t = type_default_int();
-        t.is_const = is_const;
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
     /* typedef name — resolve to the aliased type. */
@@ -136,7 +141,7 @@ static Type parse_specifiers(Parser *p) {
         if (alias) {
             advance(p);
             Type t = type_clone(*alias);
-            t.is_const = is_const;
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             return t;
         }
     }
@@ -148,7 +153,7 @@ static Type parse_specifiers(Parser *p) {
     if (peek(p)->kind == TK_KW_BOOL) {
         advance(p);
         Type t = type_make_bool();
-        t.is_const = is_const;
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
 
@@ -177,7 +182,7 @@ static Type parse_specifiers(Parser *p) {
         }
     }
     Type t = type_make_int(width, is_unsigned);
-    t.is_const = is_const;
+    t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
     return t;
 }
 
@@ -810,6 +815,20 @@ static Expr *parse_unary(Parser *p) {
             return e;
         }
         return expr_new_sizeof_expr(parse_unary(p), loc);
+    }
+    if (k == TK_KW_ALIGNOF) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        /* _Alignof(T) — C standard _Alignof takes a type-name only. */
+        if (peek(p)->kind != TK_LPAREN)
+            die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
+                   "expected '(' after '_Alignof'");
+        advance(p);
+        Type t = parse_type_abstract(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        Expr *e = expr_new_alignof_type(t, loc);
+        type_free(&t);
+        return e;
     }
     return parse_primary(p);
 }
@@ -1552,6 +1571,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
     } else if (peek(p)->kind == TK_KW_EXTERN) {
         advance(p);
         is_extern = 1;
+    } else if (peek(p)->kind == TK_KW_INLINE) {
+        /* `inline` is a no-op hint in this single-TU model — accept and
+         * discard it so it doesn't choke parse_type_abstract, like static. */
+        advance(p);
     }
     Type ret_ty = parse_type_abstract(p);
 
@@ -1849,6 +1872,8 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
         /* Skip storage-class / qualifier / sign prefix tokens. */
         while (peek(&p)->kind == TK_KW_CONST || peek(&p)->kind == TK_KW_STATIC
                || peek(&p)->kind == TK_KW_EXTERN
+               || peek(&p)->kind == TK_KW_VOLATILE || peek(&p)->kind == TK_KW_RESTRICT
+               || peek(&p)->kind == TK_KW_INLINE
                || peek(&p)->kind == TK_KW_SIGNED || peek(&p)->kind == TK_KW_UNSIGNED)
             advance(&p);
         /* Skip type keyword. */

@@ -745,6 +745,10 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
         return type_clone(e->type);
     }
+    case EX_ALIGNOF_TYPE:
+        /* _Alignof(T) — compile-time alignment, same result type as sizeof. */
+        set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
+        return type_clone(e->type);
     case EX_INIT_LIST: {
         /* An initializer list is valid only as a declarator initializer.  We
          * type-check every element; the count / layout validation against the
