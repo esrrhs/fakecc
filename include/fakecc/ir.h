@@ -137,6 +137,8 @@ typedef struct {
     int   ret_is_float;
     /* Slice 13: 1 if the function returns a struct by value (sret ABI). */
     int   ret_is_struct;
+    /* 1 if the function returns _Bool (normalize the value to 0/1). */
+    int   ret_is_bool;
     /* Variadic: 1 if the function was defined with a `...` tail.  The prologue
      * emits a register-save area and the va_* builtins read/write it. */
     int   is_variadic;

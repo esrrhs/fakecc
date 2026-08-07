@@ -23,7 +23,8 @@ struct Type {
     TypeKind kind;
     int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. TY_FUNC: 0. */
     int is_unsigned;   /* TY_INT only */
-    int is_const;      /* 1 = const-qualified (assignment forbidden) */
+    unsigned is_const : 1; /* const-qualified (assignment forbidden) */
+    unsigned is_bool : 1;  /* _Bool (width-1 unsigned that normalizes to 0/1) */
     Type *pointee;     /* TY_PTR only: malloc'd */
     Type *elem_type;   /* TY_ARRAY only: malloc'd */
     int length;        /* TY_ARRAY only */
@@ -35,20 +36,25 @@ struct Type {
 
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
-    t.is_const = 0;
+    t.is_const = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
+}
+static inline Type type_make_bool(void) {
+    Type t = type_make_int(1, 1);
+    t.is_bool = 1;
+    return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
 static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
-    t.is_const = 0;
+    t.is_const = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
-    t.is_const = 0;
+    t.is_const = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
 }

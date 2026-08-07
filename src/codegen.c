@@ -2104,8 +2104,6 @@ void codegen(const IRModule *ir, EmitModule *out) {
                                gp_spill_area);
                 ensure_reg_xmm(&out->code, inst->b, XMM_SCRATCH1, ra_xmm,
                                gp_spill_area);
-                emit_sse_ucomi(&out->code, XMM_SCRATCH0, XMM_SCRATCH1,
-                               is_float);
                 /* Map the FCMP ordering to the matching setcc byte. */
                 uint8_t cc;
                 switch (inst->is_unsigned) {
@@ -2117,8 +2115,12 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 default: cc = 0x95; break; /* NE → setne */
                 }
                 /* setcc needs RDX (a GP scratch not used by the SSE staging).
-                 * Result is int (width 4); dr is a GP register. */
+                 * Result is int (width 4); dr is a GP register.  Zero RDX BEFORE
+                 * the compare: ucomi sets the flags, and setcc reads them — a
+                 * post-compare xor would clobber ZF/CF and break the result. */
                 emit_xor_rr(&out->code, REG_RDX);
+                emit_sse_ucomi(&out->code, XMM_SCRATCH0, XMM_SCRATCH1,
+                               is_float);
                 emit_setcc_r(&out->code, cc, REG_RDX);
                 if (dr >= 0 && dr != REG_RDX)
                     emit_mov_rr(&out->code, dr, REG_RDX);

@@ -336,6 +336,34 @@ static IRValue emit_float_const(IRFunction *fn, int width, int64_t bits, SourceL
     return v;
 }
 
+/* Forward decls — bool_normalize (below) calls coerce / emit_bin_w, which are
+ * defined later in this file. */
+static IRValue coerce(IRFunction *fn, IRValue v, int src_w, int src_u,
+                      int dst_w, int dst_u, SourceLoc loc);
+static IRValue emit_bin_w(IRFunction *fn, IROpcode op, IRValue a, IRValue b,
+                          int width, int is_unsigned, SourceLoc loc);
+
+/* Normalize any scalar value to a 0/1 int (width 4) for a _Bool destination.
+ * C _Bool semantics: 0 if the value compares equal to 0, else 1.  The
+ * comparison is done at the source width/domain so that e.g. (_Bool)0x100
+ * is 1, not 0 (an early truncate to width 1 would lose the high bits). */
+static IRValue bool_normalize(IRFunction *fn, IRValue v, int w, int u,
+                              int is_float, SourceLoc loc) {
+    if (is_float) {
+        IRValue zero = emit_float_const(fn, w, 0, loc);
+        IRValue r = new_value(fn);
+        emit_inst_f(fn, IR_FCMP, r, v, zero, w, loc);
+        fn->insts.data[fn->insts.len - 1].is_unsigned = 5;  /* NE encoding */
+        set_value_float(fn, r, 0);
+        set_value_type(fn, r, 4, 0);
+        return r;
+    }
+    IRValue i = coerce(fn, v, w, u, 4, 0, loc);
+    IRValue zero = new_value(fn);
+    emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, loc);
+    return emit_bin_w(fn, IR_NE, i, zero, 4, 0, loc);
+}
+
 /* Push an instruction (width/signedness default 4/signed). */
 static void emit_inst(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
                       int imm, SourceLoc loc) {
@@ -891,8 +919,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue result;
         if (is_cmp && res_float) {
             /* Float comparison — emit IR_FCMP with the comparison encoded in
-             * is_unsigned (0=LT 1=LE 2=GT 3=GE 4=EQ 5=NE). */
-            static const unsigned char cmp_enc[] = {0,1,2,3,4,5};
+             * is_unsigned (0=LT 1=LE 2=GT 3=GE 4=EQ 5=NE).  The BOP ordering
+             * (EQ,NE,LT,LE,GT,GE) differs from the encoding order, so remap. */
+            static const unsigned char cmp_enc[] = {4,5,0,1,2,3};
             unsigned char enc = cmp_enc[e->u.bin.op - BOP_EQ];
             result = new_value(fn);
             emit_inst_f(fn, IR_FCMP, result, pl, pr, op_w, e->loc);
@@ -1000,7 +1029,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int lu = lv->type.is_unsigned;
         int lf = (lv->type.kind == TY_FLOAT);
         IRValue coerced;
-        if (rf != lf)
+        if (lv->type.is_bool) {
+            IRValue n = bool_normalize(fn, rv, rw, ru, rf, e->loc);
+            coerced = coerce(fn, n, 4, 0, lw, lu, e->loc);
+        } else if (rf != lf)
             coerced = convert_numeric(fn, rv, rw, lw, lu, lf, e->loc);
         else if (lf)
             coerced = (rw == lw) ? rv : convert_numeric(fn, rv, rw, lw, lu, 1, e->loc);
@@ -1252,6 +1284,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int dw = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int du = e->type.kind == TY_PTR ? 1 : e->type.is_unsigned;
         int df = (e->type.kind == TY_FLOAT);
+        if (e->type.is_bool) {
+            IRValue n = bool_normalize(fn, x, sw, su, sf, e->loc);
+            return coerce(fn, n, 4, 0, dw, du, e->loc);
+        }
         if (sf != df) {
             /* Cross-domain cast: float ↔ int (SITOFP / FPTOSI). */
             return convert_numeric(fn, x, sw, dw, du, df, e->loc);
@@ -1543,7 +1579,11 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 int rf = get_value_is_float(fn, rv);
                 int df = (dty.kind == TY_FLOAT);
                 IRValue coerced;
-                if (rf != df)
+                if (dty.is_bool) {
+                    /* _Bool initializer: normalize to 0/1 (width 4) then narrow. */
+                    IRValue n = bool_normalize(fn, rv, rw, ru, rf, s->loc);
+                    coerced = coerce(fn, n, 4, 0, dw, du, s->loc);
+                } else if (rf != df)
                     coerced = convert_numeric(fn, rv, rw, dw, du, df, s->loc);
                 else if (df)
                     coerced = (rw == dw) ? rv : convert_numeric(fn, rv, rw, dw, du, 1, s->loc);
@@ -1582,7 +1622,10 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             int dw = fn->ret_width, du = fn->ret_is_unsigned;
             int df = fn->ret_is_float;
             IRValue coerced;
-            if (vf != df)
+            if (fn->ret_is_bool) {
+                IRValue n = bool_normalize(fn, v, vw, vu, vf, s->loc);
+                coerced = coerce(fn, n, 4, 0, dw, du, s->loc);
+            } else if (vf != df)
                 coerced = convert_numeric(fn, v, vw, dw, du, df, s->loc);
             else if (df)
                 coerced = (vw == dw) ? v : convert_numeric(fn, v, vw, dw, du, 1, s->loc);
@@ -1838,6 +1881,8 @@ static void pack_init(const Type *ty, const Expr *e, char *bytes, int sz,
     }
     if (e->kind == EX_INT_LIT) {
         long long v = e->u.int_val;
+        if (ty->is_bool)
+            v = (v != 0) ? 1 : 0;  /* _Bool: normalize to 0/1 */
         for (int b = 0; b < sz && b < 8; b++)
             bytes[b] = (char)((v >> (8 * b)) & 0xff);
         return;
@@ -1963,6 +2008,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.ret_is_unsigned = fd->ret_type.is_unsigned;
         irfn.ret_is_float = (fd->ret_type.kind == TY_FLOAT);
         irfn.ret_is_struct = (fd->ret_type.kind == TY_STRUCT);
+        irfn.ret_is_bool = fd->ret_type.is_bool;
         irfn.is_variadic = fd->is_variadic;
         irfn.sret_value = -1;
 

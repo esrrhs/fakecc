@@ -71,6 +71,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "union", 5) == 0) return TK_KW_UNION;
         if (memcmp(s, "const", 5) == 0) return TK_KW_CONST;
         if (memcmp(s, "float", 5) == 0) return TK_KW_FLOAT;
+        if (memcmp(s, "_Bool", 5) == 0) return TK_KW_BOOL;
         break;
     case 6:
         if (memcmp(s, "double", 6) == 0) return TK_KW_DOUBLE;
@@ -284,15 +285,26 @@ void lex(const char *source, const char *filename, TokenArray *out) {
                 }
                 while (isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
-            /* Suffix: f/F = float, l/L = double (long double → treat as double),
-             *         u/U = unsigned integer, l/L = long integer. */
-            if (source[pos] == 'f' || source[pos] == 'F') {
-                is_float = 1;
-                pos++; col++;
-            } else if (source[pos] == 'l' || source[pos] == 'L') {
-                pos++; col++;  /* `l` alone = long int; after a float = double */
-            } else if (source[pos] == 'u' || source[pos] == 'U') {
-                pos++; col++;  /* unsigned integer */
+            /* Suffix (integer): optional u/U (unsigned) + optional l/L or ll/LL
+             * (long / long long), in either order.  Accepts 123, 123u, 123l,
+             * 123ll, 123ull, 123uLL, 123llu, etc. */
+            if (!is_float) {
+                int saw_u = 0, saw_l = 0;
+                for (;;) {
+                    if ((source[pos] == 'u' || source[pos] == 'U') && !saw_u) {
+                        saw_u = 1; pos++; col++;
+                    } else if ((source[pos] == 'l' || source[pos] == 'L')
+                               && saw_l < 2) {
+                        saw_l++; pos++; col++;
+                    } else break;
+                }
+            } else {
+                /* Suffix (floating): f/F = float, l/L = long double. */
+                if (source[pos] == 'f' || source[pos] == 'F') {
+                    pos++; col++;
+                } else if (source[pos] == 'l' || source[pos] == 'L') {
+                    pos++; col++;  /* long double */
+                }
             }
             size_t len = pos - start;
             Token t;

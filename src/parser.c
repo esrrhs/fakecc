@@ -40,7 +40,7 @@ static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
     if (k == TK_KW_VOID || k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
         || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED
-        || k == TK_KW_FLOAT || k == TK_KW_DOUBLE
+        || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN)
         return 1;
@@ -143,6 +143,14 @@ static Type parse_specifiers(Parser *p) {
     int saw_sign = 0;
     int width = -1;
 
+    /* _Bool — standalone, takes no signed/unsigned/long modifier. */
+    if (peek(p)->kind == TK_KW_BOOL) {
+        advance(p);
+        Type t = type_make_bool();
+        t.is_const = is_const;
+        return t;
+    }
+
     TokenKind k = peek(p)->kind;
     if (k == TK_KW_SIGNED)    { is_unsigned = 0; saw_sign = 1; advance(p); }
     else if (k == TK_KW_UNSIGNED) { is_unsigned = 1; saw_sign = 1; advance(p); }
@@ -152,7 +160,13 @@ static Type parse_specifiers(Parser *p) {
     case TK_KW_CHAR:  advance(p); width = 1; break;
     case TK_KW_SHORT: advance(p); width = 2; break;
     case TK_KW_INT:   advance(p); width = 4; break;
-    case TK_KW_LONG:  advance(p); width = 8; break;
+    case TK_KW_LONG:
+        advance(p); width = 8;
+        /* `long long` (and `long long int`) — consume a second `long`. */
+        if (peek(p)->kind == TK_KW_LONG) advance(p);
+        /* `long int` / `long long int` — consume a trailing `int`. */
+        if (peek(p)->kind == TK_KW_INT) advance(p);
+        break;
     default:
         if (saw_sign) { width = 4; break; }
         {
@@ -1682,7 +1696,7 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
         if (peek(&p)->kind == TK_KW_VOID || peek(&p)->kind == TK_KW_INT
             || peek(&p)->kind == TK_KW_CHAR || peek(&p)->kind == TK_KW_SHORT
             || peek(&p)->kind == TK_KW_LONG || peek(&p)->kind == TK_KW_FLOAT
-            || peek(&p)->kind == TK_KW_DOUBLE) {
+            || peek(&p)->kind == TK_KW_DOUBLE || peek(&p)->kind == TK_KW_BOOL) {
             advance(&p);
         } else if (peek(&p)->kind == TK_KW_STRUCT
                    || peek(&p)->kind == TK_KW_UNION) {

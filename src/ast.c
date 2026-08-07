@@ -70,7 +70,7 @@ int type_size(Type t) {
 
 Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
-    t.is_const = 0;
+    t.is_const = 0; t.is_bool = 0;
     t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.pointee = malloc(sizeof(Type));
@@ -81,7 +81,7 @@ Type type_make_ptr(Type pointee) {
 
 Type type_make_array(Type elem, int length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
-    t.is_unsigned = elem.is_unsigned; t.is_const = 0; t.length = length;
+    t.is_unsigned = elem.is_unsigned; t.is_const = 0; t.is_bool = 0; t.length = length;
     t.pointee = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.elem_type = malloc(sizeof(Type));
@@ -92,7 +92,7 @@ Type type_make_array(Type elem, int length) {
 
 Type type_make_struct(const char *tag, int size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
-    t.is_const = 0;
+    t.is_const = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.tag = xstrdup(tag);
@@ -100,7 +100,7 @@ Type type_make_struct(const char *tag, int size) {
 }
 
 Type type_make_func(Type ret, Type * const *params, int nparams) {
-    Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0;
+    Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
     t.func_ret = malloc(sizeof(Type));
     if (!t.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
@@ -406,6 +406,7 @@ Expr *expr_new_int(int v, SourceLoc loc) {
     e->kind = EX_INT_LIT;
     e->loc = loc;
     e->type = type_default_int();
+    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.int_val = v;
     return e;
 }
@@ -419,6 +420,7 @@ Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc) {
     e->kind = EX_BINOP;
     e->loc = loc;
     e->type = type_default_int();
+    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.bin.op = op;
     e->u.bin.l = l;
     e->u.bin.r = r;
@@ -434,6 +436,7 @@ Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc) {
     e->kind = EX_UNARY;
     e->loc = loc;
     e->type = type_default_int();
+    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.un.op = op;
     e->u.un.operand = operand;
     return e;
@@ -448,6 +451,7 @@ Expr *expr_new_var(const char *name, SourceLoc loc) {
     e->kind = EX_VAR;
     e->loc = loc;
     e->type = type_default_int();
+    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.var.name = xstrdup(name);
     return e;
 }
@@ -461,6 +465,7 @@ Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
     e->kind = EX_ASSIGN;
     e->loc = loc;
     e->type = type_default_int();
+    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.assign.lvalue = lvalue;
     e->u.assign.rvalue = rvalue;
     return e;
@@ -475,6 +480,7 @@ Expr *expr_new_call(Expr *callee, SourceLoc loc) {
     e->kind = EX_CALL;
     e->loc = loc;
     e->type = type_default_int();
+    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.call.callee = callee;   /* takes ownership */
     e->u.call.args.data = NULL;
     e->u.call.args.len = 0;
