@@ -222,6 +222,10 @@ static Type usual_arith_conv(Type a, Type b) {
 /* Set an expr's type (frees previous). Convenience wrapper. */
 static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
 
+/* Normalize a (possibly designated) initializer list (designator validation,
+ * array-length inference, expansion to positional with zero-fill). */
+static void normalize_init_list(Type *target, Expr *list, SourceLoc loc);
+
 /* Annotate e->type via type-checking; also returns a clone for use in callers. */
 static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     if (!e) return type_default_int();
@@ -755,6 +759,19 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         set_type(e, type_default_int());
         return type_clone(e->type);
     }
+    case EX_COMPOUND_LITERAL: {
+        /* (Type){ ... }: validate the init list against the target type and
+         * type-check every element.  The list's own type is the target type. */
+        Expr *init = e->u.compound.init;
+        if (init->kind == EX_INIT_LIST)
+            normalize_init_list(&e->u.compound.target_type, init, e->loc);
+        for (int i = 0; i < init->u.init_list.num_elements; i++) {
+            Type et = check_expr(init->u.init_list.elements[i], st, ft);
+            type_free(&et);
+        }
+        set_type(e, type_clone(e->u.compound.target_type));
+        return type_clone(e->type);
+    }
     }
     return type_default_int();
 }
@@ -784,6 +801,117 @@ static int is_const_init(const Expr *e) {
         return 1;
     }
     return 0;
+}
+
+/* Normalize a (possibly designated) initializer list against `target`:
+ *  1. infer an array length of 0 from the element count / designators,
+ *  2. validate every designator (array index in range, struct member exists,
+ *     no mixing of array designators with non-array targets or member
+ *     designators with non-struct targets),
+ *  3. expand to a fully positional list, filling gaps with int 0.
+ * Mutates `list` in place (its desig arrays are consumed and NULLed).  For
+ * nested init lists, recurses against the element / member type so their own
+ * designators resolve too.  C99 designated-initializer semantics: a designator
+ * sets the current position, and subsequent positional elements continue from
+ * the slot after it (`[1]=10, 20` → a[1]=10, a[2]=20). */
+static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
+    int n = list->u.init_list.num_elements;
+    /* 1. Infer array length for an empty `[]` declarator. */
+    if (target->kind == TY_ARRAY && target->length == 0) {
+        int len = n;
+        for (int i = 0; i < n; i++)
+            if (list->u.init_list.desig_kind[i] == 0
+                && list->u.init_list.desig_index[i] + 1 > len)
+                len = list->u.init_list.desig_index[i] + 1;
+        target->length = len;
+    }
+    /* Determine the output slot count N. */
+    int N;
+    const StructDef *sd = NULL;
+    switch (target->kind) {
+    case TY_ARRAY: N = target->length; break;
+    case TY_STRUCT:
+        sd = struct_registry_find_c(g_sema_structs, target->tag);
+        if (!sd)
+            die_at(loc.file, loc.line, loc.col,
+                   "unknown struct 'struct %s'", target->tag);
+        N = sd->num_members;
+        break;
+    default: N = 1; break;  /* scalar: `int x = {5}` */
+    }
+    /* 2. Validate designators. */
+    for (int i = 0; i < n; i++) {
+        int kind = list->u.init_list.desig_kind[i];
+        if (kind == 0) {  /* [index] */
+            if (target->kind != TY_ARRAY)
+                die_at(loc.file, loc.line, loc.col,
+                       "array index designator used on a non-array type");
+            int idx = list->u.init_list.desig_index[i];
+            if (idx < 0 || idx >= N)
+                die_at(loc.file, loc.line, loc.col,
+                       "designator index %d out of range for array of length %d",
+                       idx, N);
+        } else if (kind == 1) {  /* .member */
+            if (target->kind != TY_STRUCT)
+                die_at(loc.file, loc.line, loc.col,
+                       "member designator used on a non-struct type");
+            const char *name = list->u.init_list.desig_member[i];
+            int found = 0;
+            for (int j = 0; j < sd->num_members; j++)
+                if (strcmp(sd->members[j].name, name) == 0) { found = 1; break; }
+            if (!found)
+                die_at(loc.file, loc.line, loc.col,
+                       "struct '%s' has no member named '%s'",
+                       target->tag, name);
+        }
+    }
+    /* 3. Build a positional output of N slots, gap-filled with 0. */
+    Expr **out = malloc(N * sizeof(Expr *));
+    for (int i = 0; i < N; i++)
+        out[i] = expr_new_int(0, loc);
+    int cursor = 0;
+    for (int i = 0; i < n; i++) {
+        Expr *elem = list->u.init_list.elements[i];
+        int pos;
+        if (list->u.init_list.desig_kind[i] == 0) {
+            pos = list->u.init_list.desig_index[i];
+        } else if (list->u.init_list.desig_kind[i] == 1) {
+            const char *name = list->u.init_list.desig_member[i];
+            pos = -1;
+            for (int j = 0; j < sd->num_members; j++)
+                if (strcmp(sd->members[j].name, name) == 0) { pos = j; break; }
+        } else {
+            pos = cursor;
+        }
+        /* Recurse into a nested init list to resolve its designators against
+         * the sub-type.  Array element types are mutated in place (so an
+         * inferred inner length propagates to the parent type); struct member
+         * types carry explicit lengths and need no propagation. */
+        if (elem->kind == EX_INIT_LIST) {
+            if (target->kind == TY_ARRAY)
+                normalize_init_list(target->elem_type, elem, elem->loc);
+            else
+                normalize_init_list(&sd->members[pos].type, elem, elem->loc);
+        }
+        expr_free(out[pos]); /* drop the gap-fill zero (or previous element) */
+        out[pos] = elem;
+        /* C99 6.7.8p17: after a designator the next current object is the one
+         * following the designated slot, so the cursor always advances to
+         * pos+1 (for positional inits pos == cursor, so this is just +1). */
+        cursor = pos + 1;
+    }
+    /* Consume the now-obsolete desig arrays and the old element buffer. */
+    for (int i = 0; i < n; i++)
+        free(list->u.init_list.desig_member[i]);
+    free(list->u.init_list.desig_kind);
+    free(list->u.init_list.desig_index);
+    free(list->u.init_list.desig_member);
+    free(list->u.init_list.elements);
+    list->u.init_list.elements = out;
+    list->u.init_list.num_elements = N;
+    list->u.init_list.desig_kind = NULL;
+    list->u.init_list.desig_index = NULL;
+    list->u.init_list.desig_member = NULL;
 }
 
 /* Validate an initializer list's shape against the target type: element count
@@ -849,18 +977,14 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
         if (s->u.decl.storage_class == 2)
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "'extern' is not allowed at block scope");
-        /* Infer array length from an empty `[]` declarator when followed by an
-         * initializer: `int a[] = {1,2,3}` → length 3, or
-         * `char s[] = "hi"` → length strlen+1. */
+        /* Infer array length from an empty `[]` declarator when initialized by
+         * a string literal: `char s[] = "hi"` → length strlen+1.  (Array length
+         * from an init list is inferred later by normalize_init_list.) */
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
-            && s->u.decl.init) {
-            if (s->u.decl.init->kind == EX_INIT_LIST) {
-                s->u.decl.type.length = s->u.decl.init->u.init_list.num_elements;
-            } else if (s->u.decl.init->kind == EX_STR
-                       && s->u.decl.type.elem_type
-                       && s->u.decl.type.elem_type->width == 1) {
-                s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
-            }
+            && s->u.decl.init && s->u.decl.init->kind == EX_STR
+            && s->u.decl.type.elem_type
+            && s->u.decl.type.elem_type->width == 1) {
+            s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
         }
         /* A string literal initializing a `char[]` is lowered as a per-byte
          * copy, not a pointer store — convert it to an init list of char
@@ -879,6 +1003,10 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
             expr_free(str);
             s->u.decl.init = list;
         }
+        /* Normalize a (possibly designated) init list: infer array length,
+         * validate designators, expand to positional with zero-fill. */
+        if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
+            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
         symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST)
@@ -1053,19 +1181,19 @@ void sema_check(const TranslationUnit *tu_const) {
                    "global '%s' conflicts with a function of the same name",
                    s->u.decl.name);
         }
-        /* Infer array length from an empty `[]` declarator when followed by an
-         * initializer: `int a[] = {1,2,3}` → length 3, or
-         * `char s[] = "hi"` → length strlen+1. */
+        /* Infer array length from an empty `[]` declarator when initialized by
+         * a string literal: `char s[] = "hi"` → length strlen+1.  (Array length
+         * from an init list is inferred later by normalize_init_list.) */
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
-            && s->u.decl.init) {
-            if (s->u.decl.init->kind == EX_INIT_LIST) {
-                s->u.decl.type.length = s->u.decl.init->u.init_list.num_elements;
-            } else if (s->u.decl.init->kind == EX_STR
-                       && s->u.decl.type.elem_type
-                       && s->u.decl.type.elem_type->width == 1) {
-                s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
-            }
+            && s->u.decl.init && s->u.decl.init->kind == EX_STR
+            && s->u.decl.type.elem_type
+            && s->u.decl.type.elem_type->width == 1) {
+            s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
         }
+        /* Normalize a (possibly designated) init list: infer array length,
+         * validate designators, expand to positional with zero-fill. */
+        if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
+            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
         symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc);
         if (s->u.decl.init) {
             /* Validate the initializer list shape against the declared type. */

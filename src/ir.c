@@ -220,6 +220,8 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
         for (int i = 0; i < e->u.init_list.num_elements; i++)
             if (expr_takes_addr_of(e->u.init_list.elements[i], name)) return 1;
         return 0;
+    case EX_COMPOUND_LITERAL:
+        return expr_takes_addr_of(e->u.compound.init, name);
     }
     return 0;
 }
@@ -670,6 +672,11 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
         emit_inst_w(fn, IR_CONST, off_v, -1, -1, off, 8, 1, e->loc);
         return emit_bin_w(fn, IR_ADD, base, off_v, 8, 1, e->loc);
     }
+    case EX_COMPOUND_LITERAL:
+        /* A compound literal yields an lvalue: its address is the base for `&`
+         * or member access (e.g. `(struct S){1,2}.x`).  Lowering the literal
+         * materializes the storage; the result is the object's address. */
+        return lower_expr(fn, st, e);
     default: break;
     }
     return -1;
@@ -1389,6 +1396,26 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_CONST, v, -1, -1, type_size(e->u.sizeof_e.operand->type),
                     8, 1, e->loc);
+        return v;
+    }
+    case EX_COMPOUND_LITERAL: {
+        /* (Type){ ... }: materialize stack storage, initialize it, and return a
+         * pointer to it (aggregates) or the loaded scalar value (scalars).  The
+         * sema pass has already inferred any unspecified array length, so
+         * type_size(target) is authoritative. */
+        Type target = e->u.compound.target_type;
+        int total = type_size(target);
+        if (total <= 0) total = 8;
+        IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
+        IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        lower_init_list(fn, st, addr, &target, e->u.compound.init, e->loc);
+        if (target.kind == TY_ARRAY || target.kind == TY_STRUCT)
+            return addr;    /* aggregate value is its byte address, like struct/array vars */
+        /* Scalar: load the value back so the literal behaves as an rvalue. */
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
+                    target.width ? target.width : 4, target.is_unsigned, e->loc);
+        if (target.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
     default: break;   /* EX_INIT_LIST is lowered in ST_DECL, not here */

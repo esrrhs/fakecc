@@ -586,6 +586,20 @@ Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc) {
     Expr *e = expr_alloc(EX_INIT_LIST, loc);
     e->u.init_list.elements = elements;
     e->u.init_list.num_elements = num_elements;
+    e->u.init_list.desig_kind = malloc(num_elements * sizeof(int));
+    e->u.init_list.desig_index = malloc(num_elements * sizeof(int));
+    e->u.init_list.desig_member = calloc(num_elements, sizeof(char *));
+    for (int i = 0; i < num_elements; i++) {
+        e->u.init_list.desig_kind[i] = -1;
+        e->u.init_list.desig_index[i] = -1;
+    }
+    return e;
+}
+
+Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_COMPOUND_LITERAL, loc);
+    e->u.compound.target_type = type_clone(target_type); /* own a copy so the caller may type_free(&ty) */
+    e->u.compound.init = init;
     return e;
 }
 
@@ -654,9 +668,20 @@ void expr_free(Expr *e) {
         for (int i = 0; i < e->u.init_list.num_elements; i++)
             expr_free(e->u.init_list.elements[i]);
         free(e->u.init_list.elements);
+        if (e->u.init_list.desig_member) {
+            for (int i = 0; i < e->u.init_list.num_elements; i++)
+                free(e->u.init_list.desig_member[i]);
+        }
+        free(e->u.init_list.desig_kind);
+        free(e->u.init_list.desig_index);
+        free(e->u.init_list.desig_member);
         break;
     }
     case EX_FLOAT_LIT:
+        break;
+    case EX_COMPOUND_LITERAL:
+        type_free(&e->u.compound.target_type);
+        expr_free(e->u.compound.init);
         break;
     }
     type_free(&e->type);

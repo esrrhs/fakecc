@@ -100,6 +100,7 @@ typedef enum {
     EX_COMMA, /* a, b — evaluate a (discard), result is b */
     EX_INIT_LIST, /* { e1, e2, ... } — array/struct initializer; valid only as decl.init */
     EX_FLOAT_LIT, /* 1.5, 1e10, .5 — double value (width selects float vs double) */
+    EX_COMPOUND_LITERAL, /* (Type){ ... } — compound literal; yields a value of the named type */
 } ExprKind;
 
 typedef enum {
@@ -166,8 +167,9 @@ struct Expr {
         struct { Expr *operand; int is_inc; int is_prefix; } incdec; /* EX_INC_DEC */
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp; /* EX_COMPOUND_ASSIGN */
         struct { Expr *lhs; Expr *rhs; } comma; /* EX_COMMA */
-        struct { Expr **elements; int num_elements; } init_list; /* EX_INIT_LIST — owns each element */
+        struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list; /* EX_INIT_LIST — owns each element; desig_kind[i]: -1=positional, 0=[index], 1=.member (name in desig_member[i], index in desig_index[i]) */
         double float_lit;                                      /* EX_FLOAT_LIT — IEEE-754 value (bit-cast to int_val for width) */
+        struct { Type target_type; Expr *init; } compound; /* EX_COMPOUND_LITERAL — target_type owns sub-types; init is an EX_INIT_LIST */
     } u;
 };
 
@@ -192,6 +194,7 @@ Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc l
 Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 Expr *expr_new_float_lit(double val, int width, SourceLoc loc);
+Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_call_set_callee(Expr *e, Expr *callee); /* takes ownership, frees old */
 void  expr_free(Expr *e);

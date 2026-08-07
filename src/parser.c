@@ -444,6 +444,47 @@ static Type parse_type_abstract(Parser *p) {
     return t;
 }
 
+/* Parse a type-name (specifiers + abstract declarator): the type in a
+ * compound literal `(Type){ ... }`.  Supports a `*` chain and/or array
+ * dimensions `[int]` / `[]`, but NOT function types (illegal in a compound
+ * literal).  Arrays wrap right-to-left so `int[3][2]` → array(3, array(2)). */
+static Type parse_type_name(Parser *p) {
+    Type base = parse_specifiers(p);
+    /* Prefix pointers. */
+    int ptrs = 0;
+    while (peek(p)->kind == TK_STAR) { advance(p); ptrs++; }
+    /* Postfix array dimensions. */
+    int dims[8], ndims = 0;
+    while (peek(p)->kind == TK_LBRACKET) {
+        advance(p);
+        int len = 0;
+        if (peek(p)->kind == TK_INT_LITERAL) {
+            len = int_literal_value(peek(p)->text);
+            advance(p);
+        }
+        expect_kind(p, TK_RBRACKET, "']'");
+        if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
+                                   peek(p)->loc.col, "too many array dimensions");
+        dims[ndims++] = len;
+    }
+    if (ptrs == 0 && ndims == 0)
+        return base; /* plain scalar/struct type */
+    /* Wrap arrays right-to-left around the base type. */
+    Type t = base;
+    for (int i = ndims - 1; i >= 0; i--) {
+        Type w = type_make_array(t, dims[i]);
+        type_free(&t);
+        t = w;
+    }
+    /* Apply prefix pointers around the whole thing. */
+    for (int i = 0; i < ptrs; i++) {
+        Type w = type_make_ptr(t);
+        type_free(&t);
+        t = w;
+    }
+    return t;
+}
+
 /* ------------------------------------------------------------------ */
 /* Grammar                                                             */
 /* ------------------------------------------------------------------ */
@@ -1021,12 +1062,21 @@ static Expr *parse_primary(Parser *p) {
         return parse_postfix(p, expr_new_var(ident->text, ident->loc));
     }
     if (t->kind == TK_LPAREN) {
-        /* Cast?  (Type) unary   vs.   (expr) */
+        /* Cast?  (Type) unary   vs.   compound literal (Type){ ... }  vs.  (expr) */
         if (is_type_start(p, p->pos + 1)) {
             SourceLoc loc = peek(p)->loc;
             advance(p);
-            Type ty = parse_type_abstract(p);
+            Type ty = parse_type_name(p); /* handles array dims for compound literals */
             expect_kind(p, TK_RPAREN, "')'");
+            if (peek(p)->kind == TK_LBRACE) {
+                /* Compound literal: (Type){ initializer-list }.  parse_init_list
+                 * consumes the opening '{', so do not advance past it here. */
+                Expr *init = parse_init_list(p);
+                Expr *e = expr_new_compound_literal(ty, init, loc);
+                type_free(&ty);
+                return parse_postfix(p, e);
+            }
+            /* Cast: (Type) unary */
             Expr *e = expr_new_cast(ty, parse_unary(p), loc);
             type_free(&ty);
             return parse_postfix(p, e);
@@ -1049,11 +1099,42 @@ static Expr *parse_init_list(Parser *p) {
     SourceLoc loc = peek(p)->loc;
     expect_kind(p, TK_LBRACE, "'{'");
     Expr **elements = NULL;
+    /* Per-element designator (parallel to elements): kind -1 = positional,
+     * 0 = [index] (index in dindex), 1 = .member (name in dmember). */
+    int *dkind = NULL, *dindex = NULL;
+    char **dmember = NULL;
     int num = 0, cap = 0;
     while (peek(p)->kind != TK_RBRACE) {
         if (peek(p)->kind == TK_EOF) {
             die_at(loc.file, loc.line, loc.col,
                    "unterminated initializer list");
+        }
+        int kind = -1, idx = -1;
+        char *member = NULL;
+        if (peek(p)->kind == TK_DOT) {
+            /* .field = expr */
+            advance(p);
+            const Token *fn = peek(p);
+            if (fn->kind != TK_IDENT)
+                die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                       "expected field name after '.' but got '%s'", fn->text);
+            advance(p);
+            member = xstrdup(fn->text);
+            expect_kind(p, TK_ASSIGN, "'='");
+            kind = 1;
+        } else if (peek(p)->kind == TK_LBRACKET) {
+            /* [index] = expr — index must be an integer literal */
+            advance(p);
+            const Token *ix = peek(p);
+            if (ix->kind != TK_INT_LITERAL)
+                die_at(ix->loc.file, ix->loc.line, ix->loc.col,
+                       "expected integer constant in designator but got '%s'",
+                       ix->text);
+            idx = int_literal_value(ix->text);
+            advance(p);
+            expect_kind(p, TK_RBRACKET, "']'");
+            expect_kind(p, TK_ASSIGN, "'='");
+            kind = 0;
         }
         Expr *elem;
         if (peek(p)->kind == TK_LBRACE) {
@@ -1064,8 +1145,15 @@ static Expr *parse_init_list(Parser *p) {
         if (num >= cap) {
             cap = cap ? cap * 2 : 8;
             elements = realloc(elements, cap * sizeof(Expr *));
+            dkind = realloc(dkind, cap * sizeof(int));
+            dindex = realloc(dindex, cap * sizeof(int));
+            dmember = realloc(dmember, cap * sizeof(char *));
         }
-        elements[num++] = elem;
+        elements[num] = elem;
+        dkind[num] = kind;
+        dindex[num] = idx;
+        dmember[num] = member;
+        num++;
         if (peek(p)->kind == TK_COMMA) {
             advance(p);
             if (peek(p)->kind == TK_RBRACE) break; /* trailing comma */
@@ -1077,7 +1165,16 @@ static Expr *parse_init_list(Parser *p) {
         }
     }
     expect_kind(p, TK_RBRACE, "'}'");
-    return expr_new_init_list(elements, num, loc);
+    Expr *list = expr_new_init_list(elements, num, loc);
+    for (int i = 0; i < num; i++) {
+        list->u.init_list.desig_kind[i] = dkind[i];
+        list->u.init_list.desig_index[i] = dindex[i];
+        list->u.init_list.desig_member[i] = dmember[i];
+    }
+    free(dkind);
+    free(dindex);
+    free(dmember);
+    return list;
 }
 
 /* ---- statement parsing (forward declarations) ---- */
