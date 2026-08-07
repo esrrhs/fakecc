@@ -16,6 +16,7 @@ typedef struct {
     const char *name;
     int arity;
     int is_variadic;
+    int is_external;   /* 1 = declared `extern`, no definition in this TU */
     Type ret_type;
     Type param_types[16];
     SourceLoc loc;
@@ -40,6 +41,7 @@ static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     s->name = fn->name;
     s->arity = (int)fn->params.len;
     s->is_variadic = fn->is_variadic;
+    s->is_external = fn->is_extern;
     s->ret_type = fn->ret_type;
     s->loc = fn->loc;
     for (int i = 0; i < s->arity && i < 16; i++)
@@ -1001,12 +1003,33 @@ void sema_check(const TranslationUnit *tu_const) {
     int has_main = 0;
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
-        if (ftab_find(&ft, fn->name)) {
+        const FunSig *ex = ftab_find(&ft, fn->name);
+        if (ex) {
+            if (fn->is_extern) {
+                /* A new `extern` decl never overrides what we already have
+                 * (whether another decl or a real definition).  Silently
+                 * drop the redundant declaration. */
+                continue;
+            }
+            if (ex->is_external) {
+                /* We had only an `extern` decl; this definition replaces
+                 * it in place so the slot keeps its position. */
+                size_t idx = (size_t)(ex - ft.data);
+                ft.data[idx].is_external = 0;
+                ft.data[idx].arity = (int)fn->params.len;
+                ft.data[idx].is_variadic = fn->is_variadic;
+                ft.data[idx].ret_type = fn->ret_type;
+                ft.data[idx].loc = fn->loc;
+                for (int k = 0; k < ft.data[idx].arity && k < 16; k++)
+                    ft.data[idx].param_types[k] = fn->params.data[k].type;
+                if (strcmp(fn->name, "main") == 0) has_main = 1;
+                continue;
+            }
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "redefinition of function '%s'", fn->name);
         }
         ftab_push(&ft, fn);
-        if (strcmp(fn->name, "main") == 0) has_main = 1;
+        if (strcmp(fn->name, "main") == 0 && !fn->is_extern) has_main = 1;
     }
     if (!has_main) {
         die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
@@ -1059,6 +1082,9 @@ void sema_check(const TranslationUnit *tu_const) {
 
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
+
+        /* `extern` declarations have no body to type-check. */
+        if (fn->is_extern) continue;
 
         if (strcmp(fn->name, "main") == 0 && fn->params.len != 0) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,

@@ -1370,6 +1370,16 @@ static Stmt parse_switch(Parser *p) {
 
 static FunctionDecl parse_function_decl(Parser *p) {
     SourceLoc fn_loc = peek(p)->loc;
+    /* Consume an optional leading storage class.  `extern` means a
+     * declaration with no body; `static` is accepted (and ignored for
+     * linkage) so it doesn't choke parse_type_abstract. */
+    int is_extern = 0;
+    if (peek(p)->kind == TK_KW_STATIC) {
+        advance(p);
+    } else if (peek(p)->kind == TK_KW_EXTERN) {
+        advance(p);
+        is_extern = 1;
+    }
     Type ret_ty = parse_type_abstract(p);
 
     const Token *name = peek(p);
@@ -1388,6 +1398,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     stmt_array_init(&fn.body);
     fn.loc = fn_loc;
     fn.is_variadic = 0;
+    fn.is_extern = is_extern;
 
     /* Parameter list: type declarator ("," type declarator)* — or empty.
      * The special form `(void)` means "no parameters" (standard C). */
@@ -1443,6 +1454,13 @@ static FunctionDecl parse_function_decl(Parser *p) {
     }
 
     expect_kind(p, TK_RPAREN, "')'");
+
+    if (fn.is_extern) {
+        /* Declaration only — no body.  `extern int f();` */
+        expect_kind(p, TK_SEMICOLON, "';'");
+        return fn;
+    }
+
     expect_kind(p, TK_LBRACE, "'{'");
 
     parse_stmt_list(p, &fn.body);

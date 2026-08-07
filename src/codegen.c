@@ -490,6 +490,52 @@ static void emit_indirect_call(Buffer *b, int reg) {
     emit_modrm(b, 3, 2, reg & 7);
 }
 
+/* Emit the PLT0 resolver trampoline into the code buffer:
+ *   push   *GOT+8(%rip)   ; FF 35 rel32 -> GOT[1]
+ *   jmp    *GOT+16(%rip)  ; FF 25 rel32 -> GOT[2]
+ *   nop * 4               ; pad to 16 bytes
+ * The two `(%rip)` rel32 fields are recorded as PLT GOT fixups (their targets
+ * depend on the .got.plt vaddr, finalized in emit_elf).  Returns plt0's
+ * code-buffer offset. */
+static size_t emit_plt0(EmitModule *out) {
+    size_t start = out->code.len;
+    emit_byte(&out->code, 0xFF);
+    emit_byte(&out->code, 0x35);          /* push qword [rip+disp] */
+    emit_module_add_plt_got_fixup(out, out->code.len, 1);
+    emit_int32(&out->code, 0);
+    emit_byte(&out->code, 0xFF);
+    emit_byte(&out->code, 0x25);          /* jmp qword [rip+disp] */
+    emit_module_add_plt_got_fixup(out, out->code.len, 2);
+    emit_int32(&out->code, 0);
+    while ((out->code.len - start) < 16)  /* pad to 16 bytes */
+        emit_byte(&out->code, 0x90);
+    return start;
+}
+
+/* Emit one PLT entry (16 bytes) for external index `idx`:
+ *   jmp    *GOT(%rip)     ; FF 25 rel32 -> GOT[3+idx]
+ *   push   $idx            ; 68 imm32
+ *   jmp    plt0            ; E9 rel32
+ * The `jmp *GOT` rel32 is recorded as a PLT GOT fixup; the `jmp plt0` rel32
+ * is resolved immediately (plt0's offset is known).  Returns the entry's
+ * code-buffer offset. */
+static size_t emit_plt_entry(EmitModule *out, size_t idx, size_t plt0_off) {
+    size_t start = out->code.len;
+    emit_byte(&out->code, 0xFF);
+    emit_byte(&out->code, 0x25);          /* jmp qword [rip+disp] */
+    emit_module_add_plt_got_fixup(out, out->code.len, 3 + idx);
+    emit_int32(&out->code, 0);
+    emit_byte(&out->code, 0x68);          /* push imm32 (relocation index) */
+    emit_int32(&out->code, (int32_t)idx);
+    emit_byte(&out->code, 0xE9);          /* jmp rel32 */
+    size_t pjmp = out->code.len;
+    emit_int32(&out->code, 0);
+    /* patch jmp plt0 now: target = plt0_off, rip_next = pjmp + 4 */
+    int32_t rel = (int32_t)plt0_off - (int32_t)(pjmp + 4);
+    memcpy(out->code.data + pjmp, &rel, 4);
+    return start;
+}
+
 /* SysV AMD64: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9. */
 static const int SYSV_ARG_REGS[6] = {
     REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9
@@ -991,6 +1037,23 @@ typedef struct {
     char  *fn_name;       /* xstrdup'd function name */
 } FnAddrPatch;
 
+/* External (PLT) call patch: a named call to a function not defined in this
+ * TU.  The callee's name is registered (yielding a PLT index) and the rel32
+ * is patched to its PLT entry after the PLT is emitted. */
+typedef struct {
+    size_t patch_off;
+    size_t after_off;
+    size_t idx;           /* index into EmitModule.ext_names / PLT slot */
+} ExtCallPatch;
+
+/* External function-address patch: `&func` where func is external.  Patched
+ * to the function's PLT entry (calling through the PLT is a valid function
+ * pointer, matching the standard lazy-binding convention). */
+typedef struct {
+    size_t patch_off;
+    size_t idx;           /* index into EmitModule.ext_names / PLT slot */
+} ExtFaddrPatch;
+
 /* Compute which callee-saved registers this function actually uses.
  * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 (0 or 1). */
 static void collect_callee_saved(const RAResult *ra, int used[3]) {
@@ -1180,6 +1243,12 @@ void codegen(const IRModule *ir, EmitModule *out) {
     /* Function-address load patches (`&func` / function lvalue). */
     FnAddrPatch *fnaddr_patches = NULL;
     size_t num_fnaddr_patches = 0, cap_fnaddr_patches = 0;
+    /* External (PLT) call patches: named calls to undefined-symbol functions. */
+    ExtCallPatch *ext_call_patches = NULL;
+    size_t num_ext_call_patches = 0, cap_ext_call_patches = 0;
+    /* External function-address patches: `&func` for undefined-symbol funcs. */
+    ExtFaddrPatch *ext_faddr_patches = NULL;
+    size_t num_ext_faddr_patches = 0, cap_ext_faddr_patches = 0;
 
     for (size_t i = 0; i < ir->functions.len; i++) {
         const IRFunction *fn = &ir->functions.data[i];
@@ -2155,8 +2224,21 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
         }
         if (target == (size_t)-1) {
-            fprintf(stderr, "fakecc: unresolved call to '%s'\n", cp->callee);
-            exit(1);
+            /* Not a defined function — must be an external (`extern`) call.
+             * Register the name (dedup) for a PLT entry and remember the
+             * patch so it can be pointed at the PLT entry once emitted. */
+            size_t idx = emit_module_add_external(out, cp->callee);
+            if (num_ext_call_patches >= cap_ext_call_patches) {
+                cap_ext_call_patches = cap_ext_call_patches ? cap_ext_call_patches * 2 : 8;
+                ext_call_patches = xrealloc(ext_call_patches,
+                                             cap_ext_call_patches * sizeof(ExtCallPatch));
+            }
+            ext_call_patches[num_ext_call_patches].patch_off = cp->patch_off;
+            ext_call_patches[num_ext_call_patches].after_off = cp->after_off;
+            ext_call_patches[num_ext_call_patches].idx = idx;
+            num_ext_call_patches++;
+            free(cp->callee);
+            continue;
         }
         int64_t rel = (int64_t)target - (int64_t)cp->after_off;
         if (rel < INT32_MIN || rel > INT32_MAX) {
@@ -2181,8 +2263,18 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
         }
         if (target == (size_t)-1) {
-            fprintf(stderr, "fakecc: unresolved function address '%s'\n", fp->fn_name);
-            exit(1);
+            /* External function address — point the lea at its PLT entry. */
+            size_t idx = emit_module_add_external(out, fp->fn_name);
+            if (num_ext_faddr_patches >= cap_ext_faddr_patches) {
+                cap_ext_faddr_patches = cap_ext_faddr_patches ? cap_ext_faddr_patches * 2 : 8;
+                ext_faddr_patches = xrealloc(ext_faddr_patches,
+                                              cap_ext_faddr_patches * sizeof(ExtFaddrPatch));
+            }
+            ext_faddr_patches[num_ext_faddr_patches].patch_off = fp->patch_off;
+            ext_faddr_patches[num_ext_faddr_patches].idx = idx;
+            num_ext_faddr_patches++;
+            free(fp->fn_name);
+            continue;
         }
         /* lea r, [rip+disp32]: disp32 = target - (rip_next) where both are
          * absolute addresses.  target = ELF_BASE + symbol_offset;
@@ -2197,4 +2289,39 @@ void codegen(const IRModule *ir, EmitModule *out) {
         free(fp->fn_name);
     }
     free(fnaddr_patches);
+
+    /* ---- Emit the PLT and patch external calls / function addresses ---- */
+    if (out->num_ext > 0) {
+        size_t plt0_off = emit_plt0(out);
+        for (size_t i = 0; i < out->num_ext; i++) {
+            size_t eo = emit_plt_entry(out, i, plt0_off);
+            emit_module_set_plt_entry(out, i, eo);
+        }
+        /* Patch each external call's `call rel32` to its PLT entry. */
+        for (size_t pi = 0; pi < num_ext_call_patches; pi++) {
+            ExtCallPatch *ec = &ext_call_patches[pi];
+            size_t target = out->plt_entry_off[ec->idx];
+            int64_t rel = (int64_t)target - (int64_t)ec->after_off;
+            if (rel < INT32_MIN || rel > INT32_MAX) {
+                fprintf(stderr, "fakecc: PLT call displacement out of range\n");
+                exit(1);
+            }
+            int32_t rel32 = (int32_t)rel;
+            memcpy(out->code.data + ec->patch_off, &rel32, 4);
+        }
+        free(ext_call_patches);
+        /* Patch each external `&func` lea to its PLT entry. */
+        for (size_t pi = 0; pi < num_ext_faddr_patches; pi++) {
+            ExtFaddrPatch *ef = &ext_faddr_patches[pi];
+            size_t target = out->plt_entry_off[ef->idx];
+            int64_t rel = (int64_t)target - (int64_t)(ef->patch_off + 4);
+            if (rel < INT32_MIN || rel > INT32_MAX) {
+                fprintf(stderr, "fakecc: PLT address displacement out of range\n");
+                exit(1);
+            }
+            int32_t rel32 = (int32_t)rel;
+            memcpy(out->code.data + ef->patch_off, &rel32, 4);
+        }
+        free(ext_faddr_patches);
+    }
 }

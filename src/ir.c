@@ -1942,6 +1942,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
     for (size_t i = 0; i < tu->functions.len; i++) {
         const FunctionDecl *fd = &tu->functions.data[i];
 
+        /* `extern` declarations have no body — no IR is generated for them. */
+        if (fd->is_extern) continue;
+
         IRFunction irfn;
         irfn.name = xstrdup(fd->name);
         irfn.loc = fd->loc;
