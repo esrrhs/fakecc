@@ -194,7 +194,25 @@ void lex(const char *source, const char *filename, TokenArray *out) {
                     die_at(filename, start_line, start_col,
                            "unterminated character literal");
                 }
-                pos++; col++;  /* skip escaped char */
+                if (source[pos] == 'x' || source[pos] == 'X') {
+                    /* hex escape `\xHH...`: consume the hex digits too so the
+                     * closing quote lands in the right place. */
+                    pos++; col++;  /* skip the `x` */
+                    if (!isxdigit((unsigned char)source[pos]))
+                        die_at(filename, start_line, start_col,
+                               "hex escape \\x with no digits");
+                    while (isxdigit((unsigned char)source[pos])) {
+                        pos++; col++;
+                    }
+                } else if (source[pos] >= '0' && source[pos] <= '7') {
+                    /* octal escape `\NNN`: up to 3 octal digits. */
+                    int n = 0;
+                    while (n < 3 && source[pos] >= '0' && source[pos] <= '7') {
+                        pos++; col++; n++;
+                    }
+                } else {
+                    pos++; col++;  /* skip the single escaped char */
+                }
             } else {
                 pos++; col++;  /* skip single char */
             }
@@ -265,7 +283,19 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             int start_line = line;
             int start_col = col;
             size_t start = pos;
-            while (isdigit((unsigned char)source[pos])) { pos++; col++; }
+            /* Hex literal: `0x` / `0X` followed by hex digits.  Octal needs
+             * no special lexing (`077` is consumed as digits and decoded as
+             * octal by strtol(base=0)); only hex stops the digit loop early. */
+            if (c == '0' && (source[pos + 1] == 'x' || source[pos + 1] == 'X')) {
+                pos += 2;  /* "0x" */
+                col += 2;
+                if (!isxdigit((unsigned char)source[pos]))
+                    die_at(filename, start_line, start_col,
+                           "hex literal has no digits");
+                while (isxdigit((unsigned char)source[pos])) { pos++; col++; }
+            } else {
+                while (isdigit((unsigned char)source[pos])) { pos++; col++; }
+            }
             int is_float = 0;
             /* Fractional part: `.` followed by optional digits. Also bare `.`
              * after digits (e.g. `2.`). */

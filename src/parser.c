@@ -1,6 +1,7 @@
 #include "fakecc/parser.h"
 #include "fakecc/common.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -264,6 +265,7 @@ static ParamArray parse_param_list(Parser *p) {
  * modifiers wrap the group's "core" type (determined by the postfix that
  * follows the group).  Returns the name (owned) via *name_out (NULL if
  * abstract). */
+static int int_literal_value(const char *text);
 static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
                                 int *out_array_len, int *out_has_array) {
     int ptrs = 0;
@@ -279,7 +281,7 @@ static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
     if (peek(p)->kind == TK_LBRACKET) {
         advance(p);
         if (peek(p)->kind == TK_INT_LITERAL) {
-            array_len = atoi(peek(p)->text);
+            array_len = int_literal_value(peek(p)->text);
             advance(p);
         }
         expect_kind(p, TK_RBRACKET, "']'");
@@ -322,7 +324,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 advance(p);
                 int len = 0;
                 if (peek(p)->kind == TK_INT_LITERAL) {
-                    len = atoi(peek(p)->text);
+                    len = int_literal_value(peek(p)->text);
                     advance(p);
                 }
                 expect_kind(p, TK_RBRACKET, "']'");
@@ -358,7 +360,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 advance(p);
                 int len = 0;
                 if (peek(p)->kind == TK_INT_LITERAL) {
-                    len = atoi(peek(p)->text);
+                    len = int_literal_value(peek(p)->text);
                     advance(p);
                 }
                 expect_kind(p, TK_RBRACKET, "']'");
@@ -388,7 +390,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 advance(p);
                 int len = 0;
                 if (peek(p)->kind == TK_INT_LITERAL) {
-                    len = atoi(peek(p)->text);
+                    len = int_literal_value(peek(p)->text);
                     advance(p);
                 }
                 expect_kind(p, TK_RBRACKET, "']'");
@@ -874,9 +876,44 @@ static double float_literal_value(const char *text, int *out_width) {
     return strtod(text, NULL);
 }
 
+/* Decode an integer-literal token's text.  strtol(base=0) auto-detects the
+ * radix from the prefix: `0x`/`0X` = hex, leading `0` = octal, otherwise
+ * decimal — matching C's integer-literal rules.  Replaces raw atoi so hex
+ * (`0xFF`) and octal (`077`) literals work.  Returns the value as int. */
+static int int_literal_value(const char *text) {
+    return (int)strtol(text, NULL, 0);
+}
+
 static int char_literal_value(const char *text) {
     /* text[0] == '\'' */
     if (text[1] == '\\') {
+        /* Hex escape `\xHH...`: parse all consecutive hex digits. */
+        if (text[2] == 'x' || text[2] == 'X') {
+            int val = 0;
+            int i = 3;
+            int saw = 0;
+            while (text[i] != '\0' && isxdigit((unsigned char)text[i])) {
+                char c = text[i];
+                int d = (c >= '0' && c <= '9') ? c - '0'
+                      : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                      : c - 'A' + 10;
+                val = val * 16 + d;
+                i++; saw++;
+            }
+            /* lexer guarantees at least one hex digit follows `\x` */
+            return val & 0xff;
+        }
+        /* Octal escape `\NNN`: up to 3 octal digits. */
+        if (text[2] >= '0' && text[2] <= '7') {
+            int val = 0;
+            int i = 2;
+            int n = 0;
+            while (text[i] != '\0' && n < 3 && text[i] >= '0' && text[i] <= '7') {
+                val = val * 8 + (text[i] - '0');
+                i++; n++;
+            }
+            return val & 0xff;
+        }
         switch (text[2]) {
         case 'n': return '\n';
         case 't': return '\t';
@@ -894,7 +931,7 @@ static int char_literal_value(const char *text) {
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
-        Expr *e = expr_new_int(atoi(t->text), t->loc);
+        Expr *e = expr_new_int(int_literal_value(t->text), t->loc);
         advance(p);
         return parse_postfix(p, e);
     }
@@ -920,7 +957,32 @@ static Expr *parse_primary(Parser *p) {
             char c = src[i];
             if (c == '\\' && i + 1 < slen) {
                 i++;
-                switch (src[i]) {
+                if (src[i] == 'x' || src[i] == 'X') {
+                    /* Hex escape `\xHH...`: consume consecutive hex digits. */
+                    int val = 0, saw = 0;
+                    while (i + 1 < slen && isxdigit((unsigned char)src[i + 1])) {
+                        i++;
+                        char h = src[i];
+                        int d = (h >= '0' && h <= '9') ? h - '0'
+                              : (h >= 'a' && h <= 'f') ? h - 'a' + 10
+                              : h - 'A' + 10;
+                        val = val * 16 + d;
+                        saw++;
+                    }
+                    /* lexer guarantees at least one hex digit follows `\x` */
+                    buf[blen++] = (char)(val & 0xff);
+                } else if (src[i] >= '0' && src[i] <= '7') {
+                    /* Octal escape `\NNN`: up to 3 octal digits. */
+                    int val = src[i] - '0';
+                    int n = 1;
+                    while (n < 3 && i + 1 < slen
+                           && src[i + 1] >= '0' && src[i + 1] <= '7') {
+                        i++;
+                        val = val * 8 + (src[i] - '0');
+                        n++;
+                    }
+                    buf[blen++] = (char)(val & 0xff);
+                } else switch (src[i]) {
                 case 'n':  buf[blen++] = '\n'; break;
                 case 't':  buf[blen++] = '\t'; break;
                 case 'r':  buf[blen++] = '\r'; break;
@@ -1310,7 +1372,7 @@ static Stmt parse_typedef_stmt(Parser *p) {
  * `name` is the case label name for error messages. */
 static int case_constant_value(Parser *p, const char *text) {
     if (text[0] >= '0' && text[0] <= '9') {
-        return atoi(text);
+        return int_literal_value(text);
     }
     const EnumConstant *ec =
         enum_registry_find_constant(&p->tu->enums, text);
@@ -1349,7 +1411,7 @@ static Stmt parse_switch(Parser *p) {
             const Token *cv = peek(p);
             int value;
             if (cv->kind == TK_INT_LITERAL) {
-                value = atoi(cv->text);
+                value = int_literal_value(cv->text);
                 advance(p);
             } else if (cv->kind == TK_IDENT) {
                 value = case_constant_value(p, cv->text);
@@ -1649,7 +1711,7 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
                          * previously defined enum constant in THIS enum. */
                         const Token *v = peek(&p);
                         if (v->kind == TK_INT_LITERAL) {
-                            has_value = 1; value = atoi(v->text); advance(&p);
+                            has_value = 1; value = int_literal_value(v->text); advance(&p);
                         } else if (v->kind == TK_IDENT) {
                             const EnumConstant *ec =
                                 enum_registry_find_constant(&tu->enums, v->text);
