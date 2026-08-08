@@ -101,33 +101,41 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
 ## 当前进度
 
-### Slice 12 — 系统调用桥：真实 I/O
+**235 个 e2e + 13 个单元测试套件，CI（`ubuntu-latest·gcc` 与 `ubuntu-24.04·clang`）全绿。**  Slice 1–12 打通了从单文件表达式到 struct、变参、syscall 的完整语言层；此后继续补齐类型系统、SSA 中端优化、浮点/长浮点后端、动态链接与多文件编译。当前语言特性已覆盖编译器自身源码所需的几乎全部 C 子集，自举（Stage 1 机械翻译）正在进行。
 
-引入内置 intrinsic `__syscall(num, a0..a5)` 直接发射 Linux x86-64 syscall 指令。无需 libc、无需动态链接——直接跟内核对话。
+### 语言特性总览（当前覆盖）
 
-```c
-package main;
-int strlen(char *s) {
-    int n = 0;
-    while (s[n] != 0) { n = n + 1; }
-    return n;
-}
-int main() {
-    char *msg = "Hello from FakeCC!\n";
-    __syscall(1, 1, msg, strlen(msg));   // write(stdout, msg, len)
-    return 0;
-}
-```
+| 类别 | 已支持 |
+|---|---|
+| 声明与类型 | `char/short/int/long/long long` × `signed/unsigned`、`_Bool`、`void`、`struct`/`union`/`enum`、`typedef`、`const/volatile/restrict`、`inline`、`static/extern`、函数指针 |
+| 整型字面量 | 十进制 / 十六进制 `0x` / 八进制 `0`、后缀 `u/U/l/L/ll/LL`、`long long` |
+| 浮点 | `float` / `double`（SSE）、`long double`（x87 FPU，16 字节） |
+| 表达式 | 完整运算符（算术、位运算 `&\|^~<<>>`、逻辑 `&&||!`、比较、赋值、复合赋值、`++/--`、三元 `?:`、逗号）、指针算术、显式 cast、`sizeof`/`_Alignof`、复合字面量 |
+| 语句 | `if/else`、`while`/`do-while`/`for`、`break/continue`、`goto`、`switch/case/default`、块语句、声明混用（C99 风格声明可在语句后） |
+| 初始化器 | 标量/数组/struct 初始化列表、指定初始化器 `.field=` / `[i]=` |
+| 函数 | 多函数、递归/相互递归、最多 16 参数（前 6 走寄存器，≥7 走栈，SysV AMD64 ABI）、变参函数（`va_list`） |
+| 全局 | 全局变量（`data`/`bss`/`rodata` 自动分段）、字符串字面量（rodata）、`static` 跨文件不冲突 |
+| 后端 | SSA IR + CFG + 支配树 + mem2reg + constfold/DCE/peephole + 寄存器分配；内部 x86-64 编码器 + ELF64 写入器 |
+| 链接 | 多文件编译 + 链接（`fakecc a.c b.c -o prog`）；`fakecc -c a.c -o a.o` 出 `.o`；`fakecc a.o b.o -o prog` 链接对象文件；`static`→LOCAL 绑定、GLOBAL 符号跨文件解析；libc 调用走 PLT/GOT |
+| I/O | `__syscall(num, a0..a5)` intrinsic 直接发 Linux syscall；动态链接调 libc（`printf`/`malloc` 等） |
 
-- **Sema** 识别 `__syscall` 名字，跳过 FunTable 查找；接受 1..7 个参数（syscall 号 + 最多 6 个）；返回类型固定 `long`
-- **Codegen** 在 IR_CALL 里拦截 `__syscall` 调用：走 push-then-pop 舞蹈把 arg[0..6] 装载到 Linux syscall ABI 寄存器（`rax=num, rdi/rsi/rdx/r10/r8/r9=a0..a5`——注意用 r10 不是 rcx，跟 SysV 函数调用规约不同），发射 `0F 05`（syscall），结果按常规从 rax 取
-- **runner** 顺手把子进程 stdout 重定向到 `/dev/null`，避免和 e2e 检查输出串场
+### Slice 13+ — 浮点、动态链接、多文件编译与自举准备
 
-新增 3 个 e2e：`syscall_write / syscall_getuid / syscall_write_strlen`。104 个 e2e 全绿。
+Slice 12 之后的增量（按提交顺序），把语言层从"能写程序"推到"能编译自己"：
 
-**Slice 12 的意义**：FakeCC 生成的可执行文件现在能真正写 stdout、读 stdin、退出——所有 POSIX syscall 都能触发。搭配 Slice 8 的字符串字面量和 Slice 11 的 struct，可以写出真实的命令行工具（不含格式化 printf 但能自己实现 `itoa + write`）。
+- **浮点与长浮点**：`float`/`double` 标量算术走 SSE（`addss/mulss/cvttss2si` 等）；`long double` 走 x87 FPU（`fildl/fldt/fstpt`， SysV 约定：`ld` 在 `st0` 返回、16 字节栈上传递）。
+- **struct 按值传参/返回/赋值**：struct 在 IR 层面是指向字节的指针；每次按值边界（参数、返回、赋值）通过 `emit_struct_copy` 逐字节复制；大 struct 返回走 `sret`。
+- **动态链接（PLT/GOT）**：外部函数调用经 PLT 桩 + GOT 间接跳转，`.got.plt` 在 RW 段，支持调宿主机 libc。
+- **变参函数定义**：`va_list`/`va_start`/`va_arg`/`va_end` 内建实现，布局与 SysV AMD64 一致。
+- **标量类型扩展**：`long long`、`_Bool`；顺手修了 3 处被掩盖的 `FCMP` 标志位 bug。
+- **整型/转义扩展**：十六进制/八进制整数字面量与十六进制转义 `\xHH`、八进制转义 `\077`。
+- **复合字面量与指定初始化器**：`(T){...}`、`.field =`、`[index] =`。
+- **类型限定符**：`volatile`/`restrict`、`inline` 说明符、`_Alignof` 运算符。
+- **多文件编译 + 链接**（最新）：`EmitModule` 重设计为真正的单 TU 对象模块（`.text/.rodata/.data/.bss` + 统一符号表 + 重定位表）；codegen 把跨符号引用记录为 `EmitReloc`；新增 `emit_obj()` 写 `ET_REL`、`emit_obj_read()` 读 `.o`、`emit_link()` 合并多模块（段拼接、全局符号解析、重定位应用、PLT 构建、ELF 布局）。`main.c` CLI 支持 `fakecc [-c] <input...> -o <output>`。
 
-**未来（Slice 13+ 候选）**：完整动态链接（PLT/GOT/DT_NEEDED）以调用 libc；`printf` 内部实现；文件读写辅助库；错误处理路径（stderr、错误码传播）。
+新增 131 个 e2e（共 235），覆盖 float/double/longdouble 算术与比较、struct 按值链、变参、PLT 调用 libc、复合字面量、指定初始化器、十六进制/八进制字面量、多文件函数调用/全局变量/static 不冲突/两阶段链接。
+
+**自举准备度**：经差距分析，fakecc 语言能力已覆盖编译器 `src/*.c` 源码所需的几乎全部 C 子集（`for` 内声明、声明混用、`//` 注释、结构/联合/枚举、复合字面量、指定初始化器、变参、`__syscall`、函数指针均支持；`register` 实际 0 使用，无内联汇编、无 VLA、无 `__attribute__`、无嵌套函数）。Stage 1 机械翻译的主要负担在翻译层：删 `#include`、注入 `uint32_t`/`size_t` 等 typedef、把 ~70 个 `#define` 常量/函数宏改写为 `const`/真函数、改写 1 处 `__builtin_ctzll`、拼接相邻字符串字面量（`"\x7f""ELF"`→`"\x7fELF"`）。Stage 1 翻译与验证正在进行（见仓库内 `v0/` 目录）。
 
 ### Slice 11 — struct + `.` + `->`
 
