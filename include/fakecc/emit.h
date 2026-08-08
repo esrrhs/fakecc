@@ -102,8 +102,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path);
 void emit_elf(const EmitModule *m, const char *path);
 
 /* ELF relocation type constants. */
-#define R_X86_64_32    1
-#define R_X86_64_PC32  2
-#define R_X86_64_PLT32 4
+#define R_X86_64_32        1
+#define R_X86_64_PC32      2
+#define R_X86_64_PLT32     4
+#define R_X86_64_GOTPCREL  9
+#define R_X86_64_GLOB_DAT  6
 
 #endif /* FAKECC_EMIT_H */

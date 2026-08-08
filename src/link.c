@@ -43,6 +43,8 @@
 #define DT_PLTREL       20
 #define DT_JMPREL       23
 #define DT_RELA         7
+#define DT_RELASZ       8
+#define DT_RELENT       9
 #define R_X86_64_JUMP_SLOT 7
 
 #define STB_GLOBAL      1
@@ -227,7 +229,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         }
     }
 
-    /* ---- PLT slot assignment for undefined referenced symbols ---- */
+    /* ---- PLT slot assignment for undefined referenced symbols (functions) */
     char **ext_list = NULL;
     int num_ext = 0;
     int *reloc_ext_idx = xcalloc(total_syms, sizeof(int));
@@ -235,6 +237,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
+            if (m->relocs[r].type == R_X86_64_GOTPCREL) continue; /* data, handled below */
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (!sinfo[gsi].defined) {
                 const char *nm = m->syms[m->relocs[r].sym].name
@@ -242,6 +245,51 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
                 reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
             }
         }
+    }
+
+    /* ---- Data GOT slot assignment for external variables (GOTPCREL) ----
+     * An IR_GADDR of a symbol undefined in the referencing module emits a
+     * GOTPCREL reloc.  We assign each such referenced symbol a slot in the
+     * data GOT (right after the PLT GOT slots).  The linker fills the slot
+     * with the symbol's address: statically if the symbol is defined in
+     * another module (cross-module global), or via a R_X86_64_GLOB_DAT
+     * relocation if it is truly external (libc variable like `stderr`). */
+    char **data_ext_list = NULL;
+    int num_data_ext = 0;
+    int *reloc_data_got_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) reloc_data_got_idx[i] = -1;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            if (m->relocs[r].type != R_X86_64_GOTPCREL) continue;
+            size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
+            if (reloc_data_got_idx[gsi] >= 0) continue;
+            const char *nm = m->syms[m->relocs[r].sym].name
+                             ? m->syms[m->relocs[r].sym].name : "";
+            reloc_data_got_idx[gsi] = ext_find_or_add(&data_ext_list, &num_data_ext, nm);
+        }
+    }
+    /* Determine, per data-external slot, whether the symbol is defined in any
+     * module (cross-module global) or truly external (libc).  This only needs
+     * symbol names + definitions, NOT final addresses, so it can run now —
+     * before layout — which lets the .rela.dyn buffer be sized for layout. */
+    int *data_got_external = num_data_ext ? xcalloc(num_data_ext, sizeof(int)) : NULL;
+    for (int j = 0; j < num_data_ext; j++) {
+        const char *nm = data_ext_list[j];
+        int found = 0;
+        for (size_t mi = 0; mi < n && !found; mi++) {
+            EmitModule *om = mods[mi];
+            for (size_t mj = 0; mj < om->num_syms; mj++) {
+                size_t ogsi = mod_sym_base[mi] + mj;
+                if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
+                    && om->syms[mj].name
+                    && strcmp(om->syms[mj].name, nm) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        data_got_external[j] = !found;
     }
 
     /* ---- Build PLT at end of .text ---- */
@@ -253,18 +301,24 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         plt_entry_off[e] = emit_plt_entry(&text, e, plt0_off, &plt_got_fixup[e]);
 
     /* ---- Build dynamic-linking section buffers (sizes needed for layout) ---- */
-    Buffer dynstr, dynsym, hash, rela_plt, dynamic;
+    Buffer dynstr, dynsym, hash, rela_plt, rela_dyn, dynamic;
     buffer_init(&dynstr); buffer_init(&dynsym); buffer_init(&hash);
-    buffer_init(&rela_plt); buffer_init(&dynamic);
+    buffer_init(&rela_plt); buffer_init(&rela_dyn); buffer_init(&dynamic);
     size_t interp_len = sizeof(INTERP_PATH);
 
-    if (num_ext > 0) {
+    /* External symbols that need dynsym entries: function externals (which get
+     * PLT stubs) followed by data externals (which get GOT data slots).  Both
+     * appear in dynstr/dynsym/hash so the dynamic linker can resolve them. */
+    int num_dynsym_ext = num_ext + num_data_ext;
+    if (num_dynsym_ext > 0) {
         buf_u8(&dynstr, 0);
         buf_bytes(&dynstr, "libc.so.6", sizeof("libc.so.6"));
         for (int i = 0; i < num_ext; i++)
             buf_bytes(&dynstr, ext_list[i], strlen(ext_list[i]) + 1);
-        buf_pad(&dynsym, 24);
-        for (int i = 0; i < num_ext; i++) {
+        for (int j = 0; j < num_data_ext; j++)
+            buf_bytes(&dynstr, data_ext_list[j], strlen(data_ext_list[j]) + 1);
+        buf_pad(&dynsym, 24); /* [0] NULL symbol */
+        for (int k = 0; k < num_dynsym_ext; k++) {
             buf_u32(&dynsym, 0); /* st_name patched below */
             buf_u8(&dynsym, STB_GLOBAL << 4);
             buf_u8(&dynsym, 0);
@@ -272,12 +326,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
             buf_u64(&dynsym, 0);
             buf_u64(&dynsym, 0);
         }
-        size_t nsyms = 1 + num_ext;
+        size_t nsyms = 1 + num_dynsym_ext;
         size_t nbucket = (nsyms < 2) ? 1 : 3;
         uint32_t *bucket = calloc(nbucket, sizeof(uint32_t));
         uint32_t *chain = calloc(nsyms, sizeof(uint32_t));
         for (size_t i = 0; i < nsyms; i++) {
-            const char *nm = (i == 0) ? "" : ext_list[i - 1];
+            const char *nm;
+            if (i == 0) nm = "";
+            else if ((int)(i - 1) < num_ext) nm = ext_list[i - 1];
+            else nm = data_ext_list[i - 1 - num_ext];
             uint32_t b = (uint32_t)(elf_hash(nm) % nbucket);
             chain[i] = bucket[b];
             bucket[b] = (uint32_t)i;
@@ -293,6 +350,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
             buf_u64(&rela_plt, ((uint64_t)(i + 1) << 32) | R_X86_64_JUMP_SLOT);
             buf_u64(&rela_plt, 0);
         }
+        /* rela.dyn: R_X86_64_GLOB_DAT for each TRULY external data variable
+         * (cross-module globals are filled statically, so need no reloc). */
+        for (int j = 0; j < num_data_ext; j++) {
+            if (!data_got_external[j]) continue;
+            buf_u64(&rela_dyn, 0); /* r_offset patched after layout known */
+            buf_u64(&rela_dyn, ((uint64_t)(1 + num_ext + j) << 32) | R_X86_64_GLOB_DAT);
+            buf_u64(&rela_dyn, 0);
+        }
         /* dynamic assembled after layout */
     }
 
@@ -305,15 +370,19 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + START_SIZE;
     /* RX content: _start, .text, .rodata, .interp, .dynstr, .dynsym, .hash,
-     * .rela.plt, .dynamic.  When there are no externals, the dynamic sections
-     * are empty and only _start+.text+.rodata are loaded.  The .dynamic
+     * .rela.plt, .rela.dyn, .dynamic.  When there are no externals, the dynamic
+     * sections are empty and only _start+.text+.rodata are loaded.  The .dynamic
      * section is assembled after layout (it needs vaddrs), so its size is
-     * accounted for here: 11 DT_ entries (DT_NEEDED, DT_STRTAB, DT_SYMTAB,
-     * DT_SYMENT, DT_STRSZ, DT_HASH, DT_PLTGOT, DT_PLTRELSZ, DT_PLTREL,
-     * DT_JMPREL, DT_NULL) = 11 * 16 bytes. */
-    size_t dynamic_size = num_ext > 0 ? 11 * 16 : 0;
+     * accounted for here: 11 DT_ entries for function externals (DT_NEEDED,
+     * DT_STRTAB, DT_SYMTAB, DT_SYMENT, DT_STRSZ, DT_HASH, DT_PLTGOT,
+     * DT_PLTRELSZ, DT_PLTREL, DT_JMPREL, DT_NULL) plus 3 more (DT_RELA,
+     * DT_RELASZ, DT_RELENT) when external DATA variables are referenced. */
+    size_t dynamic_size = 0;
+    if (num_ext > 0 || num_data_ext > 0) {
+        dynamic_size = (size_t)(11 + (num_data_ext > 0 ? 3 : 0)) * 16;
+    }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
-        + rela_plt.len + dynamic_size;
+        + rela_plt.len + rela_dyn.len + dynamic_size;
     size_t rx_content_len = START_SIZE + text.len + rodata.len + dyn_sections_len;
     size_t rx_filesz = hdr_size + rx_content_len;
     size_t data_file_offset = rx_filesz;
@@ -349,11 +418,48 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         }
     }
 
+    /* ---- Resolve static data GOT fill values ----
+     * For cross-module data globals (data_got_external[j] == 0) the GOT slot is
+     * filled at link time with the symbol's final address.  Truly-external
+     * slots (data_got_external[j] == 1) are left for the dynamic linker, so
+     * they need no static address here.  This needs sym_addr, hence runs after
+     * layout. */
+    size_t *data_got_addr = num_data_ext ? xcalloc(num_data_ext, sizeof(size_t)) : NULL;
+    for (int j = 0; j < num_data_ext; j++) {
+        if (data_got_external[j]) continue; /* external: dynlinker fills it */
+        const char *nm = data_ext_list[j];
+        for (size_t mi = 0; mi < n; mi++) {
+            EmitModule *om = mods[mi];
+            for (size_t mj = 0; mj < om->num_syms; mj++) {
+                size_t ogsi = mod_sym_base[mi] + mj;
+                if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
+                    && om->syms[mj].name
+                    && strcmp(om->syms[mj].name, nm) == 0) {
+                    data_got_addr[j] = sym_addr[ogsi];
+                    break;
+                }
+            }
+        }
+    }
+
     /* ---- Apply relocations ---- */
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
             const EmitReloc *rel = &m->relocs[r];
+            size_t patch_in_text = mod_text_off[i] + rel->offset;
+            uint64_t P = code_vaddr + patch_in_text;
+            if (rel->type == R_X86_64_GOTPCREL) {
+                /* Load &global from a data GOT entry: the disp targets the GOT
+                 * slot, whose qword holds the symbol's address (filled below,
+                 * either statically or via R_X86_64_GLOB_DAT). */
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                int dgidx = reloc_data_got_idx[gsi];
+                uint64_t got_slot_vaddr = got_vaddr + (3 + num_ext + dgidx) * 8;
+                int32_t disp = (int32_t)(got_slot_vaddr - (P + 4));
+                memcpy(text.data + patch_in_text, &disp, 4);
+                continue;
+            }
             size_t gsi = mod_sym_base[i] + rel->sym;
             uint64_t S;
             if (sinfo[gsi].defined) {
@@ -385,8 +491,6 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
                     S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
                 }
             }
-            size_t patch_in_text = mod_text_off[i] + rel->offset;
-            uint64_t P = code_vaddr + patch_in_text;
             int32_t disp = (int32_t)(S + rel->addend - P);
             memcpy(text.data + patch_in_text, &disp, 4);
         }
@@ -428,22 +532,33 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     /* ================================================================ */
     /* Finalize dynamic-linking sections now that layout is known        */
     /* ================================================================ */
-    if (num_ext > 0) {
+    if (num_dynsym_ext > 0) {
         /* Patch dynsym st_name fields.  dynstr layout: "\0" + "libc.so.6\0"
-         * + name0\0 + name1\0 + ...  so name_i is at offset
-         * 1 + sizeof("libc.so.6") + sum(len(name_j)+1, j<i). */
+         * + func names + data names, so name_k is at offset
+         * 1 + sizeof("libc.so.6") + sum(len(name_j)+1, j<k). */
         {
             size_t acc = 1 + sizeof("libc.so.6");
-            for (int i = 0; i < num_ext; i++) {
+            for (int k = 0; k < num_dynsym_ext; k++) {
                 uint32_t noff = (uint32_t)acc;
-                memcpy(dynsym.data + 24 + (size_t)i * 24, &noff, 4);
-                acc += strlen(ext_list[i]) + 1;
+                memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                const char *nm = (k < num_ext) ? ext_list[k] : data_ext_list[k - num_ext];
+                acc += strlen(nm) + 1;
             }
         }
-        /* Patch rela.plt r_offsets. */
+        /* Patch rela.plt r_offsets (function externals). */
         for (int i = 0; i < num_ext; i++) {
             uint64_t roff = got_vaddr + (3 + i) * 8;
             memcpy(rela_plt.data + (size_t)i * 24, &roff, 8);
+        }
+        /* Patch rela.dyn r_offsets (truly-external data variables). */
+        {
+            int rdj = 0;
+            for (int j = 0; j < num_data_ext; j++) {
+                if (!data_got_external[j]) continue;
+                uint64_t roff = got_vaddr + (3 + num_ext + j) * 8;
+                memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
+                rdj++;
+            }
         }
         /* .dynamic */
         size_t rx_base_vaddr = base + hdr_size;
@@ -451,7 +566,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         size_t dynsym_off = dynstr_off + dynstr.len;
         size_t hash_off = dynsym_off + dynsym.len;
         size_t rela_plt_off = hash_off + hash.len;
-        size_t dynamic_off = rela_plt_off + rela_plt.len;
+        size_t rela_dyn_off = rela_plt_off + rela_plt.len;
+        size_t dynamic_off = rela_dyn_off + rela_dyn.len;
         uint64_t dynstr_vaddr = rx_base_vaddr + dynstr_off;
         buf_u64(&dynamic, DT_NEEDED);   buf_u64(&dynamic, 1);
         buf_u64(&dynamic, DT_STRTAB);   buf_u64(&dynamic, dynstr_vaddr);
@@ -463,6 +579,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         buf_u64(&dynamic, DT_PLTRELSZ); buf_u64(&dynamic, rela_plt.len);
         buf_u64(&dynamic, DT_PLTREL);   buf_u64(&dynamic, DT_RELA);
         buf_u64(&dynamic, DT_JMPREL);   buf_u64(&dynamic, rx_base_vaddr + rela_plt_off);
+        if (num_data_ext > 0) {
+            buf_u64(&dynamic, DT_RELA);     buf_u64(&dynamic, rx_base_vaddr + rela_dyn_off);
+            buf_u64(&dynamic, DT_RELASZ);   buf_u64(&dynamic, rela_dyn.len);
+            buf_u64(&dynamic, DT_RELENT);   buf_u64(&dynamic, 24);
+        }
         buf_u64(&dynamic, DT_NULL);     buf_u64(&dynamic, 0);
 
         /* ---- Assemble RX segment content ---- */
@@ -477,10 +598,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         buf_bytes(&rx, dynsym.data, dynsym.len);
         buf_bytes(&rx, hash.data, hash.len);
         buf_bytes(&rx, rela_plt.data, rela_plt.len);
+        buf_bytes(&rx, rela_dyn.data, rela_dyn.len);
         buf_bytes(&rx, dynamic.data, dynamic.len);
 
         uint64_t entry = base + start_offset;
-        size_t got_count = 3 + num_ext;
+        size_t got_count = 3 + num_ext + num_data_ext;
         size_t got_bytes = got_count * 8;
         Buffer got;
         buffer_init(&got);
@@ -489,6 +611,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         buf_u64(&got, 0); /* GOT[2] */
         for (int i = 0; i < num_ext; i++)
             buf_u64(&got, code_vaddr + plt_entry_off[i] + 6); /* push $i addr */
+        for (int j = 0; j < num_data_ext; j++)
+            buf_u64(&got, data_got_external[j] ? 0 : data_got_addr[j]);
 
         /* ---- Build ELF ---- */
         uint16_t phnum = 4; /* RX, RW, INTERP, DYNAMIC */
@@ -558,11 +682,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     }
 
     buffer_free(&dynstr); buffer_free(&dynsym); buffer_free(&hash);
-    buffer_free(&rela_plt); buffer_free(&dynamic);
+    buffer_free(&rela_plt); buffer_free(&rela_dyn); buffer_free(&dynamic);
     for (int i = 0; i < num_ext; i++) free(ext_list[i]);
     free(ext_list);
+    for (int j = 0; j < num_data_ext; j++) free(data_ext_list[j]);
+    free(data_ext_list);
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
     free(mod_text_off); free(mod_rodata_off); free(mod_data_off); free(mod_bss_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);
+    free(reloc_data_got_idx);
     free(plt_entry_off); free(plt_got_fixup);
+    free(data_got_addr); free(data_got_external);
 }

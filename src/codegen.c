@@ -638,6 +638,19 @@ static size_t emit_lea_rip(Buffer *b, int dst) {
     return patch;
 }
 
+/* Emit `mov dst, [rip+0]` (RIP-relative qword load) and return the disp32
+ * patch offset.  Encoding: REX.W 8B /r with mod=00 rm=5 (RIP-relative);
+ * the /r reg field is the destination.  Used to load the *address* of an
+ * external global from the GOT (GOTPCREL-style). */
+static size_t emit_load_rip(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, dst, 0 /* B unused — rm=5 is RIP */);
+    emit_byte(b, 0x8B);
+    emit_modrm(b, 0, dst & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
 /* Emit ModRM for `[reg]` addressing where `reg` is a full 4-bit register id
  * (0..15).  Handles the two x86 special cases:
  *   - rbp (reg&7 == 5): mod=00 rm=5 means [disp32], not [rbp]. Use mod=01 disp8=0.
@@ -1863,15 +1876,28 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_GADDR: {
-                /* dst = &global; target name in inst->call_name.  Emit
-                 * `lea r, [rip+0]` and record a PC32 relocation targeting the
-                 * global's symbol (defined in this module or external). */
+                /* dst = &global; target name in inst->call_name.  If the
+                 * global is defined in THIS module, its address is a link-time
+                 * constant — emit `lea r, [rip+0]` + PC32 reloc as before.
+                 * Otherwise (cross-module global or external libc variable) the
+                 * address is only known via the GOT: emit `mov r, [rip+0]`
+                 * (a qword load) + a GOTPCREL reloc.  The linker fills the GOT
+                 * entry with the symbol's address, so `r` ends up holding
+                 * `&global` in both cases.  This is what makes external data
+                 * (e.g. `stderr`) loadable — a plain PC32 would resolve to the
+                 * PLT stub, which is wrong for variables. */
                 int target = dr >= 0 ? dr : REG_RAX;
-                size_t patch = emit_lea_rip(&out->text, target);
                 int gsym = emit_module_find_symbol(out, inst->call_name);
-                if (gsym < 0)
-                    gsym = emit_module_add_undefined(out, inst->call_name);
-                emit_module_add_reloc(out, patch, R_X86_64_PC32, gsym, -4);
+                int defined_here = (gsym >= 0 && out->syms[gsym].shndx != SECT_UNDEF);
+                if (defined_here) {
+                    size_t patch = emit_lea_rip(&out->text, target);
+                    emit_module_add_reloc(out, patch, R_X86_64_PC32, gsym, -4);
+                } else {
+                    if (gsym < 0)
+                        gsym = emit_module_add_undefined(out, inst->call_name);
+                    size_t patch = emit_load_rip(&out->text, target);
+                    emit_module_add_reloc(out, patch, R_X86_64_GOTPCREL, gsym, -4);
+                }
                 if (dr < 0)
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
