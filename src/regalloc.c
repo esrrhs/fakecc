@@ -44,6 +44,32 @@ static int value_is_float_class(const IRFunction *fn, int v) {
     return fn->value_is_float[v];
 }
 
+/* True if SSA value `v` is a long double (TY_FLOAT width 16).  Long doubles
+ * live in x87 st0 / 16-byte stack slots, NOT in the XMM register file, so
+ * they must be excluded from the XMM regalloc class (they are also excluded
+ * from GP, since they are float-class). */
+static int value_is_ld(const IRFunction *fn, int v) {
+    if (!value_is_float_class(fn, v)) return 0;
+    if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
+    if (v >= fn->value_meta_cap) return 0;
+    return fn->value_width[v] == 16;
+}
+
+/* True if SSA value `v` belongs to the XMM-allocatable float class: float
+ * or double, but NOT long double (which uses x87). */
+static int value_is_xmm_float(const IRFunction *fn, int v) {
+    return value_is_float_class(fn, v) && !value_is_ld(fn, v);
+}
+
+/* True if SSA value `v` belongs to the register class being allocated in
+ * this run: GP (float_class 0) = non-float; XMM (float_class 1) = float but
+ * not long double.  Encapsulates the long-double exclusion so the XMM run
+ * leaves ld values uncolored (REG_NONE) — their home is an x87 stack slot. */
+static int value_in_class(const IRFunction *fn, int v, int float_class) {
+    if (float_class) return value_is_xmm_float(fn, v);
+    return !value_is_float_class(fn, v);
+}
+
 /* ================================================================== */
 /* Liveness analysis                                                   */
 /* ================================================================== */
@@ -391,18 +417,17 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             if (inst->op == IR_CALL) {
                 BS_FOREACH(&live, over) {
                     if ((int)over != inst->dst &&
-                        value_is_float_class(fn, (int)over) == float_class) {
+                        value_in_class(fn, (int)over, float_class))
                         forbid_mask[over] |= cls->caller_saved;
-                    }
                 }
             }
 
             /* dst interferes with every currently-live value — but only
              * values in the target class form edges in this graph. */
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_is_float_class(fn, inst->dst) == float_class) {
+                value_in_class(fn, inst->dst, float_class)) {
                 BS_FOREACH(&live, other) {
-                    if (value_is_float_class(fn, (int)other) != float_class)
+                    if (!value_in_class(fn, (int)other, float_class))
                         continue;
                     if ((int)other != inst->dst) {
                         ig_add_edge(g, inst->dst, (int)other);
@@ -414,17 +439,17 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             /* Uses become live *before* this instruction — but only
              * track uses that belong to the target class. */
             if (inst->a >= 0 && inst->a < nv &&
-                value_is_float_class(fn, inst->a) == float_class)
+                value_in_class(fn, inst->a, float_class))
                 bs_set(&live, inst->a);
             if (inst->op != IR_CBR &&
                 inst->b >= 0 && inst->b < nv &&
-                value_is_float_class(fn, inst->b) == float_class)
+                value_in_class(fn, inst->b, float_class))
                 bs_set(&live, inst->b);
             if (inst->op == IR_CALL) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&
-                        value_is_float_class(fn, av) == float_class)
+                        value_in_class(fn, av, float_class))
                         bs_set(&live, av);
                 }
             }
@@ -656,7 +681,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     {
         int any = 0;
         for (int v = 0; v < nv; v++) {
-            if (value_is_float_class(fn, v) == float_class) { any = 1; break; }
+            if (value_in_class(fn, v, float_class)) { any = 1; break; }
         }
         if (!any) return NULL;
     }
@@ -691,7 +716,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
      * encodings that codegen uses for ModRM.  Values not in this class
      * get REG_NONE (their real home is the other class's result). */
     for (int v = 0; v < nv; v++) {
-        if (value_is_float_class(fn, v) != float_class) {
+        if (!value_in_class(fn, v, float_class)) {
             colors[v] = REG_NONE;
         } else if (colors[v] >= 0 && colors[v] < cls->nregs) {
             colors[v] = cls->regs[colors[v]];

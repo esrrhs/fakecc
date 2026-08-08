@@ -40,6 +40,7 @@ typedef enum {
     TK_KW_RESTRICT,      /* "restrict" */
     TK_KW_INLINE,        /* "inline" */
     TK_KW_ALIGNOF,       /* "_Alignof" */
+    TK_KW_LONG_DOUBLE,   /* "long double" — recognized via lookahead in parser */
     TK_IDENT,
     TK_INT_LITERAL,
     TK_FLOAT_LITERAL,    /* 1.5, 1.5f, 1e10, .5, 2. — text kept for strtod */

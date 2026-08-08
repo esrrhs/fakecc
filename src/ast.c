@@ -511,9 +511,9 @@ Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
 
 static Expr *expr_alloc(ExprKind k, SourceLoc loc);  /* forward */
 
-Expr *expr_new_float_lit(double val, int width, SourceLoc loc) {
+Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc) {
     Expr *e = expr_alloc(EX_FLOAT_LIT, loc);
-    e->u.float_lit = val;
+    e->u.float_text = xstrdup(text);
     /* type is set by sema, but stash width now so parser-level consumers work */
     e->type = type_make_float(width);
     return e;
@@ -636,6 +636,9 @@ void expr_free(Expr *e) {
     case EX_STR:
         free(e->u.str.bytes);
         break;
+    case EX_FLOAT_LIT:
+        free(e->u.float_text);
+        break;
     case EX_ADDR:  expr_free(e->u.addr.operand); break;
     case EX_DEREF: expr_free(e->u.deref.operand); break;
     case EX_INDEX:
@@ -681,8 +684,6 @@ void expr_free(Expr *e) {
         free(e->u.init_list.desig_member);
         break;
     }
-    case EX_FLOAT_LIT:
-        break;
     case EX_COMPOUND_LITERAL:
         type_free(&e->u.compound.target_type);
         expr_free(e->u.compound.init);

@@ -536,6 +536,88 @@ static size_t emit_plt_entry(EmitModule *out, size_t idx, size_t plt0_off) {
     return start;
 }
 
+/* ================================================================== */
+/* x87 FPU emission — long double (80-bit extended, width 16)          */
+/*                                                                      */
+/* Long doubles never occupy XMM registers.  Each lives in a dedicated
+ * 16-byte stack slot (ld_off[v]) and moves through x87 st0: we `fldt` a
+ * slot to load into st0, `fstpt` to store st0 back and pop.  Every ld
+ * operation ends with st0 empty (the `*p` pop instructions + fstpt clear
+ * the x87 stack).                                                      */
+/*                                                                      */
+/* x87 memory operands use the `/r` encoding: opcode DB (low) with the
+ * reg field of ModRM selecting the operation (0=fild, 1=fisttp, 5=fldt,
+ * 7=fstpt).  To keep ModRM simple we materialize each slot's address
+ * into a GP scratch register first, then encode mod=00 rm=scratch.      */
+/* ================================================================== */
+
+/* fldt m80real  →  DB /5 [mod=00 reg=5 rm=scratch].  Load 10-byte
+ * extended from [scratch] into st0 (pushes the x87 stack).  `scratch` must
+ * not be RSP/RBP (their mod=00 encodings are special).  RCX is used. */
+static void emit_x87_fldtRCX(Buffer *b) {
+    emit_byte(b, 0xDB);
+    emit_modrm(b, 0, 5, REG_RCX & 7);
+}
+
+/* fstpt m80real  →  DB /7 [mod=00 reg=7 rm=scratch].  Store st0 to
+ * [scratch] and pop the x87 stack. */
+static void emit_x87_fstptRCX(Buffer *b) {
+    emit_byte(b, 0xDB);
+    emit_modrm(b, 0, 7, REG_RCX & 7);
+}
+
+/* faddp / fsubp / fmulp / fdivp  →  DE C1 / DE E1 / DE C9 / DE F9.
+ * Binary x87 op: st1 = st1 op st0, pop st0.  Encoded with mod=11, rm=st0. */
+static void emit_x87_arith_pop(Buffer *b, int op) {
+    emit_byte(b, 0xDE);
+    emit_byte(b, (uint8_t)op);
+}
+
+/* fstpt [rsp]  →  DB /7 [mod=00 reg=7 rm=4 SIB=0x24].  Store st0 to a 16-byte
+ * slot at [rsp] and pop.  Used to push long-double call args. */
+static void emit_x87_fstpt_rsp(Buffer *b) {
+    emit_byte(b, 0xDB);
+    emit_modrm(b, 0, 7, 4); /* mod=00 rm=100 => SIB follows */
+    emit_byte(b, 0x24);     /* SIB: base=rsp, index=none */
+}
+
+/* fcomip st0, st1  →  DF F1.  Compare st0 to st1, pop st0, set ZF/CF.
+ * Used for long-double comparisons (IR_FCMP ld). */
+static void emit_x87_fcomip(Buffer *b) {
+    emit_byte(b, 0xDF);
+    emit_byte(b, 0xF1);
+}
+
+/* Forward declarations: these helpers live later in the file (with the other
+ * SSE/GP emitters) but are referenced by the ld load/store wrappers below. */
+static void emit_ld_addr(Buffer *b, int reg, int ld_off);
+static void emit_store_base_off(Buffer *b, int base, int reg, int off);
+static void emit_load_base_off(Buffer *b, int dst, int base, int off);
+
+/* Materialize long-double value `v`'s slot address into RCX, then fldt it
+ * into st0.  `ld_off` is the prologue-computed rbp-relative slot array. */
+static void emit_ld_load(Buffer *b, int v, const int *ld_off) {
+    emit_ld_addr(b, REG_RCX, ld_off[v]);
+    emit_x87_fldtRCX(b);
+}
+
+/* Load st0 into long-double value `v`'s slot and pop. */
+static void emit_ld_store(Buffer *b, int v, const int *ld_off) {
+    emit_ld_addr(b, REG_RCX, ld_off[v]);
+    emit_x87_fstptRCX(b);
+}
+
+/* Load the 32-bit signed integer in GP register `src` into long-double value
+ * `dst`'s slot via x87: mov src→[ld_slot]; fild dword [ld_slot]; fstpt the
+ * result into [ld_slot].  int→long-double (IR_SITOFP ld).  Clobbers RAX/RCX. */
+static void emit_ld_from_gp_int(Buffer *b, int src, int dst, const int *ld_off) {
+    /* Store the int into the low 4 bytes of dst's 16-byte slot, fild it. */
+    emit_ld_addr(b, REG_RCX, ld_off[dst]);
+    emit_store_base_off(b, REG_RCX, src, 0); /* mov [rcx], src (32-bit) */
+    emit_byte(b, 0xDB); emit_modrm(b, 0, 0, REG_RCX & 7); /* fild dword [rcx] */
+    emit_x87_fstptRCX(b); /* fstpt [rcx] — st0 (the ld) → slot, pop */
+}
+
 /* SysV AMD64: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9. */
 static const int SYSV_ARG_REGS[6] = {
     REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9
@@ -889,6 +971,23 @@ static int value_is_float_class(const IRFunction *fn, int v) {
     if (!fn->value_is_float || fn->value_meta_cap <= 0) return 0;
     if (v >= fn->value_meta_cap) return 0;
     return fn->value_is_float[v];
+}
+
+/* True if SSA value `v` is a long double (TY_FLOAT width 16).  Long doubles
+ * are NOT kept in XMM registers — they live in dedicated 16-byte stack slots
+ * (ld_off[v]) and move through x87 st0.  This predicate gates the x87 path. */
+static int value_is_ld(const IRFunction *fn, int v) {
+    if (!value_is_float_class(fn, v)) return 0;
+    if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
+    if (v >= fn->value_meta_cap) return 0;
+    return fn->value_width[v] == 16;
+}
+
+/* Materialize the address of long-double value `v`'s 16-byte slot into GP
+ * register `reg`.  ld_off[v] is the rbp-relative offset assigned in the
+ * prologue (negative for locals/results, positive for stack-passed params). */
+static void emit_ld_addr(Buffer *b, int reg, int ld_off) {
+    emit_lea_rbp(b, reg, ld_off);
 }
 
 /* Ensure value `v` is in `dst_reg`.  Emits mov or load as needed. */
@@ -1279,7 +1378,30 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
         }
 
-        int stack_size = gp_spill_area + xmm_spill_area + pinned_area;
+        /* Long-double (width 16) slot assignment.  ld values never live in
+         * registers — each gets a fixed 16-byte slot addressed rbp-relative
+         * via ld_off[v].  Locals reuse their pinned-alloca offset; operation
+         * results and constants are packed into a dedicated ld area below the
+         * pinned area.  ld params are handled in the param-binding loop
+         * (positive stack offset).  Unassigned ld values keep ld_off = 0 and
+         * are treated as slot 0 (only valid once every ld value is assigned). */
+        int *ld_off = xmalloc(fn->next_value_id * sizeof(int));
+        for (int i = 0; i < fn->next_value_id; i++) ld_off[i] = 0;
+        int ld_area = 0;
+        for (size_t j = 0; j < fn->insts.len; j++) {
+            const IRInst *inst = &fn->insts.data[j];
+            if (!value_is_ld(fn, inst->dst)) continue;
+            if (inst->op == IR_ALLOCA && inst->alloca_bytes > 0) {
+                /* ld local: reuse its pinned-alloca slot (16-byte aligned). */
+                ld_off[inst->dst] = alloca_off[inst->dst];
+            } else if (inst->op != IR_PARAM) {
+                /* ld operation result or constant: fresh 16-byte slot. */
+                ld_area += 16;
+                ld_off[inst->dst] = -(gp_spill_area + xmm_spill_area + pinned_area + ld_area);
+            }
+        }
+
+        int stack_size = gp_spill_area + xmm_spill_area + pinned_area + ld_area;
         if (!ra && stack_size == 0) stack_size = 8 * fn->next_value_id;
         if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
 
@@ -1335,9 +1457,19 @@ void codegen(const IRModule *ir, EmitModule *out) {
         int gp_reg_idx = 0, xmm_reg_idx = 0, stack_arg_idx = 0;
         for (int p = 0; p < nparams; p++) {
             const IRInst *pi = &fn->insts.data[p];
-            int is_float = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+            int is_ld = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                         value_is_ld(fn, pi->dst));
+            int is_float = !is_ld && (pi->dst >= 0 && pi->dst < fn->next_value_id &&
                             value_is_float_class(fn, pi->dst));
-            if (is_float) {
+            if (is_ld) {
+                /* long double: SysV passes in a 16-byte stack slot, NOT XMM.
+                 * Record its [rbp+..] offset; codegen loads it via fldt there. */
+                arrive_reg[p] = -1;
+                arrive_is_xmm[p] = 0;
+                stack_off[p] = 16 + 8 * stack_arg_idx;
+                stack_arg_idx += 2; /* 16-byte slot = two 8-byte stack slots */
+                ld_off[pi->dst] = stack_off[p]; /* positive rbp-relative offset */
+            } else if (is_float) {
                 if (xmm_reg_idx < 8) {
                     arrive_reg[p] = xmm_reg_idx; /* native XMM code 0..7 */
                     arrive_is_xmm[p] = 1;
@@ -1410,10 +1542,18 @@ void codegen(const IRModule *ir, EmitModule *out) {
         /* Pop into each param's allocated home (or spill slot) in order. */
         for (int p = 0; p < nparams; p++) {
             const IRInst *pi = &fn->insts.data[p];
+            int is_ld = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                         value_is_ld(fn, pi->dst));
             int is_float = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
                             value_is_float_class(fn, pi->dst));
             if (arrive_reg[p] < 0) {
                 /* Stack-passed arg: load from [rbp + stack_off] into home. */
+                if (is_ld) {
+                    /* long double: already in its 16-byte stack slot (ld_off set
+                     * in the param loop); it lives in memory, not XMM — nothing
+                     * to load. */
+                    continue;
+                }
                 if (is_float) {
                     int pdr_xmm = (ra_xmm && pi->dst >= 0 &&
                                    pi->dst < ra_xmm->num_values)
@@ -1502,7 +1642,16 @@ void codegen(const IRModule *ir, EmitModule *out) {
             switch (inst->op) {
 
             case IR_CONST: {
-                if (inst->is_float) {
+                if (value_is_ld(fn, inst->dst)) {
+                    /* long double constant: 80-bit value lives in a rodata
+                     * global (name in inst->call_name).  lea rcx,[rip+0] (reloc
+                     * patched to the global), fldt [rcx], fstpt into dst's slot.
+                     * Clobbers RCX. */
+                    size_t patch = emit_lea_rip(&out->code, REG_RCX);
+                    emit_module_add_reloc(out, patch, inst->call_name);
+                    emit_x87_fldtRCX(&out->code); /* fldt [rcx] */
+                    emit_ld_store(&out->code, inst->dst, ld_off);
+                } else if (inst->is_float) {
                     /* Float constant: bit pattern in float_imm.  Materialize via
                      * RAX (movabs) then movq into the XMM file. */
                     if (dr >= 0) {
@@ -1800,7 +1949,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_LOAD_PTR: {
                 /* dst = *ptr.  ptr = inst->a. */
                 ensure_reg(&out->code, inst->a, REG_RCX, ra);
-                if (value_is_float_class(fn, inst->dst)) {
+                if (value_is_ld(fn, inst->dst)) {
+                    /* long double load: fldt [ptr] → st0; fstpt to dst's slot.
+                     * ld values are slot-backed (no XMM/GP register). */
+                    emit_byte(&out->code, 0xDB);
+                    emit_modrm(&out->code, 0, 5, REG_RCX & 7); /* fldt [rcx] */
+                    emit_ld_store(&out->code, inst->dst, ld_off);
+                } else if (value_is_float_class(fn, inst->dst)) {
                     /* Float load: movsd/movss xmm, [ptr]. */
                     int is_float = (inst->width == 4);
                     emit_sse_load_via_ptr(&out->code,
@@ -1822,7 +1977,15 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_STORE_PTR: {
                 /* *ptr = val.  ptr = inst->a, val = inst->b. */
                 ensure_reg(&out->code, inst->a, REG_RCX, ra);
-                if (value_is_float_class(fn, inst->b)) {
+                if (value_is_ld(fn, inst->b)) {
+                    /* long double store: fldt val's slot → st0; fstpt [ptr].
+                     * emit_ld_load clobbers RCX, so reload the pointer into it
+                     * after the value is in st0. */
+                    emit_ld_load(&out->code, inst->b, ld_off); /* clobbers RCX */
+                    ensure_reg(&out->code, inst->a, REG_RCX, ra); /* ptr → RCX */
+                    emit_byte(&out->code, 0xDB);
+                    emit_modrm(&out->code, 0, 7, REG_RCX & 7); /* fstpt [rcx] */
+                } else if (value_is_float_class(fn, inst->b)) {
                     /* Float store: movsd/movss [ptr], xmm. */
                     int is_float = (inst->width == 4);
                     ensure_reg_xmm(&out->code, inst->b, XMM_SCRATCH0, ra_xmm,
@@ -1928,8 +2091,15 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 int target_is_xmm[IR_CALL_MAX_ARGS];
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
                 for (int k = 0; k < nargs; k++) {
-                    int is_float = value_is_float_class(fn, inst->call_args[k]);
-                    if (is_float) {
+                    int is_ld = value_is_ld(fn, inst->call_args[k]);
+                    int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
+                    if (is_ld) {
+                        /* long double arg: passed on the stack in a 16-byte slot
+                         * (two 8-byte positions), NOT in XMM. */
+                        target_reg[k] = -1;
+                        target_is_xmm[k] = 0;
+                        n_stack += 2;
+                    } else if (is_float) {
                         if (n_xmm < 8) {
                             target_reg[k] = n_xmm; /* XMM0..7 */
                             target_is_xmm[k] = 1;
@@ -1966,7 +2136,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
                  * so they end up at [rsp+8], [rsp+16], ... in order. */
                 for (int k = nargs - 1; k >= 0; k--) {
                     if (target_reg[k] >= 0) continue; /* reg-passed */
-                    if (target_is_xmm[k]) {
+                    if (value_is_ld(fn, inst->call_args[k])) {
+                        /* long double: 16-byte stack slot.  fldt its home slot,
+                         * alloc 16 bytes, fstpt [rsp].  Clobbers RCX. */
+                        emit_ld_load(&out->code, inst->call_args[k], ld_off);
+                        emit_sub_rsp_imm32(&out->code, 16);
+                        emit_x87_fstpt_rsp(&out->code);
+                    } else if (target_is_xmm[k]) {
                         ensure_reg_xmm(&out->code, inst->call_args[k],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
                         emit_sub_rsp_imm32(&out->code, 8);
@@ -2030,7 +2206,12 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
                 if (cleanup > 0) emit_add_rsp_imm32(&out->code, cleanup);
 
-                if (value_is_float_class(fn, inst->dst)) {
+                if (value_is_ld(fn, inst->dst)) {
+                    /* long double result comes back in st0 (SysV ld ABI).  fstpt
+                     * it into dst's slot.  Clobbers RCX.  Void: dst == -1. */
+                    if (inst->dst >= 0)
+                        emit_ld_store(&out->code, inst->dst, ld_off);
+                } else if (value_is_float_class(fn, inst->dst)) {
                     /* Float result comes back in XMM0 (SysV float ABI).  Move
                      * it to dst's XMM home, or spill.  Void: dst == -1. */
                     if (inst->dst >= 0) {
@@ -2057,7 +2238,9 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_RETURN: {
                 /* Void function: bare `return;` — no value in a. */
                 if (inst->a != -1) {
-                    if (value_is_float_class(fn, inst->a))
+                    if (value_is_ld(fn, inst->a))
+                        emit_ld_load(&out->code, inst->a, ld_off); /* → st0 */
+                    else if (value_is_float_class(fn, inst->a))
                         ensure_reg_xmm(&out->code, inst->a, 0, ra_xmm,
                                        gp_spill_area); /* XMM0 */
                     else
@@ -2071,6 +2254,25 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_FSUB:
             case IR_FMUL:
             case IR_FDIV: {
+                if (value_is_ld(fn, inst->dst)) {
+                    /* long double arithmetic: ld a, ld b, f**p, fstpt dst.
+                     * x87 stack ends empty (the `*p` pop + fstpt clear st0). */
+                    emit_ld_load(&out->code, inst->a, ld_off);
+                    emit_ld_load(&out->code, inst->b, ld_off);
+                    int op;
+                    switch (inst->op) {
+                    /* load a then b (st0=b,st1=a); the pop-op does st1 = st1 op st0
+                     * (faddp/fmulp) or st1 = st0 op st1 (fsubrp/fdivp) — chosen
+                     * so the result is a+b, a-b, a*b, a/b respectively. */
+                    case IR_FADD: op = 0xC1; break; /* DE C1: faddp */
+                    case IR_FSUB: op = 0xE9; break; /* DE E9: fsubrp */
+                    case IR_FMUL: op = 0xC9; break; /* DE C9: fmulp */
+                    default:      op = 0xF9; break; /* DE F9: fdivp */
+                    }
+                    emit_x87_arith_pop(&out->code, op);
+                    emit_ld_store(&out->code, inst->dst, ld_off);
+                    break;
+                }
                 /* dst = a op b, all float.  Stage both operands into XMM
                  * scratch regs (never-allocated scratch0/1), compute into
                  * scratch0, then move to dst home or spill. */
@@ -2096,6 +2298,41 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_FCMP: {
+                if (value_is_ld(fn, inst->a) || value_is_ld(fn, inst->b)) {
+                    /* long double comparison — matches GCC's fcomip sequence.
+                     * fcomip computes st0-st1, sets flags, pops st0.  We always
+                     * read with seta/setae/sete/setne and pick direction via
+                     * load order (LT/LE load a first; GT/GE load b first): see
+                     * GCC cmplt/cmpgt.  Zero RDX before (xor clobbers flags). */
+                    int is_lt_le = (inst->is_unsigned == 0 || inst->is_unsigned == 1);
+                    emit_xor_rr(&out->code, REG_RDX);
+                    if (is_lt_le) {
+                        emit_ld_load(&out->code, inst->a, ld_off); /* st0=a */
+                        emit_ld_load(&out->code, inst->b, ld_off); /* st0=b,st1=a */
+                    } else {
+                        emit_ld_load(&out->code, inst->b, ld_off); /* st0=b */
+                        emit_ld_load(&out->code, inst->a, ld_off); /* st0=a,st1=b */
+                    }
+                    emit_x87_fcomip(&out->code);
+                    emit_byte(&out->code, 0xDD); emit_byte(&out->code, 0xD8); /* fstp %st(0) */
+                    uint8_t cc;
+                    switch (inst->is_unsigned) {
+                    case 0: cc = 0x97; break; /* LT: a<b ↔ b>a → seta */
+                    case 1: cc = 0x93; break; /* LE: a<=b ↔ b>=a → setae */
+                    case 2: cc = 0x97; break; /* GT: a>b → seta */
+                    case 3: cc = 0x93; break; /* GE: a>=b → setae */
+                    case 4: cc = 0x94; break; /* EQ → sete */
+                    default: cc = 0x95; break; /* NE → setne */
+                    }
+                    emit_setcc_r(&out->code, cc, REG_RDX);
+                    int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
+                                ? ra->reg[inst->dst] : -1;
+                    if (dr_gp >= 0 && dr_gp != REG_RDX)
+                        emit_mov_rr(&out->code, dr_gp, REG_RDX);
+                    spill_if_needed(&out->code, inst->dst,
+                                    dr_gp >= 0 ? dr_gp : REG_RDX, ra);
+                    break;
+                }
                 /* dst (int) = (a op b) ? 1 : 0, a/b float.  The comparison is
                  * encoded in inst->is_unsigned: 0=LT 1=LE 2=GT 3=GE 4=EQ
                  * 5=NE.  ucomi sets flags; setcc produces the 0/1 result. */
@@ -2130,6 +2367,17 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_SITOFP: {
+                if (value_is_ld(fn, inst->dst)) {
+                    /* int→long double.  Load int into a GP reg, store into dst's
+                     * slot, fild dword from the slot (pushes ld to st0), fstpt
+                     * the result back into dst's slot.  Clobbers RAX/RCX. */
+                    int pdr = (ra && inst->a >= 0 && inst->a < ra->num_values)
+                              ? ra->reg[inst->a] : -1;
+                    int src = (pdr >= 0) ? pdr : REG_RAX;
+                    if (pdr < 0) emit_load_spill(&out->code, REG_RAX, spill_offset(ra->spill_slot[inst->a]));
+                    emit_ld_from_gp_int(&out->code, src, inst->dst, ld_off);
+                    break;
+                }
                 /* dst (float) = (float)a, a = signed int.  Load a into a GP
                  * scratch, cvtsi2sd, then optionally narrow to float. */
                 ensure_reg(&out->code, inst->a, REG_RAX, ra);
@@ -2145,6 +2393,33 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_FPTOSI: {
+                if (value_is_ld(fn, inst->a)) {
+                    /* long double→int.  Load ld a into st0, sub a small scratch
+                     * on the stack, fisttp dword to it, read into a GP reg.  Uses
+                     * 8 bytes below rsp (SysV red zone is safe here).  Clobbers
+                     * RAX/RCX/RDX. */
+                    emit_ld_load(&out->code, inst->a, ld_off); /* fldt [a] → st0 */
+                    emit_sub_rsp_imm32(&out->code, 8);
+                    /* lea rcx, [rsp] */
+                    emit_byte(&out->code, 0x48); emit_byte(&out->code, 0x8D);
+                    emit_modrm(&out->code, 0, REG_RCX & 7, 4);
+                    emit_byte(&out->code, 0x24);
+                    emit_byte(&out->code, 0xDB);
+                    emit_modrm(&out->code, 0, 1, REG_RCX & 7); /* fisttp dword [rsp] */
+                    int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
+                                ? ra->reg[inst->dst] : -1;
+                    int dst_reg = (dr_gp >= 0) ? dr_gp : REG_RAX;
+                    /* mov dst_reg, [rsp] */
+                    emit_byte(&out->code, 0x48); emit_byte(&out->code, 0x8B);
+                    emit_modrm(&out->code, 0, dst_reg & 7, 4);
+                    emit_byte(&out->code, 0x24);
+                    emit_add_rsp_imm32(&out->code, 8);
+                    if (dr_gp >= 0 && dr_gp != dst_reg)
+                        emit_mov_rr(&out->code, dr_gp, dst_reg);
+                    spill_if_needed(&out->code, inst->dst,
+                                    dr_gp >= 0 ? dr_gp : REG_RAX, ra);
+                    break;
+                }
                 /* dst (int) = (int)a, a = float.  The source float width is
                  * inst->imm (inst->width is the target int width).  Load a
                  * into XMM scratch, cvtsd2si/cvtss2si into a GP scratch. */
@@ -2164,6 +2439,19 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_FPEXT: {
+                if (value_is_ld(fn, inst->dst)) {
+                    /* double (or float)→long double.  Load the SSE value into
+                     * XMM scratch, store to dst's slot, fld qword/dword from
+                     * the slot (pushes ld to st0), fstpt back to dst's slot. */
+                    ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                                   gp_spill_area);
+                    emit_ld_addr(&out->code, REG_RCX, ld_off[inst->dst]);
+                    emit_sse_store_via_ptr(&out->code, REG_RCX, XMM_SCRATCH0, 0);
+                    emit_byte(&out->code, 0xDD); /* fld qword [rcx] */
+                    emit_modrm(&out->code, 0, 0, REG_RCX & 7);
+                    emit_x87_fstptRCX(&out->code); /* fstpt [rcx] */
+                    break;
+                }
                 /* dst (double) = (double)(float)a.  Widen float→double. */
                 ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
                                gp_spill_area);
@@ -2176,6 +2464,22 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_FPTRUNC: {
+                if (value_is_ld(fn, inst->a)) {
+                    /* long double→double (or float).  fldt ld source slot into
+                     * st0, fstp qword into the source slot's first 8 bytes (the
+                     * source is consumed, so reusing it as scratch is safe),
+                     * load into XMM scratch → dst home. */
+                    emit_ld_load(&out->code, inst->a, ld_off); /* fldt → st0 */
+                    emit_ld_addr(&out->code, REG_RCX, ld_off[inst->a]);
+                    emit_byte(&out->code, 0xDD); /* fstp qword [rcx] */
+                    emit_modrm(&out->code, 0, 3, REG_RCX & 7);
+                    emit_sse_load_via_ptr(&out->code, XMM_SCRATCH0, REG_RCX, 0);
+                    if (dr >= 0 && dr != XMM_SCRATCH0)
+                        emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
+                    spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                                        ra_xmm, gp_spill_area);
+                    break;
+                }
                 /* dst (float) = (float)(double)a.  Narrow double→float. */
                 ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
                                gp_spill_area);
@@ -2209,6 +2513,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
         free(patches);
         free(label_off);
         free(alloca_off);
+        free(ld_off);
 
         size_t fn_size = out->code.len - start_offset;
         emit_module_add_symbol(out, fn->name, start_offset, fn_size);

@@ -122,6 +122,18 @@ static Type parse_specifiers(Parser *p) {
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
+    /* long double — TY_FLOAT with width 16 (x87 80-bit extended).  Detected by
+     * a `long` keyword immediately followed by `double` (lookahead without
+     * consuming on mismatch, since `long` alone begins an integer type). */
+    if (peek(p)->kind == TK_KW_LONG
+        && p->pos + 1 < p->tokens->len
+        && p->tokens->data[p->pos + 1].kind == TK_KW_DOUBLE) {
+        advance(p); /* consume `long` */
+        advance(p); /* consume `double` */
+        Type t = type_make_float(16);
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        return t;
+    }
     /* enum Tag — treated as int for the type system. */
     if (peek(p)->kind == TK_KW_ENUM) {
         advance(p);
@@ -923,17 +935,20 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
 
 /* Decode a char-literal token's text (e.g. "'A'" or "'\\n'") to its int value.
  * Caller guarantees text starts and ends with a single quote. */
-/* Parse a TK_FLOAT_LITERAL's text into a double and a width (4 = float,
- * 8 = double).  The `f`/`F` suffix forces width 4; otherwise double.
- * Uses strtod for the numeric value. */
-static double float_literal_value(const char *text, int *out_width) {
-    /* Detect the `f`/`F` suffix (lexer guarantees it's the last char). */
+/* Classify a TK_FLOAT_LITERAL's suffix into a width: f/F -> float (4),
+ * l/L -> long double (16), otherwise double (8).  The numeric value is left
+ * in the AST's source text and parsed at IR time (strtold preserves the
+ * 80-bit precision a double cannot hold). */
+static void float_literal_width(const char *text, int *out_width) {
     size_t len = strlen(text);
-    int is_float_suffix = 0;
-    if (len > 0 && (text[len - 1] == 'f' || text[len - 1] == 'F'))
-        is_float_suffix = 1;
-    *out_width = is_float_suffix ? 4 : 8;
-    return strtod(text, NULL);
+    *out_width = 8;  /* default: double */
+    if (len > 0) {
+        char last = text[len - 1];
+        if (last == 'f' || last == 'F')
+            *out_width = 4;
+        else if (last == 'l' || last == 'L')
+            *out_width = 16;
+    }
 }
 
 /* Decode an integer-literal token's text.  strtol(base=0) auto-detects the
@@ -997,8 +1012,8 @@ static Expr *parse_primary(Parser *p) {
     }
     if (t->kind == TK_FLOAT_LITERAL) {
         int width = 8;
-        double val = float_literal_value(t->text, &width);
-        Expr *e = expr_new_float_lit(val, width, t->loc);
+        float_literal_width(t->text, &width); /* classify width (4/8/16) */
+        Expr *e = expr_new_float_lit(t->text, width, t->loc);
         advance(p);
         return e;  /* float literal is a primary — no postfix needed */
     }
@@ -1876,14 +1891,20 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
                || peek(&p)->kind == TK_KW_INLINE
                || peek(&p)->kind == TK_KW_SIGNED || peek(&p)->kind == TK_KW_UNSIGNED)
             advance(&p);
-        /* Skip type keyword. */
-        if (peek(&p)->kind == TK_KW_VOID || peek(&p)->kind == TK_KW_INT
-            || peek(&p)->kind == TK_KW_CHAR || peek(&p)->kind == TK_KW_SHORT
-            || peek(&p)->kind == TK_KW_LONG || peek(&p)->kind == TK_KW_FLOAT
-            || peek(&p)->kind == TK_KW_DOUBLE || peek(&p)->kind == TK_KW_BOOL) {
-            advance(&p);
-        } else if (peek(&p)->kind == TK_KW_STRUCT
-                   || peek(&p)->kind == TK_KW_UNION) {
+        /* Skip type keyword(s).  `long double` is two keywords, and integer
+         * types chain several (`long long`, `unsigned long`, ...), so loop. */
+        for (;;) {
+            TokenKind tk = peek(&p)->kind;
+            if (tk == TK_KW_VOID || tk == TK_KW_INT || tk == TK_KW_CHAR
+                || tk == TK_KW_SHORT || tk == TK_KW_LONG || tk == TK_KW_FLOAT
+                || tk == TK_KW_DOUBLE || tk == TK_KW_BOOL
+                || tk == TK_KW_SIGNED || tk == TK_KW_UNSIGNED) {
+                advance(&p);
+            } else {
+                break;
+            }
+        }
+        if (peek(&p)->kind == TK_KW_STRUCT || peek(&p)->kind == TK_KW_UNION) {
             advance(&p);
             if (peek(&p)->kind == TK_IDENT) advance(&p);
         } else if (peek(&p)->kind == TK_KW_ENUM) {

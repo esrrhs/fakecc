@@ -369,6 +369,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
                 while (isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
             if (source[pos] == 'f' || source[pos] == 'F') { pos++; col++; }
+            else if (source[pos] == 'l' || source[pos] == 'L') { pos++; col++; }
             size_t len = pos - start;
             Token t;
             t.kind = TK_FLOAT_LITERAL;

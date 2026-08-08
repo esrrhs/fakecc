@@ -11,6 +11,7 @@
  * ir_generate; cleared at the end. */
 IRModule *g_ir_module = NULL;
 int g_str_counter = 0;
+int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 const TranslationUnit *g_ir_tu = NULL;      /* set by ir_generate */
 
@@ -696,11 +697,31 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return v;
     }
     case EX_FLOAT_LIT: {
-        /* Bit-cast the IEEE-754 value into an int64 constant payload. */
+        /* Parse the source text for full precision.  float/double bit-cast
+         * into an int64 payload (emitted into the XMM file at codegen).
+         * long double (width 16) needs 80 bits a double cannot hold, so its
+         * bytes live in a 10-byte rodata global; the IR value is a slot-backed
+         * constant initialized from that global (see codegen IR_CONST). */
         int w = e->type.width ? e->type.width : 8;
+        if (w == 16) {
+            extern IRModule *g_ir_module;   /* set by ir_generate */
+            extern int g_flt_counter;
+            long double val = strtold(e->u.float_text, NULL);
+            char name[32];
+            snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
+            char *init = malloc(10);
+            memcpy(init, &val, 10);
+            ir_module_push_global(g_ir_module, name, 10, init, 1, e->loc);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            fn->insts.data[fn->insts.len - 1].call_name = xstrdup(name);
+            set_value_float(fn, v, 1);
+            return v;
+        }
         int64_t bits = 0;
-        if (w == 4) { float f = (float)e->u.float_lit; bits = 0; *(float*)&bits = f; }
-        else { double d = e->u.float_lit; *(double*)&bits = d; }
+        if (w == 4) { float f = (float)strtod(e->u.float_text, NULL); *(float*)&bits = f; }
+        else { double d = strtod(e->u.float_text, NULL); *(double*)&bits = d; }
         return emit_float_const(fn, w, bits, e->loc);
     }
     case EX_STR: {
@@ -1213,7 +1234,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                       : (is_void ? 0 : (e->type.width ? e->type.width : 4));
         inst.is_unsigned = is_ret_struct ? 1 : e->type.is_unsigned;
         ir_inst_array_push(&fn->insts, inst);
-        if (!is_void) set_value_type(fn, v, inst.width, inst.is_unsigned);
+        if (!is_void) {
+            set_value_type(fn, v, inst.width, inst.is_unsigned);
+            if (e->type.kind == TY_FLOAT)
+                set_value_float(fn, v, 1);
+        }
         return v;
     }
     case EX_ADDR: {
@@ -2095,8 +2120,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
             int pinned = is_pinned_in_body(fd, pname, pty);
             /* Float params are always pinned: their SSA value lives in the XMM
              * register file (separate from the GP file the scalar regalloc
-             * targets), so mem2reg must not promote them. */
-            if (pty.kind == TY_FLOAT)
+             * targets), so mem2reg must not promote them.  long double (width 16)
+             * is the exception — it lives in a 16-byte SysV stack slot and moves
+             * through x87 st0, so it is NOT pinned (copied to an alloca); it is
+             * read/written directly at its [rbp+..] stack offset. */
+            if (pty.kind == TY_FLOAT && pty.width != 16)
                 pinned = 1;
 
             IRValue slot;
