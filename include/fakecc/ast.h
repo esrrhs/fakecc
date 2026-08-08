@@ -301,6 +301,7 @@ typedef struct {
     SourceLoc loc;
     int    is_variadic; /* 1 = ends with `...` (variadic function) */
     int    is_extern;   /* 1 = declaration only (`extern int f();`), no body */
+    int    is_static;   /* 1 = `static` function — LOCAL linkage */
 } FunctionDecl;
 
 typedef struct {

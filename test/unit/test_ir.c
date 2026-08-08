@@ -19,7 +19,7 @@ static IRModule compile_to_ir(const char *src) {
     TranslationUnit tu;
     tu_init(&tu);
     parse(&arr, &tu);
-    sema_check(&tu);
+    sema_check(&tu, 1);
 
     IRModule ir;
     ir_module_init(&ir);

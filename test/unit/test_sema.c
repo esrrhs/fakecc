@@ -20,7 +20,7 @@ static void lex_parse_sema(const char *src) {
     tu_init(&tu);
     parse(&arr, &tu);
 
-    sema_check(&tu);
+    sema_check(&tu, 1);
 
     tu_free(&tu);
     token_array_free(&arr);

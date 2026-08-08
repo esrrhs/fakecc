@@ -1121,7 +1121,7 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
     }
 }
 
-void sema_check(const TranslationUnit *tu_const) {
+void sema_check(const TranslationUnit *tu_const, int require_main) {
     TranslationUnit *tu = (TranslationUnit *)tu_const;
     g_sema_structs = &tu->structs;
 
@@ -1163,7 +1163,7 @@ void sema_check(const TranslationUnit *tu_const) {
         ftab_push(&ft, fn);
         if (strcmp(fn->name, "main") == 0 && !fn->is_extern) has_main = 1;
     }
-    if (!has_main) {
+    if (!has_main && require_main) {
         die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
                "no 'main' function defined");
     }

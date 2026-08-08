@@ -490,51 +490,10 @@ static void emit_indirect_call(Buffer *b, int reg) {
     emit_modrm(b, 3, 2, reg & 7);
 }
 
-/* Emit the PLT0 resolver trampoline into the code buffer:
- *   push   *GOT+8(%rip)   ; FF 35 rel32 -> GOT[1]
- *   jmp    *GOT+16(%rip)  ; FF 25 rel32 -> GOT[2]
- *   nop * 4               ; pad to 16 bytes
- * The two `(%rip)` rel32 fields are recorded as PLT GOT fixups (their targets
- * depend on the .got.plt vaddr, finalized in emit_elf).  Returns plt0's
- * code-buffer offset. */
-static size_t emit_plt0(EmitModule *out) {
-    size_t start = out->code.len;
-    emit_byte(&out->code, 0xFF);
-    emit_byte(&out->code, 0x35);          /* push qword [rip+disp] */
-    emit_module_add_plt_got_fixup(out, out->code.len, 1);
-    emit_int32(&out->code, 0);
-    emit_byte(&out->code, 0xFF);
-    emit_byte(&out->code, 0x25);          /* jmp qword [rip+disp] */
-    emit_module_add_plt_got_fixup(out, out->code.len, 2);
-    emit_int32(&out->code, 0);
-    while ((out->code.len - start) < 16)  /* pad to 16 bytes */
-        emit_byte(&out->code, 0x90);
-    return start;
-}
-
-/* Emit one PLT entry (16 bytes) for external index `idx`:
- *   jmp    *GOT(%rip)     ; FF 25 rel32 -> GOT[3+idx]
- *   push   $idx            ; 68 imm32
- *   jmp    plt0            ; E9 rel32
- * The `jmp *GOT` rel32 is recorded as a PLT GOT fixup; the `jmp plt0` rel32
- * is resolved immediately (plt0's offset is known).  Returns the entry's
- * code-buffer offset. */
-static size_t emit_plt_entry(EmitModule *out, size_t idx, size_t plt0_off) {
-    size_t start = out->code.len;
-    emit_byte(&out->code, 0xFF);
-    emit_byte(&out->code, 0x25);          /* jmp qword [rip+disp] */
-    emit_module_add_plt_got_fixup(out, out->code.len, 3 + idx);
-    emit_int32(&out->code, 0);
-    emit_byte(&out->code, 0x68);          /* push imm32 (relocation index) */
-    emit_int32(&out->code, (int32_t)idx);
-    emit_byte(&out->code, 0xE9);          /* jmp rel32 */
-    size_t pjmp = out->code.len;
-    emit_int32(&out->code, 0);
-    /* patch jmp plt0 now: target = plt0_off, rip_next = pjmp + 4 */
-    int32_t rel = (int32_t)plt0_off - (int32_t)(pjmp + 4);
-    memcpy(out->code.data + pjmp, &rel, 4);
-    return start;
-}
+/* PLT emission (emit_plt0 / emit_plt_entry) has been moved to the linker
+ * (src/link.c): the PLT must be built after all modules are merged, since its
+ * final code-buffer offset depends on the total merged .text length.  codegen
+ * now records cross-module references as relocations instead. */
 
 /* ================================================================== */
 /* x87 FPU emission — long double (80-bit extended, width 16)          */
@@ -1115,7 +1074,7 @@ static uint8_t ir_cmp_to_setcc(int ir_op, int is_unsigned) {
 /* Label patch record — a rel32 to be resolved once we know the label's
  * byte offset inside this function's code. */
 typedef struct {
-    size_t patch_off;     /* absolute offset of the rel32 field in out->code */
+    size_t patch_off;     /* absolute offset of the rel32 field in out->text */
     int label;            /* target label id */
     size_t after_off;     /* offset of the instruction *following* the rel32,
                              used as base for rel32 = target - after */
@@ -1135,23 +1094,6 @@ typedef struct {
     size_t patch_off;
     char  *fn_name;       /* xstrdup'd function name */
 } FnAddrPatch;
-
-/* External (PLT) call patch: a named call to a function not defined in this
- * TU.  The callee's name is registered (yielding a PLT index) and the rel32
- * is patched to its PLT entry after the PLT is emitted. */
-typedef struct {
-    size_t patch_off;
-    size_t after_off;
-    size_t idx;           /* index into EmitModule.ext_names / PLT slot */
-} ExtCallPatch;
-
-/* External function-address patch: `&func` where func is external.  Patched
- * to the function's PLT entry (calling through the PLT is a valid function
- * pointer, matching the standard lazy-binding convention). */
-typedef struct {
-    size_t patch_off;
-    size_t idx;           /* index into EmitModule.ext_names / PLT slot */
-} ExtFaddrPatch;
 
 /* Compute which callee-saved registers this function actually uses.
  * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 (0 or 1). */
@@ -1315,25 +1257,32 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
 }
 
 void codegen(const IRModule *ir, EmitModule *out) {
-    /* Emit globals into the data buffer.  Each global is written as its
-     * initializer bytes (or zeros if no init) and registered by name. */
+    /* Emit globals into the appropriate section (.rodata for read-only,
+     * .data for initialized mutable, .bss for zero-initialized) and register
+     * each as a defined symbol with its linkage binding. */
     for (size_t gi = 0; gi < ir->globals.len; gi++) {
         const IRGlobal *g = &ir->globals.data[gi];
-        size_t off = out->data.len;
-        if (g->init_bytes) buffer_append(&out->data, g->init_bytes, g->size);
-        else {
-            /* Zero-fill. */
-            for (int b = 0; b < g->size; b++) {
-                char z = 0;
-                buffer_append(&out->data, &z, 1);
-            }
+        uint8_t binding = g->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
+        uint16_t shndx;
+        size_t off;
+        if (g->is_readonly) {
+            shndx = SECT_RODATA;
+            off = out->rodata.len;
+            buffer_append(&out->rodata, g->init_bytes, g->size);
+            while (out->rodata.len & 7) { char z = 0; buffer_append(&out->rodata, &z, 1); }
+        } else if (g->init_bytes) {
+            shndx = SECT_DATA;
+            off = out->data.len;
+            buffer_append(&out->data, g->init_bytes, g->size);
+            while (out->data.len & 7) { char z = 0; buffer_append(&out->data, &z, 1); }
+        } else {
+            shndx = SECT_BSS;
+            off = out->bss_size;
+            out->bss_size += g->size;
+            while (out->bss_size & 7) out->bss_size++;
         }
-        emit_module_add_global(out, g->name, off, g->size, g->is_readonly);
-        /* Pad to 8-byte boundary so the next global is aligned. */
-        while (out->data.len & 7) {
-            char z = 0;
-            buffer_append(&out->data, &z, 1);
-        }
+        emit_module_add_symbol(out, g->name, binding, 1 /* STT_OBJECT */,
+                               shndx, off, g->size);
     }
 
     /* Cross-function call patches (accumulated across every function). */
@@ -1342,18 +1291,12 @@ void codegen(const IRModule *ir, EmitModule *out) {
     /* Function-address load patches (`&func` / function lvalue). */
     FnAddrPatch *fnaddr_patches = NULL;
     size_t num_fnaddr_patches = 0, cap_fnaddr_patches = 0;
-    /* External (PLT) call patches: named calls to undefined-symbol functions. */
-    ExtCallPatch *ext_call_patches = NULL;
-    size_t num_ext_call_patches = 0, cap_ext_call_patches = 0;
-    /* External function-address patches: `&func` for undefined-symbol funcs. */
-    ExtFaddrPatch *ext_faddr_patches = NULL;
-    size_t num_ext_faddr_patches = 0, cap_ext_faddr_patches = 0;
 
     for (size_t i = 0; i < ir->functions.len; i++) {
         const IRFunction *fn = &ir->functions.data[i];
         const RAResult *ra = (const RAResult *)fn->ra;
         const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
-        size_t start_offset = out->code.len;
+        size_t start_offset = out->text.len;
 
         /* ---- Prologue ---- */
         int cs_used[3];
@@ -1421,14 +1364,14 @@ void codegen(const IRModule *ir, EmitModule *out) {
         int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
         if (((cs_count) & 1) != 0) stack_size += 8;
 
-        emit_byte(&out->code, 0x55);              /* pushq %rbp */
-        emit_rex_w(&out->code);
-        emit_byte(&out->code, 0x89);
-        emit_byte(&out->code, 0xE5);              /* movq %rsp, %rbp */
+        emit_byte(&out->text, 0x55);              /* pushq %rbp */
+        emit_rex_w(&out->text);
+        emit_byte(&out->text, 0x89);
+        emit_byte(&out->text, 0xE5);              /* movq %rsp, %rbp */
 
-        if (cs_used[0]) emit_push_r(&out->code, REG_RBX);
-        if (cs_used[1]) emit_push_r(&out->code, REG_R12);
-        if (cs_used[2]) emit_push_r(&out->code, REG_R13);
+        if (cs_used[0]) emit_push_r(&out->text, REG_RBX);
+        if (cs_used[1]) emit_push_r(&out->text, REG_R12);
+        if (cs_used[2]) emit_push_r(&out->text, REG_R13);
 
         /* Materialize incoming SysV arg registers into their allocated
          * homes.  SysV AMD64 passes the first 6 INTEGER-class args in
@@ -1503,7 +1446,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
 
         /* Allocate the frame.  For variadic functions this also reserves the
          * 176-byte register-save area at the bottom. */
-        emit_sub_rsp_imm32(&out->code, stack_size); /* sub $N, %rsp */
+        emit_sub_rsp_imm32(&out->text, stack_size); /* sub $N, %rsp */
 
         /* Variadic: save the incoming argument registers into the save area at
          * the bottom of the frame BEFORE the param dance clobbers them.  The
@@ -1512,31 +1455,31 @@ void codegen(const IRModule *ir, EmitModule *out) {
          * constant from here on, so [rsp+off] addresses the save area stably. */
         if (fn->is_variadic) {
             /* GP regs rdi,rsi,rdx,rcx,r8,r9 → [rsp+0..+40]. */
-            emit_store_rsp_off(&out->code, REG_RDI, 0);
-            emit_store_rsp_off(&out->code, REG_RSI, 8);
-            emit_store_rsp_off(&out->code, REG_RDX, 16);
-            emit_store_rsp_off(&out->code, REG_RCX, 24);
-            emit_store_rsp_off(&out->code, REG_R8, 32);
-            emit_store_rsp_off(&out->code, REG_R9, 40);
+            emit_store_rsp_off(&out->text, REG_RDI, 0);
+            emit_store_rsp_off(&out->text, REG_RSI, 8);
+            emit_store_rsp_off(&out->text, REG_RDX, 16);
+            emit_store_rsp_off(&out->text, REG_RCX, 24);
+            emit_store_rsp_off(&out->text, REG_R8, 32);
+            emit_store_rsp_off(&out->text, REG_R9, 40);
             /* FP regs xmm0-xmm7 → [rsp+48..+176] via movaps (16-byte slots). */
-            emit_sse_store_rsp_off(&out->code, 0, 48);
-            emit_sse_store_rsp_off(&out->code, 1, 64);
-            emit_sse_store_rsp_off(&out->code, 2, 80);
-            emit_sse_store_rsp_off(&out->code, 3, 96);
-            emit_sse_store_rsp_off(&out->code, 4, 112);
-            emit_sse_store_rsp_off(&out->code, 5, 128);
-            emit_sse_store_rsp_off(&out->code, 6, 144);
-            emit_sse_store_rsp_off(&out->code, 7, 160);
+            emit_sse_store_rsp_off(&out->text, 0, 48);
+            emit_sse_store_rsp_off(&out->text, 1, 64);
+            emit_sse_store_rsp_off(&out->text, 2, 80);
+            emit_sse_store_rsp_off(&out->text, 3, 96);
+            emit_sse_store_rsp_off(&out->text, 4, 112);
+            emit_sse_store_rsp_off(&out->text, 5, 128);
+            emit_sse_store_rsp_off(&out->text, 6, 144);
+            emit_sse_store_rsp_off(&out->text, 7, 160);
         }
 
         /* Push every used arg register in REVERSE param order. */
         for (int p = nparams - 1; p >= 0; p--) {
             if (arrive_reg[p] < 0) continue;
             if (arrive_is_xmm[p]) {
-                emit_sub_rsp_imm32(&out->code, 8);
-                emit_sse_store_rsp(&out->code, arrive_reg[p]);
+                emit_sub_rsp_imm32(&out->text, 8);
+                emit_sse_store_rsp(&out->text, arrive_reg[p]);
             } else {
-                emit_push_r(&out->code, arrive_reg[p]);
+                emit_push_r(&out->text, arrive_reg[p]);
             }
         }
         /* Pop into each param's allocated home (or spill slot) in order. */
@@ -1559,20 +1502,20 @@ void codegen(const IRModule *ir, EmitModule *out) {
                                    pi->dst < ra_xmm->num_values)
                                   ? ra_xmm->reg[pi->dst] : -1;
                     if (pdr_xmm >= 0) {
-                        emit_sse_load_spill(&out->code, pdr_xmm, stack_off[p]);
+                        emit_sse_load_spill(&out->text, pdr_xmm, stack_off[p]);
                     } else {
-                        emit_sse_load_spill(&out->code, XMM_SCRATCH0, stack_off[p]);
-                        spill_if_needed_xmm(&out->code, pi->dst, XMM_SCRATCH0,
+                        emit_sse_load_spill(&out->text, XMM_SCRATCH0, stack_off[p]);
+                        spill_if_needed_xmm(&out->text, pi->dst, XMM_SCRATCH0,
                                              ra_xmm, gp_spill_area);
                     }
                 } else {
                     int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
                               ? ra->reg[pi->dst] : -1;
                     if (pdr >= 0) {
-                        emit_load_spill(&out->code, pdr, stack_off[p]);
+                        emit_load_spill(&out->text, pdr, stack_off[p]);
                     } else {
-                        emit_load_spill(&out->code, REG_RAX, stack_off[p]);
-                        spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
+                        emit_load_spill(&out->text, REG_RAX, stack_off[p]);
+                        spill_if_needed(&out->text, pi->dst, REG_RAX, ra);
                     }
                 }
                 continue;
@@ -1582,21 +1525,21 @@ void codegen(const IRModule *ir, EmitModule *out) {
                                pi->dst < ra_xmm->num_values)
                               ? ra_xmm->reg[pi->dst] : -1;
                 if (pdr_xmm >= 0) {
-                    emit_sse_load_rsp(&out->code, pdr_xmm);
+                    emit_sse_load_rsp(&out->text, pdr_xmm);
                 } else {
-                    emit_sse_load_rsp(&out->code, XMM_SCRATCH0);
-                    spill_if_needed_xmm(&out->code, pi->dst, XMM_SCRATCH0,
+                    emit_sse_load_rsp(&out->text, XMM_SCRATCH0);
+                    spill_if_needed_xmm(&out->text, pi->dst, XMM_SCRATCH0,
                                          ra_xmm, gp_spill_area);
                 }
-                emit_add_rsp_imm32(&out->code, 8);
+                emit_add_rsp_imm32(&out->text, 8);
             } else {
                 int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
                           ? ra->reg[pi->dst] : -1;
                 if (pdr >= 0) {
-                    emit_pop_r(&out->code, pdr);
+                    emit_pop_r(&out->text, pdr);
                 } else {
-                    emit_pop_r(&out->code, REG_RAX);
-                    spill_if_needed(&out->code, pi->dst, REG_RAX, ra);
+                    emit_pop_r(&out->text, REG_RAX);
+                    spill_if_needed(&out->text, pi->dst, REG_RAX, ra);
                 }
             }
         }
@@ -1644,28 +1587,31 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_CONST: {
                 if (value_is_ld(fn, inst->dst)) {
                     /* long double constant: 80-bit value lives in a rodata
-                     * global (name in inst->call_name).  lea rcx,[rip+0] (reloc
-                     * patched to the global), fldt [rcx], fstpt into dst's slot.
-                     * Clobbers RCX. */
-                    size_t patch = emit_lea_rip(&out->code, REG_RCX);
-                    emit_module_add_reloc(out, patch, inst->call_name);
-                    emit_x87_fldtRCX(&out->code); /* fldt [rcx] */
-                    emit_ld_store(&out->code, inst->dst, ld_off);
+                     * global (name in inst->call_name).  lea rcx,[rip+0] with a
+                     * PC32 reloc targeting the global symbol, fldt [rcx],
+                     * fstpt into dst's slot.  Clobbers RCX. */
+                    size_t patch = emit_lea_rip(&out->text, REG_RCX);
+                    int gsym = emit_module_find_symbol(out, inst->call_name);
+                    if (gsym < 0)
+                        gsym = emit_module_add_undefined(out, inst->call_name);
+                    emit_module_add_reloc(out, patch, R_X86_64_PC32, gsym, -4);
+                    emit_x87_fldtRCX(&out->text); /* fldt [rcx] */
+                    emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (inst->is_float) {
                     /* Float constant: bit pattern in float_imm.  Materialize via
                      * RAX (movabs) then movq into the XMM file. */
                     if (dr >= 0) {
-                        emit_float_const(&out->code, dr, inst->float_imm);
+                        emit_float_const(&out->text, dr, inst->float_imm);
                     } else {
-                        emit_float_const(&out->code, XMM_SCRATCH0, inst->float_imm);
-                        spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                        emit_float_const(&out->text, XMM_SCRATCH0, inst->float_imm);
+                        spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
                                             ra_xmm, gp_spill_area);
                     }
                 } else if (dr >= 0) {
-                    emit_mov_imm(&out->code, dr, inst->imm);
+                    emit_mov_imm(&out->text, dr, inst->imm);
                 } else {
-                    emit_mov_imm(&out->code, REG_RAX, inst->imm);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    emit_mov_imm(&out->text, REG_RAX, inst->imm);
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
@@ -1673,85 +1619,85 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_ADD: {
                 /* Stage both operands into scratch (rax = a, rcx = b) so that
                  * loading `a` into `dr` can't clobber `b` if reg[b] == dr. */
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                emit_add_rr(&out->code, REG_RAX, REG_RCX);
-                mask_to_width(&out->code, REG_RAX, inst->width);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                emit_add_rr(&out->text, REG_RAX, REG_RCX);
+                mask_to_width(&out->text, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
 
             case IR_SUB: {
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                emit_sub_rr(&out->code, REG_RAX, REG_RCX);
-                mask_to_width(&out->code, REG_RAX, inst->width);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                emit_sub_rr(&out->text, REG_RAX, REG_RCX);
+                mask_to_width(&out->text, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
 
             case IR_MUL: {
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                emit_imul_rr(&out->code, REG_RAX, REG_RCX);
-                mask_to_width(&out->code, REG_RAX, inst->width);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                emit_imul_rr(&out->text, REG_RAX, REG_RCX);
+                mask_to_width(&out->text, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
 
             case IR_DIV:
             case IR_MOD: {
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                ensure_reg(&out->code, inst->b, REG_RCX, ra);
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 if (inst->is_unsigned) {
                     /* Unsigned: zero-extend rax into rdx then div. */
-                    emit_xor_rr(&out->code, REG_RDX);
+                    emit_xor_rr(&out->text, REG_RDX);
                     /* div %rcx: F7 /6 */
-                    emit_rex_w(&out->code);
-                    emit_byte(&out->code, 0xF7);
-                    emit_byte(&out->code, 0xF1);
+                    emit_rex_w(&out->text);
+                    emit_byte(&out->text, 0xF7);
+                    emit_byte(&out->text, 0xF1);
                 } else {
-                    emit_cqto(&out->code);
-                    emit_idiv_rcx(&out->code);
+                    emit_cqto(&out->text);
+                    emit_idiv_rcx(&out->text);
                 }
                 if (inst->op == IR_DIV) {
-                    mask_to_width(&out->code, REG_RAX, inst->width);
+                    mask_to_width(&out->text, REG_RAX, inst->width);
                     if (dr >= 0 && dr != REG_RAX)
-                        emit_mov_rr(&out->code, dr, REG_RAX);
-                    spill_if_needed(&out->code, inst->dst,
+                        emit_mov_rr(&out->text, dr, REG_RAX);
+                    spill_if_needed(&out->text, inst->dst,
                                     dr >= 0 ? dr : REG_RAX, ra);
                 } else {
-                    mask_to_width(&out->code, REG_RDX, inst->width);
+                    mask_to_width(&out->text, REG_RDX, inst->width);
                     if (dr >= 0)
-                        emit_mov_rr(&out->code, dr, REG_RDX);
-                    spill_if_needed(&out->code, inst->dst,
+                        emit_mov_rr(&out->text, dr, REG_RDX);
+                    spill_if_needed(&out->text, inst->dst,
                                     dr >= 0 ? dr : REG_RAX, ra);
                 }
                 break;
             }
 
             case IR_NEG: {
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                emit_neg_r(&out->code, REG_RAX);
-                mask_to_width(&out->code, REG_RAX, inst->width);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_neg_r(&out->text, REG_RAX);
+                mask_to_width(&out->text, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
 
             case IR_BNOT: {
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                emit_not_r(&out->code, REG_RAX);
-                mask_to_width(&out->code, REG_RAX, inst->width);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_not_r(&out->text, REG_RAX);
+                mask_to_width(&out->text, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
@@ -1759,17 +1705,17 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_BAND:
             case IR_BOR:
             case IR_BXOR: {
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                ensure_reg(&out->code, inst->b, REG_RCX, ra);
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 if (inst->op == IR_BAND)
-                    emit_and_rr(&out->code, REG_RAX, REG_RCX);
+                    emit_and_rr(&out->text, REG_RAX, REG_RCX);
                 else if (inst->op == IR_BOR)
-                    emit_or_rr(&out->code, REG_RAX, REG_RCX);
+                    emit_or_rr(&out->text, REG_RAX, REG_RCX);
                 else
-                    emit_bitxor_rr(&out->code, REG_RAX, REG_RCX);
-                mask_to_width(&out->code, REG_RAX, inst->width);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                    emit_bitxor_rr(&out->text, REG_RAX, REG_RCX);
+                mask_to_width(&out->text, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
@@ -1779,17 +1725,17 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 /* Shift count must be in cl. Ensure b into rcx FIRST (before
                  * a into rax) only if a isn't bound to rcx — but ensure_reg
                  * for a uses rax, so order is safe: a→rax, b→rcx. */
-                ensure_reg(&out->code, inst->b, REG_RCX, ra);
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (inst->op == IR_SHL)
-                    emit_shl_rcx(&out->code, REG_RAX);
+                    emit_shl_rcx(&out->text, REG_RAX);
                 else if (inst->is_unsigned)
-                    emit_shr_rcx(&out->code, REG_RAX);
+                    emit_shr_rcx(&out->text, REG_RAX);
                 else
-                    emit_sar_rcx(&out->code, REG_RAX);
-                mask_to_width(&out->code, REG_RAX, inst->width);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                    emit_sar_rcx(&out->text, REG_RAX);
+                mask_to_width(&out->text, REG_RAX, inst->width);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
@@ -1803,14 +1749,14 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 /* Materialize a in rax, b in rcx (scratch), compare, then
                  * write 0/1 into dst via setcc into a THIRD scratch (rdx)
                  * to avoid clobbering rax/rcx before/during cmp. */
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                ensure_reg(&out->code, inst->b, REG_RCX, ra);
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 uint8_t cc = ir_cmp_to_setcc(inst->op, inst->is_unsigned);
-                emit_cmp_produce(&out->code, REG_RAX, REG_RCX, REG_RDX, cc);
+                emit_cmp_produce(&out->text, REG_RAX, REG_RCX, REG_RDX, cc);
                 if (dr >= 0) {
-                    if (dr != REG_RDX) emit_mov_rr(&out->code, dr, REG_RDX);
+                    if (dr != REG_RDX) emit_mov_rr(&out->text, dr, REG_RDX);
                 } else {
-                    spill_if_needed(&out->code, inst->dst, REG_RDX, ra);
+                    spill_if_needed(&out->text, inst->dst, REG_RDX, ra);
                 }
                 break;
             }
@@ -1826,10 +1772,10 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     break;
                 }
                 if (dr >= 0) {
-                    ensure_reg(&out->code, inst->a, dr, ra);
+                    ensure_reg(&out->text, inst->a, dr, ra);
                 } else {
-                    old_load(&out->code, inst->a, REG_RAX);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    old_load(&out->text, inst->a, REG_RAX);
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
@@ -1838,13 +1784,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_ZEXT: {
                 /* imm = source width */
                 int src_w = inst->imm;
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (inst->op == IR_SEXT)
-                    emit_movsx_rr(&out->code, REG_RAX, REG_RAX, src_w);
+                    emit_movsx_rr(&out->text, REG_RAX, REG_RAX, src_w);
                 else
-                    emit_movzx_rr(&out->code, REG_RAX, REG_RAX, src_w);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                    emit_movzx_rr(&out->text, REG_RAX, REG_RAX, src_w);
+                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
@@ -1860,10 +1806,10 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     break;
                 }
                 if (dr >= 0) {
-                    ensure_reg(&out->code, inst->a, dr, ra);
+                    ensure_reg(&out->text, inst->a, dr, ra);
                 } else {
-                    old_load(&out->code, inst->a, REG_RAX);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    old_load(&out->text, inst->a, REG_RAX);
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
@@ -1874,10 +1820,10 @@ void codegen(const IRModule *ir, EmitModule *out) {
                  * with narrow-width sign/zero-extend semantics.  We reuse
                  * the same copy fast-path since spill layout is 8B/slot. */
                 if (dr >= 0) {
-                    ensure_reg(&out->code, inst->a, dr, ra);
+                    ensure_reg(&out->text, inst->a, dr, ra);
                 } else {
-                    old_load(&out->code, inst->a, REG_RAX);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    old_load(&out->text, inst->a, REG_RAX);
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
@@ -1886,12 +1832,12 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 int sr = (ra && inst->b >= 0 && inst->b < ra->num_values)
                          ? ra->reg[inst->b] : -1;
                 if (sr >= 0) {
-                    spill_if_needed(&out->code, inst->a, sr, ra);
+                    spill_if_needed(&out->text, inst->a, sr, ra);
                 } else {
                     /* Fallback (no ra or spilled): load b's slot into rax,
                      * then store rax to a's slot. */
-                    old_load(&out->code, inst->b, REG_RAX);
-                    old_store(&out->code, inst->a, REG_RAX);
+                    old_load(&out->text, inst->b, REG_RAX);
+                    old_store(&out->text, inst->a, REG_RAX);
                 }
                 break;
             }
@@ -1908,22 +1854,26 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     exit(1);
                 }
                 if (dr >= 0) {
-                    emit_lea_rbp(&out->code, dr, off);
+                    emit_lea_rbp(&out->text, dr, off);
                 } else {
-                    emit_lea_rbp(&out->code, REG_RAX, off);
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    emit_lea_rbp(&out->text, REG_RAX, off);
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
 
             case IR_GADDR: {
                 /* dst = &global; target name in inst->call_name.  Emit
-                 * `lea r, [rip+0]` and register a fixup for post-layout patching. */
+                 * `lea r, [rip+0]` and record a PC32 relocation targeting the
+                 * global's symbol (defined in this module or external). */
                 int target = dr >= 0 ? dr : REG_RAX;
-                size_t patch = emit_lea_rip(&out->code, target);
-                emit_module_add_reloc(out, patch, inst->call_name);
+                size_t patch = emit_lea_rip(&out->text, target);
+                int gsym = emit_module_find_symbol(out, inst->call_name);
+                if (gsym < 0)
+                    gsym = emit_module_add_undefined(out, inst->call_name);
+                emit_module_add_reloc(out, patch, R_X86_64_PC32, gsym, -4);
                 if (dr < 0)
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
             }
 
@@ -1932,7 +1882,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                  * `lea r, [rip+0]` and record an FnAddrPatch resolved against
                  * the code symbol table (functions live in .code, not .data). */
                 int target = dr >= 0 ? dr : REG_RAX;
-                size_t patch = emit_lea_rip(&out->code, target);
+                size_t patch = emit_lea_rip(&out->text, target);
                 if (num_fnaddr_patches >= cap_fnaddr_patches) {
                     cap_fnaddr_patches = cap_fnaddr_patches ? cap_fnaddr_patches * 2 : 8;
                     fnaddr_patches = xrealloc(fnaddr_patches,
@@ -1942,73 +1892,73 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 fnaddr_patches[num_fnaddr_patches].fn_name = xstrdup(inst->call_name);
                 num_fnaddr_patches++;
                 if (dr < 0)
-                    spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
             }
 
             case IR_LOAD_PTR: {
                 /* dst = *ptr.  ptr = inst->a. */
-                ensure_reg(&out->code, inst->a, REG_RCX, ra);
+                ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->dst)) {
                     /* long double load: fldt [ptr] → st0; fstpt to dst's slot.
                      * ld values are slot-backed (no XMM/GP register). */
-                    emit_byte(&out->code, 0xDB);
-                    emit_modrm(&out->code, 0, 5, REG_RCX & 7); /* fldt [rcx] */
-                    emit_ld_store(&out->code, inst->dst, ld_off);
+                    emit_byte(&out->text, 0xDB);
+                    emit_modrm(&out->text, 0, 5, REG_RCX & 7); /* fldt [rcx] */
+                    emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (value_is_float_class(fn, inst->dst)) {
                     /* Float load: movsd/movss xmm, [ptr]. */
                     int is_float = (inst->width == 4);
-                    emit_sse_load_via_ptr(&out->code,
+                    emit_sse_load_via_ptr(&out->text,
                                           dr >= 0 ? dr : XMM_SCRATCH0,
                                           REG_RCX, is_float);
                     if (dr < 0)
-                        spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                        spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
                                             ra_xmm, gp_spill_area);
                 } else {
-                    emit_load_via_ptr(&out->code,
+                    emit_load_via_ptr(&out->text,
                                       dr >= 0 ? dr : REG_RAX,
                                       REG_RCX, inst->width, inst->is_unsigned);
                     if (dr < 0)
-                        spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
 
             case IR_STORE_PTR: {
                 /* *ptr = val.  ptr = inst->a, val = inst->b. */
-                ensure_reg(&out->code, inst->a, REG_RCX, ra);
+                ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->b)) {
                     /* long double store: fldt val's slot → st0; fstpt [ptr].
                      * emit_ld_load clobbers RCX, so reload the pointer into it
                      * after the value is in st0. */
-                    emit_ld_load(&out->code, inst->b, ld_off); /* clobbers RCX */
-                    ensure_reg(&out->code, inst->a, REG_RCX, ra); /* ptr → RCX */
-                    emit_byte(&out->code, 0xDB);
-                    emit_modrm(&out->code, 0, 7, REG_RCX & 7); /* fstpt [rcx] */
+                    emit_ld_load(&out->text, inst->b, ld_off); /* clobbers RCX */
+                    ensure_reg(&out->text, inst->a, REG_RCX, ra); /* ptr → RCX */
+                    emit_byte(&out->text, 0xDB);
+                    emit_modrm(&out->text, 0, 7, REG_RCX & 7); /* fstpt [rcx] */
                 } else if (value_is_float_class(fn, inst->b)) {
                     /* Float store: movsd/movss [ptr], xmm. */
                     int is_float = (inst->width == 4);
-                    ensure_reg_xmm(&out->code, inst->b, XMM_SCRATCH0, ra_xmm,
+                    ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm,
                                    gp_spill_area);
-                    emit_sse_store_via_ptr(&out->code, REG_RCX, XMM_SCRATCH0,
+                    emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0,
                                            is_float);
                 } else {
-                    ensure_reg(&out->code, inst->b, REG_RAX, ra);
-                    emit_store_via_ptr(&out->code, REG_RCX, REG_RAX, inst->width);
+                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, inst->width);
                 }
                 break;
             }
 
             case IR_LABEL: {
                 if (inst->imm >= 0 && inst->imm < nlabels) {
-                    label_off[inst->imm] = out->code.len;
+                    label_off[inst->imm] = out->text.len;
                 }
                 break;
             }
 
             case IR_BR: {
-                size_t patch = emit_jmp_rel32(&out->code);
-                size_t after = out->code.len;
+                size_t patch = emit_jmp_rel32(&out->text);
+                size_t after = out->text.len;
                 ADD_PATCH(patch, inst->imm, after);
                 break;
             }
@@ -2016,15 +1966,15 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_CBR: {
                 /* CBR: a = cond, imm = true_label, b = false_label.
                  * Emit "test cond,cond; jne true_label; jmp false_label". */
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
-                emit_test_rr(&out->code, REG_RAX);
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_test_rr(&out->text, REG_RAX);
                 /* jne true_label (0x85) */
-                size_t p1 = emit_jcc_rel32(&out->code, 0x85);
-                size_t a1 = out->code.len;
+                size_t p1 = emit_jcc_rel32(&out->text, 0x85);
+                size_t a1 = out->text.len;
                 ADD_PATCH(p1, inst->imm, a1);
                 /* jmp false_label */
-                size_t p2 = emit_jmp_rel32(&out->code);
-                size_t a2 = out->code.len;
+                size_t p2 = emit_jmp_rel32(&out->text);
+                size_t a2 = out->text.len;
                 ADD_PATCH(p2, inst->b, a2);
                 break;
             }
@@ -2046,21 +1996,21 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     int nargs = inst->call_nargs;
                     /* Push args in reverse order */
                     for (int k = 0; k < nargs; k++) {
-                        ensure_reg(&out->code, inst->call_args[k], REG_RCX, ra);
-                        emit_push_r(&out->code, REG_RCX);
+                        ensure_reg(&out->text, inst->call_args[k], REG_RCX, ra);
+                        emit_push_r(&out->text, REG_RCX);
                     }
                     /* Pop into syscall arg regs in reverse (arg 0 = num → RAX) */
                     for (int k = nargs - 1; k >= 0; k--) {
-                        emit_pop_r(&out->code, SYS_ARG_REGS[k]);
+                        emit_pop_r(&out->text, SYS_ARG_REGS[k]);
                     }
                     /* Emit `syscall` — 0F 05 */
-                    emit_byte(&out->code, 0x0F);
-                    emit_byte(&out->code, 0x05);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x05);
                     /* Result in RAX; move to dst or spill. */
                     if (dr >= 0) {
-                        if (dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                        if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                     } else {
-                        spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                     }
                     break;
                 }
@@ -2068,7 +2018,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                  * calls (call_name set) and operate on the va_list pointer that
                  * was passed as call_args[0].  Dispatch by name. */
                 if (inst->call_name && strcmp(inst->call_name, "va_start") == 0) {
-                    emit_va_start(&out->code, inst, ra, va_gp_offset,
+                    emit_va_start(&out->text, inst, ra, va_gp_offset,
                                   va_fp_offset, va_overflow_off);
                     break;
                 }
@@ -2077,7 +2027,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     break;
                 }
                 if (inst->call_name && strcmp(inst->call_name, "va_arg") == 0) {
-                    emit_va_arg(&out->code, inst, ra, ra_xmm, gp_spill_area);
+                    emit_va_arg(&out->text, inst, ra, ra_xmm, gp_spill_area);
                     break;
                 }
                 int nargs = inst->call_nargs;
@@ -2124,13 +2074,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
                  * dance is balanced (pushes == pops), so only the nstack
                  * pushes shift alignment.  Pad iff nstack is odd. */
                 int need_pad = (n_stack & 1);
-                if (need_pad) emit_sub_rsp_imm32(&out->code, 8);
+                if (need_pad) emit_sub_rsp_imm32(&out->text, 8);
 
                 /* For indirect calls, load the callee into R11 BEFORE the arg
                  * dance so it survives the push/pop clobbers.  R11 is
                  * caller-saved and not a SysV arg reg. */
                 if (!inst->call_name)
-                    ensure_reg(&out->code, inst->call_callee, REG_R11, ra);
+                    ensure_reg(&out->text, inst->call_callee, REG_R11, ra);
 
                 /* Push stack-passed args right-to-left (highest index first)
                  * so they end up at [rsp+8], [rsp+16], ... in order. */
@@ -2139,17 +2089,17 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     if (value_is_ld(fn, inst->call_args[k])) {
                         /* long double: 16-byte stack slot.  fldt its home slot,
                          * alloc 16 bytes, fstpt [rsp].  Clobbers RCX. */
-                        emit_ld_load(&out->code, inst->call_args[k], ld_off);
-                        emit_sub_rsp_imm32(&out->code, 16);
-                        emit_x87_fstpt_rsp(&out->code);
+                        emit_ld_load(&out->text, inst->call_args[k], ld_off);
+                        emit_sub_rsp_imm32(&out->text, 16);
+                        emit_x87_fstpt_rsp(&out->text);
                     } else if (target_is_xmm[k]) {
-                        ensure_reg_xmm(&out->code, inst->call_args[k],
+                        ensure_reg_xmm(&out->text, inst->call_args[k],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
-                        emit_sub_rsp_imm32(&out->code, 8);
-                        emit_sse_store_rsp(&out->code, XMM_SCRATCH0);
+                        emit_sub_rsp_imm32(&out->text, 8);
+                        emit_sse_store_rsp(&out->text, XMM_SCRATCH0);
                     } else {
-                        ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
-                        emit_push_r(&out->code, REG_RAX);
+                        ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
+                        emit_push_r(&out->text, REG_RAX);
                     }
                 }
 
@@ -2159,34 +2109,34 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 for (int k = nargs - 1; k >= 0; k--) {
                     if (target_reg[k] < 0) continue; /* stack-passed */
                     if (target_is_xmm[k]) {
-                        ensure_reg_xmm(&out->code, inst->call_args[k],
+                        ensure_reg_xmm(&out->text, inst->call_args[k],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
-                        emit_sub_rsp_imm32(&out->code, 8);
-                        emit_sse_store_rsp(&out->code, XMM_SCRATCH0);
+                        emit_sub_rsp_imm32(&out->text, 8);
+                        emit_sse_store_rsp(&out->text, XMM_SCRATCH0);
                     } else {
-                        ensure_reg(&out->code, inst->call_args[k], REG_RAX, ra);
-                        emit_push_r(&out->code, REG_RAX);
+                        ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
+                        emit_push_r(&out->text, REG_RAX);
                     }
                 }
                 /* Distribute in forward order (arg 0 on top of the dance). */
                 for (int k = 0; k < nargs; k++) {
                     if (target_reg[k] < 0) continue; /* stack-passed */
                     if (target_is_xmm[k]) {
-                        emit_sse_load_rsp(&out->code, target_reg[k]);
-                        emit_add_rsp_imm32(&out->code, 8);
+                        emit_sse_load_rsp(&out->text, target_reg[k]);
+                        emit_add_rsp_imm32(&out->text, 8);
                     } else {
-                        emit_pop_r(&out->code, target_reg[k]);
+                        emit_pop_r(&out->text, target_reg[k]);
                     }
                 }
                 /* AL = number of vector registers used (ABI requirement for
                  * variadic callees; harmless otherwise). */
-                emit_byte(&out->code, 0xB0 | REG_RAX); /* mov al, imm8 */
-                emit_byte(&out->code, (uint8_t)n_xmm);
+                emit_byte(&out->text, 0xB0 | REG_RAX); /* mov al, imm8 */
+                emit_byte(&out->text, (uint8_t)n_xmm);
 
                 if (inst->call_name) {
                     /* Direct named call: emit call rel32 with a cross-function patch. */
-                    size_t poff = emit_call_rel32(&out->code);
-                    size_t aft = out->code.len;
+                    size_t poff = emit_call_rel32(&out->text);
+                    size_t aft = out->text.len;
                     if (num_call_patches >= cap_call_patches) {
                         cap_call_patches = cap_call_patches ? cap_call_patches * 2 : 8;
                         call_patches = xrealloc(call_patches,
@@ -2199,26 +2149,26 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 } else {
                     /* Indirect call: the callee is already in R11.  Emit
                      * `call *%r11` (FF /2). */
-                    emit_indirect_call(&out->code, REG_R11);
+                    emit_indirect_call(&out->text, REG_R11);
                 }
 
                 /* Tear down stack args + padding. */
                 int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
-                if (cleanup > 0) emit_add_rsp_imm32(&out->code, cleanup);
+                if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);
 
                 if (value_is_ld(fn, inst->dst)) {
                     /* long double result comes back in st0 (SysV ld ABI).  fstpt
                      * it into dst's slot.  Clobbers RCX.  Void: dst == -1. */
                     if (inst->dst >= 0)
-                        emit_ld_store(&out->code, inst->dst, ld_off);
+                        emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (value_is_float_class(fn, inst->dst)) {
                     /* Float result comes back in XMM0 (SysV float ABI).  Move
                      * it to dst's XMM home, or spill.  Void: dst == -1. */
                     if (inst->dst >= 0) {
                         if (dr >= 0 && dr != 0)
-                            emit_sse_mov_rr(&out->code, dr, 0); /* 0 == XMM0 */
+                            emit_sse_mov_rr(&out->text, dr, 0); /* 0 == XMM0 */
                         else if (dr < 0)
-                            spill_if_needed_xmm(&out->code, inst->dst, 0,
+                            spill_if_needed_xmm(&out->text, inst->dst, 0,
                                                 ra_xmm, gp_spill_area);
                     }
                 } else {
@@ -2226,9 +2176,9 @@ void codegen(const IRModule *ir, EmitModule *out) {
                      * call has dst == -1 (no result) — leave RAX alone. */
                     if (inst->dst >= 0) {
                         if (dr >= 0) {
-                            if (dr != REG_RAX) emit_mov_rr(&out->code, dr, REG_RAX);
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                         } else {
-                            spill_if_needed(&out->code, inst->dst, REG_RAX, ra);
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                         }
                     }
                 }
@@ -2239,14 +2189,14 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 /* Void function: bare `return;` — no value in a. */
                 if (inst->a != -1) {
                     if (value_is_ld(fn, inst->a))
-                        emit_ld_load(&out->code, inst->a, ld_off); /* → st0 */
+                        emit_ld_load(&out->text, inst->a, ld_off); /* → st0 */
                     else if (value_is_float_class(fn, inst->a))
-                        ensure_reg_xmm(&out->code, inst->a, 0, ra_xmm,
+                        ensure_reg_xmm(&out->text, inst->a, 0, ra_xmm,
                                        gp_spill_area); /* XMM0 */
                     else
-                        ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                        ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 }
-                emit_epilogue(&out->code, stack_size, cs_used);
+                emit_epilogue(&out->text, stack_size, cs_used);
                 break;
             }
 
@@ -2257,8 +2207,8 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 if (value_is_ld(fn, inst->dst)) {
                     /* long double arithmetic: ld a, ld b, f**p, fstpt dst.
                      * x87 stack ends empty (the `*p` pop + fstpt clear st0). */
-                    emit_ld_load(&out->code, inst->a, ld_off);
-                    emit_ld_load(&out->code, inst->b, ld_off);
+                    emit_ld_load(&out->text, inst->a, ld_off);
+                    emit_ld_load(&out->text, inst->b, ld_off);
                     int op;
                     switch (inst->op) {
                     /* load a then b (st0=b,st1=a); the pop-op does st1 = st1 op st0
@@ -2269,17 +2219,17 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     case IR_FMUL: op = 0xC9; break; /* DE C9: fmulp */
                     default:      op = 0xF9; break; /* DE F9: fdivp */
                     }
-                    emit_x87_arith_pop(&out->code, op);
-                    emit_ld_store(&out->code, inst->dst, ld_off);
+                    emit_x87_arith_pop(&out->text, op);
+                    emit_ld_store(&out->text, inst->dst, ld_off);
                     break;
                 }
                 /* dst = a op b, all float.  Stage both operands into XMM
                  * scratch regs (never-allocated scratch0/1), compute into
                  * scratch0, then move to dst home or spill. */
                 int is_float = (inst->width == 4);
-                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
                                gp_spill_area);
-                ensure_reg_xmm(&out->code, inst->b, XMM_SCRATCH1, ra_xmm,
+                ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH1, ra_xmm,
                                gp_spill_area);
                 int op;
                 switch (inst->op) {
@@ -2288,11 +2238,11 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 case IR_FMUL: op = 0x59; break;
                 default:      op = 0x5E; break; /* FDIV */
                 }
-                emit_sse_arith(&out->code, op, XMM_SCRATCH0, XMM_SCRATCH1,
+                emit_sse_arith(&out->text, op, XMM_SCRATCH0, XMM_SCRATCH1,
                                is_float);
                 if (dr >= 0 && dr != XMM_SCRATCH0)
-                    emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
-                spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                    emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
+                spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
                                     ra_xmm, gp_spill_area);
                 break;
             }
@@ -2305,16 +2255,16 @@ void codegen(const IRModule *ir, EmitModule *out) {
                      * load order (LT/LE load a first; GT/GE load b first): see
                      * GCC cmplt/cmpgt.  Zero RDX before (xor clobbers flags). */
                     int is_lt_le = (inst->is_unsigned == 0 || inst->is_unsigned == 1);
-                    emit_xor_rr(&out->code, REG_RDX);
+                    emit_xor_rr(&out->text, REG_RDX);
                     if (is_lt_le) {
-                        emit_ld_load(&out->code, inst->a, ld_off); /* st0=a */
-                        emit_ld_load(&out->code, inst->b, ld_off); /* st0=b,st1=a */
+                        emit_ld_load(&out->text, inst->a, ld_off); /* st0=a */
+                        emit_ld_load(&out->text, inst->b, ld_off); /* st0=b,st1=a */
                     } else {
-                        emit_ld_load(&out->code, inst->b, ld_off); /* st0=b */
-                        emit_ld_load(&out->code, inst->a, ld_off); /* st0=a,st1=b */
+                        emit_ld_load(&out->text, inst->b, ld_off); /* st0=b */
+                        emit_ld_load(&out->text, inst->a, ld_off); /* st0=a,st1=b */
                     }
-                    emit_x87_fcomip(&out->code);
-                    emit_byte(&out->code, 0xDD); emit_byte(&out->code, 0xD8); /* fstp %st(0) */
+                    emit_x87_fcomip(&out->text);
+                    emit_byte(&out->text, 0xDD); emit_byte(&out->text, 0xD8); /* fstp %st(0) */
                     uint8_t cc;
                     switch (inst->is_unsigned) {
                     case 0: cc = 0x97; break; /* LT: a<b ↔ b>a → seta */
@@ -2324,12 +2274,12 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     case 4: cc = 0x94; break; /* EQ → sete */
                     default: cc = 0x95; break; /* NE → setne */
                     }
-                    emit_setcc_r(&out->code, cc, REG_RDX);
+                    emit_setcc_r(&out->text, cc, REG_RDX);
                     int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                                 ? ra->reg[inst->dst] : -1;
                     if (dr_gp >= 0 && dr_gp != REG_RDX)
-                        emit_mov_rr(&out->code, dr_gp, REG_RDX);
-                    spill_if_needed(&out->code, inst->dst,
+                        emit_mov_rr(&out->text, dr_gp, REG_RDX);
+                    spill_if_needed(&out->text, inst->dst,
                                     dr_gp >= 0 ? dr_gp : REG_RDX, ra);
                     break;
                 }
@@ -2337,9 +2287,9 @@ void codegen(const IRModule *ir, EmitModule *out) {
                  * encoded in inst->is_unsigned: 0=LT 1=LE 2=GT 3=GE 4=EQ
                  * 5=NE.  ucomi sets flags; setcc produces the 0/1 result. */
                 int is_float = (inst->width == 4);
-                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
                                gp_spill_area);
-                ensure_reg_xmm(&out->code, inst->b, XMM_SCRATCH1, ra_xmm,
+                ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH1, ra_xmm,
                                gp_spill_area);
                 /* Map the FCMP ordering to the matching setcc byte. */
                 uint8_t cc;
@@ -2355,13 +2305,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
                  * Result is int (width 4); dr is a GP register.  Zero RDX BEFORE
                  * the compare: ucomi sets the flags, and setcc reads them — a
                  * post-compare xor would clobber ZF/CF and break the result. */
-                emit_xor_rr(&out->code, REG_RDX);
-                emit_sse_ucomi(&out->code, XMM_SCRATCH0, XMM_SCRATCH1,
+                emit_xor_rr(&out->text, REG_RDX);
+                emit_sse_ucomi(&out->text, XMM_SCRATCH0, XMM_SCRATCH1,
                                is_float);
-                emit_setcc_r(&out->code, cc, REG_RDX);
+                emit_setcc_r(&out->text, cc, REG_RDX);
                 if (dr >= 0 && dr != REG_RDX)
-                    emit_mov_rr(&out->code, dr, REG_RDX);
-                spill_if_needed(&out->code, inst->dst,
+                    emit_mov_rr(&out->text, dr, REG_RDX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RDX, ra);
                 break;
             }
@@ -2374,20 +2324,20 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     int pdr = (ra && inst->a >= 0 && inst->a < ra->num_values)
                               ? ra->reg[inst->a] : -1;
                     int src = (pdr >= 0) ? pdr : REG_RAX;
-                    if (pdr < 0) emit_load_spill(&out->code, REG_RAX, spill_offset(ra->spill_slot[inst->a]));
-                    emit_ld_from_gp_int(&out->code, src, inst->dst, ld_off);
+                    if (pdr < 0) emit_load_spill(&out->text, REG_RAX, spill_offset(ra->spill_slot[inst->a]));
+                    emit_ld_from_gp_int(&out->text, src, inst->dst, ld_off);
                     break;
                 }
                 /* dst (float) = (float)a, a = signed int.  Load a into a GP
                  * scratch, cvtsi2sd, then optionally narrow to float. */
-                ensure_reg(&out->code, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 int is_64 = (inst->width == 8);
-                emit_sse_cvtsi2sd(&out->code, XMM_SCRATCH0, REG_RAX, is_64);
+                emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX, is_64);
                 if (inst->width == 4)
-                    emit_sse_cvtsd2ss(&out->code, XMM_SCRATCH0, XMM_SCRATCH0);
+                    emit_sse_cvtsd2ss(&out->text, XMM_SCRATCH0, XMM_SCRATCH0);
                 if (dr >= 0 && dr != XMM_SCRATCH0)
-                    emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
-                spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                    emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
+                spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
                                     ra_xmm, gp_spill_area);
                 break;
             }
@@ -2398,42 +2348,42 @@ void codegen(const IRModule *ir, EmitModule *out) {
                      * on the stack, fisttp dword to it, read into a GP reg.  Uses
                      * 8 bytes below rsp (SysV red zone is safe here).  Clobbers
                      * RAX/RCX/RDX. */
-                    emit_ld_load(&out->code, inst->a, ld_off); /* fldt [a] → st0 */
-                    emit_sub_rsp_imm32(&out->code, 8);
+                    emit_ld_load(&out->text, inst->a, ld_off); /* fldt [a] → st0 */
+                    emit_sub_rsp_imm32(&out->text, 8);
                     /* lea rcx, [rsp] */
-                    emit_byte(&out->code, 0x48); emit_byte(&out->code, 0x8D);
-                    emit_modrm(&out->code, 0, REG_RCX & 7, 4);
-                    emit_byte(&out->code, 0x24);
-                    emit_byte(&out->code, 0xDB);
-                    emit_modrm(&out->code, 0, 1, REG_RCX & 7); /* fisttp dword [rsp] */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8D);
+                    emit_modrm(&out->text, 0, REG_RCX & 7, 4);
+                    emit_byte(&out->text, 0x24);
+                    emit_byte(&out->text, 0xDB);
+                    emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp dword [rsp] */
                     int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                                 ? ra->reg[inst->dst] : -1;
                     int dst_reg = (dr_gp >= 0) ? dr_gp : REG_RAX;
                     /* mov dst_reg, [rsp] */
-                    emit_byte(&out->code, 0x48); emit_byte(&out->code, 0x8B);
-                    emit_modrm(&out->code, 0, dst_reg & 7, 4);
-                    emit_byte(&out->code, 0x24);
-                    emit_add_rsp_imm32(&out->code, 8);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B);
+                    emit_modrm(&out->text, 0, dst_reg & 7, 4);
+                    emit_byte(&out->text, 0x24);
+                    emit_add_rsp_imm32(&out->text, 8);
                     if (dr_gp >= 0 && dr_gp != dst_reg)
-                        emit_mov_rr(&out->code, dr_gp, dst_reg);
-                    spill_if_needed(&out->code, inst->dst,
+                        emit_mov_rr(&out->text, dr_gp, dst_reg);
+                    spill_if_needed(&out->text, inst->dst,
                                     dr_gp >= 0 ? dr_gp : REG_RAX, ra);
                     break;
                 }
                 /* dst (int) = (int)a, a = float.  The source float width is
                  * inst->imm (inst->width is the target int width).  Load a
                  * into XMM scratch, cvtsd2si/cvtss2si into a GP scratch. */
-                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
                                gp_spill_area);
                 int src_float = (inst->imm == 4);
                 int dst_64 = (inst->width == 8);
                 if (src_float)
-                    emit_sse_cvtss2si(&out->code, REG_RAX, XMM_SCRATCH0, dst_64);
+                    emit_sse_cvtss2si(&out->text, REG_RAX, XMM_SCRATCH0, dst_64);
                 else
-                    emit_sse_cvtsd2si(&out->code, REG_RAX, XMM_SCRATCH0, dst_64);
+                    emit_sse_cvtsd2si(&out->text, REG_RAX, XMM_SCRATCH0, dst_64);
                 if (dr >= 0 && dr != REG_RAX)
-                    emit_mov_rr(&out->code, dr, REG_RAX);
-                spill_if_needed(&out->code, inst->dst,
+                    emit_mov_rr(&out->text, dr, REG_RAX);
+                spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
                 break;
             }
@@ -2443,22 +2393,22 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     /* double (or float)→long double.  Load the SSE value into
                      * XMM scratch, store to dst's slot, fld qword/dword from
                      * the slot (pushes ld to st0), fstpt back to dst's slot. */
-                    ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                    ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
                                    gp_spill_area);
-                    emit_ld_addr(&out->code, REG_RCX, ld_off[inst->dst]);
-                    emit_sse_store_via_ptr(&out->code, REG_RCX, XMM_SCRATCH0, 0);
-                    emit_byte(&out->code, 0xDD); /* fld qword [rcx] */
-                    emit_modrm(&out->code, 0, 0, REG_RCX & 7);
-                    emit_x87_fstptRCX(&out->code); /* fstpt [rcx] */
+                    emit_ld_addr(&out->text, REG_RCX, ld_off[inst->dst]);
+                    emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0, 0);
+                    emit_byte(&out->text, 0xDD); /* fld qword [rcx] */
+                    emit_modrm(&out->text, 0, 0, REG_RCX & 7);
+                    emit_x87_fstptRCX(&out->text); /* fstpt [rcx] */
                     break;
                 }
                 /* dst (double) = (double)(float)a.  Widen float→double. */
-                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
                                gp_spill_area);
-                emit_sse_cvtss2sd(&out->code, XMM_SCRATCH0, XMM_SCRATCH0);
+                emit_sse_cvtss2sd(&out->text, XMM_SCRATCH0, XMM_SCRATCH0);
                 if (dr >= 0 && dr != XMM_SCRATCH0)
-                    emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
-                spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                    emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
+                spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
                                     ra_xmm, gp_spill_area);
                 break;
             }
@@ -2469,24 +2419,24 @@ void codegen(const IRModule *ir, EmitModule *out) {
                      * st0, fstp qword into the source slot's first 8 bytes (the
                      * source is consumed, so reusing it as scratch is safe),
                      * load into XMM scratch → dst home. */
-                    emit_ld_load(&out->code, inst->a, ld_off); /* fldt → st0 */
-                    emit_ld_addr(&out->code, REG_RCX, ld_off[inst->a]);
-                    emit_byte(&out->code, 0xDD); /* fstp qword [rcx] */
-                    emit_modrm(&out->code, 0, 3, REG_RCX & 7);
-                    emit_sse_load_via_ptr(&out->code, XMM_SCRATCH0, REG_RCX, 0);
+                    emit_ld_load(&out->text, inst->a, ld_off); /* fldt → st0 */
+                    emit_ld_addr(&out->text, REG_RCX, ld_off[inst->a]);
+                    emit_byte(&out->text, 0xDD); /* fstp qword [rcx] */
+                    emit_modrm(&out->text, 0, 3, REG_RCX & 7);
+                    emit_sse_load_via_ptr(&out->text, XMM_SCRATCH0, REG_RCX, 0);
                     if (dr >= 0 && dr != XMM_SCRATCH0)
-                        emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
-                    spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                        emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
+                    spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
                                         ra_xmm, gp_spill_area);
                     break;
                 }
                 /* dst (float) = (float)(double)a.  Narrow double→float. */
-                ensure_reg_xmm(&out->code, inst->a, XMM_SCRATCH0, ra_xmm,
+                ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
                                gp_spill_area);
-                emit_sse_cvtsd2ss(&out->code, XMM_SCRATCH0, XMM_SCRATCH0);
+                emit_sse_cvtsd2ss(&out->text, XMM_SCRATCH0, XMM_SCRATCH0);
                 if (dr >= 0 && dr != XMM_SCRATCH0)
-                    emit_sse_mov_rr(&out->code, dr, XMM_SCRATCH0);
-                spill_if_needed_xmm(&out->code, inst->dst, XMM_SCRATCH0,
+                    emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
+                spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
                                     ra_xmm, gp_spill_area);
                 break;
             }
@@ -2508,42 +2458,41 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 exit(1);
             }
             int32_t rel32 = (int32_t)rel;
-            memcpy(out->code.data + p->patch_off, &rel32, 4);
+            memcpy(out->text.data + p->patch_off, &rel32, 4);
         }
         free(patches);
         free(label_off);
         free(alloca_off);
         free(ld_off);
 
-        size_t fn_size = out->code.len - start_offset;
-        emit_module_add_symbol(out, fn->name, start_offset, fn_size);
+        size_t fn_size = out->text.len - start_offset;
+        uint8_t binding = fn->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
+        emit_module_add_symbol(out, fn->name, binding, 2 /* STT_FUNC */,
+                               (uint16_t)SECT_TEXT, start_offset, fn_size);
     }
 
     /* ---- Resolve cross-function call patches ---- */
     for (size_t pi = 0; pi < num_call_patches; pi++) {
         CallPatch *cp = &call_patches[pi];
-        /* Look up the callee's start offset in the module's symbol table. */
+        /* Look up the callee among DEFINED symbols in this module.  A match
+         * against an undefined symbol (forward declaration) must NOT resolve
+         * here — it needs a relocation so the linker can bind it across TUs. */
         size_t target = (size_t)-1;
-        for (size_t si = 0; si < out->num_symbols; si++) {
-            if (strcmp(out->symbols[si].name, cp->callee) == 0) {
-                target = out->symbols[si].offset;
+        for (size_t si = 0; si < out->num_syms; si++) {
+            if (out->syms[si].name && strcmp(out->syms[si].name, cp->callee) == 0
+                && out->syms[si].shndx != SECT_UNDEF) {
+                target = out->syms[si].value;
                 break;
             }
         }
         if (target == (size_t)-1) {
-            /* Not a defined function — must be an external (`extern`) call.
-             * Register the name (dedup) for a PLT entry and remember the
-             * patch so it can be pointed at the PLT entry once emitted. */
-            size_t idx = emit_module_add_external(out, cp->callee);
-            if (num_ext_call_patches >= cap_ext_call_patches) {
-                cap_ext_call_patches = cap_ext_call_patches ? cap_ext_call_patches * 2 : 8;
-                ext_call_patches = xrealloc(ext_call_patches,
-                                             cap_ext_call_patches * sizeof(ExtCallPatch));
-            }
-            ext_call_patches[num_ext_call_patches].patch_off = cp->patch_off;
-            ext_call_patches[num_ext_call_patches].after_off = cp->after_off;
-            ext_call_patches[num_ext_call_patches].idx = idx;
-            num_ext_call_patches++;
+            /* Not a defined function — external (`extern`) call.  Record a
+             * PLT32 relocation targeting the (undefined) symbol; the linker
+             * resolves it to the symbol's address or a PLT entry. */
+            int esym = emit_module_find_symbol(out, cp->callee);
+            if (esym < 0)
+                esym = emit_module_add_undefined(out, cp->callee);
+            emit_module_add_reloc(out, cp->patch_off, R_X86_64_PLT32, esym, -4);
             free(cp->callee);
             continue;
         }
@@ -2553,7 +2502,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
             exit(1);
         }
         int32_t rel32 = (int32_t)rel;
-        memcpy(out->code.data + cp->patch_off, &rel32, 4);
+        memcpy(out->text.data + cp->patch_off, &rel32, 4);
         free(cp->callee);
     }
     free(call_patches);
@@ -2561,30 +2510,27 @@ void codegen(const IRModule *ir, EmitModule *out) {
     /* ---- Resolve function-address load patches ---- */
     for (size_t pi = 0; pi < num_fnaddr_patches; pi++) {
         FnAddrPatch *fp = &fnaddr_patches[pi];
-        /* Look up the function's start offset in the symbol table. */
+        /* Look up the function in the symbol table. */
         size_t target = (size_t)-1;
-        for (size_t si = 0; si < out->num_symbols; si++) {
-            if (strcmp(out->symbols[si].name, fp->fn_name) == 0) {
-                target = out->symbols[si].offset;
+        for (size_t si = 0; si < out->num_syms; si++) {
+            if (out->syms[si].name && strcmp(out->syms[si].name, fp->fn_name) == 0
+                && out->syms[si].shndx != SECT_UNDEF) {
+                target = out->syms[si].value;
                 break;
             }
         }
         if (target == (size_t)-1) {
-            /* External function address — point the lea at its PLT entry. */
-            size_t idx = emit_module_add_external(out, fp->fn_name);
-            if (num_ext_faddr_patches >= cap_ext_faddr_patches) {
-                cap_ext_faddr_patches = cap_ext_faddr_patches ? cap_ext_faddr_patches * 2 : 8;
-                ext_faddr_patches = xrealloc(ext_faddr_patches,
-                                              cap_ext_faddr_patches * sizeof(ExtFaddrPatch));
-            }
-            ext_faddr_patches[num_ext_faddr_patches].patch_off = fp->patch_off;
-            ext_faddr_patches[num_ext_faddr_patches].idx = idx;
-            num_ext_faddr_patches++;
+            /* External function address — record a PC32 relocation targeting
+             * the undefined symbol; the linker resolves it. */
+            int esym = emit_module_find_symbol(out, fp->fn_name);
+            if (esym < 0)
+                esym = emit_module_add_undefined(out, fp->fn_name);
+            emit_module_add_reloc(out, fp->patch_off, R_X86_64_PC32, esym, -4);
             free(fp->fn_name);
             continue;
         }
         /* lea r, [rip+disp32]: disp32 = target - (rip_next) where both are
-         * absolute addresses.  target = ELF_BASE + symbol_offset;
+         * absolute addresses.  target = ELF_BASE + symbol value;
          * rip_next = ELF_BASE + patch_off + 4.  The ELF_BASE cancels: */
         int64_t rel = (int64_t)target - (int64_t)(fp->patch_off + 4);
         if (rel < INT32_MIN || rel > INT32_MAX) {
@@ -2592,43 +2538,8 @@ void codegen(const IRModule *ir, EmitModule *out) {
             exit(1);
         }
         int32_t rel32 = (int32_t)rel;
-        memcpy(out->code.data + fp->patch_off, &rel32, 4);
+        memcpy(out->text.data + fp->patch_off, &rel32, 4);
         free(fp->fn_name);
     }
     free(fnaddr_patches);
-
-    /* ---- Emit the PLT and patch external calls / function addresses ---- */
-    if (out->num_ext > 0) {
-        size_t plt0_off = emit_plt0(out);
-        for (size_t i = 0; i < out->num_ext; i++) {
-            size_t eo = emit_plt_entry(out, i, plt0_off);
-            emit_module_set_plt_entry(out, i, eo);
-        }
-        /* Patch each external call's `call rel32` to its PLT entry. */
-        for (size_t pi = 0; pi < num_ext_call_patches; pi++) {
-            ExtCallPatch *ec = &ext_call_patches[pi];
-            size_t target = out->plt_entry_off[ec->idx];
-            int64_t rel = (int64_t)target - (int64_t)ec->after_off;
-            if (rel < INT32_MIN || rel > INT32_MAX) {
-                fprintf(stderr, "fakecc: PLT call displacement out of range\n");
-                exit(1);
-            }
-            int32_t rel32 = (int32_t)rel;
-            memcpy(out->code.data + ec->patch_off, &rel32, 4);
-        }
-        free(ext_call_patches);
-        /* Patch each external `&func` lea to its PLT entry. */
-        for (size_t pi = 0; pi < num_ext_faddr_patches; pi++) {
-            ExtFaddrPatch *ef = &ext_faddr_patches[pi];
-            size_t target = out->plt_entry_off[ef->idx];
-            int64_t rel = (int64_t)target - (int64_t)(ef->patch_off + 4);
-            if (rel < INT32_MIN || rel > INT32_MAX) {
-                fprintf(stderr, "fakecc: PLT address displacement out of range\n");
-                exit(1);
-            }
-            int32_t rel32 = (int32_t)rel;
-            memcpy(out->code.data + ef->patch_off, &rel32, 4);
-        }
-        free(ext_faddr_patches);
-    }
 }

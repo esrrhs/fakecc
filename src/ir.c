@@ -76,7 +76,8 @@ void ir_module_free(IRModule *m) {
 
 static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
                                        int size, char *init_bytes,
-                                       int is_readonly, SourceLoc loc) {
+                                       int is_readonly, int is_static,
+                                       SourceLoc loc) {
     if (m->globals.len >= m->globals.cap) {
         size_t nc = m->globals.cap ? m->globals.cap * 2 : 4;
         m->globals.data = realloc(m->globals.data, nc * sizeof(IRGlobal));
@@ -88,6 +89,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->size = size;
     g->init_bytes = init_bytes;   /* takes ownership */
     g->is_readonly = is_readonly;
+    g->is_static = is_static;
     g->loc = loc;
     return g;
 }
@@ -711,7 +713,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
             char *init = malloc(10);
             memcpy(init, &val, 10);
-            ir_module_push_global(g_ir_module, name, 10, init, 1, e->loc);
+            /* anonymous constant — file-local by construction */
+            ir_module_push_global(g_ir_module, name, 10, init, 1, 1, e->loc);
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, e->loc);
             fn->insts.data[fn->insts.len - 1].is_float = 1;
@@ -734,7 +737,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int bytes = e->u.str.len + 1;
         char *init = malloc(bytes);
         memcpy(init, e->u.str.bytes, bytes);
-        ir_module_push_global(g_ir_module, name, bytes, init, 1, e->loc);
+        /* anonymous constant — file-local by construction */
+        ir_module_push_global(g_ir_module, name, bytes, init, 1, 1, e->loc);
         return emit_gaddr(fn, name, e->loc);
     }
     case EX_UNARY:
@@ -1582,7 +1586,9 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             char mangled[256];
             snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
                      s->u.decl.name);
-            ir_module_push_global(g_ir_module, mangled, sz, bytes, 0, s->loc);
+            /* mangled name is file-local by construction → LOCAL linkage */
+            ir_module_push_global(g_ir_module, mangled, sz, bytes, 0, 1,
+                                  s->loc);
             irsymtable_push_static_local(st, s->u.decl.name, mangled, dty);
             break;
         }
@@ -2043,7 +2049,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         if (s->u.decl.init)
             pack_init(&s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc);
-        ir_module_push_global(ir, s->u.decl.name, sz, bytes, 0, s->loc);
+        int is_static = (s->u.decl.storage_class == 1);
+        ir_module_push_global(ir, s->u.decl.name, sz, bytes, 0, is_static,
+                              s->loc);
     }
 
     for (size_t i = 0; i < tu->functions.len; i++) {
@@ -2072,6 +2080,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.ret_is_struct = (fd->ret_type.kind == TY_STRUCT);
         irfn.ret_is_bool = fd->ret_type.is_bool;
         irfn.is_variadic = fd->is_variadic;
+        irfn.is_static = fd->is_static;
         irfn.sret_value = -1;
 
         IRSymTable st;

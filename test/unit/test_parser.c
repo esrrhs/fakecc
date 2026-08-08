@@ -117,7 +117,7 @@ static void test_return_without_int_dies(void) {
         TranslationUnit tu;
         tu_init(&tu);
         parse(&arr, &tu);
-        sema_check(&tu);
+        sema_check(&tu, 1);
         _exit(0);
     }
     waitpid(pid, &status, 0);

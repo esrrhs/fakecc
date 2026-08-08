@@ -142,6 +142,7 @@ typedef struct {
     /* Variadic: 1 if the function was defined with a `...` tail.  The prologue
      * emits a register-save area and the va_* builtins read/write it. */
     int   is_variadic;
+    int   is_static;  /* 1 = `static` function — LOCAL linkage */
     /* Slice 13: SSA value of the hidden sret pointer param (param index 0)
      * when ret_is_struct.  The return statement copies struct bytes into
      * *sret_value and returns the pointer in RAX (SysV AMD64 struct ABI). */
@@ -161,6 +162,7 @@ typedef struct {
     int   size;         /* bytes in .data/.bss */
     char *init_bytes;   /* NULL → zero-init (bss).  Otherwise owns `size` bytes. */
     int   is_readonly;  /* 1 = string literal → rodata; 0 = mutable → data */
+    int   is_static;    /* 1 = `static` global — LOCAL linkage */
     SourceLoc loc;
 } IRGlobal;
 

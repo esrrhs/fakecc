@@ -22,6 +22,7 @@ add_library(fakecc_core
     src/opt.c
     src/codegen.c
     src/emit.c
+    src/link.c
 )
 target_include_directories(fakecc_core PUBLIC include)
 

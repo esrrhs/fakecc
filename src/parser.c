@@ -1578,11 +1578,14 @@ static Stmt parse_switch(Parser *p) {
 static FunctionDecl parse_function_decl(Parser *p) {
     SourceLoc fn_loc = peek(p)->loc;
     /* Consume an optional leading storage class.  `extern` means a
-     * declaration with no body; `static` is accepted (and ignored for
-     * linkage) so it doesn't choke parse_type_abstract. */
+     * declaration with no body; `static` gives the function LOCAL linkage;
+     * `inline` is a no-op hint accepted so it doesn't choke
+     * parse_type_abstract. */
     int is_extern = 0;
+    int is_static = 0;
     if (peek(p)->kind == TK_KW_STATIC) {
         advance(p);
+        is_static = 1;
     } else if (peek(p)->kind == TK_KW_EXTERN) {
         advance(p);
         is_extern = 1;
@@ -1610,6 +1613,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.loc = fn_loc;
     fn.is_variadic = 0;
     fn.is_extern = is_extern;
+    fn.is_static = is_static;
 
     /* Parameter list: type declarator ("," type declarator)* — or empty.
      * The special form `(void)` means "no parameters" (standard C). */
@@ -1669,6 +1673,15 @@ static FunctionDecl parse_function_decl(Parser *p) {
     if (fn.is_extern) {
         /* Declaration only — no body.  `extern int f();` */
         expect_kind(p, TK_SEMICOLON, "';'");
+        return fn;
+    }
+
+    /* A function declaration followed by `;` (rather than a `{` body) is a
+     * forward declaration / prototype — accepted with no body so multi-file
+     * programs can declare functions defined in other TUs. */
+    if (peek(p)->kind == TK_SEMICOLON) {
+        advance(p);
+        fn.is_extern = 1;
         return fn;
     }
 

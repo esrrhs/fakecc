@@ -25,7 +25,7 @@ static void compile_to_file(const char *src, const char *out_path) {
     TranslationUnit tu;
     tu_init(&tu);
     parse(&arr, &tu);
-    sema_check(&tu);
+    sema_check(&tu, 1);
 
     IRModule ir;
     ir_module_init(&ir);
