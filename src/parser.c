@@ -966,14 +966,13 @@ static int char_literal_value(const char *text) {
         if (text[2] == 'x' || text[2] == 'X') {
             int val = 0;
             int i = 3;
-            int saw = 0;
             while (text[i] != '\0' && isxdigit((unsigned char)text[i])) {
                 char c = text[i];
                 int d = (c >= '0' && c <= '9') ? c - '0'
                       : (c >= 'a' && c <= 'f') ? c - 'a' + 10
                       : c - 'A' + 10;
                 val = val * 16 + d;
-                i++; saw++;
+                i++;
             }
             /* lexer guarantees at least one hex digit follows `\x` */
             return val & 0xff;
@@ -1034,7 +1033,7 @@ static Expr *parse_primary(Parser *p) {
                 i++;
                 if (src[i] == 'x' || src[i] == 'X') {
                     /* Hex escape `\xHH...`: consume consecutive hex digits. */
-                    int val = 0, saw = 0;
+                    int val = 0;
                     while (i + 1 < slen && isxdigit((unsigned char)src[i + 1])) {
                         i++;
                         char h = src[i];
@@ -1042,7 +1041,6 @@ static Expr *parse_primary(Parser *p) {
                               : (h >= 'a' && h <= 'f') ? h - 'a' + 10
                               : h - 'A' + 10;
                         val = val * 16 + d;
-                        saw++;
                     }
                     /* lexer guarantees at least one hex digit follows `\x` */
                     buf[blen++] = (char)(val & 0xff);
