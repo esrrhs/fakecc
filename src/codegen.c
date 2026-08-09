@@ -1784,10 +1784,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     ra->reg[inst->dst] >= 0) {
                     break;
                 }
+                /* Materialize the source via ensure_reg (handles register-alloc
+                 * OR spilled sources); old_load would read the wrong slot when
+                 * `a` lives in a register.  Then move to dr or spill dst. */
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (dr >= 0) {
-                    ensure_reg(&out->text, inst->a, dr, ra);
+                    if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 } else {
-                    old_load(&out->text, inst->a, REG_RAX);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
@@ -1829,13 +1832,16 @@ void codegen(const IRModule *ir, EmitModule *out) {
 
             case IR_LOAD: {
                 /* Rarely reached: mem2reg usually eliminates LOAD.  If a LOAD
-                 * survives, treat it as a copy of the alloca's spill slot
-                 * with narrow-width sign/zero-extend semantics.  We reuse
-                 * the same copy fast-path since spill layout is 8B/slot. */
+                 * survives, it copies the SSA value `a` into `dst`.  With
+                 * regalloc, `a` may live in a register or a spill slot — both
+                 * must be handled, so materialize via ensure_reg (NOT old_load,
+                 * which assumes the pre-regalloc slot layout and would read
+                 * garbage when `a` is register-allocated).  Then move to dr or
+                 * spill dst. */
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (dr >= 0) {
-                    ensure_reg(&out->text, inst->a, dr, ra);
+                    if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 } else {
-                    old_load(&out->text, inst->a, REG_RAX);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;

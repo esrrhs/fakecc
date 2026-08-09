@@ -623,12 +623,19 @@ static void greedy_color(const InterfGraph *g, const int *order,
         if (c < k) {
             colors[v] = c;
         } else {
-            /* All k registers are in use by neighbors.
-             * Spill the neighbor with the lowest spill cost, then take its reg. */
+            /* All k registers are in use by neighbors (including those `v` is
+             * forbidden from).  Among neighbors, prefer to evict one whose
+             * register `v` is actually allowed to take — i.e. a color NOT set
+             * in forbid_mask[v] (a callee-saved reg for a value live across a
+             * call).  Evicting a neighbor only to hand `v` a forbidden
+             * caller-saved reg would clobber `v` at the next call, so that
+             * victim is useless; fall through to spilling `v` instead. */
             int victim = -1, victim_cost = 0x7fffffff;
             for (size_t j = 0; j < g->nodes[v].degree; j++) {
                 int w = g->nodes[v].neighbors[j];
-                if (colors[w] >= 0 && colors[w] < k && spill_cost[w] < victim_cost) {
+                if (colors[w] < 0 || colors[w] >= k) continue;
+                if (forbid_mask[v] & (1 << colors[w])) continue; /* v can't use it */
+                if (spill_cost[w] < victim_cost) {
                     victim = w;
                     victim_cost = spill_cost[w];
                 }
