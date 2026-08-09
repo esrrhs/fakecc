@@ -200,6 +200,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
     sd->is_union = 0;
     sd->members = NULL; sd->num_members = 0; sd->cap_members = 0;
     sd->size = 0; sd->loc = loc;
+    sd->bf_unit_type = 0; sd->bf_unit_used = 0; sd->bf_unit_offset = 0;
     return sd;
 }
 
@@ -234,7 +235,7 @@ int type_align(Type t) {
     return 1;
 }
 
-void struct_def_push_member(StructDef *sd, const char *name, Type ty) {
+void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width) {
     if (sd->num_members >= sd->cap_members) {
         int nc = sd->cap_members ? sd->cap_members * 2 : 4;
         sd->members = realloc(sd->members, nc * sizeof(StructMember));
@@ -247,12 +248,52 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty) {
     if (sd->is_union) {
         /* Union members all start at offset 0; total size is the max. */
         off = 0;
+    } else if (bit_width > 0 && ty.kind == TY_INT) {
+        /* Bitfield packing: a run of adjacent `unsigned/int : N` bitfields of
+         * the same byte-width unit packs into one storage unit.  The unit
+         * size is the smallest of {1,2,4,8} bytes that holds all its bits
+         * (we use the declared type width, e.g. unsigned → 4 bytes). */
+        int unit_bits = sz * 8;
+        if (sd->bf_unit_type == sz && sd->bf_unit_used + bit_width <= unit_bits) {
+            /* Fits in the current open unit. */
+            off = sd->bf_unit_offset;
+        } else {
+            /* Close any open unit and start a new one. */
+            if (sd->bf_unit_used > 0) {
+                sd->size = sd->bf_unit_offset + sd->bf_unit_type;
+                sd->size = align_up(sd->size, 8);
+            }
+            sd->bf_unit_type = sz;
+            sd->bf_unit_used = 0;
+            sd->bf_unit_offset = align_up(sd->size, a);
+            off = sd->bf_unit_offset;
+        }
+        sd->members[sd->num_members].bit_offset = sd->bf_unit_used;
+        sd->bf_unit_used += bit_width;
+        sd->members[sd->num_members].offset = off;
+        sd->members[sd->num_members].bit_width = bit_width;
+        /* Advance logical struct size to cover this unit if it extends past. */
+        int unit_end = sd->bf_unit_offset + sz;
+        if (unit_end > sd->size) sd->size = unit_end;
+        sd->size = align_up(sd->size, 8);
+        sd->members[sd->num_members].name = xstrdup(name);
+        sd->members[sd->num_members].type = type_clone(ty);
+        sd->num_members++;
+        return;
     } else {
+        /* Normal (non-bitfield) member: close any open bitfield unit first. */
+        if (sd->bf_unit_used > 0) {
+            sd->size = sd->bf_unit_offset + sd->bf_unit_type;
+            sd->size = align_up(sd->size, 8);
+            sd->bf_unit_type = 0; sd->bf_unit_used = 0;
+        }
         off = align_up(sd->size, a);
     }
     sd->members[sd->num_members].name = xstrdup(name);
     sd->members[sd->num_members].type = type_clone(ty);
     sd->members[sd->num_members].offset = off;
+    sd->members[sd->num_members].bit_width = bit_width;
+    sd->members[sd->num_members].bit_offset = 0;
     sd->num_members++;
     if (sd->is_union) {
         /* Size grows to the largest member (aligned at the end). */
@@ -821,10 +862,10 @@ void tu_init(TranslationUnit *tu) {
      * layout resolve, even though user code never constructs one directly. */
     SourceLoc vloc = {0};
     StructDef *va = struct_registry_add(&tu->structs, "__va_list_tag", vloc);
-    struct_def_push_member(va, "gp_offset", type_make_int(4, 1));
-    struct_def_push_member(va, "fp_offset", type_make_int(4, 1));
-    struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()));
-    struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()));
+    struct_def_push_member(va, "gp_offset", type_make_int(4, 1), 0);
+    struct_def_push_member(va, "fp_offset", type_make_int(4, 1), 0);
+    struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()), 0);
+    struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()), 0);
     Type va_type = type_make_struct("__va_list_tag", va->size);
     typedef_registry_add(&tu->typedefs, "va_list", va_type);
 }

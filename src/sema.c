@@ -445,6 +445,20 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             set_type(e, type_make_int(8, 0));
             return type_clone(e->type);
         }
+        /* __builtin_ctzll(x) — count trailing zeros of a nonzero uint64.  The
+         * surrounding code guarantees the argument is nonzero (`_w &&`), so
+         * the result is well-defined (1..64).  Returns int. */
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__builtin_ctzll") == 0) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_ctzll takes exactly 1 argument");
+            }
+            Type at = check_expr(e->u.call.args.data[0], st, ft);
+            type_free(&at);
+            set_type(e, type_make_int(4, 0));
+            return type_clone(e->type);
+        }
         /* Recognize the va_start / va_arg / va_end builtins BEFORE the callee
          * lookup, for the same reason as __syscall: they are not real
          * variables/functions. They operate on a `va_list` lvalue (the struct

@@ -2040,6 +2040,29 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     }
                     break;
                 }
+                /* __builtin_ctzll(x) — count trailing zeros of a nonzero uint64.
+                 * Emit `bsf rax, src` (0F BC /r): index of least significant set
+                 * bit == ctz for nonzero input.  The source guarantee (_w &&)
+                 * means the input is never zero, so bsf's ZF=1/undefined-dst
+                 * case never occurs.  Result lands in RAX; move it to dst's
+                 * home register (mirroring the generic GP result handling). */
+                if (inst->call_name
+                    && strcmp(inst->call_name, "__builtin_ctzll") == 0) {
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_rex_wrb(&out->text, 1, REG_RAX, REG_RCX);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0xBC);
+                    emit_modrm(&out->text, 3, REG_RAX & 7, REG_RCX & 7);
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX)
+                                emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                    }
+                    break;
+                }
                 /* va_start / va_arg / va_end — variadic builtins.  They are named
                  * calls (call_name set) and operate on the va_list pointer that
                  * was passed as call_args[0].  Dispatch by name. */

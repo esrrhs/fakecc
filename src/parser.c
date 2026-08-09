@@ -14,6 +14,15 @@ typedef struct {
     const TokenArray *tokens;
     size_t pos;
     TranslationUnit *tu;   /* backing TU — parser writes structs directly */
+    /* Prepended statements: multi-declarators (`int a, b;`) parse as several
+     * ST_DECLs but a statement slot holds one — the trailing declarators are
+     * queued here and flushed into the enclosing stmt-list before the next
+     * real statement, so all names land in the same (current) scope. */
+    StmtArray prepend;
+    /* Counter for generating unique tags for anonymous structs/unions/enums
+     * (`__anon_0`, `__anon_1`, ...).  Each anonymous definition gets a fresh
+     * tag so its type is distinct (C semantics). */
+    int anon_counter;
 } Parser;
 
 static const Token *peek(const Parser *p) {
@@ -24,6 +33,25 @@ static const Token *advance(Parser *p) {
     return &p->tokens->data[p->pos++];
 }
 
+/* A token usable as a member/variable name.  Normally TK_IDENT, but fakecc
+ * uses `package` as a keyword while the source also uses it as a struct member
+ * (`TranslationUnit.package`); accept it as a name in member positions. */
+static int is_name_token(TokenKind k) {
+    return k == TK_IDENT || k == TK_KW_PACKAGE;
+}
+
+/* Forward declarations for struct/enum body parsers (defined after
+ * parse_specifiers, which calls them for anonymous types). */
+static void parse_struct_body(Parser *p, StructDef *sd);
+static void parse_enum_body(Parser *p, EnumDef *ed);
+static int int_literal_value(const char *text);
+static Type parse_declarator(Parser *p, Type base, char **name_out);
+
+/* Skip a GCC-style `__attribute__((...))` annotation if present at the current
+ * position.  Tokenizes as IDENT `__attribute__`, then `(`, then a balanced
+ * parenthesized group.  Returns 1 if an attribute was consumed, else 0. */
+static int skip_attribute(Parser *p);
+
 static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     const Token *t = peek(p);
     if (t->kind != kind) {
@@ -31,6 +59,30 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
                "expected %s but got '%s'", msg, t->text);
     }
     advance(p);
+}
+
+static int skip_attribute(Parser *p) {
+    if (peek(p)->kind != TK_IDENT
+        || strcmp(peek(p)->text, "__attribute__") != 0)
+        return 0;
+    advance(p);  /* consume `__attribute__` */
+    if (peek(p)->kind != TK_LPAREN) return 0;
+    advance(p);  /* consume outer `(` */
+    if (peek(p)->kind != TK_LPAREN) {
+        /* Malformed: `__attribute__(...)` without the inner parens — but the
+         * canonical form is `__attribute__((...))`, so require the inner `(`. */
+        return 0;
+    }
+    advance(p);  /* consume inner `(` */
+    /* Skip the balanced parenthesized group (attributes may contain nested
+     * parens and arbitrary tokens).  Two parens are already open. */
+    int depth = 2;
+    while (depth > 0 && peek(p)->kind != TK_EOF) {
+        if (peek(p)->kind == TK_LPAREN) depth++;
+        else if (peek(p)->kind == TK_RPAREN) depth--;
+        advance(p);
+    }
+    return 1;
 }
 
 /* Recognize an integer type at the current position.
@@ -65,6 +117,7 @@ static Type parse_specifiers(Parser *p) {
         if (peek(p)->kind == TK_KW_CONST) { is_const = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_VOLATILE) { is_volatile = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_RESTRICT) { is_restrict = 1; advance(p); }
+        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }  /* no-op hint */
         else break;
     }
     /* void — only meaningful as a return type or as void* (pointer to void).
@@ -75,13 +128,22 @@ static Type parse_specifiers(Parser *p) {
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
-    /* struct Name — must be already defined by a `struct` definition earlier
-     * OR later; we defer size lookup to sema/IR-gen time by consulting the
-     * registry now.  Since ordering matters for parsing (need to know the
-     * size for arrays of struct, etc.), we require struct defs precede
-     * uses — enforce by looking up in the registry now. */
+    /* struct [Tag] — if Tag is present, it's a use of a (possibly forward)
+     * struct; look it up in the registry.  If the next token is `{` (no tag),
+     * it's an ANONYMOUS struct definition (`typedef struct { ... } Name;`):
+     * generate a unique tag, parse the body, and register it. */
     if (peek(p)->kind == TK_KW_STRUCT) {
         advance(p);
+        if (peek(p)->kind == TK_LBRACE) {
+            /* Anonymous struct definition. */
+            char tag[64];
+            snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
+            StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
+            parse_struct_body(p, sd);
+            Type t = type_make_struct(tag, sd->size);
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
         const Token *tag = peek(p);
         if (tag->kind != TK_IDENT) {
             die_at(tag->loc.file, tag->loc.line, tag->loc.col,
@@ -94,9 +156,20 @@ static Type parse_specifiers(Parser *p) {
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
-    /* union Name — same representation as struct in the type system. */
+    /* union [Tag] — same as struct: a Tag is a use, `{` begins an anonymous
+     * union definition. */
     if (peek(p)->kind == TK_KW_UNION) {
         advance(p);
+        if (peek(p)->kind == TK_LBRACE) {
+            char tag[64];
+            snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
+            StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
+            sd->is_union = 1;
+            parse_struct_body(p, sd);
+            Type t = type_make_struct(tag, sd->size);
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
         const Token *tag = peek(p);
         if (tag->kind != TK_IDENT) {
             die_at(tag->loc.file, tag->loc.line, tag->loc.col,
@@ -137,6 +210,18 @@ static Type parse_specifiers(Parser *p) {
     /* enum Tag — treated as int for the type system. */
     if (peek(p)->kind == TK_KW_ENUM) {
         advance(p);
+        if (peek(p)->kind == TK_LBRACE) {
+            /* Anonymous enum definition (`typedef enum { ... } Name;`).
+             * Register it under a unique tag so its constants resolve, even
+             * though the type itself is just int. */
+            char tag[64];
+            snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
+            EnumDef *ed = enum_registry_add(&p->tu->enums, tag, peek(p)->loc);
+            parse_enum_body(p, ed);
+            Type t = type_default_int();
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
         const Token *tag = peek(p);
         if (tag->kind != TK_IDENT) {
             die_at(tag->loc.file, tag->loc.line, tag->loc.col,
@@ -153,6 +238,14 @@ static Type parse_specifiers(Parser *p) {
         if (alias) {
             advance(p);
             Type t = type_clone(*alias);
+            /* A typedef to a struct/union is cloned at typedef-creation time,
+             * when the struct may have been a forward declaration (size 0).
+             * Refresh the width from the current registry so a later full
+             * definition is reflected (`typedef struct T T; struct T {…}`). */
+            if (t.kind == TY_STRUCT && t.tag) {
+                const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
+                if (sd) t.width = sd->size;
+            }
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             return t;
         }
@@ -209,6 +302,97 @@ static Type parse_type(Parser *p, char **name_out);  /* forward */
  * types we hand it, so the originals stay owned by the ParamArray and are
  * freed by param_array_free below.  The ptys array is a shallow list of
  * *pointers* into the ParamArray — its elements must NOT be type_free'd. */
+
+static void parse_struct_body(Parser *p, StructDef *sd) {
+    /* Assumes peek == '{'.  Parse members until '}'.  Each member is a
+     * comma-separated list of declarators sharing one base type, e.g.
+     * `int a, b;` or `Expr *l, r;` (multi-declarators in struct bodies).
+     *
+     * NOTE: `sd` is a pointer into the TU's StructRegistry, which reallocs
+     * when a nested anonymous struct/union member is defined inline.  We
+     * therefore keep the tag and re-fetch `sd` after any operation that may
+     * add to the registry (parse_specifiers / parse_declarator). */
+    const char *tag = sd->tag;
+    advance(p);  /* consume '{' */
+    while (peek(p)->kind != TK_RBRACE) {
+        Type base = parse_specifiers(p);
+        /* Re-fetch sd: parsing `base` may have defined a nested struct. */
+        sd = struct_registry_find(&p->tu->structs, tag);
+        for (;;) {
+            char *mname = NULL;
+            Type mty = parse_declarator(p, type_clone(base), &mname);
+            sd = struct_registry_find(&p->tu->structs, tag);
+            if (!mname) {
+                const Token *mn = peek(p);
+                if (!is_name_token(mn->kind)) {
+                    die_at(mn->loc.file, mn->loc.line, mn->loc.col,
+                           "expected member name but got '%s'", mn->text);
+                }
+                mname = xstrdup(mn->text);
+                advance(p);
+            }
+            int bit_width = 0;
+            if (peek(p)->kind == TK_COLON) {
+                /* Bitfield `name : N;`.  Consume the width (an int literal). */
+                advance(p);
+                const Token *w = peek(p);
+                if (w->kind != TK_INT_LITERAL) {
+                    die_at(w->loc.file, w->loc.line, w->loc.col,
+                           "expected bitfield width but got '%s'", w->text);
+                }
+                bit_width = int_literal_value(w->text);
+                advance(p);
+            }
+            struct_def_push_member(sd, mname, mty, bit_width);
+            free(mname);
+            if (peek(p)->kind == TK_COMMA) {
+                /* More declarators sharing this base type (`int a, b`). */
+                advance(p);
+                continue;
+            }
+            expect_kind(p, TK_SEMICOLON, "';'");
+            break;
+        }
+        type_free(&base);
+    }
+    expect_kind(p, TK_RBRACE, "'}'");
+}
+
+static void parse_enum_body(Parser *p, EnumDef *ed) {
+    /* Assumes peek == '{'.  Parse constants until '}'. */
+    advance(p);  /* consume '{' */
+    while (peek(p)->kind != TK_RBRACE) {
+        const Token *cn = peek(p);
+        if (cn->kind != TK_IDENT) {
+            die_at(cn->loc.file, cn->loc.line, cn->loc.col,
+                   "expected enum constant name but got '%s'", cn->text);
+        }
+        advance(p);
+        int has_value = 0, value = 0;
+        if (peek(p)->kind == TK_ASSIGN) {
+            advance(p);
+            const Token *v = peek(p);
+            if (v->kind == TK_INT_LITERAL) {
+                has_value = 1; value = int_literal_value(v->text); advance(p);
+            } else if (v->kind == TK_IDENT) {
+                const EnumConstant *ec =
+                    enum_registry_find_constant(&p->tu->enums, v->text);
+                if (!ec) {
+                    die_at(v->loc.file, v->loc.line, v->loc.col,
+                           "enum value '%s' is not a constant", v->text);
+                }
+                has_value = 1; value = ec->value; advance(p);
+            } else {
+                die_at(v->loc.file, v->loc.line, v->loc.col,
+                       "expected integer value for enum constant '%s'", cn->text);
+            }
+        }
+        enum_def_push_constant(ed, cn->text, has_value, value, cn->loc);
+        if (peek(p)->kind == TK_COMMA) advance(p);
+    }
+    expect_kind(p, TK_RBRACE, "'}'");
+}
+
 static Type make_func_type(Type ret, ParamArray *params) {
     /* Build a shallow array of pointers into the ParamArray's owned types.
      * type_make_func deep-clones them, so the originals stay owned by the
@@ -283,6 +467,22 @@ static ParamArray parse_param_list(Parser *p) {
  * follows the group).  Returns the name (owned) via *name_out (NULL if
  * abstract). */
 static int int_literal_value(const char *text);
+/* Parse a constant array dimension size: an int literal or an enum constant
+ * (e.g. `arr[MAX]` where MAX is an enum const).  Consumes the size token.
+ * Returns the value (0 if absent). */
+static int parse_array_size(Parser *p) {
+    if (peek(p)->kind == TK_INT_LITERAL) {
+        int v = int_literal_value(peek(p)->text);
+        advance(p);
+        return v;
+    }
+    if (peek(p)->kind == TK_IDENT) {
+        const EnumConstant *ec =
+            enum_registry_find_constant(&p->tu->enums, peek(p)->text);
+        if (ec) { advance(p); return ec->value; }
+    }
+    return 0;
+}
 static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
                                 int *out_array_len, int *out_has_array) {
     int ptrs = 0;
@@ -297,10 +497,7 @@ static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
     int has_array = 0;
     if (peek(p)->kind == TK_LBRACKET) {
         advance(p);
-        if (peek(p)->kind == TK_INT_LITERAL) {
-            array_len = int_literal_value(peek(p)->text);
-            advance(p);
-        }
+        array_len = parse_array_size(p);
         expect_kind(p, TK_RBRACKET, "']'");
         has_array = 1;
     }
@@ -315,10 +512,39 @@ static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
  *
  * Returns the declared type.  *name_out receives the declared name (owned,
  * freed by caller) or NULL for abstract declarators (casts/sizeof). */
+/* Apply a pointer wrap with optional qualifiers to `t` (in place). */
+static Type ptr_wrap(Type t, int is_const, int is_volatile, int is_restrict) {
+    Type w = type_make_ptr(t);
+    w.is_const = is_const;
+    w.is_volatile = is_volatile;
+    w.is_restrict = is_restrict;
+    return w;
+}
+
 static Type parse_declarator(Parser *p, Type base, char **name_out) {
-    /* Prefix: zero-or-more `*` → wrap the result. */
+    /* Prefix: zero-or-more `*`, each optionally followed by qualifiers
+     * (`* const`, `*volatile`, `* const restrict`, ...).  Record the qualifier
+     * set per pointer level so `Type * const *p` parses as pointer-to-(const-pointer).
+     * The leftmost `*` is the innermost pointer (applied first). */
+    enum { MAX_PTRS = 8 };
+    int ptr_const[MAX_PTRS], ptr_volatile[MAX_PTRS], ptr_restrict[MAX_PTRS];
     int ptrs = 0;
-    while (peek(p)->kind == TK_STAR) { advance(p); ptrs++; }
+    while (peek(p)->kind == TK_STAR) {
+        advance(p);
+        int c = 0, v = 0, r = 0;
+        while (peek(p)->kind == TK_KW_CONST
+               || peek(p)->kind == TK_KW_VOLATILE
+               || peek(p)->kind == TK_KW_RESTRICT) {
+            if (peek(p)->kind == TK_KW_CONST) c = 1;
+            else if (peek(p)->kind == TK_KW_VOLATILE) v = 1;
+            else r = 1;
+            advance(p);
+        }
+        if (ptrs >= MAX_PTRS) die_at(peek(p)->loc.file, peek(p)->loc.line,
+                                     peek(p)->loc.col, "too many pointer levels");
+        ptr_const[ptrs] = c; ptr_volatile[ptrs] = v; ptr_restrict[ptrs] = r;
+        ptrs++;
+    }
 
     Type t;
     if (peek(p)->kind == TK_LPAREN) {
@@ -339,11 +565,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
-                int len = 0;
-                if (peek(p)->kind == TK_INT_LITERAL) {
-                    len = int_literal_value(peek(p)->text);
-                    advance(p);
-                }
+                int len = parse_array_size(p);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -375,11 +597,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
-                int len = 0;
-                if (peek(p)->kind == TK_INT_LITERAL) {
-                    len = int_literal_value(peek(p)->text);
-                    advance(p);
-                }
+                int len = parse_array_size(p);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -405,11 +623,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
-                int len = 0;
-                if (peek(p)->kind == TK_INT_LITERAL) {
-                    len = int_literal_value(peek(p)->text);
-                    advance(p);
-                }
+                int len = parse_array_size(p);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -429,8 +643,9 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         }
     }
 
-    /* Apply prefix pointers (they wrap the whole thing). */
-    for (int i = 0; i < ptrs; i++) t = type_make_ptr(t);
+    /* Apply prefix pointers (they wrap the whole thing), innermost first. */
+    for (int i = 0; i < ptrs; i++)
+        t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
     return t;
 }
 
@@ -474,11 +689,7 @@ static Type parse_type_name(Parser *p) {
     int dims[8], ndims = 0;
     while (peek(p)->kind == TK_LBRACKET) {
         advance(p);
-        int len = 0;
-        if (peek(p)->kind == TK_INT_LITERAL) {
-            len = int_literal_value(peek(p)->text);
-            advance(p);
-        }
+        int len = parse_array_size(p);
         expect_kind(p, TK_RBRACKET, "']'");
         if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                    peek(p)->loc.col, "too many array dimensions");
@@ -861,7 +1072,7 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
             SourceLoc loc = peek(p)->loc;
             advance(p);
             const Token *mn = peek(p);
-            if (mn->kind != TK_IDENT) {
+            if (!is_name_token(mn->kind)) {
                 die_at(mn->loc.file, mn->loc.line, mn->loc.col,
                        "expected member name after '.'");
             }
@@ -873,7 +1084,7 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
             SourceLoc loc = peek(p)->loc;
             advance(p);
             const Token *mn = peek(p);
-            if (mn->kind != TK_IDENT) {
+            if (!is_name_token(mn->kind)) {
                 die_at(mn->loc.file, mn->loc.line, mn->loc.col,
                        "expected member name after '->'");
             }
@@ -1017,61 +1228,67 @@ static Expr *parse_primary(Parser *p) {
         return e;  /* float literal is a primary — no postfix needed */
     }
     if (t->kind == TK_STRING_LITERAL) {
-        /* Token text includes surrounding quotes; strip and process escapes. */
-        const char *src = t->text;
-        size_t slen = strlen(src);
-        /* strip leading `"` and trailing `"` (lexer guarantees a leading `"`
-         * but the trailing one might be missing on EOF — tolerate that). */
-        if (slen >= 1 && src[0] == '"') { src++; slen--; }
-        if (slen >= 1 && src[slen-1] == '"') slen--;
-        /* Decode escape sequences into a temporary buffer. */
-        char *buf = malloc(slen + 1);
-        int blen = 0;
-        for (size_t i = 0; i < slen; i++) {
-            char c = src[i];
-            if (c == '\\' && i + 1 < slen) {
-                i++;
-                if (src[i] == 'x' || src[i] == 'X') {
-                    /* Hex escape `\xHH...`: consume consecutive hex digits. */
-                    int val = 0;
-                    while (i + 1 < slen && isxdigit((unsigned char)src[i + 1])) {
-                        i++;
-                        char h = src[i];
-                        int d = (h >= '0' && h <= '9') ? h - '0'
-                              : (h >= 'a' && h <= 'f') ? h - 'a' + 10
-                              : h - 'A' + 10;
-                        val = val * 16 + d;
+        /* Token text includes surrounding quotes; strip and process escapes.
+         * Adjacent string literals ("a" "b") are concatenated by the parser
+         * (NOT the lexer) so each literal's escapes are decoded independently
+         * before joining — required because `\xHH...` consumes consecutive hex
+         * digits, so "\x7f" "ELF" must NOT be merged into "\x7fELF". */
+        int total = 0;
+        char *buf = NULL;
+        while (peek(p)->kind == TK_STRING_LITERAL) {
+            const char *src = peek(p)->text;
+            size_t slen = strlen(src);
+            if (slen >= 1 && src[0] == '"') { src++; slen--; }
+            if (slen >= 1 && src[slen-1] == '"') slen--;
+            char *seg = malloc(slen + 1);
+            int slen2 = 0;
+            for (size_t i = 0; i < slen; i++) {
+                char c = src[i];
+                if (c == '\\' && i + 1 < slen) {
+                    i++;
+                    if (src[i] == 'x' || src[i] == 'X') {
+                        int val = 0;
+                        while (i + 1 < slen && isxdigit((unsigned char)src[i + 1])) {
+                            i++;
+                            char h = src[i];
+                            int d = (h >= '0' && h <= '9') ? h - '0'
+                                  : (h >= 'a' && h <= 'f') ? h - 'a' + 10
+                                  : h - 'A' + 10;
+                            val = val * 16 + d;
+                        }
+                        seg[slen2++] = (char)(val & 0xff);
+                    } else if (src[i] >= '0' && src[i] <= '7') {
+                        int val = src[i] - '0';
+                        int n = 1;
+                        while (n < 3 && i + 1 < slen
+                               && src[i + 1] >= '0' && src[i + 1] <= '7') {
+                            i++;
+                            val = val * 8 + (src[i] - '0');
+                            n++;
+                        }
+                        seg[slen2++] = (char)(val & 0xff);
+                    } else switch (src[i]) {
+                    case 'n':  seg[slen2++] = '\n'; break;
+                    case 't':  seg[slen2++] = '\t'; break;
+                    case 'r':  seg[slen2++] = '\r'; break;
+                    case '0':  seg[slen2++] = '\0'; break;
+                    case '\\': seg[slen2++] = '\\'; break;
+                    case '"':  seg[slen2++] = '"'; break;
+                    case '\'': seg[slen2++] = '\''; break;
+                    default:   seg[slen2++] = src[i]; break;
                     }
-                    /* lexer guarantees at least one hex digit follows `\x` */
-                    buf[blen++] = (char)(val & 0xff);
-                } else if (src[i] >= '0' && src[i] <= '7') {
-                    /* Octal escape `\NNN`: up to 3 octal digits. */
-                    int val = src[i] - '0';
-                    int n = 1;
-                    while (n < 3 && i + 1 < slen
-                           && src[i + 1] >= '0' && src[i + 1] <= '7') {
-                        i++;
-                        val = val * 8 + (src[i] - '0');
-                        n++;
-                    }
-                    buf[blen++] = (char)(val & 0xff);
-                } else switch (src[i]) {
-                case 'n':  buf[blen++] = '\n'; break;
-                case 't':  buf[blen++] = '\t'; break;
-                case 'r':  buf[blen++] = '\r'; break;
-                case '0':  buf[blen++] = '\0'; break;
-                case '\\': buf[blen++] = '\\'; break;
-                case '"':  buf[blen++] = '"'; break;
-                case '\'': buf[blen++] = '\''; break;
-                default:   buf[blen++] = src[i]; break;
+                } else {
+                    seg[slen2++] = c;
                 }
-            } else {
-                buf[blen++] = c;
             }
+            buf = realloc(buf, (size_t)total + slen2 + 1);
+            memcpy(buf + total, seg, slen2);
+            total += slen2;
+            free(seg);
+            advance(p);
         }
-        Expr *e = expr_new_str(buf, blen, t->loc);
+        Expr *e = expr_new_str(buf, total, t->loc);
         free(buf);
-        advance(p);
         return parse_postfix(p, e);
     }
     if (t->kind == TK_CHAR_LITERAL) {
@@ -1224,8 +1441,17 @@ static void parse_stmt_list(Parser *p, StmtArray *out) {
             die_at(t->loc.file, t->loc.line, t->loc.col,
                    "expected '}' but got end of file");
         }
+        /* Flush any multi-declarator trailers queued by the previous stmt
+         * before parsing the next one — they belong to the same scope. */
+        for (size_t i = 0; i < p->prepend.len; i++)
+            stmt_array_push(out, p->prepend.data[i]);
+        p->prepend.len = 0;
         stmt_array_push(out, parse_stmt(p));
     }
+    /* Flush any trailing queued declarators at the end of the list. */
+    for (size_t i = 0; i < p->prepend.len; i++)
+        stmt_array_push(out, p->prepend.data[i]);
+    p->prepend.len = 0;
 }
 
 /* stmt = decl-stmt | return-stmt | if-stmt | while-stmt | block | expr-stmt */
@@ -1250,43 +1476,79 @@ static Stmt parse_stmt(Parser *p) {
             storage_class = 2;
             advance(p);
         }
-        char *decl_name = NULL;
-        Type ty = parse_type(p, &decl_name);
-        const Token *name = peek(p);
-        if (!decl_name) {
-            /* No name produced by the declarator — expect one here. */
-            if (name->kind != TK_IDENT) {
-                die_at(name->loc.file, name->loc.line, name->loc.col,
-                       "expected variable name but got '%s'", name->text);
-            }
-            decl_name = xstrdup(name->text);
+        /* Parse the common specifier base type once; each declarator in a
+         * comma-separated list (`int a, b, c`) shares this base.  Clone it for
+         * each declarator because parse_declarator takes its argument by value
+         * and may consume (free) its heap children along some paths. */
+        Type base = parse_specifiers(p);
+        /* A definition-only declaration (`enum { ... };`, `struct { ... };`)
+         * has no declarator or variable name — the specifiers consumed the
+         * whole definition and the next token is `;`.  Accept it as a no-op. */
+        if (peek(p)->kind == TK_SEMICOLON) {
             advance(p);
+            Stmt s;
+            s.kind = ST_BLOCK;
+            s.loc = decl_loc;
+            stmt_array_init(&s.u.block);
+            return s;
         }
-        /* Array/function declarator postfixes (including `[N]`) are now parsed
-         * inside parse_declarator.  Empty `[]` for init-list inference is
-         * handled there too. */
-        Stmt s;
-        s.kind = ST_DECL;
-        s.loc = decl_loc;
-        s.u.decl.name = decl_name;
-        s.u.decl.type = ty;
-        s.u.decl.storage_class = storage_class;
-        s.u.decl.init = NULL;
-        if (peek(p)->kind == TK_ASSIGN) {
-            advance(p);
-            /* `extern` may not have an initializer. */
-            if (storage_class == 2) {
-                die_at(s.loc.file, s.loc.line, s.loc.col,
-                       "cannot initialize an 'extern' variable");
+        /* Collect one ST_DECL per declarator. */
+        StmtArray decls;
+        stmt_array_init(&decls);
+        for (;;) {
+            char *decl_name = NULL;
+            Type ty = parse_declarator(p, type_clone(base), &decl_name);
+            if (!decl_name) {
+                const Token *name = peek(p);
+                if (name->kind != TK_IDENT) {
+                    die_at(name->loc.file, name->loc.line, name->loc.col,
+                           "expected variable name but got '%s'", name->text);
+                }
+                decl_name = xstrdup(name->text);
+                advance(p);
             }
-            if (peek(p)->kind == TK_LBRACE) {
-                s.u.decl.init = parse_init_list(p);
-            } else {
-                s.u.decl.init = parse_expr(p);
+            Stmt s;
+            s.kind = ST_DECL;
+            s.loc = decl_loc;
+            s.u.decl.name = decl_name;
+            s.u.decl.type = ty;
+            s.u.decl.storage_class = storage_class;
+            s.u.decl.init = NULL;
+            if (peek(p)->kind == TK_ASSIGN) {
+                advance(p);
+                /* `extern` may not have an initializer. */
+                if (storage_class == 2) {
+                    die_at(s.loc.file, s.loc.line, s.loc.col,
+                           "cannot initialize an 'extern' variable");
+                }
+                if (peek(p)->kind == TK_LBRACE) {
+                    s.u.decl.init = parse_init_list(p);
+                } else {
+                    /* Initializer is an ASSIGNMENT-expression, NOT a comma
+                     * expression — otherwise `int a = 5, b = 6` would let the
+                     * init of `a` consume the `,` as a comma operator. */
+                    s.u.decl.init = parse_assign(p);
+                }
             }
+            stmt_array_push(&decls, s);
+            if (peek(p)->kind == TK_COMMA) {
+                advance(p);
+                continue;
+            }
+            break;
         }
         expect_kind(p, TK_SEMICOLON, "';'");
-        return s;
+        type_free(&base);
+        /* A stmt slot holds one declaration.  data[0]'s ownership passes back
+         * to the caller; the trailing declarators' ownership moves (shallow
+         * copy) into the prepend queue so they land in the same scope.  No
+         * element's heap fields are freed here — they all live on, either in
+         * the returned stmt or in prepend — only the array buffer is freed. */
+        Stmt first = decls.data[0];
+        for (size_t i = 1; i < decls.len; i++)
+            stmt_array_push(&p->prepend, decls.data[i]);
+        free(decls.data);
+        return first;
     }
     if (k == TK_KW_RETURN) {
         /* return-stmt — bare `return;` (value==NULL) is allowed for void
@@ -1465,6 +1727,166 @@ static Stmt parse_stmt(Parser *p) {
 static Stmt parse_typedef_stmt(Parser *p) {
     const Token *kw = peek(p);
     advance(p);  /* consume "typedef" */
+    /* `typedef struct Tag { ... } Name;` and `typedef enum Tag { ... } Name;`
+     * combine a definition with a typedef.  Detect the `struct`/`enum` keyword
+     * followed by an IDENT tag and a `{`; parse the body, then bind `Name`. */
+    if (peek(p)->kind == TK_KW_STRUCT || peek(p)->kind == TK_KW_UNION) {
+        TokenKind base = peek(p)->kind;
+        advance(p);  /* consume struct/union */
+        if (peek(p)->kind == TK_IDENT
+            && p->tokens->data[p->pos + 1].kind == TK_LBRACE) {
+            const Token *tag = peek(p);
+            advance(p);  /* consume tag */
+            if (struct_registry_find(&p->tu->structs, tag->text)) {
+                die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                       "redefinition of '%s'", tag->text);
+            }
+            StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, tag->loc);
+            sd->is_union = (base == TK_KW_UNION);
+            parse_struct_body(p, sd);
+            /* Now expect the typedef name and ';'. */
+            const Token *name = peek(p);
+            if (name->kind != TK_IDENT) {
+                die_at(name->loc.file, name->loc.line, name->loc.col,
+                       "expected typedef name but got '%s'", name->text);
+            }
+            advance(p);
+            Type ty = type_make_struct(tag->text, sd->size);
+            typedef_registry_add(&p->tu->typedefs, name->text, ty);
+            expect_kind(p, TK_SEMICOLON, "';'");
+            Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
+            stmt_array_init(&s.u.block);
+            return s;
+        }
+        /* Not a definition — fall back.  We already consumed struct/union, so
+         * reconstruct the type via parse_specifiers-like logic by hand.  If the
+         * next token is `{`, this is an anonymous struct typedef
+         * (`typedef struct { ... } Name;`). */
+        if (peek(p)->kind == TK_LBRACE) {
+            char tag[64];
+            snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
+            StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
+            sd->is_union = (base == TK_KW_UNION);
+            parse_struct_body(p, sd);
+            const Token *name = peek(p);
+            if (name->kind != TK_IDENT) {
+                die_at(name->loc.file, name->loc.line, name->loc.col,
+                       "expected typedef name but got '%s'", name->text);
+            }
+            advance(p);
+            Type ty = type_make_struct(tag, sd->size);
+            typedef_registry_add(&p->tu->typedefs, name->text, ty);
+            expect_kind(p, TK_SEMICOLON, "';'");
+            Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
+            stmt_array_init(&s.u.block);
+            return s;
+        }
+        const Token *tag = peek(p);
+        if (tag->kind != TK_IDENT) {
+            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                   "expected struct tag but got '%s'", tag->text);
+        }
+        advance(p);
+        StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
+        int size = sd ? sd->size : 0;
+        Type ty = type_make_struct(tag->text, size);
+        /* Continue as a normal typedef with this base type. */
+        char *decl_name = NULL;
+        ty = parse_declarator(p, ty, &decl_name);
+        const Token *name = peek(p);
+        if (!decl_name) {
+            if (name->kind != TK_IDENT) {
+                die_at(name->loc.file, name->loc.line, name->loc.col,
+                       "expected typedef name but got '%s'", name->text);
+            }
+            decl_name = xstrdup(name->text);
+            advance(p);
+        } else if (name->kind == TK_IDENT) {
+            advance(p);
+        }
+        if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
+            die_at(name->loc.file, name->loc.line, name->loc.col,
+                   "redefinition of typedef '%s'", decl_name);
+        }
+        typedef_registry_add(&p->tu->typedefs, decl_name, ty);
+        expect_kind(p, TK_SEMICOLON, "';'");
+        Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
+        stmt_array_init(&s.u.block);
+        return s;
+    }
+    if (peek(p)->kind == TK_KW_ENUM) {
+        advance(p);  /* consume enum */
+        if (peek(p)->kind == TK_IDENT
+            && p->tokens->data[p->pos + 1].kind == TK_LBRACE) {
+            const Token *tag = peek(p);
+            advance(p);  /* consume tag */
+            if (enum_registry_find(&p->tu->enums, tag->text)) {
+                die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                       "redefinition of enum '%s'", tag->text);
+            }
+            EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, tag->loc);
+            parse_enum_body(p, ed);
+            const Token *name = peek(p);
+            if (name->kind != TK_IDENT) {
+                die_at(name->loc.file, name->loc.line, name->loc.col,
+                       "expected typedef name but got '%s'", name->text);
+            }
+            advance(p);
+            typedef_registry_add(&p->tu->typedefs, name->text, type_default_int());
+            expect_kind(p, TK_SEMICOLON, "';'");
+            Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
+            stmt_array_init(&s.u.block);
+            return s;
+        }
+        /* Not a definition — fall back.  If the next token is `{`, this is an
+         * anonymous enum typedef (`typedef enum { ... } Name;`). */
+        if (peek(p)->kind == TK_LBRACE) {
+            char tag[64];
+            snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
+            EnumDef *ed = enum_registry_add(&p->tu->enums, tag, peek(p)->loc);
+            parse_enum_body(p, ed);
+            const Token *name = peek(p);
+            if (name->kind != TK_IDENT) {
+                die_at(name->loc.file, name->loc.line, name->loc.col,
+                       "expected typedef name but got '%s'", name->text);
+            }
+            advance(p);
+            typedef_registry_add(&p->tu->typedefs, name->text, type_default_int());
+            expect_kind(p, TK_SEMICOLON, "';'");
+            Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
+            stmt_array_init(&s.u.block);
+            return s;
+        }
+        const Token *tag = peek(p);
+        if (tag->kind != TK_IDENT) {
+            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                   "expected enum tag but got '%s'", tag->text);
+        }
+        advance(p);
+        char *decl_name = NULL;
+        Type ty = type_default_int();
+        ty = parse_declarator(p, ty, &decl_name);
+        const Token *name = peek(p);
+        if (!decl_name) {
+            if (name->kind != TK_IDENT) {
+                die_at(name->loc.file, name->loc.line, name->loc.col,
+                       "expected typedef name but got '%s'", name->text);
+            }
+            decl_name = xstrdup(name->text);
+            advance(p);
+        } else if (name->kind == TK_IDENT) {
+            advance(p);
+        }
+        if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
+            die_at(name->loc.file, name->loc.line, name->loc.col,
+                   "redefinition of typedef '%s'", decl_name);
+        }
+        typedef_registry_add(&p->tu->typedefs, decl_name, ty);
+        expect_kind(p, TK_SEMICOLON, "';'");
+        Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
+        stmt_array_init(&s.u.block);
+        return s;
+    }
     char *decl_name = NULL;
     Type ty = parse_type(p, &decl_name);
     const Token *name = peek(p);
@@ -1668,6 +2090,12 @@ static FunctionDecl parse_function_decl(Parser *p) {
 
     expect_kind(p, TK_RPAREN, "')'");
 
+    /* Skip optional GCC `__attribute__((...))` annotations (e.g.
+     * `__attribute__((noreturn))`) that may follow the parameter list. */
+    for (;;) {
+        if (!skip_attribute(p)) break;
+    }
+
     if (fn.is_extern) {
         /* Declaration only — no body.  `extern int f();` */
         expect_kind(p, TK_SEMICOLON, "';'");
@@ -1716,6 +2144,8 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
     p.tokens = tokens;
     p.pos = 0;
     p.tu = tu;
+    stmt_array_init(&p.prepend);
+    p.anon_counter = 0;
 
     /* must start with package declaration */
     if (peek(&p)->kind != TK_KW_PACKAGE) {
@@ -1736,6 +2166,10 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
     /* At file scope: each top-level declaration starts with a type OR
      * with `struct TAG { ... };` — a struct definition (no variable). */
     while (peek(&p)->kind != TK_EOF) {
+        /* Flush any multi-declarator trailers queued by the previous stmt. */
+        for (size_t i = 0; i < p.prepend.len; i++)
+            stmt_array_push(&tu->globals, p.prepend.data[i]);
+        p.prepend.len = 0;
         /* Struct definition: `struct TAG { type NAME [ [N] ]* ; ... };`
          * Distinguish from `struct TAG x;` global by lookahead — after
          * `struct TAG` we expect `{` for a definition. */
@@ -1744,31 +2178,17 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
             advance(&p);
             const Token *tag = peek(&p);
             if (tag->kind == TK_IDENT) advance(&p);
-            if (peek(&p)->kind == TK_LBRACE) {
+            /* A definition requires an IDENT tag followed by `{`.  Anonymous
+             * structs (`struct { ... }` with no tag) fall through to the
+             * declaration path, where parse_specifiers defines them inline. */
+            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE) {
                 /* Struct definition. */
                 if (struct_registry_find(&tu->structs, tag->text)) {
                     die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of struct '%s'", tag->text);
                 }
                 StructDef *sd = struct_registry_add(&tu->structs, tag->text, tag->loc);
-                advance(&p);  /* consume `{` */
-                while (peek(&p)->kind != TK_RBRACE) {
-                    char *mname = NULL;
-                    Type mty = parse_type(&p, &mname);
-                    if (!mname) {
-                        const Token *mn = peek(&p);
-                        if (mn->kind != TK_IDENT) {
-                            die_at(mn->loc.file, mn->loc.line, mn->loc.col,
-                                   "expected member name");
-                        }
-                        mname = xstrdup(mn->text);
-                        advance(&p);
-                    }
-                    expect_kind(&p, TK_SEMICOLON, "';'");
-                    struct_def_push_member(sd, mname, mty);
-                    free(mname);
-                }
-                expect_kind(&p, TK_RBRACE, "'}'");
+                parse_struct_body(&p, sd);
                 expect_kind(&p, TK_SEMICOLON, "';'");
                 continue;
             } else {
@@ -1785,36 +2205,17 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
             advance(&p);
             const Token *tag = peek(&p);
             if (tag->kind == TK_IDENT) advance(&p);
-            if (peek(&p)->kind == TK_LBRACE) {
+            /* A definition requires an IDENT tag followed by `{`.  Anonymous
+             * unions fall through to the declaration path. */
+            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE) {
                 /* Union definition. */
-                if (tag->kind != TK_IDENT) {
-                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
-                           "expected union tag but got '%s'", tag->text);
-                }
                 if (struct_registry_find(&tu->structs, tag->text)) {
                     die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of '%s'", tag->text);
                 }
                 StructDef *sd = struct_registry_add(&tu->structs, tag->text, tag->loc);
                 sd->is_union = 1;
-                advance(&p);  /* consume `{` */
-                while (peek(&p)->kind != TK_RBRACE) {
-                    char *mname = NULL;
-                    Type mty = parse_type(&p, &mname);
-                    if (!mname) {
-                        const Token *mn = peek(&p);
-                        if (mn->kind != TK_IDENT) {
-                            die_at(mn->loc.file, mn->loc.line, mn->loc.col,
-                                   "expected member name");
-                        }
-                        mname = xstrdup(mn->text);
-                        advance(&p);
-                    }
-                    expect_kind(&p, TK_SEMICOLON, "';'");
-                    struct_def_push_member(sd, mname, mty);
-                    free(mname);
-                }
-                expect_kind(&p, TK_RBRACE, "'}'");
+                parse_struct_body(&p, sd);
                 expect_kind(&p, TK_SEMICOLON, "';'");
                 continue;
             } else {
@@ -1831,51 +2232,16 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
             advance(&p);
             const Token *tag = peek(&p);
             if (tag->kind == TK_IDENT) advance(&p);
-            if (peek(&p)->kind == TK_LBRACE) {
+            /* A definition requires an IDENT tag followed by `{`.  Anonymous
+             * enums fall through to the declaration path. */
+            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE) {
                 /* Enum definition. */
-                if (tag->kind != TK_IDENT) {
-                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
-                           "expected enum tag but got '%s'", tag->text);
-                }
                 if (enum_registry_find(&tu->enums, tag->text)) {
                     die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of enum '%s'", tag->text);
                 }
                 EnumDef *ed = enum_registry_add(&tu->enums, tag->text, tag->loc);
-                advance(&p);  /* consume `{` */
-                while (peek(&p)->kind != TK_RBRACE) {
-                    const Token *cn = peek(&p);
-                    if (cn->kind != TK_IDENT) {
-                        die_at(cn->loc.file, cn->loc.line, cn->loc.col,
-                               "expected enum constant name but got '%s'", cn->text);
-                    }
-                    advance(&p);
-                    int has_value = 0, value = 0;
-                    if (peek(&p)->kind == TK_ASSIGN) {
-                        advance(&p);
-                        /* Compile-time constant expression: int literal or a
-                         * previously defined enum constant in THIS enum. */
-                        const Token *v = peek(&p);
-                        if (v->kind == TK_INT_LITERAL) {
-                            has_value = 1; value = int_literal_value(v->text); advance(&p);
-                        } else if (v->kind == TK_IDENT) {
-                            const EnumConstant *ec =
-                                enum_registry_find_constant(&tu->enums, v->text);
-                            if (!ec) {
-                                die_at(v->loc.file, v->loc.line, v->loc.col,
-                                       "enum value '%s' is not a constant", v->text);
-                            }
-                            has_value = 1; value = ec->value; advance(&p);
-                        } else {
-                            die_at(v->loc.file, v->loc.line, v->loc.col,
-                                   "expected integer value for enum constant '%s'",
-                                   cn->text);
-                        }
-                    }
-                    enum_def_push_constant(ed, cn->text, has_value, value, cn->loc);
-                    if (peek(&p)->kind == TK_COMMA) advance(&p);
-                }
-                expect_kind(&p, TK_RBRACE, "'}'");
+                parse_enum_body(&p, ed);
                 expect_kind(&p, TK_SEMICOLON, "';'");
                 continue;
             } else {
@@ -1926,6 +2292,15 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
             /* typedef name used as a type. */
             advance(&p);
         }
+        /* Skip an anonymous type body (`struct { ... }`, `enum { ... }`). */
+        if (peek(&p)->kind == TK_LBRACE) {
+            int depth = 0;
+            do {
+                if (peek(&p)->kind == TK_LBRACE) depth++;
+                else if (peek(&p)->kind == TK_RBRACE) depth--;
+                advance(&p);
+            } while (depth > 0 && peek(&p)->kind != TK_EOF);
+        }
         /* Skip pointer stars */
         while (peek(&p)->kind == TK_STAR) advance(&p);
         /* Skip identifier (the declared name) */
@@ -1959,4 +2334,9 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
             stmt_array_push(&tu->globals, s);
         }
     }
+    /* Flush any trailing queued declarators and free the prepend buffer. */
+    for (size_t i = 0; i < p.prepend.len; i++)
+        stmt_array_push(&tu->globals, p.prepend.data[i]);
+    p.prepend.len = 0;
+    stmt_array_free(&p.prepend);
 }

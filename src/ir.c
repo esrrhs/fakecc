@@ -274,6 +274,32 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
     return 0;
 }
 
+/* Look up bitfield info for `e` (an EX_MEMBER).  If the accessed member is a
+ * bitfield, set *bit_width/bit_offset to its width (bits) and position within
+ * the storage unit, and return 1.  Otherwise return 0.  The storage unit is the
+ * naturally-aligned integer (1/2/4 bytes) that holds the bitfield run. */
+static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
+                           int *unit_width) {
+    if (e->kind != EX_MEMBER) return 0;
+    if (e->u.member.obj->type.kind != TY_STRUCT) return 0;
+    const char *tag = e->u.member.obj->type.tag;
+    if (!tag) return 0;
+    const StructDef *sd = struct_registry_find_c(g_ir_structs, tag);
+    if (!sd) return 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        if (strcmp(sd->members[i].name, e->u.member.name) == 0) {
+            if (sd->members[i].bit_width > 0) {
+                *bit_width = sd->members[i].bit_width;
+                *bit_offset = sd->members[i].bit_offset;
+                *unit_width = type_size(sd->members[i].type);
+                return 1;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
 /* Is `name` pinned in the given function body? True iff array-typed
  * (its decl is TY_ARRAY, or param would be TY_PTR — the latter is fine) or
  * `&name` appears anywhere in the function. */
@@ -1112,6 +1138,39 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return coerced;
         } else if (lv->kind == EX_INDEX || lv->kind == EX_MEMBER) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
+            int bit_width = 0, bit_offset = 0, unit_width = 0;
+            if (lv->kind == EX_MEMBER
+                && member_bitfield(lv, &bit_width, &bit_offset, &unit_width)) {
+                /* Bitfield store: read-modify-write the storage unit.
+                 * unit = load(addr);
+                 * unit = unit & ~(mask << bit_offset);   // clear the field
+                 * unit = unit | ((val & mask) << bit_offset); // set the field
+                 * store(addr, unit); */
+                int uw = unit_width ? unit_width : 4;
+                IRValue unit = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
+                int mask = (1 << bit_width) - 1;
+                /* Clear the field bits: unit &= ~(mask << bit_offset). */
+                IRValue m = new_value(fn);
+                emit_inst_w(fn, IR_CONST, m, -1, -1, mask, uw, 1, e->loc);
+                IRValue so = new_value(fn);
+                emit_inst_w(fn, IR_CONST, so, -1, -1, bit_offset, 8, 1, e->loc);
+                IRValue ms = new_value(fn);
+                emit_inst_w(fn, IR_SHL, ms, m, so, 0, uw, 1, e->loc);
+                IRValue nm = new_value(fn);
+                emit_inst_w(fn, IR_BNOT, nm, ms, -1, 0, uw, 1, e->loc);
+                IRValue cleared = new_value(fn);
+                emit_inst_w(fn, IR_BAND, cleared, unit, nm, 0, uw, 1, e->loc);
+                /* Position the new value's bits: (val & mask) << bit_offset. */
+                IRValue vm = new_value(fn);
+                emit_inst_w(fn, IR_BAND, vm, coerced, m, 0, uw, 1, e->loc);
+                IRValue vs = new_value(fn);
+                emit_inst_w(fn, IR_SHL, vs, vm, so, 0, uw, 1, e->loc);
+                IRValue merged = new_value(fn);
+                emit_inst_w(fn, IR_BOR, merged, cleared, vs, 0, uw, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, merged, 0, uw, 1, e->loc);
+                return coerced;
+            }
             emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
             return coerced;
         }
@@ -1202,6 +1261,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
              * emits the raw `syscall` instruction.  It is not in the function
              * table, so the direct-call lookup below would miss it. */
             if (strcmp(cname, "__syscall") == 0) {
+                inst.call_name = xstrdup(cname);
+            } else if (strcmp(cname, "__builtin_ctzll") == 0) {
+                /* ctz intrinsic — codegen emits a `bsf` + fixup. */
                 inst.call_name = xstrdup(cname);
             } else {
                 int is_direct = 0;
@@ -1308,10 +1370,37 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Struct/array members: return address (decay). Scalar/pointer: load. */
         if (e->type.kind == TY_STRUCT) return addr;
         if (e->type.kind == TY_ARRAY)  return addr;
-        int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
-        int u = e->type.is_unsigned;
+        int bit_width = 0, bit_offset = 0, unit_width = 0;
+        int is_bf = member_bitfield(e, &bit_width, &bit_offset, &unit_width);
+        /* Bitfields are loaded as their storage unit (e.g. 4-byte int), then
+         * shifted/masked to the member's declared width below. */
+        int w = is_bf ? (unit_width ? unit_width : 4)
+                      : (e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4));
+        int u = is_bf ? 1 : e->type.is_unsigned;  /* bitfields read as unsigned unit */
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        if (is_bf) {
+            /* Extract the bitfield: v = (v >> bit_offset) & ((1<<bit_width)-1). */
+            if (bit_offset > 0) {
+                IRValue s = new_value(fn);
+                emit_inst_w(fn, IR_CONST, s, -1, -1, bit_offset, 8, 1, e->loc);
+                IRValue shifted = new_value(fn);
+                emit_inst_w(fn, IR_SHR, shifted, v, s, 0, w, 1, e->loc);
+                v = shifted;
+            }
+            if (bit_width < w * 8) {
+                int mask = (1 << bit_width) - 1;
+                IRValue m = new_value(fn);
+                emit_inst_w(fn, IR_CONST, m, -1, -1, mask, w, 1, e->loc);
+                IRValue masked = new_value(fn);
+                emit_inst_w(fn, IR_BAND, masked, v, m, 0, w, 1, e->loc);
+                v = masked;
+            }
+            /* Result is a small unsigned int; coerce to the member's declared
+             * width (semantically int/bool). */
+            return coerce(fn, v, w, u, e->type.width ? e->type.width : 4,
+                         e->type.is_unsigned, e->loc);
+        }
         if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }

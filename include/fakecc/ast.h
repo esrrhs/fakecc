@@ -310,11 +310,19 @@ typedef struct {
 } PackageDecl;
 
 /* Struct definition: tag + ordered member list.  Each member has a name,
- * a Type (owned), a computed byte offset within the struct, and a size. */
+ * a Type (owned), a computed byte offset within the struct, and a size.
+ * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield
+ * `unsigned x : N;`.  Bitfield members share a storage unit with adjacent
+ * bitfields of the same underlying type (tracked by the struct's
+ * `bit_cur_unit` / `bit_cur_used` during member layout). */
 typedef struct {
     char *name;
     Type type;
     int  offset;
+    int  bit_width;     /* 0 = normal member, else bitfield width in bits */
+    int  bit_offset;    /* bit position within the unit (0 = LSB); valid when
+                         * bit_width > 0.  Codegen loads the unit, shifts right
+                         * by bit_offset, and masks to (1<<bit_width)-1. */
 } StructMember;
 
 typedef struct {
@@ -325,6 +333,13 @@ typedef struct {
     int cap_members;
     int size;             /* total size in bytes (already aligned) */
     SourceLoc loc;
+    /* Bitfield layout state (valid while members are being added).  A run of
+     * adjacent bitfields of the same `type` packs into one "unit"; the unit
+     * size is the smallest of {1,2,4,8} bytes holding all its bits.  A
+     * non-bitfield member (or a type/width change) closes the current unit. */
+    int   bf_unit_type;   /* width (bytes) of the current open bitfield unit */
+    int   bf_unit_used;   /* bits used in the current open unit */
+    int   bf_unit_offset; /* byte offset of the current open unit */
 } StructDef;
 
 typedef struct {
@@ -342,8 +357,9 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
 StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 /* Const variant. */
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
-/* Append a member to a struct definition; computes offset (naturally aligned). */
-void struct_def_push_member(StructDef *sd, const char *name, Type ty);
+/* Append a member to a struct definition; computes offset (naturally aligned).
+ * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield `x : N;`. */
+void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 
 typedef struct {
     FunctionDecl *data;
