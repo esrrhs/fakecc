@@ -52,7 +52,7 @@
 
 static const char INTERP_PATH[] = "/lib64/ld-linux-x86-64.so.2";
 
-#define START_SIZE  14
+#define START_SIZE  22 /* gen_start: mov_edi(3)+lea_rsi(5)+call(5)+mov_reg(2)+mov_imm(5)+syscall(2) */
 #define CALL_SIZE   5
 
 /* ================================================================== */
@@ -115,13 +115,20 @@ static void write_phdr(Buffer *b, uint32_t type, uint32_t flags,
 }
 
 static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr) {
+    /* SysV ABI: main(argc @ edi, argv @ rsi). At process entry the kernel
+     * leaves [rsp]=argc, [rsp+8]=argv. Load them before calling main. */
+    uint8_t mov_edi[] = {0x8b, 0x3c, 0x24}; /* mov edi, [rsp] */
+    buffer_append(code, (const char *)mov_edi, 3);
+    uint8_t lea_rsi[] = {0x48, 0x8d, 0x74, 0x24, 0x08}; /* lea rsi, [rsp+8] */
+    buffer_append(code, (const char *)lea_rsi, 5);
+    /* call main (rel32 is relative to end of the 5-byte call, i.e. call_vaddr+8+5) */
     uint8_t call_opcode = 0xe8;
     buffer_append(code, (const char *)&call_opcode, 1);
-    int32_t rel = (int32_t)(main_vaddr - (call_vaddr + CALL_SIZE));
+    int32_t rel = (int32_t)(main_vaddr - (call_vaddr + 3 + 5 + CALL_SIZE));
     buffer_append(code, (const char *)&rel, 4);
-    uint8_t mov_reg[] = {0x89, 0xc7};
+    uint8_t mov_reg[] = {0x89, 0xc7}; /* mov edi, eax (exit code = main return) */
     buffer_append(code, (const char *)mov_reg, 2);
-    uint8_t mov_imm[] = {0xb8, 0x3c, 0x00, 0x00, 0x00};
+    uint8_t mov_imm[] = {0xb8, 0x3c, 0x00, 0x00, 0x00}; /* mov eax, 60 */
     buffer_append(code, (const char *)mov_imm, 5);
     uint8_t syscall[] = {0x0f, 0x05};
     buffer_append(code, (const char *)syscall, 2);

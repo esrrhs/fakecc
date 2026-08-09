@@ -2493,6 +2493,22 @@ void codegen(const IRModule *ir, EmitModule *out) {
             } /* switch */
         } /* for insts */
 
+        /* Fallthrough guard: if the function body can fall off the end without
+         * hitting a terminator (return or branch), append an epilogue + ret so
+         * execution does not tumble into the next function.  This happens for
+         * void functions with no explicit `return;` (e.g. `void f() {}`), and
+         * for empty-bodied functions whose IR carries no instructions at all. */
+        int needs_ret = 0;
+        if (fn->insts.len == 0) {
+            needs_ret = 1;
+        } else {
+            IROpcode last = fn->insts.data[fn->insts.len - 1].op;
+            if (last != IR_RETURN && last != IR_BR && last != IR_CBR)
+                needs_ret = 1;
+        }
+        if (needs_ret)
+            emit_epilogue(&out->text, stack_size, cs_used);
+
         /* ---- Apply label patches ---- */
         for (size_t pi = 0; pi < num_patches; pi++) {
             Patch *p = &patches[pi];
