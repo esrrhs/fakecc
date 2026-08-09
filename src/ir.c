@@ -562,8 +562,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 
 /* Initializer-list lowering (defined after ir_generate). */
-static void pack_init(const Type *ty, const Expr *e, char *bytes, int sz,
-                      const char *ctx, SourceLoc loc);
+static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
+                      char *bytes, int sz, const char *ctx, SourceLoc loc);
 static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                             const Type *ty, const Expr *e, SourceLoc loc);
 
@@ -1670,7 +1670,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             char *bytes = calloc(sz, 1);
             if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
             if (s->u.decl.init)
-                pack_init(&dty, s->u.decl.init, bytes, sz,
+                pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
                           s->u.decl.name, s->loc);
             char mangled[256];
             snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
@@ -1860,8 +1860,19 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
          *   L_exit:
          * continue → L_step, break → L_exit. */
         size_t mark = st->len;
-        if (s->u.for_s.init)
-            lower_stmt(fn, st, s->u.for_s.init, cur_fd);
+        if (s->u.for_s.init) {
+            if (s->u.for_s.init->kind == ST_BLOCK) {
+                /* Multi-declarator init wrapped in a block by the parser.
+                 * Lower its stmts directly so the declarations stay in the
+                 * for scope (lower_stmt(ST_BLOCK) would pop them, hiding the
+                 * names from cond/step/body). */
+                StmtArray *blk = &s->u.for_s.init->u.block;
+                for (size_t i = 0; i < blk->len; i++)
+                    lower_stmt(fn, st, &blk->data[i], cur_fd);
+            } else {
+                lower_stmt(fn, st, s->u.for_s.init, cur_fd);
+            }
+        }
         int L_head = new_label(fn);
         int L_body = new_label(fn);
         int L_step = new_label(fn);
@@ -2003,19 +2014,31 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
     }
 }
 
+/* Find a previously-packed global by name (for const-global references in
+ * initializers, e.g. `.regs = ALLOCATABLE_REGS`).  Returns NULL if not found. */
+static const IRGlobal *find_packed_global(const IRModule *m, const char *name) {
+    for (size_t i = 0; i < m->globals.len; i++)
+        if (m->globals.data[i].name
+            && strcmp(m->globals.data[i].name, name) == 0)
+            return &m->globals.data[i];
+    return NULL;
+}
+
 /* Pack a compile-time constant initializer into `bytes` (size `sz`) for a
  * global of type `ty`.  Handles integer literals, negated literals, nested
- * initializer lists (positional, per-element/per-member offset), and string
- * literals for `char[]="..."`.  Sema guarantees every element is constant. */
-static void pack_init(const Type *ty, const Expr *e, char *bytes, int sz,
-                      const char *ctx, SourceLoc loc) {
+ * initializer lists (positional, per-element/per-member offset), string
+ * literals for `char[]="..."`, cast expressions, and references to previously
+ * packed const globals.  `ir` is the module whose globals may be referenced.
+ * Sema guarantees every element is constant. */
+static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
+                      char *bytes, int sz, const char *ctx, SourceLoc loc) {
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
         switch (ty->kind) {
         case TY_ARRAY: {
             int esz = type_size(*ty->elem_type);
             for (int i = 0; i < n; i++)
-                pack_init(ty->elem_type, e->u.init_list.elements[i],
+                pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
                           bytes + i * esz, esz, ctx, loc);
             break;
         }
@@ -2024,29 +2047,33 @@ static void pack_init(const Type *ty, const Expr *e, char *bytes, int sz,
             if (!sd) die_at(loc.file, loc.line, loc.col,
                             "unknown struct 'struct %s'", ty->tag);
             for (int i = 0; i < n; i++)
-                pack_init(&sd->members[i].type, e->u.init_list.elements[i],
+                pack_init(ir, &sd->members[i].type, e->u.init_list.elements[i],
                           bytes + sd->members[i].offset,
                           type_size(sd->members[i].type), ctx, loc);
             break;
         }
         default:
             /* Scalar with a single-element brace list: `int x = {5}`. */
-            pack_init(ty, e->u.init_list.elements[0], bytes, sz, ctx, loc);
+            pack_init(ir, ty, e->u.init_list.elements[0], bytes, sz, ctx, loc);
             break;
         }
         return;
     }
-    if (e->kind == EX_INT_LIT) {
-        long long v = e->u.int_val;
-        if (ty->is_bool)
-            v = (v != 0) ? 1 : 0;  /* _Bool: normalize to 0/1 */
-        for (int b = 0; b < sz && b < 8; b++)
-            bytes[b] = (char)((v >> (8 * b)) & 0xff);
+    if (e->kind == EX_CAST) {
+        /* `(T)expr` — the cast itself is a no-op at the bit level for the
+         * cases we accept (e.g. `(int*)0`); pack the operand. */
+        pack_init(ir, ty, e->u.cast.operand, bytes, sz, ctx, loc);
         return;
     }
-    if (e->kind == EX_UNARY && e->u.un.op == UOP_NEG
-        && e->u.un.operand->kind == EX_INT_LIT) {
-        long long v = -(long long)e->u.un.operand->u.int_val;
+    long long _fold_v;
+    if (e->kind == EX_INT_LIT || fold_const_int(e, &_fold_v)) {
+        long long v;
+        if (e->kind == EX_INT_LIT)
+            v = e->u.int_val;
+        else
+            v = _fold_v; /* already confirmed foldable above */
+        if (ty->is_bool)
+            v = (v != 0) ? 1 : 0;  /* _Bool: normalize to 0/1 */
         for (int b = 0; b < sz && b < 8; b++)
             bytes[b] = (char)((v >> (8 * b)) & 0xff);
         return;
@@ -2060,6 +2087,16 @@ static void pack_init(const Type *ty, const Expr *e, char *bytes, int sz,
         memcpy(bytes, e->u.str.bytes, n);
         bytes[n] = '\0';
         return;
+    }
+    /* Reference to a previously-defined const global: `.regs = ALLOCATABLE_REGS`.
+     * Copy its already-packed bytes (truncated/padded to `sz`). */
+    if (e->kind == EX_VAR && ir) {
+        const IRGlobal *g = find_packed_global(ir, e->u.var.name);
+        if (g) {
+            int n = sz < g->size ? sz : g->size;
+            memcpy(bytes, g->init_bytes, n);
+            return;
+        }
     }
     die_at(loc.file, loc.line, loc.col,
            "global '%s' initializer must be a compile-time constant", ctx);
@@ -2136,7 +2173,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         char *bytes = calloc(sz, 1);
         if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         if (s->u.decl.init)
-            pack_init(&s->u.decl.type, s->u.decl.init, bytes, sz,
+            pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc);
         int is_static = (s->u.decl.storage_class == 1);
         ir_module_push_global(ir, s->u.decl.name, sz, bytes, 0, is_static,

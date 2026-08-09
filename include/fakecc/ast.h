@@ -136,6 +136,7 @@ typedef enum {
 } UnaryOp;
 
 typedef struct Expr Expr;
+int fold_const_int(const Expr *e, long long *out); /* compile-time int fold */
 
 /* Argument-list holder used by EX_CALL — grows as arguments are parsed. */
 typedef struct {

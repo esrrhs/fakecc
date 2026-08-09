@@ -81,7 +81,9 @@ Type type_make_ptr(Type pointee) {
 
 Type type_make_array(Type elem, int length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
-    t.is_unsigned = elem.is_unsigned; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0; t.length = length;
+    t.is_unsigned = elem.is_unsigned;
+    t.is_const = elem.is_const; t.is_volatile = elem.is_volatile; t.is_restrict = elem.is_restrict;
+    t.is_bool = 0; t.length = length;
     t.pointee = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
     t.elem_type = malloc(sizeof(Type));
@@ -908,4 +910,63 @@ void param_array_free(ParamArray *a) {
     }
     free(a->data);
     a->data = NULL; a->len = 0; a->cap = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Compile-time integer constant folding                               */
+/* ------------------------------------------------------------------ */
+
+/* Try to fold `e` to a single integer constant.  Returns 1 and writes the
+ * value to *out if `e` is an integer literal, a cast of one, or a unary/
+ * binary operation on constant integer operands (e.g. `(1u << 14) - 1u`).
+ * Returns 0 otherwise (non-constant, non-integer, or涉及 pointer values).
+ * Used by sema (global-init constness check) and ir (pack_init) so that
+ * constant expressions are accepted and emitted exactly like literals. */
+int fold_const_int(const Expr *e, long long *out) {
+    if (!e) return 0;
+    if (e->kind == EX_INT_LIT) {
+        *out = e->u.int_val;
+        return 1;
+    }
+    if (e->kind == EX_CAST) {
+        /* Fold through integer casts (e.g. `(int)`); pointer casts are not
+         * integer constants, so require the operand to fold to an int. */
+        return fold_const_int(e->u.cast.operand, out);
+    }
+    if (e->kind == EX_UNARY) {
+        long long v;
+        if (!fold_const_int(e->u.un.operand, &v)) return 0;
+        switch (e->u.un.op) {
+        case UOP_NEG: *out = -v; return 1;
+        case UOP_POS: *out = v; return 1;
+        case UOP_BITNOT: *out = ~v; return 1;
+        case UOP_NOT: *out = !v ? 1 : 0; return 1;
+        default: return 0;
+        }
+    }
+    if (e->kind == EX_BINOP) {
+        long long l, r;
+        if (!fold_const_int(e->u.bin.l, &l)) return 0;
+        if (!fold_const_int(e->u.bin.r, &r)) return 0;
+        switch (e->u.bin.op) {
+        case BOP_ADD: *out = l + r; return 1;
+        case BOP_SUB: *out = l - r; return 1;
+        case BOP_MUL: *out = l * r; return 1;
+        case BOP_DIV: if (r == 0) { *out = 0; return 1; } *out = l / r; return 1;
+        case BOP_MOD: if (r == 0) { *out = 0; return 1; } *out = l % r; return 1;
+        case BOP_BITAND: *out = l & r; return 1;
+        case BOP_BITOR:  *out = l | r; return 1;
+        case BOP_BITXOR: *out = l ^ r; return 1;
+        case BOP_SHL:    *out = l << r; return 1;
+        case BOP_SHR:    *out = l >> r; return 1;
+        case BOP_EQ:     *out = (l == r) ? 1 : 0; return 1;
+        case BOP_NE:     *out = (l != r) ? 1 : 0; return 1;
+        case BOP_LT:     *out = (l < r) ? 1 : 0; return 1;
+        case BOP_LE:     *out = (l <= r) ? 1 : 0; return 1;
+        case BOP_GT:     *out = (l > r) ? 1 : 0; return 1;
+        case BOP_GE:     *out = (l >= r) ? 1 : 0; return 1;
+        default: return 0;  /* BOP_AND/BOP_OR (logical) */
+        }
+    }
+    return 0;
 }

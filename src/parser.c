@@ -371,9 +371,13 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
         int has_value = 0, value = 0;
         if (peek(p)->kind == TK_ASSIGN) {
             advance(p);
+            int sign = 1;
+            /* Leading unary +/- on the value: `enum { A = -1 };`. */
+            if (peek(p)->kind == TK_MINUS) { sign = -1; advance(p); }
+            else if (peek(p)->kind == TK_PLUS) { advance(p); }
             const Token *v = peek(p);
             if (v->kind == TK_INT_LITERAL) {
-                has_value = 1; value = int_literal_value(v->text); advance(p);
+                has_value = 1; value = sign * int_literal_value(v->text); advance(p);
             } else if (v->kind == TK_IDENT) {
                 const EnumConstant *ec =
                     enum_registry_find_constant(&p->tu->enums, v->text);
@@ -1631,8 +1635,26 @@ static Stmt parse_stmt(Parser *p) {
         Stmt *init_ptr = NULL;
         if (peek(p)->kind != TK_SEMICOLON) {
             Stmt is = parse_stmt(p);   /* consumes trailing `;` */
-            init_ptr = stmt_alloc();
-            *init_ptr = is;
+            /* A multi-declarator init (`for (unsigned _w = v, over; ...)`)
+             * parks the trailing declarators in p->prepend.  They must share
+             * the for-loop's scope and be visible in cond/step/body, so fold
+             * them into the init as a block (sema checks the block's stmts
+             * directly in the for scope — no extra nesting). */
+            if (p->prepend.len > 0) {
+                Stmt blk;
+                blk.kind = ST_BLOCK;
+                blk.loc = is.loc;
+                stmt_array_init(&blk.u.block);
+                stmt_array_push(&blk.u.block, is);
+                for (size_t pi = 0; pi < p->prepend.len; pi++)
+                    stmt_array_push(&blk.u.block, p->prepend.data[pi]);
+                p->prepend.len = 0;
+                init_ptr = stmt_alloc();
+                *init_ptr = blk;
+            } else {
+                init_ptr = stmt_alloc();
+                *init_ptr = is;
+            }
         } else {
             advance(p);  /* consume `;` */
         }

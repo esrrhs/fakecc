@@ -733,6 +733,12 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             res = type_clone(tt);
         } else if (et.kind == TY_PTR && t_is_null_const) {
             res = type_clone(et);
+        } else if (tt.kind == TY_STRUCT && et.kind == TY_STRUCT
+                   && strcmp(tt.tag, et.tag) == 0) {
+            /* Both branches are the same struct type — C99 permits returning
+             * a struct by value from a ternary (e.g. `cond ? a : b` where
+             * `a`, `b` are struct values, which here are pointers to bytes). */
+            res = type_clone(tt);
         } else {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "ternary branches must both be arithmetic, both be pointer, "
@@ -810,13 +816,27 @@ static void check_stmt_list(StmtArray *body, SymTable *st,
 
 /* Is `e` a compile-time constant suitable for initializing a global?  Integer
  * literals and nested initializer lists of constants qualify. */
-static int is_const_init(const Expr *e) {
+static int is_const_init(const Expr *e, const SymTable *globals) {
     if (!e) return 1;
     if (e->kind == EX_INT_LIT) return 1;
+    if (e->kind == EX_FLOAT_LIT) return 1;
+    if (e->kind == EX_STR) return 1;
+    if (e->kind == EX_CAST)
+        return is_const_init(e->u.cast.operand, globals);
+    /* A constant integer expression: `(1u << 14) - 1u`, `-1`, etc. */
+    long long _fold_tmp;
+    if (fold_const_int(e, &_fold_tmp)) return 1;
     if (e->kind == EX_INIT_LIST) {
         for (int i = 0; i < e->u.init_list.num_elements; i++)
-            if (!is_const_init(e->u.init_list.elements[i])) return 0;
+            if (!is_const_init(e->u.init_list.elements[i], globals)) return 0;
         return 1;
+    }
+    /* A reference to a previously-defined const global: `const int x = 5; int y = x;`
+     * or `.regs = ALLOCATABLE_REGS`.  Accept only when the name resolves to a
+     * const-qualified symbol (so a mutable global is still rejected). */
+    if (e->kind == EX_VAR && globals) {
+        const Sym *s = symtable_find(globals, e->u.var.name);
+        if (s && s->type.is_const) return 1;
     }
     return 0;
 }
@@ -989,12 +1009,14 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
         if (s->u.decl.type.kind == TY_VOID)
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "cannot declare variable of type void");
-        /* `extern` is a file-scope-only declaration; a local `extern` has no
-         * storage to bind to in this single-TU model.  check_stmt is only
-         * reached for function-locals, so any `extern` here is an error. */
-        if (s->u.decl.storage_class == 2)
-            die_at(s->loc.file, s->loc.line, s->loc.col,
-                   "'extern' is not allowed at block scope");
+        /* Block-scope `extern` (e.g. `extern void foo();`) is a re-declaration
+         * that refers to a file-scope symbol.  It carries no storage of its own,
+         * so register the name in the scope (a subsequent use resolves through
+         * it) and skip init/storage processing. */
+        if (s->u.decl.storage_class == 2) {
+            symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
+            break;
+        }
         /* Infer array length from an empty `[]` declarator when initialized by
          * a string literal: `char s[] = "hi"` → length strlen+1.  (Array length
          * from an init list is inferred later by normalize_init_list.) */
@@ -1108,7 +1130,17 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
         /* for-loop introduces its own scope for the init decl (if any). */
         size_t mark = symtable_enter_scope(st);
         if (s->u.for_s.init) {
-            check_stmt(s->u.for_s.init, st, ft, mark, has_return);
+            if (s->u.for_s.init->kind == ST_BLOCK) {
+                /* Multi-declarator init (`for (T a, b; ...)`) is wrapped in a
+                 * block by the parser.  Check its stmts directly in the for
+                 * scope so the declarations are visible in cond/step/body
+                 * (check_stmt_list would add a nested scope, hiding them). */
+                StmtArray *blk = &s->u.for_s.init->u.block;
+                for (size_t i = 0; i < blk->len; i++)
+                    check_stmt(&blk->data[i], st, ft, mark, has_return);
+            } else {
+                check_stmt(s->u.for_s.init, st, ft, mark, has_return);
+            }
         }
         if (s->u.for_s.cond) {
             discard = check_expr(s->u.for_s.cond, st, ft); type_free(&discard);
@@ -1218,7 +1250,7 @@ void sema_check(const TranslationUnit *tu_const, int require_main) {
             if (s->u.decl.init->kind == EX_INIT_LIST)
                 check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
             /* A global's initializer must be a compile-time constant. */
-            if (!is_const_init(s->u.decl.init))
+            if (!is_const_init(s->u.decl.init, &globals))
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "global initializer must be a constant");
             Type dt = check_expr(s->u.decl.init, &globals, &ft);
@@ -1231,11 +1263,6 @@ void sema_check(const TranslationUnit *tu_const, int require_main) {
 
         /* `extern` declarations have no body to type-check. */
         if (fn->is_extern) continue;
-
-        if (strcmp(fn->name, "main") == 0 && fn->params.len != 0) {
-            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                   "'main' must take no parameters");
-        }
 
         SymTable st;
         symtable_init(&st);
