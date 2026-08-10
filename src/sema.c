@@ -1319,7 +1319,8 @@ void sema_check(const TranslationUnit *tu_const, int require_main) {
          * have a return statement. */
         if (!has_return && fn->ret_type.kind != TY_VOID) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                   "function '%s' must have a return statement", fn->name);
+                   "function '%s' must have a return statement",
+                   fn->name ? fn->name : "(nullptr)");
         }
     }
 

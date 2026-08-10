@@ -114,9 +114,11 @@ void lex(const char *source, const char *filename, TokenArray *out) {
 
     /* check if we are at start of a line (for preprocessor detection) */
     int line_start = 1;
+    char c;
 
+lex_loop_head:
     while (source[pos] != '\0') {
-        char c = source[pos];
+        c = source[pos];
 
         /* newline */
         if (c == '\n') {
@@ -124,14 +126,14 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             line++;
             col = 1;
             line_start = 1;
-            continue;
+            goto lex_loop_head;
         }
 
         /* other whitespace */
         if (c == ' ' || c == '\t' || c == '\r') {
             pos++;
             col++;
-            continue;
+            goto lex_loop_head;
         }
 
         /* line comment */
@@ -142,7 +144,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
                 pos++;
                 col++;
             }
-            continue;
+            goto lex_loop_head;
         }
 
         /* block comment */
@@ -164,7 +166,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
                     col++;
                 }
             }
-            continue;
+            goto lex_loop_head;
         }
 
         /* preprocessor directive — reject explicitly */
@@ -238,7 +240,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.line = start_line;
             t.loc.col = start_col;
             token_array_push(out, t);
-            continue;
+            goto lex_loop_head;
         }
 
         /* string literal */
@@ -275,7 +277,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.line = start_line;
             t.loc.col = start_col;
             token_array_push(out, t);
-            continue;
+            goto lex_loop_head;
         }
 
         /* numeric literal — integer or floating point.
@@ -350,7 +352,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.line = start_line;
             t.loc.col = start_col;
             token_array_push(out, t);
-            continue;
+            goto lex_loop_head;
         }
 
         /* A leading `.` followed by a digit is a floating literal: .5, .123 */
@@ -380,7 +382,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.line = start_line;
             t.loc.col = start_col;
             token_array_push(out, t);
-            continue;
+            goto lex_loop_head;
         }
 
         /* identifier or keyword */
@@ -402,7 +404,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.line = start_line;
             t.loc.col = start_col;
             token_array_push(out, t);
-            continue;
+            goto lex_loop_head;
         }
 
         /* two-char operators & comparisons */
@@ -413,7 +415,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '+' && source[pos + 1] == '+') {
             Token t;
@@ -422,7 +424,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '-' && source[pos + 1] == '-') {
             Token t;
@@ -431,7 +433,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '-' && source[pos + 1] == '>') {
             Token t;
@@ -440,7 +442,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '!' && source[pos + 1] == '=') {
             Token t;
@@ -449,7 +451,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '&' && source[pos + 1] == '&') {
             Token t;
@@ -458,7 +460,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '|' && source[pos + 1] == '|') {
             Token t;
@@ -467,7 +469,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '+' && source[pos + 1] == '=') {
             Token t;
@@ -476,7 +478,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '-' && source[pos + 1] == '=') {
             Token t;
@@ -485,7 +487,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '*' && source[pos + 1] == '=') {
             Token t;
@@ -494,7 +496,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '/' && source[pos + 1] == '=') {
             Token t;
@@ -503,7 +505,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '%' && source[pos + 1] == '=') {
             Token t;
@@ -512,7 +514,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '&' && source[pos + 1] == '=') {
             Token t;
@@ -521,7 +523,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '|' && source[pos + 1] == '=') {
             Token t;
@@ -530,7 +532,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '^' && source[pos + 1] == '=') {
             Token t;
@@ -539,7 +541,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '<' && source[pos + 1] == '<' && source[pos + 2] == '=') {
             Token t;
@@ -548,7 +550,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 3; col += 3;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '>' && source[pos + 1] == '>' && source[pos + 2] == '=') {
             Token t;
@@ -557,7 +559,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 3; col += 3;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '<' && source[pos + 1] == '<') {
             Token t;
@@ -566,7 +568,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '>' && source[pos + 1] == '>') {
             Token t;
@@ -575,7 +577,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             t.loc.file = filename; t.loc.line = line; t.loc.col = col;
             token_array_push(out, t);
             pos += 2; col += 2;
-            continue;
+            goto lex_loop_head;
         }
         if (c == '<') {
             Token t;
@@ -590,7 +592,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
                 pos++; col++;
             }
             token_array_push(out, t);
-            continue;
+            goto lex_loop_head;
         }
         if (c == '>') {
             Token t;
@@ -605,7 +607,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
                 pos++; col++;
             }
             token_array_push(out, t);
-            continue;
+            goto lex_loop_head;
         }
 
         /* punctuation */
@@ -654,7 +656,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
                     t.loc.col = col;
                     token_array_push(out, t);
                     pos += 3; col += 3;
-                    continue;
+                    goto lex_loop_head;
                 }
                 t.kind = TK_DOT;
                 break;
@@ -682,7 +684,7 @@ void lex(const char *source, const char *filename, TokenArray *out) {
             token_array_push(out, t);
             pos++;
             col++;
-            continue;
+            goto lex_loop_head;
         }
         default:
             break;

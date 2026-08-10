@@ -1900,9 +1900,18 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
     case ST_BREAK:
         emit_br(fn, g_loops[g_loop_depth - 1].break_label, s->loc);
         break;
-    case ST_CONTINUE:
-        emit_br(fn, g_loops[g_loop_depth - 1].cont_label, s->loc);
+    case ST_CONTINUE: {
+        int cont = g_loops[g_loop_depth - 1].cont_label;
+        /* Emit BR to the cont_label through an intermediate label so that
+         * continues follow the same path as the initial loop entry.  This
+         * works around a codegen issue that manifests in large functions
+         * when many continues jump directly to the loop header. */
+        int thunk = new_label(fn);
+        emit_br(fn, thunk, s->loc);
+        emit_label(fn, thunk, s->loc);
+        emit_br(fn, cont, s->loc);
         break;
+    }
     case ST_BLOCK: {
         size_t mark = st->len;
         for (size_t i = 0; i < s->u.block.len; i++) {
