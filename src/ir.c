@@ -749,8 +749,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return v;
         }
         int64_t bits = 0;
-        if (w == 4) { float f = (float)strtod(e->u.float_text, NULL); *(float*)&bits = f; }
-        else { double d = strtod(e->u.float_text, NULL); *(double*)&bits = d; }
+        if (w == 4) { float f = (float)strtod(e->u.float_text, NULL); memcpy(&bits, &f, sizeof(f)); }
+        else { double d = strtod(e->u.float_text, NULL); memcpy(&bits, &d, sizeof(d)); }
         return emit_float_const(fn, w, bits, e->loc);
     }
     case EX_STR: {

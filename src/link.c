@@ -311,7 +311,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     Buffer dynstr, dynsym, hash, rela_plt, rela_dyn, dynamic;
     buffer_init(&dynstr); buffer_init(&dynsym); buffer_init(&hash);
     buffer_init(&rela_plt); buffer_init(&rela_dyn); buffer_init(&dynamic);
-    size_t interp_len = sizeof(INTERP_PATH);
+    size_t interp_len = (num_ext > 0 || num_data_ext > 0) ? sizeof(INTERP_PATH) : 0;
 
     /* External symbols that need dynsym entries: function externals (which get
      * PLT stubs) followed by data externals (which get GOT data slots).  Both

@@ -6,7 +6,7 @@
 /* Optimization pipeline (per function):                                */
 /*   opt_mem2reg  →  scalar_cleanup  →  reg_alloc                       */
 /*                                                                      */
-/* reg_alloc uses CFG-aware liveness that is correct across loop back    */
+/* regalloc uses CFG-aware liveness that is correct across loop back    */
 /* edges; all functions — straight-line or with control flow — go       */
 /* through register allocation. */
 
