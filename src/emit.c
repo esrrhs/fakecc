@@ -230,21 +230,47 @@ void emit_obj(const EmitModule *m, const char *path) {
     uint32_t sym_bss = (uint32_t)(symtab.len / ELF64_SYM_SIZE);
     buf_pad(&symtab, ELF64_SYM_SIZE);
 
-    /* defined + undefined symbols (already in m->syms[]) */
+    /* Emit defined + undefined symbols in ELF-required order: all LOCAL
+     * symbols first, then all GLOBAL/WEAK symbols.  This groups the
+     * .symtab correctly so sh_info (index of first non-local) is valid.
+     * We also remap old m->syms[] indices → new .symtab indices so
+     * relocation entries (which reference symbols by index) stay correct. */
+    int *sym_remap = malloc(m->num_syms * sizeof(int));
+    if (!sym_remap) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    for (size_t i = 0; i < m->num_syms; i++) sym_remap[i] = -1;
+
+    /* Pass 1: LOCAL symbols */
     for (size_t i = 0; i < m->num_syms; i++) {
         const EmitSymbol *s = &m->syms[i];
+        if (s->binding != STB_LOCAL) continue;
+        sym_remap[i] = (int)(symtab.len / ELF64_SYM_SIZE);
         uint32_t name_off = (uint32_t)strtab.len;
-        if (s->name) {
-            buf_bytes(&strtab, s->name, strlen(s->name) + 1);
-        } else {
-            buf_u8(&strtab, 0);
-        }
-        buf_u32(&symtab, name_off);                 /* st_name */
-        buf_u8(&symtab, (s->binding << 4) | (s->type & 0xf)); /* st_info */
-        buf_u8(&symtab, 0);                          /* st_other */
-        buf_u16(&symtab, s->shndx);                  /* st_shndx */
-        buf_u64(&symtab, s->value);                  /* st_value */
-        buf_u64(&symtab, s->size);                   /* st_size */
+        if (s->name) buf_bytes(&strtab, s->name, strlen(s->name) + 1);
+        else buf_u8(&strtab, 0);
+        buf_u32(&symtab, name_off);
+        buf_u8(&symtab, (s->binding << 4) | (s->type & 0xf));
+        buf_u8(&symtab, 0);
+        buf_u16(&symtab, s->shndx);
+        buf_u64(&symtab, s->value);
+        buf_u64(&symtab, s->size);
+    }
+    /* Remember the first non-local index for sh_info. */
+    unsigned first_global = (unsigned)(symtab.len / ELF64_SYM_SIZE);
+
+    /* Pass 2: GLOBAL / WEAK symbols */
+    for (size_t i = 0; i < m->num_syms; i++) {
+        const EmitSymbol *s = &m->syms[i];
+        if (s->binding == STB_LOCAL) continue;
+        sym_remap[i] = (int)(symtab.len / ELF64_SYM_SIZE);
+        uint32_t name_off = (uint32_t)strtab.len;
+        if (s->name) buf_bytes(&strtab, s->name, strlen(s->name) + 1);
+        else buf_u8(&strtab, 0);
+        buf_u32(&symtab, name_off);
+        buf_u8(&symtab, (s->binding << 4) | (s->type & 0xf));
+        buf_u8(&symtab, 0);
+        buf_u16(&symtab, s->shndx);
+        buf_u64(&symtab, s->value);
+        buf_u64(&symtab, s->size);
     }
     /* Fill in the section symbols' st_info now that the table exists. */
     uint8_t sec_info = (STB_LOCAL << 4) | STT_SECTION;
@@ -254,16 +280,20 @@ void emit_obj(const EmitModule *m, const char *path) {
     memcpy(symtab.data + sym_bss * ELF64_SYM_SIZE + 4, &sec_info, 1);
 
     /* --- relocation table (.rela.text) --- */
-    /* emit_obj prepends section symbols (NULL + text/rodata/data/bss = 5
-     * entries) before the codegen-supplied symbols, so relocation symbol
-     * indices must be shifted by SECSYM_COUNT to remain correct. */
-    size_t secsym_count = 5; /* NULL + 4 section symbols */
+    /* Relocations reference symbols by their old m->syms[] index.
+     * sym_remap[] maps old index → new .symtab index (which already
+     * includes the 5 section symbols at positions 0-4), so we use
+     * the remapped value directly. */
     Buffer rela;
     buffer_init(&rela);
     for (size_t i = 0; i < m->num_relocs; i++) {
         const EmitReloc *r = &m->relocs[i];
+        int old_sym = r->sym;
+        int new_sym = (old_sym >= 0 && old_sym < (int)m->num_syms)
+                      ? sym_remap[old_sym] : old_sym;
+        if (new_sym < 0) new_sym = old_sym; /* safety: unmapped stays as-is */
         buf_u64(&rela, r->offset);                        /* r_offset */
-        buf_u64(&rela, ((uint64_t)(r->sym + secsym_count) << 32) | r->type);
+        buf_u64(&rela, ((uint64_t)new_sym << 32) | r->type);
         buf_u64(&rela, (uint64_t)(int64_t)r->addend);     /* r_addend */
     }
 
@@ -327,9 +357,7 @@ void emit_obj(const EmitModule *m, const char *path) {
      * 5=.symtab, 6=.strtab, 7=.shstrtab, 8=.rela.text. */
     unsigned symtab_idx = 5;
     unsigned strtab_idx = 6;
-    /* Symbol table: [0]=NULL, [1..4]=section syms (LOCAL), [5..]=defined.
-     * sh_info = index of first non-local = 5. */
-    unsigned first_global = 5;
+    /* Symbol table: sh_info = first_global (computed during symtab emission) */
     write_shdr(&elf, shname_symtab, SHT_SYMTAB, 0,
                0, hdr_size + off_symtab, symtab.len, strtab_idx, first_global, 8,
                ELF64_SYM_SIZE);
@@ -351,6 +379,7 @@ void emit_obj(const EmitModule *m, const char *path) {
     fwrite(elf.data, 1, elf.len, f);
     fclose(f);
 
+    free(sym_remap);
     buffer_free(&shstrtab);
     buffer_free(&strtab);
     buffer_free(&symtab);

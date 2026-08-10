@@ -584,9 +584,23 @@ static const int SYSV_ARG_REGS[6] = {
 
 /* ================================================================== */
 /* Stack-frame helpers                                                 */
+/*                                                                      */
+/* curr_cs_count is set once per function in codegen() to the number of */
+/* callee-saved GP registers that are pushed in the prologue (0-3:      */
+/* RBX, R12, R13).  Spill offsets must account for this save area       */
+/* because it sits between rbp and the spill region:                    */
+/*                                                                      */
+/*   rbp     → saved rbp                                                */
+/*   rbp-8   → saved RBX (if used)                                      */
+/*   rbp-16  → saved R12 (if used)                                      */
+/*   rbp-24  → saved R13 (if used)                                      */
+/*   rbp-32  → spill slot 0 (prev was rbp-8 → BUG!)                     */
+/*   ...                                                                 */
 /* ================================================================== */
 
-static int spill_offset(int slot) { return -8 * (slot + 1); }
+static int curr_cs_count = 0;
+
+static int spill_offset(int slot) { return -8 * (slot + 1 + curr_cs_count); }
 
 /* mov [rbp+off], %reg */
 static void emit_store_spill(Buffer *b, int reg, int off) {
@@ -990,9 +1004,11 @@ static void spill_if_needed(Buffer *b, int v, int src_reg, const RAResult *ra) {
 
 /* XMM spill area sits further from rbp than the GP spill area, so XMM
  * spill slots don't collide with GP ones.  gp_spill_area is the total
- * byte-size of the GP spill region (ra_gp->stack_size). */
+ * byte-size of the GP spill region (ra_gp->stack_size).
+ * curr_cs_count accounts for the callee-saved register save area above
+ * the spill region (see spill_offset above). */
 static int spill_offset_xmm(int slot, int gp_spill_area) {
-    return -(gp_spill_area + 8 * (slot + 1));
+    return -(gp_spill_area + 8 * (slot + 1 + curr_cs_count));
 }
 
 /* Ensure float value `v` is in `dst_xmm`.  Emits movsd or load as needed. */
@@ -1314,11 +1330,14 @@ void codegen(const IRModule *ir, EmitModule *out) {
         /* ---- Prologue ---- */
         int cs_used[3];
         collect_callee_saved(ra, cs_used);
+        int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
+        curr_cs_count = cs_count;
+        int cs_save_area = 8 * cs_count;  /* bytes occupied by callee-saved reg pushes */
 
         /* Compute pinned-alloca frame area: byte-offset from rbp for each
          * IR_ALLOCA with alloca_bytes > 0.  Offsets are placed above the
          * spill areas (further from rbp, i.e. more negative).  The frame
-         * layout below rbp is: [GP spills][XMM spills][pinned allocas]. */
+         * layout below rbp is: [cs saves][GP spills][XMM spills][pinned allocas]. */
         int *alloca_off = xmalloc(fn->next_value_id * sizeof(int));
         for (int i = 0; i < fn->next_value_id; i++) alloca_off[i] = 0;
         int gp_spill_area = ra ? ra->stack_size : 0;
@@ -1330,7 +1349,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 int bytes = inst->alloca_bytes;
                 if (bytes % 8 != 0) bytes += 8 - (bytes % 8);
                 pinned_area += bytes;
-                alloca_off[inst->dst] = -(gp_spill_area + xmm_spill_area + pinned_area);
+                alloca_off[inst->dst] = -(cs_save_area + gp_spill_area + xmm_spill_area + pinned_area);
             }
         }
 
@@ -1353,7 +1372,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
             } else if (inst->op != IR_PARAM) {
                 /* ld operation result or constant: fresh 16-byte slot. */
                 ld_area += 16;
-                ld_off[inst->dst] = -(gp_spill_area + xmm_spill_area + pinned_area + ld_area);
+                ld_off[inst->dst] = -(cs_save_area + gp_spill_area + xmm_spill_area + pinned_area + ld_area);
             }
         }
 
@@ -1374,7 +1393,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
          * After "push rbp" rsp % 16 == 0.  Each callee-saved push adds 8;
          * if odd count, we need one extra bump so that rsp (the save-area base)
          * ends up 16-aligned for the movaps stores. */
-        int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
+        curr_cs_count = cs_count;
         if (((cs_count) & 1) != 0) stack_size += 8;
 
         emit_byte(&out->text, 0x55);              /* pushq %rbp */

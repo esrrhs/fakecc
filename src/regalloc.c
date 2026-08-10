@@ -433,7 +433,14 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                         ig_add_edge(g, inst->dst, (int)other);
                     }
                 }
-                bs_clr(&live, inst->dst);
+                /* Don't kill COPY destinations from the live set.
+                 * COPYs are lowered φ-nodes that are simultaneously
+                 * live at block exit.  Removing each COPY dst from
+                 * `live` during the backward walk would prevent
+                 * sibling COPY destinations from interfering — they
+                 * would get the same register and clobber each other. */
+                if (inst->op != IR_COPY)
+                    bs_clr(&live, inst->dst);
             }
 
             /* Uses become live *before* this instruction — but only
@@ -629,12 +636,25 @@ static void greedy_color(const InterfGraph *g, const int *order,
              * in forbid_mask[v] (a callee-saved reg for a value live across a
              * call).  Evicting a neighbor only to hand `v` a forbidden
              * caller-saved reg would clobber `v` at the next call, so that
-             * victim is useless; fall through to spilling `v` instead. */
+             * victim is useless; fall through to spilling `v` instead.
+             *
+             * IMPORTANT: we must ensure the victim's color is NOT also held
+             * by another neighbor — otherwise evicting one neighbor still
+             * leaves v in conflict with the other.  Only consider colors
+             * that appear exactly once among colored, non-forbidden neighbors. */
+            int color_count[32] = {0};
+            for (size_t j = 0; j < g->nodes[v].degree; j++) {
+                int w = g->nodes[v].neighbors[j];
+                if (colors[w] >= 0 && colors[w] < k &&
+                    !(forbid_mask[v] & (1 << colors[w])))
+                    color_count[colors[w]]++;
+            }
             int victim = -1, victim_cost = 0x7fffffff;
             for (size_t j = 0; j < g->nodes[v].degree; j++) {
                 int w = g->nodes[v].neighbors[j];
                 if (colors[w] < 0 || colors[w] >= k) continue;
                 if (forbid_mask[v] & (1 << colors[w])) continue; /* v can't use it */
+                if (color_count[colors[w]] != 1) continue; /* shared — unsafe */
                 if (spill_cost[w] < victim_cost) {
                     victim = w;
                     victim_cost = spill_cost[w];
