@@ -106,7 +106,7 @@ char *xstrdup(const char *s) {
 void die_at(const char *file, int line, int col, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "%s:%d:%d: error: ", file, line, col);
+    fprintf(stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, "\n");
     va_end(ap);

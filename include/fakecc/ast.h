@@ -335,6 +335,10 @@ typedef struct {
     int size;             /* total size in bytes (already aligned) */
     int align;            /* max member alignment seen so far */
     SourceLoc loc;
+    /* Canonical TY_STRUCT Type for this struct's tag, if one has been created
+     * via type_make_struct().  struct_def_finish() updates its width so that
+     * clones made while the struct was still incomplete see the final size. */
+    Type *canonical_type;
     /* Bitfield layout state (valid while members are being added).  A run of
      * adjacent bitfields of the same `type` packs into one "unit"; the unit
      * size is the smallest of {1,2,4,8} bytes holding all its bits.  A
@@ -362,6 +366,7 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 /* Append a member to a struct definition; computes offset (naturally aligned).
  * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield `x : N;`. */
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
+void struct_def_finish(StructDef *sd);
 void struct_def_fixup_self_types(StructDef *sd);
 
 typedef struct {

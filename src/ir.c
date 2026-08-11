@@ -15,6 +15,12 @@ int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 const TranslationUnit *g_ir_tu = NULL;      /* set by ir_generate */
 
+/* Return the live struct registry during lowering, NULL outside it.
+ * type_size() uses this to refresh stale cached struct widths. */
+const StructRegistry *get_ir_structs(void) {
+    return g_ir_tu ? &g_ir_tu->structs : NULL;
+}
+
 /* Loop-stack: (continue_label, break_label).  Pushed on entry to every
  * loop-lowering block; popped on exit.  ST_BREAK / ST_CONTINUE consult the
  * top entry.  Depth guarded by sema — this stack never underflows. */

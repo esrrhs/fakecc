@@ -184,4 +184,8 @@ void ir_module_free(IRModule *m);
 #include "fakecc/ast.h"
 void ir_generate(const TranslationUnit *tu, IRModule *ir);
 
+/* Return the live struct registry during lowering (NULL outside it).
+ * type_size() uses this to refresh stale cached struct widths. */
+const StructRegistry *get_ir_structs(void);
+
 #endif /* FAKECC_IR_H */

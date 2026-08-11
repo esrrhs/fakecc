@@ -87,6 +87,9 @@ void type_free(Type *t) {
     }
 }
 
+/* Declared in ir.c; returns live struct registry during lowering, NULL otherwise. */
+extern const StructRegistry *get_ir_structs(void);
+
 int type_size(Type t) {
     switch (t.kind) {
     case TY_VOID:   return 0;
@@ -94,7 +97,17 @@ int type_size(Type t) {
     case TY_FLOAT:  return t.width;  /* 4 for float, 8 for double */
     case TY_PTR:    return 8;
     case TY_ARRAY:  return type_size(*t.elem_type) * t.length;
-    case TY_STRUCT: return t.width;  /* precomputed at struct-def time */
+    case TY_STRUCT: {
+        /* The cached width can be stale for self-referential structs (e.g.
+         * Stmt): they are cloned while still being parsed, freezing width==0
+         * before struct_def_finish() sets the real size.  At copy/lowering
+         * time the registry holds the final size — use it. */
+        if (t.tag) {
+            const StructDef *sd = struct_registry_find_c(get_ir_structs(), t.tag);
+            if (sd && sd->size > 0) return sd->size;
+        }
+        return t.width;
+    }
     case TY_FUNC:   return 0;        /* sizeof a function is undefined */
     }
     return 0;
@@ -318,11 +331,12 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
             /* Fits in the current open unit. */
             off = sd->bf_unit_offset;
         } else {
-            /* Close any open unit and start a new one. */
-            if (sd->bf_unit_used > 0) {
+            /* Close any open unit and start a new one.  Track the raw byte
+             * end of the closed unit; defer alignment padding to
+             * struct_def_finish() so a following member can still pack into
+             * any trailing gap. */
+            if (sd->bf_unit_used > 0)
                 sd->size = sd->bf_unit_offset + sd->bf_unit_type;
-                sd->size = align_up(sd->size, sd->align);
-            }
             sd->bf_unit_type = sz;
             sd->bf_unit_used = 0;
             sd->bf_unit_offset = align_up(sd->size, a);
@@ -340,10 +354,11 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         sd->num_members++;
         return;
     } else {
-        /* Normal (non-bitfield) member: close any open bitfield unit first. */
+        /* Normal (non-bitfield) member: close any open bitfield unit first.
+         * Track the raw byte end of the closed unit; alignment padding is
+         * deferred to struct_def_finish() so trailing members can pack. */
         if (sd->bf_unit_used > 0) {
             sd->size = sd->bf_unit_offset + sd->bf_unit_type;
-            sd->size = align_up(sd->size, sd->align);
             sd->bf_unit_type = 0; sd->bf_unit_used = 0;
         }
         off = align_up(sd->size, a);
@@ -355,14 +370,25 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
     sd->members[sd->num_members].bit_offset = 0;
     sd->num_members++;
     if (sd->is_union) {
-        /* Size grows to the largest member (aligned at the end). */
+        /* Size grows to the largest member.  Final alignment is applied once
+         * in struct_def_finish(), not here — padding after every member would
+         * prevent later members from packing into the trailing gap. */
         if (sz > sd->size) sd->size = sz;
-        sd->size = align_up(sd->size, sd->align);
     } else {
+        /* Track the raw byte end of the member.  Alignment padding to the
+         * struct's natural boundary is deferred to struct_def_finish() so
+         * that a following member can still pack into any trailing gap
+         * (e.g. `struct { void *p; int a; int b; }` packs a,b at 8,12). */
         sd->size = off + sz;
-        /* pad struct to its natural alignment boundary at end */
-        sd->size = align_up(sd->size, sd->align);
     }
+}
+
+/* Finalize a struct/union definition: round the total size up to the struct's
+ * natural alignment (max member alignment).  Call once after the last member
+ * is pushed.  Applying this per-member would prematurely pad the struct and
+ * break trailing-member packing. */
+void struct_def_finish(StructDef *sd) {
+    sd->size = align_up(sd->size, sd->align);
 }
 
 /* ------------------------------------------------------------------ */
@@ -925,6 +951,7 @@ void tu_init(TranslationUnit *tu) {
     struct_def_push_member(va, "fp_offset", type_make_int(4, 1), 0);
     struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()), 0);
     struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()), 0);
+    struct_def_finish(va);
     Type va_type = type_make_struct("__va_list_tag", va->size);
     typedef_registry_add(&tu->typedefs, "va_list", va_type);
 }

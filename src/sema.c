@@ -1018,7 +1018,8 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
          * pointer, TY_PTR). */
         if (s->u.decl.type.kind == TY_VOID)
             die_at(s->loc.file, s->loc.line, s->loc.col,
-                   "cannot declare variable of type void");
+                   "cannot declare variable '%s' of type void",
+                   s->u.decl.name ? s->u.decl.name : "(null)");
         /* Block-scope `extern` (e.g. `extern void foo();`) is a re-declaration
          * that refers to a file-scope symbol.  It carries no storage of its own,
          * so register the name in the scope (a subsequent use resolves through
@@ -1284,12 +1285,14 @@ void sema_check(const TranslationUnit *tu_const, int require_main) {
 
         size_t mark = symtable_enter_scope(&st);
         for (size_t j = 0; j < fn->params.len; j++) {
-            if (symtable_has_since(&st, fn->params.data[j].name, mark)) {
-                die_at(fn->params.data[j].loc.file,
-                       fn->params.data[j].loc.line,
-                       fn->params.data[j].loc.col,
-                       "duplicate parameter name '%s'",
-                       fn->params.data[j].name);
+            if (fn->params.data[j].name && fn->params.data[j].name[0] != '\0') {
+                if (symtable_has_since(&st, fn->params.data[j].name, mark)) {
+                    die_at(fn->params.data[j].loc.file,
+                           fn->params.data[j].loc.line,
+                           fn->params.data[j].loc.col,
+                           "duplicate parameter name '%s'",
+                           fn->params.data[j].name);
+                }
             }
             /* Normalize unsized array parameters (`int a[]`) to pointers,
              * matching standard C parameter adjustment.  `own_ptr` is true
@@ -1303,8 +1306,10 @@ void sema_check(const TranslationUnit *tu_const, int require_main) {
                 pty = type_make_ptr(*pty.elem_type);
                 own_ptr = 1;
             }
-            symtable_push(&st, fn->params.data[j].name,
-                          pty, fn->params.data[j].loc);
+            if (fn->params.data[j].name && fn->params.data[j].name[0] != '\0') {
+                symtable_push(&st, fn->params.data[j].name,
+                              pty, fn->params.data[j].loc);
+            }
             if (own_ptr) type_free(&pty);
         }
 
