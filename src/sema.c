@@ -579,11 +579,12 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_STR: {
-        /* Type: char[len+1] — but immediately decayed to `char*` in the
-         * value context. Since decay happens on read at operand sites, we
-         * store the pointer type here directly. */
+        /* Type: char[len+1] — array of char with length = len+1.
+         * The array-to-pointer decay happens at expression use sites
+         * (BINOP, UNARY, DEREF, INDEX, ASSIGN, CALL), preserving the
+         * array type for sizeof("literal") which must return N, not 8. */
         Type ct = type_make_int(1, 0);   /* char */
-        set_type(e, type_make_ptr(ct));
+        set_type(e, type_make_array(ct, e->u.str.len + 1));
         type_free(&ct);
         return type_clone(e->type);
     }
@@ -716,6 +717,15 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         type_free(&ct);
         Type tt = check_expr(e->u.tern.then, st, ft);
         Type et = check_expr(e->u.tern.else_, st, ft);
+        /* Array-to-pointer decay for string literals (now typed as char[N]). */
+        if (tt.kind == TY_ARRAY) {
+            Type d = type_decay(tt); type_free(&tt); tt = d;
+            set_type(e->u.tern.then, type_clone(tt));
+        }
+        if (et.kind == TY_ARRAY) {
+            Type d = type_decay(et); type_free(&et); et = d;
+            set_type(e->u.tern.else_, type_clone(et));
+        }
         int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
                                && e->u.tern.then->kind == EX_INT_LIT
                                && e->u.tern.then->u.int_val == 0);

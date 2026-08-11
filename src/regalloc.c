@@ -396,24 +396,19 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
     compute_use_def(fn, cfg, use_b, def_b);
     compute_live_in_out(cfg, use_b, def_b, in_b, out_b);
 
-    /* Walk blocks, maintain a live-set (start = out[b]), step backward. */
     BitSet live;
     bs_init(&live, nv);
 
+    /* Pass 1: Walk instructions backwards in each block to collect initial
+     * IR_CALL forbid_mask constraints for values live across calls. */
     for (size_t bi = 0; bi < cfg->num; bi++) {
         const CFGBlock *blk = &cfg->blocks[bi];
         bs_copy(&live, &out_b[bi]);
 
-        /* Walk instructions backwards. */
         for (size_t i = blk->end; i > blk->start; i--) {
             const IRInst *inst = &fn->insts.data[i - 1];
             if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
 
-            /* Before defining dst — if this is a CALL, every value that
-             * is live AFTER the call (i.e. in `live` right now, minus dst
-             * itself, since dst is being redefined) must survive the call.
-             * A caller-saved register would be clobbered, so forbid those
-             * colors for such values. */
             if (inst->op == IR_CALL) {
                 BS_FOREACH(&live, over) {
                     if ((int)over != inst->dst &&
@@ -422,8 +417,67 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 }
             }
 
-            /* dst interferes with every currently-live value — but only
-             * values in the target class form edges in this graph. */
+            if (inst->dst >= 0 && inst->dst < nv &&
+                value_in_class(fn, inst->dst, float_class)) {
+                if (inst->op != IR_COPY)
+                    bs_clr(&live, inst->dst);
+            }
+
+            if (inst->a >= 0 && inst->a < nv &&
+                value_in_class(fn, inst->a, float_class))
+                bs_set(&live, inst->a);
+            if (inst->op != IR_CBR &&
+                inst->b >= 0 && inst->b < nv &&
+                value_in_class(fn, inst->b, float_class))
+                bs_set(&live, inst->b);
+            if (inst->op == IR_CALL) {
+                for (int k = 0; k < inst->call_nargs; k++) {
+                    IRValue av = inst->call_args[k];
+                    if (av >= 0 && av < nv &&
+                        value_in_class(fn, av, float_class))
+                        bs_set(&live, av);
+                }
+            }
+        }
+    }
+
+    /* Pass 2: Propagate forbid_mask backwards across CFG live ranges.
+     * If value `v` is live-in to block s and forbidden in block s (e.g. because
+     * it crosses a call in s or in a descendant of s), and `v` is live-out of
+     * block bi, its forbid_mask must propagate to bi.  This ensures that
+     * pre-loop definitions and loop-carried φ inputs receive the caller-saved
+     * restriction if `v` ever crosses a call inside the loop. */
+    {
+        int changed = 1;
+        while (changed) {
+            changed = 0;
+            for (size_t bi = 0; bi < cfg->num; bi++) {
+                const CFGBlock *blk = &cfg->blocks[bi];
+                BS_FOREACH(&out_b[bi], v) {
+                    for (size_t si = 0; si < blk->num_succs; si++) {
+                        int s = blk->succs[si];
+                        if (bs_test(&in_b[s], (int)v)) {
+                            int new_mask = forbid_mask[v] | forbid_mask[s];
+                            if (new_mask != forbid_mask[v]) {
+                                forbid_mask[v] = new_mask;
+                                changed = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Pass 3: Build interference graph by walking instructions backwards. */
+    for (size_t bi = 0; bi < cfg->num; bi++) {
+        const CFGBlock *blk = &cfg->blocks[bi];
+        bs_copy(&live, &out_b[bi]);
+
+        for (size_t i = blk->end; i > blk->start; i--) {
+            const IRInst *inst = &fn->insts.data[i - 1];
+            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+
             if (inst->dst >= 0 && inst->dst < nv &&
                 value_in_class(fn, inst->dst, float_class)) {
                 BS_FOREACH(&live, other) {
@@ -433,18 +487,10 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                         ig_add_edge(g, inst->dst, (int)other);
                     }
                 }
-                /* Don't kill COPY destinations from the live set.
-                 * COPYs are lowered φ-nodes that are simultaneously
-                 * live at block exit.  Removing each COPY dst from
-                 * `live` during the backward walk would prevent
-                 * sibling COPY destinations from interfering — they
-                 * would get the same register and clobber each other. */
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
 
-            /* Uses become live *before* this instruction — but only
-             * track uses that belong to the target class. */
             if (inst->a >= 0 && inst->a < nv &&
                 value_in_class(fn, inst->a, float_class))
                 bs_set(&live, inst->a);
