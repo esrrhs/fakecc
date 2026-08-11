@@ -907,10 +907,16 @@ static void emit_movzx_rr(Buffer *b, int dst, int src, int src_w) {
     }
 }
 
-/* Mask (zero-extend) a register's low `width` bytes; no-op for width==8. */
-static void mask_to_width(Buffer *b, int reg, int width) {
+/* Mask (extend) a register's low `width` bytes to 64 bits.
+ * For unsigned values this is zero-extension; for signed values it is
+ * sign-extension so that subsequent 64-bit comparisons (CBR) see the
+ * correct signed value.  No-op for width==8. */
+static void mask_to_width(Buffer *b, int reg, int width, int is_unsigned) {
     if (width >= 8 || width <= 0) return;
-    emit_movzx_rr(b, reg, reg, width);
+    if (is_unsigned)
+        emit_movzx_rr(b, reg, reg, width);
+    else
+        emit_movsx_rr(b, reg, reg, width);
 }
 
 /* ================================================================== */
@@ -1682,7 +1688,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 emit_add_rr(&out->text, REG_RAX, REG_RCX);
-                mask_to_width(&out->text, REG_RAX, inst->width);
+                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -1693,7 +1699,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 emit_sub_rr(&out->text, REG_RAX, REG_RCX);
-                mask_to_width(&out->text, REG_RAX, inst->width);
+                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -1704,7 +1710,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 emit_imul_rr(&out->text, REG_RAX, REG_RCX);
-                mask_to_width(&out->text, REG_RAX, inst->width);
+                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -1727,13 +1733,13 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     emit_idiv_rcx(&out->text);
                 }
                 if (inst->op == IR_DIV) {
-                    mask_to_width(&out->text, REG_RAX, inst->width);
+                    mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
                     if (dr >= 0 && dr != REG_RAX)
                         emit_mov_rr(&out->text, dr, REG_RAX);
                     spill_if_needed(&out->text, inst->dst,
                                     dr >= 0 ? dr : REG_RAX, ra);
                 } else {
-                    mask_to_width(&out->text, REG_RDX, inst->width);
+                    mask_to_width(&out->text, REG_RDX, inst->width, inst->is_unsigned);
                     if (dr >= 0)
                         emit_mov_rr(&out->text, dr, REG_RDX);
                     spill_if_needed(&out->text, inst->dst,
@@ -1745,7 +1751,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_NEG: {
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 emit_neg_r(&out->text, REG_RAX);
-                mask_to_width(&out->text, REG_RAX, inst->width);
+                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -1755,7 +1761,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
             case IR_BNOT: {
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 emit_not_r(&out->text, REG_RAX);
-                mask_to_width(&out->text, REG_RAX, inst->width);
+                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -1773,7 +1779,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     emit_or_rr(&out->text, REG_RAX, REG_RCX);
                 else
                     emit_bitxor_rr(&out->text, REG_RAX, REG_RCX);
-                mask_to_width(&out->text, REG_RAX, inst->width);
+                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
@@ -1793,7 +1799,7 @@ void codegen(const IRModule *ir, EmitModule *out) {
                     emit_shr_rcx(&out->text, REG_RAX);
                 else
                     emit_sar_rcx(&out->text, REG_RAX);
-                mask_to_width(&out->text, REG_RAX, inst->width);
+                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
                 if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                 spill_if_needed(&out->text, inst->dst,
                                 dr >= 0 ? dr : REG_RAX, ra);
