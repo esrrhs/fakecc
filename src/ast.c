@@ -11,24 +11,39 @@
 Type type_clone(Type t) {
     Type r = t;
     if (t.kind == TY_PTR && t.pointee) {
-        r.pointee = malloc(sizeof(Type));
-        if (!r.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-        *r.pointee = type_clone(*t.pointee);
+        /* struct types are shared — deep-copying them freezes the struct's
+         * width at the time of the clone, which breaks self-referential structs
+         * where the struct is still growing.  share the pointee instead. */
+        if (t.pointee->kind == TY_STRUCT) {
+            r.pointee = t.pointee;
+        } else {
+            r.pointee = malloc(sizeof(Type));
+            if (!r.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            *r.pointee = type_clone(*t.pointee);
+        }
     } else {
         r.pointee = NULL;
     }
     if (t.kind == TY_ARRAY && t.elem_type) {
-        r.elem_type = malloc(sizeof(Type));
-        if (!r.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-        *r.elem_type = type_clone(*t.elem_type);
+        if (t.elem_type->kind == TY_STRUCT) {
+            r.elem_type = t.elem_type;
+        } else {
+            r.elem_type = malloc(sizeof(Type));
+            if (!r.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            *r.elem_type = type_clone(*t.elem_type);
+        }
     } else {
         r.elem_type = NULL;
     }
     r.tag = t.tag ? xstrdup(t.tag) : NULL;
     if (t.kind == TY_FUNC && t.func_ret) {
-        r.func_ret = malloc(sizeof(Type));
-        if (!r.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-        *r.func_ret = type_clone(*t.func_ret);
+        if (t.func_ret->kind == TY_STRUCT) {
+            r.func_ret = t.func_ret;
+        } else {
+            r.func_ret = malloc(sizeof(Type));
+            if (!r.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            *r.func_ret = type_clone(*t.func_ret);
+        }
     } else {
         r.func_ret = NULL;
     }
@@ -45,10 +60,27 @@ Type type_clone(Type t) {
 
 void type_free(Type *t) {
     if (!t) return;
-    if (t->pointee) { type_free(t->pointee); free(t->pointee); t->pointee = NULL; }
-    if (t->elem_type) { type_free(t->elem_type); free(t->elem_type); t->elem_type = NULL; }
+    /* struct types are shared (not owned by the pointer they're embedded in).
+     * only free non-struct pointees / elem_types / func_rets. */
+    if (t->pointee) {
+        if (t->pointee->kind != TY_STRUCT) {
+            type_free(t->pointee); free(t->pointee);
+        }
+        t->pointee = NULL;
+    }
+    if (t->elem_type) {
+        if (t->elem_type->kind != TY_STRUCT) {
+            type_free(t->elem_type); free(t->elem_type);
+        }
+        t->elem_type = NULL;
+    }
     if (t->tag) { free(t->tag); t->tag = NULL; }
-    if (t->func_ret) { type_free(t->func_ret); free(t->func_ret); t->func_ret = NULL; }
+    if (t->func_ret) {
+        if (t->func_ret->kind != TY_STRUCT) {
+            type_free(t->func_ret); free(t->func_ret);
+        }
+        t->func_ret = NULL;
+    }
     if (t->func_params) {
         for (int i = 0; i < t->func_nparams; i++) type_free(&t->func_params[i]);
         free(t->func_params); t->func_params = NULL;
@@ -77,6 +109,30 @@ Type type_make_ptr(Type pointee) {
     if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.pointee = type_clone(pointee);
     return t;
+}
+
+/* fixup all TY_STRUCT widths in a type tree that match the given tag.
+ * this is called after a struct definition is complete so that self-referential
+ * pointer members use the final struct size instead of a stale snapshot. */
+static void type_fixup_struct_width(Type *t, const char *tag, int final_width) {
+    if (!t || !tag) return;
+    if (t->kind == TY_STRUCT && t->tag && strcmp(t->tag, tag) == 0) {
+        t->width = final_width;
+    }
+    if (t->pointee) type_fixup_struct_width(t->pointee, tag, final_width);
+    if (t->elem_type) type_fixup_struct_width(t->elem_type, tag, final_width);
+    if (t->func_ret) type_fixup_struct_width(t->func_ret, tag, final_width);
+    if (t->func_params) {
+        for (int i = 0; i < t->func_nparams; i++)
+            type_fixup_struct_width(&t->func_params[i], tag, final_width);
+    }
+}
+
+void struct_def_fixup_self_types(StructDef *sd) {
+    if (!sd || !sd->tag) return;
+    for (int i = 0; i < sd->num_members; i++) {
+        type_fixup_struct_width(&sd->members[i].type, sd->tag, sd->size);
+    }
 }
 
 Type type_make_array(Type elem, int length) {
@@ -201,7 +257,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
     sd->tag = xstrdup(tag);
     sd->is_union = 0;
     sd->members = NULL; sd->num_members = 0; sd->cap_members = 0;
-    sd->size = 0; sd->loc = loc;
+    sd->size = 0; sd->align = 1; sd->loc = loc;
     sd->bf_unit_type = 0; sd->bf_unit_used = 0; sd->bf_unit_offset = 0;
     return sd;
 }
@@ -246,6 +302,8 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
     }
     int a = type_align(ty);
     int sz = type_size(ty);
+    /* Track the max member alignment for final struct alignment. */
+    if (a > sd->align) sd->align = a;
     int off;
     if (sd->is_union) {
         /* Union members all start at offset 0; total size is the max. */
@@ -263,7 +321,7 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
             /* Close any open unit and start a new one. */
             if (sd->bf_unit_used > 0) {
                 sd->size = sd->bf_unit_offset + sd->bf_unit_type;
-                sd->size = align_up(sd->size, 8);
+                sd->size = align_up(sd->size, sd->align);
             }
             sd->bf_unit_type = sz;
             sd->bf_unit_used = 0;
@@ -277,7 +335,6 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         /* Advance logical struct size to cover this unit if it extends past. */
         int unit_end = sd->bf_unit_offset + sz;
         if (unit_end > sd->size) sd->size = unit_end;
-        sd->size = align_up(sd->size, 8);
         sd->members[sd->num_members].name = xstrdup(name);
         sd->members[sd->num_members].type = type_clone(ty);
         sd->num_members++;
@@ -286,7 +343,7 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         /* Normal (non-bitfield) member: close any open bitfield unit first. */
         if (sd->bf_unit_used > 0) {
             sd->size = sd->bf_unit_offset + sd->bf_unit_type;
-            sd->size = align_up(sd->size, 8);
+            sd->size = align_up(sd->size, sd->align);
             sd->bf_unit_type = 0; sd->bf_unit_used = 0;
         }
         off = align_up(sd->size, a);
@@ -300,11 +357,11 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
     if (sd->is_union) {
         /* Size grows to the largest member (aligned at the end). */
         if (sz > sd->size) sd->size = sz;
-        sd->size = align_up(sd->size, 8);
+        sd->size = align_up(sd->size, sd->align);
     } else {
         sd->size = off + sz;
-        /* pad struct to 8-byte boundary at end */
-        sd->size = align_up(sd->size, 8);
+        /* pad struct to its natural alignment boundary at end */
+        sd->size = align_up(sd->size, sd->align);
     }
 }
 

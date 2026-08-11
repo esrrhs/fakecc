@@ -333,6 +333,7 @@ typedef struct {
     int num_members;
     int cap_members;
     int size;             /* total size in bytes (already aligned) */
+    int align;            /* max member alignment seen so far */
     SourceLoc loc;
     /* Bitfield layout state (valid while members are being added).  A run of
      * adjacent bitfields of the same `type` packs into one "unit"; the unit
@@ -361,6 +362,7 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 /* Append a member to a struct definition; computes offset (naturally aligned).
  * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield `x : N;`. */
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
+void struct_def_fixup_self_types(StructDef *sd);
 
 typedef struct {
     FunctionDecl *data;

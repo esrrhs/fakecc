@@ -150,6 +150,19 @@ static Type parse_specifiers(Parser *p) {
                    "expected struct tag but got '%s'", tag->text);
         }
         advance(p);
+        /* If '{' follows, this is a struct definition at use site
+         * (`struct Tag { ... }`), not just a forward reference. */
+        if (peek(p)->kind == TK_LBRACE) {
+            if (struct_registry_find(&p->tu->structs, tag->text)) {
+                die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                       "redefinition of struct '%s'", tag->text);
+            }
+            StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
+            parse_struct_body(p, sd);
+            Type t = type_make_struct(tag->text, sd->size);
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         int size = sd ? sd->size : 0;
         Type t = type_make_struct(tag->text, size);
@@ -176,6 +189,20 @@ static Type parse_specifiers(Parser *p) {
                    "expected union tag but got '%s'", tag->text);
         }
         advance(p);
+        /* If '{' follows, this is a union definition at use site
+         * (`union Tag { ... }`), not just a forward reference. */
+        if (peek(p)->kind == TK_LBRACE) {
+            if (struct_registry_find(&p->tu->structs, tag->text)) {
+                die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                       "redefinition of union '%s'", tag->text);
+            }
+            StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
+            sd->is_union = 1;
+            parse_struct_body(p, sd);
+            Type t = type_make_struct(tag->text, sd->size);
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         int size = sd ? sd->size : 0;
         Type t = type_make_struct(tag->text, size);
@@ -318,6 +345,15 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         Type base = parse_specifiers(p);
         /* Re-fetch sd: parsing `base` may have defined a nested struct. */
         sd = struct_registry_find(&p->tu->structs, tag);
+        /* parse_specifiers may have consumed an inline struct/union definition
+         * body (`struct Tag { ... }` / `union Tag { ... }`).  If the next token
+         * is ';', this is a standalone type definition, not a member declaration
+         * — consume the ';' and continue to the next member. */
+        if (peek(p)->kind == TK_SEMICOLON) {
+            advance(p);
+            type_free(&base);
+            continue;
+        }
         for (;;) {
             char *mname = NULL;
             Type mty = parse_declarator(p, type_clone(base), &mname);
@@ -356,6 +392,11 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         type_free(&base);
     }
     expect_kind(p, TK_RBRACE, "'}'");
+    /* Fix up self-referential struct types: during parsing, member types like
+     * `struct Type *` were cloned when the struct was still incomplete, so
+     * their pointee->width is stale.  Re-fetch sd and correct all widths. */
+    sd = struct_registry_find(&p->tu->structs, tag);
+    if (sd) struct_def_fixup_self_types(sd);
 }
 
 static void parse_enum_body(Parser *p, EnumDef *ed) {
