@@ -70,6 +70,9 @@ void ir_module_free(IRModule *m) {
     for (size_t i = 0; i < m->globals.len; i++) {
         free(m->globals.data[i].name);
         free(m->globals.data[i].init_bytes);
+        for (int f = 0; f < m->globals.data[i].num_fixups; f++)
+            free(m->globals.data[i].fixups[f].sym);
+        free(m->globals.data[i].fixups);
     }
     free(m->globals.data);
     m->functions.data = NULL;
@@ -97,7 +100,25 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->is_readonly = is_readonly;
     g->is_static = is_static;
     g->loc = loc;
+    g->fixups = NULL;
+    g->num_fixups = 0;
+    g->cap_fixups = 0;
     return g;
+}
+
+/* Record a pointer-slot fixup on global `g`: the slot at byte offset `offset`
+ * within g->init_bytes must be patched with the link-time address of symbol
+ * `sym` (an array/struct global decaying to a pointer). */
+static void add_global_fixup(IRGlobal *g, int offset, const char *sym) {
+    if (g->num_fixups >= g->cap_fixups) {
+        size_t nc = g->cap_fixups ? g->cap_fixups * 2 : 4;
+        g->fixups = realloc(g->fixups, nc * sizeof(GlobalFixup));
+        if (!g->fixups) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        g->cap_fixups = (int)nc;
+    }
+    g->fixups[g->num_fixups].offset = offset;
+    g->fixups[g->num_fixups].sym = xstrdup(sym);
+    g->num_fixups++;
 }
 
 /* ------------------------------------------------------------------ */
@@ -569,7 +590,8 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 
 /* Initializer-list lowering (defined after ir_generate). */
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
-                      char *bytes, int sz, const char *ctx, SourceLoc loc);
+                      char *bytes, int sz, const char *ctx, SourceLoc loc,
+                      IRGlobal *g);
 static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                             const Type *ty, const Expr *e, SourceLoc loc);
 
@@ -1677,7 +1699,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
             if (s->u.decl.init)
                 pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
-                          s->u.decl.name, s->loc);
+                          s->u.decl.name, s->loc, NULL);
             char mangled[256];
             snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
                      s->u.decl.name);
@@ -2046,7 +2068,8 @@ static const IRGlobal *find_packed_global(const IRModule *m, const char *name) {
  * packed const globals.  `ir` is the module whose globals may be referenced.
  * Sema guarantees every element is constant. */
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
-                      char *bytes, int sz, const char *ctx, SourceLoc loc) {
+                      char *bytes, int sz, const char *ctx, SourceLoc loc,
+                      IRGlobal *g) {
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
         switch (ty->kind) {
@@ -2054,7 +2077,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             int esz = type_size(*ty->elem_type);
             for (int i = 0; i < n; i++)
                 pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
-                          bytes + i * esz, esz, ctx, loc);
+                          bytes + i * esz, esz, ctx, loc, g);
             break;
         }
         case TY_STRUCT: {
@@ -2064,12 +2087,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             for (int i = 0; i < n; i++)
                 pack_init(ir, &sd->members[i].type, e->u.init_list.elements[i],
                           bytes + sd->members[i].offset,
-                          type_size(sd->members[i].type), ctx, loc);
+                          type_size(sd->members[i].type), ctx, loc, g);
             break;
         }
         default:
             /* Scalar with a single-element brace list: `int x = {5}`. */
-            pack_init(ir, ty, e->u.init_list.elements[0], bytes, sz, ctx, loc);
+            pack_init(ir, ty, e->u.init_list.elements[0], bytes, sz, ctx, loc, g);
             break;
         }
         return;
@@ -2077,7 +2100,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     if (e->kind == EX_CAST) {
         /* `(T)expr` — the cast itself is a no-op at the bit level for the
          * cases we accept (e.g. `(int*)0`); pack the operand. */
-        pack_init(ir, ty, e->u.cast.operand, bytes, sz, ctx, loc);
+        pack_init(ir, ty, e->u.cast.operand, bytes, sz, ctx, loc, g);
         return;
     }
     long long _fold_v;
@@ -2104,12 +2127,25 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         return;
     }
     /* Reference to a previously-defined const global: `.regs = ALLOCATABLE_REGS`.
-     * Copy its already-packed bytes (truncated/padded to `sz`). */
+     * If the target slot is a pointer, the array/struct must decay to its
+     * ADDRESS (a link-time constant) — record a fixup so codegen emits a
+     * R_X86_64_64 relocation.  Otherwise copy its already-packed bytes. */
     if (e->kind == EX_VAR && ir) {
-        const IRGlobal *g = find_packed_global(ir, e->u.var.name);
-        if (g) {
-            int n = sz < g->size ? sz : g->size;
-            memcpy(bytes, g->init_bytes, n);
+        const IRGlobal *src = find_packed_global(ir, e->u.var.name);
+        if (src) {
+            if (ty->kind == TY_PTR && g) {
+                /* Pointer slot: patch in the target's address at link time. */
+                if (sz < g->size) {
+                    /* Target global is larger than the pointer slot — it MUST
+                     * be an address (array/struct decay), not a value copy. */
+                }
+                int off = (int)(bytes - g->init_bytes);
+                add_global_fixup(g, off, src->name);
+                memset(bytes, 0, sz);  /* patched by linker */
+                return;
+            }
+            int n = sz < src->size ? sz : src->size;
+            memcpy(bytes, src->init_bytes, n);
             return;
         }
     }
@@ -2187,12 +2223,14 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         if (sz <= 0) sz = 8;
         char *bytes = calloc(sz, 1);
         if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        int is_static = (s->u.decl.storage_class == 1);
+        /* Create the global FIRST so pack_init can attach pointer fixups to it
+         * when an array/struct member decays to a pointer (e.g. `.regs = ARR`). */
+        IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
+                                            0, is_static, s->loc);
         if (s->u.decl.init)
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
-                      s->u.decl.name, s->loc);
-        int is_static = (s->u.decl.storage_class == 1);
-        ir_module_push_global(ir, s->u.decl.name, sz, bytes, 0, is_static,
-                              s->loc);
+                      s->u.decl.name, s->loc, g);
     }
 
     for (size_t i = 0; i < tu->functions.len; i++) {

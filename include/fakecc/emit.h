@@ -54,6 +54,8 @@ typedef struct {
 
     EmitReloc  *relocs; /* relocations (all within .text) */
     size_t num_relocs, cap_relocs;
+    EmitReloc  *data_relocs; /* relocations within .data (pointer fixups) */
+    size_t num_data_relocs, cap_data_relocs;
 } EmitModule;
 
 /* ------------------------------------------------------------------ */
@@ -82,6 +84,8 @@ int  emit_module_add_undefined(EmitModule *m, const char *name);
 
 void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
+void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                int sym, int32_t addend);
 
 /* ------------------------------------------------------------------ */
 /* Output                                                              */
@@ -107,5 +111,6 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_PLT32     4
 #define R_X86_64_GOTPCREL  9
 #define R_X86_64_GLOB_DAT  6
+#define R_X86_64_64       10  /* absolute 64-bit (pointer fixups in .data) */
 
 #endif /* FAKECC_EMIT_H */

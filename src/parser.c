@@ -647,6 +647,13 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         *name_out = xstrdup(peek(p)->text);
         advance(p);
         t = base;
+        /* Apply prefix pointers FIRST (they wrap the base type, innermost).
+         * `int *rows[2]` → ptr(int) then array(2, ptr(int)).  Applying them
+         * after the array (at function scope) would wrongly yield
+         * ptr(array(2,int)) i.e. `int(*)[2]`. */
+        for (int i = 0; i < ptrs; i++)
+            t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
+        ptrs = 0; /* applied here — prevent double-apply at function scope */
         /* Postfix: array [] or function ().  Collect dims, wrap right-to-left. */
         int dims[8], ndims = 0;
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {

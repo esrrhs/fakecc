@@ -1346,6 +1346,16 @@ void codegen(const IRModule *ir, EmitModule *out) {
         }
         emit_module_add_symbol(out, g->name, binding, 1 /* STT_OBJECT */,
                                shndx, off, g->size);
+        /* Emit data-section relocations for pointer slots that must hold the
+         * address of another global (array/struct decay in the initializer).
+         * Each fixup becomes a R_X86_64_64 absolute relocation in .rela.data. */
+        for (int fi = 0; fi < g->num_fixups; fi++) {
+            int tsym = emit_module_find_symbol(out, g->fixups[fi].sym);
+            if (tsym < 0)
+                tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
+            emit_module_add_data_reloc(out, off + g->fixups[fi].offset,
+                                      R_X86_64_64, tsym, 0);
+        }
     }
 
     /* Cross-function call patches (accumulated across every function). */

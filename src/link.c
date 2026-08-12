@@ -503,6 +503,48 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         }
     }
 
+    /* ---- Apply data relocations (pointer fixups in .data) ---- */
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_data_relocs; r++) {
+            const EmitReloc *rel = &m->data_relocs[r];
+            size_t patch_in_data = mod_data_off[i] + rel->offset;
+            size_t gsi = mod_sym_base[i] + rel->sym;
+            uint64_t S;
+            if (sinfo[gsi].defined) {
+                S = sym_addr[gsi];
+            } else {
+                /* Undefined locally — look for a GLOBAL definition in another
+                 * module with the same name. */
+                const char *nm = m->syms[rel->sym].name
+                                 ? m->syms[rel->sym].name : "";
+                size_t global_addr = (size_t)-1;
+                for (size_t mi = 0; mi < n && global_addr == (size_t)-1; mi++) {
+                    EmitModule *om = mods[mi];
+                    for (size_t mj = 0; mj < om->num_syms; mj++) {
+                        size_t ogsi = mod_sym_base[mi] + mj;
+                        if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
+                            && om->syms[mj].name
+                            && strcmp(om->syms[mj].name, nm) == 0) {
+                            global_addr = sym_addr[ogsi];
+                            break;
+                        }
+                    }
+                }
+                if (global_addr != (size_t)-1) {
+                    S = global_addr;
+                } else {
+                    /* Truly external → PLT (should not happen for data fixups). */
+                    int eidx = reloc_ext_idx[gsi];
+                    S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
+                }
+            }
+            /* R_X86_64_64: absolute 64-bit, value = S + A. */
+            uint64_t value = S + rel->addend;
+            memcpy(data.data + patch_in_data, &value, 8);
+        }
+    }
+
     /* ---- Patch PLT GOT fixups ---- */
     for (int f = 0; f < 2; f++) {
         uint64_t target = got_vaddr + (1 + f) * 8;

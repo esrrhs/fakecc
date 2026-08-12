@@ -155,6 +155,17 @@ typedef struct {
     size_t cap;
 } IRFunctionArray;
 
+/* A pointer slot inside a global's init_bytes that must hold the *address*
+ * of another global (e.g. `.regs = ALLOCATABLE_REGS`: array decays to a
+ * pointer).  Codegen emits a R_X86_64_64 relocation for each fixup; the
+ * linker patches the slot with the target symbol's link-time address.
+ * Without this, pack_init would copy the target's *bytes* into the pointer
+ * slot — wrong, and the root cause of the self-bootstrap crash. */
+typedef struct {
+    int   offset;       /* byte offset within the global's init_bytes */
+    char *sym;          /* xstrdup'd target symbol name */
+} GlobalFixup;
+
 /* Module-level global variable.  Codegen places these in the .data section
  * (or .bss when init_bytes == NULL).  `init_bytes` owns `size` bytes. */
 typedef struct {
@@ -164,6 +175,8 @@ typedef struct {
     int   is_readonly;  /* 1 = string literal → rodata; 0 = mutable → data */
     int   is_static;    /* 1 = `static` global — LOCAL linkage */
     SourceLoc loc;
+    GlobalFixup *fixups;/* pointer slots needing link-time address patching */
+    int   num_fixups, cap_fixups;
 } IRGlobal;
 
 typedef struct {
