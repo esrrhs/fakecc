@@ -1250,7 +1250,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
         }
         IRValue arg_vals[IR_CALL_MAX_ARGS];
-        int nargs = (int)e->u.call.args.len;
+        /* Force a fresh memory read: the self-hosted compiler erroneously
+         * constant-folds e->u.call.args.len to 0 when e is const, dropping
+         * all call arguments. A volatile read defeats that optimization. */
+        int nargs = *(volatile int *)&e->u.call.args.len;
         for (int i = 0; i < nargs; i++)
             arg_vals[i] = lower_expr(fn, st, e->u.call.args.data[i]);
         /* Void call: no result value (width 0).  Still emit the call for its
