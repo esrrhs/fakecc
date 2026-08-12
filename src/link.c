@@ -622,9 +622,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
             buf_u64(&got, data_got_external[j] ? 0 : data_got_addr[j]);
 
         /* ---- Build ELF ---- */
-        uint16_t phnum = 4; /* RX, RW, INTERP, DYNAMIC */
+        /* NOTE: phnum computed AFTER buffer_init() to avoid a codegen
+         * limitation where a value in a caller-saved register is not spilled
+         * across a function call. */
         Buffer elf;
         buffer_init(&elf);
+        uint16_t phnum = 4; /* RX, RW, INTERP, DYNAMIC */
         write_ehdr(&elf, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base, rx_filesz, rx_filesz, PAGE_SIZE);
         write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
@@ -657,10 +660,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
 
         /* 1 phdr if no data, 2 if data/bss present.  The ehdr is written with
          * the real phnum, but we pad the header area out to hdr_size so that
-         * the content (_start) lands at start_offset regardless. */
-        uint16_t phnum = (data.len > 0 || bss_size > 0) ? 2 : 1;
+         * the content (_start) lands at start_offset regardless.
+         * NOTE: phnum is computed AFTER buffer_init() so its value does not
+         * have to survive a function call in a caller-saved register (a known
+         * codegen limitation). */
         Buffer elf;
         buffer_init(&elf);
+        uint16_t phnum = (data.len > 0 || bss_size > 0) ? 2 : 1;
         write_ehdr(&elf, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base,
                    rx_filesz, rx_filesz, PAGE_SIZE);

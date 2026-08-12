@@ -30,7 +30,7 @@ static int const_value(const IRInstArray *insts, IRValue v, int *found) {
 static int has_side_effect(IROpcode op) {
     return op == IR_RETURN || op == IR_STORE || op == IR_STORE_PTR ||
            op == IR_BR || op == IR_CBR || op == IR_LABEL ||
-           op == IR_ALLOCA || op == IR_CALL;
+           op == IR_ALLOCA || op == IR_CALL || op == IR_PARAM;
 }
 
 /* ================================================================== */
