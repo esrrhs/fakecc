@@ -242,6 +242,27 @@ void scalar_renumber(IRFunction *fn) {
         int *old_width = fn->value_width;
         int *old_unsigned = fn->value_is_unsigned;
         int *old_float = fn->value_is_float;
+        /* The metadata arrays only cover value ids [0, value_meta_cap).
+         * mem2reg (and other passes) can raise next_value_id past that cap
+         * by emitting φ values whose metadata is never set, so the old
+         * arrays may be shorter than next_value_id.  Grow them (zero-filled)
+         * before the copy below, otherwise the copy reads out of bounds and
+         * strews heap garbage through the new arrays — which later misleads
+         * regalloc's classifier and crashes codegen. */
+        if (fn->next_value_id > fn->value_meta_cap) {
+            int old_cap = fn->value_meta_cap;
+            int grow = old_cap ? old_cap : 16;
+            while (grow < fn->next_value_id) grow *= 2;
+            old_width = xrealloc(old_width, grow * sizeof(int));
+            old_unsigned = xrealloc(old_unsigned, grow * sizeof(int));
+            old_float = xrealloc(old_float, grow * sizeof(int));
+            for (int i = old_cap; i < grow; i++) {
+                old_width[i] = 4;
+                old_unsigned[i] = 0;
+                old_float[i] = 0;
+            }
+            fn->value_meta_cap = grow;
+        }
         fn->value_width = xmalloc(next * sizeof(int));
         fn->value_is_unsigned = xmalloc(next * sizeof(int));
         fn->value_is_float = xmalloc(next * sizeof(int));
