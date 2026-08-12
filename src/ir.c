@@ -1295,7 +1295,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 inst.call_name = xstrdup(cname);
             } else {
                 int is_direct = 0;
-                if (g_ir_tu) {
+                /* If the callee's type is a bare function type (TY_FUNC),
+                 * it's a direct call — even if the function is only declared
+                 * `extern` in this TU (not defined, so absent from g_ir_tu).
+                 * Without this, extern function calls are wrongly lowered to
+                 * indirect calls through an uninitialized function-pointer
+                 * variable, which crashes at runtime. */
+                if (e->u.call.callee->type.kind == TY_FUNC) {
+                    is_direct = 1;
+                } else if (g_ir_tu) {
                     for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
                         if (strcmp(g_ir_tu->functions.data[i].name, cname) == 0) {
                             is_direct = 1;

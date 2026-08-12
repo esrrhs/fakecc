@@ -549,6 +549,33 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                 set_type(e, type_clone(sig->ret_type));
                 return type_clone(e->type);
             }
+            /* Not in function table — check the symbol table for an extern
+             * function declaration (block-scope `extern void foo();`).  Such
+             * declarations are registered as function-typed symbols so that
+             * the call resolves as a direct call rather than indirect through
+             * an uninitialized function-pointer variable (which would crash). */
+            const Sym *extern_sym = symtable_find(st, e->u.call.callee->u.var.name);
+            if (extern_sym && (extern_sym->type.kind == TY_FUNC ||
+                               (extern_sym->type.kind == TY_PTR &&
+                                extern_sym->type.pointee &&
+                                extern_sym->type.pointee->kind == TY_FUNC))) {
+                const Type *fty = (extern_sym->type.kind == TY_FUNC)
+                                  ? &extern_sym->type : extern_sym->type.pointee;
+                type_free(&callee_ty);
+                if ((int)e->u.call.args.len != fty->func_nparams) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "function '%s' takes %d argument%s but %zu given",
+                           e->u.call.callee->u.var.name, fty->func_nparams,
+                           fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
+                }
+                for (size_t i = 0; i < e->u.call.args.len; i++) {
+                    Type at = check_expr(e->u.call.args.data[i], st, ft);
+                    type_free(&at);
+                }
+                Type ret = fty->func_ret ? *fty->func_ret : type_make_void();
+                set_type(e, ret);
+                return type_clone(e->type);
+            }
         }
         /* Indirect call: callee type must be pointer-to-function or bare
          * function (a function lvalue such as `*fp` decays to a pointer). */
