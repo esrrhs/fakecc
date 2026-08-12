@@ -13,6 +13,7 @@ typedef struct {
     int **df;         /* df[b] = dominance-frontier set (array of block ids) */
     size_t *df_len;   /* length of each df set */
     size_t n;          /* number of blocks */
+    char *processed;  /* scratch: processed[b] = 1 if idom[b] has been set */
 } DomTree;
 
 /* Build dominator tree + dominance frontiers from a CFG.

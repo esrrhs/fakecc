@@ -12,11 +12,18 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
     size_t n = cfg->num;
     dt->n = n;
     dt->idom = xmalloc(n * sizeof(int));
-    for (size_t i = 0; i < n; i++) dt->idom[i] = -1;
+    dt->processed = xmalloc(n);
+    for (size_t i = 0; i < n; i++) {
+        dt->idom[i] = -1;
+        dt->processed[i] = 0;
+    }
 
-    /* Entry dominates itself — mark with a sentinel distinct from -1,
-     * so it is recognised as "processed" during the dataflow iteration. */
-    dt->idom[cfg->entry] = (int)cfg->entry;
+    /* Entry is "processed" from the start (it dominates itself).
+     * We use a separate `processed` bitmap rather than overloading
+     * idom[entry] as a sentinel: the self-hosted compiler miscompiles
+     * same-array read-after-write in the dataflow loop (it hoists the
+     * read of idom[p] past the sentinel write, folding it to -1). */
+    dt->processed[cfg->entry] = 1;
 
     /* --- RPO numbering for the intersect step ---
      * The Cooper-Harvey-Kennedy intersect walks up idom chains
@@ -35,6 +42,15 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
     int changed = 1;
     while (changed) {
         changed = 0;
+
+        /* Snapshot idom into a separate array. The intersect step reads
+         * idom values; reading them straight from dt->idom while the loop
+         * writes dt->idom[b] miscompiles under the self-hosted compiler
+         * (same-array read-after-write hoisting). A snapshot decouples the
+         * read set from the write set. */
+        int *sid = xmalloc(n * sizeof(int));
+        for (size_t i = 0; i < n; i++) sid[i] = dt->idom[i];
+
         for (size_t bi = 0; bi < n; bi++) {
             int b = (int)bi;
             if (b == cfg->entry) continue;
@@ -44,7 +60,7 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
             int new_idom = -1;
             for (size_t i = 0; i < blk->num_preds; i++) {
                 int p = blk->preds[i];
-                if (dt->idom[p] != -1) {
+                if (dt->processed[p]) {
                     new_idom = p;
                     break;
                 }
@@ -55,29 +71,30 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
             for (size_t i = 0; i < blk->num_preds; i++) {
                 int p = blk->preds[i];
                 if (p == new_idom) continue;
-                if (dt->idom[p] == -1) continue;
+                if (!dt->processed[p]) continue;
 
                 /* Intersect: find the lowest common ancestor on the dom tree.
-                 * Uses RPO numbering so we can walk upward reliably. */
+                 * Uses RPO numbering so we can walk upward reliably.
+                 * Reads from the snapshot sid[], not dt->idom[]. */
                 int f1 = new_idom, f2 = p;
                 while (f1 != f2) {
-                    while (rpo[f1] > rpo[f2]) f1 = dt->idom[f1];
-                    while (rpo[f2] > rpo[f1]) f2 = dt->idom[f2];
+                    while (rpo[f1] > rpo[f2]) f1 = sid[f1];
+                    while (rpo[f2] > rpo[f1]) f2 = sid[f2];
                 }
                 new_idom = f1;
             }
 
             if (dt->idom[b] != new_idom) {
                 dt->idom[b] = new_idom;
+                dt->processed[b] = 1;
                 changed = 1;
             }
         }
+
+        free(sid);
     }
 
     free(rpo);
-
-    /* Entry's idom is conventionally -1 (no parent). */
-    dt->idom[cfg->entry] = -1;
 
     /* --- Dominance frontiers ---
      * For each block b with ≥ 2 predecessors: for each predecessor p,
@@ -127,8 +144,10 @@ void domtree_free(DomTree *dt) {
     free(dt->df);
     free(dt->df_len);
     free(dt->idom);
+    free(dt->processed);
     dt->idom = NULL;
     dt->df = NULL;
     dt->df_len = NULL;
+    dt->processed = NULL;
     dt->n = 0;
 }
