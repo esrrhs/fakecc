@@ -101,10 +101,15 @@ int type_size(Type t) {
         /* The cached width can be stale for self-referential structs (e.g.
          * Stmt): they are cloned while still being parsed, freezing width==0
          * before struct_def_finish() sets the real size.  At copy/lowering
-         * time the registry holds the final size — use it. */
+         * time the registry holds the final size — use it.  During parsing
+         * g_ir_tu is NULL, so guard the lookup; the fallback to t.width is
+         * correct there (the struct is not finished yet anyway). */
         if (t.tag) {
-            const StructDef *sd = struct_registry_find_c(get_ir_structs(), t.tag);
-            if (sd && sd->size > 0) return sd->size;
+            const StructRegistry *reg = get_ir_structs();
+            if (reg) {
+                const StructDef *sd = struct_registry_find_c(reg, t.tag);
+                if (sd && sd->size > 0) return sd->size;
+            }
         }
         return t.width;
     }
