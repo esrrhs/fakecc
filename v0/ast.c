@@ -657,21 +657,27 @@ void type_free(Type *t) {
 }
 extern const StructRegistry *get_ir_structs(void);
 int type_size(Type t) {
-    switch (t.kind) {
+    const Type *p = &t;
+    int count = 1;
+    while (p->kind == TY_ARRAY && p->elem_type) {
+        count *= p->length;
+        p = p->elem_type;
+    }
+    switch (p->kind) {
     case TY_VOID: return 0;
-    case TY_INT: return t.width;
-    case TY_FLOAT: return t.width;
-    case TY_PTR: return 8;
-    case TY_ARRAY: return type_size(*t.elem_type) * t.length;
+    case TY_INT: return count * p->width;
+    case TY_FLOAT: return count * p->width;
+    case TY_PTR: return count * 8;
+    case TY_ARRAY: return 0;
     case TY_STRUCT: {
-        if (t.tag) {
+        if (p->tag) {
             const StructRegistry *reg = get_ir_structs();
             if (reg) {
-                const StructDef *sd = struct_registry_find_c(reg, t.tag);
-                if (sd && sd->size > 0) return sd->size;
+                const StructDef *sd = struct_registry_find_c(reg, p->tag);
+                if (sd && sd->size > 0) return count * sd->size;
             }
         }
-        return t.width;
+        return count * p->width;
     }
     case TY_FUNC: return 0;
     }
@@ -829,12 +835,14 @@ static int align_up(int x, int align) {
     return (x + align - 1) & ~(align - 1);
 }
 int type_align(Type t) {
-    switch (t.kind) {
+    const Type *p = &t;
+    while (p->kind == TY_ARRAY && p->elem_type) p = p->elem_type;
+    switch (p->kind) {
     case TY_VOID: return 1;
-    case TY_INT: return t.width;
-    case TY_FLOAT: return t.width;
+    case TY_INT: return p->width;
+    case TY_FLOAT: return p->width;
     case TY_PTR: return 8;
-    case TY_ARRAY: return type_align(*t.elem_type);
+    case TY_ARRAY: return 1;
     case TY_STRUCT: return 8;
     case TY_FUNC: return 1;
     }

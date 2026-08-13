@@ -3,20 +3,50 @@
 set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
+CC_TIMEOUT=${CC_TIMEOUT:-30}
+RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 FAIL=0
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 
 run_multi() {
     local expect="$1"; shift
     local out="$TMP/prog"
-    "$FAKECC" "$@" -o "$out"
+    rm -f "$out"
+    local cc_rc=0
+    timeout "$CC_TIMEOUT" "$FAKECC" "$@" -o "$out" 2>"$TMP/cc.err" || cc_rc=$?
+    if [ "$cc_rc" != "0" ]; then
+        echo "FAIL multi $* (compile exited $cc_rc: $(head -1 "$TMP/cc.err"))"
+        FAIL=1
+        return
+    fi
     local got=0
-    "$out" >/dev/null 2>&1 || got=$?
-    if [ "$got" = "$expect" ]; then
+    timeout "$RUN_TIMEOUT" "$out" >/dev/null 2>&1 || got=$?
+    if [ "$got" = "124" ]; then
+        echo "FAIL multi $* (program timed out)"
+        FAIL=1
+    elif [ "$got" = "$expect" ]; then
         echo "PASS multi $* (expect $expect)"
     else
         echo "FAIL multi $* (expected $expect, got $got)"
         FAIL=1
+    fi
+}
+
+# Expect the compiler/linker to reject the inputs.
+run_multi_fail() {
+    local out="$TMP/prog"
+    rm -f "$out"
+    local cc_rc=0
+    timeout "$CC_TIMEOUT" "$FAKECC" "$@" -o "$out" 2>"$TMP/cc.err" || cc_rc=$?
+    if [ "$cc_rc" = "0" ]; then
+        echo "FAIL multi-fail $* (expected link/compile error, but succeeded)"
+        FAIL=1
+    elif [ "$cc_rc" -ge 124 ]; then
+        echo "FAIL multi-fail $* (compiler timed out / killed: $cc_rc)"
+        FAIL=1
+    else
+        echo "PASS multi-fail $* (rejected)"
     fi
 }
 
@@ -48,5 +78,38 @@ echo 'package main; extern int printf(const char *f,...); void hi(){ printf("x")
 echo 'package main; void hi(); int main(){ hi(); return 5; }' > "$TMP/q.c"
 run_multi 5 "$TMP/p.c" "$TMP/q.c"
 
-rm -rf "$TMP"
+# Three translation units: leaf → mid → main.
+echo 'package main; int leaf(void) { return 2; }' > "$TMP/t1.c"
+echo 'package main; int leaf(void); int mid(void) { return leaf() + 3; }' > "$TMP/t2.c"
+echo 'package main; int mid(void); int main(void) { return mid() * 7; }' > "$TMP/t3.c"
+run_multi 35 "$TMP/t1.c" "$TMP/t2.c" "$TMP/t3.c"
+
+# Cross-file global mutation: writer TU updates, reader TU observes.
+echo 'package main; int g; void bump(void) { g = g + 1; return; }' > "$TMP/w.c"
+echo 'package main; extern int g; void bump(void); int main(void) { g = 40; bump(); bump(); return g; }' > "$TMP/r.c"
+run_multi 42 "$TMP/w.c" "$TMP/r.c"
+
+# Mixed .o + .c link.
+echo 'package main; int twice(int x) { return x + x; }' > "$TMP/twice.c"
+echo 'package main; int twice(int x); int main(void) { return twice(21); }' > "$TMP/use_twice.c"
+"$FAKECC" -c "$TMP/twice.c" -o "$TMP/twice.o"
+run_multi 42 "$TMP/twice.o" "$TMP/use_twice.c"
+
+# Two static helpers with the same local name, both called from main.
+echo 'package main; static int helper(void) { return 3; } int left(void) { return helper(); }' > "$TMP/st_a.c"
+echo 'package main; static int helper(void) { return 4; } int right(void) { return helper(); }' > "$TMP/st_b.c"
+echo 'package main; int left(void); int right(void); int main(void) { return left() * 10 + right(); }' > "$TMP/st_m.c"
+run_multi 34 "$TMP/st_a.c" "$TMP/st_b.c" "$TMP/st_m.c"
+
+# Negative: no main → linker must reject.
+echo 'package main; int foo(void) { return 1; }' > "$TMP/nomain.c"
+run_multi_fail "$TMP/nomain.c"
+
+# Negative: two object files, still no main.
+echo 'package main; int a(void) { return 1; }' > "$TMP/nm1.c"
+echo 'package main; int b(void) { return 2; }' > "$TMP/nm2.c"
+"$FAKECC" -c "$TMP/nm1.c" -o "$TMP/nm1.o"
+"$FAKECC" -c "$TMP/nm2.c" -o "$TMP/nm2.o"
+run_multi_fail "$TMP/nm1.o" "$TMP/nm2.o"
+
 exit $FAIL

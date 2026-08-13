@@ -100,14 +100,14 @@ FakeCC 的最终目标是**自己编译自己**。分三阶段：
 - **Stage 1** — 机械翻译到 FakeCC：`v0/translate.py` 把 `src/*.c` 翻译成 FakeCC 源码，用 Stage 0 编译 → `fakecc-1`
 - **Stage 2** — 自我编译验证：用 `fakecc-1` 编译同一份源码 → `fakecc-2`；若 `fakecc-2` 通过全部测试且与 `fakecc-1` 逐字节相同，自举成功
 
-**三个阶段均已达成，且全程不借助外部工具链。** 两级自举的编译与链接都由 fakecc 自己完成：`fakecc-1` 通过全部 243 个 e2e 测试，与 Stage 0 结果一致；`fakecc-1` 与 `fakecc-2` 的 16 个目标文件**以及最终二进制**逐字节相同，编译器复现了自己。
+**三个阶段均已达成，且全程不借助外部工具链。** 两级自举的编译与链接都由 fakecc 自己完成：`fakecc-1` 通过全部 e2e / e2e_multi / difftest，与 Stage 0 结果一致；`fakecc-1` 与 `fakecc-2` 的 16 个目标文件**以及最终二进制**逐字节相同，编译器复现了自己。
 
 ```bash
 v0/build_bootstrap.sh   # 翻译 + 用 Stage 0 编译并链接 → v0/bootstrap_fakecc
 v0/stage2_check.sh      # 跑完整两级自举，逐字节比对目标文件与二进制
 ```
 
-gcc 只在翻译阶段出现，充当 `src/*.c` 的预处理器——FakeCC 方言没有预处理器，这是一次性机械翻译的固有成本，不在构建路径上。两个脚本都接入了 CI。
+gcc 只在翻译阶段出现，充当 `src/*.c` 的预处理器——FakeCC 方言没有预处理器，这是一次性机械翻译的固有成本，不在构建路径上。CI 的 bootstrap job 在不动点检查之后，还会用 `v0/fakecc-1` 再跑一遍 e2e、e2e_multi 与 difftest。
 
 ## 语言特性
 
@@ -164,8 +164,11 @@ echo $?    # 42
 
 ```bash
 ctest --test-dir build --output-on-failure
-# 含单元测试、单文件 e2e、多文件链接 e2e
+# 含单元测试、单文件 e2e、多文件链接 e2e、gcc 差分测试（difftest）
 
-# 自举不动点（需先 build Stage 0）
+# 自举不动点 + 自举编译器再跑功能套件（与 CI bootstrap job 一致）
 bash v0/stage2_check.sh
+bash test/e2e/run_e2e.sh v0/fakecc-1
+bash test/e2e/run_multi_e2e.sh v0/fakecc-1
+bash test/e2e/run_difftest.sh v0/fakecc-1
 ```

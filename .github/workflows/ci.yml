@@ -56,7 +56,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   bootstrap:
-    name: bootstrap (stage 2 fixed point)
+    name: bootstrap (fixed point + self-hosted suite)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +74,13 @@ jobs:
         run: bash v0/stage2_check.sh
 
       # A fixed point alone does not prove correctness — a deterministic but
-      # wrong compiler also reproduces itself.  Run the suite with the
-      # self-hosted binary too.
+      # wrong compiler also reproduces itself.  Re-run the full functional
+      # suites with the self-hosted binary.
       - name: e2e with the self-hosted compiler
         run: bash test/e2e/run_e2e.sh v0/fakecc-1
+
+      - name: e2e_multi with the self-hosted compiler
+        run: bash test/e2e/run_multi_e2e.sh v0/fakecc-1
+
+      - name: difftest with the self-hosted compiler
+        run: bash test/e2e/run_difftest.sh v0/fakecc-1

@@ -107,6 +107,46 @@ static void test_var_codegen(void) {
     emit_module_free(&em);
 }
 
+static void test_arith_codegen_longer(void) {
+    EmitModule simple = compile_to_code(
+        "package main; int main() { return 1; }");
+    EmitModule arith = compile_to_code(
+        "package main; int main() { return 1 + 2 * 3 - 4; }");
+    T_ASSERT(arith.text.len > simple.text.len);
+    T_ASSERT(find_sym(&arith, "main") != NULL);
+    emit_module_free(&simple);
+    emit_module_free(&arith);
+}
+
+static void test_if_codegen_has_main(void) {
+    EmitModule em = compile_to_code(
+        "package main; int main() { int x = 1; if (x) return 2; return 3; }");
+    const EmitSymbol *main_sym = find_sym(&em, "main");
+    T_ASSERT(main_sym != NULL);
+    T_ASSERT(main_sym->size > 16);
+    emit_module_free(&em);
+}
+
+static void test_multi_function_symbols(void) {
+    EmitModule em = compile_to_code(
+        "package main;"
+        "int add(int a, int b) { return a + b; }"
+        "int main() { return add(1, 2); }");
+    T_ASSERT(find_sym(&em, "main") != NULL);
+    T_ASSERT(find_sym(&em, "add") != NULL);
+    emit_module_free(&em);
+}
+
+static void test_bitfield_codegen(void) {
+    EmitModule em = compile_to_code(
+        "package main;"
+        "struct F { unsigned a : 3; unsigned b : 5; };"
+        "int main() { struct F f; f.a = 1; f.b = 2; return f.a + f.b; }");
+    T_ASSERT(find_sym(&em, "main") != NULL);
+    T_ASSERT(em.text.len > 0);
+    emit_module_free(&em);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -115,5 +155,9 @@ int main(void) {
     test_return_255();
     test_prologue_present();
     test_var_codegen();
+    test_arith_codegen_longer();
+    test_if_codegen_has_main();
+    test_multi_function_symbols();
+    test_bitfield_codegen();
     return t_finalize();
 }

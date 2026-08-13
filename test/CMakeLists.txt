@@ -58,6 +58,10 @@ add_executable(test_opt unit/test_opt.c)
 target_link_libraries(test_opt PRIVATE fakecc_core test_framework)
 add_test(NAME test_opt COMMAND test_opt)
 
+add_executable(test_link unit/test_link.c)
+target_link_libraries(test_link PRIVATE fakecc_core test_framework)
+add_test(NAME test_link COMMAND test_link)
+
 # --- e2e tests ---
 
 add_test(NAME e2e
@@ -66,4 +70,9 @@ add_test(NAME e2e
 
 add_test(NAME e2e_multi
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_multi_e2e.sh $<TARGET_FILE:fakecc>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# gcc-oracle differential suite over a curated e2e manifest.
+add_test(NAME difftest
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

@@ -444,8 +444,11 @@ int emit_obj_read(const char *path, EmitModule *m) {
     long fsize = ftell(f);
     fseek(f, 0, 0);
     unsigned char *buf = malloc((size_t)fsize);
-    fread(buf, 1, (size_t)fsize, f);
+    size_t nread = fread(buf, 1, (size_t)fsize, f);
     fclose(f);
+    if (nread != (size_t)fsize) {
+        fprintf(stderr, "fakecc: short read on '%s'\n", path); free(buf); return -1;
+    }
     if (fsize < 64 || buf[0] != 0x7f || buf[1] != 'E' || buf[2] != 'L' || buf[3] != 'F') {
         fprintf(stderr, "fakecc: '%s' is not an ELF object\n", path); free(buf); return -1;
     }

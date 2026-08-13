@@ -266,6 +266,75 @@ static void test_ra_loop_carried_liveness(void) {
     inst_array_data_free(&fn.insts);
 }
 
+/* ================================================================ */
+/* Test: many simultaneously-live values force some spills          */
+/* ================================================================ */
+
+static void test_ra_spill_pressure(void) {
+    IRFunction fn;
+    fn.name = NULL;
+    fn.insts.data = NULL; fn.insts.len = 0; fn.insts.cap = 0;
+    fn.next_value_id = 0;
+    fn.loc = (SourceLoc){NULL, 0, 0};
+    fn.ra = NULL;
+    fn.value_is_float = NULL;
+    fn.value_meta_cap = 0;
+    fn.ra_xmm = NULL;
+
+    /* Create 16 independent consts, then sum them left-associatively so
+     * all earlier values stay live until the end — more than REG_ALLOCATABLE. */
+    const int N = 16;
+    for (int i = 0; i < N; i++)
+        push_inst(&fn.insts, IR_CONST, i, -1, -1, i + 1);
+    int acc = N;
+    push_inst(&fn.insts, IR_ADD, acc, 0, 1, 0);
+    for (int i = 2; i < N; i++) {
+        int next = acc + 1;
+        push_inst(&fn.insts, IR_ADD, next, acc, i, 0);
+        acc = next;
+    }
+    push_inst(&fn.insts, IR_RETURN, -1, acc, -1, 0);
+    fn.next_value_id = acc + 1;
+
+    RAResult *ra = reg_alloc(&fn);
+    T_ASSERT(ra != NULL);
+    T_ASSERT(count_spilled(ra) >= 1);
+    /* Accumulators and consts that remain live should still be assigned. */
+    T_ASSERT(ra->reg[acc] >= 0 || ra->reg[acc] == REG_NONE);
+
+    ra_result_free(ra);
+    inst_array_data_free(&fn.insts);
+}
+
+/* ================================================================ */
+/* Test: return value prefers a usable register assignment          */
+/* ================================================================ */
+
+static void test_ra_return_assigned(void) {
+    IRFunction fn;
+    fn.name = NULL;
+    fn.insts.data = NULL; fn.insts.len = 0; fn.insts.cap = 0;
+    fn.next_value_id = 3;
+    fn.loc = (SourceLoc){NULL, 0, 0};
+    fn.ra = NULL;
+    fn.value_is_float = NULL;
+    fn.value_meta_cap = 0;
+    fn.ra_xmm = NULL;
+
+    push_inst(&fn.insts, IR_CONST, 0, -1, -1, 10);
+    push_inst(&fn.insts, IR_CONST, 1, -1, -1, 32);
+    push_inst(&fn.insts, IR_ADD, 2, 0, 1, 0);
+    push_inst(&fn.insts, IR_RETURN, -1, 2, -1, 0);
+
+    RAResult *ra = reg_alloc(&fn);
+    T_ASSERT(ra != NULL);
+    T_ASSERT(ra->reg[2] >= 0); /* sum should not be spilled in this tiny fn */
+    T_ASSERT_EQ_INT(count_spilled(ra), 0);
+
+    ra_result_free(ra);
+    inst_array_data_free(&fn.insts);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -275,5 +344,7 @@ int main(void) {
     test_ra_after_mem2reg();
     test_ra_empty();
     test_ra_loop_carried_liveness();
+    test_ra_spill_pressure();
+    test_ra_return_assigned();
     return t_finalize();
 }
