@@ -20,7 +20,10 @@ static void push_inst(IRInstArray *a, IROpcode op, IRValue dst,
         a->data = realloc(a->data, a->cap * sizeof(IRInst));
         if (!a->data) exit(1);
     }
-    IRInst inst = {op, dst, arg1, arg2, imm, {NULL, 0, 0}, NULL, {0}, 0, 8, 0, 0, -1, 0, 0};
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = op; inst.dst = dst; inst.a = arg1; inst.b = arg2;
+    inst.imm = imm; inst.width = 8; inst.call_callee = -1;
     a->data[a->len++] = inst;
 }
 

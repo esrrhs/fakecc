@@ -1,6 +1,5 @@
 # Curated e2e cases for tools/difftest.sh (gcc as oracle).
-# Exclude: expect_error, __syscall, FakeCC-only intrinsics, and cases where
-# fakecc's ABI intentionally diverges from SysV (small struct-by-value).
+# Exclude: expect_error, __syscall, FakeCC-only intrinsics.
 operators/arith_add.c
 operators/arith_complex.c
 operators/arith_div.c
@@ -79,6 +78,12 @@ chars_strings/string_len.c
 aggregates/struct_basic.c
 aggregates/struct_init.c
 aggregates/struct_arrow.c
+aggregates/struct_byvalue_param.c
+aggregates/struct_byvalue_return.c
+aggregates/struct_byvalue_assign.c
+aggregates/struct_byvalue_chain.c
+aggregates/struct_byvalue_init.c
+aggregates/struct_byvalue_large.c
 control_flow/switch_basic.c
 control_flow/switch_default.c
 control_flow/switch_fallthrough.c
@@ -89,6 +94,7 @@ operators/ternary_nested.c
 types/typedef_basic.c
 types/type_bool_basic.c
 types/type_uint_wrap.c
+types/param_narrow_unsigned.c
 types/type_long_arith.c
 control_flow/while_sum.c
 control_flow/while_break.c

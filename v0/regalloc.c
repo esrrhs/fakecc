@@ -96,13 +96,15 @@ struct IRInst {
     int imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[16];
+    IRValue call_args[32];
     int call_nargs;
     IRValue call_callee;
     int width;
     int is_unsigned;
     int64_t float_imm;
     int is_float;
+    int force_stack;
+    unsigned char call_arg_on_stack[32];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -114,6 +116,16 @@ enum IRDebugVarKind {
     IR_DBG_PARAM = 0,
     IR_DBG_LOCAL = 1
 };typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugMember {
+    char *name;
+    int offset;
+    int bit_width;
+    int bit_offset;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+};typedef struct IRDebugMember IRDebugMember;
 struct IRDebugVar {
     char *name;
     SourceLoc loc;
@@ -123,6 +135,10 @@ struct IRDebugVar {
     int is_unsigned;
     int is_bool;
     int array_len;
+    char *struct_tag;
+    int struct_size;
+    IRDebugMember *members;
+    int num_members;
     int alloca_ssa;
     int param_idx;
 };typedef struct IRDebugVar IRDebugVar;
@@ -142,6 +158,8 @@ struct IRFunction {
     int ret_is_unsigned;
     int ret_is_float;
     int ret_is_struct;
+    int ret_reg_n;
+    int ret_reg_cls[2];
     int ret_is_bool;
     int is_variadic;
     int is_static;
@@ -339,6 +357,11 @@ Type type_clone(Type t);
 void type_free(Type *t);
 int type_size(Type t);
 int type_align(Type t);
+enum SysVRegClass {
+    SYSV_CLS_INTEGER = 1,
+    SYSV_CLS_SSE = 2
+};typedef enum SysVRegClass SysVRegClass;
+int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);
@@ -873,8 +896,10 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
         if (inst->dst >= 0 && inst->dst < nv) {
             liv[inst->dst].def_point = (int)i;
         }
+        if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv)
+            liv[inst->b].def_point = (int)i;
         if (inst->a >= 0 && inst->a < nv) liv_add_use(&liv[inst->a], (int)i);
-        if (inst->op != IR_CBR &&
+        if (inst->op != IR_CBR && inst->op != IR_CALL &&
             inst->b >= 0 && inst->b < nv) liv_add_use(&liv[inst->b], (int)i);
         if (inst->op == IR_CALL) {
             for (int k = 0; k < inst->call_nargs; k++) {
@@ -990,7 +1015,7 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 if (!bs_test(&def_b[bi], inst->a))
                     bs_set(&use_b[bi], inst->a);
             }
-            if (inst->op != IR_CBR &&
+            if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < use_b[bi].nv) {
                 if (!bs_test(&def_b[bi], inst->b))
                     bs_set(&use_b[bi], inst->b);
@@ -1006,6 +1031,9 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
             if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
                 bs_set(&def_b[bi], inst->dst);
             }
+            if (inst->op == IR_CALL && inst->b >= 0 &&
+                inst->b < def_b[bi].nv)
+                bs_set(&def_b[bi], inst->b);
         }
     }
 }
@@ -1071,7 +1099,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             inst->op == IR_DBG_VALUE) continue;
             if (inst->op == IR_CALL) {
                 for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], over; _w && ((over = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
-                    if ((int)over != inst->dst &&
+                    if ((int)over != inst->dst && (int)over != inst->b &&
                         value_in_class(fn, (int)over, float_class))
                         forbid_mask[over] |= cls->caller_saved;
                 }
@@ -1081,10 +1109,13 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
+            if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
+                value_in_class(fn, inst->b, float_class))
+                bs_clr(&live, inst->b);
             if (inst->a >= 0 && inst->a < nv &&
                 value_in_class(fn, inst->a, float_class))
                 bs_set(&live, inst->a);
-            if (inst->op != IR_CBR &&
+            if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class))
                 bs_set(&live, inst->b);
@@ -1138,10 +1169,20 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
+            if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
+                value_in_class(fn, inst->b, float_class)) {
+                for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], other; _w && ((other = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
+                    if (!value_in_class(fn, (int)other, float_class))
+                        continue;
+                    if ((int)other != inst->b)
+                        ig_add_edge(g, inst->b, (int)other);
+                }
+                bs_clr(&live, inst->b);
+            }
             if (inst->a >= 0 && inst->a < nv &&
                 value_in_class(fn, inst->a, float_class))
                 bs_set(&live, inst->a);
-            if (inst->op != IR_CBR &&
+            if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class))
                 bs_set(&live, inst->b);

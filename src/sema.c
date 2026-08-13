@@ -222,6 +222,33 @@ static Type usual_arith_conv(Type a, Type b) {
 /* Set an expr's type (frees previous). Convenience wrapper. */
 static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
 
+/* Insert an implicit conversion of a call argument to its declared parameter
+ * type ("as if by assignment", C11 6.5.2.2p7).  Without this, an argument is
+ * lowered with its own width/signedness, which misbehaves when a value whose
+ * representation is wider than the parameter reaches a narrower parameter —
+ * e.g. a literal larger than INT_MAX passed to `unsigned int` gets sign
+ * extended to 64 bits and participates in a 64-bit divide (see README known
+ * defects).  Wrapping the argument in an EX_CAST makes IR lowering emit the
+ * proper SEXT/ZEXT/TRUNC.  Only scalar arithmetic types are converted: pointers
+ * are already 8 bytes, and structs/unions/arrays travel by reference in
+ * fakecc's ABI and must not be reinterpreted here. */
+static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
+    if (!argp || !*argp || !ptype) return;
+    Expr *arg = *argp;
+    const Type *at = &arg->type;
+    int at_arith = (at->kind == TY_INT || at->kind == TY_FLOAT);
+    int pt_arith = (ptype->kind == TY_INT || ptype->kind == TY_FLOAT);
+    if (!at_arith || !pt_arith) return;
+    /* No-op when the argument already has the parameter's representation. */
+    if (at->kind == ptype->kind && at->width == ptype->width
+        && at->is_unsigned == ptype->is_unsigned)
+        return;
+    Type target = type_clone(*ptype);
+    Expr *cast = expr_new_cast(target, arg, arg->loc);  /* clones target */
+    set_type(cast, target);                             /* takes ownership */
+    *argp = cast;
+}
+
 /* Normalize a (possibly designated) initializer list (designator validation,
  * array-length inference, expansion to positional with zero-fill). */
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc);
@@ -545,6 +572,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr(e->u.call.args.data[i], st, ft);
                     type_free(&at);
+                    if ((int)i < sig->arity)
+                        coerce_arg_to_param(&e->u.call.args.data[i],
+                                            &sig->param_types[i]);
                 }
                 set_type(e, type_clone(sig->ret_type));
                 return type_clone(e->type);
@@ -571,6 +601,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr(e->u.call.args.data[i], st, ft);
                     type_free(&at);
+                    if (fty->func_params && (int)i < fty->func_nparams)
+                        coerce_arg_to_param(&e->u.call.args.data[i],
+                                            &fty->func_params[i]);
                 }
                 Type ret = fty->func_ret ? *fty->func_ret : type_make_void();
                 set_type(e, ret);
@@ -600,6 +633,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         for (size_t i = 0; i < e->u.call.args.len; i++) {
             Type at = check_expr(e->u.call.args.data[i], st, ft);
             type_free(&at);
+            if (fn_ty.func_params && (int)i < fn_ty.func_nparams)
+                coerce_arg_to_param(&e->u.call.args.data[i],
+                                    &fn_ty.func_params[i]);
         }
         set_type(e, type_clone(*fn_ty.func_ret));
         type_free(&fn_ty);

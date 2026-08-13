@@ -14,17 +14,11 @@
 # the same symbol names as the gcc-built ones — v0/*.c is a mechanical
 # translation of src/*.c, so the two halves agree on every interface.
 #
-# LIMITATION — false positives from the struct ABI.  fakecc passes a struct by
-# value as a pointer regardless of size, while SysV AMD64 packs anything up to
-# 16 bytes into registers.  Any module that passes a small struct by value
-# across a module boundary (`SourceLoc` is the one that matters here, so: ast,
-# parser, sema) cannot be mixed with a gcc-built half at all, and this tool
-# reports it as miscompiled whether or not it is.
-#
-# To tell the two apart: reverse the swap (build everything with fakecc except
-# the suspect module, which comes from gcc).  A real miscompilation shows up in
-# one direction; a calling-convention mismatch shows up in both, and the
-# all-fakecc build still passes.
+# LIMITATION — false positives from remaining ABI gaps.  Small structs
+# (≤16 bytes) now follow SysV register pass/return, and MEMORY-class
+# aggregates travel on the stack.  Hybrid linking can still disagree on
+# less-common corner cases (e.g. nested X87 fields); reverse the swap to
+# tell a real miscompilation apart from a calling-convention mismatch.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

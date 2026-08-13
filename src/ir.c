@@ -65,8 +65,14 @@ void ir_module_free(IRModule *m) {
         free(m->functions.data[i].value_width);
         free(m->functions.data[i].value_is_unsigned);
         free(m->functions.data[i].value_is_float);
-        for (size_t d = 0; d < m->functions.data[i].num_dbg_vars; d++)
-            free(m->functions.data[i].dbg_vars[d].name);
+        for (size_t d = 0; d < m->functions.data[i].num_dbg_vars; d++) {
+            IRDebugVar *dv = &m->functions.data[i].dbg_vars[d];
+            free(dv->name);
+            free(dv->struct_tag);
+            for (int mi = 0; mi < dv->num_members; mi++)
+                free(dv->members[mi].name);
+            free(dv->members);
+        }
         free(m->functions.data[i].dbg_vars);
         /* Free register allocation results if present. */
         extern void ra_result_free(void *ra);
@@ -380,6 +386,8 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     inst.alloca_bytes = 0;
     inst.float_imm = 0;
     inst.is_float = 0;
+    inst.force_stack = 0;
+    memset(inst.call_arg_on_stack, 0, sizeof(inst.call_arg_on_stack));
     ir_inst_array_push(&fn->insts, inst);
     if (dst >= 0) set_value_type(fn, dst, width ? width : 4, is_unsigned);
 }
@@ -488,6 +496,67 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
     }
 }
 
+/* Load the SysV register eightbytes of an aggregate at `addr` into SSA
+ * values.  `n`/`cls` come from sysv_classify_agg.  Each eightbyte becomes a
+ * width-8 INTEGER or float SSA value (zero-extended from a shorter chunk). */
+static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
+                          const SysVRegClass cls[2], IRValue out[2],
+                          SourceLoc loc) {
+    for (int i = 0; i < n; i++) {
+        int off = i * 8;
+        int remain = size - off;
+        if (remain <= 0) remain = 1;
+        int w = remain >= 8 ? 8 : remain >= 4 ? 4 : remain >= 2 ? 2 : 1;
+        IRValue a = emit_add_const(fn, addr, off, loc);
+        IRValue v = new_value(fn);
+        int is_sse = (cls[i] == SYSV_CLS_SSE);
+        emit_inst_w(fn, IR_LOAD_PTR, v, a, -1, 0, w, 1, loc);
+        if (is_sse) set_value_float(fn, v, 1);
+        if (w < 8 && !is_sse) {
+            /* Zero-extend a short integer chunk to a full eightbyte. */
+            IRValue wide = new_value(fn);
+            emit_inst_w(fn, IR_ZEXT, wide, v, -1, w, 8, 1, loc);
+            v = wide;
+        } else if (w < 8 && is_sse) {
+            /* float in a 4-byte chunk: leave width 4; double is already 8. */
+            set_value_type(fn, v, w, 0);
+            set_value_float(fn, v, 1);
+        } else {
+            set_value_type(fn, v, is_sse ? (w <= 4 ? 4 : 8) : 8, is_sse ? 0 : 1);
+            if (is_sse) set_value_float(fn, v, 1);
+        }
+        out[i] = v;
+    }
+}
+
+/* Store register eightbytes into an aggregate at `addr`. */
+static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
+                           const SysVRegClass cls[2], const IRValue vals[2],
+                           SourceLoc loc) {
+    (void)cls;
+    for (int i = 0; i < n; i++) {
+        int off = i * 8;
+        int remain = size - off;
+        if (remain <= 0) break;
+        int w = remain >= 8 ? 8 : remain >= 4 ? 4 : remain >= 2 ? 2 : 1;
+        IRValue a = emit_add_const(fn, addr, off, loc);
+        IRValue v = vals[i];
+        int vw = get_value_width(fn, v);
+        if (vw != w && !get_value_is_float(fn, v)) {
+            if (vw > w) {
+                IRValue t = new_value(fn);
+                emit_inst_w(fn, IR_TRUNC, t, v, -1, vw, w, 1, loc);
+                v = t;
+            } else {
+                IRValue t = new_value(fn);
+                emit_inst_w(fn, IR_ZEXT, t, v, -1, vw, w, 1, loc);
+                v = t;
+            }
+        }
+        emit_inst_w(fn, IR_STORE_PTR, -1, a, v, 0, w, 1, loc);
+    }
+}
+
 /* Emit `dst = &global-with-name`. */
 static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc) {
     IRValue v = new_value(fn);
@@ -553,6 +622,42 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
     st->len++;
 }
 
+static void ir_dbg_fill_struct(IRDebugVar *dv, Type ty) {
+    dv->struct_tag = NULL;
+    dv->struct_size = 0;
+    dv->members = NULL;
+    dv->num_members = 0;
+    const char *tag = NULL;
+    if (ty.kind == TY_STRUCT && ty.tag) tag = ty.tag;
+    else if (ty.kind == TY_PTR && ty.pointee && ty.pointee->kind == TY_STRUCT
+             && ty.pointee->tag)
+        tag = ty.pointee->tag;
+    if (!tag) return;
+    dv->struct_tag = xstrdup(tag);
+    const StructDef *sd = struct_registry_find_c(g_ir_structs, tag);
+    if (!sd) return;
+    dv->struct_size = sd->size > 0 ? sd->size : (ty.kind == TY_STRUCT ? type_size(ty) : 0);
+    if (sd->num_members <= 0) return;
+    dv->members = xmalloc((size_t)sd->num_members * sizeof(IRDebugMember));
+    dv->num_members = sd->num_members;
+    for (int i = 0; i < sd->num_members; i++) {
+        const StructMember *sm = &sd->members[i];
+        IRDebugMember *m = &dv->members[i];
+        memset(m, 0, sizeof(*m));
+        m->name = sm->name ? xstrdup(sm->name) : xstrdup("");
+        m->offset = sm->offset;
+        m->bit_width = sm->bit_width;
+        m->bit_offset = sm->bit_offset;
+        m->type_kind = (int)sm->type.kind;
+        m->width = sm->type.kind == TY_PTR ? 8
+                 : (sm->type.kind == TY_ARRAY ? type_size(sm->type)
+                    : (sm->type.kind == TY_STRUCT ? type_size(sm->type)
+                       : (sm->type.width ? sm->type.width : 4)));
+        m->is_unsigned = sm->type.is_unsigned;
+        m->is_bool = sm->type.is_bool;
+    }
+}
+
 static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
                            IRDebugVarKind kind, Type ty, int alloca_ssa,
                            int param_idx) {
@@ -563,6 +668,7 @@ static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
         fn->cap_dbg_vars = nc;
     }
     IRDebugVar *dv = &fn->dbg_vars[fn->num_dbg_vars++];
+    memset(dv, 0, sizeof(*dv));
     dv->name = xstrdup(name);
     dv->loc = loc;
     dv->kind = kind;
@@ -575,6 +681,7 @@ static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
     dv->array_len = ty.kind == TY_ARRAY ? ty.length : 0;
     dv->alloca_ssa = alloca_ssa;
     dv->param_idx = param_idx;
+    ir_dbg_fill_struct(dv, ty);
 }
 
 static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty) {
@@ -1240,6 +1347,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     && e->u.call.args.len >= 2)
                     last = lower_expr(fn, st, e->u.call.args.data[1]);
                 IRInst inst;
+                memset(&inst, 0, sizeof(inst));
                 inst.op = IR_CALL;
                 inst.a = -1; inst.b = -1; inst.imm = 0;
                 inst.loc = e->loc;
@@ -1267,32 +1375,106 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
         }
         IRValue arg_vals[IR_CALL_MAX_ARGS];
-        int nargs = (int)e->u.call.args.len;
-        for (int i = 0; i < nargs; i++)
-            arg_vals[i] = lower_expr(fn, st, e->u.call.args.data[i]);
+        unsigned char arg_on_stack[IR_CALL_MAX_ARGS];
+        int nargs = 0;
+        memset(arg_on_stack, 0, sizeof(arg_on_stack));
+        /* Reserve a slot if the return needs a hidden sret pointer. */
+        int is_void_pre = (e->type.width == 0);
+        int is_ret_struct_pre = (!is_void_pre && e->type.kind == TY_STRUCT);
+        SysVRegClass ret_cls_pre[2];
+        int ret_nreg_pre = is_ret_struct_pre
+                           ? sysv_classify_agg(e->type, ret_cls_pre) : 0;
+        int ret_in_mem_pre = is_ret_struct_pre && ret_nreg_pre == 0;
+        int arg_limit = IR_CALL_MAX_ARGS - (ret_in_mem_pre ? 1 : 0);
+        /* Expand aggregates into per-eightbyte SSA args.  Register-class
+         * eightbytes travel in GP/XMM; MEMORY-class eightbytes are forced
+         * onto the stack (SysV). */
+        for (int i = 0; i < (int)e->u.call.args.len; i++) {
+            Expr *arg = e->u.call.args.data[i];
+            IRValue av = lower_expr(fn, st, arg);
+            if (arg->type.kind == TY_STRUCT) {
+                SysVRegClass cls[2];
+                int nreg = sysv_classify_agg(arg->type, cls);
+                int asz = type_size(arg->type);
+                if (nreg > 0) {
+                    IRValue ebs[2];
+                    load_agg_regs(fn, av, asz, nreg, cls, ebs, e->loc);
+                    for (int k = 0; k < nreg; k++) {
+                        if (nargs >= arg_limit) break;
+                        arg_vals[nargs] = ebs[k];
+                        arg_on_stack[nargs] = 0;
+                        nargs++;
+                    }
+                    continue;
+                }
+                /* MEMORY: copy eightbytes onto the outgoing stack. */
+                int nmem = (asz + 7) / 8;
+                if (nmem < 1) nmem = 1;
+                for (int k = 0; k < nmem; k++) {
+                    if (nargs >= arg_limit) break;
+                    int off = k * 8;
+                    int remain = asz - off;
+                    int w = remain >= 8 ? 8 : remain >= 4 ? 4 : remain >= 2 ? 2 : 1;
+                    IRValue a = emit_add_const(fn, av, off, e->loc);
+                    IRValue v = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, v, a, -1, 0, w, 1, e->loc);
+                    if (w < 8) {
+                        IRValue wide = new_value(fn);
+                        emit_inst_w(fn, IR_ZEXT, wide, v, -1, w, 8, 1, e->loc);
+                        v = wide;
+                    }
+                    arg_vals[nargs] = v;
+                    arg_on_stack[nargs] = 1;
+                    nargs++;
+                }
+                continue;
+            }
+            if (nargs < arg_limit) {
+                arg_vals[nargs] = av;
+                arg_on_stack[nargs] = 0;
+                nargs++;
+            }
+        }
         /* Void call: no result value (width 0).  Still emit the call for its
          * side effects; dst=-1 marks "no result". */
-        int is_void = (e->type.width == 0);
-        /* Slice 13 — sret: a struct-returning call needs a destination slot.
-         * Allocate it, pass &slot as a hidden arg 0, shift real args up, and
-         * take the slot address as the call's result "value" (a pointer). */
-        int is_ret_struct = (!is_void && e->type.kind == TY_STRUCT);
+        int is_void = is_void_pre;
+        /* Struct return: MEMORY class uses hidden sret; register class
+         * returns bits in RAX(/RDX) or XMM0(/XMM1). */
+        int is_ret_struct = is_ret_struct_pre;
+        SysVRegClass ret_cls[2];
+        ret_cls[0] = ret_cls_pre[0];
+        ret_cls[1] = ret_cls_pre[1];
+        int ret_nreg = ret_nreg_pre;
+        int ret_in_mem = ret_in_mem_pre;
         IRValue sret_addr = -1;
-        if (is_ret_struct) {
+        if (ret_in_mem) {
             int total = type_size(e->type);
             IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
             sret_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
-        /* A struct call produces no scalar result (dst=-1): the bytes land in
-         * the slot backing sret_addr, which is also passed as hidden arg 0 and
-         * kept live across the call.  The expression's "value" is sret_addr. */
-        IRValue v = is_ret_struct ? sret_addr : (is_void ? -1 : new_value(fn));
-        int total_nargs = nargs + (is_ret_struct ? 1 : 0);
+        IRValue slot_addr = -1;
+        if (is_ret_struct && ret_nreg > 0) {
+            int total = type_size(e->type);
+            IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
+            slot_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        }
+        IRValue v = ret_in_mem ? sret_addr
+                  : (is_ret_struct && ret_nreg > 0) ? slot_addr
+                  : (is_void ? -1 : new_value(fn));
+        IRValue ret_lo = -1, ret_hi = -1;
+        if (is_ret_struct && ret_nreg > 0) {
+            ret_lo = new_value(fn);
+            if (ret_nreg > 1) ret_hi = new_value(fn);
+        }
+        int total_nargs = nargs + (ret_in_mem ? 1 : 0);
         IRInst inst;
+        memset(&inst, 0, sizeof(inst));
         inst.op = IR_CALL;
-        inst.dst = is_ret_struct ? -1 : v;
+        inst.dst = ret_in_mem ? -1
+                 : (is_ret_struct && ret_nreg > 0) ? ret_lo
+                 : v;
         inst.a = -1;
-        inst.b = -1;
+        inst.b = ret_hi;   /* second return eightbyte, or -1 */
         inst.imm = 0;
         inst.loc = e->loc;
         inst.call_name = NULL;
@@ -1341,22 +1523,50 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             inst.call_callee = lower_expr(fn, st, e->u.call.callee);
         }
         inst.call_nargs = total_nargs;
-        if (is_ret_struct) {
+        if (ret_in_mem) {
             inst.call_args[0] = sret_addr;
-            for (int i = 0; i < nargs; i++)
+            inst.call_arg_on_stack[0] = 0;
+            for (int i = 0; i < nargs; i++) {
                 inst.call_args[i + 1] = arg_vals[i];
+                inst.call_arg_on_stack[i + 1] = arg_on_stack[i];
+            }
         } else {
-            for (int i = 0; i < nargs; i++) inst.call_args[i] = arg_vals[i];
+            for (int i = 0; i < nargs; i++) {
+                inst.call_args[i] = arg_vals[i];
+                inst.call_arg_on_stack[i] = arg_on_stack[i];
+            }
         }
-        /* A struct call's "value" is the destination pointer (width 8). */
-        inst.width = is_ret_struct ? 8
+        /* Register-returned structs: result eightbytes land in dst(/b); the
+         * expression value is still the slot address.  MEMORY structs: value
+         * is the sret pointer (width 8). */
+        if (is_ret_struct && ret_nreg > 0) {
+            /* Result eightbytes are INTEGER (RAX/RDX) or SSE (XMM0/XMM1).
+             * Mark float class on the SSA results so codegen picks XMM. */
+            inst.width = 8;
+            inst.is_float = (ret_cls[0] == SYSV_CLS_SSE);
+            inst.is_unsigned = 1;
+            ir_inst_array_push(&fn->insts, inst);
+            set_value_type(fn, ret_lo, 8, 1);
+            if (ret_cls[0] == SYSV_CLS_SSE) set_value_float(fn, ret_lo, 1);
+            if (ret_hi >= 0) {
+                set_value_type(fn, ret_hi, 8, 1);
+                if (ret_cls[1] == SYSV_CLS_SSE) set_value_float(fn, ret_hi, 1);
+            }
+            IRValue ebs[2] = { ret_lo, ret_hi };
+            store_agg_regs(fn, slot_addr, type_size(e->type), ret_nreg,
+                           ret_cls, ebs, e->loc);
+            return slot_addr;
+        }
+        inst.width = ret_in_mem ? 8
                       : (is_void ? 0 : (e->type.width ? e->type.width : 4));
-        inst.is_unsigned = is_ret_struct ? 1 : e->type.is_unsigned;
+        inst.is_unsigned = ret_in_mem ? 1 : e->type.is_unsigned;
         ir_inst_array_push(&fn->insts, inst);
-        if (!is_void) {
+        if (!is_void && !is_ret_struct) {
             set_value_type(fn, v, inst.width, inst.is_unsigned);
             if (e->type.kind == TY_FLOAT)
                 set_value_float(fn, v, 1);
+        } else if (ret_in_mem) {
+            set_value_type(fn, v, 8, 1);
         }
         return v;
     }
@@ -1836,14 +2046,26 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             /* void function: bare `return;` — no value. */
             emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
         } else if (fn->ret_is_struct) {
-            /* Slice 13 — sret: the returned expression lowers to a pointer to
-             * the local struct; copy its bytes into the hidden destination
-             * (*sret_value) and return the sret pointer in RAX (SysV AMD64
-             * struct-return convention). */
             IRValue v = lower_expr(fn, st, s->u.value);
-            emit_struct_copy(fn, fn->sret_value, v, fn->ret_width, s->loc);
-            emit_inst_w(fn, IR_RETURN, -1, fn->sret_value, -1, 0,
-                        8, 1, s->loc);
+            if (fn->ret_reg_n > 0) {
+                /* SysV register return: load eightbytes into RAX(/RDX) or
+                 * XMM0(/XMM1).  IR_RETURN.a = lo, .b = hi (or -1). */
+                SysVRegClass cls[2];
+                cls[0] = (SysVRegClass)fn->ret_reg_cls[0];
+                cls[1] = (SysVRegClass)fn->ret_reg_cls[1];
+                IRValue ebs[2];
+                load_agg_regs(fn, v, fn->ret_width, fn->ret_reg_n, cls, ebs,
+                              s->loc);
+                IRValue hi = (fn->ret_reg_n > 1) ? ebs[1] : -1;
+                emit_inst_w(fn, IR_RETURN, -1, ebs[0], hi, 0, 8, 1, s->loc);
+                if (cls[0] == SYSV_CLS_SSE)
+                    fn->insts.data[fn->insts.len - 1].is_float = 1;
+            } else {
+                /* MEMORY class: copy into hidden sret slot; return pointer. */
+                emit_struct_copy(fn, fn->sret_value, v, fn->ret_width, s->loc);
+                emit_inst_w(fn, IR_RETURN, -1, fn->sret_value, -1, 0,
+                            8, 1, s->loc);
+            }
         } else {
             IRValue v = lower_expr(fn, st, s->u.value);
             int vw = get_value_width(fn, v), vu = get_value_is_unsigned(fn, v);
@@ -2306,6 +2528,17 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
         irfn.sret_value = -1;
+        irfn.ret_reg_n = 0;
+        irfn.ret_reg_cls[0] = 0;
+        irfn.ret_reg_cls[1] = 0;
+        if (irfn.ret_is_struct) {
+            SysVRegClass rcls[2];
+            irfn.ret_reg_n = sysv_classify_agg(fd->ret_type, rcls);
+            for (int i = 0; i < irfn.ret_reg_n; i++)
+                irfn.ret_reg_cls[i] = (int)rcls[i];
+            /* Struct size for copy/load lives in ret_width. */
+            irfn.ret_width = type_size(fd->ret_type);
+        }
         irfn.dbg_vars = NULL;
         irfn.num_dbg_vars = 0;
         irfn.cap_dbg_vars = 0;
@@ -2322,37 +2555,76 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
 
         /* Emit all PARAM instructions up front so they stay contiguous at
          * function start (codegen's prologue relies on this layout).  The
-         * alloca/addr/store chains follow afterward. */
-        IRValue param_vs[64];
-        /* Slice 13 — sret: a struct-returning function receives a hidden
-         * destination pointer as param 0 (in RDI per SysV AMD64).  Real params
-         * are shifted up to indices 1..n. */
-        if (irfn.ret_is_struct) {
+         * alloca/addr/store chains follow afterward.
+         *
+         * SysV: MEMORY-class struct returns get a hidden sret pointer as
+         * param 0.  Register-class struct returns need no hidden param.
+         * Struct formals ≤16 bytes expand into 1–2 register PARAMs; larger
+         * (MEMORY) formals expand into stack-only eightbyte PARAMs. */
+        IRValue param_ebs[64][2];
+        int param_nreg[64]; /* >0 reg ebs; 0 MEMORY; -1 scalar */
+        IRValue param_mem_vals[256];
+        int param_mem_base[64];
+        int param_mem_n[64];
+        int mem_nvals = 0;
+        int next_pidx = 0;
+        if (irfn.ret_is_struct && irfn.ret_reg_n == 0) {
             irfn.sret_value = new_value(&irfn);
-            emit_inst_w(&irfn, IR_PARAM, irfn.sret_value, -1, -1, 0, 8, 1,
-                        fd->loc);
+            emit_inst_w(&irfn, IR_PARAM, irfn.sret_value, -1, -1, next_pidx++,
+                        8, 1, fd->loc);
         }
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
-            /* A struct arrives by reference (caller passes &struct), so the
-             * incoming param is an 8-byte pointer regardless of struct size. */
-            int pw = (pty.kind == TY_PTR || pty.kind == TY_STRUCT) ? 8
-                      : (pty.width ? pty.width : 4);
-            int pu = (pty.kind == TY_PTR || pty.kind == TY_STRUCT) ? 1
-                      : pty.is_unsigned;
-            int pidx = (int)p + (irfn.ret_is_struct ? 1 : 0);
-
-            param_vs[p] = new_value(&irfn);
-            emit_inst_w(&irfn, IR_PARAM, param_vs[p], -1, -1, pidx, pw, pu,
-                        fd->params.data[p].loc);
-            if (pty.kind == TY_FLOAT)
-                set_value_float(&irfn, param_vs[p], 1);
+            SourceLoc ploc = fd->params.data[p].loc;
+            param_mem_base[p] = 0;
+            param_mem_n[p] = 0;
+            if (pty.kind == TY_STRUCT) {
+                SysVRegClass cls[2];
+                int nreg = sysv_classify_agg(pty, cls);
+                if (nreg > 0) {
+                    param_nreg[p] = nreg;
+                    for (int k = 0; k < nreg; k++) {
+                        param_ebs[p][k] = new_value(&irfn);
+                        int is_sse = (cls[k] == SYSV_CLS_SSE);
+                        emit_inst_w(&irfn, IR_PARAM, param_ebs[p][k], -1, -1,
+                                    next_pidx++, 8, 1, ploc);
+                        if (is_sse)
+                            set_value_float(&irfn, param_ebs[p][k], 1);
+                    }
+                } else {
+                    /* MEMORY: eightbytes arrive on the stack only. */
+                    int total = type_size(pty);
+                    int nmem = (total + 7) / 8;
+                    if (nmem < 1) nmem = 1;
+                    if (mem_nvals + nmem > 256) nmem = 256 - mem_nvals;
+                    param_nreg[p] = 0;
+                    param_mem_base[p] = mem_nvals;
+                    param_mem_n[p] = nmem;
+                    for (int k = 0; k < nmem; k++) {
+                        IRValue v = new_value(&irfn);
+                        emit_inst_w(&irfn, IR_PARAM, v, -1, -1, next_pidx++,
+                                    8, 1, ploc);
+                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
+                        param_mem_vals[mem_nvals++] = v;
+                    }
+                }
+            } else {
+                param_nreg[p] = -1;
+                int pw = (pty.kind == TY_PTR) ? 8 : (pty.width ? pty.width : 4);
+                int pu = (pty.kind == TY_PTR) ? 1 : pty.is_unsigned;
+                param_ebs[p][0] = new_value(&irfn);
+                emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
+                            next_pidx++, pw, pu, ploc);
+                if (pty.kind == TY_FLOAT)
+                    set_value_float(&irfn, param_ebs[p][0], 1);
+            }
         }
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
             int pw = pty.kind == TY_PTR ? 8 : (pty.width ? pty.width : 4);
             int pu = pty.kind == TY_PTR ? 1 : pty.is_unsigned;
             const char *pname = fd->params.data[p].name;
+            SourceLoc ploc = fd->params.data[p].loc;
             int pinned = is_pinned_in_body(fd, pname, pty);
             if (g_ir_pin_locals)
                 pinned = 1;
@@ -2364,35 +2636,66 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
              * read/written directly at its [rbp+..] stack offset. */
             if (pty.kind == TY_FLOAT && pty.width != 16)
                 pinned = 1;
+            /* Struct formals are always pinned (live in a stack slot). */
+            if (pty.kind == TY_STRUCT)
+                pinned = 1;
 
             IRValue slot;
-            if (pinned) {
+            if (pty.kind == TY_STRUCT) {
                 int total = type_size(pty);
-                slot = emit_alloca(&irfn, total, pw, pu, fd->params.data[p].loc);
-                IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1,
-                                          fd->params.data[p].loc);
-                if (pty.kind == TY_STRUCT) {
-                    /* Struct by value: the incoming param is a pointer to the
-                     * caller's struct — copy the bytes into our local slot
-                     * instead of storing the pointer itself. */
-                    emit_struct_copy(&irfn, addr, param_vs[p], total,
-                                     fd->params.data[p].loc);
+                slot = emit_alloca(&irfn, total, 8, 1, ploc);
+                IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1, ploc);
+                if (param_nreg[p] > 0) {
+                    SysVRegClass cls[2];
+                    sysv_classify_agg(pty, cls);
+                    store_agg_regs(&irfn, addr, total, param_nreg[p], cls,
+                                   param_ebs[p], ploc);
                 } else {
-                    emit_inst_w(&irfn, IR_STORE_PTR, -1, addr, param_vs[p], 0, pw, pu,
-                                fd->params.data[p].loc);
+                    /* MEMORY: store each incoming stack eightbyte into the
+                     * local slot. */
+                    SysVRegClass cls[2] = { SYSV_CLS_INTEGER, SYSV_CLS_INTEGER };
+                    for (int k = 0; k < param_mem_n[p]; k++) {
+                        int off = k * 8;
+                        int remain = total - off;
+                        if (remain <= 0) break;
+                        int w = remain >= 8 ? 8 : remain >= 4 ? 4
+                              : remain >= 2 ? 2 : 1;
+                        IRValue a = emit_add_const(&irfn, addr, off, ploc);
+                        IRValue v = param_mem_vals[param_mem_base[p] + k];
+                        if (w < 8) {
+                            IRValue t = new_value(&irfn);
+                            emit_inst_w(&irfn, IR_TRUNC, t, v, -1, 8, w, 1,
+                                        ploc);
+                            v = t;
+                        }
+                        emit_inst_w(&irfn, IR_STORE_PTR, -1, a, v, 0, w, 1,
+                                    ploc);
+                        (void)cls;
+                    }
                 }
+            } else if (pinned) {
+                int total = type_size(pty);
+                slot = emit_alloca(&irfn, total, pw, pu, ploc);
+                IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1, ploc);
+                emit_inst_w(&irfn, IR_STORE_PTR, -1, addr, param_ebs[p][0], 0,
+                            pw, pu, ploc);
             } else {
                 slot = new_value(&irfn);
-                emit_inst_w(&irfn, IR_ALLOCA, slot, -1, -1, 0, pw, pu,
-                            fd->params.data[p].loc);
-                emit_inst_w(&irfn, IR_STORE, -1, slot, param_vs[p], 0, pw, pu,
-                            fd->params.data[p].loc);
+                emit_inst_w(&irfn, IR_ALLOCA, slot, -1, -1, 0, pw, pu, ploc);
+                emit_inst_w(&irfn, IR_STORE, -1, slot, param_ebs[p][0], 0, pw,
+                            pu, ploc);
             }
             irsymtable_push(&st, pname, slot, pinned, pty);
             {
-                int pidx = (int)p + (irfn.ret_is_struct ? 1 : 0);
-                ir_add_dbg_var(&irfn, pname, fd->params.data[p].loc, IR_DBG_PARAM,
-                               pty, slot, pidx);
+                /* Debug: first IR param index for this formal (sret shifts). */
+                int pidx = 0;
+                if (irfn.ret_is_struct && irfn.ret_reg_n == 0) pidx = 1;
+                for (size_t q = 0; q < p; q++) {
+                    if (param_nreg[q] > 0) pidx += param_nreg[q];
+                    else if (param_nreg[q] == 0) pidx += param_mem_n[q];
+                    else pidx += 1;
+                }
+                ir_add_dbg_var(&irfn, pname, ploc, IR_DBG_PARAM, pty, slot, pidx);
             }
         }
 

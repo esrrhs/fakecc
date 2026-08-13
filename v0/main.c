@@ -70,7 +70,8 @@ enum DebugLocKind {
     DBG_LOC_NONE = 0,
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
-    DBG_LOC_ADDR = 3
+    DBG_LOC_ADDR = 3,
+    DBG_LOC_ENTRY_VALUE = 4
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -79,6 +80,15 @@ struct DebugLocRange {
     int rbp_offset;
     int dwarf_reg;
 };typedef struct DebugLocRange DebugLocRange;
+struct DebugMember {
+    char *name;
+    int offset;
+    int bit_width;
+    int bit_offset;
+    DebugTypeTag type_tag;
+    int width;
+    int is_unsigned;
+};typedef struct DebugMember DebugMember;
 struct DebugVar {
     char *name;
     char *file;
@@ -88,6 +98,10 @@ struct DebugVar {
     int width;
     int is_unsigned;
     int array_len;
+    char *type_name;
+    int struct_size;
+    DebugMember *members;
+    size_t num_members;
     DebugLocKind loc_kind;
     int rbp_offset;
     int dwarf_reg;
@@ -97,7 +111,20 @@ struct DebugVar {
     size_t cap_ranges;
     int alloca_ssa;
     int param_idx;
+    int entry_dwarf_reg;
 };typedef struct DebugVar DebugVar;
+struct DebugCallSiteParam {
+    int dwarf_reg;
+    unsigned char *value_expr;
+    size_t value_expr_len;
+};typedef struct DebugCallSiteParam DebugCallSiteParam;
+struct DebugCallSite {
+    size_t call_pc;
+    size_t return_pc;
+    char *callee_name;
+    DebugCallSiteParam *params;
+    size_t num_params;
+};typedef struct DebugCallSite DebugCallSite;
 struct DebugLineEntry {
     char *file;
     int line;
@@ -116,6 +143,9 @@ struct DebugFunc {
     DebugVar *vars;
     size_t num_vars;
     size_t cap_vars;
+    DebugCallSite *call_sites;
+    size_t num_call_sites;
+    size_t cap_call_sites;
 };typedef struct DebugFunc DebugFunc;
 struct EmitModule {
     Buffer text;
@@ -218,13 +248,15 @@ struct IRInst {
     int imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[16];
+    IRValue call_args[32];
     int call_nargs;
     IRValue call_callee;
     int width;
     int is_unsigned;
     int64_t float_imm;
     int is_float;
+    int force_stack;
+    unsigned char call_arg_on_stack[32];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -236,6 +268,16 @@ enum IRDebugVarKind {
     IR_DBG_PARAM = 0,
     IR_DBG_LOCAL = 1
 };typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugMember {
+    char *name;
+    int offset;
+    int bit_width;
+    int bit_offset;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+};typedef struct IRDebugMember IRDebugMember;
 struct IRDebugVar {
     char *name;
     SourceLoc loc;
@@ -245,6 +287,10 @@ struct IRDebugVar {
     int is_unsigned;
     int is_bool;
     int array_len;
+    char *struct_tag;
+    int struct_size;
+    IRDebugMember *members;
+    int num_members;
     int alloca_ssa;
     int param_idx;
 };typedef struct IRDebugVar IRDebugVar;
@@ -264,6 +310,8 @@ struct IRFunction {
     int ret_is_unsigned;
     int ret_is_float;
     int ret_is_struct;
+    int ret_reg_n;
+    int ret_reg_cls[2];
     int ret_is_bool;
     int is_variadic;
     int is_static;
@@ -461,6 +509,11 @@ Type type_clone(Type t);
 void type_free(Type *t);
 int type_size(Type t);
 int type_align(Type t);
+enum SysVRegClass {
+    SYSV_CLS_INTEGER = 1,
+    SYSV_CLS_SSE = 2
+};typedef enum SysVRegClass SysVRegClass;
+int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);

@@ -1,18 +1,20 @@
 package main;
-// A struct local lives in memory, its size reaches the debugger, and a pointer
-// to it compares equal to its address.  Naming individual members is a known
-// gap (no DW_TAG_member DIEs, and the struct type DIE is unnamed), so this case
-// pins down what does work rather than the shape we would eventually like.
+// Struct locals get a named DW_TAG_structure_type with DW_TAG_member children,
+// so gdb can print fields by name (`p.x`) and through a typed pointer (`q->x`).
 // expect: 42
 // gdb: break {brk}
 // gdb: run
 // gdb: print sizeof(p)
-// gdb: print q == &p
-// gdb: print *(int *)q
+// gdb: print p.x
+// gdb: print p.y
+// gdb: print q->x
+// gdb: print q->y
 // gdb: continue
 // gdb_expect: \$1 = 8
-// gdb_expect: \$2 = 1
-// gdb_expect: \$3 = 8
+// gdb_expect: \$2 = 8
+// gdb_expect: \$3 = 34
+// gdb_expect: \$4 = 8
+// gdb_expect: \$5 = 34
 struct P { int x; int y; };
 int main(void) {
     struct P p;

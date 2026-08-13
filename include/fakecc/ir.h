@@ -75,10 +75,10 @@ typedef enum {
     IR_DBG_VALUE,
 } IROpcode;
 
-/* Maximum arguments to IR_CALL — Slice 10 raises this from 6 to 16.
- * Args 0..5 go in SysV integer arg regs; args 6..15 pushed on the stack
- * right-to-left before the call. */
-#define IR_CALL_MAX_ARGS 16
+/* Maximum arguments to IR_CALL.  SysV packs small aggregates into 1–2
+ * register args and MEMORY-class aggregates into one stack eightbyte per
+ * 8 bytes of payload, so a single large struct can consume many slots. */
+#define IR_CALL_MAX_ARGS 32
 
 typedef struct {
     IROpcode op;
@@ -104,6 +104,12 @@ typedef struct {
     /* True if this instruction produces a float value (TY_FLOAT).  Lets
      * codegen pick the XMM register file instead of the GP file. */
     int      is_float;
+    /* IR_PARAM / IR_CALL arg: force SysV MEMORY-class stack passing (do not
+     * assign a GP/XMM register even if one is free).  For IR_CALL, see also
+     * call_arg_on_stack[]. */
+    int      force_stack;
+    /* IR_CALL only: per-arg force_stack (MEMORY-class aggregate eightbytes). */
+    unsigned char call_arg_on_stack[IR_CALL_MAX_ARGS];
     /* Slice 7b/c: for IR_ALLOCA only. Total bytes reserved on the stack when
      * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
      * mem2reg promotes get 0 here (they never reach codegen anyway). */
@@ -126,6 +132,18 @@ typedef enum {
     IR_DBG_LOCAL  = 1
 } IRDebugVarKind;
 
+/* Member layout for a TY_STRUCT debug variable (feeds DW_TAG_member). */
+typedef struct {
+    char *name;           /* xstrdup'd */
+    int offset;
+    int bit_width;        /* 0 = normal */
+    int bit_offset;
+    int type_kind;        /* TypeKind of the member */
+    int width;
+    int is_unsigned;
+    int is_bool;
+} IRDebugMember;
+
 typedef struct {
     char *name;           /* xstrdup'd */
     SourceLoc loc;
@@ -135,6 +153,10 @@ typedef struct {
     int is_unsigned;
     int is_bool;
     int array_len;        /* >0 for TY_ARRAY */
+    char *struct_tag;     /* TY_STRUCT tag, or pointee tag for ptr-to-struct */
+    int struct_size;      /* byte size of that struct (for DIE AT_byte_size) */
+    IRDebugMember *members;
+    int num_members;
     int alloca_ssa;       /* IR_ALLOCA dst for locals/pinned params; -1 else */
     int param_idx;        /* SysV param index for IR_DBG_PARAM; -1 else */
 } IRDebugVar;
@@ -163,8 +185,13 @@ typedef struct {
     int   ret_is_unsigned;
     /* Float support: 1 if the function returns TY_FLOAT. */
     int   ret_is_float;
-    /* Slice 13: 1 if the function returns a struct by value (sret ABI). */
+    /* Slice 13: 1 if the function returns a struct by value. */
     int   ret_is_struct;
+    /* SysV: how many eightbytes of a struct return travel in registers
+     * (1 or 2).  0 means MEMORY class — hidden sret pointer in RDI.
+     * ret_reg_cls[i] holds SysVRegClass (INTEGER/SSE) for each eightbyte. */
+    int   ret_reg_n;
+    int   ret_reg_cls[2];
     /* 1 if the function returns _Bool (normalize the value to 0/1). */
     int   ret_is_bool;
     /* Variadic: 1 if the function was defined with a `...` tail.  The prologue
@@ -172,8 +199,8 @@ typedef struct {
     int   is_variadic;
     int   is_static;  /* 1 = `static` function — LOCAL linkage */
     /* Slice 13: SSA value of the hidden sret pointer param (param index 0)
-     * when ret_is_struct.  The return statement copies struct bytes into
-     * *sret_value and returns the pointer in RAX (SysV AMD64 struct ABI). */
+     * when ret_is_struct && ret_reg_n == 0.  The return statement copies
+     * struct bytes into *sret_value and returns the pointer in RAX. */
     IRValue sret_value;
     /* Debug variables (params + locals). Always populated; codegen uses
      * them only when -g is set. */

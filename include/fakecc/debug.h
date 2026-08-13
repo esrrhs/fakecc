@@ -30,8 +30,11 @@ void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
                                 size_t after_mov_rbp_pc);
 void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v);
 void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v);
+void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
+                                   const DebugCallSite *cs);
 
 /* Free everything a DebugVar owns and reset it to empty. */
 void debug_var_release(DebugVar *v);
+void debug_call_site_release(DebugCallSite *cs);
 
 #endif /* FAKECC_DEBUG_H */

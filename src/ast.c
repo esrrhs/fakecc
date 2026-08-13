@@ -325,6 +325,88 @@ int type_align(Type t) {
     return 1;
 }
 
+/* Field class for SysV eightbyte merging (NO_CLASS = 0). */
+enum { SV_NO = 0, SV_INT = 1, SV_SSE = 2, SV_MEM = 3 };
+
+static int sysv_merge(int a, int b) {
+    if (a == b) return a;
+    if (a == SV_NO) return b;
+    if (b == SV_NO) return a;
+    if (a == SV_MEM || b == SV_MEM) return SV_MEM;
+    if (a == SV_INT || b == SV_INT) return SV_INT;
+    return SV_SSE;
+}
+
+static int sysv_field_class(Type t) {
+    switch (t.kind) {
+    case TY_INT:
+    case TY_PTR:
+    case TY_ARRAY:   /* decays; treated as pointer-sized when nested oddly */
+        return SV_INT;
+    case TY_FLOAT:
+        if (t.width == 16) return SV_MEM; /* long double / X87 → MEMORY */
+        return SV_SSE;
+    case TY_STRUCT:
+        return SV_MEM; /* nested handled by walking members of the outer def */
+    default:
+        return SV_MEM;
+    }
+}
+
+int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
+    cls[0] = SYSV_CLS_INTEGER;
+    cls[1] = SYSV_CLS_INTEGER;
+    if (t.kind != TY_STRUCT || !t.tag) return 0;
+    int sz = type_size(t);
+    if (sz <= 0 || sz > 16) return 0;
+    const StructRegistry *reg = get_ir_structs();
+    /* During sema there may be no IR registry; fall back to size-only for
+     * incomplete classification — treat as MEMORY to stay safe. */
+    const StructDef *sd = NULL;
+    if (reg) sd = struct_registry_find_c(reg, t.tag);
+    if (!sd) {
+        /* Size-only fallback used before ir_generate: ≤8 → 1 INTEGER,
+         * ≤16 → 2 INTEGER, which matches all-integer structs (the common
+         * case).  Floats/X87 are rare in early checks; ir_generate always
+         * has the registry and re-classifies for real lowering. */
+        int n = (sz + 7) / 8;
+        cls[0] = SYSV_CLS_INTEGER;
+        if (n > 1) cls[1] = SYSV_CLS_INTEGER;
+        return n;
+    }
+    int eight[2] = { SV_NO, SV_NO };
+    for (int mi = 0; mi < sd->num_members; mi++) {
+        const StructMember *m = &sd->members[mi];
+        int msz = m->bit_width > 0
+                  ? (m->bit_width <= 8 ? 1 : m->bit_width <= 16 ? 2
+                     : m->bit_width <= 32 ? 4 : 8)
+                  : type_size(m->type);
+        if (msz <= 0) continue;
+        /* Bitfields share a storage unit starting at m->offset. */
+        int start = m->offset;
+        int end = start + msz;
+        int fc = sysv_field_class(m->type);
+        if (m->bit_width > 0) fc = SV_INT;
+        if (fc == SV_MEM) return 0;
+        for (int eb = 0; eb < 2; eb++) {
+            int lo = eb * 8, hi = lo + 8;
+            if (end <= lo || start >= hi) continue;
+            eight[eb] = sysv_merge(eight[eb], fc);
+            if (eight[eb] == SV_MEM) return 0;
+        }
+    }
+    int n = (sz + 7) / 8;
+    if (n < 1) n = 1;
+    if (n > 2) return 0;
+    for (int i = 0; i < n; i++) {
+        int c = eight[i] == SV_NO ? SV_INT : eight[i];
+        if (c == SV_MEM) return 0;
+        cls[i] = (c == SV_SSE) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
+    }
+    /* Post-merger: >2 eightbytes already rejected; X87 already → MEM. */
+    return n;
+}
+
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width) {
     if (sd->num_members >= sd->cap_members) {
         int nc = sd->cap_members ? sd->cap_members * 2 : 4;

@@ -69,6 +69,18 @@ void type_free(Type *t);
  * width for structs (which is stashed at parse-time via layout). */
 int  type_size(Type t);
 int  type_align(Type t); /* natural alignment of a type */
+
+/* SysV AMD64 aggregate classification for ≤16-byte structs/unions.
+ * Returns the number of eightbytes passed/returned in registers (1 or 2),
+ * writing INTEGER/SSE class per eightbyte into `cls`.  Returns 0 when the
+ * aggregate must use the MEMORY convention (hidden pointer / sret) — size
+ * > 16, unaligned fields, X87 members, or anything we do not yet classify. */
+typedef enum {
+    SYSV_CLS_INTEGER = 1,
+    SYSV_CLS_SSE     = 2
+} SysVRegClass;
+int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);

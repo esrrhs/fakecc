@@ -187,6 +187,11 @@ Type type_clone(Type t);
 void type_free(Type *t);
 int type_size(Type t);
 int type_align(Type t);
+enum SysVRegClass {
+    SYSV_CLS_INTEGER = 1,
+    SYSV_CLS_SSE = 2
+};typedef enum SysVRegClass SysVRegClass;
+int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);

@@ -274,6 +274,13 @@ static void finalize_sections(
                         dv->ranges[r].pc_end += mod_text_off[i];
                     }
                 }
+                for (size_t k = 0; k < f->num_call_sites; k++) {
+                    DebugCallSite cs = f->call_sites[k];
+                    /* Shallow fields; add_dbg_call_site deep-copies. */
+                    cs.call_pc += mod_text_off[i];
+                    cs.return_pc += mod_text_off[i];
+                    emit_module_add_dbg_call_site(&dbg, fi, &cs);
+                }
             }
             for (size_t j = 0; j < m->num_dbg_globals; j++)
                 emit_module_add_dbg_global(&dbg, &m->dbg_globals[j]);

@@ -187,6 +187,11 @@ Type type_clone(Type t);
 void type_free(Type *t);
 int type_size(Type t);
 int type_align(Type t);
+enum SysVRegClass {
+    SYSV_CLS_INTEGER = 1,
+    SYSV_CLS_SSE = 2
+};typedef enum SysVRegClass SysVRegClass;
+int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);
@@ -757,6 +762,21 @@ static Type usual_arith_conv(Type a, Type b) {
     return s;
 }
 static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
+static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
+    if (!argp || !*argp || !ptype) return;
+    Expr *arg = *argp;
+    const Type *at = &arg->type;
+    int at_arith = (at->kind == TY_INT || at->kind == TY_FLOAT);
+    int pt_arith = (ptype->kind == TY_INT || ptype->kind == TY_FLOAT);
+    if (!at_arith || !pt_arith) return;
+    if (at->kind == ptype->kind && at->width == ptype->width
+        && at->is_unsigned == ptype->is_unsigned)
+        return;
+    Type target = type_clone(*ptype);
+    Expr *cast = expr_new_cast(target, arg, arg->loc);
+    set_type(cast, target);
+    *argp = cast;
+}
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc);
 static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     if (!e) return type_default_int();
@@ -1039,6 +1059,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr(e->u.call.args.data[i], st, ft);
                     type_free(&at);
+                    if ((int)i < sig->arity)
+                        coerce_arg_to_param(&e->u.call.args.data[i],
+                                            &sig->param_types[i]);
                 }
                 set_type(e, type_clone(sig->ret_type));
                 return type_clone(e->type);
@@ -1060,6 +1083,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr(e->u.call.args.data[i], st, ft);
                     type_free(&at);
+                    if (fty->func_params && (int)i < fty->func_nparams)
+                        coerce_arg_to_param(&e->u.call.args.data[i],
+                                            &fty->func_params[i]);
                 }
                 Type ret = fty->func_ret ? *fty->func_ret : type_make_void();
                 set_type(e, ret);
@@ -1086,6 +1112,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         for (size_t i = 0; i < e->u.call.args.len; i++) {
             Type at = check_expr(e->u.call.args.data[i], st, ft);
             type_free(&at);
+            if (fn_ty.func_params && (int)i < fn_ty.func_nparams)
+                coerce_arg_to_param(&e->u.call.args.data[i],
+                                    &fn_ty.func_params[i]);
         }
         set_type(e, type_clone(*fn_ty.func_ret));
         type_free(&fn_ty);

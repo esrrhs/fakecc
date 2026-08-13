@@ -1279,6 +1279,157 @@ static void dbg_var_add_range(DebugVar *dv, size_t pc_start, size_t pc_end,
     r->dwarf_reg = dwarf_reg;
 }
 
+/* DWARF expression builders for DW_AT_call_value. */
+static void cv_u8(Buffer *b, uint8_t v) { buffer_append(b, (const char *)&v, 1); }
+static void cv_uleb(Buffer *b, uint64_t v) {
+    do {
+        uint8_t byte = v & 0x7f;
+        v >>= 7;
+        if (v) byte |= 0x80;
+        cv_u8(b, byte);
+    } while (v);
+}
+static void cv_sleb(Buffer *b, int64_t v) {
+    int more = 1;
+    while (more) {
+        uint8_t byte = v & 0x7f;
+        v >>= 7;
+        int sign = (byte & 0x40) != 0;
+        if ((v == 0 && !sign) || (v == -1 && sign)) more = 0;
+        else byte |= 0x80;
+        cv_u8(b, byte);
+    }
+}
+
+#define CV_OP_consts       0x11
+#define CV_OP_plus         0x22
+#define CV_OP_minus        0x1c
+#define CV_OP_neg          0x29
+#define CV_OP_lit0         0x30
+#define CV_OP_reg0         0x50
+#define CV_OP_entry_value  0xa3
+
+static void cv_entry_reg(Buffer *b, int dwarf_reg) {
+    Buffer inner; buffer_init(&inner);
+    if (dwarf_reg >= 0 && dwarf_reg <= 31)
+        cv_u8(&inner, (uint8_t)(CV_OP_reg0 + dwarf_reg));
+    else {
+        cv_u8(&inner, 0x90); /* DW_OP_regx */
+        cv_uleb(&inner, (uint64_t)dwarf_reg);
+    }
+    cv_u8(b, CV_OP_entry_value);
+    cv_uleb(b, inner.len);
+    buffer_append(b, inner.data, inner.len);
+    buffer_free(&inner);
+}
+
+/* Is SSA `v` the live value of formal parameter with SysV index `param_idx`
+ * just before instruction index `at`? */
+static int ssa_is_param(const IRFunction *fn, IRValue v, int param_idx, size_t at) {
+    if (v < 0 || param_idx < 0) return 0;
+    int dbg_i = -1;
+    for (size_t i = 0; i < fn->num_dbg_vars; i++) {
+        if (fn->dbg_vars[i].kind == IR_DBG_PARAM
+            && fn->dbg_vars[i].param_idx == param_idx) {
+            dbg_i = (int)i;
+            break;
+        }
+    }
+    if (dbg_i < 0) {
+        for (size_t i = 0; i < at && i < fn->insts.len; i++) {
+            const IRInst *ins = &fn->insts.data[i];
+            if (ins->op == IR_PARAM && (int)ins->imm == param_idx && ins->dst == v)
+                return 1;
+        }
+        return 0;
+    }
+    for (size_t i = at; i > 0; ) {
+        i--;
+        const IRInst *ins = &fn->insts.data[i];
+        if (ins->op == IR_DBG_VALUE && (int)ins->imm == dbg_i)
+            return ins->a == v;
+        if (ins->op == IR_PARAM && (int)ins->imm == param_idx && ins->dst == v)
+            return 1;
+    }
+    return 0;
+}
+
+static int find_param_for_ssa(const IRFunction *fn, IRValue v, size_t at) {
+    for (size_t i = 0; i < fn->num_dbg_vars; i++) {
+        if (fn->dbg_vars[i].kind != IR_DBG_PARAM) continue;
+        if (ssa_is_param(fn, v, fn->dbg_vars[i].param_idx, at))
+            return fn->dbg_vars[i].param_idx;
+    }
+    /* Fall back: IR_PARAM result itself. */
+    for (size_t i = 0; i < at && i < fn->insts.len; i++) {
+        const IRInst *ins = &fn->insts.data[i];
+        if (ins->op == IR_PARAM && ins->dst == v) return (int)ins->imm;
+    }
+    return -1;
+}
+
+static const IRInst *find_def(const IRFunction *fn, IRValue v, size_t at) {
+    if (v < 0) return NULL;
+    for (size_t i = at; i > 0; ) {
+        i--;
+        if (fn->insts.data[i].dst == v) return &fn->insts.data[i];
+    }
+    return NULL;
+}
+
+/* Synthesize a DW_AT_call_value expression for SSA `v`.  Prefer describing
+ * it in terms of DW_OP_entry_value of formal parameters (so outer frames
+ * survive caller-saved clobbers), falling back to a literal when possible.
+ * Returns 1 on success. */
+static int synth_call_value(const IRFunction *fn, IRValue v, size_t at,
+                            const int *param_entry_dwarf, int nparams,
+                            Buffer *out, int depth) {
+    if (depth > 16 || v < 0) return 0;
+    int pidx = find_param_for_ssa(fn, v, at);
+    if (pidx >= 0 && pidx < nparams && param_entry_dwarf[pidx] >= 0) {
+        cv_entry_reg(out, param_entry_dwarf[pidx]);
+        return 1;
+    }
+    const IRInst *def = find_def(fn, v, at);
+    if (!def) return 0;
+    switch (def->op) {
+    case IR_CONST:
+        if (def->imm >= 0 && def->imm <= 31) {
+            cv_u8(out, (uint8_t)(CV_OP_lit0 + def->imm));
+        } else {
+            cv_u8(out, CV_OP_consts);
+            cv_sleb(out, (int64_t)def->imm);
+        }
+        return 1;
+    case IR_COPY:
+    case IR_SEXT:
+    case IR_ZEXT:
+    case IR_TRUNC:
+        return synth_call_value(fn, def->a, at, param_entry_dwarf, nparams,
+                                out, depth + 1);
+    case IR_NEG: {
+        if (!synth_call_value(fn, def->a, at, param_entry_dwarf, nparams,
+                              out, depth + 1))
+            return 0;
+        cv_u8(out, CV_OP_neg);
+        return 1;
+    }
+    case IR_ADD:
+    case IR_SUB: {
+        if (!synth_call_value(fn, def->a, at, param_entry_dwarf, nparams,
+                              out, depth + 1))
+            return 0;
+        if (!synth_call_value(fn, def->b, at, param_entry_dwarf, nparams,
+                              out, depth + 1))
+            return 0;
+        cv_u8(out, def->op == IR_ADD ? CV_OP_plus : CV_OP_minus);
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
 static DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
     if (is_bool) return DBG_TY_BOOL;
     switch (type_kind) {
@@ -1499,14 +1650,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                          value_is_ld(fn, pi->dst));
             int is_float = !is_ld && (pi->dst >= 0 && pi->dst < fn->next_value_id &&
                             value_is_float_class(fn, pi->dst));
-            if (is_ld) {
-                /* long double: SysV passes in a 16-byte stack slot, NOT XMM.
-                 * Record its [rbp+..] offset; codegen loads it via fldt there. */
+            int force_stack = pi->force_stack || is_ld;
+            if (force_stack) {
+                /* long double or MEMORY-class eightbyte: stack only. */
                 arrive_reg[p] = -1;
                 arrive_is_xmm[p] = 0;
                 stack_off[p] = 16 + 8 * stack_arg_idx;
-                stack_arg_idx += 2; /* 16-byte slot = two 8-byte stack slots */
-                ld_off[pi->dst] = stack_off[p]; /* positive rbp-relative offset */
+                stack_arg_idx += is_ld ? 2 : 1;
+                if (is_ld)
+                    ld_off[pi->dst] = stack_off[p];
             } else if (is_float) {
                 if (xmm_reg_idx < 8) {
                     arrive_reg[p] = xmm_reg_idx; /* native XMM code 0..7 */
@@ -2233,12 +2385,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
                     int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
-                    if (is_ld) {
-                        /* long double arg: passed on the stack in a 16-byte slot
-                         * (two 8-byte positions), NOT in XMM. */
+                    int force_stack = inst->call_arg_on_stack[k] || is_ld;
+                    if (force_stack) {
+                        /* MEMORY-class eightbyte or long double: stack only. */
                         target_reg[k] = -1;
                         target_is_xmm[k] = 0;
-                        n_stack += 2;
+                        n_stack += is_ld ? 2 : 1;
                     } else if (is_float) {
                         if (n_xmm < 8) {
                             target_reg[k] = n_xmm; /* XMM0..7 */
@@ -2336,39 +2488,176 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     call_patches[num_call_patches].callee = xstrdup(inst->call_name);
                     call_patches[num_call_patches].after_off = aft;
                     num_call_patches++;
+                    if (want_debug && dbg_func_idx >= 0) {
+                        /* Record DW_TAG_call_site so DW_OP_entry_value can
+                         * recover outer-frame parameter values. */
+                        int entry_dwarf[64];
+                        for (int p = 0; p < nparams && p < 64; p++) {
+                            if (arrive_reg[p] < 0) entry_dwarf[p] = -1;
+                            else if (arrive_is_xmm[p])
+                                entry_dwarf[p] = 17 + arrive_reg[p];
+                            else
+                                entry_dwarf[p] = reg_to_dwarf(arrive_reg[p]);
+                        }
+                        DebugCallSite cs;
+                        memset(&cs, 0, sizeof(cs));
+                        cs.call_pc = aft - 5; /* E8 + rel32 */
+                        cs.return_pc = aft;
+                        cs.callee_name = inst->call_name
+                                         ? xstrdup(inst->call_name) : NULL;
+                        /* Count register-passed GP/XMM args only. */
+                        int ncs = 0;
+                        for (int k = 0; k < nargs; k++)
+                            if (target_reg[k] >= 0) ncs++;
+                        if (ncs > 0) {
+                            cs.params = xmalloc((size_t)ncs * sizeof(DebugCallSiteParam));
+                            cs.num_params = (size_t)ncs;
+                            int pi = 0;
+                            for (int k = 0; k < nargs; k++) {
+                                if (target_reg[k] < 0) continue;
+                                DebugCallSiteParam *cp = &cs.params[pi++];
+                                memset(cp, 0, sizeof(*cp));
+                                if (target_is_xmm[k])
+                                    cp->dwarf_reg = 17 + target_reg[k];
+                                else
+                                    cp->dwarf_reg = reg_to_dwarf(target_reg[k]);
+                                Buffer cv; buffer_init(&cv);
+                                if (!synth_call_value(fn, inst->call_args[k], j,
+                                                      entry_dwarf, nparams,
+                                                      &cv, 0)
+                                    || cv.len == 0) {
+                                    /* Fallback: the ABI register at the call
+                                     * (best-effort; may fail for outer frames
+                                     * when the reg is caller-saved). */
+                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31)
+                                        cv_u8(&cv, (uint8_t)(CV_OP_reg0 + cp->dwarf_reg));
+                                }
+                                cp->value_expr_len = cv.len;
+                                if (cv.len) {
+                                    cp->value_expr = xmalloc(cv.len);
+                                    memcpy(cp->value_expr, cv.data, cv.len);
+                                }
+                                buffer_free(&cv);
+                            }
+                        }
+                        emit_module_add_dbg_call_site(out, dbg_func_idx, &cs);
+                        debug_call_site_release(&cs);
+                    }
                 } else {
                     /* Indirect call: the callee is already in R11.  Emit
                      * `call *%r11` (FF /2). */
+                    size_t call_pc = out->text.len;
                     emit_indirect_call(&out->text, REG_R11);
+                    size_t aft = out->text.len;
+                    if (want_debug && dbg_func_idx >= 0) {
+                        int entry_dwarf[64];
+                        for (int p = 0; p < nparams && p < 64; p++) {
+                            if (arrive_reg[p] < 0) entry_dwarf[p] = -1;
+                            else if (arrive_is_xmm[p])
+                                entry_dwarf[p] = 17 + arrive_reg[p];
+                            else
+                                entry_dwarf[p] = reg_to_dwarf(arrive_reg[p]);
+                        }
+                        DebugCallSite cs;
+                        memset(&cs, 0, sizeof(cs));
+                        cs.call_pc = call_pc;
+                        cs.return_pc = aft;
+                        cs.callee_name = NULL;
+                        int ncs = 0;
+                        for (int k = 0; k < nargs; k++)
+                            if (target_reg[k] >= 0) ncs++;
+                        if (ncs > 0) {
+                            cs.params = xmalloc((size_t)ncs * sizeof(DebugCallSiteParam));
+                            cs.num_params = (size_t)ncs;
+                            int pi = 0;
+                            for (int k = 0; k < nargs; k++) {
+                                if (target_reg[k] < 0) continue;
+                                DebugCallSiteParam *cp = &cs.params[pi++];
+                                memset(cp, 0, sizeof(*cp));
+                                if (target_is_xmm[k])
+                                    cp->dwarf_reg = 17 + target_reg[k];
+                                else
+                                    cp->dwarf_reg = reg_to_dwarf(target_reg[k]);
+                                Buffer cv; buffer_init(&cv);
+                                if (!synth_call_value(fn, inst->call_args[k], j,
+                                                      entry_dwarf, nparams,
+                                                      &cv, 0)
+                                    || cv.len == 0) {
+                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31)
+                                        cv_u8(&cv, (uint8_t)(CV_OP_reg0 + cp->dwarf_reg));
+                                }
+                                cp->value_expr_len = cv.len;
+                                if (cv.len) {
+                                    cp->value_expr = xmalloc(cv.len);
+                                    memcpy(cp->value_expr, cv.data, cv.len);
+                                }
+                                buffer_free(&cv);
+                            }
+                        }
+                        emit_module_add_dbg_call_site(out, dbg_func_idx, &cs);
+                        debug_call_site_release(&cs);
+                    }
                 }
 
                 /* Tear down stack args + padding. */
                 int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
                 if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);
 
-                if (value_is_ld(fn, inst->dst)) {
+                /* Multi-eightbyte aggregate return: save hi (RDX/XMM1) first
+                 * so capturing lo into a home that aliases RDX/XMM1 is safe. */
+                if (inst->b >= 0) {
+                    if (value_is_float_class(fn, inst->b)) {
+                        emit_sub_rsp_imm32(&out->text, 8);
+                        emit_sse_store_rsp(&out->text, 1); /* XMM1 */
+                    } else {
+                        emit_push_r(&out->text, REG_RDX);
+                    }
+                }
+
+                if (inst->dst >= 0 && value_is_ld(fn, inst->dst)) {
                     /* long double result comes back in st0 (SysV ld ABI).  fstpt
                      * it into dst's slot.  Clobbers RCX.  Void: dst == -1. */
-                    if (inst->dst >= 0)
-                        emit_ld_store(&out->text, inst->dst, ld_off);
-                } else if (value_is_float_class(fn, inst->dst)) {
+                    emit_ld_store(&out->text, inst->dst, ld_off);
+                } else if (inst->dst >= 0 && value_is_float_class(fn, inst->dst)) {
                     /* Float result comes back in XMM0 (SysV float ABI).  Move
                      * it to dst's XMM home, or spill.  Void: dst == -1. */
-                    if (inst->dst >= 0) {
-                        if (dr >= 0 && dr != 0)
-                            emit_sse_mov_rr(&out->text, dr, 0); /* 0 == XMM0 */
-                        else if (dr < 0)
-                            spill_if_needed_xmm(&out->text, inst->dst, 0,
-                                                ra_xmm, gp_spill_area);
-                    }
-                } else {
+                    if (dr >= 0 && dr != 0)
+                        emit_sse_mov_rr(&out->text, dr, 0); /* 0 == XMM0 */
+                    else if (dr < 0)
+                        spill_if_needed_xmm(&out->text, inst->dst, 0,
+                                            ra_xmm, gp_spill_area);
+                } else if (inst->dst >= 0) {
                     /* Result is in RAX; move to dst home (or spill).  A void
                      * call has dst == -1 (no result) — leave RAX alone. */
-                    if (inst->dst >= 0) {
-                        if (dr >= 0) {
-                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                    if (dr >= 0) {
+                        if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                    } else {
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    }
+                }
+
+                if (inst->b >= 0) {
+                    if (value_is_float_class(fn, inst->b)) {
+                        int br = (ra_xmm && inst->b < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->b] : -1;
+                        if (br >= 0) {
+                            emit_sse_load_rsp(&out->text, br);
+                            emit_add_rsp_imm32(&out->text, 8);
                         } else {
-                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                            emit_sse_load_rsp(&out->text, XMM_SCRATCH0);
+                            emit_add_rsp_imm32(&out->text, 8);
+                            spill_if_needed_xmm(&out->text, inst->b,
+                                                XMM_SCRATCH0, ra_xmm,
+                                                gp_spill_area);
+                        }
+                    } else {
+                        int br = (ra && inst->b < ra->num_values)
+                                 ? ra->reg[inst->b] : -1;
+                        if (br >= 0)
+                            emit_pop_r(&out->text, br);
+                        else {
+                            emit_pop_r(&out->text, REG_RCX);
+                            spill_if_needed(&out->text, inst->b, REG_RCX, ra);
                         }
                     }
                 }
@@ -2376,8 +2665,37 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_RETURN: {
-                /* Void function: bare `return;` — no value in a. */
-                if (inst->a != -1) {
+                /* Void function: bare `return;` — no value in a.
+                 * SysV multi-eightbyte returns: a → RAX/XMM0, b → RDX/XMM1. */
+                if (inst->a != -1 && inst->b != -1) {
+                    int a_f = value_is_float_class(fn, inst->a);
+                    int b_f = value_is_float_class(fn, inst->b);
+                    if (!a_f && !b_f) {
+                        /* Both INTEGER: stage hi in R11 so loading lo into
+                         * RAX cannot clobber a value that lived in RDX. */
+                        ensure_reg(&out->text, inst->b, REG_R11, ra);
+                        ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                        if (REG_R11 != REG_RDX)
+                            emit_mov_rr(&out->text, REG_RDX, REG_R11);
+                    } else if (a_f && b_f) {
+                        ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0,
+                                       ra_xmm, gp_spill_area);
+                        ensure_reg_xmm(&out->text, inst->a, 0, ra_xmm,
+                                       gp_spill_area); /* XMM0 */
+                        if (XMM_SCRATCH0 != 1)
+                            emit_sse_mov_rr(&out->text, 1, XMM_SCRATCH0);
+                    } else if (a_f) {
+                        /* lo SSE, hi INTEGER — independent files. */
+                        ensure_reg(&out->text, inst->b, REG_RDX, ra);
+                        ensure_reg_xmm(&out->text, inst->a, 0, ra_xmm,
+                                       gp_spill_area);
+                    } else {
+                        /* lo INTEGER, hi SSE. */
+                        ensure_reg_xmm(&out->text, inst->b, 1, ra_xmm,
+                                       gp_spill_area); /* XMM1 */
+                        ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                    }
+                } else if (inst->a != -1) {
                     if (value_is_ld(fn, inst->a))
                         emit_ld_load(&out->text, inst->a, ld_off); /* → st0 */
                     else if (value_is_float_class(fn, inst->a))
@@ -2670,8 +2988,28 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 dv.width = idv->width;
                 dv.is_unsigned = idv->is_unsigned;
                 dv.array_len = idv->array_len;
+                dv.type_name = idv->struct_tag;
+                dv.struct_size = idv->struct_size;
+                if (idv->num_members > 0) {
+                    dv.members = xmalloc((size_t)idv->num_members *
+                                         sizeof(DebugMember));
+                    dv.num_members = (size_t)idv->num_members;
+                    for (int mi = 0; mi < idv->num_members; mi++) {
+                        const IRDebugMember *im = &idv->members[mi];
+                        DebugMember *dm = &dv.members[mi];
+                        memset(dm, 0, sizeof(*dm));
+                        dm->name = im->name;
+                        dm->offset = im->offset;
+                        dm->bit_width = im->bit_width;
+                        dm->bit_offset = im->bit_offset;
+                        dm->type_tag = ir_type_tag(im->type_kind, im->is_bool);
+                        dm->width = im->width;
+                        dm->is_unsigned = im->is_unsigned;
+                    }
+                }
                 dv.alloca_ssa = idv->alloca_ssa;
                 dv.param_idx = idv->param_idx;
+                dv.entry_dwarf_reg = -1;
                 dv.loc_kind = DBG_LOC_NONE;
 
                 if (idv->alloca_ssa >= 0 && idv->alloca_ssa < fn->next_value_id
@@ -2686,12 +3024,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (arrive_reg[p] < 0) {
                         dv.loc_kind = DBG_LOC_FBREG;
                         dv.rbp_offset = stack_off[p];
+                        dv.entry_dwarf_reg = -1;
                     } else if (arrive_is_xmm[p]) {
                         dv.loc_kind = DBG_LOC_REG;
                         dv.dwarf_reg = 17 + arrive_reg[p];
+                        dv.entry_dwarf_reg = dv.dwarf_reg;
                     } else {
                         dv.loc_kind = DBG_LOC_REG;
                         dv.dwarf_reg = reg_to_dwarf(arrive_reg[p]);
+                        dv.entry_dwarf_reg = dv.dwarf_reg;
                     }
                 }
 
@@ -2723,6 +3064,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 emit_module_add_dbg_var(out, dbg_func_idx, &dv);
                 free(dv.ranges);
+                free(dv.members);
             }
         }
         free(dbg_obs);

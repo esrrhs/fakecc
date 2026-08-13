@@ -47,6 +47,9 @@ void emit_module_free(EmitModule *m) {
         for (size_t j = 0; j < m->dbg_funcs[i].num_vars; j++)
             free_debug_var(&m->dbg_funcs[i].vars[j]);
         free(m->dbg_funcs[i].vars);
+        for (size_t j = 0; j < m->dbg_funcs[i].num_call_sites; j++)
+            debug_call_site_release(&m->dbg_funcs[i].call_sites[j]);
+        free(m->dbg_funcs[i].call_sites);
     }
     free(m->dbg_funcs);
     for (size_t i = 0; i < m->num_dbg_globals; i++)

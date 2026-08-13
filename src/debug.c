@@ -11,9 +11,13 @@
 #define DW_TAG_array_type         0x01
 #define DW_TAG_subrange_type      0x21
 #define DW_TAG_structure_type     0x13
+#define DW_TAG_member             0x0d
 #define DW_TAG_subprogram         0x2e
 #define DW_TAG_formal_parameter   0x05
 #define DW_TAG_variable           0x34
+#define DW_TAG_call_site          0x48
+/* DW_TAG_call_site_parameter is also 0x49 — same numeric value as
+ * DW_AT_type; use the literal 0x49 in abbrevs for the tag. */
 
 #define DW_CHILDREN_no            0x00
 #define DW_CHILDREN_yes           0x01
@@ -32,9 +36,16 @@
 #define DW_AT_prototyped          0x27
 #define DW_AT_type                0x49
 #define DW_AT_count               0x37
+#define DW_AT_data_member_location 0x38
+#define DW_AT_bit_size            0x0d
+#define DW_AT_bit_offset          0x0c
+#define DW_AT_call_value          0x7e
+#define DW_AT_call_return_pc      0x7d
+#define DW_AT_call_origin         0x7f
 
 #define DW_FORM_addr              0x01
 #define DW_FORM_data1             0x0b
+#define DW_FORM_data2             0x05
 #define DW_FORM_data4             0x06
 #define DW_FORM_data8             0x07
 #define DW_FORM_string            0x08
@@ -43,6 +54,8 @@
 #define DW_FORM_sec_offset        0x17
 #define DW_FORM_exprloc           0x18
 #define DW_FORM_flag_present      0x19
+#define DW_FORM_sdata             0x0d
+#define DW_FORM_udata             0x0f
 
 #define DW_ATE_boolean            0x02
 #define DW_ATE_float              0x04
@@ -52,9 +65,16 @@
 #define DW_ATE_unsigned_char      0x08
 
 #define DW_OP_addr                0x03
+#define DW_OP_consts              0x11
+#define DW_OP_plus                0x22
+#define DW_OP_minus               0x1c
+#define DW_OP_neg                 0x29
+#define DW_OP_lit0                0x30
 #define DW_OP_reg0                0x50
 #define DW_OP_fbreg               0x91
 #define DW_OP_regx                0x90
+#define DW_OP_stack_value         0x9f
+#define DW_OP_entry_value         0xa3
 
 #define DW_LANG_C99               0x0c
 
@@ -175,6 +195,25 @@ void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
     m->dbg_funcs[func_idx].after_mov_rbp_pc = after_mov_rbp_pc;
 }
 
+static void debug_members_copy(DebugMember **dst, size_t *ndst,
+                               const DebugMember *src, size_t nsrc) {
+    *dst = NULL;
+    *ndst = 0;
+    if (!src || nsrc == 0) return;
+    *dst = xmalloc(nsrc * sizeof(DebugMember));
+    *ndst = nsrc;
+    for (size_t i = 0; i < nsrc; i++) {
+        (*dst)[i] = src[i];
+        (*dst)[i].name = src[i].name ? xstrdup(src[i].name) : NULL;
+    }
+}
+
+static void debug_members_free(DebugMember *members, size_t n) {
+    if (!members) return;
+    for (size_t i = 0; i < n; i++) free(members[i].name);
+    free(members);
+}
+
 static void debug_var_copy(DebugVar *dst, const DebugVar *src) {
     memset(dst, 0, sizeof(*dst));
     dst->name = src->name ? xstrdup(src->name) : NULL;
@@ -185,12 +224,17 @@ static void debug_var_copy(DebugVar *dst, const DebugVar *src) {
     dst->width = src->width;
     dst->is_unsigned = src->is_unsigned;
     dst->array_len = src->array_len;
+    dst->type_name = src->type_name ? xstrdup(src->type_name) : NULL;
+    dst->struct_size = src->struct_size;
+    debug_members_copy(&dst->members, &dst->num_members,
+                       src->members, src->num_members);
     dst->loc_kind = src->loc_kind;
     dst->rbp_offset = src->rbp_offset;
     dst->dwarf_reg = src->dwarf_reg;
     dst->sym_name = src->sym_name ? xstrdup(src->sym_name) : NULL;
     dst->alloca_ssa = src->alloca_ssa;
     dst->param_idx = src->param_idx;
+    dst->entry_dwarf_reg = src->entry_dwarf_reg;
     if (src->num_ranges > 0) {
         dst->ranges = xmalloc(src->num_ranges * sizeof(DebugLocRange));
         memcpy(dst->ranges, src->ranges,
@@ -204,13 +248,28 @@ void debug_var_release(DebugVar *v) {
     free(v->name);
     free(v->file);
     free(v->sym_name);
+    free(v->type_name);
+    debug_members_free(v->members, v->num_members);
     free(v->ranges);
     v->name = NULL;
     v->file = NULL;
     v->sym_name = NULL;
+    v->type_name = NULL;
+    v->members = NULL;
+    v->num_members = 0;
     v->ranges = NULL;
     v->num_ranges = 0;
     v->cap_ranges = 0;
+}
+
+void debug_call_site_release(DebugCallSite *cs) {
+    free(cs->callee_name);
+    for (size_t i = 0; i < cs->num_params; i++)
+        free(cs->params[i].value_expr);
+    free(cs->params);
+    cs->callee_name = NULL;
+    cs->params = NULL;
+    cs->num_params = 0;
 }
 
 void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v) {
@@ -223,6 +282,42 @@ void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v) {
         f->cap_vars = nc;
     }
     debug_var_copy(&f->vars[f->num_vars++], v);
+}
+
+static void debug_call_site_copy(DebugCallSite *dst, const DebugCallSite *src) {
+    memset(dst, 0, sizeof(*dst));
+    dst->call_pc = src->call_pc;
+    dst->return_pc = src->return_pc;
+    dst->callee_name = src->callee_name ? xstrdup(src->callee_name) : NULL;
+    if (src->num_params > 0) {
+        dst->params = xmalloc(src->num_params * sizeof(DebugCallSiteParam));
+        dst->num_params = src->num_params;
+        for (size_t i = 0; i < src->num_params; i++) {
+            dst->params[i].dwarf_reg = src->params[i].dwarf_reg;
+            dst->params[i].value_expr_len = src->params[i].value_expr_len;
+            if (src->params[i].value_expr_len > 0) {
+                dst->params[i].value_expr =
+                    xmalloc(src->params[i].value_expr_len);
+                memcpy(dst->params[i].value_expr, src->params[i].value_expr,
+                       src->params[i].value_expr_len);
+            } else {
+                dst->params[i].value_expr = NULL;
+            }
+        }
+    }
+}
+
+void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
+                                   const DebugCallSite *cs) {
+    if (func_idx < 0 || (size_t)func_idx >= m->num_dbg_funcs) return;
+    DebugFunc *f = &m->dbg_funcs[func_idx];
+    if (f->num_call_sites >= f->cap_call_sites) {
+        size_t nc = f->cap_call_sites ? f->cap_call_sites * 2 : 4;
+        f->call_sites = realloc(f->call_sites, nc * sizeof(DebugCallSite));
+        if (!f->call_sites) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        f->cap_call_sites = nc;
+    }
+    debug_call_site_copy(&f->call_sites[f->num_call_sites++], cs);
 }
 
 void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v) {
@@ -276,12 +371,26 @@ static void ser_var(Buffer *b, const DebugVar *v) {
     d_u32(b, (uint32_t)v->width);
     d_u8(b, (uint8_t)v->is_unsigned);
     d_u32(b, (uint32_t)v->array_len);
+    ser_str(b, v->type_name);
+    d_u32(b, (uint32_t)v->struct_size);
+    d_u32(b, (uint32_t)v->num_members);
+    for (size_t i = 0; i < v->num_members; i++) {
+        const DebugMember *m = &v->members[i];
+        ser_str(b, m->name);
+        d_u32(b, (uint32_t)m->offset);
+        d_u32(b, (uint32_t)m->bit_width);
+        d_u32(b, (uint32_t)m->bit_offset);
+        d_u8(b, (uint8_t)m->type_tag);
+        d_u32(b, (uint32_t)m->width);
+        d_u8(b, (uint8_t)m->is_unsigned);
+    }
     d_u8(b, (uint8_t)v->loc_kind);
     d_u32(b, (uint32_t)v->rbp_offset);
     d_u32(b, (uint32_t)v->dwarf_reg);
     ser_str(b, v->sym_name);
     d_u32(b, (uint32_t)v->alloca_ssa);
     d_u32(b, (uint32_t)v->param_idx);
+    d_u32(b, (uint32_t)v->entry_dwarf_reg);
     d_u32(b, (uint32_t)v->num_ranges);
     for (size_t i = 0; i < v->num_ranges; i++) {
         const DebugLocRange *r = &v->ranges[i];
@@ -309,6 +418,28 @@ static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar
     v->is_unsigned = **p; (*p)++;
     if (*p + 4 > end) return -1;
     v->array_len = (int)rd32(p);
+    if (deser_str(p, end, &v->type_name) < 0) return -1;
+    if (v->type_name && v->type_name[0] == '\0') { free(v->type_name); v->type_name = NULL; }
+    if (*p + 4 > end) return -1;
+    v->struct_size = (int)rd32(p);
+    if (*p + 4 > end) return -1;
+    uint32_t nmembers = rd32(p);
+    if (nmembers > 0) {
+        v->members = xmalloc(nmembers * sizeof(DebugMember));
+        v->num_members = nmembers;
+        for (uint32_t i = 0; i < nmembers; i++) {
+            DebugMember *m = &v->members[i];
+            memset(m, 0, sizeof(*m));
+            if (deser_str(p, end, &m->name) < 0) return -1;
+            if (*p + 4 + 4 + 4 + 1 + 4 + 1 > end) return -1;
+            m->offset = (int)rd32(p);
+            m->bit_width = (int)rd32(p);
+            m->bit_offset = (int)rd32(p);
+            m->type_tag = (DebugTypeTag)**p; (*p)++;
+            m->width = (int)rd32(p);
+            m->is_unsigned = **p; (*p)++;
+        }
+    }
     if (*p + 1 > end) return -1;
     v->loc_kind = (DebugLocKind)**p; (*p)++;
     if (*p + 4 > end) return -1;
@@ -320,6 +451,8 @@ static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar
     v->alloca_ssa = (int)rd32(p);
     if (*p + 4 > end) return -1;
     v->param_idx = (int)rd32(p);
+    if (*p + 4 > end) return -1;
+    v->entry_dwarf_reg = (int)rd32(p);
     if (*p + 4 > end) return -1;
     uint32_t nranges = rd32(p);
     if (nranges > 0) {
@@ -341,7 +474,7 @@ static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar
 
 void debug_serialize(const EmitModule *m, Buffer *out) {
     d_bytes(out, "FDBG", 4);
-    d_u32(out, 1);
+    d_u32(out, 3);   /* v3: call sites + entry_dwarf_reg */
     ser_str(out, m->dbg_tu_name);
     d_u32(out, (uint32_t)m->num_dbg_lines);
     for (size_t i = 0; i < m->num_dbg_lines; i++) {
@@ -362,6 +495,21 @@ void debug_serialize(const EmitModule *m, Buffer *out) {
         d_u64(out, (uint64_t)f->prologue_end_pc);
         d_u32(out, (uint32_t)f->num_vars);
         for (size_t j = 0; j < f->num_vars; j++) ser_var(out, &f->vars[j]);
+        d_u32(out, (uint32_t)f->num_call_sites);
+        for (size_t j = 0; j < f->num_call_sites; j++) {
+            const DebugCallSite *cs = &f->call_sites[j];
+            d_u64(out, (uint64_t)cs->call_pc);
+            d_u64(out, (uint64_t)cs->return_pc);
+            ser_str(out, cs->callee_name);
+            d_u32(out, (uint32_t)cs->num_params);
+            for (size_t k = 0; k < cs->num_params; k++) {
+                d_u32(out, (uint32_t)cs->params[k].dwarf_reg);
+                d_u32(out, (uint32_t)cs->params[k].value_expr_len);
+                if (cs->params[k].value_expr_len)
+                    d_bytes(out, cs->params[k].value_expr,
+                            cs->params[k].value_expr_len);
+            }
+        }
     }
     d_u32(out, (uint32_t)m->num_dbg_globals);
     for (size_t i = 0; i < m->num_dbg_globals; i++)
@@ -372,7 +520,7 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
     const unsigned char *p = data, *end = data + len;
     if (len < 8 || memcmp(p, "FDBG", 4) != 0) return -1;
     p += 4;
-    if (rd32(&p) != 1) return -1;
+    if (rd32(&p) != 3) return -1;
     if (deser_str(&p, end, &m->dbg_tu_name) < 0) return -1;
     if (p + 4 > end) return -1;
     uint32_t nlines = rd32(&p);
@@ -404,6 +552,41 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
             emit_module_add_dbg_var(m, fi, &v);
             debug_var_release(&v);
         }
+        if (p + 4 > end) return -1;
+        uint32_t ncs = rd32(&p);
+        for (uint32_t j = 0; j < ncs; j++) {
+            DebugCallSite cs;
+            memset(&cs, 0, sizeof(cs));
+            if (p + 16 > end) return -1;
+            cs.call_pc = (size_t)rd64(&p);
+            cs.return_pc = (size_t)rd64(&p);
+            if (deser_str(&p, end, &cs.callee_name) < 0) return -1;
+            if (cs.callee_name && cs.callee_name[0] == '\0') {
+                free(cs.callee_name); cs.callee_name = NULL;
+            }
+            if (p + 4 > end) { debug_call_site_release(&cs); return -1; }
+            uint32_t np = rd32(&p);
+            if (np > 0) {
+                cs.params = xmalloc(np * sizeof(DebugCallSiteParam));
+                cs.num_params = np;
+                for (uint32_t k = 0; k < np; k++) {
+                    if (p + 8 > end) { debug_call_site_release(&cs); return -1; }
+                    cs.params[k].dwarf_reg = (int)rd32(&p);
+                    uint32_t elen = rd32(&p);
+                    cs.params[k].value_expr_len = elen;
+                    if (elen > 0) {
+                        if (p + elen > end) { debug_call_site_release(&cs); return -1; }
+                        cs.params[k].value_expr = xmalloc(elen);
+                        memcpy(cs.params[k].value_expr, p, elen);
+                        p += elen;
+                    } else {
+                        cs.params[k].value_expr = NULL;
+                    }
+                }
+            }
+            emit_module_add_dbg_call_site(m, fi, &cs);
+            debug_call_site_release(&cs);
+        }
     }
     if (p + 4 > end) return -1;
     uint32_t nglobs = rd32(&p);
@@ -431,26 +614,53 @@ static uint64_t resolve_sym_addr(const EmitModule *m, const char *name,
 typedef struct {
     DebugTypeTag tag;
     int width, is_unsigned, array_len;
+    char *type_name;   /* struct tag for named structs / ptr-to-struct; may be NULL */
     uint32_t offset;
 } TypeDie;
 typedef struct { TypeDie *data; size_t len, cap; } TypeDieCache;
 
 static uint32_t type_die_get(TypeDieCache *c, Buffer *info, DebugTypeTag tag,
                              int width, int is_unsigned, int array_len);
+static uint32_t type_die_struct(TypeDieCache *c, Buffer *info,
+                                const char *tag_name, int width,
+                                const DebugMember *members, size_t nmembers);
+static uint32_t type_die_ptr(TypeDieCache *c, Buffer *info,
+                             uint32_t pointee_off);
 
-static uint32_t type_die_get(TypeDieCache *c, Buffer *info, DebugTypeTag tag,
-                             int width, int is_unsigned, int array_len) {
-    for (size_t i = 0; i < c->len; i++) {
-        if (c->data[i].tag == tag && c->data[i].width == width &&
-            c->data[i].is_unsigned == is_unsigned &&
-            c->data[i].array_len == array_len)
-            return c->data[i].offset;
-    }
+static int type_die_match(const TypeDie *td, DebugTypeTag tag, int width,
+                          int is_unsigned, int array_len, const char *type_name) {
+    if (td->tag != tag || td->width != width || td->is_unsigned != is_unsigned
+        || td->array_len != array_len)
+        return 0;
+    if (!td->type_name && !type_name) return 1;
+    if (!td->type_name || !type_name) return 0;
+    return strcmp(td->type_name, type_name) == 0;
+}
+
+static TypeDie *type_die_push(TypeDieCache *c, DebugTypeTag tag, int width,
+                              int is_unsigned, int array_len,
+                              const char *type_name, uint32_t off) {
     if (c->len >= c->cap) {
         size_t nc = c->cap ? c->cap * 2 : 8;
         c->data = realloc(c->data, nc * sizeof(TypeDie));
         if (!c->data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         c->cap = nc;
+    }
+    TypeDie *td = &c->data[c->len++];
+    td->tag = tag;
+    td->width = width;
+    td->is_unsigned = is_unsigned;
+    td->array_len = array_len;
+    td->type_name = type_name ? xstrdup(type_name) : NULL;
+    td->offset = off;
+    return td;
+}
+
+static uint32_t type_die_get(TypeDieCache *c, Buffer *info, DebugTypeTag tag,
+                             int width, int is_unsigned, int array_len) {
+    for (size_t i = 0; i < c->len; i++) {
+        if (type_die_match(&c->data[i], tag, width, is_unsigned, array_len, NULL))
+            return c->data[i].offset;
     }
     /* Create referenced types first so their DIEs are not nested inside ours. */
     uint32_t pointee_off = 0, elem_off = 0;
@@ -473,8 +683,11 @@ static uint32_t type_die_get(TypeDieCache *c, Buffer *info, DebugTypeTag tag,
         d_u32(info, (uint32_t)(array_len > 0 ? array_len : 1));
         d_u8(info, 0);
     } else if (tag == DBG_TY_STRUCT) {
+        /* Anonymous / size-only struct (no members available). */
         d_uleb(info, 6);
+        d_u8(info, 0);   /* empty name */
         d_u32(info, (uint32_t)(width > 0 ? width : 1));
+        d_u8(info, 0);   /* no children */
     } else {
         d_uleb(info, 2);
         const char *nm = "int";
@@ -503,17 +716,90 @@ static uint32_t type_die_get(TypeDieCache *c, Buffer *info, DebugTypeTag tag,
         d_u8(info, enc);
         d_u8(info, (uint8_t)width);
     }
-    TypeDie *td = &c->data[c->len++];
-    td->tag = tag; td->width = width; td->is_unsigned = is_unsigned;
-    td->array_len = array_len; td->offset = off;
+    type_die_push(c, tag, width, is_unsigned, array_len, NULL, off);
+    return off;
+}
+
+static uint32_t type_die_ptr(TypeDieCache *c, Buffer *info, uint32_t pointee_off) {
+    /* Pointer DIEs are not cached by pointee (rare enough); always emit. */
+    uint32_t off = (uint32_t)info->len;
+    d_uleb(info, 3);
+    d_u32(info, pointee_off);
+    return off;
+}
+
+static uint32_t type_die_struct(TypeDieCache *c, Buffer *info,
+                                const char *tag_name, int width,
+                                const DebugMember *members, size_t nmembers) {
+    if (tag_name) {
+        for (size_t i = 0; i < c->len; i++) {
+            if (type_die_match(&c->data[i], DBG_TY_STRUCT, width, 0, 0, tag_name))
+                return c->data[i].offset;
+        }
+    }
+    /* Emit member types first so their DIEs are siblings, not nested. */
+    uint32_t *mem_ty = NULL;
+    if (nmembers > 0) {
+        mem_ty = xmalloc(nmembers * sizeof(uint32_t));
+        for (size_t i = 0; i < nmembers; i++) {
+            const DebugMember *m = &members[i];
+            mem_ty[i] = type_die_get(c, info, m->type_tag, m->width,
+                                     m->is_unsigned, 0);
+        }
+    }
+    uint32_t off = (uint32_t)info->len;
+    d_uleb(info, 6);  /* structure_type with children */
+    if (tag_name) d_bytes(info, tag_name, strlen(tag_name) + 1);
+    else d_u8(info, 0);
+    d_u32(info, (uint32_t)(width > 0 ? width : 1));
+    for (size_t i = 0; i < nmembers; i++) {
+        const DebugMember *m = &members[i];
+        if (m->bit_width > 0) {
+            d_uleb(info, 14);  /* member with bitfield attrs */
+            if (m->name) d_bytes(info, m->name, strlen(m->name) + 1);
+            else d_u8(info, 0);
+            d_u32(info, mem_ty[i]);
+            d_u32(info, (uint32_t)m->offset);
+            d_u8(info, (uint8_t)m->bit_width);
+            d_u8(info, (uint8_t)m->bit_offset);
+        } else {
+            d_uleb(info, 13);  /* ordinary member */
+            if (m->name) d_bytes(info, m->name, strlen(m->name) + 1);
+            else d_u8(info, 0);
+            d_u32(info, mem_ty[i]);
+            d_u32(info, (uint32_t)m->offset);
+        }
+    }
+    d_u8(info, 0);  /* end of children */
+    free(mem_ty);
+    type_die_push(c, DBG_TY_STRUCT, width, 0, 0, tag_name, off);
     return off;
 }
 
 static uint32_t type_for_var(TypeDieCache *c, Buffer *info, const DebugVar *v) {
+    if (v->type_tag == DBG_TY_STRUCT && (v->type_name || v->num_members > 0)) {
+        int sz = v->struct_size > 0 ? v->struct_size : v->width;
+        return type_die_struct(c, info, v->type_name, sz,
+                               v->members, v->num_members);
+    }
+    if (v->type_tag == DBG_TY_PTR && v->type_name && v->num_members > 0) {
+        /* Pointer to a named struct: emit the struct DIE, then a pointer DIE
+         * that references it (so `print q->x` works). */
+        int sz = v->struct_size > 0 ? v->struct_size : 1;
+        uint32_t st = type_die_struct(c, info, v->type_name, sz,
+                                      v->members, v->num_members);
+        for (size_t i = 0; i < c->len; i++) {
+            if (type_die_match(&c->data[i], DBG_TY_PTR, 8, 0, 0, v->type_name))
+                return c->data[i].offset;
+        }
+        uint32_t off = type_die_ptr(c, info, st);
+        type_die_push(c, DBG_TY_PTR, 8, 0, 0, v->type_name, off);
+        return off;
+    }
     return type_die_get(c, info, v->type_tag, v->width, v->is_unsigned, v->array_len);
 }
 
-/* Write one DWARF location expression for a register/stack home. */
+/* Write one DWARF location expression for a register/stack/entry-value home. */
 static void emit_loc_bytes(Buffer *expr, DebugLocKind kind, int rbp_offset,
                            int dwarf_reg) {
     if (kind == DBG_LOC_FBREG) {
@@ -522,6 +808,17 @@ static void emit_loc_bytes(Buffer *expr, DebugLocKind kind, int rbp_offset,
         if (dwarf_reg >= 0 && dwarf_reg <= 31)
             d_u8(expr, (uint8_t)(DW_OP_reg0 + dwarf_reg));
         else { d_u8(expr, DW_OP_regx); d_uleb(expr, (uint64_t)dwarf_reg); }
+    } else if (kind == DBG_LOC_ENTRY_VALUE) {
+        /* DW_OP_entry_value <len> DW_OP_regN ; DW_OP_stack_value */
+        Buffer inner; buffer_init(&inner);
+        if (dwarf_reg >= 0 && dwarf_reg <= 31)
+            d_u8(&inner, (uint8_t)(DW_OP_reg0 + dwarf_reg));
+        else { d_u8(&inner, DW_OP_regx); d_uleb(&inner, (uint64_t)dwarf_reg); }
+        d_u8(expr, DW_OP_entry_value);
+        d_uleb(expr, inner.len);
+        d_bytes(expr, inner.data, inner.len);
+        buffer_free(&inner);
+        d_u8(expr, DW_OP_stack_value);
     }
 }
 
@@ -590,7 +887,8 @@ static void emit_abbrevs(Buffer *ab) {
     d_uleb(ab, DW_AT_count); d_uleb(ab, DW_FORM_data4);
     d_uleb(ab, 0); d_uleb(ab, 0);
 
-    d_uleb(ab, 6); d_uleb(ab, DW_TAG_structure_type); d_u8(ab, DW_CHILDREN_no);
+    d_uleb(ab, 6); d_uleb(ab, DW_TAG_structure_type); d_u8(ab, DW_CHILDREN_yes);
+    d_uleb(ab, DW_AT_name); d_uleb(ab, DW_FORM_string);
     d_uleb(ab, DW_AT_byte_size); d_uleb(ab, DW_FORM_data4);
     d_uleb(ab, 0); d_uleb(ab, 0);
 
@@ -634,6 +932,31 @@ static void emit_abbrevs(Buffer *ab) {
     d_uleb(ab, DW_AT_name); d_uleb(ab, DW_FORM_strp);
     d_uleb(ab, DW_AT_type); d_uleb(ab, DW_FORM_ref4);
     d_uleb(ab, DW_AT_location); d_uleb(ab, DW_FORM_sec_offset);
+    d_uleb(ab, 0); d_uleb(ab, 0);
+
+    d_uleb(ab, 13); d_uleb(ab, DW_TAG_member); d_u8(ab, DW_CHILDREN_no);
+    d_uleb(ab, DW_AT_name); d_uleb(ab, DW_FORM_string);
+    d_uleb(ab, DW_AT_type); d_uleb(ab, DW_FORM_ref4);
+    d_uleb(ab, DW_AT_data_member_location); d_uleb(ab, DW_FORM_data4);
+    d_uleb(ab, 0); d_uleb(ab, 0);
+
+    d_uleb(ab, 14); d_uleb(ab, DW_TAG_member); d_u8(ab, DW_CHILDREN_no);
+    d_uleb(ab, DW_AT_name); d_uleb(ab, DW_FORM_string);
+    d_uleb(ab, DW_AT_type); d_uleb(ab, DW_FORM_ref4);
+    d_uleb(ab, DW_AT_data_member_location); d_uleb(ab, DW_FORM_data4);
+    d_uleb(ab, DW_AT_bit_size); d_uleb(ab, DW_FORM_data1);
+    d_uleb(ab, DW_AT_bit_offset); d_uleb(ab, DW_FORM_data1);
+    d_uleb(ab, 0); d_uleb(ab, 0);
+
+    d_uleb(ab, 15); d_uleb(ab, DW_TAG_call_site); d_u8(ab, DW_CHILDREN_yes);
+    d_uleb(ab, DW_AT_call_return_pc); d_uleb(ab, DW_FORM_addr);
+    d_uleb(ab, DW_AT_call_origin); d_uleb(ab, DW_FORM_ref4);
+    d_uleb(ab, 0); d_uleb(ab, 0);
+
+    d_uleb(ab, 16); d_uleb(ab, 0x49); /* DW_TAG_call_site_parameter */
+    d_u8(ab, DW_CHILDREN_no);
+    d_uleb(ab, DW_AT_location); d_uleb(ab, DW_FORM_exprloc);
+    d_uleb(ab, DW_AT_call_value); d_uleb(ab, DW_FORM_exprloc);
     d_uleb(ab, 0); d_uleb(ab, 0);
 
     d_uleb(ab, 0);
@@ -802,6 +1125,133 @@ static void emit_debug_frame(const EmitModule *m, uint64_t text_base, Buffer *fr
     }
 }
 
+static int dwarf_reg_is_caller_saved(int dreg) {
+    if (dreg >= 17 && dreg <= 32) return 1; /* XMM0..15 */
+    switch (dreg) {
+    case 0: case 1: case 2: case 4: case 5:   /* rax rdx rcx rsi rdi */
+    case 8: case 9: case 10: case 11:          /* r8..r11 */
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Build a location list for a parameter that (a) does not claim a caller-saved
+ * register across a CALL and (b) fills the remaining function range with
+ * DW_OP_entry_value so outer frames can recover the ABI arrival value. */
+static void refine_param_ranges(DebugVar *out, const DebugVar *v,
+                                const DebugFunc *f) {
+    memset(out, 0, sizeof(*out));
+    *out = *v;
+    out->ranges = NULL;
+    out->num_ranges = 0;
+    out->cap_ranges = 0;
+    out->name = v->name; /* not owned */
+    out->file = v->file;
+    out->sym_name = v->sym_name;
+    out->type_name = v->type_name;
+    out->members = v->members;
+
+    if (v->entry_dwarf_reg < 0) {
+        /* Stack-passed: existing ranges (or single loc) are CFA-stable. */
+        if (v->num_ranges > 0) {
+            out->ranges = xmalloc(v->num_ranges * sizeof(DebugLocRange));
+            memcpy(out->ranges, v->ranges, v->num_ranges * sizeof(DebugLocRange));
+            out->num_ranges = v->num_ranges;
+            out->cap_ranges = v->num_ranges;
+        }
+        return;
+    }
+
+    /* Clip caller-saved register ranges at the next call in this function. */
+    DebugLocRange *clipped = NULL;
+    size_t nclipped = 0, cclipped = 0;
+    for (size_t i = 0; i < v->num_ranges; i++) {
+        DebugLocRange r = v->ranges[i];
+        if (r.loc_kind == DBG_LOC_REG && dwarf_reg_is_caller_saved(r.dwarf_reg)) {
+            for (size_t c = 0; c < f->num_call_sites; c++) {
+                size_t cp = f->call_sites[c].call_pc;
+                if (cp > r.pc_start && cp < r.pc_end) {
+                    r.pc_end = cp;
+                    break;
+                }
+            }
+        }
+        if (r.pc_end <= r.pc_start) continue;
+        if (nclipped >= cclipped) {
+            cclipped = cclipped ? cclipped * 2 : 4;
+            clipped = realloc(clipped, cclipped * sizeof(DebugLocRange));
+        }
+        clipped[nclipped++] = r;
+    }
+
+    /* Also keep a single-location home as a range over the whole function when
+     * there was no loclist — but still clip at calls if caller-saved. */
+    if (nclipped == 0 && v->loc_kind != DBG_LOC_NONE && v->num_ranges == 0) {
+        DebugLocRange r;
+        r.pc_start = f->start_pc;
+        r.pc_end = f->end_pc;
+        r.loc_kind = v->loc_kind;
+        r.rbp_offset = v->rbp_offset;
+        r.dwarf_reg = v->dwarf_reg;
+        if (r.loc_kind == DBG_LOC_REG && dwarf_reg_is_caller_saved(r.dwarf_reg)) {
+            for (size_t c = 0; c < f->num_call_sites; c++) {
+                size_t cp = f->call_sites[c].call_pc;
+                if (cp > r.pc_start && cp < r.pc_end) {
+                    r.pc_end = cp;
+                    break;
+                }
+            }
+        }
+        if (r.pc_end > r.pc_start) {
+            clipped = realloc(clipped, sizeof(DebugLocRange));
+            clipped[0] = r;
+            nclipped = 1;
+        }
+    }
+
+    /* Fill [start_pc, end_pc) gaps with entry_value. */
+    size_t cursor = f->start_pc;
+    for (size_t i = 0; i < nclipped; i++) {
+        if (clipped[i].pc_start > cursor) {
+            if (out->num_ranges >= out->cap_ranges) {
+                out->cap_ranges = out->cap_ranges ? out->cap_ranges * 2 : 4;
+                out->ranges = realloc(out->ranges,
+                                      out->cap_ranges * sizeof(DebugLocRange));
+            }
+            DebugLocRange *er = &out->ranges[out->num_ranges++];
+            er->pc_start = cursor;
+            er->pc_end = clipped[i].pc_start;
+            er->loc_kind = DBG_LOC_ENTRY_VALUE;
+            er->rbp_offset = 0;
+            er->dwarf_reg = v->entry_dwarf_reg;
+        }
+        if (out->num_ranges >= out->cap_ranges) {
+            out->cap_ranges = out->cap_ranges ? out->cap_ranges * 2 : 4;
+            out->ranges = realloc(out->ranges,
+                                  out->cap_ranges * sizeof(DebugLocRange));
+        }
+        out->ranges[out->num_ranges++] = clipped[i];
+        if (clipped[i].pc_end > cursor) cursor = clipped[i].pc_end;
+    }
+    if (cursor < f->end_pc) {
+        if (out->num_ranges >= out->cap_ranges) {
+            out->cap_ranges = out->cap_ranges ? out->cap_ranges * 2 : 4;
+            out->ranges = realloc(out->ranges,
+                                  out->cap_ranges * sizeof(DebugLocRange));
+        }
+        DebugLocRange *er = &out->ranges[out->num_ranges++];
+        er->pc_start = cursor;
+        er->pc_end = f->end_pc;
+        er->loc_kind = DBG_LOC_ENTRY_VALUE;
+        er->rbp_offset = 0;
+        er->dwarf_reg = v->entry_dwarf_reg;
+    }
+    free(clipped);
+    /* Prefer the loclist form. */
+    out->loc_kind = DBG_LOC_NONE;
+}
+
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
                       Buffer *debug_str, Buffer *debug_line,
@@ -849,9 +1299,25 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
         emit_location_expr(debug_info, v, m, text_base_vaddr);
     }
 
+    /* Map function name → DIE offset (relative to CU info start) for
+     * DW_AT_call_origin. */
+    typedef struct { char *name; uint32_t off; } FuncDieRef;
+    FuncDieRef *frefs = NULL;
+    size_t nfrefs = 0, cfrefs = 0;
+
     for (size_t fi = 0; fi < m->num_dbg_funcs; fi++) {
         const DebugFunc *f = &m->dbg_funcs[fi];
         uint32_t nm = strtab_add(&strs, f->name ? f->name : "");
+        uint32_t func_die_off = (uint32_t)(debug_info->len - info_len_off);
+        if (f->name && f->name[0]) {
+            if (nfrefs >= cfrefs) {
+                cfrefs = cfrefs ? cfrefs * 2 : 8;
+                frefs = realloc(frefs, cfrefs * sizeof(FuncDieRef));
+            }
+            frefs[nfrefs].name = f->name;
+            frefs[nfrefs].off = func_die_off;
+            nfrefs++;
+        }
         d_uleb(debug_info, 7);
         d_u32(debug_info, nm);
         d_u64(debug_info, text_base_vaddr + f->start_pc);
@@ -863,8 +1329,16 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
             uint32_t ty = type_for_var(&tcache, debug_info, v);
             uint32_t vnm = strtab_add(&strs, v->name ? v->name : "");
             int is_param = v->kind == DBG_VAR_PARAM;
-            if (v->num_ranges > 0) {
-                uint32_t loc_off = emit_loclist(debug_loc, v, text_base_vaddr);
+            DebugVar refined;
+            const DebugVar *use = v;
+            int free_refined = 0;
+            if (is_param && v->entry_dwarf_reg >= 0) {
+                refine_param_ranges(&refined, v, f);
+                use = &refined;
+                free_refined = 1;
+            }
+            if (use->num_ranges > 0) {
+                uint32_t loc_off = emit_loclist(debug_loc, use, text_base_vaddr);
                 d_uleb(debug_info, is_param ? 11 : 12);
                 d_u32(debug_info, vnm);
                 d_u32(debug_info, ty);
@@ -873,17 +1347,52 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                 d_uleb(debug_info, is_param ? 8 : 9);
                 d_u32(debug_info, vnm);
                 d_u32(debug_info, ty);
-                emit_location_expr(debug_info, v, m, text_base_vaddr);
+                emit_location_expr(debug_info, use, m, text_base_vaddr);
             }
+            if (free_refined) free(refined.ranges);
+        }
+        for (size_t ci = 0; ci < f->num_call_sites; ci++) {
+            const DebugCallSite *cs = &f->call_sites[ci];
+            uint32_t origin = func_die_off; /* default: self (recursion) */
+            if (cs->callee_name) {
+                for (size_t r = 0; r < nfrefs; r++) {
+                    if (strcmp(frefs[r].name, cs->callee_name) == 0) {
+                        origin = frefs[r].off;
+                        break;
+                    }
+                }
+                /* Callee may be a later function in this CU — leave a self
+                 * origin for now; gdb mainly keys off call_return_pc. */
+            }
+            d_uleb(debug_info, 15);
+            d_u64(debug_info, text_base_vaddr + cs->return_pc);
+            d_u32(debug_info, origin);
+            for (size_t pi = 0; pi < cs->num_params; pi++) {
+                const DebugCallSiteParam *cp = &cs->params[pi];
+                d_uleb(debug_info, 16);
+                Buffer loc; buffer_init(&loc);
+                if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31)
+                    d_u8(&loc, (uint8_t)(DW_OP_reg0 + cp->dwarf_reg));
+                else { d_u8(&loc, DW_OP_regx); d_uleb(&loc, (uint64_t)cp->dwarf_reg); }
+                d_uleb(debug_info, loc.len);
+                d_bytes(debug_info, loc.data, loc.len);
+                buffer_free(&loc);
+                d_uleb(debug_info, cp->value_expr_len);
+                if (cp->value_expr_len)
+                    d_bytes(debug_info, cp->value_expr, cp->value_expr_len);
+            }
+            d_u8(debug_info, 0); /* end call_site children */
         }
         d_u8(debug_info, 0);
     }
+    free(frefs);
     d_u8(debug_info, 0);
     uint32_t info_len = (uint32_t)(debug_info->len - info_len_off - 4);
     memcpy(debug_info->data + info_len_off, &info_len, 4);
 
     d_bytes(debug_str, strs.buf.data, strs.buf.len);
     strtab_free(&strs);
+    for (size_t i = 0; i < tcache.len; i++) free(tcache.data[i].type_name);
     free(tcache.data);
     emit_debug_line(m, text_base_vaddr, debug_line);
     emit_debug_frame(m, text_base_vaddr, debug_frame);

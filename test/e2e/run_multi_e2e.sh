@@ -98,6 +98,24 @@ echo 'package main; int twice(int x); int main(void) { return twice(21); }' > "$
 "$FAKECC" $CC_EXTRA -c "$TMP/twice.c" -o "$TMP/twice.o"
 run_multi 42 "$TMP/twice.o" "$TMP/use_twice.c"
 
+# SysV small-struct interop: gcc callee + fakecc caller.
+echo 'struct S { int x; int y; }; int sum(struct S s) { return s.x + s.y; }' > "$TMP/gcc_sum.c"
+echo 'package main; struct S { int x; int y; }; int sum(struct S s); int main(void) { struct S p; p.x = 3; p.y = 4; return sum(p); }' > "$TMP/fc_main_sum.c"
+gcc -std=c99 -c "$TMP/gcc_sum.c" -o "$TMP/gcc_sum.o"
+run_multi 7 "$TMP/fc_main_sum.c" "$TMP/gcc_sum.o"
+
+# SysV MEMORY-class (>16) interop: gcc callee + fakecc caller.
+echo 'struct Big { long a; long b; long c; }; long sum3(struct Big s) { return s.a + s.b + s.c; }' > "$TMP/gcc_big.c"
+echo 'package main; struct Big { long a; long b; long c; }; long sum3(struct Big s); int main(void) { struct Big s; s.a = 1; s.b = 2; s.c = 4; return (int)sum3(s); }' > "$TMP/fc_main_big.c"
+gcc -std=c99 -c "$TMP/gcc_big.c" -o "$TMP/gcc_big.o"
+run_multi 7 "$TMP/fc_main_big.c" "$TMP/gcc_big.o"
+
+# SysV small-struct return interop: gcc callee returns in RAX.
+echo 'struct S { int a; int b; }; struct S make(int x, int y) { struct S s; s.a = x; s.b = y; return s; }' > "$TMP/gcc_make.c"
+echo 'package main; struct S { int a; int b; }; struct S make(int x, int y); int main(void) { struct S s = make(3, 4); return s.a + s.b; }' > "$TMP/fc_main_make.c"
+gcc -std=c99 -c "$TMP/gcc_make.c" -o "$TMP/gcc_make.o"
+run_multi 7 "$TMP/fc_main_make.c" "$TMP/gcc_make.o"
+
 # Two static helpers with the same local name, both called from main.
 echo 'package main; static int helper(void) { return 3; } int left(void) { return helper(); }' > "$TMP/st_a.c"
 echo 'package main; static int helper(void) { return 4; } int right(void) { return helper(); }' > "$TMP/st_b.c"

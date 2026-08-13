@@ -119,7 +119,7 @@ int scalar_dce(IRFunction *fn) {
          * dead-code elimination and change the generated code. */
         if (inst->op == IR_DBG_VALUE) continue;
         if (inst->a >= 0 && inst->a < fn->next_value_id) used[inst->a] = 1;
-        if (inst->op != IR_CBR &&
+        if (inst->op != IR_CBR && inst->op != IR_CALL &&
             inst->b >= 0 && inst->b < fn->next_value_id) used[inst->b] = 1;
         if (inst->op == IR_CALL) {
             for (int k = 0; k < inst->call_nargs; k++) {
@@ -219,8 +219,10 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->call_callee >= 0 && map[inst->call_callee] == -1)
                 map[inst->call_callee] = next++;
             for (int k = 0; k < inst->call_nargs; k++) {
+                if (k >= IR_CALL_MAX_ARGS) break;
                 int v = inst->call_args[k];
-                if (v >= 0 && map[v] == -1) map[v] = next++;
+                if (v >= 0 && v < fn->next_value_id && map[v] == -1)
+                    map[v] = next++;
             }
         }
     }

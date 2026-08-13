@@ -63,7 +63,10 @@ typedef enum {
     DBG_LOC_NONE  = 0,
     DBG_LOC_FBREG = 1,  /* rbp + rbp_offset */
     DBG_LOC_REG   = 2,  /* DWARF register number in dwarf_reg */
-    DBG_LOC_ADDR  = 3   /* absolute address via sym_name (link resolves) */
+    DBG_LOC_ADDR  = 3,  /* absolute address via sym_name (link resolves) */
+    /* Value of the ABI arrival register as it was on entry to this function.
+     * Resolved by the debugger via DW_TAG_call_site_parameter. */
+    DBG_LOC_ENTRY_VALUE = 4
 } DebugLocKind;
 
 /* One entry of a DWARF location list: over [pc_start, pc_end) within the
@@ -78,6 +81,20 @@ typedef struct {
     int dwarf_reg;
 } DebugLocRange;
 
+/* One field of a DBG_TY_STRUCT, used to emit DW_TAG_member.  Nested structs
+ * are represented as DBG_TY_STRUCT with only width (no further members here);
+ * that is enough for sizeof / offsetof of the outer type and for `print p.x`
+ * when the member itself is a scalar. */
+typedef struct {
+    char *name;
+    int offset;
+    int bit_width;      /* 0 = normal member */
+    int bit_offset;
+    DebugTypeTag type_tag;
+    int width;
+    int is_unsigned;
+} DebugMember;
+
 typedef struct {
     char *name;
     char *file;
@@ -87,6 +104,12 @@ typedef struct {
     int width;          /* byte size of the object */
     int is_unsigned;
     int array_len;      /* DBG_TY_ARRAY element count; else 0 */
+    /* Struct tag when type_tag==DBG_TY_STRUCT, or pointee struct tag when
+     * type_tag==DBG_TY_PTR and the pointee is a named struct. */
+    char *type_name;
+    int struct_size;        /* byte size of that struct; 0 if unknown */
+    DebugMember *members;
+    size_t num_members;
     /* Single-location form: used when the variable has one home for its
      * whole scope (stack slot, or a global's address). */
     DebugLocKind loc_kind;
@@ -100,7 +123,26 @@ typedef struct {
     /* Scratch for codegen before locations are finalized: */
     int alloca_ssa;     /* local/param alloca SSA id, or -1 */
     int param_idx;      /* SysV param index, or -1 */
+    /* For DBG_VAR_PARAM: DWARF register the argument arrived in (SysV), or
+     * -1 if it arrived on the stack.  Used to emit DW_OP_entry_value so outer
+     * frames can recover the parameter after caller-saved homes are clobbered. */
+    int entry_dwarf_reg;
 } DebugVar;
+
+/* One register argument at a call site (DW_TAG_call_site_parameter). */
+typedef struct {
+    int dwarf_reg;              /* DW_AT_location: DW_OP_regN */
+    unsigned char *value_expr;  /* DW_AT_call_value expression bytes */
+    size_t value_expr_len;
+} DebugCallSiteParam;
+
+typedef struct {
+    size_t call_pc;             /* offset of the CALL instruction */
+    size_t return_pc;           /* offset of the instruction after CALL */
+    char *callee_name;          /* direct callee; NULL if indirect */
+    DebugCallSiteParam *params;
+    size_t num_params;
+} DebugCallSite;
 
 typedef struct {
     char *file;
@@ -124,6 +166,8 @@ typedef struct {
     size_t after_mov_rbp_pc;    /* just past `mov %rsp,%rbp` */
     DebugVar *vars;
     size_t num_vars, cap_vars;
+    DebugCallSite *call_sites;
+    size_t num_call_sites, cap_call_sites;
 } DebugFunc;
 
 /* ------------------------------------------------------------------ */

@@ -128,10 +128,13 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
         if (inst->dst >= 0 && inst->dst < nv) {
             liv[inst->dst].def_point = (int)i;
         }
+        /* IR_CALL.b is a second return eightbyte (def), not a use. */
+        if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv)
+            liv[inst->b].def_point = (int)i;
 
         /* Uses */
         if (inst->a >= 0 && inst->a < nv) liv_add_use(&liv[inst->a], (int)i);
-        if (inst->op != IR_CBR &&
+        if (inst->op != IR_CBR && inst->op != IR_CALL &&
             inst->b >= 0 && inst->b < nv) liv_add_use(&liv[inst->b], (int)i);
 
         /* IR_CALL: each call_args[k] is a use. */
@@ -300,7 +303,7 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 if (!bs_test(&def_b[bi], inst->a))
                     bs_set(&use_b[bi], inst->a);
             }
-            if (inst->op != IR_CBR &&
+            if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < use_b[bi].nv) {
                 if (!bs_test(&def_b[bi], inst->b))
                     bs_set(&use_b[bi], inst->b);
@@ -316,6 +319,10 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
             if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
                 bs_set(&def_b[bi], inst->dst);
             }
+            /* IR_CALL.b: second return eightbyte. */
+            if (inst->op == IR_CALL && inst->b >= 0 &&
+                inst->b < def_b[bi].nv)
+                bs_set(&def_b[bi], inst->b);
         }
     }
 }
@@ -417,7 +424,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
 
             if (inst->op == IR_CALL) {
                 BS_FOREACH(&live, over) {
-                    if ((int)over != inst->dst &&
+                    if ((int)over != inst->dst && (int)over != inst->b &&
                         value_in_class(fn, (int)over, float_class))
                         forbid_mask[over] |= cls->caller_saved;
                 }
@@ -428,11 +435,14 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
+            if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
+                value_in_class(fn, inst->b, float_class))
+                bs_clr(&live, inst->b);
 
             if (inst->a >= 0 && inst->a < nv &&
                 value_in_class(fn, inst->a, float_class))
                 bs_set(&live, inst->a);
-            if (inst->op != IR_CBR &&
+            if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class))
                 bs_set(&live, inst->b);
@@ -498,11 +508,21 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
+            if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
+                value_in_class(fn, inst->b, float_class)) {
+                BS_FOREACH(&live, other) {
+                    if (!value_in_class(fn, (int)other, float_class))
+                        continue;
+                    if ((int)other != inst->b)
+                        ig_add_edge(g, inst->b, (int)other);
+                }
+                bs_clr(&live, inst->b);
+            }
 
             if (inst->a >= 0 && inst->a < nv &&
                 value_in_class(fn, inst->a, float_class))
                 bs_set(&live, inst->a);
-            if (inst->op != IR_CBR &&
+            if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class))
                 bs_set(&live, inst->b);

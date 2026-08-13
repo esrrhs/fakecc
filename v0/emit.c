@@ -70,7 +70,8 @@ enum DebugLocKind {
     DBG_LOC_NONE = 0,
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
-    DBG_LOC_ADDR = 3
+    DBG_LOC_ADDR = 3,
+    DBG_LOC_ENTRY_VALUE = 4
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -79,6 +80,15 @@ struct DebugLocRange {
     int rbp_offset;
     int dwarf_reg;
 };typedef struct DebugLocRange DebugLocRange;
+struct DebugMember {
+    char *name;
+    int offset;
+    int bit_width;
+    int bit_offset;
+    DebugTypeTag type_tag;
+    int width;
+    int is_unsigned;
+};typedef struct DebugMember DebugMember;
 struct DebugVar {
     char *name;
     char *file;
@@ -88,6 +98,10 @@ struct DebugVar {
     int width;
     int is_unsigned;
     int array_len;
+    char *type_name;
+    int struct_size;
+    DebugMember *members;
+    size_t num_members;
     DebugLocKind loc_kind;
     int rbp_offset;
     int dwarf_reg;
@@ -97,7 +111,20 @@ struct DebugVar {
     size_t cap_ranges;
     int alloca_ssa;
     int param_idx;
+    int entry_dwarf_reg;
 };typedef struct DebugVar DebugVar;
+struct DebugCallSiteParam {
+    int dwarf_reg;
+    unsigned char *value_expr;
+    size_t value_expr_len;
+};typedef struct DebugCallSiteParam DebugCallSiteParam;
+struct DebugCallSite {
+    size_t call_pc;
+    size_t return_pc;
+    char *callee_name;
+    DebugCallSiteParam *params;
+    size_t num_params;
+};typedef struct DebugCallSite DebugCallSite;
 struct DebugLineEntry {
     char *file;
     int line;
@@ -116,6 +143,9 @@ struct DebugFunc {
     DebugVar *vars;
     size_t num_vars;
     size_t cap_vars;
+    DebugCallSite *call_sites;
+    size_t num_call_sites;
+    size_t cap_call_sites;
 };typedef struct DebugFunc DebugFunc;
 struct EmitModule {
     Buffer text;
@@ -177,7 +207,10 @@ void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
                                 size_t after_mov_rbp_pc);
 void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v);
 void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v);
+void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
+                                   const DebugCallSite *cs);
 void debug_var_release(DebugVar *v);
+void debug_call_site_release(DebugCallSite *cs);
 typedef struct FILE FILE;
 extern FILE *stderr;
 extern FILE *stdin;
@@ -262,6 +295,9 @@ void emit_module_free(EmitModule *m) {
         for (size_t j = 0; j < m->dbg_funcs[i].num_vars; j++)
             free_debug_var(&m->dbg_funcs[i].vars[j]);
         free(m->dbg_funcs[i].vars);
+        for (size_t j = 0; j < m->dbg_funcs[i].num_call_sites; j++)
+            debug_call_site_release(&m->dbg_funcs[i].call_sites[j]);
+        free(m->dbg_funcs[i].call_sites);
     }
     free(m->dbg_funcs);
     for (size_t i = 0; i < m->num_dbg_globals; i++)
