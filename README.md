@@ -3,8 +3,9 @@
 [![CI](https://github.com/esrrhs/fakecc/actions/workflows/ci.yml/badge.svg)](https://github.com/esrrhs/fakecc/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Language: C99](https://img.shields.io/badge/language-C99-orange.svg)
+![Self-hosting](https://img.shields.io/badge/self--hosting-yes-brightgreen.svg)
 
-一门类 C 的系统级编程语言——保留 C 的执行模型和性能特性，去掉预处理器，用现代包管理替代头文件。
+一门类 C 的系统级编程语言——保留 C 的执行模型和性能特性，去掉预处理器，用现代包管理替代头文件。**已自举**：fakecc 能编译自己，两级产物逐字节相同。
 
 ## 设计目标
 
@@ -110,7 +111,7 @@ gcc 只在翻译阶段出现，充当 `src/*.c` 的预处理器——FakeCC 方�
 
 ## 当前进度
 
-**243 个 e2e + 13 个单元测试套件，CI（`ubuntu-latest·gcc` 与 `ubuntu-24.04·clang`）全绿；自举已达成不动点。**  Slice 1–12 打通了从单文件表达式到 struct、变参、syscall 的完整语言层；此后补齐类型系统、SSA 中端优化、浮点/长浮点后端、动态链接与多文件编译。fakecc 现在能编译自己的全部 16 个模块，产物通过同一套测试并可复现自身。
+**自举已完成。** 243 个单文件 e2e + 多文件链接套件 + 13 个单元测试，CI（`ubuntu-latest·gcc` / `-O2` 与 `ubuntu-24.04·clang` / `-O2`）全绿；Stage 2 不动点检查与自举编译器跑 e2e 均接入 CI。Slice 1–12 打通语言层，此后补齐类型系统、SSA 中端优化、浮点/长浮点后端、动态链接与多文件编译——fakecc 编译全部 16 个自身模块，产物可复现自身。
 
 ### 已知缺陷
 
@@ -148,9 +149,9 @@ gcc 只在翻译阶段出现，充当 `src/*.c` 的预处理器——FakeCC 方�
 | 链接 | 多文件编译 + 链接（`fakecc a.c b.c -o prog`）；`fakecc -c a.c -o a.o` 出 `.o`；`fakecc a.o b.o -o prog` 链接对象文件；`static`→LOCAL 绑定、GLOBAL 符号跨文件解析；libc 调用走 PLT/GOT |
 | I/O | `__syscall(num, a0..a5)` intrinsic 直接发 Linux syscall；动态链接调 libc（`printf`/`malloc` 等） |
 
-### Slice 13+ — 浮点、动态链接、多文件编译与自举准备
+### Slice 13+ — 浮点、动态链接、多文件编译与自举
 
-Slice 12 之后的增量（按提交顺序），把语言层从"能写程序"推到"能编译自己"：
+Slice 12 之后的增量（按提交顺序），把语言层从「能写程序」推到「能编译自己」，并完成自举：
 
 - **浮点与长浮点**：`float`/`double` 标量算术走 SSE（`addss/mulss/cvttss2si` 等）；`long double` 走 x87 FPU（`fildl/fldt/fstpt`， SysV 约定：`ld` 在 `st0` 返回、16 字节栈上传递）。
 - **struct 按值传参/返回/赋值**：struct 在 IR 层面是指向字节的指针；每次按值边界（参数、返回、赋值）通过 `emit_struct_copy` 逐字节复制；大 struct 返回走 `sret`。
@@ -160,11 +161,10 @@ Slice 12 之后的增量（按提交顺序），把语言层从"能写程序"推
 - **整型/转义扩展**：十六进制/八进制整数字面量与十六进制转义 `\xHH`、八进制转义 `\077`。
 - **复合字面量与指定初始化器**：`(T){...}`、`.field =`、`[index] =`。
 - **类型限定符**：`volatile`/`restrict`、`inline` 说明符、`_Alignof` 运算符。
-- **多文件编译 + 链接**（最新）：`EmitModule` 重设计为真正的单 TU 对象模块（`.text/.rodata/.data/.bss` + 统一符号表 + 重定位表）；codegen 把跨符号引用记录为 `EmitReloc`；新增 `emit_obj()` 写 `ET_REL`、`emit_obj_read()` 读 `.o`、`emit_link()` 合并多模块（段拼接、全局符号解析、重定位应用、PLT 构建、ELF 布局）。`main.c` CLI 支持 `fakecc [-c] <input...> -o <output>`。
+- **多文件编译 + 链接**：`EmitModule` 重设计为真正的单 TU 对象模块（`.text/.rodata/.data/.bss` + 统一符号表 + 重定位表）；codegen 把跨符号引用记录为 `EmitReloc`；新增 `emit_obj()` 写 `ET_REL`、`emit_obj_read()` 读 `.o`、`emit_link()` 合并多模块（段拼接、全局符号解析、重定位应用、PLT 构建、ELF 布局）。`main.c` CLI 支持 `fakecc [-c] <input...> -o <output>`。
+- **自举（已完成）**：`v0/translate.py` 把 `src/*.c` 机械翻译为 FakeCC 源码；Stage 0 编译出 `fakecc-1`，再用 `fakecc-1` 编译同一份源码得到 `fakecc-2`；16 个目标文件与最终二进制逐字节相同。翻译层处理：删 `#include`、注入 typedef、把 `#define` 改写为 `const`/真函数、改写 `__builtin_ctzll`、拼接相邻字符串字面量。
 
-新增 131 个 e2e（共 235），覆盖 float/double/longdouble 算术与比较、struct 按值链、变参、PLT 调用 libc、复合字面量、指定初始化器、十六进制/八进制字面量、多文件函数调用/全局变量/static 不冲突/两阶段链接。
-
-**自举准备度**：经差距分析，fakecc 语言能力已覆盖编译器 `src/*.c` 源码所需的几乎全部 C 子集（`for` 内声明、声明混用、`//` 注释、结构/联合/枚举、复合字面量、指定初始化器、变参、`__syscall`、函数指针均支持；`register` 实际 0 使用，无内联汇编、无 VLA、无 `__attribute__`、无嵌套函数）。Stage 1 机械翻译的主要负担在翻译层：删 `#include`、注入 `uint32_t`/`size_t` 等 typedef、把 ~70 个 `#define` 常量/函数宏改写为 `const`/真函数、改写 1 处 `__builtin_ctzll`、拼接相邻字符串字面量（`"\x7f""ELF"`→`"\x7fELF"`）。Stage 1 翻译与验证正在进行（见仓库内 `v0/` 目录）。
+新增 e2e 覆盖 float/double/longdouble、struct 按值链、变参、PLT 调 libc、复合字面量、指定初始化器、字面量扩展，以及多文件函数调用/全局变量/static 不冲突/两阶段链接（`test/e2e/run_multi_e2e.sh`）。
 
 ### Slice 11 — struct + `.` + `->`
 
@@ -470,4 +470,8 @@ echo $?    # 42
 
 ```bash
 ctest --test-dir build --output-on-failure
+# 含单元测试、单文件 e2e、多文件链接 e2e
+
+# 自举不动点（需先 build Stage 0）
+bash v0/stage2_check.sh
 ```

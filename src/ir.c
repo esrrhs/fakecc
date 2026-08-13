@@ -571,18 +571,6 @@ static const char *slot_global_name(const IRSlot *entry) {
     return entry->global_name ? entry->global_name : entry->name;
 }
 
-/* Look up a variable's slot. Sema guarantees the name exists. */
-#if 0
-static IRValue irsymtable_get(const IRSymTable *st, const char *name) {
-    for (size_t i = 0; i < st->len; i++) {
-        if (strcmp(st->data[i].name, name) == 0) {
-            return st->data[i].slot;
-        }
-    }
-    return -1;
-}
-#endif
-
 static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
     for (size_t i = st->len; i > 0; i--)
         if (strcmp(st->data[i-1].name, name) == 0) return &st->data[i-1];

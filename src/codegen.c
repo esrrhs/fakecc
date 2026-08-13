@@ -193,17 +193,6 @@ static void emit_setcc_r(Buffer *b, uint8_t cc_opcode, int r) {
     emit_modrm(b, 3, 0, r & 7);
 }
 
-/* movzx dst, src8  (64-bit dst) →  48 0F B6 [ModRM: reg=dst, rm=src, mod=11] */
-/* unused after xor+setcc scheme, kept for future use */
-#if 0
-static void emit_movzx_r8(Buffer *b, int dst, int src) {
-    emit_rex_w(b);
-    emit_byte(b, 0x0F);
-    emit_byte(b, 0xB6);
-    emit_modrm(b, 3, dst, src);
-}
-#endif
-
 /* xor %r, %r  →  REX 31 [ModRM: reg=r, rm=r, mod=11] — zero r */
 static void emit_xor_rr(Buffer *b, int r) {
     emit_rex_wrb(b, 1, r, r);
@@ -765,102 +754,6 @@ static void emit_load_via_ptr(Buffer *b, int dst, int ptr, int width, int is_uns
         break;
     }
 }
-
-/* ---- Width-aware load/store to [rbp+off] ----
- * Currently unused: mem2reg promotes every scalar alloca, so IR_LOAD/STORE
- * never survives to codegen for Slice 7a. Kept for future non-scalar support. */
-#if 0
-static void emit_store_narrow(Buffer *b, int reg, int off, int width) {
-    switch (width) {
-    case 1: {
-        /* mov byte ptr [rbp+off], reg8 — need REX (0x40) for reg 4-7 low byte,
-         * REX.R for r8-r15. */
-        uint8_t rex = 0x40 | ((reg & 8) >> 1);   /* REX.R = bit 2, reg>>3 */
-        emit_byte(b, rex);
-        emit_byte(b, 0x88);
-        int mod = (off >= -128 && off <= 127) ? 1 : 2;
-        emit_modrm(b, mod, reg & 7, REG_RBP);
-        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
-        else emit_int32(b, off);
-        break;
-    }
-    case 2: {
-        /* 0x66 prefix + mov word ptr [rbp+off], reg16 */
-        emit_byte(b, 0x66);
-        emit_rex_wrb(b, 0, reg, REG_RBP);
-        emit_byte(b, 0x89);
-        int mod = (off >= -128 && off <= 127) ? 1 : 2;
-        emit_modrm(b, mod, reg, REG_RBP);
-        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
-        else emit_int32(b, off);
-        break;
-    }
-    case 4: {
-        /* mov dword ptr [rbp+off], reg32 — REX (no W) for r8-r15, otherwise no REX */
-        if (reg >= 8) emit_rex_wrb(b, 0, reg, REG_RBP);
-        emit_byte(b, 0x89);
-        int mod = (off >= -128 && off <= 127) ? 1 : 2;
-        emit_modrm(b, mod, reg, REG_RBP);
-        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
-        else emit_int32(b, off);
-        break;
-    }
-    default:
-        emit_store_spill(b, reg, off);
-        break;
-    }
-}
-
-/* Load `width` bytes from [rbp+off] into `reg`, sign- or zero-extending to 64. */
-static void emit_load_narrow(Buffer *b, int reg, int off, int width, int is_unsigned) {
-    switch (width) {
-    case 1: {
-        /* movsx/movzx reg64, byte ptr [rbp+off] */
-        emit_rex_wrb(b, 1, reg, REG_RBP);
-        emit_byte(b, 0x0F);
-        emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
-        int mod = (off >= -128 && off <= 127) ? 1 : 2;
-        emit_modrm(b, mod, reg, REG_RBP);
-        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
-        else emit_int32(b, off);
-        break;
-    }
-    case 2: {
-        emit_rex_wrb(b, 1, reg, REG_RBP);
-        emit_byte(b, 0x0F);
-        emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
-        int mod = (off >= -128 && off <= 127) ? 1 : 2;
-        emit_modrm(b, mod, reg, REG_RBP);
-        if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
-        else emit_int32(b, off);
-        break;
-    }
-    case 4: {
-        if (is_unsigned) {
-            /* mov reg32, dword ptr [rbp+off] — auto zero-extends to 64. */
-            if (reg >= 8) emit_rex_wrb(b, 0, reg, REG_RBP);
-            emit_byte(b, 0x8B);
-            int mod = (off >= -128 && off <= 127) ? 1 : 2;
-            emit_modrm(b, mod, reg, REG_RBP);
-            if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
-            else emit_int32(b, off);
-        } else {
-            /* movsxd reg64, dword ptr [rbp+off] */
-            emit_rex_wrb(b, 1, reg, REG_RBP);
-            emit_byte(b, 0x63);
-            int mod = (off >= -128 && off <= 127) ? 1 : 2;
-            emit_modrm(b, mod, reg, REG_RBP);
-            if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
-            else emit_int32(b, off);
-        }
-        break;
-    }
-    default:
-        emit_load_spill(b, reg, off);
-        break;
-    }
-}
-#endif
 
 /* movsx reg64, reg_small — sign-extend a register's low `src_w` bytes. */
 static void emit_movsx_rr(Buffer *b, int dst, int src, int src_w) {

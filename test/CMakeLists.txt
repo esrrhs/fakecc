@@ -63,3 +63,7 @@ add_test(NAME test_opt COMMAND test_opt)
 add_test(NAME e2e
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_e2e.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_test(NAME e2e_multi
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_multi_e2e.sh $<TARGET_FILE:fakecc>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
