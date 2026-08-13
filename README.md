@@ -95,13 +95,42 @@ FakeCC 内嵌汇编器和链接器，不依赖外部 `gcc`、`as` 或 `ld`。编
 
 FakeCC 的最终目标是**自己编译自己**。分三阶段：
 
-- **Stage 0** — C99 实现（当前阶段）：用系统 gcc 编译 `fakecc-c`，严格遵守编码约束（无代码生成宏、无变参宏、无条件编译，除 include guard 外）
-- **Stage 1** — 机械翻译到 FakeCC：写一个一次性翻译脚本将 `src/*.c` 翻译成 FakeCC 源码，用 Stage 0 编译 → 得到 `fakecc-1` 二进制
-- **Stage 2** — 自我编译验证：用 `fakecc-1` 编译 FakeCC 源码 → 得到 `fakecc-2`；若 `fakecc-2` 通过全部测试（或与 `fakecc-1` 逐字节相同），自举成功
+- **Stage 0** — C99 实现：用系统 gcc 编译 `fakecc`，严格遵守编码约束（无代码生成宏、无变参宏、无条件编译，除 include guard 外）
+- **Stage 1** — 机械翻译到 FakeCC：`v0/translate.py` 把 `src/*.c` 翻译成 FakeCC 源码，用 Stage 0 编译 → `fakecc-1`
+- **Stage 2** — 自我编译验证：用 `fakecc-1` 编译同一份源码 → `fakecc-2`；若 `fakecc-2` 通过全部测试且与 `fakecc-1` 逐字节相同，自举成功
+
+**三个阶段均已达成，且全程不借助外部工具链。** 两级自举的编译与链接都由 fakecc 自己完成：`fakecc-1` 通过全部 243 个 e2e 测试，与 Stage 0 结果一致；`fakecc-1` 与 `fakecc-2` 的 16 个目标文件**以及最终二进制**逐字节相同，编译器复现了自己。
+
+```bash
+v0/build_bootstrap.sh   # 翻译 + 用 Stage 0 编译并链接 → v0/bootstrap_fakecc
+v0/stage2_check.sh      # 跑完整两级自举，逐字节比对目标文件与二进制
+```
+
+gcc 只在翻译阶段出现，充当 `src/*.c` 的预处理器——FakeCC 方言没有预处理器，这是一次性机械翻译的固有成本，不在构建路径上。两个脚本都接入了 CI。
 
 ## 当前进度
 
-**235 个 e2e + 13 个单元测试套件，CI（`ubuntu-latest·gcc` 与 `ubuntu-24.04·clang`）全绿。**  Slice 1–12 打通了从单文件表达式到 struct、变参、syscall 的完整语言层；此后继续补齐类型系统、SSA 中端优化、浮点/长浮点后端、动态链接与多文件编译。当前语言特性已覆盖编译器自身源码所需的几乎全部 C 子集，自举（Stage 1 机械翻译）正在进行。
+**243 个 e2e + 13 个单元测试套件，CI（`ubuntu-latest·gcc` 与 `ubuntu-24.04·clang`）全绿；自举已达成不动点。**  Slice 1–12 打通了从单文件表达式到 struct、变参、syscall 的完整语言层；此后补齐类型系统、SSA 中端优化、浮点/长浮点后端、动态链接与多文件编译。fakecc 现在能编译自己的全部 16 个模块，产物通过同一套测试并可复现自身。
+
+### 已知缺陷
+
+**小结构体按值传参不符合 SysV AMD64。** fakecc 无论大小一律把结构体按值传参降级为传指针；SysV 规定 ≤16 字节的结构体拆成 eightbyte 装进寄存器（>16 字节走内存的路径是对的）。自举不受影响——纯 fakecc 构建两侧约定一致——但这破坏了「ABI 与 C 完全兼容」：调用任何按值收发小结构体的 libc 函数都会传错，fakecc 目标文件也无法与 gcc 目标文件混合链接。
+
+### 调试工具
+
+自举期的 bug 有个共同特点：症状出现在一个 1.2 MB 的二进制里，离病因十万八千里。`tools/` 下的两个脚本把这段距离缩短到可操作的范围：
+
+- `tools/bisect_module.sh` — 混合链接二分。除一个模块外全部用 gcc 编译，那一个用 fakecc，看混合出的编译器是否还正常。把「自举编译器不对」变成「模块 M 被编译错了」。
+- `tools/difftest.sh` — 以 gcc 为 oracle 的差分测试。同一份源码两边编译、运行、比对退出码与 stdout，不需要手算期望值（手算错一个期望值和真 bug 长得一模一样，排查代价却高得多）。
+
+自举暴露出的后端 bug 都已收敛成 e2e 回归用例，每一个都是"只在编译器自身源码这种规模下才触发"的类型：
+
+| 用例 | 缺陷 |
+|---|---|
+| `extern_block_scope*.c` | 块作用域 `extern` 被当成新的零初始化局部变量，而不是绑定到文件作用域符号 |
+| `regalloc_trunc_spill.c` | `IR_TRUNC` 结果溢出到栈时，codegen 按寄存器分配**前**的槽位寻址，读到帧外内存 |
+| `trunc_dirty_high_bits.c` | `IR_TRUNC` 不做掩码，而比较指令发的是 64 位 `cmp`，被丢弃的高半部分参与了比较 |
+| `dynamic_printf_output.c` | 入口桩用裸 `exit_group` 退出，跳过 libc 的 atexit，stdout 缓冲区从不刷新 |
 
 ### 语言特性总览（当前覆盖）
 

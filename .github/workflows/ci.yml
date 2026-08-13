@@ -37,3 +37,27 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  bootstrap:
+    name: bootstrap (stage 2 fixed point)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build stage 0
+        run: |
+          cmake -S . -B build
+          cmake --build build --parallel
+
+      # Stage 0 compiles and links fakecc; that fakecc compiles and links
+      # fakecc again.  Both stages must produce byte-identical objects and
+      # binaries, which fails loudly on any miscompilation that is not an
+      # exact fixed point.
+      - name: Stage 2 fixed point
+        run: bash v0/stage2_check.sh
+
+      # A fixed point alone does not prove correctness — a deterministic but
+      # wrong compiler also reproduces itself.  Run the suite with the
+      # self-hosted binary too.
+      - name: e2e with the self-hosted compiler
+        run: bash test/e2e/run_e2e.sh v0/fakecc-1
