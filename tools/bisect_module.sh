@@ -28,7 +28,9 @@
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-MODULES="ast cfg codegen common domtree emit ir lexer link main mem2reg opt parser regalloc scalar_opt sema"
+# Derived from src/, not listed here — see v0/build_bootstrap.sh for why.
+MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | tr '\n' ' ')
+[ -n "$MODULES" ] || { echo "no sources found in $ROOT/src" >&2; exit 1; }
 PROBE=""
 TRANSLATE=0
 

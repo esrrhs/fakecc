@@ -21,7 +21,12 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 OUT="$ROOT/v0"
 FAKECC=${FAKECC:-$ROOT/build/fakecc}
-MODULES="ast cfg codegen common domtree emit ir lexer link main mem2reg opt parser regalloc scalar_opt sema"
+# Derived from src/, not listed here: translate.py globs src/*.c, so a
+# hardcoded list silently drops a newly added module from the bootstrap while
+# the Stage 0 build picks it up.  LC_ALL=C fixes the order across locales,
+# which keeps the linked binary byte-reproducible.
+MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | tr '\n' ' ')
+[ -n "$MODULES" ] || { echo "no sources found in $ROOT/src" >&2; exit 1; }
 
 TRANSLATE=1
 LINK_WITH_GCC=0

@@ -20,7 +20,9 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 STAGE0=${FAKECC:-$ROOT/build/fakecc}
-MODULES="ast cfg codegen common domtree emit ir lexer link main mem2reg opt parser regalloc scalar_opt sema"
+# Derived from src/, not listed here — see build_bootstrap.sh for why.
+MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | tr '\n' ' ')
+[ -n "$MODULES" ] || { echo "no sources found in $ROOT/src" >&2; exit 1; }
 
 [ -x "$STAGE0" ] || { echo "no Stage 0 compiler at $STAGE0" >&2; exit 1; }
 

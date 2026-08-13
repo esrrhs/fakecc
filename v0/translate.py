@@ -5,13 +5,16 @@ Pipeline per file:
   1. gcc -E -P with minimal fake system headers (expands fakecc's own macros
      and includes; resolves <stdint.h> etc. to tiny stubs).
   2. Post-process: strip __attribute__, rewrite __builtin_ctzll.
-  3. Rewrite anonymous struct/union forms into tagged forms that fakecc
-     accepts:
+  3. Rewrite anonymous struct/union forms into tagged forms:
        - `typedef struct { ... } Name;` ->
          `struct Name { ... }; typedef struct Name Name;`
        - anonymous struct/union members inside unions get hoisted to unique
          top-level `struct/union <tag> { ... };` definitions and referenced
          as `struct/union <tag> field;`.
+     fakecc accepts both the original and the rewritten spelling now, so this
+     step is no longer required for the bootstrap to work.  It is kept because
+     dropping it rewrites every v0/*.c, and that is worth doing on its own
+     rather than as a side effect.
   4. Prepend `package main;` and a small __builtin_ctzll helper.
 """
 import os
@@ -31,8 +34,6 @@ static void __fakecc_va_copy(void *dst, void *src){
     for(int i = 0; i < 24; i++) d[i] = s[i];
 }
 """
-
-# We'll inject a proper ctz helper in the preamble instead (see below).
 
 
 def preprocess(path):
@@ -460,7 +461,7 @@ def rewrite_structs(text):
         out.append(t)
         i += 1
 
-    return [], "".join(out)
+    return "".join(out)
 
 
 
@@ -571,7 +572,7 @@ def translate_file(src_path, out_path):
     text = strip_attributes(text)
     text = strip_va_copy_extern(text)
     text = rewrite_builtin(text)
-    _, body = rewrite_structs(text)
+    body = rewrite_structs(text)
     body = strip_ptr_qualifiers(body)
     body = split_global_multidecl(body)
     body = hoist_local_structs(body)
