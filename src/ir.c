@@ -9,11 +9,18 @@
 /* File-scope handles used by lower_expr when it needs to allocate a new
  * anonymous rodata global for a string literal.  Set at the start of
  * ir_generate; cleared at the end. */
-IRModule *g_ir_module = NULL;
-int g_str_counter = 0;
-int g_flt_counter = 0;
-const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
-const TranslationUnit *g_ir_tu = NULL;      /* set by ir_generate */
+/* These globals are written in ir_generate() and read in lower_expr(),
+ * which fakecc (as a self-hoster) miscompiles via interprocedural constant
+ * propagation: it folds reads of a file-scope global to its initializer
+ * value, ignoring writes made in a different function.  Qualifying them
+ * volatile defeats that folding.  (Same class as the args.len bug.) */
+/* NOTE: `volatile` must lead the type (fakecc's parser rejects `int volatile`
+ * — it only accepts qualifiers before the base type, not after). */
+volatile IRModule *g_ir_module = NULL;
+volatile int g_str_counter = 0;
+volatile int g_flt_counter = 0;
+volatile const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
+volatile const TranslationUnit *g_ir_tu = NULL;      /* set by ir_generate */
 
 /* Return the live struct registry during lowering, NULL outside it.
  * type_size() uses this to refresh stale cached struct widths. */
@@ -760,8 +767,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * constant initialized from that global (see codegen IR_CONST). */
         int w = e->type.width ? e->type.width : 8;
         if (w == 16) {
-            extern IRModule *g_ir_module;   /* set by ir_generate */
-            extern int g_flt_counter;
             long double val = strtold(e->u.float_text, NULL);
             char name[32];
             snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
@@ -784,8 +789,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     case EX_STR: {
         /* Register a rodata global holding the bytes, then produce its
          * address via IR_GADDR. */
-        extern IRModule *g_ir_module;   /* set by ir_generate */
-        extern int g_str_counter;
         char name[32];
         snprintf(name, sizeof name, "__str.%d", g_str_counter++);
         int bytes = e->u.str.len + 1;
