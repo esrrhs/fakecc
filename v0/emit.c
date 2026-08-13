@@ -1,24 +1,26 @@
 package main;
+
 static int __fakecc_ctzll(unsigned long _v){int c;for(c=0;!(_v&1);c++)_v>>=1;return c;}
 static void __fakecc_va_copy(void *dst, void *src){
     char *d = (char*)dst; char *s = (char*)src;
     for(int i = 0; i < 24; i++) d[i] = s[i];
 }
+
 typedef long ptrdiff_t;
 typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
-typedef struct {
+struct SourceLoc {
     const char *file;
     int line;
     int col;
-} SourceLoc;
-typedef struct {
+};typedef struct SourceLoc SourceLoc;
+struct Buffer {
     char *data;
     size_t len;
     size_t cap;
-} Buffer;
+};typedef struct Buffer Buffer;
 void buffer_init(Buffer *b);
 void buffer_free(Buffer *b);
 void buffer_append(Buffer *b, const char *s, size_t n);
@@ -26,8 +28,7 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...)
-    ;
+void die_at(const char *file, int line, int col, const char *fmt, ...);
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -37,32 +38,35 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
-typedef struct {
+struct EmitSymbol {
     char *name;
     uint8_t binding;
     uint8_t type;
     uint16_t shndx;
     size_t value;
     size_t size;
-} EmitSymbol;
-typedef struct {
+};typedef struct EmitSymbol EmitSymbol;
+struct EmitReloc {
     size_t offset;
     uint32_t type;
     uint32_t sym;
     int32_t addend;
-} EmitReloc;
-typedef struct {
+};typedef struct EmitReloc EmitReloc;
+struct EmitModule {
     Buffer text;
     Buffer rodata;
     Buffer data;
     size_t bss_size;
     EmitSymbol *syms;
-    size_t num_syms, cap_syms;
+    size_t num_syms;
+    size_t cap_syms;
     EmitReloc *relocs;
-    size_t num_relocs, cap_relocs;
+    size_t num_relocs;
+    size_t cap_relocs;
     EmitReloc *data_relocs;
-    size_t num_data_relocs, cap_data_relocs;
-} EmitModule;
+    size_t num_data_relocs;
+    size_t cap_data_relocs;
+};typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
 int emit_module_add_symbol(EmitModule *m, const char *name,

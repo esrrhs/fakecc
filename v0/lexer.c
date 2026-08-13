@@ -1,24 +1,26 @@
 package main;
+
 static int __fakecc_ctzll(unsigned long _v){int c;for(c=0;!(_v&1);c++)_v>>=1;return c;}
 static void __fakecc_va_copy(void *dst, void *src){
     char *d = (char*)dst; char *s = (char*)src;
     for(int i = 0; i < 24; i++) d[i] = s[i];
 }
+
 typedef long ptrdiff_t;
 typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
-typedef struct {
+struct SourceLoc {
     const char *file;
     int line;
     int col;
-} SourceLoc;
-typedef struct {
+};typedef struct SourceLoc SourceLoc;
+struct Buffer {
     char *data;
     size_t len;
     size_t cap;
-} Buffer;
+};typedef struct Buffer Buffer;
 void buffer_init(Buffer *b);
 void buffer_free(Buffer *b);
 void buffer_append(Buffer *b, const char *s, size_t n);
@@ -26,9 +28,8 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...)
-    ;
-typedef enum {
+void die_at(const char *file, int line, int col, const char *fmt, ...);
+enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
     TK_KW_VOID,
@@ -118,17 +119,17 @@ typedef enum {
     TK_GT,
     TK_GE,
     TK_EOF,
-} TokenKind;
-typedef struct {
+};typedef enum TokenKind TokenKind;
+struct Token {
     TokenKind kind;
     char *text;
     SourceLoc loc;
-} Token;
-typedef struct {
+};typedef struct Token Token;
+struct TokenArray {
     Token *data;
     size_t len;
     size_t cap;
-} TokenArray;
+};typedef struct TokenArray TokenArray;
 void token_array_init(TokenArray *a);
 void token_array_free(TokenArray *a);
 void token_array_push(TokenArray *a, Token t);

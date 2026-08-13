@@ -1,24 +1,26 @@
 package main;
+
 static int __fakecc_ctzll(unsigned long _v){int c;for(c=0;!(_v&1);c++)_v>>=1;return c;}
 static void __fakecc_va_copy(void *dst, void *src){
     char *d = (char*)dst; char *s = (char*)src;
     for(int i = 0; i < 24; i++) d[i] = s[i];
 }
+
 typedef long ptrdiff_t;
 typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
-typedef struct {
+struct SourceLoc {
     const char *file;
     int line;
     int col;
-} SourceLoc;
-typedef struct {
+};typedef struct SourceLoc SourceLoc;
+struct Buffer {
     char *data;
     size_t len;
     size_t cap;
-} Buffer;
+};typedef struct Buffer Buffer;
 void buffer_init(Buffer *b);
 void buffer_free(Buffer *b);
 void buffer_append(Buffer *b, const char *s, size_t n);
@@ -26,8 +28,7 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...)
-    ;
+void die_at(const char *file, int line, int col, const char *fmt, ...);
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -37,32 +38,35 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
-typedef struct {
+struct EmitSymbol {
     char *name;
     uint8_t binding;
     uint8_t type;
     uint16_t shndx;
     size_t value;
     size_t size;
-} EmitSymbol;
-typedef struct {
+};typedef struct EmitSymbol EmitSymbol;
+struct EmitReloc {
     size_t offset;
     uint32_t type;
     uint32_t sym;
     int32_t addend;
-} EmitReloc;
-typedef struct {
+};typedef struct EmitReloc EmitReloc;
+struct EmitModule {
     Buffer text;
     Buffer rodata;
     Buffer data;
     size_t bss_size;
     EmitSymbol *syms;
-    size_t num_syms, cap_syms;
+    size_t num_syms;
+    size_t cap_syms;
     EmitReloc *relocs;
-    size_t num_relocs, cap_relocs;
+    size_t num_relocs;
+    size_t cap_relocs;
     EmitReloc *data_relocs;
-    size_t num_data_relocs, cap_data_relocs;
-} EmitModule;
+    size_t num_data_relocs;
+    size_t cap_data_relocs;
+};typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
 int emit_module_add_symbol(EmitModule *m, const char *name,
@@ -127,6 +131,8 @@ extern char *strncpy(char *dst, const char *src, size_t n);
 extern char *strerror(int n);
 extern int chmod(const char *p, int mode);
 static const char INTERP_PATH[] = "/lib64/ld-linux-x86-64.so.2";
+struct SymInfo { int defined; int shndx; size_t value; uint8_t binding; };
+typedef struct SymInfo SymInfo;
 static void emit_byte(Buffer *b, uint8_t v) { buffer_append(b, (const char *)&v, 1); }
 static void emit_int32(Buffer *b, int32_t v) { buffer_append(b, (const char *)&v, 4); }
 static void *xcalloc(size_t nmemb, size_t size) {
@@ -177,7 +183,8 @@ static void write_phdr(Buffer *b, uint32_t type, uint32_t flags,
     buf_u64(b, memsz);
     buf_u64(b, align);
 }
-static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr) {
+static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
+                      uint64_t exit_plt_vaddr) {
     uint8_t mov_edi[] = {0x8b, 0x3c, 0x24};
     buffer_append(code, (const char *)mov_edi, 3);
     uint8_t lea_rsi[] = {0x48, 0x8d, 0x74, 0x24, 0x08};
@@ -188,10 +195,19 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr) {
     buffer_append(code, (const char *)&rel, 4);
     uint8_t mov_reg[] = {0x89, 0xc7};
     buffer_append(code, (const char *)mov_reg, 2);
-    uint8_t mov_imm[] = {0xb8, 0x3c, 0x00, 0x00, 0x00};
-    buffer_append(code, (const char *)mov_imm, 5);
-    uint8_t syscall[] = {0x0f, 0x05};
-    buffer_append(code, (const char *)syscall, 2);
+    if (exit_plt_vaddr != 0) {
+        buffer_append(code, (const char *)&call_opcode, 1);
+        int32_t erel = (int32_t)(exit_plt_vaddr -
+                                 (call_vaddr + 3 + 5 + 5 + 2 + 5));
+        buffer_append(code, (const char *)&erel, 4);
+        uint8_t ud2[] = {0x0f, 0x0b};
+        buffer_append(code, (const char *)ud2, 2);
+    } else {
+        uint8_t mov_imm[] = {0xb8, 0x3c, 0x00, 0x00, 0x00};
+        buffer_append(code, (const char *)mov_imm, 5);
+        uint8_t syscall[] = {0x0f, 0x05};
+        buffer_append(code, (const char *)syscall, 2);
+    }
 }
 static unsigned long elf_hash(const char *name) {
     unsigned long h = 0, g;
@@ -237,7 +253,9 @@ static int ext_find_or_add(char ***ext, int *num_ext, const char *name) {
     return *num_ext - 1;
 }
 void emit_link(EmitModule **mods, size_t n, const char *path) {
-    Buffer text, rodata, data;
+Buffer text;
+Buffer rodata;
+Buffer data;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
     size_t bss_size = 0;
     size_t *mod_text_off = xcalloc(n, sizeof(size_t));
@@ -263,7 +281,6 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     for (size_t i = 0; i < n; i++)
         mod_sym_base[i + 1] = mod_sym_base[i] + mods[i]->num_syms;
     size_t total_syms = mod_sym_base[n];
-    typedef struct { int defined; int shndx; size_t value; uint8_t binding; } SymInfo;
     SymInfo *sinfo = xcalloc(total_syms, sizeof(SymInfo));
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
@@ -324,13 +341,21 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         }
         data_got_external[j] = !found;
     }
+    int exit_ext_idx = -1;
+    if (num_ext > 0 || num_data_ext > 0)
+        exit_ext_idx = ext_find_or_add(&ext_list, &num_ext, "exit");
     size_t *plt_entry_off = num_ext ? xcalloc(num_ext, sizeof(size_t)) : ((void*)0);
     size_t *plt_got_fixup = num_ext ? xcalloc(num_ext, sizeof(size_t)) : ((void*)0);
     size_t plt0_got_fixup[2];
     size_t plt0_off = emit_plt0(&text, plt0_got_fixup);
     for (int e = 0; e < num_ext; e++)
         plt_entry_off[e] = emit_plt_entry(&text, e, plt0_off, &plt_got_fixup[e]);
-    Buffer dynstr, dynsym, hash, rela_plt, rela_dyn, dynamic;
+Buffer dynstr;
+Buffer dynsym;
+Buffer hash;
+Buffer rela_plt;
+Buffer rela_dyn;
+Buffer dynamic;
     buffer_init(&dynstr); buffer_init(&dynsym); buffer_init(&hash);
     buffer_init(&rela_plt); buffer_init(&rela_dyn); buffer_init(&dynamic);
     size_t interp_len = (num_ext > 0 || num_data_ext > 0) ? sizeof(INTERP_PATH) : 0;
@@ -599,7 +624,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         buf_u64(&dynamic, 0); buf_u64(&dynamic, 0);
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr);
+        uint64_t exit_plt_vaddr = (exit_ext_idx >= 0)
+            ? code_vaddr + plt_entry_off[exit_ext_idx] : 0;
+        gen_start(&rx, base + start_offset, main_addr, exit_plt_vaddr);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t interp_off = rx.len;
@@ -647,7 +674,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         uint64_t entry = base + start_offset;
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr);
+        gen_start(&rx, base + start_offset, main_addr, 0);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         Buffer elf;

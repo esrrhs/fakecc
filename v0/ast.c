@@ -1,24 +1,26 @@
 package main;
+
 static int __fakecc_ctzll(unsigned long _v){int c;for(c=0;!(_v&1);c++)_v>>=1;return c;}
 static void __fakecc_va_copy(void *dst, void *src){
     char *d = (char*)dst; char *s = (char*)src;
     for(int i = 0; i < 24; i++) d[i] = s[i];
 }
+
 typedef long ptrdiff_t;
 typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
-typedef struct {
+struct SourceLoc {
     const char *file;
     int line;
     int col;
-} SourceLoc;
-typedef struct {
+};typedef struct SourceLoc SourceLoc;
+struct Buffer {
     char *data;
     size_t len;
     size_t cap;
-} Buffer;
+};typedef struct Buffer Buffer;
 void buffer_init(Buffer *b);
 void buffer_free(Buffer *b);
 void buffer_append(Buffer *b, const char *s, size_t n);
@@ -26,9 +28,8 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...)
-    ;
-typedef enum {
+void die_at(const char *file, int line, int col, const char *fmt, ...);
+enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
     TK_KW_VOID,
@@ -118,21 +119,21 @@ typedef enum {
     TK_GT,
     TK_GE,
     TK_EOF,
-} TokenKind;
-typedef struct {
+};typedef enum TokenKind TokenKind;
+struct Token {
     TokenKind kind;
     char *text;
     SourceLoc loc;
-} Token;
-typedef struct {
+};typedef struct Token Token;
+struct TokenArray {
     Token *data;
     size_t len;
     size_t cap;
-} TokenArray;
+};typedef struct TokenArray TokenArray;
 void token_array_init(TokenArray *a);
 void token_array_free(TokenArray *a);
 void token_array_push(TokenArray *a, Token t);
-typedef enum {
+enum TypeKind {
     TY_VOID,
     TY_INT,
     TY_FLOAT,
@@ -140,7 +141,7 @@ typedef enum {
     TY_ARRAY,
     TY_STRUCT,
     TY_FUNC,
-} TypeKind;
+};typedef enum TypeKind TypeKind;
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
@@ -189,12 +190,12 @@ int type_align(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
 Type type_make_struct(const char *tag, int size);
-Type type_make_func(Type ret, Type * const *params, int nparams);
+Type type_make_func(Type ret, Type * *params, int nparams);
 Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
-typedef enum {
+enum ExprKind {
     EX_INT_LIT,
     EX_BINOP,
     EX_UNARY,
@@ -217,8 +218,8 @@ typedef enum {
     EX_INIT_LIST,
     EX_FLOAT_LIT,
     EX_COMPOUND_LITERAL,
-} ExprKind;
-typedef enum {
+};typedef enum ExprKind ExprKind;
+enum BinOp {
     BOP_ADD,
     BOP_SUB,
     BOP_MUL,
@@ -237,26 +238,21 @@ typedef enum {
     BOP_BITXOR,
     BOP_SHL,
     BOP_SHR,
-} BinOp;
-typedef enum {
+};typedef enum BinOp BinOp;
+enum UnaryOp {
     UOP_NEG,
     UOP_POS,
     UOP_BITNOT,
     UOP_NOT,
-} UnaryOp;
+};typedef enum UnaryOp UnaryOp;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
-typedef struct {
+struct ExprArray {
     Expr **data;
     size_t len;
     size_t cap;
-} ExprArray;
-struct Expr {
-    ExprKind kind;
-    SourceLoc loc;
-    Type type;
-    Type va_arg_type;
-    union {
+};typedef struct ExprArray ExprArray;
+union __anon_u_1 {
         int int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
@@ -279,7 +275,56 @@ struct Expr {
         struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
         char *float_text;
         struct { Type target_type; Expr *init; } compound;
-    } u;
+    };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
+struct __anon_un_5 { UnaryOp op; Expr *operand; };
+struct __anon_var_6 { char *name; };
+struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
+struct __anon_call_8 { Expr *callee; ExprArray args; };
+struct __anon_str_9 { char *bytes; int len; };
+struct __anon_addr_10 { Expr *operand; };
+struct __anon_deref_11 { Expr *operand; };
+struct __anon_idx_12 { Expr *array; Expr *index; };
+struct __anon_member_13 { Expr *obj; char *name; };
+struct __anon_cast_14 { Type target; Expr *operand; };
+struct __anon_sizeof_t_15 { Type target; };
+struct __anon_sizeof_e_16 { Expr *operand; };
+struct __anon_alignof_t_17 { Type target; };
+struct __anon_tern_18 { Expr *cond; Expr *then; Expr *else_; };
+struct __anon_incdec_19 { Expr *operand; int is_inc; int is_prefix; };
+struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
+struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
+struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
+struct __anon_compound_23 { Type target_type; Expr *init; };
+
+        int int_val;
+        struct __anon_bin_4 bin;
+        struct __anon_un_5 un;
+        struct __anon_var_6 var;
+        struct __anon_assign_7 assign;
+        struct __anon_call_8 call;
+        struct __anon_str_9 str;
+        struct __anon_addr_10 addr;
+        struct __anon_deref_11 deref;
+        struct __anon_idx_12 idx;
+        struct __anon_member_13 member;
+        struct __anon_cast_14 cast;
+        struct __anon_sizeof_t_15 sizeof_t;
+        struct __anon_sizeof_e_16 sizeof_e;
+        struct __anon_alignof_t_17 alignof_t;
+        struct __anon_tern_18 tern;
+        struct __anon_incdec_19 incdec;
+        struct __anon_comp_20 comp;
+        struct __anon_comma_21 comma;
+        struct __anon_init_list_22 init_list;
+        char *float_text;
+        struct __anon_compound_23 compound;
+    };
+
+    ExprKind kind;
+    SourceLoc loc;
+    Type type;
+    Type va_arg_type;
+    union __anon_u_3 u;
 };
 Expr *expr_new_int(int v, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
@@ -307,7 +352,7 @@ void expr_call_push_arg(Expr *e, Expr *arg);
 void expr_call_set_callee(Expr *e, Expr *callee);
 void expr_free(Expr *e);
 void expr_set_type(Expr *e, Type t);
-typedef enum {
+enum StmtKind {
     ST_DECL,
     ST_EXPR,
     ST_RETURN,
@@ -321,22 +366,19 @@ typedef enum {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
-} StmtKind;
+};typedef enum StmtKind StmtKind;
 typedef struct Stmt Stmt;
-typedef struct StmtArray {
+struct StmtArray {
     Stmt *data;
     size_t len;
     size_t cap;
-} StmtArray;
-typedef struct {
+};typedef struct StmtArray StmtArray;
+struct SwitchCase {
     int is_default;
     int value;
     StmtArray stmts;
-} SwitchCase;
-struct Stmt {
-    StmtKind kind;
-    SourceLoc loc;
-    union {
+};typedef struct SwitchCase SwitchCase;
+union __anon_u_2 {
         struct { char *name; Type type; Expr *init; int storage_class; } decl;
         Expr *expr;
         Expr *value;
@@ -348,7 +390,31 @@ struct Stmt {
         struct { char *target; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    } u;
+    };struct Stmt {union __anon_u_24 {struct __anon_decl_25 { char *name; Type type; Expr *init; int storage_class; };
+struct __anon_if_s_26 { Expr *cond; Stmt *then_s; Stmt *else_s; };
+struct __anon_while_s_27 { Expr *cond; Stmt *body; };
+struct __anon_do_s_28 { Expr *cond; Stmt *body; };
+struct __anon_for_s_29 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
+struct __anon_goto_s_30 { char *target; };
+struct __anon_label_s_31 { char *name; Stmt *stmt; };
+struct __anon_switch_s_32 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
+
+        struct __anon_decl_25 decl;
+        Expr *expr;
+        Expr *value;
+        struct __anon_if_s_26 if_s;
+        struct __anon_while_s_27 while_s;
+        struct __anon_do_s_28 do_s;
+        struct __anon_for_s_29 for_s;
+        StmtArray block;
+        struct __anon_goto_s_30 goto_s;
+        struct __anon_label_s_31 label_s;
+        struct __anon_switch_s_32 switch_s;
+    };
+
+    StmtKind kind;
+    SourceLoc loc;
+    union __anon_u_24 u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
@@ -357,20 +423,20 @@ void stmt_free(Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
 void switch_push_case(Stmt *s, int is_default, int value);
-typedef struct {
+struct Param {
     char *name;
     Type type;
     SourceLoc loc;
-} Param;
-typedef struct {
+};typedef struct Param Param;
+struct ParamArray {
     Param *data;
     size_t len;
     size_t cap;
-} ParamArray;
+};typedef struct ParamArray ParamArray;
 void param_array_init(ParamArray *a);
 void param_array_push(ParamArray *a, const char *name, Type type, SourceLoc loc);
 void param_array_free(ParamArray *a);
-typedef struct {
+struct FunctionDecl {
     char *name;
     Type ret_type;
     ParamArray params;
@@ -379,19 +445,19 @@ typedef struct {
     int is_variadic;
     int is_extern;
     int is_static;
-} FunctionDecl;
-typedef struct {
+};typedef struct FunctionDecl FunctionDecl;
+struct PackageDecl {
     char *name;
     SourceLoc loc;
-} PackageDecl;
-typedef struct {
+};typedef struct PackageDecl PackageDecl;
+struct StructMember {
     char *name;
     Type type;
     int offset;
     int bit_width;
     int bit_offset;
-} StructMember;
-typedef struct {
+};typedef struct StructMember StructMember;
+struct StructDef {
     char *tag;
     int is_union;
     StructMember *members;
@@ -404,12 +470,12 @@ typedef struct {
     int bf_unit_type;
     int bf_unit_used;
     int bf_unit_offset;
-} StructDef;
-typedef struct {
+};typedef struct StructDef StructDef;
+struct StructRegistry {
     StructDef *data;
     size_t len;
     size_t cap;
-} StructRegistry;
+};typedef struct StructRegistry StructRegistry;
 void struct_registry_init(StructRegistry *r);
 void struct_registry_free(StructRegistry *r);
 StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc);
@@ -418,27 +484,27 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
 void struct_def_fixup_self_types(StructDef *sd);
-typedef struct {
+struct FunctionArray {
     FunctionDecl *data;
     size_t len;
     size_t cap;
-} FunctionArray;
-typedef struct {
+};typedef struct FunctionArray FunctionArray;
+struct EnumConstant {
     char *name;
     int value;
-} EnumConstant;
-typedef struct {
+};typedef struct EnumConstant EnumConstant;
+struct EnumDef {
     char *tag;
     EnumConstant *constants;
     int num_constants;
     int cap_constants;
     SourceLoc loc;
-} EnumDef;
-typedef struct {
+};typedef struct EnumDef EnumDef;
+struct EnumRegistry {
     EnumDef *data;
     size_t len;
     size_t cap;
-} EnumRegistry;
+};typedef struct EnumRegistry EnumRegistry;
 void enum_registry_init(EnumRegistry *r);
 void enum_registry_free(EnumRegistry *r);
 EnumDef *enum_registry_add(EnumRegistry *r, const char *tag, SourceLoc loc);
@@ -447,27 +513,27 @@ int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
                             int value, SourceLoc loc);
 const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
                                                 const char *name);
-typedef struct {
+struct TypedefEntry {
     char *name;
     Type type;
-} TypedefEntry;
-typedef struct {
+};typedef struct TypedefEntry TypedefEntry;
+struct TypedefRegistry {
     TypedefEntry *data;
     size_t len;
     size_t cap;
-} TypedefRegistry;
+};typedef struct TypedefRegistry TypedefRegistry;
 void typedef_registry_init(TypedefRegistry *r);
 void typedef_registry_free(TypedefRegistry *r);
 TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type);
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
-typedef struct {
+struct TranslationUnit {
     PackageDecl package;
     StmtArray globals;
     FunctionArray functions;
     StructRegistry structs;
     EnumRegistry enums;
     TypedefRegistry typedefs;
-} TranslationUnit;
+};typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
 typedef struct FILE FILE;
@@ -660,7 +726,7 @@ Type type_make_struct(const char *tag, int size) {
     t.tag = xstrdup(tag);
     return t;
 }
-Type type_make_func(Type ret, Type * const *params, int nparams) {
+Type type_make_func(Type ret, Type * *params, int nparams) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
     t.func_ret = malloc(sizeof(Type));
@@ -1390,7 +1456,8 @@ int fold_const_int(const Expr *e, long long *out) {
         }
     }
     if (e->kind == EX_BINOP) {
-        long long l, r;
+long long l;
+long long r;
         if (!fold_const_int(e->u.bin.l, &l)) return 0;
         if (!fold_const_int(e->u.bin.r, &r)) return 0;
         switch (e->u.bin.op) {
