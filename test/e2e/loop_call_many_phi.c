@@ -24,9 +24,10 @@ L:
     i=i+1;
     goto L;
 done:
+    /* flag is still 0 exactly when the loop body never ran; -1 marks that. */
     if(flag==0) flag=-1;
-    if(n<=0){ if(flag!=0) return 1; }
-    else { if(flag==0) return 2; }
+    if(n<=0){ if(flag!=-1) return 1; }
+    else { if(flag!=100) return 2; }
     if(v0!=a0+n) return 10;
     if(v1!=a1+n) return 11;
     if(v2!=a2+n) return 12;
@@ -48,9 +49,9 @@ done:
 
 int main(void) {
     int r;
-    r = test_many_phi(0,1,2,3,4,5,6,7,8,9);
+    r = test_many_phi(0,1,2,3,4,5,6,7,8,9,10);
     if(r!=0) return r;
-    r = test_many_phi(15,1,2,3,4,5,6,7,8,9);
+    r = test_many_phi(15,1,2,3,4,5,6,7,8,9,10);
     if(r!=0) return r;
     return 0;
 }

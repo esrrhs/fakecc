@@ -1875,19 +1875,35 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_TRUNC: {
-                /* No-op at register level: SSA values live in 64-bit regs;
-                 * narrower uses (stores, cmp width) will mask via width field.
-                 * Copy value if regs differ. */
+                /* Narrow `a` to inst->width and re-extend it to 64 bits, so
+                 * the result upholds the invariant every other opcode relies
+                 * on: a value of width W is correctly extended in its 64-bit
+                 * register.  Skipping the mask (treating TRUNC as a pure
+                 * register-level no-op) leaves the source's high bits behind,
+                 * and the comparison opcodes issue a 64-bit `cmp` without
+                 * re-masking — so `(unsigned)wide64 == 1` compared false
+                 * whenever the discarded half was non-zero. */
                 if (ra && inst->a >= 0 && inst->a < ra->num_values &&
                     inst->dst >= 0 && inst->dst < ra->num_values &&
                     ra->reg[inst->dst] == ra->reg[inst->a] &&
                     ra->reg[inst->dst] >= 0) {
+                    mask_to_width(&out->text, ra->reg[inst->dst],
+                                  inst->width, inst->is_unsigned);
                     break;
                 }
                 if (dr >= 0) {
                     ensure_reg(&out->text, inst->a, dr, ra);
+                    mask_to_width(&out->text, dr, inst->width,
+                                  inst->is_unsigned);
                 } else {
-                    old_load(&out->text, inst->a, REG_RAX);
+                    /* Materialize the source with ensure_reg, not old_load:
+                     * old_load addresses `a` at the pre-regalloc slot
+                     * -8*(a+1), which under register allocation is usually
+                     * outside the frame entirely (the frame is sized for the
+                     * spill slots, not one slot per SSA value). */
+                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                    mask_to_width(&out->text, REG_RAX, inst->width,
+                                  inst->is_unsigned);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
@@ -1911,15 +1927,18 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
 
             case IR_STORE: {
-                int sr = (ra && inst->b >= 0 && inst->b < ra->num_values)
-                         ? ra->reg[inst->b] : -1;
-                if (sr >= 0) {
-                    spill_if_needed(&out->text, inst->a, sr, ra);
+                /* [a] = b.  Rarely reached — mem2reg normally removes it.
+                 * Route both operands through ensure_reg / spill_if_needed so
+                 * each is addressed at its real home; old_load/old_store
+                 * assume the pre-regalloc "one slot per SSA value" layout and
+                 * read or write outside the frame once regalloc is on. */
+                int ar = (ra && inst->a >= 0 && inst->a < ra->num_values)
+                         ? ra->reg[inst->a] : -1;
+                if (ar >= 0) {
+                    ensure_reg(&out->text, inst->b, ar, ra);
                 } else {
-                    /* Fallback (no ra or spilled): load b's slot into rax,
-                     * then store rax to a's slot. */
-                    old_load(&out->text, inst->b, REG_RAX);
-                    old_store(&out->text, inst->a, REG_RAX);
+                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    spill_if_needed(&out->text, inst->a, REG_RAX, ra);
                 }
                 break;
             }

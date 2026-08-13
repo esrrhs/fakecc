@@ -114,7 +114,19 @@ static void write_phdr(Buffer *b, uint32_t type, uint32_t flags,
     buf_u64(b, align);
 }
 
-static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr) {
+/* Emit the process entry stub.  `exit_plt_vaddr` is the address of the
+ * `exit` PLT entry, or 0 for a static executable (no libc to call).
+ *
+ * Returning from main is not the same as calling exit(): libc buffers stdout,
+ * and the buffer is drained by an atexit handler that only exit() runs.  A
+ * raw exit_group syscall skips it, so a dynamically linked program that
+ * printf()s and then returns from main writes nothing at all.  When libc is
+ * present, hand control to its exit(); keep the syscall for static binaries.
+ *
+ * Both forms are exactly START_SIZE bytes so the layout above does not have to
+ * know which one it gets. */
+static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
+                      uint64_t exit_plt_vaddr) {
     /* SysV ABI: main(argc @ edi, argv @ rsi). At process entry the kernel
      * leaves [rsp]=argc, [rsp+8]=argv. Load them before calling main. */
     uint8_t mov_edi[] = {0x8b, 0x3c, 0x24}; /* mov edi, [rsp] */
@@ -128,10 +140,19 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr) {
     buffer_append(code, (const char *)&rel, 4);
     uint8_t mov_reg[] = {0x89, 0xc7}; /* mov edi, eax (exit code = main return) */
     buffer_append(code, (const char *)mov_reg, 2);
-    uint8_t mov_imm[] = {0xb8, 0x3c, 0x00, 0x00, 0x00}; /* mov eax, 60 */
-    buffer_append(code, (const char *)mov_imm, 5);
-    uint8_t syscall[] = {0x0f, 0x05};
-    buffer_append(code, (const char *)syscall, 2);
+    if (exit_plt_vaddr != 0) {
+        buffer_append(code, (const char *)&call_opcode, 1);
+        int32_t erel = (int32_t)(exit_plt_vaddr -
+                                 (call_vaddr + 3 + 5 + CALL_SIZE + 2 + CALL_SIZE));
+        buffer_append(code, (const char *)&erel, 4);
+        uint8_t ud2[] = {0x0f, 0x0b}; /* exit() does not return */
+        buffer_append(code, (const char *)ud2, 2);
+    } else {
+        uint8_t mov_imm[] = {0xb8, 0x3c, 0x00, 0x00, 0x00}; /* mov eax, 60 */
+        buffer_append(code, (const char *)mov_imm, 5);
+        uint8_t syscall[] = {0x0f, 0x05};
+        buffer_append(code, (const char *)syscall, 2);
+    }
 }
 
 static unsigned long elf_hash(const char *name) {
@@ -298,6 +319,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         }
         data_got_external[j] = !found;
     }
+
+    /* ---- Reserve a PLT slot for exit() ----
+     * The entry stub calls it instead of issuing exit_group directly, so libc
+     * gets to run its atexit handlers (stdout is flushed by one of them).
+     * Only for a dynamic link: a static executable has no libc to call. */
+    int exit_ext_idx = -1;
+    if (num_ext > 0 || num_data_ext > 0)
+        exit_ext_idx = ext_find_or_add(&ext_list, &num_ext, "exit");
 
     /* ---- Build PLT at end of .text ---- */
     size_t *plt_entry_off = num_ext ? xcalloc(num_ext, sizeof(size_t)) : NULL;
@@ -638,7 +667,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         /* ---- Assemble RX segment content ---- */
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr);
+        uint64_t exit_plt_vaddr = (exit_ext_idx >= 0)
+            ? code_vaddr + plt_entry_off[exit_ext_idx] : 0;
+        gen_start(&rx, base + start_offset, main_addr, exit_plt_vaddr);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t interp_off = rx.len;
@@ -696,7 +727,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         /* RX content: _start, .text, .rodata (read-only data lives in RX) */
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr);
+        gen_start(&rx, base + start_offset, main_addr, 0);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
 

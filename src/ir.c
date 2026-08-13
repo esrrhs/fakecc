@@ -8,19 +8,17 @@
 
 /* File-scope handles used by lower_expr when it needs to allocate a new
  * anonymous rodata global for a string literal.  Set at the start of
- * ir_generate; cleared at the end. */
-/* These globals are written in ir_generate() and read in lower_expr(),
- * which fakecc (as a self-hoster) miscompiles via interprocedural constant
- * propagation: it folds reads of a file-scope global to its initializer
- * value, ignoring writes made in a different function.  Qualifying them
- * volatile defeats that folding.  (Same class as the args.len bug.) */
-/* NOTE: `volatile` must lead the type (fakecc's parser rejects `int volatile`
- * — it only accepts qualifiers before the base type, not after). */
-volatile IRModule *g_ir_module = NULL;
-volatile int g_str_counter = 0;
-volatile int g_flt_counter = 0;
-volatile const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
-volatile const TranslationUnit *g_ir_tu = NULL;      /* set by ir_generate */
+ * ir_generate; cleared at the end.
+ *
+ * Every reader lives in this file and sees these definitions directly.  Do
+ * not re-declare them `extern` inside a function body: fakecc currently
+ * lowers a block-scope `extern` as a fresh zero-initialized local, so such
+ * a redeclaration silently shadows the global in the self-hosted build. */
+IRModule *g_ir_module = NULL;
+int g_str_counter = 0;
+int g_flt_counter = 0;
+const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
+const TranslationUnit *g_ir_tu = NULL;       /* set by ir_generate */
 
 /* Return the live struct registry during lowering, NULL outside it.
  * type_size() uses this to refresh stale cached struct widths. */
@@ -1253,10 +1251,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
         }
         IRValue arg_vals[IR_CALL_MAX_ARGS];
-        /* Force a fresh memory read: the self-hosted compiler erroneously
-         * constant-folds e->u.call.args.len to 0 when e is const, dropping
-         * all call arguments. A volatile read defeats that optimization. */
-        int nargs = *(volatile int *)&e->u.call.args.len;
+        int nargs = (int)e->u.call.args.len;
         for (int i = 0; i < nargs; i++)
             arg_vals[i] = lower_expr(fn, st, e->u.call.args.data[i]);
         /* Void call: no result value (width 0).  Still emit the call for its
@@ -1703,6 +1698,22 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 : (dty.kind == TY_PTR ? 8
                    : (dty.kind == TY_STRUCT ? 8 : dty.width));
         int du = dty.is_unsigned;
+
+        /* Block-scope `extern` is a re-declaration of a file-scope symbol, not
+         * a definition: it must not allocate storage.  Bind the name to the
+         * global so reads/writes go through IR_GADDR, exactly as a file-scope
+         * declaration would.  Falling through to the ordinary local path
+         * instead would give the name a fresh zero-initialized stack slot that
+         * silently shadows the global.
+         *
+         * A block-scope `extern` function declaration needs no binding at all:
+         * the call site dispatches on the callee's TY_FUNC type, and binding
+         * the name as a data global would misroute an address-of. */
+        if (s->u.decl.storage_class == 2) {
+            if (dty.kind != TY_FUNC)
+                irsymtable_push_global(st, s->u.decl.name, dty);
+            break;
+        }
 
         /* static local → allocate in static storage via a mangled global
          * `fn.varname`.  Reads/writes resolve through the global_name path. */
