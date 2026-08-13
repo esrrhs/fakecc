@@ -43,13 +43,17 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
     while (changed) {
         changed = 0;
 
-        /* Snapshot idom into a separate array. The intersect step reads
-         * idom values; reading them straight from dt->idom while the loop
-         * writes dt->idom[b] miscompiles under the self-hosted compiler
-         * (same-array read-after-write hoisting). A snapshot decouples the
-         * read set from the write set. */
+        /* Snapshot idom and processed into separate arrays. The intersect
+         * step reads both; reading them straight from dt->idom / dt->processed
+         * while the loop writes dt->idom[b] / dt->processed[b] miscompiles
+         * under the self-hosted compiler (same-array read-after-write
+         * hoisting). A snapshot decouples the read set from the write set. */
         int *sid = xmalloc(n * sizeof(int));
-        for (size_t i = 0; i < n; i++) sid[i] = dt->idom[i];
+        char *sp = xmalloc(n);
+        for (size_t i = 0; i < n; i++) {
+            sid[i] = dt->idom[i];
+            sp[i] = dt->processed[i];
+        }
 
         for (size_t bi = 0; bi < n; bi++) {
             int b = (int)bi;
@@ -60,7 +64,7 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
             int new_idom = -1;
             for (size_t i = 0; i < blk->num_preds; i++) {
                 int p = blk->preds[i];
-                if (dt->processed[p]) {
+                if (sp[p]) {
                     new_idom = p;
                     break;
                 }
@@ -71,7 +75,7 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
             for (size_t i = 0; i < blk->num_preds; i++) {
                 int p = blk->preds[i];
                 if (p == new_idom) continue;
-                if (!dt->processed[p]) continue;
+                if (!sp[p]) continue;
 
                 /* Intersect: find the lowest common ancestor on the dom tree.
                  * Uses RPO numbering so we can walk upward reliably.
@@ -92,6 +96,7 @@ void domtree_build(DomTree *dt, const CFG *cfg) {
         }
 
         free(sid);
+        free(sp);
     }
 
     free(rpo);
