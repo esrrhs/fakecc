@@ -1,0 +1,94 @@
+#define ADD_PATCH(POFF, LBL, AFT) do { \
+#define BS_FOREACH(bs, v)  \
+#define CALL_SIZE   5
+#define DFS_PUSH(b, ci) do { \
+#define DT_HASH         4
+#define DT_JMPREL       23
+#define DT_NEEDED       1
+#define DT_NULL         0
+#define DT_PLTGOT       3
+#define DT_PLTREL       20
+#define DT_PLTRELSZ     2
+#define DT_RELA         7
+#define DT_STRSZ        10
+#define DT_STRTAB       5
+#define DT_SYMENT       11
+#define DT_SYMTAB       6
+#define ELF64_EHDR_SIZE  64
+#define ELF64_EHDR_SIZE 64
+#define ELF64_PHDR_SIZE  56
+#define ELF64_PHDR_SIZE 56
+#define ELF64_RELA_SIZE 24
+#define ELF64_SHDR_SIZE 64
+#define ELF64_SYM_SIZE  24
+#define ELF_BASE        0x400000
+#define ELFCLASS64      2
+#define ELFDATA2LSB     1
+#define ELFOSABI_NONE   0
+#define EM_X86_64       62
+#define ET_EXEC         2
+#define ET_REL          1
+#define EV_CURRENT      1
+#define FAKECC_AST_H
+#define FAKECC_CFG_H
+#define FAKECC_CODEGEN_H
+#define FAKECC_COMMON_H
+#define FAKECC_DOMTREE_H
+#define FAKECC_EMIT_H
+#define FAKECC_IR_H
+#define FAKECC_LEXER_H
+#define FAKECC_MEM2REG_H
+#define FAKECC_NORETURN
+#define FAKECC_NORETURN __attribute__((noreturn))
+#define FAKECC_OPT_H
+#define FAKECC_PARSER_H
+#define FAKECC_PHI_H
+#define FAKECC_REGALLOC_H
+#define FAKECC_SCALAR_OPT_H
+#define FAKECC_SEMA_H
+#define FAKECC_TOKEN_H
+#define GP_CALLER_SAVED_MASK  0x3Fu
+#define IR_CALL_MAX_ARGS 16
+#define PAGE_SIZE       0x1000
+#define PF_R            4
+#define PF_W            2
+#define PF_X            1
+#define PT_DYNAMIC      2
+#define PT_INTERP       3
+#define PT_LOAD         1
+#define REG_ALLOCATABLE  9
+#define REG_XMM_ALLOCATABLE  14
+#define R_X86_64_32    1
+#define R_X86_64_JUMP_SLOT 7
+#define R_X86_64_PC32  2
+#define R_X86_64_PLT32 4
+#define SECT_BSS    4
+#define SECT_DATA   3
+#define SECT_RODATA 2
+#define SECT_TEXT   1
+#define SECT_UNDEF  0
+#define SHF_ALLOC       0x2
+#define SHF_EXECINSTR   0x4
+#define SHF_WRITE       0x1
+#define SHN_ABS         0xfff1
+#define SHN_UNDEF       0
+#define SHT_NOBITS      8
+#define SHT_NULL        0
+#define SHT_PROGBITS    1
+#define SHT_RELA        4
+#define SHT_STRTAB      3
+#define SHT_SYMTAB      2
+#define START_SIZE  14
+#define STB_GLOBAL      1
+#define STB_LOCAL       0
+#define STT_FUNC        2
+#define STT_NOTYPE      0
+#define STT_OBJECT      1
+#define STT_SECTION     3
+#define VA_FP_OFF   8
+#define VA_GP_OFF   0
+#define VA_OV_OFF   16
+#define VA_REG_OFF  24
+#define XMM_CALLER_SAVED_MASK  ((1u << REG_XMM_ALLOCATABLE) - 1u)
+#define XMM_SCRATCH0  14
+#define XMM_SCRATCH1  15

@@ -59,3 +59,10 @@ dkms.conf
 
 # Plan documents (not part of the repo)
 *_plan.md
+
+# Stage 1 bootstrap build products (binaries — sources committed, these are reproducible)
+v0/*.o
+v0/bootstrap_fakecc
+v0/fakecc-1
+v0/test_min_build
+v0/__pycache__/
