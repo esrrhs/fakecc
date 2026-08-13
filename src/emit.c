@@ -1,5 +1,6 @@
 #include "fakecc/emit.h"
 #include "fakecc/common.h"
+#include "fakecc/debug.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +20,14 @@ void emit_module_init(EmitModule *m) {
     m->syms = NULL; m->num_syms = 0; m->cap_syms = 0;
     m->relocs = NULL; m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = NULL; m->num_data_relocs = 0; m->cap_data_relocs = 0;
+    m->dbg_tu_name = NULL;
+    m->dbg_lines = NULL; m->num_dbg_lines = 0; m->cap_dbg_lines = 0;
+    m->dbg_funcs = NULL; m->num_dbg_funcs = 0; m->cap_dbg_funcs = 0;
+    m->dbg_globals = NULL; m->num_dbg_globals = 0; m->cap_dbg_globals = 0;
+}
+
+static void free_debug_var(DebugVar *v) {
+    debug_var_release(v);
 }
 
 void emit_module_free(EmitModule *m) {
@@ -29,6 +38,20 @@ void emit_module_free(EmitModule *m) {
     buffer_free(&m->text);
     buffer_free(&m->rodata);
     buffer_free(&m->data);
+    free(m->dbg_tu_name);
+    for (size_t i = 0; i < m->num_dbg_lines; i++) free(m->dbg_lines[i].file);
+    free(m->dbg_lines);
+    for (size_t i = 0; i < m->num_dbg_funcs; i++) {
+        free(m->dbg_funcs[i].name);
+        free(m->dbg_funcs[i].file);
+        for (size_t j = 0; j < m->dbg_funcs[i].num_vars; j++)
+            free_debug_var(&m->dbg_funcs[i].vars[j]);
+        free(m->dbg_funcs[i].vars);
+    }
+    free(m->dbg_funcs);
+    for (size_t i = 0; i < m->num_dbg_globals; i++)
+        free_debug_var(&m->dbg_globals[i]);
+    free(m->dbg_globals);
 }
 
 /* ------------------------------------------------------------------ */
@@ -227,6 +250,8 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&shstrtab, ".rela.text", sizeof(".rela.text"));
     uint32_t shname_rela_data = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".rela.data", sizeof(".rela.data"));
+    uint32_t shname_fakecc_dbg = (uint32_t)shstrtab.len;
+    buf_bytes(&shstrtab, ".fakecc_dbg", sizeof(".fakecc_dbg"));
     uint32_t shname_shstrtab = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".shstrtab", sizeof(".shstrtab"));
 
@@ -354,9 +379,19 @@ void emit_obj(const EmitModule *m, const char *path) {
     size_t off_rela_data = body.len;
     buf_bytes(&body, rela_data.data, rela_data.len);
 
+    Buffer fakecc_dbg;
+    buffer_init(&fakecc_dbg);
+    int have_dbg = (m->num_dbg_lines > 0 || m->num_dbg_funcs > 0 ||
+                    m->num_dbg_globals > 0 || m->dbg_tu_name != NULL);
+    if (have_dbg)
+        debug_serialize(m, &fakecc_dbg);
+    size_t off_fakecc_dbg = body.len;
+    buf_bytes(&body, fakecc_dbg.data, fakecc_dbg.len);
+
     size_t shoff = hdr_size + body.len;
-    /* null + 4 data + symtab + strtab + shstrtab + rela.text + rela.data */
-    unsigned shnum = 10;
+    /* null + 4 data + symtab + strtab + shstrtab + rela.text + rela.data
+     * + [.fakecc_dbg] */
+    unsigned shnum = have_dbg ? 11 : 10;
     unsigned shstrndx = 7; /* index of .shstrtab */
 
     /* --- ELF header --- */
@@ -411,8 +446,13 @@ void emit_obj(const EmitModule *m, const char *path) {
     write_shdr(&elf, shname_rela_data, SHT_RELA, 0,
                0, hdr_size + off_rela_data, rela_data.len, symtab_idx,
                3 /* .data */, 8, ELF64_RELA_SIZE);
+    if (have_dbg) {
+        write_shdr(&elf, shname_fakecc_dbg, SHT_PROGBITS, 0,
+                   0, hdr_size + off_fakecc_dbg, fakecc_dbg.len, 0, 0, 1, 0);
+    }
 
     (void)shstrndx; (void)symtab_idx; (void)strtab_idx; (void)first_global;
+    (void)shname_fakecc_dbg;
 
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "fakecc: cannot write '%s'\n", path); exit(1); }
@@ -425,6 +465,7 @@ void emit_obj(const EmitModule *m, const char *path) {
     buffer_free(&symtab);
     buffer_free(&rela_text);
     buffer_free(&rela_data);
+    buffer_free(&fakecc_dbg);
     buffer_free(&body);
     buffer_free(&elf);
 }
@@ -435,7 +476,7 @@ void emit_obj(const EmitModule *m, const char *path) {
 
 void emit_elf(const EmitModule *m, const char *path) {
     EmitModule *arr = (EmitModule *)m;
-    emit_link(&arr, 1, path, NULL, 0, 0, NULL, 0);
+    emit_link(&arr, 1, path, NULL, 0, 0, NULL, 0, 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -492,6 +533,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
      * symtab + rela.text indices. */
     int symtab_idx = -1, rela_text_idx = -1, rela_data_idx = -1, strtab_idx = -1;
     int text_idx = -1, rodata_idx = -1, data_idx = -1, bss_idx = -1;
+    int fakecc_dbg_idx = -1;
     for (int s = 0; s < shnum; s++) {
         const unsigned char *sh = buf + shoff + (size_t)s * shentsize;
         uint32_t name_idx = rd_u32(sh);
@@ -505,6 +547,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
         else if (strcmp(sname, ".strtab") == 0 && type == SHT_STRTAB) strtab_idx = s;
         else if (strcmp(sname, ".rela.text") == 0 && type == SHT_RELA) rela_text_idx = s;
         else if (strcmp(sname, ".rela.data") == 0 && type == SHT_RELA) rela_data_idx = s;
+        else if (strcmp(sname, ".fakecc_dbg") == 0 && type == SHT_PROGBITS) fakecc_dbg_idx = s;
     }
 
     /* String table (for symbol names). */
@@ -597,6 +640,15 @@ int emit_obj_read(const char *path, EmitModule *m) {
             uint32_t sym = (uint32_t)(rinfo >> 32);
             uint32_t type = (uint32_t)(rinfo & 0xffffffff);
             emit_module_add_data_reloc(m, (size_t)roff, type, (int)sym, (int32_t)raddend);
+        }
+    }
+
+    if (fakecc_dbg_idx >= 0) {
+        const unsigned char *sh = buf + shoff + (size_t)fakecc_dbg_idx * shentsize;
+        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+        if (sz > 0 && debug_deserialize(m, buf + off, (size_t)sz) != 0) {
+            fprintf(stderr, "fakecc: warning: ignoring corrupt .fakecc_dbg in '%s'\n",
+                    path);
         }
     }
 

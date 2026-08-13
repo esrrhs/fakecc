@@ -63,7 +63,7 @@ static void test_mem2reg_single_var(void) {
     fn.next_value_id = 3; /* v0=ALLOCA, v1=CONST, v2=LOAD */
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    int promoted = opt_mem2reg(&fn);
+    int promoted = opt_mem2reg(&fn, 0);
     T_ASSERT_EQ_INT(promoted, 1);
 
     /* Verify no ALLOCA/STORE/LOAD remain. */
@@ -104,7 +104,7 @@ static void test_mem2reg_const_prop(void) {
     fn.next_value_id = 3;
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    int promoted = opt_mem2reg(&fn);
+    int promoted = opt_mem2reg(&fn, 0);
     T_ASSERT_EQ_INT(promoted, 1);
 
     T_ASSERT_EQ_INT(count_op(&fn.insts, IR_ALLOCA), 0);
@@ -148,7 +148,7 @@ static void test_mem2reg_two_vars(void) {
     fn.next_value_id = 7; /* v0-6 used */
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    int promoted = opt_mem2reg(&fn);
+    int promoted = opt_mem2reg(&fn, 0);
     T_ASSERT_EQ_INT(promoted, 2);
 
     /* No ALLOCA/STORE/LOAD remain. */
@@ -198,7 +198,7 @@ static void test_mem2reg_undef_read(void) {
     fn.next_value_id = 2; /* v0=ALLOCA, v1=LOAD */
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    int promoted = opt_mem2reg(&fn);
+    int promoted = opt_mem2reg(&fn, 0);
     T_ASSERT_EQ_INT(promoted, 1);
 
     /* No ALLOCA. LOAD→CONST 0. */
@@ -239,7 +239,7 @@ static void test_mem2reg_no_allocas(void) {
     fn.next_value_id = 1;
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    int promoted = opt_mem2reg(&fn);
+    int promoted = opt_mem2reg(&fn, 0);
     T_ASSERT_EQ_INT(promoted, 0);
 
     /* Instructions should be unchanged. */
@@ -286,7 +286,7 @@ static void test_mem2reg_diamond(void) {
     fn.next_value_id = 5; /* v0-4 used */
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    int promoted = opt_mem2reg(&fn);
+    int promoted = opt_mem2reg(&fn, 0);
     T_ASSERT_EQ_INT(promoted, 1);
 
     /* No ALLOCA/STORE/LOAD remain. */

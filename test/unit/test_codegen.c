@@ -35,11 +35,11 @@ static EmitModule compile_to_code(const char *src) {
 
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir);
+    ir_generate(&tu, &ir, 0);
 
     EmitModule em;
     emit_module_init(&em);
-    codegen(&ir, &em);
+    codegen(&ir, &em, 0);
 
     ir_module_free(&ir);
     token_array_free(&arr);

@@ -1,5 +1,6 @@
 #include "fakecc/emit.h"
 #include "fakecc/common.h"
+#include "fakecc/debug.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -30,6 +31,21 @@
 
 #define ELF64_EHDR_SIZE  64
 #define ELF64_PHDR_SIZE  56
+#define ELF64_SHDR_SIZE  64
+#define ELF64_SYM_SIZE   24
+
+#define SHT_NULL         0
+#define SHT_PROGBITS     1
+#define SHT_SYMTAB       2
+#define SHT_STRTAB       3
+#define SHT_NOBITS       8
+
+#define SHF_WRITE        0x1
+#define SHF_ALLOC        0x2
+#define SHF_EXECINSTR    0x4
+
+#define STB_LOCAL        0
+#define STT_SECTION      3
 
 #define DT_NULL         0
 #define DT_NEEDED       1
@@ -113,6 +129,257 @@ static void write_phdr(Buffer *b, uint32_t type, uint32_t flags,
     buf_u64(b, filesz);
     buf_u64(b, memsz);
     buf_u64(b, align);
+}
+
+static void write_shdr_exec(Buffer *b, uint32_t name, uint32_t type,
+                            uint64_t flags, uint64_t addr, uint64_t offset,
+                            uint64_t size, uint32_t link, uint32_t info,
+                            uint64_t addralign, uint64_t entsize) {
+    buf_u32(b, name);
+    buf_u32(b, type);
+    buf_u64(b, flags);
+    buf_u64(b, addr);
+    buf_u64(b, offset);
+    buf_u64(b, size);
+    buf_u32(b, link);
+    buf_u32(b, info);
+    buf_u64(b, addralign);
+    buf_u64(b, entsize);
+}
+
+static uint32_t append_string(Buffer *b, const char *s) {
+    uint32_t off = (uint32_t)b->len;
+    buf_bytes(b, s, strlen(s) + 1);
+    return off;
+}
+
+static void write_sym(Buffer *b, uint32_t name, uint8_t binding, uint8_t type,
+                      uint16_t shndx, uint64_t value, uint64_t size) {
+    buf_u32(b, name);
+    buf_u8(b, (uint8_t)((binding << 4) | (type & 0xf)));
+    buf_u8(b, 0);
+    buf_u16(b, shndx);
+    buf_u64(b, value);
+    buf_u64(b, size);
+}
+
+/*
+ * Add the non-ALLOC metadata after all PT_LOAD file content.  The first four
+ * section headers point back into those segments; every other section lives
+ * after them and therefore cannot enlarge a load segment's p_filesz.
+ */
+/* Where each output section landed, both in the file and in memory.  Passed
+ * as one struct so finalize_sections stays within the dialect's argument
+ * limit (and so callers can't transpose two same-typed arguments). */
+typedef struct {
+    uint64_t code_vaddr;
+    uint64_t data_vaddr;
+    uint64_t bss_vaddr;
+    size_t   text_offset;
+    size_t   data_file_offset;
+    size_t   text_len;
+    size_t   rodata_len;
+    size_t   data_len;
+    size_t   bss_file_offset;
+    size_t   bss_size;
+} SectionLayout;
+
+static void finalize_sections(
+    Buffer *elf, EmitModule **mods, size_t n,
+    const size_t *mod_text_off, const size_t *mod_sym_base,
+    const size_t *sym_addr, const SectionLayout *lay,
+    uint64_t entry, int want_debug) {
+    uint64_t code_vaddr = lay->code_vaddr;
+    uint64_t data_vaddr = lay->data_vaddr;
+    uint64_t bss_vaddr = lay->bss_vaddr;
+    size_t text_offset = lay->text_offset;
+    size_t data_file_offset = lay->data_file_offset;
+    size_t text_len = lay->text_len;
+    size_t rodata_len = lay->rodata_len;
+    size_t data_len = lay->data_len;
+    size_t bss_file_offset = lay->bss_file_offset;
+    size_t bss_size = lay->bss_size;
+    Buffer symtab, strtab, shstrtab;
+    Buffer debug_abbrev, debug_info, debug_str, debug_line, debug_frame;
+    Buffer debug_loc;
+    buffer_init(&symtab); buffer_init(&strtab); buffer_init(&shstrtab);
+    buffer_init(&debug_abbrev); buffer_init(&debug_info);
+    buffer_init(&debug_str); buffer_init(&debug_line);
+    buffer_init(&debug_frame); buffer_init(&debug_loc);
+
+    buf_u8(&strtab, 0);
+    buf_pad(&symtab, ELF64_SYM_SIZE);
+
+    /* ELF requires all locals to precede the first global symbol. */
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            const EmitSymbol *s = &m->syms[j];
+            if (!s->name || s->type == STT_SECTION ||
+                s->shndx == SECT_UNDEF || s->binding != STB_LOCAL)
+                continue;
+            uint32_t name = append_string(&strtab, s->name);
+            write_sym(&symtab, name, s->binding, s->type, s->shndx,
+                      sym_addr[mod_sym_base[i] + j], s->size);
+        }
+    }
+    uint32_t first_global = (uint32_t)(symtab.len / ELF64_SYM_SIZE);
+    uint32_t start_name = append_string(&strtab, "_start");
+    write_sym(&symtab, start_name, STB_GLOBAL, 2, SECT_TEXT,
+              entry, START_SIZE);
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            const EmitSymbol *s = &m->syms[j];
+            if (!s->name || s->type == STT_SECTION ||
+                s->shndx == SECT_UNDEF || s->binding == STB_LOCAL)
+                continue;
+            uint32_t name = append_string(&strtab, s->name);
+            write_sym(&symtab, name, s->binding, s->type, s->shndx,
+                      sym_addr[mod_sym_base[i] + j], s->size);
+        }
+    }
+
+    EmitModule dbg;
+    int have_dbg = want_debug;
+    if (have_dbg) {
+        emit_module_init(&dbg);
+        dbg.text.len = text_len;
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            if (!dbg.dbg_tu_name && m->dbg_tu_name)
+                dbg.dbg_tu_name = xstrdup(m->dbg_tu_name);
+            for (size_t j = 0; j < m->num_dbg_lines; j++) {
+                const DebugLineEntry *line = &m->dbg_lines[j];
+                emit_module_add_dbg_line(&dbg, line->file, line->line,
+                                         line->col,
+                                         mod_text_off[i] + line->pc_off);
+            }
+            for (size_t j = 0; j < m->num_dbg_funcs; j++) {
+                const DebugFunc *f = &m->dbg_funcs[j];
+                int fi = emit_module_add_dbg_func(
+                    &dbg, f->name, f->file, f->line,
+                    mod_text_off[i] + f->start_pc);
+                emit_module_dbg_func_end(
+                    &dbg, fi, mod_text_off[i] + f->end_pc,
+                    mod_text_off[i] + f->prologue_end_pc);
+                for (size_t k = 0; k < f->num_vars; k++) {
+                    emit_module_add_dbg_var(&dbg, fi, &f->vars[k]);
+                    /* Location-list ranges are offsets into the module's own
+                     * .text; rebase them onto the linked image. */
+                    DebugVar *dv = &dbg.dbg_funcs[fi].vars[
+                        dbg.dbg_funcs[fi].num_vars - 1];
+                    for (size_t r = 0; r < dv->num_ranges; r++) {
+                        dv->ranges[r].pc_start += mod_text_off[i];
+                        dv->ranges[r].pc_end += mod_text_off[i];
+                    }
+                }
+            }
+            for (size_t j = 0; j < m->num_dbg_globals; j++)
+                emit_module_add_dbg_global(&dbg, &m->dbg_globals[j]);
+            for (size_t j = 0; j < m->num_syms; j++) {
+                const EmitSymbol *s = &m->syms[j];
+                if (!s->name || s->shndx == SECT_UNDEF) continue;
+                emit_module_add_symbol(
+                    &dbg, s->name, s->binding, s->type, s->shndx,
+                    sym_addr[mod_sym_base[i] + j], s->size);
+            }
+        }
+        debug_emit_dwarf(&dbg, code_vaddr, &debug_abbrev, &debug_info,
+                         &debug_str, &debug_line, &debug_frame, &debug_loc);
+    }
+
+    buf_u8(&shstrtab, 0);
+    uint32_t shname_text = append_string(&shstrtab, ".text");
+    uint32_t shname_rodata = append_string(&shstrtab, ".rodata");
+    uint32_t shname_data = append_string(&shstrtab, ".data");
+    uint32_t shname_bss = append_string(&shstrtab, ".bss");
+    uint32_t shname_symtab = append_string(&shstrtab, ".symtab");
+    uint32_t shname_strtab = append_string(&shstrtab, ".strtab");
+    uint32_t shname_shstrtab = append_string(&shstrtab, ".shstrtab");
+    uint32_t shname_debug_abbrev = 0, shname_debug_info = 0;
+    uint32_t shname_debug_str = 0, shname_debug_line = 0;
+    uint32_t shname_debug_frame = 0, shname_debug_loc = 0;
+    if (have_dbg) {
+        shname_debug_abbrev = append_string(&shstrtab, ".debug_abbrev");
+        shname_debug_info = append_string(&shstrtab, ".debug_info");
+        shname_debug_str = append_string(&shstrtab, ".debug_str");
+        shname_debug_line = append_string(&shstrtab, ".debug_line");
+        shname_debug_frame = append_string(&shstrtab, ".debug_frame");
+        shname_debug_loc = append_string(&shstrtab, ".debug_loc");
+    }
+
+    while (elf->len & 7) buf_u8(elf, 0);
+    size_t off_symtab = elf->len;
+    buf_bytes(elf, symtab.data, symtab.len);
+    size_t off_strtab = elf->len;
+    buf_bytes(elf, strtab.data, strtab.len);
+    size_t off_shstrtab = elf->len;
+    buf_bytes(elf, shstrtab.data, shstrtab.len);
+    size_t off_debug_abbrev = elf->len;
+    if (have_dbg) buf_bytes(elf, debug_abbrev.data, debug_abbrev.len);
+    size_t off_debug_info = elf->len;
+    if (have_dbg) buf_bytes(elf, debug_info.data, debug_info.len);
+    size_t off_debug_str = elf->len;
+    if (have_dbg) buf_bytes(elf, debug_str.data, debug_str.len);
+    size_t off_debug_line = elf->len;
+    if (have_dbg) buf_bytes(elf, debug_line.data, debug_line.len);
+    if (have_dbg) while (elf->len & 7) buf_u8(elf, 0);
+    size_t off_debug_frame = elf->len;
+    if (have_dbg) buf_bytes(elf, debug_frame.data, debug_frame.len);
+    if (have_dbg) while (elf->len & 7) buf_u8(elf, 0);
+    size_t off_debug_loc = elf->len;
+    if (have_dbg) buf_bytes(elf, debug_loc.data, debug_loc.len);
+
+    while (elf->len & 7) buf_u8(elf, 0);
+    uint64_t shoff = elf->len;
+    buf_pad(elf, ELF64_SHDR_SIZE);
+    write_shdr_exec(elf, shname_text, SHT_PROGBITS,
+                    SHF_ALLOC | SHF_EXECINSTR, code_vaddr, text_offset,
+                    text_len, 0, 0, 16, 0);
+    write_shdr_exec(elf, shname_rodata, SHT_PROGBITS, SHF_ALLOC,
+                    code_vaddr + text_len, text_offset + text_len,
+                    rodata_len, 0, 0, 8, 0);
+    write_shdr_exec(elf, shname_data, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE,
+                    data_vaddr, data_file_offset, data_len, 0, 0, 8, 0);
+    write_shdr_exec(elf, shname_bss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE,
+                    bss_vaddr, bss_file_offset,
+                    bss_size, 0, 0, 8, 0);
+    write_shdr_exec(elf, shname_symtab, SHT_SYMTAB, 0, 0, off_symtab,
+                    symtab.len, 6, first_global, 8, ELF64_SYM_SIZE);
+    write_shdr_exec(elf, shname_strtab, SHT_STRTAB, 0, 0, off_strtab,
+                    strtab.len, 0, 0, 1, 0);
+    write_shdr_exec(elf, shname_shstrtab, SHT_STRTAB, 0, 0, off_shstrtab,
+                    shstrtab.len, 0, 0, 1, 0);
+    if (have_dbg) {
+        write_shdr_exec(elf, shname_debug_abbrev, SHT_PROGBITS, 0, 0,
+                        off_debug_abbrev, debug_abbrev.len, 0, 0, 1, 0);
+        write_shdr_exec(elf, shname_debug_info, SHT_PROGBITS, 0, 0,
+                        off_debug_info, debug_info.len, 0, 0, 1, 0);
+        write_shdr_exec(elf, shname_debug_str, SHT_PROGBITS, 0, 0,
+                        off_debug_str, debug_str.len, 0, 0, 1, 0);
+        write_shdr_exec(elf, shname_debug_line, SHT_PROGBITS, 0, 0,
+                        off_debug_line, debug_line.len, 0, 0, 1, 0);
+        write_shdr_exec(elf, shname_debug_frame, SHT_PROGBITS, 0, 0,
+                        off_debug_frame, debug_frame.len, 0, 0, 8, 0);
+        write_shdr_exec(elf, shname_debug_loc, SHT_PROGBITS, 0, 0,
+                        off_debug_loc, debug_loc.len, 0, 0, 1, 0);
+    }
+
+    uint16_t shnum = (uint16_t)(have_dbg ? 14 : 8);
+    uint16_t shstrndx = 7;
+    memcpy(elf->data + 40, &shoff, sizeof(shoff));
+    memcpy(elf->data + 60, &shnum, sizeof(shnum));
+    memcpy(elf->data + 62, &shstrndx, sizeof(shstrndx));
+
+    if (have_dbg) {
+        dbg.text.len = 0;
+        emit_module_free(&dbg);
+    }
+    buffer_free(&symtab); buffer_free(&strtab); buffer_free(&shstrtab);
+    buffer_free(&debug_abbrev); buffer_free(&debug_info);
+    buffer_free(&debug_str); buffer_free(&debug_line);
+    buffer_free(&debug_frame); buffer_free(&debug_loc);
 }
 
 /* Emit the process entry stub.  `exit_plt_vaddr` is the address of the
@@ -223,7 +490,8 @@ static void needed_add(char ***needed, int *num, const char *soname) {
 
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed_in, size_t num_needed_in, int nodefaultlibs,
-               const char **lib_paths, size_t num_lib_paths) {
+               const char **lib_paths, size_t num_lib_paths,
+               int want_debug) {
     /* ---- Merge sections ---- */
     Buffer text, rodata, data;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
@@ -520,6 +788,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t got_data_off = data.len;
     while (got_data_off & 7) got_data_off++;
     uint64_t got_vaddr = data_vaddr + got_data_off;
+    size_t layout_got_bytes = need_dynamic
+        ? (size_t)(3 + num_ext + num_data_ext) * 8
+        : (num_data_ext > 0 ? (size_t)(3 + num_data_ext) * 8 : 0);
+    size_t bss_data_off = layout_got_bytes
+        ? got_data_off + layout_got_bytes : data.len;
+    uint64_t bss_vaddr = data_vaddr + bss_data_off;
+    size_t bss_file_offset = data_file_offset + bss_data_off;
     uint64_t code_vaddr = base + text_offset;
 
     /* ---- Compute final symbol addresses ---- */
@@ -538,7 +813,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             case SECT_DATA:
                 sym_addr[gsi] = data_vaddr + mod_data_off[i] + sym->value; break;
             case SECT_BSS:
-                sym_addr[gsi] = data_vaddr + data.len + mod_bss_off[i] + sym->value; break;
+                sym_addr[gsi] = bss_vaddr + mod_bss_off[i] + sym->value; break;
             default:
                 sym_addr[gsi] = sym->value; break;
             }
@@ -821,7 +1096,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         write_ehdr(&elf, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base, rx_filesz, rx_filesz, PAGE_SIZE);
         write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
-                   data.len + got_bytes, data.len + got_bytes, PAGE_SIZE);
+                   got_data_off + got_bytes,
+                   got_data_off + got_bytes + bss_size, PAGE_SIZE);
         write_phdr(&elf, PT_INTERP, PF_R, hdr_size + interp_off, rx_base_vaddr + interp_off,
                    interp_len, interp_len, 1);
         write_phdr(&elf, PT_DYNAMIC, PF_R, hdr_size + dynamic_off, rx_base_vaddr + dynamic_off,
@@ -829,7 +1105,21 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         buf_bytes(&elf, rx.data, rx.len);
         while (elf.len < data_file_offset) buf_u8(&elf, 0);
         buf_bytes(&elf, data.data, data.len);
+        while (elf.len < data_file_offset + got_data_off) buf_u8(&elf, 0);
         buf_bytes(&elf, got.data, got.len);
+        SectionLayout lay;
+        lay.code_vaddr = code_vaddr;
+        lay.data_vaddr = data_vaddr;
+        lay.bss_vaddr = bss_vaddr;
+        lay.text_offset = text_offset;
+        lay.data_file_offset = data_file_offset;
+        lay.text_len = text.len;
+        lay.rodata_len = rodata.len;
+        lay.data_len = data.len;
+        lay.bss_file_offset = bss_file_offset;
+        lay.bss_size = bss_size;
+        finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
+                          &lay, entry, want_debug);
 
         FILE *f = fopen(path, "wb");
         if (!f) { fprintf(stderr, "fakecc: cannot write '%s'\n", path); exit(1); }
@@ -869,7 +1159,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                    rx_filesz, rx_filesz, PAGE_SIZE);
         if (has_rw) {
             write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
-                       data.len + got_bytes, data.len + got_bytes + bss_size, PAGE_SIZE);
+                       bss_data_off, bss_data_off + bss_size, PAGE_SIZE);
         }
         while (elf.len < hdr_size)
             buf_u8(&elf, 0);
@@ -877,9 +1167,23 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         if (has_rw) {
             while (elf.len < data_file_offset) buf_u8(&elf, 0);
             buf_bytes(&elf, data.data, data.len);
+            if (got_bytes > 0)
+                while (elf.len < data_file_offset + got_data_off) buf_u8(&elf, 0);
             buf_bytes(&elf, got.data, got.len);
-            for (size_t i = 0; i < bss_size; i++) buf_u8(&elf, 0);
         }
+        SectionLayout lay;
+        lay.code_vaddr = code_vaddr;
+        lay.data_vaddr = data_vaddr;
+        lay.bss_vaddr = bss_vaddr;
+        lay.text_offset = text_offset;
+        lay.data_file_offset = data_file_offset;
+        lay.text_len = text.len;
+        lay.rodata_len = rodata.len;
+        lay.data_len = data.len;
+        lay.bss_file_offset = bss_file_offset;
+        lay.bss_size = bss_size;
+        finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
+                          &lay, entry, want_debug);
 
         FILE *f = fopen(path, "wb");
         if (!f) { fprintf(stderr, "fakecc: cannot write '%s'\n", path); exit(1); }

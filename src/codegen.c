@@ -1,5 +1,8 @@
 #include "fakecc/codegen.h"
 #include "fakecc/common.h"
+#include "fakecc/debug.h"
+#include "fakecc/emit.h"
+#include "fakecc/ir.h"
 #include "fakecc/regalloc.h"
 
 #include <stdint.h>
@@ -1023,6 +1026,15 @@ typedef struct {
     char  *fn_name;       /* xstrdup'd function name */
 } FnAddrPatch;
 
+/* An IR_DBG_VALUE marker seen at code offset `pc`: from there on, source
+ * variable `var` (index into fn->dbg_vars) lives wherever SSA value `value`
+ * was allocated.  `value` is -1 once the definition has been optimized away. */
+typedef struct {
+    int    var;
+    int    value;
+    size_t pc;
+} DbgObs;
+
 /* Compute which callee-saved registers this function actually uses.
  * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 (0 or 1). */
 static void collect_callee_saved(const RAResult *ra, int used[3]) {
@@ -1202,6 +1214,84 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
     }
 }
 
+/* Map codegen Reg enum → DWARF x86-64 register number. */
+static int reg_to_dwarf(int r) {
+    static const int map[16] = {
+        /* RAX RCX RDX RBX RSP RBP RSI RDI */
+           0,   2,   1,   3,   7,   6,   4,   5,
+        /* R8  R9  R10 R11 R12 R13 R14 R15 */
+           8,   9,  10,  11,  12,  13,  14,  15
+    };
+    if (r >= 0 && r < 16) return map[r];
+    return -1;
+}
+
+/* Where did register allocation put SSA value `v`?  Fills a DWARF location
+ * description: a machine register, or the rbp-relative spill slot it was
+ * assigned.  Yields DBG_LOC_NONE when `v` has no home — the value's defining
+ * instruction was optimized away, so the variable is unavailable here. */
+static void value_home(const IRFunction *fn, int v, int gp_spill_area,
+                       DebugLocKind *kind, int *rbp_offset, int *dwarf_reg) {
+    *kind = DBG_LOC_NONE;
+    *rbp_offset = 0;
+    *dwarf_reg = -1;
+    if (v < 0) return;
+
+    if (value_is_float_class(fn, v)) {
+        const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
+        if (!ra_xmm || v >= ra_xmm->num_values) return;
+        if (ra_xmm->reg[v] >= 0) {
+            *kind = DBG_LOC_REG;
+            *dwarf_reg = 17 + ra_xmm->reg[v];   /* DWARF xmm0 == 17 */
+        } else {
+            *kind = DBG_LOC_FBREG;
+            *rbp_offset = spill_offset_xmm(ra_xmm->spill_slot[v], gp_spill_area);
+        }
+        return;
+    }
+
+    const RAResult *ra = (const RAResult *)fn->ra;
+    if (!ra || v >= ra->num_values) return;
+    if (ra->reg[v] >= 0) {
+        *kind = DBG_LOC_REG;
+        *dwarf_reg = reg_to_dwarf(ra->reg[v]);
+        if (*dwarf_reg < 0) *kind = DBG_LOC_NONE;
+    } else {
+        *kind = DBG_LOC_FBREG;
+        *rbp_offset = spill_offset(ra->spill_slot[v]);
+    }
+}
+
+/* Append one location-list entry to a debug variable. */
+static void dbg_var_add_range(DebugVar *dv, size_t pc_start, size_t pc_end,
+                              DebugLocKind kind, int rbp_offset, int dwarf_reg) {
+    if (kind == DBG_LOC_NONE || pc_end <= pc_start) return;
+    if (dv->num_ranges >= dv->cap_ranges) {
+        dv->cap_ranges = dv->cap_ranges ? dv->cap_ranges * 2 : 4;
+        dv->ranges = xrealloc(dv->ranges,
+                              dv->cap_ranges * sizeof(DebugLocRange));
+    }
+    DebugLocRange *r = &dv->ranges[dv->num_ranges++];
+    r->pc_start = pc_start;
+    r->pc_end = pc_end;
+    r->loc_kind = kind;
+    r->rbp_offset = rbp_offset;
+    r->dwarf_reg = dwarf_reg;
+}
+
+static DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
+    if (is_bool) return DBG_TY_BOOL;
+    switch (type_kind) {
+    case TY_VOID: return DBG_TY_VOID;
+    case TY_INT: return DBG_TY_INT;
+    case TY_FLOAT: return DBG_TY_FLOAT;
+    case TY_PTR: return DBG_TY_PTR;
+    case TY_ARRAY: return DBG_TY_ARRAY;
+    case TY_STRUCT: return DBG_TY_STRUCT;
+    default: return DBG_TY_INT;
+    }
+}
+
 /* Emit epilogue: restore callee-saved (reverse order), tear down frame, ret. */
 static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
     emit_add_rsp_imm32(b, stack_size);
@@ -1212,7 +1302,7 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
     emit_byte(b, 0xC3);   /* ret */
 }
 
-void codegen(const IRModule *ir, EmitModule *out) {
+void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     /* Emit globals into the appropriate section (.rodata for read-only,
      * .data for initialized mutable, .bss for zero-initialized) and register
      * each as a defined symbol with its linkage binding. */
@@ -1249,6 +1339,23 @@ void codegen(const IRModule *ir, EmitModule *out) {
             emit_module_add_data_reloc(out, off + g->fixups[fi].offset,
                                       R_X86_64_64, tsym, 0);
         }
+        if (want_debug && !g->is_readonly) {
+            /* Skip anonymous string literals (readonly); emit mutable globals. */
+            DebugVar gv;
+            memset(&gv, 0, sizeof(gv));
+            gv.name = g->name;
+            gv.file = (char *)g->loc.file;
+            gv.line = g->loc.line;
+            gv.kind = DBG_VAR_GLOBAL;
+            gv.type_tag = DBG_TY_INT;
+            gv.width = g->size;
+            gv.is_unsigned = 0;
+            gv.loc_kind = DBG_LOC_ADDR;
+            gv.sym_name = g->name;
+            gv.alloca_ssa = -1;
+            gv.param_idx = -1;
+            emit_module_add_dbg_global(out, &gv);
+        }
     }
 
     /* Cross-function call patches (accumulated across every function). */
@@ -1263,6 +1370,20 @@ void codegen(const IRModule *ir, EmitModule *out) {
         const RAResult *ra = (const RAResult *)fn->ra;
         const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
         size_t start_offset = out->text.len;
+        int dbg_func_idx = -1;
+        size_t prologue_end_pc = start_offset;
+        DbgObs *dbg_obs = NULL;
+        size_t num_dbg_obs = 0, cap_dbg_obs = 0;
+        if (want_debug) {
+            dbg_func_idx = emit_module_add_dbg_func(out, fn->name, fn->loc.file,
+                                                    fn->loc.line, start_offset);
+            /* A row for the function's own line, so the entry address maps to
+             * a source location.  Without it a debugger that stops inside the
+             * prologue reports a bare address and cannot show the frame. */
+            if (fn->loc.file && fn->loc.line > 0)
+                emit_module_add_dbg_line(out, fn->loc.file, fn->loc.line,
+                                         fn->loc.col, start_offset);
+        }
 
         /* ---- Prologue ---- */
         int cs_used[3];
@@ -1334,9 +1455,14 @@ void codegen(const IRModule *ir, EmitModule *out) {
         if (((cs_count) & 1) != 0) stack_size += 8;
 
         emit_byte(&out->text, 0x55);              /* pushq %rbp */
+        size_t after_push_rbp_pc = out->text.len;
         emit_rex_w(&out->text);
         emit_byte(&out->text, 0x89);
         emit_byte(&out->text, 0xE5);              /* movq %rsp, %rbp */
+        size_t after_mov_rbp_pc = out->text.len;
+        if (want_debug && dbg_func_idx >= 0)
+            emit_module_dbg_func_frame(out, dbg_func_idx, after_push_rbp_pc,
+                                       after_mov_rbp_pc);
 
         if (cs_used[0]) emit_push_r(&out->text, REG_RBX);
         if (cs_used[1]) emit_push_r(&out->text, REG_R12);
@@ -1513,6 +1639,15 @@ void codegen(const IRModule *ir, EmitModule *out) {
             }
         }
 
+        /* Provisional: refined below to the first instruction that belongs to
+         * the body rather than to the declaration line.  At -O0 the parameters
+         * are spilled to their stack slots by instructions carrying the
+         * declaration's line, and those are still prologue as far as a
+         * debugger is concerned — stopping before them shows uninitialized
+         * parameters. */
+        prologue_end_pc = out->text.len;
+        int prologue_end_found = 0;
+
         /* ---- Per-function label + patch tables ---- */
         /* label_off[label_id] = absolute code offset where the label lands,
          * or (size_t)-1 if not yet seen. */
@@ -1539,6 +1674,31 @@ void codegen(const IRModule *ir, EmitModule *out) {
         /* ---- Instruction loop ---- */
         for (size_t j = 0; j < fn->insts.len; j++) {
             const IRInst *inst = &fn->insts.data[j];
+            if (inst->op == IR_DBG_VALUE) {
+                /* Emits no code — it only records where a source variable
+                 * lives from this point in the instruction stream on. */
+                if (want_debug && inst->imm >= 0 &&
+                    (size_t)inst->imm < fn->num_dbg_vars) {
+                    if (num_dbg_obs >= cap_dbg_obs) {
+                        cap_dbg_obs = cap_dbg_obs ? cap_dbg_obs * 2 : 8;
+                        dbg_obs = xrealloc(dbg_obs, cap_dbg_obs * sizeof(DbgObs));
+                    }
+                    dbg_obs[num_dbg_obs].var = inst->imm;
+                    dbg_obs[num_dbg_obs].value = inst->a;
+                    dbg_obs[num_dbg_obs].pc = out->text.len;
+                    num_dbg_obs++;
+                }
+                continue;
+            }
+            if (want_debug && inst->loc.file && inst->loc.line > 0 &&
+                inst->op != IR_PARAM && inst->op != IR_ALLOCA) {
+                if (!prologue_end_found && inst->loc.line != fn->loc.line) {
+                    prologue_end_pc = out->text.len;
+                    prologue_end_found = 1;
+                }
+                emit_module_add_dbg_line(out, inst->loc.file, inst->loc.line,
+                                         inst->loc.col, out->text.len);
+            }
             /* Pick the register file by class: float values live in XMM,
              * everything else in the GP file.  `dr` is the destination's home
              * register (GP code or XMM code) or -1 if spilled. */
@@ -2471,6 +2631,10 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 break;
             }
 
+            case IR_DBG_VALUE:
+                /* Handled before the switch; produces no machine code. */
+                break;
+
             } /* switch */
         } /* for insts */
 
@@ -2489,6 +2653,79 @@ void codegen(const IRModule *ir, EmitModule *out) {
         }
         if (needs_ret)
             emit_epilogue(&out->text, stack_size, cs_used);
+
+        if (want_debug && dbg_func_idx >= 0) {
+            size_t fn_end_pc = out->text.len;
+            emit_module_dbg_func_end(out, dbg_func_idx, fn_end_pc,
+                                     prologue_end_pc);
+            for (size_t di = 0; di < fn->num_dbg_vars; di++) {
+                const IRDebugVar *idv = &fn->dbg_vars[di];
+                DebugVar dv;
+                memset(&dv, 0, sizeof(dv));
+                dv.name = idv->name;
+                dv.file = (char *)idv->loc.file;
+                dv.line = idv->loc.line;
+                dv.kind = idv->kind == IR_DBG_PARAM ? DBG_VAR_PARAM : DBG_VAR_LOCAL;
+                dv.type_tag = ir_type_tag(idv->type_kind, idv->is_bool);
+                dv.width = idv->width;
+                dv.is_unsigned = idv->is_unsigned;
+                dv.array_len = idv->array_len;
+                dv.alloca_ssa = idv->alloca_ssa;
+                dv.param_idx = idv->param_idx;
+                dv.loc_kind = DBG_LOC_NONE;
+
+                if (idv->alloca_ssa >= 0 && idv->alloca_ssa < fn->next_value_id
+                    && alloca_off[idv->alloca_ssa] != 0) {
+                    /* Still in memory (array, address-taken, or -O0): one
+                     * stack slot for the variable's whole lifetime. */
+                    dv.loc_kind = DBG_LOC_FBREG;
+                    dv.rbp_offset = alloca_off[idv->alloca_ssa];
+                } else if (idv->kind == IR_DBG_PARAM && idv->param_idx >= 0
+                           && idv->param_idx < nparams) {
+                    int p = idv->param_idx;
+                    if (arrive_reg[p] < 0) {
+                        dv.loc_kind = DBG_LOC_FBREG;
+                        dv.rbp_offset = stack_off[p];
+                    } else if (arrive_is_xmm[p]) {
+                        dv.loc_kind = DBG_LOC_REG;
+                        dv.dwarf_reg = 17 + arrive_reg[p];
+                    } else {
+                        dv.loc_kind = DBG_LOC_REG;
+                        dv.dwarf_reg = reg_to_dwarf(arrive_reg[p]);
+                    }
+                }
+
+                /* Promoted into SSA: the variable has no single home, so turn
+                 * the markers left by mem2reg into a location list.  Each
+                 * marker's location holds until the next marker for the same
+                 * variable, or the end of the function.  A parameter starts
+                 * out in its ABI arrival register, before any marker. */
+                if (dv.loc_kind == DBG_LOC_REG && idv->kind == IR_DBG_PARAM) {
+                    size_t first = fn_end_pc;
+                    for (size_t k = 0; k < num_dbg_obs; k++) {
+                        if (dbg_obs[k].var == (int)di) { first = dbg_obs[k].pc; break; }
+                    }
+                    if (first > start_offset && num_dbg_obs > 0)
+                        dbg_var_add_range(&dv, start_offset, first, dv.loc_kind,
+                                          dv.rbp_offset, dv.dwarf_reg);
+                }
+                for (size_t k = 0; k < num_dbg_obs; k++) {
+                    if (dbg_obs[k].var != (int)di) continue;
+                    size_t end = fn_end_pc;
+                    for (size_t k2 = k + 1; k2 < num_dbg_obs; k2++) {
+                        if (dbg_obs[k2].var == (int)di) { end = dbg_obs[k2].pc; break; }
+                    }
+                    DebugLocKind lk;
+                    int off, dreg;
+                    value_home(fn, dbg_obs[k].value, gp_spill_area,
+                               &lk, &off, &dreg);
+                    dbg_var_add_range(&dv, dbg_obs[k].pc, end, lk, off, dreg);
+                }
+                emit_module_add_dbg_var(out, dbg_func_idx, &dv);
+                free(dv.ranges);
+            }
+        }
+        free(dbg_obs);
 
         /* ---- Apply label patches ---- */
         for (size_t pi = 0; pi < num_patches; pi++) {

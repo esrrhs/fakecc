@@ -29,11 +29,11 @@ static void compile_tu(const char *src, EmitModule *out) {
 
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir);
-    opt(&ir);
+    ir_generate(&tu, &ir, 0);
+    opt(&ir, 1, 0);
 
     emit_module_init(out);
-    codegen(&ir, out);
+    codegen(&ir, out, 0);
 
     ir_module_free(&ir);
     tu_free(&tu);
@@ -75,7 +75,7 @@ static void test_link_two_modules(void) {
     EmitModule *mods[2];
     mods[0] = &a;
     mods[1] = &b;
-    emit_link(mods, 2, path, NULL, 0, 0, NULL, 0);
+    emit_link(mods, 2, path, NULL, 0, 0, NULL, 0, 0);
     emit_module_free(&a);
     emit_module_free(&b);
 
@@ -96,7 +96,7 @@ static void link_no_main_body(void) {
     compile_tu("package main; int foo(void) { return 1; }", &a);
     EmitModule *mods[1];
     mods[0] = &a;
-    emit_link(mods, 1, "/tmp/fakecc_test_link_nomain", NULL, 0, 0, NULL, 0);
+    emit_link(mods, 1, "/tmp/fakecc_test_link_nomain", NULL, 0, 0, NULL, 0, 0);
     emit_module_free(&a);
 }
 
@@ -113,7 +113,7 @@ static void test_link_static_no_collision(void) {
     EmitModule *mods[2];
     mods[0] = &a;
     mods[1] = &b;
-    emit_link(mods, 2, path, NULL, 0, 0, NULL, 0);
+    emit_link(mods, 2, path, NULL, 0, 0, NULL, 0, 0);
     emit_module_free(&a);
     emit_module_free(&b);
 

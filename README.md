@@ -93,7 +93,13 @@ Stage0（`build/fakecc`，gcc 编）本身仍依赖系统 libc；**它编出来�
 - 入口桩：设置 `argc`/`argv` → `call main` → 调用 `exit`（有 rt 或 `-lc` 时）或裸 `exit_group`
 - 无未解析外部符号时：静态 ELF（`ldd` 报非动态可执行文件）
 
-可执行文件当前**不带** `.symtab` / DWARF，gdb 只能按地址看指令，不能 `break main` 或按源码行调试。
+可执行文件默认带 `.symtab` / `.strtab`（对齐未 strip 的 gcc），gdb 可 `break main`、按函数名反汇编。加 `-g` 时额外发出 DWARF（行号、参数/局部变量、`.debug_frame`、`.debug_loc`），支持按源码行调试与 `print`。
+
+`-g` 与 `-O` 正交，和 gcc 一致：`-g` 只增加调试节，绝不改变生成的指令（`test_debug` 与 gdb e2e 都逐字节比对 `.text` 来守住这条）。优化后变量常驻寄存器且位置随程序点变化，因此 mem2reg 会留下 `IR_DBG_VALUE` 标记，codegen 据此结合寄存器分配结果生成 DWARF 位置列表。该标记对 DCE、活跃区间和 SSA 重编号一律不可见，这正是它不影响代码的原因。
+
+`.debug_frame` 逐步描述 prologue（entry / `push %rbp` 之后 / `mov %rsp,%rbp` 之后各一条规则），行表则用 `DW_LNS_set_prologue_end` 标出函数体的第一行。两者都是 `break <函数名>` 能用的前提：gdb 会自己跳过 prologue 停在中间，只给整段 prologue 一条 CFI 规则的话它会展开出一个并不存在的栈帧。
+
+优化级别：`-O0` 让标量留在栈上（跳过 SSA 提升，调试信息最直白），`-O1`（默认）跑完整流水线。
 
 ## 自举
 
@@ -126,7 +132,16 @@ gcc 只出现在：编 Stage0，以及 `translate.py` 里对 `src/*.c` 做预处
 ## 已知缺陷
 
 - **小结构体按值传参不符合 SysV AMD64**：一律降级为传指针；纯 fakecc 自洽，但与 gcc/libc 按值小结构体 ABI 不混用。
-- **无调试信息**：链接产物无符号表 / DWARF。
+- **实参没有按形参类型做隐式转换**：调用时实参直接按自身类型传递，不转换到形参的声明类型。绝大多数情况无碍（值本来就是按宽度正确扩展的），但超出 signed int 范围的字面量直接传给较窄的无符号形参时会出错：
+
+  ```c
+  int f(unsigned int u) { return (int)(u / 200000000); }
+  int main(void) { return f(4000000000); }   // gcc: 20，fakecc -O1: 47
+  ```
+
+  字面量被符号扩展成 `0xFFFFFFFFEE6B2800` 传入，`-O1` 下直接参与 64 位 `div`。`-O0` 恰好正确，因为参数经过 4 字节栈槽往返被截断了——这也是为什么 e2e 要分级跑。修复需要 sema 在调用处按 `FunSig::param_types` 插入隐式转换。
+- **DWARF 仍较简**：`-g` 提供行号、标量/指针变量与位置列表；struct 成员 DIE 与带名字的 struct 类型 DIE 尚未实现（`print p.x` 不可用，`print sizeof(p)` 可用）。位置列表按线性指令流推导，块的入口值靠 φ 标记补齐，因此块被重排时个别范围可能偏保守。
+- **优化后外层栈帧的参数值不可信**：`-O1` 下参数被提升进寄存器后，从外层栈帧恢复调用者的寄存器值需要 call-site 信息（`DW_OP_entry_value` / `DW_TAG_call_site_parameter`），fakecc 尚未发出，因此递归时外层帧会显示最内层的参数值。栈帧链本身、函数名与行号都是准确的。
 - **工程主体仍是 `src/` + translate**：方言尚未成为唯一源码树；Stage0 仍需 gcc。
 
 ## 调试工具
@@ -149,6 +164,12 @@ cmake --build build --parallel
 ./build/fakecc examples/return42.c -o /tmp/a.out
 /tmp/a.out; echo $?    # 42
 
+# 带 DWARF，可用 gdb 按行调试（不影响优化，也不影响生成的指令）
+./build/fakecc -g examples/return42.c -o /tmp/a.out
+
+# 变量全部留在栈上，调试体验最直白（代价是更慢）
+./build/fakecc -O0 -g examples/return42.c -o /tmp/a.out
+
 # 可选：不用 rt，改链系统 libc
 ./build/fakecc hello.c -nostdlib -lc -o /tmp/hello_libc
 ```
@@ -157,11 +178,48 @@ cmake --build build --parallel
 
 ```bash
 ctest --test-dir build --output-on-failure
-# 单元测试、单文件 e2e、多文件 e2e、共享库 -l、gcc difftest
+# 单元测试 + 四类 e2e（单文件 / 多文件 / 共享库 -l / gcc difftest）各跑 -O0 -O1 两轮
+# 外加 gdb 调试信息套件（内部自己跑两级）
 
-bash v0/stage2_check.sh
-bash test/e2e/run_e2e.sh v0/fakecc-1
-bash test/e2e/run_multi_e2e.sh v0/fakecc-1
-bash test/e2e/run_difftest.sh v0/fakecc-1
-bash test/e2e/run_shlib_e2e.sh v0/fakecc-1
+bash v0/stage2_check.sh                        # 自举不动点
+bash test/e2e/run_e2e.sh v0/fakecc-1 -O0       # 再用自举产物验证一遍
+bash test/e2e/run_e2e.sh v0/fakecc-1 -O1
+bash test/e2e/run_gdb_e2e.sh v0/fakecc-1       # 需要 gdb
 ```
+
+每个 e2e 套件都跑 `-O0` 和 `-O1` 两轮，因为两级走的是很不一样的路径：`-O0` 让标量留在内存里，`-O1` 把它们提升成 SSA 再做寄存器分配，一级通过说明不了另一级。这一点不是理论顾虑——分级跑起来第一次就抓出了一个只在 `-O1` 出错的实参传递 bug（见已知缺陷）。
+
+用例按语言特性分目录，加用例就是往对应目录里丢文件，runner 递归发现：
+
+```
+test/e2e/
+├── run_e2e.sh / run_multi_e2e.sh / run_difftest.sh / run_shlib_e2e.sh / run_gdb_e2e.sh
+├── difftest_manifest.txt        # difftest 取用的用例清单（category/name.c）
+└── cases/
+    ├── basics/        return / 变量 / 字面量
+    ├── operators/     算术、位运算、比较、逻辑、三元、自增自减、复合赋值、强制转换
+    ├── control_flow/  if / while / for / do-while / switch / goto / 嵌套循环
+    ├── types/         整型宽度与符号、typedef、enum、sizeof / alignof、const / volatile
+    ├── floats/        float / double / long double
+    ├── aggregates/    数组、struct、union、位域、指定初始化、复合字面量
+    ├── pointers/      指针、多级指针、函数指针
+    ├── functions/     调用与递归、多参数、变参、argc/argv
+    ├── chars_strings/ 字符、转义、字符串
+    ├── linkage/       global / static / extern
+    ├── runtime/       libc 动态链接、裸系统调用
+    ├── codegen/       寄存器分配与窄类型高位的回归用例
+    ├── errors/        必须被拒绝并给出诊断的程序
+    └── debug/         `-g` 的 gdb 用例（见下）
+```
+
+`cases/debug/` 里的用例由 `run_gdb_e2e.sh` 驱动真实 gdb，用注解声明期望，断点用 `// BRK` 标记所在行而不写死行号：
+
+```c
+// expect: 42                  程序自身退出码
+// gdb: break {brk}            gdb 命令，按顺序执行
+// gdb_expect: a = 40          输出必须匹配的正则
+// gdb_reject: optimized out   输出不允许出现的正则
+// gdb_expect_O0: n = 1        只在某一优化级别检查
+```
+
+这些用例同时被单文件 e2e 套件当普通用例跑（它们都有 `// expect:`），并且每个都额外比对加 `-g` 与不加 `-g` 的 `.text` 是否逐字节相同。

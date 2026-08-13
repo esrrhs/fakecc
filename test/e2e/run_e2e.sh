@@ -3,6 +3,13 @@
 # `// expect:` annotation.  Cases annotated `// expect_error` must be rejected
 # with a diagnostic.
 #
+# Cases live in cases/<category>/*.c and are discovered recursively, so adding
+# a case is just dropping a file into the right category directory.
+#
+# Extra compiler flags come from CC_FLAGS, which is how the suite is run once
+# per optimization level: the -O0 and -O1 pipelines differ enough (scalars in
+# memory vs promoted to SSA) that passing under one says little about the other.
+#
 # A case may also assert its output, one line per annotation:
 #
 #     // expect_stdout: hello 42
@@ -20,10 +27,16 @@
 set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
+shift || true
 CC_TIMEOUT=${CC_TIMEOUT:-30}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
+# Remaining arguments are extra compiler flags (e.g. -O0), as is CC_FLAGS.
+# Kept as a word-split string so an empty flag set stays safe under `set -u`.
+CC_EXTRA="${CC_FLAGS:-} $*"
+CC_EXTRA=$(echo "$CC_EXTRA" | tr -s ' ' | sed 's/^ //; s/ $//')
 
 SUITE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CASE_DIR="$SUITE_DIR/cases"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -40,12 +53,15 @@ cc_status_desc() {
     esac
 }
 
-for src in "$SUITE_DIR"/*.c; do
-    name=${src#"$SUITE_DIR"/}
-    out="$WORK/${name%.c}"
+label="$CC_EXTRA"
+echo "--- e2e: $(basename "$CASE_DIR")/**  flags: ${label:-(default)} ---"
+
+while IFS= read -r src; do
+    name=${src#"$CASE_DIR"/}
+    out="$WORK/$(echo "${name%.c}" | tr / _)"
     rm -f "$out"
 
-    timeout "$CC_TIMEOUT" "$FAKECC" "$src" -o "$out" 2>"$WORK/cc.err"
+    timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$src" -o "$out" 2>"$WORK/cc.err"
     cc_rc=$?
 
     if grep -q '^// expect_error' "$src"; then
@@ -102,7 +118,7 @@ for src in "$SUITE_DIR"/*.c; do
 
     echo "PASS $name"
     n_pass=$((n_pass + 1))
-done
+done < <(find "$CASE_DIR" -name '*.c' | sort)
 
-echo "--- e2e: $n_pass passed, $n_fail failed, $((n_pass + n_fail)) total ---"
+echo "--- e2e${label:+ ($label)}: $n_pass passed, $n_fail failed, $((n_pass + n_fail)) total ---"
 exit $FAIL

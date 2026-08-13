@@ -86,6 +86,7 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -109,6 +110,22 @@ struct IRInstArray {
     size_t len;
     size_t cap;
 };typedef struct IRInstArray IRInstArray;
+enum IRDebugVarKind {
+    IR_DBG_PARAM = 0,
+    IR_DBG_LOCAL = 1
+};typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugVar {
+    char *name;
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct IRDebugVar IRDebugVar;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -129,6 +146,9 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     IRValue sret_value;
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars;
+    size_t cap_dbg_vars;
 };typedef struct IRFunction IRFunction;
 struct IRFunctionArray {
     IRFunction *data;
@@ -668,7 +688,7 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
 typedef struct FILE FILE;
 extern FILE *stderr;
@@ -725,6 +745,7 @@ int g_str_counter = 0;
 int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = ((void*)0);
 const TranslationUnit *g_ir_tu = ((void*)0);
+static int g_ir_pin_locals = 0;
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : ((void*)0);
 }
@@ -757,6 +778,9 @@ void ir_module_free(IRModule *m) {
         free(m->functions.data[i].value_width);
         free(m->functions.data[i].value_is_unsigned);
         free(m->functions.data[i].value_is_float);
+        for (size_t d = 0; d < m->functions.data[i].num_dbg_vars; d++)
+            free(m->functions.data[i].dbg_vars[d].name);
+        free(m->functions.data[i].dbg_vars);
         extern void ra_result_free(void *ra);
         if (m->functions.data[i].ra)
             ra_result_free(m->functions.data[i].ra);
@@ -1156,6 +1180,29 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
     st->data[st->len].is_global = 0;
     st->data[st->len].ty = ty;
     st->len++;
+}
+static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
+                           IRDebugVarKind kind, Type ty, int alloca_ssa,
+                           int param_idx) {
+    if (fn->num_dbg_vars >= fn->cap_dbg_vars) {
+        size_t nc = fn->cap_dbg_vars ? fn->cap_dbg_vars * 2 : 4;
+        fn->dbg_vars = realloc(fn->dbg_vars, nc * sizeof(IRDebugVar));
+        if (!fn->dbg_vars) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        fn->cap_dbg_vars = nc;
+    }
+    IRDebugVar *dv = &fn->dbg_vars[fn->num_dbg_vars++];
+    dv->name = xstrdup(name);
+    dv->loc = loc;
+    dv->kind = kind;
+    dv->type_kind = (int)ty.kind;
+    dv->width = ty.kind == TY_PTR ? 8
+              : (ty.kind == TY_ARRAY ? type_size(ty)
+                 : (ty.width ? ty.width : 4));
+    dv->is_unsigned = ty.is_unsigned;
+    dv->is_bool = ty.is_bool;
+    dv->array_len = ty.kind == TY_ARRAY ? ty.length : 0;
+    dv->alloca_ssa = alloca_ssa;
+    dv->param_idx = param_idx;
 }
 static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty) {
     irsymtable_push(st, name, -1, 1, ty);
@@ -2107,6 +2154,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             break;
         }
         int pinned = is_pinned_in_body(cur_fd, s->u.decl.name, dty);
+        if (g_ir_pin_locals)
+            pinned = 1;
         if (dty.kind == TY_PTR && dty.pointee && dty.pointee->kind == TY_FUNC)
             pinned = 1;
         if (dty.kind == TY_FLOAT)
@@ -2120,6 +2169,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             emit_inst_w(fn, IR_ALLOCA, v, -1, -1, 0, dw, du, s->loc);
         }
         irsymtable_push(st, s->u.decl.name, v, pinned, dty);
+        ir_add_dbg_var(fn, s->u.decl.name, s->loc, IR_DBG_LOCAL, dty, v, -1);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST) {
                 if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT) {
@@ -2498,11 +2548,12 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
     IRValue coerced = coerce(fn, rv, rw, ru, sw, su, loc);
     emit_inst_w(fn, IR_STORE_PTR, -1, base, coerced, 0, sw, su, loc);
 }
-void ir_generate(const TranslationUnit *tu, IRModule *ir) {
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     g_ir_module = ir;
     g_str_counter = 0;
     g_ir_structs = &tu->structs;
     g_ir_tu = tu;
+    g_ir_pin_locals = pin_locals;
     for (size_t i = 0; i < tu->globals.len; i++) {
         const Stmt *s = &tu->globals.data[i];
         if (s->kind != ST_DECL) continue;
@@ -2543,6 +2594,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
         irfn.sret_value = -1;
+        irfn.dbg_vars = ((void*)0);
+        irfn.num_dbg_vars = 0;
+        irfn.cap_dbg_vars = 0;
         IRSymTable st;
         irsymtable_init(&st);
         for (size_t g = 0; g < tu->globals.len; g++) {
@@ -2575,6 +2629,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
             int pu = pty.kind == TY_PTR ? 1 : pty.is_unsigned;
             const char *pname = fd->params.data[p].name;
             int pinned = is_pinned_in_body(fd, pname, pty);
+            if (g_ir_pin_locals)
+                pinned = 1;
             if (pty.kind == TY_FLOAT && pty.width != 16)
                 pinned = 1;
             IRValue slot;
@@ -2598,6 +2654,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
                             fd->params.data[p].loc);
             }
             irsymtable_push(&st, pname, slot, pinned, pty);
+            {
+                int pidx = (int)p + (irfn.ret_is_struct ? 1 : 0);
+                ir_add_dbg_var(&irfn, pname, fd->params.data[p].loc, IR_DBG_PARAM,
+                               pty, slot, pidx);
+            }
         }
         LabelMap lm;
         labelmap_init(&lm);

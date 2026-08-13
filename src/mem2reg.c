@@ -152,17 +152,54 @@ static void inst_array_free_contents(IRInstArray *a) {
 /* Writeback — resolve φ to COPYs and rebuild flat IR                  */
 /* ================================================================== */
 
+/* Which source variable does this alloca slot stand for? Returns an index
+ * into fn->dbg_vars, or -1 if the slot is compiler-generated. */
+static int dbg_var_for_slot(const IRFunction *fn, int slot) {
+    for (size_t i = 0; i < fn->num_dbg_vars; i++)
+        if (fn->dbg_vars[i].alloca_ssa == slot) return (int)i;
+    return -1;
+}
+
+/* Turn instruction `inst` into a marker saying "source variable `var` now
+ * lives in SSA value `val`". */
+static void make_dbg_value(IRInst *inst, int var, IRValue val) {
+    inst->op = IR_DBG_VALUE;
+    inst->dst = -1;
+    inst->a = val;
+    inst->b = -1;
+    inst->imm = var;
+    inst->call_name = NULL;
+    inst->call_nargs = 0;
+}
+
 void mem2reg_writeback(
     IRFunction *fn,
     const CFG *cfg,
     BlockPhiInfo *block_phi_info,
-    char *dead)
+    char *dead,
+    int want_debug)
 {
     IRInstArray out;
     inst_array_init(&out);
 
     for (size_t bi = 0; bi < cfg->num; bi++) {
         const CFGBlock *blk = &cfg->blocks[bi];
+
+        /* A φ merges several definitions of one source variable, so on entry
+         * to this block the variable lives in the φ result.  Record that. */
+        if (want_debug) {
+            for (size_t phi_i = 0; phi_i < block_phi_info[bi].num_phis; phi_i++) {
+                IRPhi *phi = &block_phi_info[bi].phis[phi_i];
+                int var = dbg_var_for_slot(fn, phi->alloca_slot);
+                if (var < 0) continue;
+                IRInst marker;
+                memset(&marker, 0, sizeof(marker));
+                marker.width = 8;
+                marker.loc = phi->loc;
+                make_dbg_value(&marker, var, phi->dst);
+                inst_array_push(&out, marker);
+            }
+        }
 
         /* Identify the terminator (last instruction if BR/CBR/RETURN). */
         size_t term_idx = blk->end;
@@ -289,7 +326,8 @@ static void mem2reg_rename_dfs(
     size_t num_alloca,
     BlockPhiInfo *block_phi_info,
     char *d,
-    RenameStack *stacks)
+    RenameStack *stacks,
+    int want_debug)
 {
     const CFGBlock *blk = &cfg->blocks[b];
 
@@ -324,8 +362,15 @@ static void mem2reg_rename_dfs(
         } else if (inst->op == IR_STORE) {
             size_t ai = find_alloca_slot(alloca_slots, num_alloca, inst->a);
             if (ai != (size_t)-1) {
-                rstack_push(&stacks[ai], inst->b);
-                d[i] = 1;
+                IRValue stored = inst->b;
+                rstack_push(&stacks[ai], stored);
+                /* The store itself is gone, but under -g we keep a marker in
+                 * its place so the variable's new home is known from here on. */
+                int var = want_debug ? dbg_var_for_slot(fn, inst->a) : -1;
+                if (var >= 0)
+                    make_dbg_value(inst, var, stored);
+                else
+                    d[i] = 1;
             }
         }
     }
@@ -348,7 +393,7 @@ static void mem2reg_rename_dfs(
     for (size_t i = 0; i < dt->n; i++) {
         if (dt->idom[i] == b)
             mem2reg_rename_dfs((int)i, fn, cfg, dt, alloca_slots, num_alloca,
-                               block_phi_info, d, stacks);
+                               block_phi_info, d, stacks, want_debug);
     }
 
     /* Pop this block's contributions. */
@@ -365,7 +410,8 @@ void mem2reg_rename(
     const int *alloca_slots,
     size_t num_alloca,
     BlockPhiInfo *block_phi_info,
-    char **dead)
+    char **dead,
+    int want_debug)
 {
     size_t ninst = fn->insts.len;
 
@@ -396,7 +442,7 @@ void mem2reg_rename(
 
     /* ---- 2. Rename via dominator-tree DFS (recursive, backtrack popping) ---- */
     mem2reg_rename_dfs(cfg->entry, fn, cfg, dt, alloca_slots, num_alloca,
-                       block_phi_info, d, stacks);
+                       block_phi_info, d, stacks, want_debug);
 
     /* ---- 3. Cleanup ---- */
     for (size_t ai = 0; ai < num_alloca; ai++) rstack_free(&stacks[ai]);
@@ -418,7 +464,7 @@ void mem2reg_rename(
 /* Returns: number of alloca variables promoted.                        */
 /* ================================================================== */
 
-int opt_mem2reg(IRFunction *fn)
+int opt_mem2reg(IRFunction *fn, int want_debug)
 {
     CFG cfg;
     cfg_build(&cfg, &fn->insts);
@@ -494,10 +540,11 @@ int opt_mem2reg(IRFunction *fn)
 
     /* ---- 4. Rename ---- */
     char *dead = NULL;
-    mem2reg_rename(fn, &cfg, &dt, alloca_slots, num_alloca, bp, &dead);
+    mem2reg_rename(fn, &cfg, &dt, alloca_slots, num_alloca, bp, &dead,
+                   want_debug);
 
     /* ---- 5. Writeback (rebuild flat IR, resolve φ → COPY) ---- */
-    mem2reg_writeback(fn, &cfg, bp, dead);
+    mem2reg_writeback(fn, &cfg, bp, dead, want_debug);
 
     /* ---- 6. Cleanup ---- */
     block_phi_info_free(bp, cfg.num);

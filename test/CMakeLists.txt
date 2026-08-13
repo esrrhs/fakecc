@@ -62,22 +62,38 @@ add_executable(test_link unit/test_link.c)
 target_link_libraries(test_link PRIVATE fakecc_core test_framework)
 add_test(NAME test_link COMMAND test_link)
 
+add_executable(test_debug unit/test_debug.c)
+target_link_libraries(test_debug PRIVATE fakecc_core test_framework)
+add_test(NAME test_debug COMMAND test_debug)
+
 # --- e2e tests ---
+#
+# Each suite runs once per optimization level.  -O0 keeps scalars in memory and
+# -O1 promotes them to SSA, so the two take substantially different paths
+# through mem2reg, the register allocator and the debug-info emitter; passing
+# under one says little about the other.
+foreach(lvl O0 O1)
+    add_test(NAME e2e_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-add_test(NAME e2e
-         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_e2e.sh $<TARGET_FILE:fakecc>
-         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME e2e_multi_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_multi_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-add_test(NAME e2e_multi
-         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_multi_e2e.sh $<TARGET_FILE:fakecc>
-         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # gcc-oracle differential suite over a curated e2e manifest.
+    add_test(NAME difftest_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# gcc-oracle differential suite over a curated e2e manifest.
-add_test(NAME difftest
-         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc>
-         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # Shared-library linking: -l / -l: / -nodefaultlibs / .so path.
+    add_test(NAME e2e_shlib_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_shlib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endforeach()
 
-# Shared-library linking: -l / -l: / -nodefaultlibs / .so path.
-add_test(NAME e2e_shlib
-         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_shlib_e2e.sh $<TARGET_FILE:fakecc>
+# DWARF against a real gdb.  Runs both -O0 and -O1 internally, since the
+# expected answers differ between them.  Skipped gracefully if gdb is absent.
+add_test(NAME e2e_gdb
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_gdb_e2e.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

@@ -4,6 +4,9 @@
 set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
+shift || true
+# Extra compiler flags (e.g. -O0) so the suite can run once per opt level.
+CC_EXTRA="${CC_FLAGS:-} $*"
 CC_TIMEOUT=${CC_TIMEOUT:-30}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 FAIL=0
@@ -56,7 +59,7 @@ EOF
 
 # 1) Opt-in libc via -nostdlib -lc (cgo-style escape hatch).
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_printf.c" -nostdlib -lc -o "$TMP/p" 2>"$TMP/err" \
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_printf.c" -nostdlib -lc -o "$TMP/p" 2>"$TMP/err" \
     || { fail "nostdlib -lc compile: $(head -1 "$TMP/err")"; }
 if [ -x "$TMP/p" ]; then
     got=0; timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
@@ -70,7 +73,7 @@ fi
 
 # 2) Default freestanding: printf via rt/, no DT_NEEDED.
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_printf.c" -o "$TMP/p" 2>"$TMP/err" \
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_printf.c" -o "$TMP/p" 2>"$TMP/err" \
     || { fail "default rt compile: $(head -1 "$TMP/err")"; }
 if [ -x "$TMP/p" ]; then
     got=0; out=$(timeout "$RUN_TIMEOUT" "$TMP/p" 2>/dev/null) || got=$?
@@ -93,7 +96,7 @@ fi
 
 # 3) Custom shared library via -L + -ladd (DT_RUNPATH; no libc by default).
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_add.c" -L"$TMP" -ladd -o "$TMP/p" 2>"$TMP/err" \
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_add.c" -L"$TMP" -ladd -o "$TMP/p" 2>"$TMP/err" \
     || { fail "-L -ladd compile: $(head -1 "$TMP/err")"; }
 if [ -x "$TMP/p" ]; then
     if has_needed "$TMP/p" "libadd.so"; then
@@ -118,7 +121,7 @@ fi
 
 # 3b) -L with a missing library must fail at link time.
 rm -f "$TMP/p"
-if timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_add.c" -L"$TMP/does-not-exist" -ladd -o "$TMP/p" 2>"$TMP/err"; then
+if timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_add.c" -L"$TMP/does-not-exist" -ladd -o "$TMP/p" 2>"$TMP/err"; then
     fail "-L missing dir should reject -ladd"
 else
     pass "-L missing dir rejects -ladd"
@@ -126,7 +129,7 @@ fi
 
 # 4) Exact soname form -l:libadd.so with -L, and passing the .so path.
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_add.c" -L"$TMP" -l:libadd.so -o "$TMP/p" 2>"$TMP/err" \
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_add.c" -L"$TMP" -l:libadd.so -o "$TMP/p" 2>"$TMP/err" \
     || { fail "-l:libadd.so compile"; }
 if [ -x "$TMP/p" ]; then
     got=0
@@ -135,7 +138,7 @@ if [ -x "$TMP/p" ]; then
 fi
 
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_add.c" "$TMP/libadd.so" -o "$TMP/p" 2>"$TMP/err" \
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_add.c" "$TMP/libadd.so" -o "$TMP/p" 2>"$TMP/err" \
     || { fail ".so path compile"; }
 if [ -x "$TMP/p" ]; then
     if has_needed "$TMP/p" "libadd.so"; then
@@ -155,7 +158,7 @@ fi
 
 # 5) -nodefaultlibs + -L -ladd: still no libc (alias / compatibility).
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_add.c" -nodefaultlibs -L"$TMP" -ladd -o "$TMP/p" 2>"$TMP/err" \
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_add.c" -nodefaultlibs -L"$TMP" -ladd -o "$TMP/p" 2>"$TMP/err" \
     || { fail "-nodefaultlibs -L -ladd compile"; }
 if [ -x "$TMP/p" ]; then
     if has_needed "$TMP/p" "libc.so.6"; then
@@ -175,7 +178,7 @@ fi
 
 # 6) -nostdlib with an unresolved symbol: runtime must fail (no rt, no libc).
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_missing.c" -nostdlib -o "$TMP/p" 2>"$TMP/err"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_missing.c" -nostdlib -o "$TMP/p" 2>"$TMP/err"
 cc_rc=$?
 if [ "$cc_rc" != "0" ]; then
     pass "-nostdlib missing-sym rejected at link"

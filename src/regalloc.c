@@ -119,8 +119,10 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         const IRInst *inst = &fn->insts.data[i];
 
-        /* LABEL/BR carry no value operands.  CBR's `b` is a label id. */
-        if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        /* LABEL/BR carry no value operands.  CBR's `b` is a label id.
+         * DBG_VALUE's operand is an observation, not a use. */
+        if (inst->op == IR_LABEL || inst->op == IR_BR ||
+            inst->op == IR_DBG_VALUE) continue;
 
         /* Definition */
         if (inst->dst >= 0 && inst->dst < nv) {
@@ -289,7 +291,9 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
         const CFGBlock *blk = &cfg->blocks[bi];
         for (size_t i = blk->start; i < blk->end; i++) {
             const IRInst *inst = &fn->insts.data[i];
-            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+            /* LABEL/BR/DBG_VALUE carry no register operands. */
+        if (inst->op == IR_LABEL || inst->op == IR_BR ||
+            inst->op == IR_DBG_VALUE) continue;
 
             /* Uses come before def within a single instruction. */
             if (inst->a >= 0 && inst->a < use_b[bi].nv) {
@@ -407,7 +411,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
 
         for (size_t i = blk->end; i > blk->start; i--) {
             const IRInst *inst = &fn->insts.data[i - 1];
-            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+            /* LABEL/BR/DBG_VALUE carry no register operands. */
+        if (inst->op == IR_LABEL || inst->op == IR_BR ||
+            inst->op == IR_DBG_VALUE) continue;
 
             if (inst->op == IR_CALL) {
                 BS_FOREACH(&live, over) {
@@ -476,7 +482,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
 
         for (size_t i = blk->end; i > blk->start; i--) {
             const IRInst *inst = &fn->insts.data[i - 1];
-            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+            /* LABEL/BR/DBG_VALUE carry no register operands. */
+        if (inst->op == IR_LABEL || inst->op == IR_BR ||
+            inst->op == IR_DBG_VALUE) continue;
 
             if (inst->dst >= 0 && inst->dst < nv &&
                 value_in_class(fn, inst->dst, float_class)) {

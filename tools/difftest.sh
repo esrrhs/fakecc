@@ -2,7 +2,7 @@
 # Differential testing: compile the same program with gcc and with fakecc,
 # run both, compare exit codes.
 #
-#   tools/difftest.sh [-c FAKECC] file.c [file.c ...]
+#   tools/difftest.sh [-c FAKECC] [-f "FAKECC_FLAGS"] file.c [file.c ...]
 #
 # gcc is the oracle, so a case never needs a hand-computed expected value.
 # That matters more than it sounds: a wrong expectation looks exactly like a
@@ -14,11 +14,15 @@ set -uo pipefail
 
 FAKECC=${FAKECC:-./build/fakecc}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
+# Flags for fakecc only: gcc stays the unmodified oracle regardless of the
+# optimization level we are exercising.
+FCC_FLAGS=${FCC_FLAGS:-}
 
-while getopts "c:" opt; do
+while getopts "c:f:" opt; do
     case "$opt" in
         c) FAKECC=$OPTARG ;;
-        *) echo "usage: $0 [-c FAKECC] file.c ..." >&2; exit 2 ;;
+        f) FCC_FLAGS=$OPTARG ;;
+        *) echo "usage: $0 [-c FAKECC] [-f FLAGS] file.c ..." >&2; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
@@ -39,7 +43,7 @@ for src in "$@"; do
     gcc_rc=0
     timeout "$RUN_TIMEOUT" "$WORK/$name.gcc" >"$WORK/$name.gcc.out" 2>&1 || gcc_rc=$?
 
-    if ! "$FAKECC" "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
+    if ! "$FAKECC" $FCC_FLAGS "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
         rc=$?
         if [ "$rc" -ge 128 ]; then
             printf '%-28s DIFF (fakecc killed by signal %s; gcc exits %s)\n' \

@@ -86,6 +86,7 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -109,6 +110,22 @@ struct IRInstArray {
     size_t len;
     size_t cap;
 };typedef struct IRInstArray IRInstArray;
+enum IRDebugVarKind {
+    IR_DBG_PARAM = 0,
+    IR_DBG_LOCAL = 1
+};typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugVar {
+    char *name;
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct IRDebugVar IRDebugVar;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -129,6 +146,9 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     IRValue sret_value;
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars;
+    size_t cap_dbg_vars;
 };typedef struct IRFunction IRFunction;
 struct IRFunctionArray {
     IRFunction *data;
@@ -668,9 +688,9 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
-void opt(IRModule *ir);
+void opt(IRModule *ir, int opt_level, int want_debug);
 struct CFGBlock {
     int id;
     int label;
@@ -729,13 +749,15 @@ void mem2reg_rename(
     const int *alloca_slots,
     size_t num_alloca,
     BlockPhiInfo *block_phi_info,
-    char **dead);
+    char **dead,
+    int want_debug);
 void mem2reg_writeback(
     IRFunction *fn,
     const CFG *cfg,
     BlockPhiInfo *block_phi_info,
-    char *dead);
-int opt_mem2reg(IRFunction *fn);
+    char *dead,
+    int want_debug);
+int opt_mem2reg(IRFunction *fn, int want_debug);
 int scalar_constfold(IRFunction *fn);
 int scalar_dce(IRFunction *fn);
 int scalar_peephole(IRFunction *fn);
@@ -779,10 +801,27 @@ struct RAResult {
 RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
-void opt(IRModule *ir) {
+static void pin_scalar_allocas(IRFunction *fn) {
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        IRInst *inst = &fn->insts.data[i];
+        if (inst->op != IR_ALLOCA) continue;
+        if (inst->alloca_bytes > 0) continue;
+        int w = inst->width > 0 ? inst->width : 4;
+        if (w < 8 && !inst->is_float) {
+            inst->alloca_bytes = w;
+        } else {
+            inst->alloca_bytes = w;
+        }
+        if (inst->alloca_bytes < 1) inst->alloca_bytes = 8;
+    }
+}
+void opt(IRModule *ir, int opt_level, int want_debug) {
     for (size_t i = 0; i < ir->functions.len; i++) {
         IRFunction *fn = &ir->functions.data[i];
-        opt_mem2reg(fn);
+        if (opt_level == 0)
+            pin_scalar_allocas(fn);
+        else
+            opt_mem2reg(fn, want_debug);
         scalar_cleanup(fn);
         fn->ra = reg_alloc(fn);
         fn->ra_xmm = reg_alloc_xmm(fn);

@@ -29,11 +29,11 @@ static void compile_to_file(const char *src, const char *out_path) {
 
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir);
+    ir_generate(&tu, &ir, 0);
 
     EmitModule em;
     emit_module_init(&em);
-    codegen(&ir, &em);
+    codegen(&ir, &em, 0);
     emit_elf(&em, out_path);
 
     emit_module_free(&em);

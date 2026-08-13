@@ -19,6 +19,7 @@ int g_str_counter = 0;
 int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 const TranslationUnit *g_ir_tu = NULL;       /* set by ir_generate */
+static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
 
 /* Return the live struct registry during lowering, NULL outside it.
  * type_size() uses this to refresh stale cached struct widths. */
@@ -64,6 +65,9 @@ void ir_module_free(IRModule *m) {
         free(m->functions.data[i].value_width);
         free(m->functions.data[i].value_is_unsigned);
         free(m->functions.data[i].value_is_float);
+        for (size_t d = 0; d < m->functions.data[i].num_dbg_vars; d++)
+            free(m->functions.data[i].dbg_vars[d].name);
+        free(m->functions.data[i].dbg_vars);
         /* Free register allocation results if present. */
         extern void ra_result_free(void *ra);
         if (m->functions.data[i].ra)
@@ -547,6 +551,30 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
     st->data[st->len].is_global = 0;
     st->data[st->len].ty = ty;
     st->len++;
+}
+
+static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
+                           IRDebugVarKind kind, Type ty, int alloca_ssa,
+                           int param_idx) {
+    if (fn->num_dbg_vars >= fn->cap_dbg_vars) {
+        size_t nc = fn->cap_dbg_vars ? fn->cap_dbg_vars * 2 : 4;
+        fn->dbg_vars = realloc(fn->dbg_vars, nc * sizeof(IRDebugVar));
+        if (!fn->dbg_vars) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        fn->cap_dbg_vars = nc;
+    }
+    IRDebugVar *dv = &fn->dbg_vars[fn->num_dbg_vars++];
+    dv->name = xstrdup(name);
+    dv->loc = loc;
+    dv->kind = kind;
+    dv->type_kind = (int)ty.kind;
+    dv->width = ty.kind == TY_PTR ? 8
+              : (ty.kind == TY_ARRAY ? type_size(ty)
+                 : (ty.width ? ty.width : 4));
+    dv->is_unsigned = ty.is_unsigned;
+    dv->is_bool = ty.is_bool;
+    dv->array_len = ty.kind == TY_ARRAY ? ty.length : 0;
+    dv->alloca_ssa = alloca_ssa;
+    dv->param_idx = param_idx;
 }
 
 static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty) {
@@ -1724,6 +1752,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         }
 
         int pinned = is_pinned_in_body(cur_fd, s->u.decl.name, dty);
+        if (g_ir_pin_locals)
+            pinned = 1;
         /* Function-pointer variables are always pinned: their value must
          * survive in memory so indirect calls can load them.  Without this,
          * mem2reg promotes them and the store/load chain breaks. */
@@ -1744,6 +1774,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             emit_inst_w(fn, IR_ALLOCA, v, -1, -1, 0, dw, du, s->loc);
         }
         irsymtable_push(st, s->u.decl.name, v, pinned, dty);
+        ir_add_dbg_var(fn, s->u.decl.name, s->loc, IR_DBG_LOCAL, dty, v, -1);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST) {
                 if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT) {
@@ -2215,12 +2246,13 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
     emit_inst_w(fn, IR_STORE_PTR, -1, base, coerced, 0, sw, su, loc);
 }
 
-void ir_generate(const TranslationUnit *tu, IRModule *ir) {
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     /* Publish module + reset string counter for lower_expr's use. */
     g_ir_module = ir;
     g_str_counter = 0;
     g_ir_structs = &tu->structs;
     g_ir_tu = tu;
+    g_ir_pin_locals = pin_locals;
 
     /* Register named globals from tu->globals.  `extern` globals are
      * declarations only — no storage, no emission (single-TU model: they can
@@ -2274,6 +2306,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
         irfn.sret_value = -1;
+        irfn.dbg_vars = NULL;
+        irfn.num_dbg_vars = 0;
+        irfn.cap_dbg_vars = 0;
 
         IRSymTable st;
         irsymtable_init(&st);
@@ -2319,6 +2354,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
             int pu = pty.kind == TY_PTR ? 1 : pty.is_unsigned;
             const char *pname = fd->params.data[p].name;
             int pinned = is_pinned_in_body(fd, pname, pty);
+            if (g_ir_pin_locals)
+                pinned = 1;
             /* Float params are always pinned: their SSA value lives in the XMM
              * register file (separate from the GP file the scalar regalloc
              * targets), so mem2reg must not promote them.  long double (width 16)
@@ -2352,6 +2389,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir) {
                             fd->params.data[p].loc);
             }
             irsymtable_push(&st, pname, slot, pinned, pty);
+            {
+                int pidx = (int)p + (irfn.ret_is_struct ? 1 : 0);
+                ir_add_dbg_var(&irfn, pname, fd->params.data[p].loc, IR_DBG_PARAM,
+                               pty, slot, pidx);
+            }
         }
 
         /* Pre-pass: assign label ids to every label in this function so

@@ -35,7 +35,7 @@ static char *read_file(const char *path) {
 
 /* Compile one .c source into an EmitModule. */
 static void compile_source(const char *source, const char *filename,
-                           EmitModule *out) {
+                           EmitModule *out, int opt_level, int want_debug) {
     TokenArray tokens;
     token_array_init(&tokens);
     lex(source, filename, &tokens);
@@ -49,12 +49,14 @@ static void compile_source(const char *source, const char *filename,
 
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir);
+    ir_generate(&tu, &ir, opt_level == 0);
 
-    opt(&ir);
+    opt(&ir, opt_level, want_debug);
 
     emit_module_init(out);
-    codegen(&ir, out);
+    if (want_debug)
+        out->dbg_tu_name = xstrdup(filename);
+    codegen(&ir, out, want_debug);
 
     ir_module_free(&ir);
     tu_free(&tu);
@@ -67,9 +69,13 @@ static void module_free(EmitModule *m) {
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: fakecc [-c] [-nostdlib] [-nodefaultlibs] [-LDIR]... [-lLIB]...\n"
-            "              <input...> -o <output>\n"
+            "usage: fakecc [-c] [-g] [-O0|-O1] [-nostdlib] [-nodefaultlibs]\n"
+            "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
             "  (default)       link builtin rt/ (freestanding; no DT_NEEDED)\n"
+            "  -g              emit DWARF debug info (line numbers, variables);\n"
+            "                  independent of -O, never changes generated code\n"
+            "  -O0             keep locals in memory (skip SSA promotion)\n"
+            "  -O1             default: SSA promotion + folding + DCE\n"
             "  -nostdlib       do not link builtin rt/; use -l for system libs\n"
             "  -lLIB           link against libLIB.so (DT_NEEDED; optional interop)\n"
             "  -l:SONAME       link against exact soname SONAME\n"
@@ -254,6 +260,8 @@ int main(int argc, char **argv) {
     int compile_only = 0;
     int nodefaultlibs = 0;
     int nostdlib = 0;
+    int want_debug = 0;
+    int opt_level = 1;
     const char *output_path = NULL;
     const char **inputs = NULL;
     int ninputs = 0;
@@ -267,6 +275,13 @@ int main(int argc, char **argv) {
             compile_only = 1;
         } else if (strcmp(argv[i], "-nodefaultlibs") == 0) {
             nodefaultlibs = 1;
+        } else if (strcmp(argv[i], "-g") == 0) {
+            want_debug = 1;
+        } else if (strcmp(argv[i], "-O0") == 0) {
+            opt_level = 0;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
+            /* -O1/-O2/-O3/-Os/-Ofast all map to the single pipeline fakecc has. */
+            opt_level = 1;
         } else if (strcmp(argv[i], "-nostdlib") == 0) {
             nostdlib = 1;
         } else if (strcmp(argv[i], "-o") == 0) {
@@ -316,7 +331,7 @@ int main(int argc, char **argv) {
         }
         EmitModule em;
         char *src = read_file(inputs[0]);
-        compile_source(src, inputs[0], &em);
+        compile_source(src, inputs[0], &em, opt_level, want_debug);
         free(src);
         emit_obj(&em, output_path);
         module_free(&em);
@@ -351,7 +366,7 @@ int main(int argc, char **argv) {
             if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
         } else {
             char *src = read_file(inputs[i]);
-            compile_source(src, inputs[i], &mods[i]);
+            compile_source(src, inputs[i], &mods[i], opt_level, want_debug);
             free(src);
         }
         mod_ptrs[i] = &mods[i];
@@ -360,7 +375,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nrt; i++) {
         char *path = path_join(rt_dir, rt_file_at(i));
         char *src = read_file(path);
-        compile_source(src, path, &mods[ninputs + i]);
+        compile_source(src, path, &mods[ninputs + i], opt_level, 0);
         free(src);
         free(path);
         mod_ptrs[ninputs + i] = &mods[ninputs + i];
@@ -368,7 +383,7 @@ int main(int argc, char **argv) {
 
     emit_link(mod_ptrs, (size_t)nmods, output_path,
               (const char **)needed, (size_t)num_needed, nodefaultlibs,
-              (const char **)lib_paths, (size_t)num_lib_paths);
+              (const char **)lib_paths, (size_t)num_lib_paths, want_debug);
 
     for (int i = 0; i < nmods; i++) module_free(&mods[i]);
     free(mod_ptrs);

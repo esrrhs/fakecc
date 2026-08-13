@@ -62,7 +62,7 @@ static void test_opt_reduces_alloca(void) {
     PUSH(IR_LOAD,   2,  0, -1, 0);
     PUSH(IR_RETURN, -1,  2, -1, 0);
 
-    opt(&mod);
+    opt(&mod, 1, 0);
 
     /* After opt: no ALLOCA, STORE, or LOAD remain. */
     T_ASSERT_EQ_INT(count_op(&fn->insts, IR_ALLOCA), 0);
@@ -89,7 +89,7 @@ static void test_opt_folds_return(void) {
     PUSH(IR_LOAD,   2,  0, -1, 0);
     PUSH(IR_RETURN, -1,  2, -1, 0);
 
-    opt(&mod);
+    opt(&mod, 1, 0);
 
     /* After opt: RETURN should reference the CONST 5 directly.
      * mem2reg turns LOAD→COPY from the CONST; constfold/peephole eliminate the
@@ -144,7 +144,7 @@ static void test_opt_eliminates_dead(void) {
     PUSH(IR_CONST,  6, -1, -1, 10);
     PUSH(IR_RETURN, -1,  6, -1, 0);
 
-    opt(&mod);
+    opt(&mod, 1, 0);
 
     /* mem2reg eliminates ALLOCA/STORE/LOAD.
      * The dead value (ADD dst=5 and CONST dst=2) should be eliminated by DCE.
@@ -209,14 +209,14 @@ static void test_opt_idempotent(void) {
     PUSH(IR_LOAD,   2,  0, -1, 0);
     PUSH(IR_RETURN, -1,  2, -1, 0);
 
-    opt(&mod);
+    opt(&mod, 1, 0);
 
     /* Serialize after first opt. */
     char *s1 = serialize_insts(&fn->insts);
     T_ASSERT(s1 != NULL);
 
     /* Second opt should not change anything. */
-    opt(&mod);
+    opt(&mod, 1, 0);
     char *s2 = serialize_insts(&fn->insts);
     T_ASSERT(s2 != NULL);
 
@@ -243,7 +243,7 @@ static void test_opt_no_allocas(void) {
     PUSH(IR_ADD,    2,  0,  1, 0);
     PUSH(IR_RETURN, -1,  2, -1, 0);
 
-    opt(&mod);
+    opt(&mod, 1, 0);
 
     /* After constfold: 1+2 → 3.  After DCE: CONST 0 and CONST 1 may be
      * eliminated if unused.  The ADD becomes CONST 3. */

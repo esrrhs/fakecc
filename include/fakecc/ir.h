@@ -64,6 +64,15 @@ typedef enum {
     IR_TRUNC,       /* dst = trunc(a) to `width` — no-op at register level */
     IR_GADDR,       /* dst = &global; global name in call_name.  Result is 8-byte ptr. */
     IR_FADDR,       /* dst = &function; function name in call_name.  Result is 8-byte ptr. */
+    /* Debug-only marker (emitted by mem2reg under -g): from here on, source
+     * variable `imm` (index into fn->dbg_vars) lives in SSA value `a`.
+     *
+     * Codegen emits no machine code for it.  Every optimization pass must
+     * treat it as invisible — it is NOT a use for DCE/liveness and takes no
+     * part in value renumbering — so that -g cannot change generated code.
+     * If `a`'s definition is optimized away, renumber sets `a` to -1 and the
+     * variable is reported as unavailable over that range. */
+    IR_DBG_VALUE,
 } IROpcode;
 
 /* Maximum arguments to IR_CALL — Slice 10 raises this from 6 to 16.
@@ -111,6 +120,25 @@ typedef struct {
     size_t cap;
 } IRInstArray;
 
+/* Debug variable retained from lowering for DWARF emission under -g. */
+typedef enum {
+    IR_DBG_PARAM  = 0,
+    IR_DBG_LOCAL  = 1
+} IRDebugVarKind;
+
+typedef struct {
+    char *name;           /* xstrdup'd */
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;        /* TypeKind value */
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;        /* >0 for TY_ARRAY */
+    int alloca_ssa;       /* IR_ALLOCA dst for locals/pinned params; -1 else */
+    int param_idx;        /* SysV param index for IR_DBG_PARAM; -1 else */
+} IRDebugVar;
+
 typedef struct {
     char *name;       /* function name, xstrdup'd */
     IRInstArray insts;
@@ -147,6 +175,10 @@ typedef struct {
      * when ret_is_struct.  The return statement copies struct bytes into
      * *sret_value and returns the pointer in RAX (SysV AMD64 struct ABI). */
     IRValue sret_value;
+    /* Debug variables (params + locals). Always populated; codegen uses
+     * them only when -g is set. */
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars, cap_dbg_vars;
 } IRFunction;
 
 typedef struct {
@@ -193,9 +225,10 @@ typedef struct {
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
 
-/* Lower AST to IR */
 #include "fakecc/ast.h"
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+/* Lower AST to IR.  When `pin_locals` is set (-O0), scalar locals and params
+ * keep a real stack slot instead of relying on mem2reg promotion. */
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 
 /* Return the live struct registry during lowering (NULL outside it).
  * type_size() uses this to refresh stale cached struct widths. */

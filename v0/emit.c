@@ -52,6 +52,71 @@ struct EmitReloc {
     uint32_t sym;
     int32_t addend;
 };typedef struct EmitReloc EmitReloc;
+enum DebugVarKind {
+    DBG_VAR_PARAM = 0,
+    DBG_VAR_LOCAL = 1,
+    DBG_VAR_GLOBAL = 2
+};typedef enum DebugVarKind DebugVarKind;
+enum DebugTypeTag {
+    DBG_TY_VOID = 0,
+    DBG_TY_INT = 1,
+    DBG_TY_FLOAT = 2,
+    DBG_TY_PTR = 3,
+    DBG_TY_ARRAY = 4,
+    DBG_TY_STRUCT = 5,
+    DBG_TY_BOOL = 6
+};typedef enum DebugTypeTag DebugTypeTag;
+enum DebugLocKind {
+    DBG_LOC_NONE = 0,
+    DBG_LOC_FBREG = 1,
+    DBG_LOC_REG = 2,
+    DBG_LOC_ADDR = 3
+};typedef enum DebugLocKind DebugLocKind;
+struct DebugLocRange {
+    size_t pc_start;
+    size_t pc_end;
+    DebugLocKind loc_kind;
+    int rbp_offset;
+    int dwarf_reg;
+};typedef struct DebugLocRange DebugLocRange;
+struct DebugVar {
+    char *name;
+    char *file;
+    int line;
+    DebugVarKind kind;
+    DebugTypeTag type_tag;
+    int width;
+    int is_unsigned;
+    int array_len;
+    DebugLocKind loc_kind;
+    int rbp_offset;
+    int dwarf_reg;
+    char *sym_name;
+    DebugLocRange *ranges;
+    size_t num_ranges;
+    size_t cap_ranges;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct DebugVar DebugVar;
+struct DebugLineEntry {
+    char *file;
+    int line;
+    int col;
+    size_t pc_off;
+};typedef struct DebugLineEntry DebugLineEntry;
+struct DebugFunc {
+    char *name;
+    char *file;
+    int line;
+    size_t start_pc;
+    size_t end_pc;
+    size_t prologue_end_pc;
+    size_t after_push_rbp_pc;
+    size_t after_mov_rbp_pc;
+    DebugVar *vars;
+    size_t num_vars;
+    size_t cap_vars;
+};typedef struct DebugFunc DebugFunc;
 struct EmitModule {
     Buffer text;
     Buffer rodata;
@@ -66,6 +131,16 @@ struct EmitModule {
     EmitReloc *data_relocs;
     size_t num_data_relocs;
     size_t cap_data_relocs;
+    char *dbg_tu_name;
+    DebugLineEntry *dbg_lines;
+    size_t num_dbg_lines;
+    size_t cap_dbg_lines;
+    DebugFunc *dbg_funcs;
+    size_t num_dbg_funcs;
+    size_t cap_dbg_funcs;
+    DebugVar *dbg_globals;
+    size_t num_dbg_globals;
+    size_t cap_dbg_globals;
 };typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
@@ -82,8 +157,27 @@ void emit_obj(const EmitModule *m, const char *path);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
-               const char **lib_paths, size_t num_lib_paths);
+               const char **lib_paths, size_t num_lib_paths,
+               int want_debug);
 void emit_elf(const EmitModule *m, const char *path);
+void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
+                      Buffer *debug_abbrev, Buffer *debug_info,
+                      Buffer *debug_str, Buffer *debug_line,
+                      Buffer *debug_frame, Buffer *debug_loc);
+void debug_serialize(const EmitModule *m, Buffer *out);
+int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len);
+void emit_module_add_dbg_line(EmitModule *m, const char *file, int line,
+                              int col, size_t pc_off);
+int emit_module_add_dbg_func(EmitModule *m, const char *name,
+                              const char *file, int line, size_t start_pc);
+void emit_module_dbg_func_end(EmitModule *m, int func_idx, size_t end_pc,
+                              size_t prologue_end_pc);
+void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
+                                size_t after_push_rbp_pc,
+                                size_t after_mov_rbp_pc);
+void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v);
+void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v);
+void debug_var_release(DebugVar *v);
 typedef struct FILE FILE;
 extern FILE *stderr;
 extern FILE *stdin;
@@ -143,6 +237,13 @@ void emit_module_init(EmitModule *m) {
     m->syms = ((void*)0); m->num_syms = 0; m->cap_syms = 0;
     m->relocs = ((void*)0); m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = ((void*)0); m->num_data_relocs = 0; m->cap_data_relocs = 0;
+    m->dbg_tu_name = ((void*)0);
+    m->dbg_lines = ((void*)0); m->num_dbg_lines = 0; m->cap_dbg_lines = 0;
+    m->dbg_funcs = ((void*)0); m->num_dbg_funcs = 0; m->cap_dbg_funcs = 0;
+    m->dbg_globals = ((void*)0); m->num_dbg_globals = 0; m->cap_dbg_globals = 0;
+}
+static void free_debug_var(DebugVar *v) {
+    debug_var_release(v);
 }
 void emit_module_free(EmitModule *m) {
     for (size_t i = 0; i < m->num_syms; i++) free(m->syms[i].name);
@@ -152,6 +253,20 @@ void emit_module_free(EmitModule *m) {
     buffer_free(&m->text);
     buffer_free(&m->rodata);
     buffer_free(&m->data);
+    free(m->dbg_tu_name);
+    for (size_t i = 0; i < m->num_dbg_lines; i++) free(m->dbg_lines[i].file);
+    free(m->dbg_lines);
+    for (size_t i = 0; i < m->num_dbg_funcs; i++) {
+        free(m->dbg_funcs[i].name);
+        free(m->dbg_funcs[i].file);
+        for (size_t j = 0; j < m->dbg_funcs[i].num_vars; j++)
+            free_debug_var(&m->dbg_funcs[i].vars[j]);
+        free(m->dbg_funcs[i].vars);
+    }
+    free(m->dbg_funcs);
+    for (size_t i = 0; i < m->num_dbg_globals; i++)
+        free_debug_var(&m->dbg_globals[i]);
+    free(m->dbg_globals);
 }
 int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
                            uint8_t type, uint16_t shndx, size_t value,
@@ -280,6 +395,8 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&shstrtab, ".rela.text", sizeof(".rela.text"));
     uint32_t shname_rela_data = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".rela.data", sizeof(".rela.data"));
+    uint32_t shname_fakecc_dbg = (uint32_t)shstrtab.len;
+    buf_bytes(&shstrtab, ".fakecc_dbg", sizeof(".fakecc_dbg"));
     uint32_t shname_shstrtab = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".shstrtab", sizeof(".shstrtab"));
     Buffer strtab;
@@ -376,8 +493,16 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&body, rela_text.data, rela_text.len);
     size_t off_rela_data = body.len;
     buf_bytes(&body, rela_data.data, rela_data.len);
+    Buffer fakecc_dbg;
+    buffer_init(&fakecc_dbg);
+    int have_dbg = (m->num_dbg_lines > 0 || m->num_dbg_funcs > 0 ||
+                    m->num_dbg_globals > 0 || m->dbg_tu_name != ((void*)0));
+    if (have_dbg)
+        debug_serialize(m, &fakecc_dbg);
+    size_t off_fakecc_dbg = body.len;
+    buf_bytes(&body, fakecc_dbg.data, fakecc_dbg.len);
     size_t shoff = hdr_size + body.len;
-    unsigned shnum = 10;
+    unsigned shnum = have_dbg ? 11 : 10;
     unsigned shstrndx = 7;
     Buffer elf;
     buffer_init(&elf);
@@ -413,7 +538,12 @@ void emit_obj(const EmitModule *m, const char *path) {
     write_shdr(&elf, shname_rela_data, 4, 0,
                0, hdr_size + off_rela_data, rela_data.len, symtab_idx,
                3 , 8, 24);
+    if (have_dbg) {
+        write_shdr(&elf, shname_fakecc_dbg, 1, 0,
+                   0, hdr_size + off_fakecc_dbg, fakecc_dbg.len, 0, 0, 1, 0);
+    }
     (void)shstrndx; (void)symtab_idx; (void)strtab_idx; (void)first_global;
+    (void)shname_fakecc_dbg;
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "fakecc: cannot write '%s'\n", path); exit(1); }
     fwrite(elf.data, 1, elf.len, f);
@@ -424,12 +554,13 @@ void emit_obj(const EmitModule *m, const char *path) {
     buffer_free(&symtab);
     buffer_free(&rela_text);
     buffer_free(&rela_data);
+    buffer_free(&fakecc_dbg);
     buffer_free(&body);
     buffer_free(&elf);
 }
 void emit_elf(const EmitModule *m, const char *path) {
     EmitModule *arr = (EmitModule *)m;
-    emit_link(&arr, 1, path, ((void*)0), 0, 0, ((void*)0), 0);
+    emit_link(&arr, 1, path, ((void*)0), 0, 0, ((void*)0), 0, 0);
 }
 static uint64_t rd_u64(const unsigned char *p) {
     uint64_t v = 0;
@@ -470,6 +601,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
     const char *shstr = (const char *)buf + shstr_off;
     int symtab_idx = -1, rela_text_idx = -1, rela_data_idx = -1, strtab_idx = -1;
     int text_idx = -1, rodata_idx = -1, data_idx = -1, bss_idx = -1;
+    int fakecc_dbg_idx = -1;
     for (int s = 0; s < shnum; s++) {
         const unsigned char *sh = buf + shoff + (size_t)s * shentsize;
         uint32_t name_idx = rd_u32(sh);
@@ -483,6 +615,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
         else if (strcmp(sname, ".strtab") == 0 && type == 3) strtab_idx = s;
         else if (strcmp(sname, ".rela.text") == 0 && type == 4) rela_text_idx = s;
         else if (strcmp(sname, ".rela.data") == 0 && type == 4) rela_data_idx = s;
+        else if (strcmp(sname, ".fakecc_dbg") == 0 && type == 1) fakecc_dbg_idx = s;
     }
     const unsigned char *strtab_data = ((void*)0);
     size_t strtab_len = 0;
@@ -566,6 +699,14 @@ int emit_obj_read(const char *path, EmitModule *m) {
             uint32_t sym = (uint32_t)(rinfo >> 32);
             uint32_t type = (uint32_t)(rinfo & 0xffffffff);
             emit_module_add_data_reloc(m, (size_t)roff, type, (int)sym, (int32_t)raddend);
+        }
+    }
+    if (fakecc_dbg_idx >= 0) {
+        const unsigned char *sh = buf + shoff + (size_t)fakecc_dbg_idx * shentsize;
+        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+        if (sz > 0 && debug_deserialize(m, buf + off, (size_t)sz) != 0) {
+            fprintf(stderr, "fakecc: warning: ignoring corrupt .fakecc_dbg in '%s'\n",
+                    path);
         }
     }
     free(buf);

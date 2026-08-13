@@ -23,7 +23,7 @@ static IRModule compile_to_ir(const char *src) {
 
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir);
+    ir_generate(&tu, &ir, 0);
 
     token_array_free(&arr);
     tu_free(&tu);

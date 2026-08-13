@@ -25,6 +25,8 @@
  *   block_phi_info  — φ nodes per block (from mem2reg_place_phis)
  *   dead            — output: calloc'd bitmap, dead[i]=1 if instruction i
  *                     should be removed. Caller must free().
+ *   want_debug      — rewrite promoted STOREs into IR_DBG_VALUE markers
+ *                     instead of dropping them, for DWARF location lists.
  */
 void mem2reg_rename(
     IRFunction *fn,
@@ -33,7 +35,8 @@ void mem2reg_rename(
     const int *alloca_slots,
     size_t num_alloca,
     BlockPhiInfo *block_phi_info,
-    char **dead);
+    char **dead,
+    int want_debug);
 
 /* ------------------------------------------------------------------ */
 /* mem2reg — writeback phase                                           */
@@ -53,7 +56,8 @@ void mem2reg_writeback(
     IRFunction *fn,
     const CFG *cfg,
     BlockPhiInfo *block_phi_info,
-    char *dead);
+    char *dead,
+    int want_debug);
 
 /* ------------------------------------------------------------------ */
 /* mem2reg — full pass (convenience entry point)                       */
@@ -68,7 +72,12 @@ void mem2reg_writeback(
  *   4. Rename variables via dominator-tree DFS (mem2reg_rename)
  *   5. Resolve φ → COPY and rebuild flat IR (mem2reg_writeback)
  *
+ * When `want_debug` is set, each promoted store and each φ merge leaves an
+ * IR_DBG_VALUE marker behind so codegen can build a DWARF location list for
+ * the source variable.  The markers are invisible to every other pass, so
+ * enabling them cannot change generated code.
+ *
  * Returns: number of alloca variables promoted (0 if none). */
-int opt_mem2reg(IRFunction *fn);
+int opt_mem2reg(IRFunction *fn, int want_debug);
 
 #endif /* FAKECC_MEM2REG_H */

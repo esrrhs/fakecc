@@ -52,6 +52,71 @@ struct EmitReloc {
     uint32_t sym;
     int32_t addend;
 };typedef struct EmitReloc EmitReloc;
+enum DebugVarKind {
+    DBG_VAR_PARAM = 0,
+    DBG_VAR_LOCAL = 1,
+    DBG_VAR_GLOBAL = 2
+};typedef enum DebugVarKind DebugVarKind;
+enum DebugTypeTag {
+    DBG_TY_VOID = 0,
+    DBG_TY_INT = 1,
+    DBG_TY_FLOAT = 2,
+    DBG_TY_PTR = 3,
+    DBG_TY_ARRAY = 4,
+    DBG_TY_STRUCT = 5,
+    DBG_TY_BOOL = 6
+};typedef enum DebugTypeTag DebugTypeTag;
+enum DebugLocKind {
+    DBG_LOC_NONE = 0,
+    DBG_LOC_FBREG = 1,
+    DBG_LOC_REG = 2,
+    DBG_LOC_ADDR = 3
+};typedef enum DebugLocKind DebugLocKind;
+struct DebugLocRange {
+    size_t pc_start;
+    size_t pc_end;
+    DebugLocKind loc_kind;
+    int rbp_offset;
+    int dwarf_reg;
+};typedef struct DebugLocRange DebugLocRange;
+struct DebugVar {
+    char *name;
+    char *file;
+    int line;
+    DebugVarKind kind;
+    DebugTypeTag type_tag;
+    int width;
+    int is_unsigned;
+    int array_len;
+    DebugLocKind loc_kind;
+    int rbp_offset;
+    int dwarf_reg;
+    char *sym_name;
+    DebugLocRange *ranges;
+    size_t num_ranges;
+    size_t cap_ranges;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct DebugVar DebugVar;
+struct DebugLineEntry {
+    char *file;
+    int line;
+    int col;
+    size_t pc_off;
+};typedef struct DebugLineEntry DebugLineEntry;
+struct DebugFunc {
+    char *name;
+    char *file;
+    int line;
+    size_t start_pc;
+    size_t end_pc;
+    size_t prologue_end_pc;
+    size_t after_push_rbp_pc;
+    size_t after_mov_rbp_pc;
+    DebugVar *vars;
+    size_t num_vars;
+    size_t cap_vars;
+};typedef struct DebugFunc DebugFunc;
 struct EmitModule {
     Buffer text;
     Buffer rodata;
@@ -66,6 +131,16 @@ struct EmitModule {
     EmitReloc *data_relocs;
     size_t num_data_relocs;
     size_t cap_data_relocs;
+    char *dbg_tu_name;
+    DebugLineEntry *dbg_lines;
+    size_t num_dbg_lines;
+    size_t cap_dbg_lines;
+    DebugFunc *dbg_funcs;
+    size_t num_dbg_funcs;
+    size_t cap_dbg_funcs;
+    DebugVar *dbg_globals;
+    size_t num_dbg_globals;
+    size_t cap_dbg_globals;
 };typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
@@ -82,7 +157,8 @@ void emit_obj(const EmitModule *m, const char *path);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
-               const char **lib_paths, size_t num_lib_paths);
+               const char **lib_paths, size_t num_lib_paths,
+               int want_debug);
 void emit_elf(const EmitModule *m, const char *path);
 typedef int IRValue;
 enum IROpcode {
@@ -132,6 +208,7 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -155,6 +232,22 @@ struct IRInstArray {
     size_t len;
     size_t cap;
 };typedef struct IRInstArray IRInstArray;
+enum IRDebugVarKind {
+    IR_DBG_PARAM = 0,
+    IR_DBG_LOCAL = 1
+};typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugVar {
+    char *name;
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct IRDebugVar IRDebugVar;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -175,6 +268,9 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     IRValue sret_value;
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars;
+    size_t cap_dbg_vars;
 };typedef struct IRFunction IRFunction;
 struct IRFunctionArray {
     IRFunction *data;
@@ -714,11 +810,11 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
-void codegen(const IRModule *ir, EmitModule *out);
+void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 void lex(const char *source, const char *filename, TokenArray *out);
-void opt(IRModule *ir);
+void opt(IRModule *ir, int opt_level, int want_debug);
 void parse(const TokenArray *tokens, TranslationUnit *tu);
 void sema_check(const TranslationUnit *tu, int require_main);
 typedef struct FILE FILE;
@@ -791,7 +887,7 @@ static char *read_file(const char *path) {
     return buf;
 }
 static void compile_source(const char *source, const char *filename,
-                           EmitModule *out) {
+                           EmitModule *out, int opt_level, int want_debug) {
     TokenArray tokens;
     token_array_init(&tokens);
     lex(source, filename, &tokens);
@@ -801,10 +897,12 @@ static void compile_source(const char *source, const char *filename,
     sema_check(&tu, 0);
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir);
-    opt(&ir);
+    ir_generate(&tu, &ir, opt_level == 0);
+    opt(&ir, opt_level, want_debug);
     emit_module_init(out);
-    codegen(&ir, out);
+    if (want_debug)
+        out->dbg_tu_name = xstrdup(filename);
+    codegen(&ir, out, want_debug);
     ir_module_free(&ir);
     tu_free(&tu);
     token_array_free(&tokens);
@@ -814,9 +912,13 @@ static void module_free(EmitModule *m) {
 }
 static void usage(void) {
     fprintf(stderr,
-            "usage: fakecc [-c] [-nostdlib] [-nodefaultlibs] [-LDIR]... [-lLIB]...\n"
-            "              <input...> -o <output>\n"
+            "usage: fakecc [-c] [-g] [-O0|-O1] [-nostdlib] [-nodefaultlibs]\n"
+            "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
             "  (default)       link builtin rt/ (freestanding; no DT_NEEDED)\n"
+            "  -g              emit DWARF debug info (line numbers, variables);\n"
+            "                  independent of -O, never changes generated code\n"
+            "  -O0             keep locals in memory (skip SSA promotion)\n"
+            "  -O1             default: SSA promotion + folding + DCE\n"
             "  -nostdlib       do not link builtin rt/; use -l for system libs\n"
             "  -lLIB           link against libLIB.so (DT_NEEDED; optional interop)\n"
             "  -l:SONAME       link against exact soname SONAME\n"
@@ -978,6 +1080,8 @@ int main(int argc, char **argv) {
     int compile_only = 0;
     int nodefaultlibs = 0;
     int nostdlib = 0;
+    int want_debug = 0;
+    int opt_level = 1;
     const char *output_path = ((void*)0);
     const char **inputs = ((void*)0);
     int ninputs = 0;
@@ -990,6 +1094,12 @@ int main(int argc, char **argv) {
             compile_only = 1;
         } else if (strcmp(argv[i], "-nodefaultlibs") == 0) {
             nodefaultlibs = 1;
+        } else if (strcmp(argv[i], "-g") == 0) {
+            want_debug = 1;
+        } else if (strcmp(argv[i], "-O0") == 0) {
+            opt_level = 0;
+        } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
+            opt_level = 1;
         } else if (strcmp(argv[i], "-nostdlib") == 0) {
             nostdlib = 1;
         } else if (strcmp(argv[i], "-o") == 0) {
@@ -1036,7 +1146,7 @@ int main(int argc, char **argv) {
         }
         EmitModule em;
         char *src = read_file(inputs[0]);
-        compile_source(src, inputs[0], &em);
+        compile_source(src, inputs[0], &em, opt_level, want_debug);
         free(src);
         emit_obj(&em, output_path);
         module_free(&em);
@@ -1067,7 +1177,7 @@ int main(int argc, char **argv) {
             if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
         } else {
             char *src = read_file(inputs[i]);
-            compile_source(src, inputs[i], &mods[i]);
+            compile_source(src, inputs[i], &mods[i], opt_level, want_debug);
             free(src);
         }
         mod_ptrs[i] = &mods[i];
@@ -1075,14 +1185,14 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nrt; i++) {
         char *path = path_join(rt_dir, rt_file_at(i));
         char *src = read_file(path);
-        compile_source(src, path, &mods[ninputs + i]);
+        compile_source(src, path, &mods[ninputs + i], opt_level, 0);
         free(src);
         free(path);
         mod_ptrs[ninputs + i] = &mods[ninputs + i];
     }
     emit_link(mod_ptrs, (size_t)nmods, output_path,
               (const char **)needed, (size_t)num_needed, nodefaultlibs,
-              (const char **)lib_paths, (size_t)num_lib_paths);
+              (const char **)lib_paths, (size_t)num_lib_paths, want_debug);
     for (int i = 0; i < nmods; i++) module_free(&mods[i]);
     free(mod_ptrs);
     free(mods);

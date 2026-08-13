@@ -156,7 +156,7 @@ static void test_ra_after_mem2reg(void) {
     push_inst(&fn.insts, IR_RETURN, -1,  2, -1, 0);
 
     /* Run mem2reg to promote to SSA form. */
-    opt_mem2reg(&fn);
+    opt_mem2reg(&fn, 0);
 
     /* After mem2reg, next_value_id may have grown (phi result ids). */
     /* Run register allocator. */

@@ -98,7 +98,7 @@ static void test_rename_simple(void) {
     fn.next_value_id = next_id;
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    mem2reg_rename(&fn, &cfg, &dt, alloca_slots, 1, bp, &dead);
+    mem2reg_rename(&fn, &cfg, &dt, alloca_slots, 1, bp, &dead, 0);
 
     /* Verify: ALLOCA is dead, STORE is dead, LOAD→COPY, RETURN lives */
     T_ASSERT(dead[0]);  /* ALLOCA dead */
@@ -156,7 +156,7 @@ static void test_rename_two_stores(void) {
     fn.next_value_id = next_id;
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    mem2reg_rename(&fn, &cfg, &dt, alloca_slots, 1, bp, &dead);
+    mem2reg_rename(&fn, &cfg, &dt, alloca_slots, 1, bp, &dead, 0);
 
     /* ALLOCA dead, both STOREs dead */
     T_ASSERT(dead[0]);
@@ -207,7 +207,7 @@ static void test_rename_undef_read(void) {
     fn.next_value_id = next_id;
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    mem2reg_rename(&fn, &cfg, &dt, alloca_slots, 1, bp, &dead);
+    mem2reg_rename(&fn, &cfg, &dt, alloca_slots, 1, bp, &dead, 0);
 
     /* ALLOCA dead */
     T_ASSERT(dead[0]);
@@ -285,7 +285,7 @@ static void test_rename_diamond(void) {
     fn.next_value_id = next_id;
     fn.loc = (SourceLoc){NULL, 0, 0};
 
-    mem2reg_rename(&fn, &cfg, &dt, alloca_slots, 1, bp, &dead);
+    mem2reg_rename(&fn, &cfg, &dt, alloca_slots, 1, bp, &dead, 0);
 
     /* The φ in merge should now have 2 args (one from each predecessor) */
     T_ASSERT_EQ_INT((int)bp[merge].phis[0].num_args, 2);

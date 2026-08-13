@@ -86,6 +86,7 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -109,6 +110,22 @@ struct IRInstArray {
     size_t len;
     size_t cap;
 };typedef struct IRInstArray IRInstArray;
+enum IRDebugVarKind {
+    IR_DBG_PARAM = 0,
+    IR_DBG_LOCAL = 1
+};typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugVar {
+    char *name;
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct IRDebugVar IRDebugVar;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -129,6 +146,9 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     IRValue sret_value;
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars;
+    size_t cap_dbg_vars;
 };typedef struct IRFunction IRFunction;
 struct IRFunctionArray {
     IRFunction *data;
@@ -668,7 +688,7 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
 int scalar_constfold(IRFunction *fn);
 int scalar_dce(IRFunction *fn);
@@ -811,6 +831,7 @@ int scalar_dce(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->op == IR_DBG_VALUE) continue;
         if (inst->a >= 0 && inst->a < fn->next_value_id) used[inst->a] = 1;
         if (inst->op != IR_CBR &&
             inst->b >= 0 && inst->b < fn->next_value_id) used[inst->b] = 1;
@@ -881,6 +902,7 @@ void scalar_renumber(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->op == IR_DBG_VALUE) continue;
         if (inst->dst >= 0 && map[inst->dst] == -1)
             map[inst->dst] = next++;
         if (inst->a >= 0 && map[inst->a] == -1)
@@ -899,6 +921,10 @@ void scalar_renumber(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->op == IR_DBG_VALUE) {
+            if (inst->a >= 0) inst->a = map[inst->a];
+            continue;
+        }
         if (inst->dst >= 0) inst->dst = map[inst->dst];
         if (inst->a >= 0) inst->a = map[inst->a];
         if (inst->op != IR_CBR && inst->b >= 0) inst->b = map[inst->b];
@@ -910,6 +936,11 @@ void scalar_renumber(IRFunction *fn) {
                 if (v >= 0) inst->call_args[k] = map[v];
             }
         }
+    }
+    for (size_t i = 0; i < fn->num_dbg_vars; i++) {
+        int slot = fn->dbg_vars[i].alloca_ssa;
+        fn->dbg_vars[i].alloca_ssa =
+            (slot >= 0 && slot < fn->next_value_id) ? map[slot] : -1;
     }
     if (fn->value_meta_cap > 0) {
         int *old_width = fn->value_width;

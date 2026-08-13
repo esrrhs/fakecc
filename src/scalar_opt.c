@@ -115,6 +115,9 @@ int scalar_dce(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        /* A debug marker must not keep a value alive, or -g would suppress
+         * dead-code elimination and change the generated code. */
+        if (inst->op == IR_DBG_VALUE) continue;
         if (inst->a >= 0 && inst->a < fn->next_value_id) used[inst->a] = 1;
         if (inst->op != IR_CBR &&
             inst->b >= 0 && inst->b < fn->next_value_id) used[inst->b] = 1;
@@ -203,6 +206,9 @@ void scalar_renumber(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        /* Debug markers observe ids, they never introduce them: giving one a
+         * fresh id would inflate the frame and change codegen under -g. */
+        if (inst->op == IR_DBG_VALUE) continue;
         if (inst->dst >= 0 && map[inst->dst] == -1)
             map[inst->dst] = next++;
         if (inst->a >= 0 && map[inst->a] == -1)
@@ -223,6 +229,12 @@ void scalar_renumber(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->op == IR_DBG_VALUE) {
+            /* map[] is -1 when the definition was optimized away; the
+             * variable then has no location over this range. */
+            if (inst->a >= 0) inst->a = map[inst->a];
+            continue;
+        }
         if (inst->dst >= 0) inst->dst = map[inst->dst];
         if (inst->a >= 0) inst->a = map[inst->a];
         if (inst->op != IR_CBR && inst->b >= 0) inst->b = map[inst->b];
@@ -234,6 +246,15 @@ void scalar_renumber(IRFunction *fn) {
                 if (v >= 0) inst->call_args[k] = map[v];
             }
         }
+    }
+
+    /* Stack-resident debug variables point at their IR_ALLOCA id, which the
+     * compaction above moved.  A -1 here means the alloca was promoted away,
+     * in which case IR_DBG_VALUE markers describe the variable instead. */
+    for (size_t i = 0; i < fn->num_dbg_vars; i++) {
+        int slot = fn->dbg_vars[i].alloca_ssa;
+        fn->dbg_vars[i].alloca_ssa =
+            (slot >= 0 && slot < fn->next_value_id) ? map[slot] : -1;
     }
 
     /* Remap per-value metadata (width / signedness / float) through the same

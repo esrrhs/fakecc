@@ -4,8 +4,11 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 FAKECC=${1:-"$ROOT/build/fakecc"}
+shift || true
 MANIFEST=${MANIFEST:-"$ROOT/test/e2e/difftest_manifest.txt"}
-SUITE_DIR="$ROOT/test/e2e"
+SUITE_DIR="$ROOT/test/e2e/cases"
+# Extra fakecc flags (e.g. -O0); gcc remains the unmodified oracle.
+FCC_FLAGS="${CC_FLAGS:-} $*"
 
 if [ ! -x "$FAKECC" ]; then
     echo "difftest: fakecc not executable: $FAKECC" >&2
@@ -29,4 +32,4 @@ while IFS= read -r name || [ -n "$name" ]; do
     files+=("$f")
 done < "$MANIFEST"
 
-exec bash "$ROOT/tools/difftest.sh" -c "$FAKECC" "${files[@]}"
+exec bash "$ROOT/tools/difftest.sh" -c "$FAKECC" -f "$FCC_FLAGS" "${files[@]}"

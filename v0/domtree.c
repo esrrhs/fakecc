@@ -86,6 +86,7 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -109,6 +110,22 @@ struct IRInstArray {
     size_t len;
     size_t cap;
 };typedef struct IRInstArray IRInstArray;
+enum IRDebugVarKind {
+    IR_DBG_PARAM = 0,
+    IR_DBG_LOCAL = 1
+};typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugVar {
+    char *name;
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct IRDebugVar IRDebugVar;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -129,6 +146,9 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     IRValue sret_value;
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars;
+    size_t cap_dbg_vars;
 };typedef struct IRFunction IRFunction;
 struct IRFunctionArray {
     IRFunction *data;
@@ -668,7 +688,7 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
 struct CFGBlock {
     int id;

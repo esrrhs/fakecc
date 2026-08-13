@@ -86,6 +86,7 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -109,6 +110,22 @@ struct IRInstArray {
     size_t len;
     size_t cap;
 };typedef struct IRInstArray IRInstArray;
+enum IRDebugVarKind {
+    IR_DBG_PARAM = 0,
+    IR_DBG_LOCAL = 1
+};typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugVar {
+    char *name;
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct IRDebugVar IRDebugVar;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -129,6 +146,9 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     IRValue sret_value;
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars;
+    size_t cap_dbg_vars;
 };typedef struct IRFunction IRFunction;
 struct IRFunctionArray {
     IRFunction *data;
@@ -668,7 +688,7 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
 struct CFGBlock {
     int id;
@@ -728,13 +748,15 @@ void mem2reg_rename(
     const int *alloca_slots,
     size_t num_alloca,
     BlockPhiInfo *block_phi_info,
-    char **dead);
+    char **dead,
+    int want_debug);
 void mem2reg_writeback(
     IRFunction *fn,
     const CFG *cfg,
     BlockPhiInfo *block_phi_info,
-    char *dead);
-int opt_mem2reg(IRFunction *fn);
+    char *dead,
+    int want_debug);
+int opt_mem2reg(IRFunction *fn, int want_debug);
 typedef struct FILE FILE;
 extern FILE *stderr;
 extern FILE *stdin;
@@ -880,16 +902,44 @@ static void inst_array_free_contents(IRInstArray *a) {
     free(a->data);
     a->data = ((void*)0); a->len = 0; a->cap = 0;
 }
+static int dbg_var_for_slot(const IRFunction *fn, int slot) {
+    for (size_t i = 0; i < fn->num_dbg_vars; i++)
+        if (fn->dbg_vars[i].alloca_ssa == slot) return (int)i;
+    return -1;
+}
+static void make_dbg_value(IRInst *inst, int var, IRValue val) {
+    inst->op = IR_DBG_VALUE;
+    inst->dst = -1;
+    inst->a = val;
+    inst->b = -1;
+    inst->imm = var;
+    inst->call_name = ((void*)0);
+    inst->call_nargs = 0;
+}
 void mem2reg_writeback(
     IRFunction *fn,
     const CFG *cfg,
     BlockPhiInfo *block_phi_info,
-    char *dead)
+    char *dead,
+    int want_debug)
 {
     IRInstArray out;
     inst_array_init(&out);
     for (size_t bi = 0; bi < cfg->num; bi++) {
         const CFGBlock *blk = &cfg->blocks[bi];
+        if (want_debug) {
+            for (size_t phi_i = 0; phi_i < block_phi_info[bi].num_phis; phi_i++) {
+                IRPhi *phi = &block_phi_info[bi].phis[phi_i];
+                int var = dbg_var_for_slot(fn, phi->alloca_slot);
+                if (var < 0) continue;
+                IRInst marker;
+                memset(&marker, 0, sizeof(marker));
+                marker.width = 8;
+                marker.loc = phi->loc;
+                make_dbg_value(&marker, var, phi->dst);
+                inst_array_push(&out, marker);
+            }
+        }
         size_t term_idx = blk->end;
         if (blk->end > blk->start) {
             IROpcode last_op = fn->insts.data[blk->end - 1].op;
@@ -978,7 +1028,8 @@ static void mem2reg_rename_dfs(
     size_t num_alloca,
     BlockPhiInfo *block_phi_info,
     char *d,
-    RenameStack *stacks)
+    RenameStack *stacks,
+    int want_debug)
 {
     const CFGBlock *blk = &cfg->blocks[b];
     size_t *entry_sizes = xmalloc(num_alloca * sizeof(size_t));
@@ -1007,8 +1058,13 @@ static void mem2reg_rename_dfs(
         } else if (inst->op == IR_STORE) {
             size_t ai = find_alloca_slot(alloca_slots, num_alloca, inst->a);
             if (ai != (size_t)-1) {
-                rstack_push(&stacks[ai], inst->b);
-                d[i] = 1;
+                IRValue stored = inst->b;
+                rstack_push(&stacks[ai], stored);
+                int var = want_debug ? dbg_var_for_slot(fn, inst->a) : -1;
+                if (var >= 0)
+                    make_dbg_value(inst, var, stored);
+                else
+                    d[i] = 1;
             }
         }
     }
@@ -1027,7 +1083,7 @@ static void mem2reg_rename_dfs(
     for (size_t i = 0; i < dt->n; i++) {
         if (dt->idom[i] == b)
             mem2reg_rename_dfs((int)i, fn, cfg, dt, alloca_slots, num_alloca,
-                               block_phi_info, d, stacks);
+                               block_phi_info, d, stacks, want_debug);
     }
     for (size_t ai = 0; ai < num_alloca; ai++)
         while (stacks[ai].len > entry_sizes[ai])
@@ -1041,7 +1097,8 @@ void mem2reg_rename(
     const int *alloca_slots,
     size_t num_alloca,
     BlockPhiInfo *block_phi_info,
-    char **dead)
+    char **dead,
+    int want_debug)
 {
     size_t ninst = fn->insts.len;
     *dead = calloc(ninst, 1);
@@ -1062,11 +1119,11 @@ void mem2reg_rename(
     RenameStack *stacks = xmalloc(num_alloca * sizeof(RenameStack));
     for (size_t ai = 0; ai < num_alloca; ai++) rstack_init(&stacks[ai]);
     mem2reg_rename_dfs(cfg->entry, fn, cfg, dt, alloca_slots, num_alloca,
-                       block_phi_info, d, stacks);
+                       block_phi_info, d, stacks, want_debug);
     for (size_t ai = 0; ai < num_alloca; ai++) rstack_free(&stacks[ai]);
     free(stacks);
 }
-int opt_mem2reg(IRFunction *fn)
+int opt_mem2reg(IRFunction *fn, int want_debug)
 {
     CFG cfg;
     cfg_build(&cfg, &fn->insts);
@@ -1127,8 +1184,9 @@ int opt_mem2reg(IRFunction *fn)
     for (size_t bi = 0; bi < cfg.num; bi++) free(block_stores[bi]);
     free(block_stores);
     char *dead = ((void*)0);
-    mem2reg_rename(fn, &cfg, &dt, alloca_slots, num_alloca, bp, &dead);
-    mem2reg_writeback(fn, &cfg, bp, dead);
+    mem2reg_rename(fn, &cfg, &dt, alloca_slots, num_alloca, bp, &dead,
+                   want_debug);
+    mem2reg_writeback(fn, &cfg, bp, dead, want_debug);
     block_phi_info_free(bp, cfg.num);
     free(alloca_slots);
     free(dead);

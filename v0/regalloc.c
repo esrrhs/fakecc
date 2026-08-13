@@ -86,6 +86,7 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -109,6 +110,22 @@ struct IRInstArray {
     size_t len;
     size_t cap;
 };typedef struct IRInstArray IRInstArray;
+enum IRDebugVarKind {
+    IR_DBG_PARAM = 0,
+    IR_DBG_LOCAL = 1
+};typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugVar {
+    char *name;
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct IRDebugVar IRDebugVar;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -129,6 +146,9 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     IRValue sret_value;
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars;
+    size_t cap_dbg_vars;
 };typedef struct IRFunction IRFunction;
 struct IRFunctionArray {
     IRFunction *data;
@@ -668,7 +688,7 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
 enum Reg {
     REG_RAX = 0,
@@ -848,7 +868,8 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
     liv_init(liv, nv);
     for (size_t i = 0; i < fn->insts.len; i++) {
         const IRInst *inst = &fn->insts.data[i];
-        if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->op == IR_LABEL || inst->op == IR_BR ||
+            inst->op == IR_DBG_VALUE) continue;
         if (inst->dst >= 0 && inst->dst < nv) {
             liv[inst->dst].def_point = (int)i;
         }
@@ -963,7 +984,8 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
         const CFGBlock *blk = &cfg->blocks[bi];
         for (size_t i = blk->start; i < blk->end; i++) {
             const IRInst *inst = &fn->insts.data[i];
-            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->op == IR_LABEL || inst->op == IR_BR ||
+            inst->op == IR_DBG_VALUE) continue;
             if (inst->a >= 0 && inst->a < use_b[bi].nv) {
                 if (!bs_test(&def_b[bi], inst->a))
                     bs_set(&use_b[bi], inst->a);
@@ -1045,7 +1067,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         bs_copy(&live, &out_b[bi]);
         for (size_t i = blk->end; i > blk->start; i--) {
             const IRInst *inst = &fn->insts.data[i - 1];
-            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->op == IR_LABEL || inst->op == IR_BR ||
+            inst->op == IR_DBG_VALUE) continue;
             if (inst->op == IR_CALL) {
                 for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], over; _w && ((over = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
                     if ((int)over != inst->dst &&
@@ -1101,7 +1124,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         bs_copy(&live, &out_b[bi]);
         for (size_t i = blk->end; i > blk->start; i--) {
             const IRInst *inst = &fn->insts.data[i - 1];
-            if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
+        if (inst->op == IR_LABEL || inst->op == IR_BR ||
+            inst->op == IR_DBG_VALUE) continue;
             if (inst->dst >= 0 && inst->dst < nv &&
                 value_in_class(fn, inst->dst, float_class)) {
                 for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], other; _w && ((other = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {

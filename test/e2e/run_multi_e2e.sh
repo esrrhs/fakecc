@@ -3,6 +3,9 @@
 set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
+shift || true
+# Extra compiler flags (e.g. -O0) so the suite can run once per opt level.
+CC_EXTRA="${CC_FLAGS:-} $*"
 CC_TIMEOUT=${CC_TIMEOUT:-30}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 FAIL=0
@@ -14,7 +17,7 @@ run_multi() {
     local out="$TMP/prog"
     rm -f "$out"
     local cc_rc=0
-    timeout "$CC_TIMEOUT" "$FAKECC" "$@" -o "$out" 2>"$TMP/cc.err" || cc_rc=$?
+    timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$@" -o "$out" 2>"$TMP/cc.err" || cc_rc=$?
     if [ "$cc_rc" != "0" ]; then
         echo "FAIL multi $* (compile exited $cc_rc: $(head -1 "$TMP/cc.err"))"
         FAIL=1
@@ -38,7 +41,7 @@ run_multi_fail() {
     local out="$TMP/prog"
     rm -f "$out"
     local cc_rc=0
-    timeout "$CC_TIMEOUT" "$FAKECC" "$@" -o "$out" 2>"$TMP/cc.err" || cc_rc=$?
+    timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$@" -o "$out" 2>"$TMP/cc.err" || cc_rc=$?
     if [ "$cc_rc" = "0" ]; then
         echo "FAIL multi-fail $* (expected link/compile error, but succeeded)"
         FAIL=1
@@ -68,8 +71,8 @@ run_multi 10 "$TMP/s1.c" "$TMP/s2.c"
 # Two-stage: compile to .o then link.
 echo 'package main; int mul(int a, int b) { return a * b; }' > "$TMP/mul.c"
 echo 'package main; int mul(int a, int b); int main() { return mul(6, 7); }' > "$TMP/main.c"
-"$FAKECC" -c "$TMP/mul.c" -o "$TMP/mul.o"
-"$FAKECC" -c "$TMP/main.c" -o "$TMP/main.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/mul.c" -o "$TMP/mul.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/main.c" -o "$TMP/main.o"
 run_multi 42 "$TMP/mul.o" "$TMP/main.o"
 
 # Cross-file libc call (PLT).  (`return;` required — void functions without
@@ -92,7 +95,7 @@ run_multi 42 "$TMP/w.c" "$TMP/r.c"
 # Mixed .o + .c link.
 echo 'package main; int twice(int x) { return x + x; }' > "$TMP/twice.c"
 echo 'package main; int twice(int x); int main(void) { return twice(21); }' > "$TMP/use_twice.c"
-"$FAKECC" -c "$TMP/twice.c" -o "$TMP/twice.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/twice.c" -o "$TMP/twice.o"
 run_multi 42 "$TMP/twice.o" "$TMP/use_twice.c"
 
 # Two static helpers with the same local name, both called from main.
@@ -108,8 +111,8 @@ run_multi_fail "$TMP/nomain.c"
 # Negative: two object files, still no main.
 echo 'package main; int a(void) { return 1; }' > "$TMP/nm1.c"
 echo 'package main; int b(void) { return 2; }' > "$TMP/nm2.c"
-"$FAKECC" -c "$TMP/nm1.c" -o "$TMP/nm1.o"
-"$FAKECC" -c "$TMP/nm2.c" -o "$TMP/nm2.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/nm1.c" -o "$TMP/nm1.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/nm2.c" -o "$TMP/nm2.o"
 run_multi_fail "$TMP/nm1.o" "$TMP/nm2.o"
 
 exit $FAIL

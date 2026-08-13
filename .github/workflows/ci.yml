@@ -75,15 +75,28 @@ jobs:
 
       # A fixed point alone does not prove correctness — a deterministic but
       # wrong compiler also reproduces itself.  Re-run the full functional
-      # suites with the self-hosted binary.
+      # suites with the self-hosted binary, once per optimization level: -O0
+      # and -O1 differ in whether scalars are promoted out of memory, so they
+      # exercise largely separate code in the compiler.
       - name: e2e with the self-hosted compiler
-        run: bash test/e2e/run_e2e.sh v0/fakecc-1
+        run: |
+          bash test/e2e/run_e2e.sh v0/fakecc-1 -O0
+          bash test/e2e/run_e2e.sh v0/fakecc-1 -O1
 
       - name: e2e_multi with the self-hosted compiler
-        run: bash test/e2e/run_multi_e2e.sh v0/fakecc-1
+        run: |
+          bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O0
+          bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O1
 
       - name: difftest with the self-hosted compiler
-        run: bash test/e2e/run_difftest.sh v0/fakecc-1
+        run: |
+          bash test/e2e/run_difftest.sh v0/fakecc-1 -O0
+          bash test/e2e/run_difftest.sh v0/fakecc-1 -O1
 
       - name: e2e_shlib with the self-hosted compiler
-        run: bash test/e2e/run_shlib_e2e.sh v0/fakecc-1
+        run: |
+          bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O0
+          bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O1
+
+      - name: gdb debug info with the self-hosted compiler
+        run: bash test/e2e/run_gdb_e2e.sh v0/fakecc-1

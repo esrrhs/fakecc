@@ -52,6 +52,71 @@ struct EmitReloc {
     uint32_t sym;
     int32_t addend;
 };typedef struct EmitReloc EmitReloc;
+enum DebugVarKind {
+    DBG_VAR_PARAM = 0,
+    DBG_VAR_LOCAL = 1,
+    DBG_VAR_GLOBAL = 2
+};typedef enum DebugVarKind DebugVarKind;
+enum DebugTypeTag {
+    DBG_TY_VOID = 0,
+    DBG_TY_INT = 1,
+    DBG_TY_FLOAT = 2,
+    DBG_TY_PTR = 3,
+    DBG_TY_ARRAY = 4,
+    DBG_TY_STRUCT = 5,
+    DBG_TY_BOOL = 6
+};typedef enum DebugTypeTag DebugTypeTag;
+enum DebugLocKind {
+    DBG_LOC_NONE = 0,
+    DBG_LOC_FBREG = 1,
+    DBG_LOC_REG = 2,
+    DBG_LOC_ADDR = 3
+};typedef enum DebugLocKind DebugLocKind;
+struct DebugLocRange {
+    size_t pc_start;
+    size_t pc_end;
+    DebugLocKind loc_kind;
+    int rbp_offset;
+    int dwarf_reg;
+};typedef struct DebugLocRange DebugLocRange;
+struct DebugVar {
+    char *name;
+    char *file;
+    int line;
+    DebugVarKind kind;
+    DebugTypeTag type_tag;
+    int width;
+    int is_unsigned;
+    int array_len;
+    DebugLocKind loc_kind;
+    int rbp_offset;
+    int dwarf_reg;
+    char *sym_name;
+    DebugLocRange *ranges;
+    size_t num_ranges;
+    size_t cap_ranges;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct DebugVar DebugVar;
+struct DebugLineEntry {
+    char *file;
+    int line;
+    int col;
+    size_t pc_off;
+};typedef struct DebugLineEntry DebugLineEntry;
+struct DebugFunc {
+    char *name;
+    char *file;
+    int line;
+    size_t start_pc;
+    size_t end_pc;
+    size_t prologue_end_pc;
+    size_t after_push_rbp_pc;
+    size_t after_mov_rbp_pc;
+    DebugVar *vars;
+    size_t num_vars;
+    size_t cap_vars;
+};typedef struct DebugFunc DebugFunc;
 struct EmitModule {
     Buffer text;
     Buffer rodata;
@@ -66,6 +131,16 @@ struct EmitModule {
     EmitReloc *data_relocs;
     size_t num_data_relocs;
     size_t cap_data_relocs;
+    char *dbg_tu_name;
+    DebugLineEntry *dbg_lines;
+    size_t num_dbg_lines;
+    size_t cap_dbg_lines;
+    DebugFunc *dbg_funcs;
+    size_t num_dbg_funcs;
+    size_t cap_dbg_funcs;
+    DebugVar *dbg_globals;
+    size_t num_dbg_globals;
+    size_t cap_dbg_globals;
 };typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
@@ -82,7 +157,8 @@ void emit_obj(const EmitModule *m, const char *path);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
-               const char **lib_paths, size_t num_lib_paths);
+               const char **lib_paths, size_t num_lib_paths,
+               int want_debug);
 void emit_elf(const EmitModule *m, const char *path);
 typedef int IRValue;
 enum IROpcode {
@@ -132,6 +208,7 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -155,6 +232,22 @@ struct IRInstArray {
     size_t len;
     size_t cap;
 };typedef struct IRInstArray IRInstArray;
+enum IRDebugVarKind {
+    IR_DBG_PARAM = 0,
+    IR_DBG_LOCAL = 1
+};typedef enum IRDebugVarKind IRDebugVarKind;
+struct IRDebugVar {
+    char *name;
+    SourceLoc loc;
+    IRDebugVarKind kind;
+    int type_kind;
+    int width;
+    int is_unsigned;
+    int is_bool;
+    int array_len;
+    int alloca_ssa;
+    int param_idx;
+};typedef struct IRDebugVar IRDebugVar;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -175,6 +268,9 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     IRValue sret_value;
+    IRDebugVar *dbg_vars;
+    size_t num_dbg_vars;
+    size_t cap_dbg_vars;
 };typedef struct IRFunction IRFunction;
 struct IRFunctionArray {
     IRFunction *data;
@@ -714,9 +810,27 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir);
+void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
-void codegen(const IRModule *ir, EmitModule *out);
+void codegen(const IRModule *ir, EmitModule *out, int want_debug);
+void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
+                      Buffer *debug_abbrev, Buffer *debug_info,
+                      Buffer *debug_str, Buffer *debug_line,
+                      Buffer *debug_frame, Buffer *debug_loc);
+void debug_serialize(const EmitModule *m, Buffer *out);
+int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len);
+void emit_module_add_dbg_line(EmitModule *m, const char *file, int line,
+                              int col, size_t pc_off);
+int emit_module_add_dbg_func(EmitModule *m, const char *name,
+                              const char *file, int line, size_t start_pc);
+void emit_module_dbg_func_end(EmitModule *m, int func_idx, size_t end_pc,
+                              size_t prologue_end_pc);
+void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
+                                size_t after_push_rbp_pc,
+                                size_t after_mov_rbp_pc);
+void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v);
+void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v);
+void debug_var_release(DebugVar *v);
 enum Reg {
     REG_RAX = 0,
     REG_RCX = 1,
@@ -1490,6 +1604,11 @@ struct FnAddrPatch {
     size_t patch_off;
     char *fn_name;
 };typedef struct FnAddrPatch FnAddrPatch;
+struct DbgObs {
+    int var;
+    int value;
+    size_t pc;
+};typedef struct DbgObs DbgObs;
 static void collect_callee_saved(const RAResult *ra, int used[3]) {
     used[0] = used[1] = used[2] = 0;
     if (!ra) return;
@@ -1618,6 +1737,70 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
         }
     }
 }
+static int reg_to_dwarf(int r) {
+    static const int map[16] = {
+           0, 2, 1, 3, 7, 6, 4, 5,
+           8, 9, 10, 11, 12, 13, 14, 15
+    };
+    if (r >= 0 && r < 16) return map[r];
+    return -1;
+}
+static void value_home(const IRFunction *fn, int v, int gp_spill_area,
+                       DebugLocKind *kind, int *rbp_offset, int *dwarf_reg) {
+    *kind = DBG_LOC_NONE;
+    *rbp_offset = 0;
+    *dwarf_reg = -1;
+    if (v < 0) return;
+    if (value_is_float_class(fn, v)) {
+        const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
+        if (!ra_xmm || v >= ra_xmm->num_values) return;
+        if (ra_xmm->reg[v] >= 0) {
+            *kind = DBG_LOC_REG;
+            *dwarf_reg = 17 + ra_xmm->reg[v];
+        } else {
+            *kind = DBG_LOC_FBREG;
+            *rbp_offset = spill_offset_xmm(ra_xmm->spill_slot[v], gp_spill_area);
+        }
+        return;
+    }
+    const RAResult *ra = (const RAResult *)fn->ra;
+    if (!ra || v >= ra->num_values) return;
+    if (ra->reg[v] >= 0) {
+        *kind = DBG_LOC_REG;
+        *dwarf_reg = reg_to_dwarf(ra->reg[v]);
+        if (*dwarf_reg < 0) *kind = DBG_LOC_NONE;
+    } else {
+        *kind = DBG_LOC_FBREG;
+        *rbp_offset = spill_offset(ra->spill_slot[v]);
+    }
+}
+static void dbg_var_add_range(DebugVar *dv, size_t pc_start, size_t pc_end,
+                              DebugLocKind kind, int rbp_offset, int dwarf_reg) {
+    if (kind == DBG_LOC_NONE || pc_end <= pc_start) return;
+    if (dv->num_ranges >= dv->cap_ranges) {
+        dv->cap_ranges = dv->cap_ranges ? dv->cap_ranges * 2 : 4;
+        dv->ranges = xrealloc(dv->ranges,
+                              dv->cap_ranges * sizeof(DebugLocRange));
+    }
+    DebugLocRange *r = &dv->ranges[dv->num_ranges++];
+    r->pc_start = pc_start;
+    r->pc_end = pc_end;
+    r->loc_kind = kind;
+    r->rbp_offset = rbp_offset;
+    r->dwarf_reg = dwarf_reg;
+}
+static DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
+    if (is_bool) return DBG_TY_BOOL;
+    switch (type_kind) {
+    case TY_VOID: return DBG_TY_VOID;
+    case TY_INT: return DBG_TY_INT;
+    case TY_FLOAT: return DBG_TY_FLOAT;
+    case TY_PTR: return DBG_TY_PTR;
+    case TY_ARRAY: return DBG_TY_ARRAY;
+    case TY_STRUCT: return DBG_TY_STRUCT;
+    default: return DBG_TY_INT;
+    }
+}
 static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
     emit_add_rsp_imm32(b, stack_size);
     if (cs_used[2]) emit_pop_r(b, REG_R13);
@@ -1626,7 +1809,7 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
     emit_byte(b, 0x5D);
     emit_byte(b, 0xC3);
 }
-void codegen(const IRModule *ir, EmitModule *out) {
+void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     for (size_t gi = 0; gi < ir->globals.len; gi++) {
         const IRGlobal *g = &ir->globals.data[gi];
         uint8_t binding = g->is_static ? 0 : 1 ;
@@ -1657,6 +1840,22 @@ void codegen(const IRModule *ir, EmitModule *out) {
             emit_module_add_data_reloc(out, off + g->fixups[fi].offset,
                                       10, tsym, 0);
         }
+        if (want_debug && !g->is_readonly) {
+            DebugVar gv;
+            memset(&gv, 0, sizeof(gv));
+            gv.name = g->name;
+            gv.file = (char *)g->loc.file;
+            gv.line = g->loc.line;
+            gv.kind = DBG_VAR_GLOBAL;
+            gv.type_tag = DBG_TY_INT;
+            gv.width = g->size;
+            gv.is_unsigned = 0;
+            gv.loc_kind = DBG_LOC_ADDR;
+            gv.sym_name = g->name;
+            gv.alloca_ssa = -1;
+            gv.param_idx = -1;
+            emit_module_add_dbg_global(out, &gv);
+        }
     }
     CallPatch *call_patches = ((void*)0);
     size_t num_call_patches = 0, cap_call_patches = 0;
@@ -1667,6 +1866,17 @@ void codegen(const IRModule *ir, EmitModule *out) {
         const RAResult *ra = (const RAResult *)fn->ra;
         const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
         size_t start_offset = out->text.len;
+        int dbg_func_idx = -1;
+        size_t prologue_end_pc = start_offset;
+        DbgObs *dbg_obs = ((void*)0);
+        size_t num_dbg_obs = 0, cap_dbg_obs = 0;
+        if (want_debug) {
+            dbg_func_idx = emit_module_add_dbg_func(out, fn->name, fn->loc.file,
+                                                    fn->loc.line, start_offset);
+            if (fn->loc.file && fn->loc.line > 0)
+                emit_module_add_dbg_line(out, fn->loc.file, fn->loc.line,
+                                         fn->loc.col, start_offset);
+        }
         int cs_used[3];
         collect_callee_saved(ra, cs_used);
         int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
@@ -1707,9 +1917,14 @@ void codegen(const IRModule *ir, EmitModule *out) {
         curr_cs_count = cs_count;
         if (((cs_count) & 1) != 0) stack_size += 8;
         emit_byte(&out->text, 0x55);
+        size_t after_push_rbp_pc = out->text.len;
         emit_rex_w(&out->text);
         emit_byte(&out->text, 0x89);
         emit_byte(&out->text, 0xE5);
+        size_t after_mov_rbp_pc = out->text.len;
+        if (want_debug && dbg_func_idx >= 0)
+            emit_module_dbg_func_frame(out, dbg_func_idx, after_push_rbp_pc,
+                                       after_mov_rbp_pc);
         if (cs_used[0]) emit_push_r(&out->text, REG_RBX);
         if (cs_used[1]) emit_push_r(&out->text, REG_R12);
         if (cs_used[2]) emit_push_r(&out->text, REG_R13);
@@ -1843,6 +2058,8 @@ void codegen(const IRModule *ir, EmitModule *out) {
                 }
             }
         }
+        prologue_end_pc = out->text.len;
+        int prologue_end_found = 0;
         int nlabels = fn->next_label_id;
         size_t *label_off = ((void*)0);
         if (nlabels > 0) {
@@ -1853,6 +2070,29 @@ void codegen(const IRModule *ir, EmitModule *out) {
         size_t num_patches = 0, cap_patches = 0;
         for (size_t j = 0; j < fn->insts.len; j++) {
             const IRInst *inst = &fn->insts.data[j];
+            if (inst->op == IR_DBG_VALUE) {
+                if (want_debug && inst->imm >= 0 &&
+                    (size_t)inst->imm < fn->num_dbg_vars) {
+                    if (num_dbg_obs >= cap_dbg_obs) {
+                        cap_dbg_obs = cap_dbg_obs ? cap_dbg_obs * 2 : 8;
+                        dbg_obs = xrealloc(dbg_obs, cap_dbg_obs * sizeof(DbgObs));
+                    }
+                    dbg_obs[num_dbg_obs].var = inst->imm;
+                    dbg_obs[num_dbg_obs].value = inst->a;
+                    dbg_obs[num_dbg_obs].pc = out->text.len;
+                    num_dbg_obs++;
+                }
+                continue;
+            }
+            if (want_debug && inst->loc.file && inst->loc.line > 0 &&
+                inst->op != IR_PARAM && inst->op != IR_ALLOCA) {
+                if (!prologue_end_found && inst->loc.line != fn->loc.line) {
+                    prologue_end_pc = out->text.len;
+                    prologue_end_found = 1;
+                }
+                emit_module_add_dbg_line(out, inst->loc.file, inst->loc.line,
+                                         inst->loc.col, out->text.len);
+            }
             int dr;
             if (value_is_float_class(fn, inst->dst)) {
                 dr = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
@@ -2569,6 +2809,8 @@ void codegen(const IRModule *ir, EmitModule *out) {
                                     ra_xmm, gp_spill_area);
                 break;
             }
+            case IR_DBG_VALUE:
+                break;
             }
         }
         int needs_ret = 0;
@@ -2581,6 +2823,70 @@ void codegen(const IRModule *ir, EmitModule *out) {
         }
         if (needs_ret)
             emit_epilogue(&out->text, stack_size, cs_used);
+        if (want_debug && dbg_func_idx >= 0) {
+            size_t fn_end_pc = out->text.len;
+            emit_module_dbg_func_end(out, dbg_func_idx, fn_end_pc,
+                                     prologue_end_pc);
+            for (size_t di = 0; di < fn->num_dbg_vars; di++) {
+                const IRDebugVar *idv = &fn->dbg_vars[di];
+                DebugVar dv;
+                memset(&dv, 0, sizeof(dv));
+                dv.name = idv->name;
+                dv.file = (char *)idv->loc.file;
+                dv.line = idv->loc.line;
+                dv.kind = idv->kind == IR_DBG_PARAM ? DBG_VAR_PARAM : DBG_VAR_LOCAL;
+                dv.type_tag = ir_type_tag(idv->type_kind, idv->is_bool);
+                dv.width = idv->width;
+                dv.is_unsigned = idv->is_unsigned;
+                dv.array_len = idv->array_len;
+                dv.alloca_ssa = idv->alloca_ssa;
+                dv.param_idx = idv->param_idx;
+                dv.loc_kind = DBG_LOC_NONE;
+                if (idv->alloca_ssa >= 0 && idv->alloca_ssa < fn->next_value_id
+                    && alloca_off[idv->alloca_ssa] != 0) {
+                    dv.loc_kind = DBG_LOC_FBREG;
+                    dv.rbp_offset = alloca_off[idv->alloca_ssa];
+                } else if (idv->kind == IR_DBG_PARAM && idv->param_idx >= 0
+                           && idv->param_idx < nparams) {
+                    int p = idv->param_idx;
+                    if (arrive_reg[p] < 0) {
+                        dv.loc_kind = DBG_LOC_FBREG;
+                        dv.rbp_offset = stack_off[p];
+                    } else if (arrive_is_xmm[p]) {
+                        dv.loc_kind = DBG_LOC_REG;
+                        dv.dwarf_reg = 17 + arrive_reg[p];
+                    } else {
+                        dv.loc_kind = DBG_LOC_REG;
+                        dv.dwarf_reg = reg_to_dwarf(arrive_reg[p]);
+                    }
+                }
+                if (dv.loc_kind == DBG_LOC_REG && idv->kind == IR_DBG_PARAM) {
+                    size_t first = fn_end_pc;
+                    for (size_t k = 0; k < num_dbg_obs; k++) {
+                        if (dbg_obs[k].var == (int)di) { first = dbg_obs[k].pc; break; }
+                    }
+                    if (first > start_offset && num_dbg_obs > 0)
+                        dbg_var_add_range(&dv, start_offset, first, dv.loc_kind,
+                                          dv.rbp_offset, dv.dwarf_reg);
+                }
+                for (size_t k = 0; k < num_dbg_obs; k++) {
+                    if (dbg_obs[k].var != (int)di) continue;
+                    size_t end = fn_end_pc;
+                    for (size_t k2 = k + 1; k2 < num_dbg_obs; k2++) {
+                        if (dbg_obs[k2].var == (int)di) { end = dbg_obs[k2].pc; break; }
+                    }
+                    DebugLocKind lk;
+int off;
+int dreg;
+                    value_home(fn, dbg_obs[k].value, gp_spill_area,
+                               &lk, &off, &dreg);
+                    dbg_var_add_range(&dv, dbg_obs[k].pc, end, lk, off, dreg);
+                }
+                emit_module_add_dbg_var(out, dbg_func_idx, &dv);
+                free(dv.ranges);
+            }
+        }
+        free(dbg_obs);
         for (size_t pi = 0; pi < num_patches; pi++) {
             Patch *p = &patches[pi];
             if (p->label < 0 || p->label >= nlabels ||

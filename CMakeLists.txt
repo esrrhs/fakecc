@@ -21,6 +21,7 @@ add_library(fakecc_core
     src/regalloc.c
     src/opt.c
     src/codegen.c
+    src/debug.c
     src/emit.c
     src/link.c
 )
