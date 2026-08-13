@@ -4,8 +4,7 @@
 Pipeline per file:
   1. gcc -E -P with minimal fake system headers (expands fakecc's own macros
      and includes; resolves <stdint.h> etc. to tiny stubs).
-  2. Post-process: strip __attribute__, rewrite __builtin_ctzll, concatenate
-     adjacent string literals.
+  2. Post-process: strip __attribute__, rewrite __builtin_ctzll.
   3. Rewrite anonymous struct/union forms into tagged forms that fakecc
      accepts:
        - `typedef struct { ... } Name;` ->
@@ -53,8 +52,10 @@ def strip_va_copy_extern(text):
 
 
 def strip_attributes(text):
-    # `inline` is a no-op hint fakecc doesn't support -> strip it.
-    text = re.sub(r'\binline\b', '', text)
+    # `inline` is NOT stripped: fakecc's parser accepts it as a no-op
+    # specifier, and a blanket regex also hits the keyword table's own
+    # `"inline"` string literal in lexer.c — which leaves the bootstrap
+    # compiler unable to recognize the keyword at all.
     # __attribute__((anything nested-parens)) -> empty
     out = []
     i = 0
@@ -87,58 +88,11 @@ def rewrite_builtin(text):
     return text.replace("__builtin_ctzll(", "__fakecc_ctzll(")
 
 
-def concat_strings(text):
-    """Concatenate adjacent string literals: "a" "b" -> "ab".
-    Handles regular "...\"..." and concatenation across whitespace."""
-    # Repeatedly merge "..." immediately followed by "..."
-    changed = True
-    while changed:
-        changed = False
-        new = []
-        i = 0
-        n = len(text)
-        while i < n:
-            if text[i] == '"':
-                # read one string literal
-                j = i + 1
-                while j < n:
-                    if text[j] == "\\":
-                        j += 2
-                        continue
-                    if text[j] == '"':
-                        j += 1
-                        break
-                    j += 1
-                lit = text[i:j]
-                # peek for adjacent string
-                k = j
-                while k < n and text[k] in " \t\n\r":
-                    k += 1
-                if k < n and text[k] == '"':
-                    # read second literal
-                    m = k + 1
-                    while m < n:
-                        if text[m] == "\\":
-                            m += 2
-                            continue
-                        if text[m] == '"':
-                            m += 1
-                            break
-                        m += 1
-                    lit2 = text[k:m]
-                    # merge inner contents
-                    merged = '"' + lit[1:-1] + lit2[1:-1] + '"'
-                    new.append(merged)
-                    i = m
-                    changed = True
-                    continue
-                new.append(lit)
-                i = j
-            else:
-                new.append(text[i])
-                i += 1
-        text = "".join(new)
-    return text
+# Adjacent string literals are deliberately NOT merged here.  fakecc's parser
+# concatenates them itself, and merging them textually is unsound: `\x` eats as
+# many hex digits as it can, so `"\x7f" "ELF"` (4 bytes) would become
+# `"\x7fELF"`, where `\x7fE` is one out-of-range escape — 3 bytes starting with
+# 0xFE.  That silently corrupted the ELF magic in emit.c and link.c.
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +571,6 @@ def translate_file(src_path, out_path):
     text = strip_attributes(text)
     text = strip_va_copy_extern(text)
     text = rewrite_builtin(text)
-    text = concat_strings(text)
     _, body = rewrite_structs(text)
     body = strip_ptr_qualifiers(body)
     body = split_global_multidecl(body)
