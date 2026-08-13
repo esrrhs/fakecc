@@ -75,7 +75,7 @@ ldd hello          # 「不是动态可执行文件」— 无 libc
 | `string.c` | `memcpy` / `memset` / `strlen` / `strcmp` / … |
 | `ctype.c` | `isdigit` / `isspace` / … |
 | `malloc.c` | `mmap` freelist：`malloc` / `free` / `calloc` / `realloc` |
-| `stdio.c` | 迷你 `FILE`、`stdin`/`stdout`/`stderr`、缓冲、`fopen`/`fread`/`fwrite`/… |
+| `stdio.c` | 迷你 `FILE`、`stdin`/`stdout`/`stderr`、缓冲、`fopen`/`fread`/`fwrite`/`puts`/`putchar`/… |
 | `printf.c` | `printf` / `fprintf` / `snprintf` / `v*`（`%s%c%d%i%u%x%p` 等） |
 | `stdlib.c` | `exit`（先 fflush）/ `abort` / `strto*` / `qsort` / `chmod` / `getenv` |
 
