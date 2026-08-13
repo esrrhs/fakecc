@@ -107,7 +107,7 @@ v0/build_bootstrap.sh   # 翻译 + 用 Stage 0 编译并链接 → v0/bootstrap_
 v0/stage2_check.sh      # 跑完整两级自举，逐字节比对目标文件与二进制
 ```
 
-gcc 只在翻译阶段出现，充当 `src/*.c` 的预处理器——FakeCC 方言没有预处理器，这是一次性机械翻译的固有成本，不在构建路径上。CI 的 bootstrap job 在不动点检查之后，还会用 `v0/fakecc-1` 再跑一遍 e2e、e2e_multi 与 difftest。
+gcc 只在翻译阶段出现，充当 `src/*.c` 的预处理器——FakeCC 方言没有预处理器，这是一次性机械翻译的固有成本，不在构建路径上。CI 的 bootstrap job 在不动点检查之后，还会用 `v0/fakecc-1` 再跑一遍 e2e、e2e_multi、difftest 与 e2e_shlib。
 
 ## 语言特性
 
@@ -122,7 +122,7 @@ gcc 只在翻译阶段出现，充当 `src/*.c` 的预处理器——FakeCC 方�
 | 函数 | 多函数、递归/相互递归、最多 16 参数（前 6 走寄存器，≥7 走栈，SysV AMD64 ABI）、变参函数（`va_list`） |
 | 全局 | 全局变量（`data`/`bss`/`rodata` 自动分段）、字符串字面量（rodata）、`static` 跨文件不冲突 |
 | 后端 | SSA IR + CFG + 支配树 + mem2reg + constfold/DCE/peephole + 寄存器分配；内部 x86-64 编码器 + ELF64 写入器 |
-| 链接 | 多文件编译 + 链接（`fakecc a.c b.c -o prog`）；`fakecc -c a.c -o a.o` 出 `.o`；`fakecc a.o b.o -o prog` 链接对象文件；`static`→LOCAL 绑定、GLOBAL 符号跨文件解析；libc 调用走 PLT/GOT |
+| 链接 | 多文件编译 + 链接（`fakecc a.c b.c -o prog`）；`fakecc -c a.c -o a.o` 出 `.o`；`fakecc a.o b.o -o prog` 链接对象文件；`static`→LOCAL 绑定、GLOBAL 符号跨文件解析；动态依赖用 `-l` / `-l:SONAME` / `-LDIR` / 直接传 `.so`（默认自动加 `libc.so.6`，`-nodefaultlibs` 可关掉；`-L` 写入 `DT_RUNPATH`） |
 | I/O | `__syscall(num, a0..a5)` intrinsic 直接发 Linux syscall；动态链接调 libc（`printf`/`malloc` 等） |
 
 ## 已知缺陷
@@ -164,11 +164,12 @@ echo $?    # 42
 
 ```bash
 ctest --test-dir build --output-on-failure
-# 含单元测试、单文件 e2e、多文件链接 e2e、gcc 差分测试（difftest）
+# 含单元测试、单文件 e2e、多文件链接 e2e、共享库 -l 测试、gcc 差分测试（difftest）
 
 # 自举不动点 + 自举编译器再跑功能套件（与 CI bootstrap job 一致）
 bash v0/stage2_check.sh
 bash test/e2e/run_e2e.sh v0/fakecc-1
 bash test/e2e/run_multi_e2e.sh v0/fakecc-1
 bash test/e2e/run_difftest.sh v0/fakecc-1
+bash test/e2e/run_shlib_e2e.sh v0/fakecc-1
 ```

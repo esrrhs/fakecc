@@ -45,6 +45,7 @@
 #define DT_RELA         7
 #define DT_RELASZ       8
 #define DT_RELENT       9
+#define DT_RUNPATH      29
 #define R_X86_64_JUMP_SLOT 7
 
 #define STB_GLOBAL      1
@@ -211,7 +212,18 @@ static int ext_find_or_add(char ***ext, int *num_ext, const char *name) {
     return *num_ext - 1;
 }
 
-void emit_link(EmitModule **mods, size_t n, const char *path) {
+/* Append a DT_NEEDED soname if it is not already present. */
+static void needed_add(char ***needed, int *num, const char *soname) {
+    for (int i = 0; i < *num; i++)
+        if (strcmp((*needed)[i], soname) == 0) return;
+    *needed = realloc(*needed, ((size_t)*num + 1) * sizeof(char *));
+    if (!*needed) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    (*needed)[(*num)++] = xstrdup(soname);
+}
+
+void emit_link(EmitModule **mods, size_t n, const char *path,
+               const char **needed_in, size_t num_needed_in, int nodefaultlibs,
+               const char **lib_paths, size_t num_lib_paths) {
     /* ---- Merge sections ---- */
     Buffer text, rodata, data;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
@@ -320,12 +332,42 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         data_got_external[j] = !found;
     }
 
-    /* ---- Reserve a PLT slot for exit() ----
+    /* ---- Shared-library DT_NEEDED list (from -l / defaults) ---- */
+    char **needed = NULL;
+    int num_needed = 0;
+    for (size_t i = 0; i < num_needed_in; i++)
+        needed_add(&needed, &num_needed, needed_in[i]);
+    if ((num_ext > 0 || num_data_ext > 0) && !nodefaultlibs)
+        needed_add(&needed, &num_needed, "libc.so.6");
+
+    /* Colon-separated DT_RUNPATH from -L directories (and dirs of explicit .so). */
+    char *runpath = NULL;
+    if ((num_ext > 0 || num_data_ext > 0) && num_lib_paths > 0) {
+        size_t len = 1; /* NUL */
+        for (size_t i = 0; i < num_lib_paths; i++)
+            len += strlen(lib_paths[i]) + (i > 0 ? 1 : 0);
+        runpath = malloc(len);
+        if (!runpath) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        size_t pos = 0;
+        for (size_t i = 0; i < num_lib_paths; i++) {
+            if (i > 0) runpath[pos++] = ':';
+            size_t n = strlen(lib_paths[i]);
+            memcpy(runpath + pos, lib_paths[i], n);
+            pos += n;
+        }
+        runpath[pos] = '\0';
+    }
+
+    /* ---- Reserve a PLT slot for exit() when libc is linked ----
      * The entry stub calls it instead of issuing exit_group directly, so libc
      * gets to run its atexit handlers (stdout is flushed by one of them).
-     * Only for a dynamic link: a static executable has no libc to call. */
+     * Without libc in DT_NEEDED, keep the raw syscall exit path. */
     int exit_ext_idx = -1;
-    if (num_ext > 0 || num_data_ext > 0)
+    int have_libc = 0;
+    for (int i = 0; i < num_needed; i++) {
+        if (strcmp(needed[i], "libc.so.6") == 0) { have_libc = 1; break; }
+    }
+    if ((num_ext > 0 || num_data_ext > 0) && have_libc)
         exit_ext_idx = ext_find_or_add(&ext_list, &num_ext, "exit");
 
     /* ---- Build PLT at end of .text ---- */
@@ -344,11 +386,23 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
 
     /* External symbols that need dynsym entries: function externals (which get
      * PLT stubs) followed by data externals (which get GOT data slots).  Both
-     * appear in dynstr/dynsym/hash so the dynamic linker can resolve them. */
+     * appear in dynstr/dynsym/hash so the dynamic linker can resolve them.
+     * dynstr layout: "\0" + DT_NEEDED sonames + [DT_RUNPATH] + symbol names. */
     int num_dynsym_ext = num_ext + num_data_ext;
+    size_t needed_str_bytes = 0;
+    size_t runpath_str_bytes = 0;
+    size_t runpath_dynstr_off = 0;
     if (num_dynsym_ext > 0) {
         buf_u8(&dynstr, 0);
-        buf_bytes(&dynstr, "libc.so.6", sizeof("libc.so.6"));
+        for (int i = 0; i < num_needed; i++) {
+            buf_bytes(&dynstr, needed[i], strlen(needed[i]) + 1);
+            needed_str_bytes += strlen(needed[i]) + 1;
+        }
+        if (runpath) {
+            runpath_dynstr_off = dynstr.len;
+            buf_bytes(&dynstr, runpath, strlen(runpath) + 1);
+            runpath_str_bytes = strlen(runpath) + 1;
+        }
         for (int i = 0; i < num_ext; i++)
             buf_bytes(&dynstr, ext_list[i], strlen(ext_list[i]) + 1);
         for (int j = 0; j < num_data_ext; j++)
@@ -405,17 +459,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + START_SIZE;
-    /* RX content: _start, .text, .rodata, .interp, .dynstr, .dynsym, .hash,
-     * .rela.plt, .rela.dyn, .dynamic.  When there are no externals, the dynamic
-     * sections are empty and only _start+.text+.rodata are loaded.  The .dynamic
-     * section is assembled after layout (it needs vaddrs), so its size is
-     * accounted for here: 11 DT_ entries for function externals (DT_NEEDED,
-     * DT_STRTAB, DT_SYMTAB, DT_SYMENT, DT_STRSZ, DT_HASH, DT_PLTGOT,
-     * DT_PLTRELSZ, DT_PLTREL, DT_JMPREL, DT_NULL) plus 3 more (DT_RELA,
-     * DT_RELASZ, DT_RELENT) when external DATA variables are referenced. */
+    /* .dynamic size: num_needed×DT_NEEDED + [DT_RUNPATH] + 9 fixed tags +
+     * DT_NULL, plus DT_RELA/RELASZ/RELENT when external DATA vars exist. */
     size_t dynamic_size = 0;
     if (num_ext > 0 || num_data_ext > 0) {
-        dynamic_size = (size_t)(11 + (num_data_ext > 0 ? 3 : 0)) * 16;
+        dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0)
+                                + (num_data_ext > 0 ? 3 : 0)) * 16;
     }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
         + rela_plt.len + rela_dyn.len + dynamic_size;
@@ -611,11 +660,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     /* Finalize dynamic-linking sections now that layout is known        */
     /* ================================================================ */
     if (num_dynsym_ext > 0) {
-        /* Patch dynsym st_name fields.  dynstr layout: "\0" + "libc.so.6\0"
-         * + func names + data names, so name_k is at offset
-         * 1 + sizeof("libc.so.6") + sum(len(name_j)+1, j<k). */
+        /* Patch dynsym st_name fields.  dynstr layout: "\0" + sonames +
+         * [runpath] + func names + data names. */
         {
-            size_t acc = 1 + sizeof("libc.so.6");
+            size_t acc = 1 + needed_str_bytes + runpath_str_bytes;
             for (int k = 0; k < num_dynsym_ext; k++) {
                 uint32_t noff = (uint32_t)acc;
                 memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
@@ -647,7 +695,19 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
         size_t rela_dyn_off = rela_plt_off + rela_plt.len;
         size_t dynamic_off = rela_dyn_off + rela_dyn.len;
         uint64_t dynstr_vaddr = rx_base_vaddr + dynstr_off;
-        buf_u64(&dynamic, DT_NEEDED);   buf_u64(&dynamic, 1);
+        /* DT_NEEDED values are byte offsets into .dynstr. */
+        {
+            size_t off = 1; /* skip the leading NUL */
+            for (int i = 0; i < num_needed; i++) {
+                buf_u64(&dynamic, DT_NEEDED);
+                buf_u64(&dynamic, off);
+                off += strlen(needed[i]) + 1;
+            }
+        }
+        if (runpath) {
+            buf_u64(&dynamic, DT_RUNPATH);
+            buf_u64(&dynamic, runpath_dynstr_off);
+        }
         buf_u64(&dynamic, DT_STRTAB);   buf_u64(&dynamic, dynstr_vaddr);
         buf_u64(&dynamic, DT_SYMTAB);   buf_u64(&dynamic, rx_base_vaddr + dynsym_off);
         buf_u64(&dynamic, DT_SYMENT);   buf_u64(&dynamic, 24);
@@ -773,6 +833,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path) {
     free(ext_list);
     for (int j = 0; j < num_data_ext; j++) free(data_ext_list[j]);
     free(data_ext_list);
+    for (int i = 0; i < num_needed; i++) free(needed[i]);
+    free(needed);
+    free(runpath);
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
     free(mod_text_off); free(mod_rodata_off); free(mod_data_off); free(mod_bss_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);

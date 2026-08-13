@@ -76,3 +76,8 @@ add_test(NAME e2e_multi
 add_test(NAME difftest
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# Shared-library linking: -l / -l: / -nodefaultlibs / .so path.
+add_test(NAME e2e_shlib
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_shlib_e2e.sh $<TARGET_FILE:fakecc>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

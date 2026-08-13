@@ -435,7 +435,7 @@ void emit_obj(const EmitModule *m, const char *path) {
 
 void emit_elf(const EmitModule *m, const char *path) {
     EmitModule *arr = (EmitModule *)m;
-    emit_link(&arr, 1, path);
+    emit_link(&arr, 1, path, NULL, 0, 0, NULL, 0);
 }
 
 /* ------------------------------------------------------------------ */

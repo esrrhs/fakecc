@@ -96,13 +96,27 @@ void emit_obj(const EmitModule *m, const char *path);
 /* Read a relocatable object file into an EmitModule.  Returns 0 on success. */
 int  emit_obj_read(const char *path, EmitModule *m);
 
-/* Link one or more object modules into an executable.  If any module
- * references undefined symbols, a dynamically-linked executable with a
- * PLT/GOT for libc is produced; otherwise a static executable. */
-void emit_link(EmitModule **mods, size_t n, const char *path);
+/* Link one or more object modules into an executable.
+ *
+ * If any module references undefined symbols, a dynamically-linked executable
+ * with a PLT/GOT is produced; otherwise a static executable.
+ *
+ * `needed` / `num_needed` are DT_NEEDED sonames (e.g. "libc.so.6", "libfoo.so"),
+ * typically derived from `-l` flags.  When the link is dynamic and
+ * `nodefaultlibs` is 0, "libc.so.6" is added automatically if absent — matching
+ * gcc's default hosted link.  Pass `nodefaultlibs=1` to emit only the explicit
+ * list (may be empty).  `needed` may be NULL when `num_needed` is 0.
+ *
+ * `lib_paths` / `num_lib_paths` come from `-L` (and directories of explicit `.so`
+ * inputs).  When non-empty on a dynamic link they are joined with ':' into
+ * DT_RUNPATH so the dynamic linker can find non-system libraries without
+ * LD_LIBRARY_PATH. */
+void emit_link(EmitModule **mods, size_t n, const char *path,
+               const char **needed, size_t num_needed, int nodefaultlibs,
+               const char **lib_paths, size_t num_lib_paths);
 
 /* Legacy entry point — compile a single TU directly into an executable.
- * Equivalent to link(&m, 1, path). */
+ * Equivalent to emit_link(&m, 1, path, NULL, 0, 0, NULL, 0). */
 void emit_elf(const EmitModule *m, const char *path);
 
 /* ELF relocation type constants. */

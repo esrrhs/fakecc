@@ -84,3 +84,6 @@ jobs:
 
       - name: difftest with the self-hosted compiler
         run: bash test/e2e/run_difftest.sh v0/fakecc-1
+
+      - name: e2e_shlib with the self-hosted compiler
+        run: bash test/e2e/run_shlib_e2e.sh v0/fakecc-1
