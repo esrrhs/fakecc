@@ -554,6 +554,8 @@ extern int snprintf(char *buf, size_t n, const char *fmt, ...);
 extern int fputs(const char *s, FILE *f);
 extern int fputc(int c, FILE *f);
 extern int fflush(FILE *f);
+extern int puts(const char *s);
+extern int putchar(int c);
 extern FILE *fopen(const char *p, const char *m);
 extern int fclose(FILE *f);
 extern size_t fwrite(const void *p, size_t n, size_t m, FILE *f);

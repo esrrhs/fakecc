@@ -400,7 +400,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     /* ---- Build PLT at end of .text (only when truly external funcs) ---- */
     size_t *plt_entry_off = num_ext ? xcalloc(num_ext, sizeof(size_t)) : NULL;
     size_t *plt_got_fixup = num_ext ? xcalloc(num_ext, sizeof(size_t)) : NULL;
-    size_t plt0_got_fixup[2];
+    size_t plt0_got_fixup[2] = {0, 0};
     size_t plt0_off = 0;
     if (num_ext > 0) {
         plt0_off = emit_plt0(&text, plt0_got_fixup);

@@ -97,6 +97,18 @@ int fputs(const char *s, FILE *f) {
     return 0;
 }
 
+int puts(const char *s) {
+    stdio_init();
+    if (fputs(s, stdout) < 0) return -1;
+    if (fputc('\n', stdout) < 0) return -1;
+    return 0;
+}
+
+int putchar(int c) {
+    stdio_init();
+    return fputc(c, stdout);
+}
+
 size_t fwrite(const void *p, size_t sz, size_t nm, FILE *f) {
     size_t total = sz * nm;
     if (file_write(f, (const char *)p, total) < 0) return 0;

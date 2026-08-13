@@ -96,6 +96,8 @@ extern int snprintf(char *buf, size_t n, const char *fmt, ...);
 extern int fputs(const char *s, FILE *f);
 extern int fputc(int c, FILE *f);
 extern int fflush(FILE *f);
+extern int puts(const char *s);
+extern int putchar(int c);
 extern FILE *fopen(const char *p, const char *m);
 extern int fclose(FILE *f);
 extern size_t fwrite(const void *p, size_t n, size_t m, FILE *f);
@@ -399,7 +401,7 @@ Buffer data;
         exit_ext_idx = ext_find_or_add(&ext_list, &num_ext, "exit");
     size_t *plt_entry_off = num_ext ? xcalloc(num_ext, sizeof(size_t)) : ((void*)0);
     size_t *plt_got_fixup = num_ext ? xcalloc(num_ext, sizeof(size_t)) : ((void*)0);
-    size_t plt0_got_fixup[2];
+    size_t plt0_got_fixup[2] = {0, 0};
     size_t plt0_off = 0;
     if (num_ext > 0) {
         plt0_off = emit_plt0(&text, plt0_got_fixup);
