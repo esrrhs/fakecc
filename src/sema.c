@@ -258,7 +258,11 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     if (!e) return type_default_int();
     switch (e->kind) {
     case EX_INT_LIT:
-        set_type(e, type_default_int());
+        /* Width/signedness were derived from the suffix and magnitude by the
+         * parser; overwriting them with plain int here would truncate every
+         * wide constant. */
+        set_type(e, type_make_int(e->type.width ? e->type.width : 4,
+                                  e->type.is_unsigned));
         return type_clone(e->type);
     case EX_FLOAT_LIT:
         /* Width was stashed in e->type by the parser (4 = float, 8 = double). */
@@ -434,13 +438,17 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                    "compound assignment of read-only variable");
         Type rt = check_expr(e->u.comp.rvalue, st, ft);
         BinOp op = e->u.comp.op;
+        int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
+                           || op == BOP_DIV);
         if (op == BOP_ADD || op == BOP_SUB) {
             /* Pointer arithmetic: p += n, p -= n (n must be int). */
             if (lt.kind == TY_PTR && rt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
-        } else {
+        }
+        if (lt.kind != TY_PTR
+            && !(arith_float && (lt.kind == TY_FLOAT || rt.kind == TY_FLOAT))) {
             if (lt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "left operand of '%s' must be integer",
@@ -450,6 +458,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                        "right operand of '%s' must be integer",
                        "compound assign");
         }
+        if (lt.kind == TY_FLOAT && !arith_float)
+            die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                   "left operand of '%s' must be integer", "compound assign");
         type_free(&rt);
         set_type(e, lt);
         return type_clone(e->type);
@@ -690,7 +701,16 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         /* a[i] — a must be ptr or array; result = pointee/elem. */
         Type at = check_expr(e->u.idx.array, st, ft);
         Type it = check_expr(e->u.idx.index, st, ft);
-        (void)it;
+        /* `a[i]` is defined as `*(a + i)`, and addition commutes, so the
+         * pointer is allowed on either side: `3[p]` means `p[3]`.  Normalize
+         * by swapping the operands so everything downstream sees the usual
+         * order. */
+        if (at.kind == TY_INT && (it.kind == TY_PTR || it.kind == TY_ARRAY)) {
+            Expr *tmp = e->u.idx.array;
+            e->u.idx.array = e->u.idx.index;
+            e->u.idx.index = tmp;
+            Type swap = at; at = it; it = swap;
+        }
         type_free(&it);
         Type base = at;
         if (base.kind == TY_ARRAY) {
@@ -896,6 +916,12 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     if (e->kind == EX_STR) return 1;
     if (e->kind == EX_CAST)
         return is_const_init(e->u.cast.operand, globals);
+    /* -1.5 / +1.5: fold_const_int below rejects these, since the operand is
+     * not an integer. */
+    if (e->kind == EX_UNARY
+        && (e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS)
+        && e->u.un.operand && e->u.un.operand->kind == EX_FLOAT_LIT)
+        return 1;
     /* A constant integer expression: `(1u << 14) - 1u`, `-1`, etc. */
     long long _fold_tmp;
     if (fold_const_int(e, &_fold_tmp)) return 1;
@@ -914,6 +940,38 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     return 0;
 }
 
+/* Number of scalar slots an aggregate swallows when its braces are elided. */
+static int init_leaf_count(Type t) {
+    if (t.kind == TY_ARRAY && t.elem_type)
+        return t.length * init_leaf_count(*t.elem_type);
+    if (t.kind == TY_STRUCT) {
+        const StructDef *sd = struct_registry_find_c(g_sema_structs, t.tag);
+        if (!sd || sd->num_members == 0) return 1;
+        if (sd->is_union) return init_leaf_count(sd->members[0].type);
+        int total = 0;
+        for (int i = 0; i < sd->num_members; i++)
+            total += init_leaf_count(sd->members[i].type);
+        return total;
+    }
+    return 1;
+}
+
+/* Could this element denote a whole aggregate value?  Initializer lists are
+ * normalized before the elements are type-checked, so the decision to regroup
+ * flat elements into an elided sub-aggregate has to be made syntactically:
+ * `struct P a[2] = {p, q}` initializes one slot per expression and must be
+ * left alone, while `struct P a[2] = {1, 2, 3, 4}` is regrouped. */
+static int init_elem_may_be_aggregate(const Expr *e) {
+    switch (e->kind) {
+    case EX_VAR: case EX_CALL: case EX_MEMBER: case EX_INDEX: case EX_DEREF:
+    case EX_COMPOUND_LITERAL: case EX_ASSIGN: case EX_TERNARY: case EX_COMMA:
+    case EX_CAST:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* Normalize a (possibly designated) initializer list against `target`:
  *  1. infer an array length of 0 from the element count / designators,
  *  2. validate every designator (array index in range, struct member exists,
@@ -930,6 +988,18 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
     /* 1. Infer array length for an empty `[]` declarator. */
     if (target->kind == TY_ARRAY && target->length == 0) {
         int len = n;
+        /* With elided braces each slot swallows several flat elements, so
+         * `int m[][3] = {1,2,3,4,5,6}` has length 2, not 6. */
+        if (target->elem_type
+            && (target->elem_type->kind == TY_ARRAY
+                || target->elem_type->kind == TY_STRUCT)
+            && n > 0 && list->u.init_list.elements[0]->kind != EX_INIT_LIST
+            && !init_elem_may_be_aggregate(list->u.init_list.elements[0])
+            && !(list->u.init_list.elements[0]->kind == EX_STR
+                 && target->elem_type->kind == TY_ARRAY)) {
+            int per = init_leaf_count(*target->elem_type);
+            if (per > 0) len = (n + per - 1) / per;
+        }
         for (int i = 0; i < n; i++)
             if (list->u.init_list.desig_kind[i] == 0
                 && list->u.init_list.desig_index[i] + 1 > len)
@@ -994,6 +1064,33 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
         } else {
             pos = cursor;
         }
+        if (pos < 0 || pos >= N)
+            die_at(loc.file, loc.line, loc.col,
+                   "too many initializers: %d value(s) for %d slot(s)", n, N);
+
+        /* Brace elision (C99 6.7.8p17): a sub-aggregate may be written without
+         * its own braces, as in `int m[2][3] = {1, 2, 3, 4}`.  Collect the
+         * elements that belong to this slot into a synthesized sub-list so the
+         * rest of the pipeline only ever sees fully braced initializers. */
+        Type *slot_type = NULL;
+        if (target->kind == TY_ARRAY) slot_type = target->elem_type;
+        else if (target->kind == TY_STRUCT) slot_type = &sd->members[pos].type;
+        if (slot_type && elem->kind != EX_INIT_LIST
+            && (slot_type->kind == TY_ARRAY || slot_type->kind == TY_STRUCT)
+            && !init_elem_may_be_aggregate(elem)
+            && !(elem->kind == EX_STR && slot_type->kind == TY_ARRAY)) {
+            int want = init_leaf_count(*slot_type);
+            int take = 1;
+            while (take < want && i + take < n
+                   && list->u.init_list.desig_kind[i + take] == -1)
+                take++;
+            Expr **sub = malloc(take * sizeof(Expr *));
+            for (int k = 0; k < take; k++)
+                sub[k] = list->u.init_list.elements[i + k];
+            elem = expr_new_init_list(sub, take, elem->loc);
+            i += take - 1;
+        }
+
         /* Recurse into a nested init list to resolve its designators against
          * the sub-type.  Array element types are mutated in place (so an
          * inferred inner length propagates to the parent type); struct member

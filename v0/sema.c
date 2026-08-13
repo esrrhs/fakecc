@@ -258,7 +258,7 @@ struct ExprArray {
     size_t cap;
 };typedef struct ExprArray ExprArray;
 union __anon_u_1 {
-        int int_val;
+        long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
         struct { char *name; } var;
@@ -301,7 +301,7 @@ struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
 struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
 struct __anon_compound_23 { Type target_type; Expr *init; };
 
-        int int_val;
+        long long int_val;
         struct __anon_bin_4 bin;
         struct __anon_un_5 un;
         struct __anon_var_6 var;
@@ -331,7 +331,8 @@ struct __anon_compound_23 { Type target_type; Expr *init; };
     Type va_arg_type;
     union __anon_u_3 u;
 };
-Expr *expr_new_int(int v, SourceLoc loc);
+Expr *expr_new_int(long long v, SourceLoc loc);
+Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -574,6 +575,8 @@ extern void abort(void);
 extern int atoi(const char *s);
 extern long atol(const char *s);
 extern long strtol(const char *s, char **end, int base);
+extern unsigned long strtoul(const char *s, char **end, int base);
+extern unsigned long long strtoull(const char *s, char **end, int base);
 extern double strtod(const char *s, char **end);
 extern long double strtold(const char *nptr, char **endptr);
 extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
@@ -782,7 +785,8 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     if (!e) return type_default_int();
     switch (e->kind) {
     case EX_INT_LIT:
-        set_type(e, type_default_int());
+        set_type(e, type_make_int(e->type.width ? e->type.width : 4,
+                                  e->type.is_unsigned));
         return type_clone(e->type);
     case EX_FLOAT_LIT:
         set_type(e, type_make_float(e->type.width ? e->type.width : 8));
@@ -939,12 +943,16 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                    "compound assignment of read-only variable");
         Type rt = check_expr(e->u.comp.rvalue, st, ft);
         BinOp op = e->u.comp.op;
+        int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
+                           || op == BOP_DIV);
         if (op == BOP_ADD || op == BOP_SUB) {
             if (lt.kind == TY_PTR && rt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
-        } else {
+        }
+        if (lt.kind != TY_PTR
+            && !(arith_float && (lt.kind == TY_FLOAT || rt.kind == TY_FLOAT))) {
             if (lt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "left operand of '%s' must be integer",
@@ -954,6 +962,9 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
                        "right operand of '%s' must be integer",
                        "compound assign");
         }
+        if (lt.kind == TY_FLOAT && !arith_float)
+            die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                   "left operand of '%s' must be integer", "compound assign");
         type_free(&rt);
         set_type(e, lt);
         return type_clone(e->type);
@@ -1160,7 +1171,12 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     case EX_INDEX: {
         Type at = check_expr(e->u.idx.array, st, ft);
         Type it = check_expr(e->u.idx.index, st, ft);
-        (void)it;
+        if (at.kind == TY_INT && (it.kind == TY_PTR || it.kind == TY_ARRAY)) {
+            Expr *tmp = e->u.idx.array;
+            e->u.idx.array = e->u.idx.index;
+            e->u.idx.index = tmp;
+            Type swap = at; at = it; it = swap;
+        }
         type_free(&it);
         Type base = at;
         if (base.kind == TY_ARRAY) {
@@ -1333,6 +1349,10 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     if (e->kind == EX_STR) return 1;
     if (e->kind == EX_CAST)
         return is_const_init(e->u.cast.operand, globals);
+    if (e->kind == EX_UNARY
+        && (e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS)
+        && e->u.un.operand && e->u.un.operand->kind == EX_FLOAT_LIT)
+        return 1;
     long long _fold_tmp;
     if (fold_const_int(e, &_fold_tmp)) return 1;
     if (e->kind == EX_INIT_LIST) {
@@ -1346,10 +1366,44 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     }
     return 0;
 }
+static int init_leaf_count(Type t) {
+    if (t.kind == TY_ARRAY && t.elem_type)
+        return t.length * init_leaf_count(*t.elem_type);
+    if (t.kind == TY_STRUCT) {
+        const StructDef *sd = struct_registry_find_c(g_sema_structs, t.tag);
+        if (!sd || sd->num_members == 0) return 1;
+        if (sd->is_union) return init_leaf_count(sd->members[0].type);
+        int total = 0;
+        for (int i = 0; i < sd->num_members; i++)
+            total += init_leaf_count(sd->members[i].type);
+        return total;
+    }
+    return 1;
+}
+static int init_elem_may_be_aggregate(const Expr *e) {
+    switch (e->kind) {
+    case EX_VAR: case EX_CALL: case EX_MEMBER: case EX_INDEX: case EX_DEREF:
+    case EX_COMPOUND_LITERAL: case EX_ASSIGN: case EX_TERNARY: case EX_COMMA:
+    case EX_CAST:
+        return 1;
+    default:
+        return 0;
+    }
+}
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
     int n = list->u.init_list.num_elements;
     if (target->kind == TY_ARRAY && target->length == 0) {
         int len = n;
+        if (target->elem_type
+            && (target->elem_type->kind == TY_ARRAY
+                || target->elem_type->kind == TY_STRUCT)
+            && n > 0 && list->u.init_list.elements[0]->kind != EX_INIT_LIST
+            && !init_elem_may_be_aggregate(list->u.init_list.elements[0])
+            && !(list->u.init_list.elements[0]->kind == EX_STR
+                 && target->elem_type->kind == TY_ARRAY)) {
+            int per = init_leaf_count(*target->elem_type);
+            if (per > 0) len = (n + per - 1) / per;
+        }
         for (int i = 0; i < n; i++)
             if (list->u.init_list.desig_kind[i] == 0
                 && list->u.init_list.desig_index[i] + 1 > len)
@@ -1410,6 +1464,27 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
                 if (strcmp(sd->members[j].name, name) == 0) { pos = j; break; }
         } else {
             pos = cursor;
+        }
+        if (pos < 0 || pos >= N)
+            die_at(loc.file, loc.line, loc.col,
+                   "too many initializers: %d value(s) for %d slot(s)", n, N);
+        Type *slot_type = ((void*)0);
+        if (target->kind == TY_ARRAY) slot_type = target->elem_type;
+        else if (target->kind == TY_STRUCT) slot_type = &sd->members[pos].type;
+        if (slot_type && elem->kind != EX_INIT_LIST
+            && (slot_type->kind == TY_ARRAY || slot_type->kind == TY_STRUCT)
+            && !init_elem_may_be_aggregate(elem)
+            && !(elem->kind == EX_STR && slot_type->kind == TY_ARRAY)) {
+            int want = init_leaf_count(*slot_type);
+            int take = 1;
+            while (take < want && i + take < n
+                   && list->u.init_list.desig_kind[i + take] == -1)
+                take++;
+            Expr **sub = malloc(take * sizeof(Expr *));
+            for (int k = 0; k < take; k++)
+                sub[k] = list->u.init_list.elements[i + k];
+            elem = expr_new_init_list(sub, take, elem->loc);
+            i += take - 1;
         }
         if (elem->kind == EX_INIT_LIST) {
             if (target->kind == TY_ARRAY)

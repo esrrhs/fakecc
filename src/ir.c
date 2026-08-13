@@ -371,7 +371,7 @@ static int get_value_is_float(const IRFunction *fn, IRValue v) {
 
 /* Push an instruction with the given fields (width + signedness). */
 static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
-                        int imm, int width, int is_unsigned, SourceLoc loc) {
+                        int64_t imm, int width, int is_unsigned, SourceLoc loc) {
     IRInst inst;
     inst.op = op;
     inst.dst = dst;
@@ -403,7 +403,28 @@ static void emit_inst_f(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
 }
 
 /* Emit a float constant (bit pattern in `bits`). */
+/* Materialize a long double constant: its 80 bits do not fit in an immediate,
+ * so the bytes go into an anonymous rodata global and the IR_CONST names it. */
+static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
+    char name[32];
+    snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
+    char *init = malloc(10);
+    memcpy(init, &val, 10);
+    ir_module_push_global(g_ir_module, name, 10, init, 1, 1, loc);
+    IRValue v = new_value(fn);
+    emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, loc);
+    fn->insts.data[fn->insts.len - 1].is_float = 1;
+    fn->insts.data[fn->insts.len - 1].call_name = xstrdup(name);
+    set_value_float(fn, v, 1);
+    return v;
+}
+
 static IRValue emit_float_const(IRFunction *fn, int width, int64_t bits, SourceLoc loc) {
+    if (width == 16) {
+        double d;
+        memcpy(&d, &bits, sizeof d);
+        return emit_ld_const(fn, (long double)d, loc);
+    }
     IRValue v = new_value(fn);
     emit_inst_w(fn, IR_CONST, v, -1, -1, 0, width, 0, loc);
     IRInst *inst = &fn->insts.data[fn->insts.len - 1];
@@ -443,7 +464,7 @@ static IRValue bool_normalize(IRFunction *fn, IRValue v, int w, int u,
 
 /* Push an instruction (width/signedness default 4/signed). */
 static void emit_inst(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
-                      int imm, SourceLoc loc) {
+                      int64_t imm, SourceLoc loc) {
     emit_inst_w(fn, op, dst, a, b, imm, 4, 0, loc);
 }
 
@@ -720,6 +741,8 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g);
+/* Push the rodata globals queued while packing an initializer. */
+static void flush_rodata(IRModule *m);
 static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                             const Type *ty, const Expr *e, SourceLoc loc);
 
@@ -769,9 +792,12 @@ static IRValue convert_numeric(IRFunction *fn, IRValue v,
         set_value_float(fn, res, 0);
         return res;
     }
-    /* int → float. */
+    /* int → float.  The destination is a float, so is_unsigned is free to
+     * carry the SOURCE signedness — codegen needs it because the x86
+     * conversions (cvtsi2sd, fild) are signed. */
     op = IR_SITOFP;
-    emit_inst_w(fn, op, res, v, -1, src_w, dst_w, 0, loc);
+    emit_inst_w(fn, op, res, v, -1, src_w, dst_w, get_value_is_unsigned(fn, v),
+                loc);
     set_value_float(fn, res, 1);
     return res;
 }
@@ -887,21 +913,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * bytes live in a 10-byte rodata global; the IR value is a slot-backed
          * constant initialized from that global (see codegen IR_CONST). */
         int w = e->type.width ? e->type.width : 8;
-        if (w == 16) {
-            long double val = strtold(e->u.float_text, NULL);
-            char name[32];
-            snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
-            char *init = malloc(10);
-            memcpy(init, &val, 10);
-            /* anonymous constant — file-local by construction */
-            ir_module_push_global(g_ir_module, name, 10, init, 1, 1, e->loc);
-            IRValue v = new_value(fn);
-            emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, e->loc);
-            fn->insts.data[fn->insts.len - 1].is_float = 1;
-            fn->insts.data[fn->insts.len - 1].call_name = xstrdup(name);
-            set_value_float(fn, v, 1);
-            return v;
-        }
+        if (w == 16)
+            return emit_ld_const(fn, strtold(e->u.float_text, NULL), e->loc);
         int64_t bits = 0;
         if (w == 4) { float f = (float)strtod(e->u.float_text, NULL); memcpy(&bits, &f, sizeof(f)); }
         else { double d = strtod(e->u.float_text, NULL); memcpy(&bits, &d, sizeof(d)); }
@@ -929,8 +942,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int rw = e->type.width ? e->type.width : 4;
             int ru = e->type.is_unsigned;
             if (sf) {
-                /* Float negation: -x = 0.0 - x. */
-                IRValue zero = emit_float_const(fn, rw, 0, e->loc);
+                /* Float negation: -x = (-0.0) - x.  Subtracting from +0.0
+                 * would turn -0.0 into +0.0, losing the sign IEEE keeps. */
+                int64_t negzero = (rw == 4) ? (int64_t)0x80000000
+                                            : (int64_t)0x8000000000000000LL;
+                IRValue zero = emit_float_const(fn, rw, negzero, e->loc);
                 IRValue neg = emit_bin_w(fn, IR_FSUB, zero, x, rw, 0, e->loc);
                 set_value_float(fn, neg, 1);
                 return neg;
@@ -1652,12 +1668,31 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 v = shifted;
             }
             if (bit_width < w * 8) {
-                int mask = (1 << bit_width) - 1;
-                IRValue m = new_value(fn);
-                emit_inst_w(fn, IR_CONST, m, -1, -1, mask, w, 1, e->loc);
-                IRValue masked = new_value(fn);
-                emit_inst_w(fn, IR_BAND, masked, v, m, 0, w, 1, e->loc);
-                v = masked;
+                if (!e->type.is_unsigned && !e->type.is_bool) {
+                    /* A signed bitfield holds a two's-complement value in
+                     * bit_width bits: shift it up to the unit's sign bit and
+                     * back down arithmetically.  Masking alone would read
+                     * `int a : 3` holding -3 back as 5. */
+                    int shift = w * 8 - bit_width;
+                    IRValue s = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, s, -1, -1, shift, 8, 1, e->loc);
+                    /* The left shift is tagged signed so its result is
+                     * sign-extended in the register — the arithmetic shift
+                     * below reads the full 64-bit value. */
+                    IRValue up = new_value(fn);
+                    emit_inst_w(fn, IR_SHL, up, v, s, 0, w, 0, e->loc);
+                    IRValue down = new_value(fn);
+                    emit_inst_w(fn, IR_SHR, down, up, s, 0, w, 0, e->loc);
+                    v = down;
+                    u = 0;
+                } else {
+                    int mask = (1 << bit_width) - 1;
+                    IRValue m = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, m, -1, -1, mask, w, 1, e->loc);
+                    IRValue masked = new_value(fn);
+                    emit_inst_w(fn, IR_BAND, masked, v, m, 0, w, 1, e->loc);
+                    v = masked;
+                }
             }
             /* Result is a small unsigned int; coerce to the member's declared
              * width (semantically int/bool). */
@@ -1701,6 +1736,29 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int lw = is_ptr ? 8 : (lv->type.width ? lv->type.width : 4);
         int lu = is_ptr ? 1 : lv->type.is_unsigned;
 
+        if (lv->type.kind == TY_FLOAT) {
+            /* ++x on a float steps by 1.0 in the float domain; the integer
+             * path below would add the integer 1 to the bit pattern. */
+            IRValue addr = lower_lvalue_addr(fn, st, lv);
+            IRValue old = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
+            set_value_float(fn, old, 1);
+            IRValue one;
+            if (lw == 16) {
+                one = emit_ld_const(fn, 1.0L, e->loc);
+            } else {
+                int64_t bits;
+                if (lw == 4) { float f = 1.0f; bits = 0; memcpy(&bits, &f, sizeof f); }
+                else { double d = 1.0; memcpy(&bits, &d, sizeof d); }
+                one = emit_float_const(fn, lw, bits, e->loc);
+            }
+            IRValue neu = emit_bin_w(fn, is_inc ? IR_FADD : IR_FSUB, old, one,
+                                     lw, lu, e->loc);
+            set_value_float(fn, neu, 1);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, neu, 0, lw, lu, e->loc);
+            return is_prefix ? neu : old;
+        }
+
         /* Promotable path: simple non-pinned, non-global scalar variable.
          * Use IR_LOAD/IR_STORE on the slot so mem2reg can still promote it. */
         if (lv->kind == EX_VAR) {
@@ -1736,12 +1794,23 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         Expr *lv = e->u.comp.lvalue;
         BinOp op = e->u.comp.op;
         int is_ptr = (lv->type.kind == TY_PTR);
+        int is_float = (lv->type.kind == TY_FLOAT);
         int lw = is_ptr ? 8 : (lv->type.width ? lv->type.width : 4);
         int lu = is_ptr ? 1 : lv->type.is_unsigned;
-        IROpcode ir_op = bop_to_ir(op);
+        IROpcode ir_op;
+        if (is_float) {
+            switch (op) {
+            case BOP_SUB: ir_op = IR_FSUB; break;
+            case BOP_MUL: ir_op = IR_FMUL; break;
+            case BOP_DIV: ir_op = IR_FDIV; break;
+            default:      ir_op = IR_FADD; break;
+            }
+        } else {
+            ir_op = bop_to_ir(op);
+        }
 
         /* Promotable path: simple non-pinned, non-global scalar variable. */
-        if (lv->kind == EX_VAR) {
+        if (lv->kind == EX_VAR && !is_float) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
             if (entry && !entry->is_global && !entry->pinned) {
                 IRValue old = new_value(fn);
@@ -1758,9 +1827,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue addr = lower_lvalue_addr(fn, st, lv);
         IRValue old = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
+        if (is_float) set_value_float(fn, old, 1);
         IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
-        IRValue scaled = scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc);
+        IRValue scaled;
+        if (is_float) {
+            /* The right operand joins the lvalue's float type, whether it
+             * arrives as an int or as a float of another width. */
+            int rw = get_value_width(fn, rhs);
+            scaled = (get_value_is_float(fn, rhs) && rw == lw)
+                     ? rhs
+                     : convert_numeric(fn, rhs, rw, lw, 0, 1, e->loc);
+        } else {
+            scaled = scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc);
+        }
         IRValue neu = emit_bin_w(fn, ir_op, old, scaled, lw, lu, e->loc);
+        if (is_float) set_value_float(fn, neu, 1);
         emit_inst_w(fn, IR_STORE_PTR, -1, addr, neu, 0, lw, lu, e->loc);
         return neu;
     }
@@ -1948,15 +2029,19 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             if (sz <= 0) sz = 8;
             char *bytes = calloc(sz, 1);
             if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-            if (s->u.decl.init)
-                pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
-                          s->u.decl.name, s->loc, NULL);
             char mangled[256];
             snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
                      s->u.decl.name);
-            /* mangled name is file-local by construction → LOCAL linkage */
-            ir_module_push_global(g_ir_module, mangled, sz, bytes, 0, 1,
-                                  s->loc);
+            /* mangled name is file-local by construction → LOCAL linkage.
+             * Created before packing so a pointer slot in the initializer can
+             * attach its link-time fixup to this global. */
+            IRGlobal *sg = ir_module_push_global(g_ir_module, mangled, sz, bytes,
+                                                 0, 1, s->loc);
+            if (s->u.decl.init) {
+                pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
+                          s->u.decl.name, s->loc, sg);
+                flush_rodata(g_ir_module);
+            }
             irsymtable_push_static_local(st, s->u.decl.name, mangled, dty);
             break;
         }
@@ -2327,6 +2412,73 @@ static const IRGlobal *find_packed_global(const IRModule *m, const char *name) {
     return NULL;
 }
 
+/* Rodata globals created while packing an initializer (`const char *p = "x"`
+ * needs the bytes to live somewhere before the slot can point at them).  They
+ * are queued instead of pushed immediately: pushing reallocs the module's
+ * global array, which would dangle the `IRGlobal *g` that pack_init is
+ * attaching fixups to. */
+typedef struct {
+    char *name;
+    char *bytes;
+    int   size;
+    SourceLoc loc;
+} PendingRodata;
+static PendingRodata *g_pending_rodata = NULL;
+static int g_pending_rodata_len = 0;
+static int g_pending_rodata_cap = 0;
+
+static void queue_rodata(const char *name, char *bytes, int size, SourceLoc loc) {
+    if (g_pending_rodata_len >= g_pending_rodata_cap) {
+        int nc = g_pending_rodata_cap ? g_pending_rodata_cap * 2 : 4;
+        g_pending_rodata = realloc(g_pending_rodata, nc * sizeof(PendingRodata));
+        if (!g_pending_rodata) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        g_pending_rodata_cap = nc;
+    }
+    g_pending_rodata[g_pending_rodata_len].name = xstrdup(name);
+    g_pending_rodata[g_pending_rodata_len].bytes = bytes;
+    g_pending_rodata[g_pending_rodata_len].size = size;
+    g_pending_rodata[g_pending_rodata_len].loc = loc;
+    g_pending_rodata_len++;
+}
+
+static void flush_rodata(IRModule *m) {
+    for (int i = 0; i < g_pending_rodata_len; i++) {
+        ir_module_push_global(m, g_pending_rodata[i].name, g_pending_rodata[i].size,
+                              g_pending_rodata[i].bytes, 1, 1, g_pending_rodata[i].loc);
+        free(g_pending_rodata[i].name);
+    }
+    g_pending_rodata_len = 0;
+}
+
+/* Evaluate a constant expression as a long double, so a float-typed global can
+ * be packed in its own format.  Integer constants are accepted too: `double
+ * d = 1;` must store 1.0, not the bit pattern of the integer 1. */
+static int fold_const_float(const Expr *e, long double *out) {
+    if (!e) return 0;
+    if (e->kind == EX_FLOAT_LIT) {
+        *out = strtold(e->u.float_text, NULL);
+        return 1;
+    }
+    if (e->kind == EX_CAST)
+        return fold_const_float(e->u.cast.operand, out);
+    if (e->kind == EX_UNARY
+        && (e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS)) {
+        if (!fold_const_float(e->u.un.operand, out)) return 0;
+        if (e->u.un.op == UOP_NEG) *out = -*out;
+        return 1;
+    }
+    if (e->kind == EX_INT_LIT) {
+        *out = (long double)e->u.int_val;
+        return 1;
+    }
+    long long iv;
+    if (fold_const_int(e, &iv)) {
+        *out = (long double)iv;
+        return 1;
+    }
+    return 0;
+}
+
 /* Pack a compile-time constant initializer into `bytes` (size `sz`) for a
  * global of type `ty`.  Handles integer literals, negated literals, nested
  * initializer lists (positional, per-element/per-member offset), string
@@ -2369,6 +2521,23 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         pack_init(ir, ty, e->u.cast.operand, bytes, sz, ctx, loc, g);
         return;
     }
+    if (ty->kind == TY_FLOAT) {
+        /* Float slots must be packed as the target's binary format, not as the
+         * integer the literal would fold to. */
+        long double fv;
+        if (fold_const_float(e, &fv)) {
+            if (ty->width == 16) {
+                memcpy(bytes, &fv, 10);
+            } else if (ty->width == 4) {
+                float f = (float)fv;
+                memcpy(bytes, &f, sizeof f);
+            } else {
+                double d = (double)fv;
+                memcpy(bytes, &d, sizeof d);
+            }
+            return;
+        }
+    }
     long long _fold_v;
     if (e->kind == EX_INT_LIT || fold_const_int(e, &_fold_v)) {
         long long v;
@@ -2380,6 +2549,21 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             v = (v != 0) ? 1 : 0;  /* _Bool: normalize to 0/1 */
         for (int b = 0; b < sz && b < 8; b++)
             bytes[b] = (char)((v >> (8 * b)) & 0xff);
+        return;
+    }
+    if (e->kind == EX_STR && ty->kind == TY_PTR && g) {
+        /* `const char *p = "x"` — the slot holds the address of the bytes, so
+         * park them in an anonymous rodata global and let the linker patch the
+         * pointer in. */
+        char name[32];
+        snprintf(name, sizeof name, "__str.%d", g_str_counter++);
+        int nbytes = e->u.str.len + 1;
+        char *init = malloc(nbytes);
+        if (!init) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        memcpy(init, e->u.str.bytes, nbytes);
+        queue_rodata(name, init, nbytes, loc);
+        add_global_fixup(g, (int)(bytes - g->init_bytes), name);
+        memset(bytes, 0, sz);  /* patched by the linker */
         return;
     }
     if (e->kind == EX_STR && ty->kind == TY_ARRAY && ty->elem_type
@@ -2459,6 +2643,28 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         }
         return;
     }
+    /* A string literal initializing a char array member copies the bytes into
+     * the array (`struct { char name[8]; } q = {"xy"}`).  Without this the
+     * generic scalar path below would store the literal's *address*, truncated
+     * to one byte.  The top-level `char s[] = "hi"` form never reaches here:
+     * sema rewrites it into an element list first. */
+    if (e->kind == EX_STR && ty->kind == TY_ARRAY && ty->elem_type
+        && ty->elem_type->width == 1) {
+        int total = ty->length;
+        int n = e->u.str.len;
+        if (n > total) n = total;
+        int eu = ty->elem_type->is_unsigned;
+        for (int i = 0; i < total; i++) {
+            IRValue off = new_value(fn);
+            emit_inst_w(fn, IR_CONST, off, -1, -1, i, 8, 1, loc);
+            IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
+            IRValue cv = new_value(fn);
+            emit_inst_w(fn, IR_CONST, cv, -1, -1,
+                        i < n ? (unsigned char)e->u.str.bytes[i] : 0, 1, eu, loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, ptr, cv, 0, 1, eu, loc);
+        }
+        return;
+    }
     /* Scalar element: lower, coerce to the target width, store via pointer. */
     IRValue rv = lower_expr(fn, st, e);
     int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
@@ -2495,9 +2701,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * when an array/struct member decays to a pointer (e.g. `.regs = ARR`). */
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
                                             0, is_static, s->loc);
-        if (s->u.decl.init)
+        if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);
+            flush_rodata(ir);
+        }
     }
 
     for (size_t i = 0; i < tu->functions.len; i++) {
@@ -2630,11 +2838,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 pinned = 1;
             /* Float params are always pinned: their SSA value lives in the XMM
              * register file (separate from the GP file the scalar regalloc
-             * targets), so mem2reg must not promote them.  long double (width 16)
-             * is the exception — it lives in a 16-byte SysV stack slot and moves
-             * through x87 st0, so it is NOT pinned (copied to an alloca); it is
-             * read/written directly at its [rbp+..] stack offset. */
-            if (pty.kind == TY_FLOAT && pty.width != 16)
+             * targets), so mem2reg must not promote them.  long double params
+             * are pinned for the same reason: they arrive in a 16-byte stack
+             * slot and move through x87 st0, and a promoted copy would be
+             * renamed into the GP file and reloaded as an integer. */
+            if (pty.kind == TY_FLOAT)
                 pinned = 1;
             /* Struct formals are always pinned (live in a stack slot). */
             if (pty.kind == TY_STRUCT)

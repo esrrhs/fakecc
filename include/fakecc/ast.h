@@ -166,7 +166,7 @@ struct Expr {
      * Kept OUT of the union so it never aliases with EX_CALL::args/callee. */
     Type va_arg_type;
     union {
-        int int_val;                                   /* EX_INT_LIT */
+        long long int_val;                             /* EX_INT_LIT — value in the literal's own type */
         struct { BinOp op; Expr *l, *r; } bin;        /* EX_BINOP */
         struct { UnaryOp op; Expr *operand; } un;     /* EX_UNARY */
         struct { char *name; } var;                    /* EX_VAR */
@@ -192,7 +192,11 @@ struct Expr {
 };
 
 /* Ownership: Expr uses malloc; tu_free recurses */
-Expr *expr_new_int(int v, SourceLoc loc);
+Expr *expr_new_int(long long v, SourceLoc loc);
+/* Integer literal with an explicit type, as C §6.4.4.1 assigns one from the
+ * suffix and the value's magnitude: 0x8000000000000000 is unsigned long even
+ * with no suffix.  Getting this wrong silently truncates wide constants. */
+Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);

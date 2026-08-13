@@ -624,7 +624,7 @@ const Type *typedef_registry_find(const TypedefRegistry *r, const char *name) {
 /* Expr constructors & destructor                                       */
 /* ------------------------------------------------------------------ */
 
-Expr *expr_new_int(int v, SourceLoc loc) {
+Expr *expr_new_int(long long v, SourceLoc loc) {
     Expr *e = malloc(sizeof(Expr));
     if (!e) {
         fprintf(stderr, "fakecc: out of memory\n");
@@ -635,6 +635,12 @@ Expr *expr_new_int(int v, SourceLoc loc) {
     e->type = type_default_int();
     memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.int_val = v;
+    return e;
+}
+
+Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc) {
+    Expr *e = expr_new_int(v, loc);
+    e->type = type_make_int(width, is_unsigned);
     return e;
 }
 

@@ -1232,6 +1232,44 @@ static int int_literal_value(const char *text) {
     return (int)strtol(text, NULL, 0);
 }
 
+/* Decode an integer literal to its full 64-bit value AND the type C gives it
+ * (§6.4.4.1): the u/l suffixes set a floor, and the magnitude raises it — a
+ * decimal too large for int becomes long, and a hex constant too large for
+ * int becomes unsigned int before it becomes long.
+ *
+ * Deriving the type here (rather than defaulting every literal to int) is what
+ * makes `1UL << 63` and `0xFFu << 24 >> 24` come out right: the shift result
+ * type is the promoted type of the left operand, so a mistyped literal
+ * silently truncates the whole expression. */
+static unsigned long long int_literal_typed(const char *text, int *out_width,
+                                            int *out_unsigned) {
+    unsigned long long v = strtoull(text, NULL, 0);
+    int suffix_u = 0, suffix_l = 0;
+    for (const char *s = text; *s; s++) {
+        if (*s == 'u' || *s == 'U') suffix_u = 1;
+        else if (*s == 'l' || *s == 'L') suffix_l = 1;
+    }
+    /* Decimal constants never take an unsigned type implicitly; hex and octal
+     * do, which is why `0xFFFFFFFF` is unsigned int but `4294967295` is long. */
+    int decimal = !(text[0] == '0' && text[1] != '\0');
+    int width = suffix_l ? 8 : 4;
+    int is_unsigned = suffix_u;
+
+    if (is_unsigned) {
+        if (v > 0xFFFFFFFFULL) width = 8;
+    } else if (v > 0x7FFFFFFFFFFFFFFFULL) {
+        width = 8; is_unsigned = 1;
+    } else if (v > 0xFFFFFFFFULL) {
+        width = 8;
+    } else if (v > 0x7FFFFFFFULL) {
+        if (decimal) width = 8;
+        else if (width == 4) is_unsigned = 1;
+    }
+    *out_width = width;
+    *out_unsigned = is_unsigned;
+    return v;
+}
+
 static int char_literal_value(const char *text) {
     /* text[0] == '\'' */
     if (text[1] == '\\') {
@@ -1278,7 +1316,9 @@ static int char_literal_value(const char *text) {
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
-        Expr *e = expr_new_int(int_literal_value(t->text), t->loc);
+        int width, is_unsigned;
+        unsigned long long v = int_literal_typed(t->text, &width, &is_unsigned);
+        Expr *e = expr_new_int_typed((long long)v, width, is_unsigned, t->loc);
         advance(p);
         return parse_postfix(p, e);
     }
@@ -2042,18 +2082,21 @@ static Stmt parse_switch(Parser *p) {
             advance(p);  /* consume "case" */
             const Token *cv = peek(p);
             int value;
-            if (cv->kind == TK_INT_LITERAL) {
-                value = int_literal_value(cv->text);
-                advance(p);
-            } else if (cv->kind == TK_IDENT) {
+            if (cv->kind == TK_IDENT) {
+                /* A bare name may be an enum constant the expression parser
+                 * cannot fold on its own. */
                 value = case_constant_value(p, cv->text);
                 advance(p);
-            } else if (cv->kind == TK_CHAR_LITERAL) {
-                value = char_literal_value(cv->text);
-                advance(p);
             } else {
-                die_at(cv->loc.file, cv->loc.line, cv->loc.col,
-                       "expected constant case label but got '%s'", cv->text);
+                /* Any integer constant expression: `case -3:`, `case 'a':`,
+                 * `case 1 << 4:`, `case MAX - 1:`. */
+                Expr *ce = parse_ternary(p);
+                long long folded;
+                if (!fold_const_int(ce, &folded))
+                    die_at(cv->loc.file, cv->loc.line, cv->loc.col,
+                           "case label must be an integer constant expression");
+                expr_free(ce);
+                value = (int)folded;
             }
             expect_kind(p, TK_COLON, "':'");
             switch_push_case(&s, 0, value);

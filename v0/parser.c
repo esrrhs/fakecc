@@ -258,7 +258,7 @@ struct ExprArray {
     size_t cap;
 };typedef struct ExprArray ExprArray;
 union __anon_u_1 {
-        int int_val;
+        long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
         struct { char *name; } var;
@@ -301,7 +301,7 @@ struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
 struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
 struct __anon_compound_23 { Type target_type; Expr *init; };
 
-        int int_val;
+        long long int_val;
         struct __anon_bin_4 bin;
         struct __anon_un_5 un;
         struct __anon_var_6 var;
@@ -331,7 +331,8 @@ struct __anon_compound_23 { Type target_type; Expr *init; };
     Type va_arg_type;
     union __anon_u_3 u;
 };
-Expr *expr_new_int(int v, SourceLoc loc);
+Expr *expr_new_int(long long v, SourceLoc loc);
+Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -579,6 +580,8 @@ extern void abort(void);
 extern int atoi(const char *s);
 extern long atol(const char *s);
 extern long strtol(const char *s, char **end, int base);
+extern unsigned long strtoul(const char *s, char **end, int base);
+extern unsigned long long strtoull(const char *s, char **end, int base);
 extern double strtod(const char *s, char **end);
 extern long double strtold(const char *nptr, char **endptr);
 extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
@@ -1536,6 +1539,31 @@ static void float_literal_width(const char *text, int *out_width) {
 static int int_literal_value(const char *text) {
     return (int)strtol(text, ((void*)0), 0);
 }
+static unsigned long long int_literal_typed(const char *text, int *out_width,
+                                            int *out_unsigned) {
+    unsigned long long v = strtoull(text, ((void*)0), 0);
+    int suffix_u = 0, suffix_l = 0;
+    for (const char *s = text; *s; s++) {
+        if (*s == 'u' || *s == 'U') suffix_u = 1;
+        else if (*s == 'l' || *s == 'L') suffix_l = 1;
+    }
+    int decimal = !(text[0] == '0' && text[1] != '\0');
+    int width = suffix_l ? 8 : 4;
+    int is_unsigned = suffix_u;
+    if (is_unsigned) {
+        if (v > 0xFFFFFFFFULL) width = 8;
+    } else if (v > 0x7FFFFFFFFFFFFFFFULL) {
+        width = 8; is_unsigned = 1;
+    } else if (v > 0xFFFFFFFFULL) {
+        width = 8;
+    } else if (v > 0x7FFFFFFFULL) {
+        if (decimal) width = 8;
+        else if (width == 4) is_unsigned = 1;
+    }
+    *out_width = width;
+    *out_unsigned = is_unsigned;
+    return v;
+}
 static int char_literal_value(const char *text) {
     if (text[1] == '\\') {
         if (text[2] == 'x' || text[2] == 'X') {
@@ -1576,7 +1604,10 @@ static int char_literal_value(const char *text) {
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
-        Expr *e = expr_new_int(int_literal_value(t->text), t->loc);
+int width;
+int is_unsigned;
+        unsigned long long v = int_literal_typed(t->text, &width, &is_unsigned);
+        Expr *e = expr_new_int_typed((long long)v, width, is_unsigned, t->loc);
         advance(p);
         return parse_postfix(p, e);
     }
@@ -2245,18 +2276,17 @@ static Stmt parse_switch(Parser *p) {
             advance(p);
             const Token *cv = peek(p);
             int value;
-            if (cv->kind == TK_INT_LITERAL) {
-                value = int_literal_value(cv->text);
-                advance(p);
-            } else if (cv->kind == TK_IDENT) {
+            if (cv->kind == TK_IDENT) {
                 value = case_constant_value(p, cv->text);
                 advance(p);
-            } else if (cv->kind == TK_CHAR_LITERAL) {
-                value = char_literal_value(cv->text);
-                advance(p);
             } else {
-                die_at(cv->loc.file, cv->loc.line, cv->loc.col,
-                       "expected constant case label but got '%s'", cv->text);
+                Expr *ce = parse_ternary(p);
+                long long folded;
+                if (!fold_const_int(ce, &folded))
+                    die_at(cv->loc.file, cv->loc.line, cv->loc.col,
+                           "case label must be an integer constant expression");
+                expr_free(ce);
+                value = (int)folded;
             }
             expect_kind(p, TK_COLON, "':'");
             switch_push_case(&s, 0, value);

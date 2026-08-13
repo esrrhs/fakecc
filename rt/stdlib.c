@@ -25,12 +25,16 @@ void abort(void) {
     __syscall(231, 127);
 }
 
-long strtol(const char *s, char **end, int base) {
+/* Shared body of the strto* family: parses [ws][sign][base prefix][digits] and
+ * returns the magnitude, with the sign reported through *neg.  Wraparound on
+ * overflow rather than clamping to LONG_MAX/ULLONG_MAX. */
+static unsigned long long strtou_body(const char *s, char **end, int base,
+                                      int *neg) {
     while (isspace((unsigned char)*s)) s = s + 1;
-    int neg = 0;
+    *neg = 0;
     if (*s == '+') s = s + 1;
     else if (*s == '-') {
-        neg = 1;
+        *neg = 1;
         s = s + 1;
     }
     if (base == 0) {
@@ -42,8 +46,7 @@ long strtol(const char *s, char **end, int base) {
     } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
         s = s + 2;
     }
-    long v = 0;
-    int any = 0;
+    unsigned long long v = 0;
     while (1) {
         int d;
         char c = *s;
@@ -52,16 +55,29 @@ long strtol(const char *s, char **end, int base) {
         else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
         else break;
         if (d >= base) break;
-        any = 1;
-        v = v * base + d;
+        v = v * (unsigned long long)base + (unsigned long long)d;
         s = s + 1;
     }
-    if (end) {
-        if (any) *end = (char *)s;
-        else *end = (char *)s;
-    }
-    if (neg) v = -v;
+    if (end) *end = (char *)s;
     return v;
+}
+
+long strtol(const char *s, char **end, int base) {
+    int neg;
+    unsigned long long v = strtou_body(s, end, base, &neg);
+    if (neg) return -(long)v;
+    return (long)v;
+}
+
+unsigned long long strtoull(const char *s, char **end, int base) {
+    int neg;
+    unsigned long long v = strtou_body(s, end, base, &neg);
+    if (neg) return 0ULL - v;
+    return v;
+}
+
+unsigned long strtoul(const char *s, char **end, int base) {
+    return (unsigned long)strtoull(s, end, base);
 }
 
 int atoi(const char *s) {

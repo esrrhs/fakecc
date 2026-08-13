@@ -81,6 +81,20 @@ static void emit_mov_imm(Buffer *b, int dst_reg, int32_t imm) {
     emit_int32(b, imm);
 }
 
+/* movabs $imm64, %dst  →  REX.W B8+rd imm64.  The imm32 form sign-extends,
+ * so anything outside int32 (a large unsigned int, any wide long constant)
+ * has to go through this. */
+static void emit_mov_imm64(Buffer *b, int dst_reg, int64_t imm) {
+    if (imm == (int64_t)(int32_t)imm) {
+        emit_mov_imm(b, dst_reg, (int32_t)imm);
+        return;
+    }
+    emit_rex_wrb(b, 1, 0, dst_reg);
+    emit_byte(b, (uint8_t)(0xB8 + (dst_reg & 7)));
+    for (int i = 0; i < 8; i++)
+        emit_byte(b, (uint8_t)(imm >> (i * 8)));
+}
+
 /* neg %dst */
 static void emit_neg_r(Buffer *b, int dst_reg) {
     emit_rex_wrb(b, 1, 0, dst_reg);
@@ -558,14 +572,59 @@ static void emit_ld_store(Buffer *b, int v, const int *ld_off) {
     emit_x87_fstptRCX(b);
 }
 
-/* Load the 32-bit signed integer in GP register `src` into long-double value
- * `dst`'s slot via x87: mov src→[ld_slot]; fild dword [ld_slot]; fstpt the
- * result into [ld_slot].  int→long-double (IR_SITOFP ld).  Clobbers RAX/RCX. */
-static void emit_ld_from_gp_int(Buffer *b, int src, int dst, const int *ld_off) {
-    /* Store the int into the low 4 bytes of dst's 16-byte slot, fild it. */
+/* lea %dst, [rsp]  →  REX 8D [ModRM: mod=00, rm=100 (SIB)] [SIB: base=rsp] */
+static void emit_lea_rsp0(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, dst, REG_RSP);
+    emit_byte(b, 0x8D);
+    emit_modrm(b, 0, dst & 7, 4);
+    emit_byte(b, 0x24);
+}
+
+/* shr $imm8, %dst  →  REX C1 /5 ib */
+static void emit_shr_imm8(Buffer *b, int dst, uint8_t imm) {
+    emit_rex_wrb(b, 1, 0, dst);
+    emit_byte(b, 0xC1);
+    emit_modrm(b, 3, 5, dst);
+    emit_byte(b, imm);
+}
+
+/* and $imm32, %dst  →  REX 81 /4 id */
+static void emit_and_imm32(Buffer *b, int dst, int32_t imm) {
+    emit_rex_wrb(b, 1, 0, dst);
+    emit_byte(b, 0x81);
+    emit_modrm(b, 3, 4, dst);
+    emit_int32(b, imm);
+}
+
+/* Load the integer in GP register `src` into long-double value `dst`'s slot
+ * via x87: stage src in the slot, fild it, fstpt the result back.
+ * int→long-double (IR_SITOFP ld).  Clobbers RAX/RCX/RDX. */
+static void emit_ld_from_gp_int(Buffer *b, int src, int dst, const int *ld_off,
+                                int src_w, int src_u) {
     emit_ld_addr(b, REG_RCX, ld_off[dst]);
-    emit_store_base_off(b, REG_RCX, src, 0); /* mov [rcx], src (32-bit) */
-    emit_byte(b, 0xDB); emit_modrm(b, 0, 0, REG_RCX & 7); /* fild dword [rcx] */
+    if (src_w == 8 && src_u) {
+        /* fild reads a signed integer, so a value above 2^63 would come out
+         * negative.  Feed it as 2*(u>>1) + (u&1) instead: both halves fit in
+         * 63 bits and the x87's 64-bit mantissa holds each exactly. */
+        emit_mov_rr(b, REG_RDX, src);
+        emit_shr_imm8(b, REG_RDX, 1);
+        emit_store_base_off(b, REG_RCX, REG_RDX, 0);
+        emit_byte(b, 0xDF); emit_modrm(b, 0, 5, REG_RCX & 7); /* fild qword */
+        emit_byte(b, 0xD8); emit_byte(b, 0xC0);               /* fadd st0,st0 */
+        emit_mov_rr(b, REG_RDX, src);
+        emit_and_imm32(b, REG_RDX, 1);
+        emit_store_base_off(b, REG_RCX, REG_RDX, 0);
+        emit_byte(b, 0xDF); emit_modrm(b, 0, 5, REG_RCX & 7); /* fild qword */
+        emit_byte(b, 0xDE); emit_byte(b, 0xC1);               /* faddp st1,st0 */
+    } else if (src_w == 8 || src_u) {
+        /* Signed 64-bit, or a narrower unsigned whose register is already
+         * zero-extended: both are correct as a signed 64-bit fild. */
+        emit_store_base_off(b, REG_RCX, src, 0);
+        emit_byte(b, 0xDF); emit_modrm(b, 0, 5, REG_RCX & 7); /* fild qword */
+    } else {
+        emit_store_base_off(b, REG_RCX, src, 0);
+        emit_byte(b, 0xDB); emit_modrm(b, 0, 0, REG_RCX & 7); /* fild dword */
+    }
     emit_x87_fstptRCX(b); /* fstpt [rcx] — st0 (the ld) → slot, pop */
 }
 
@@ -1457,6 +1516,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     /* Emit globals into the appropriate section (.rodata for read-only,
      * .data for initialized mutable, .bss for zero-initialized) and register
      * each as a defined symbol with its linkage binding. */
+    size_t *global_off = NULL;
+    if (ir->globals.len > 0) {
+        global_off = malloc(ir->globals.len * sizeof(size_t));
+        if (!global_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
     for (size_t gi = 0; gi < ir->globals.len; gi++) {
         const IRGlobal *g = &ir->globals.data[gi];
         uint8_t binding = g->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
@@ -1480,16 +1544,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
         emit_module_add_symbol(out, g->name, binding, 1 /* STT_OBJECT */,
                                shndx, off, g->size);
-        /* Emit data-section relocations for pointer slots that must hold the
-         * address of another global (array/struct decay in the initializer).
-         * Each fixup becomes a R_X86_64_64 absolute relocation in .rela.data. */
-        for (int fi = 0; fi < g->num_fixups; fi++) {
-            int tsym = emit_module_find_symbol(out, g->fixups[fi].sym);
-            if (tsym < 0)
-                tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
-            emit_module_add_data_reloc(out, off + g->fixups[fi].offset,
-                                      R_X86_64_64, tsym, 0);
-        }
+        global_off[gi] = off;
         if (want_debug && !g->is_readonly) {
             /* Skip anonymous string literals (readonly); emit mutable globals. */
             DebugVar gv;
@@ -1508,6 +1563,24 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_module_add_dbg_global(out, &gv);
         }
     }
+
+    /* Pointer slots that must hold the address of another global (array/struct
+     * decay, or a string literal parked in .rodata) become R_X86_64_64
+     * relocations in .rela.data.  This runs as a second pass so a fixup can
+     * name a global defined later in the module — resolving it against a
+     * half-built symbol table would turn it into an undefined external and
+     * point the slot at a PLT stub. */
+    for (size_t gi = 0; gi < ir->globals.len; gi++) {
+        const IRGlobal *g = &ir->globals.data[gi];
+        for (int fi = 0; fi < g->num_fixups; fi++) {
+            int tsym = emit_module_find_symbol(out, g->fixups[fi].sym);
+            if (tsym < 0)
+                tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
+            emit_module_add_data_reloc(out, global_off[gi] + g->fixups[fi].offset,
+                                       R_X86_64_64, tsym, 0);
+        }
+    }
+    free(global_off);
 
     /* Cross-function call patches (accumulated across every function). */
     CallPatch *call_patches = NULL;
@@ -1889,9 +1962,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                             ra_xmm, gp_spill_area);
                     }
                 } else if (dr >= 0) {
-                    emit_mov_imm(&out->text, dr, inst->imm);
+                    emit_mov_imm64(&out->text, dr, inst->imm);
                 } else {
-                    emit_mov_imm(&out->text, REG_RAX, inst->imm);
+                    emit_mov_imm64(&out->text, REG_RAX, inst->imm);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
@@ -2434,7 +2507,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_ld_load(&out->text, inst->call_args[k], ld_off);
                         emit_sub_rsp_imm32(&out->text, 16);
                         emit_x87_fstpt_rsp(&out->text);
-                    } else if (target_is_xmm[k]) {
+                    } else if (value_is_float_class(fn, inst->call_args[k])) {
+                        /* float/double past XMM0-7 (or in a MEMORY eightbyte):
+                         * it lives in the XMM file, so it has to be fetched
+                         * from there even though it travels on the stack. */
                         ensure_reg_xmm(&out->text, inst->call_args[k],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
                         emit_sub_rsp_imm32(&out->text, 8);
@@ -2771,6 +2847,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_ld_load(&out->text, inst->b, ld_off); /* st0=b */
                         emit_ld_load(&out->text, inst->a, ld_off); /* st0=a,st1=b */
                     }
+                    if (inst->is_unsigned >= 4) emit_xor_rr(&out->text, REG_RAX);
                     emit_x87_fcomip(&out->text);
                     emit_byte(&out->text, 0xDD); emit_byte(&out->text, 0xD8); /* fstp %st(0) */
                     uint8_t cc;
@@ -2783,6 +2860,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     default: cc = 0x95; break; /* NE → setne */
                     }
                     emit_setcc_r(&out->text, cc, REG_RDX);
+                    /* Unordered (either operand NaN) sets ZF=PF=CF=1, which
+                     * reads as equal.  The ordered relations already come out
+                     * false there, but equality has to exclude PF explicitly:
+                     * a == b is ZF && !PF, a != b is !ZF || PF. */
+                    if (inst->is_unsigned == 4) {
+                        emit_setcc_r(&out->text, 0x9B, REG_RAX); /* setnp */
+                        emit_and_rr(&out->text, REG_RDX, REG_RAX);
+                    } else if (inst->is_unsigned == 5) {
+                        emit_setcc_r(&out->text, 0x9A, REG_RAX); /* setp */
+                        emit_or_rr(&out->text, REG_RDX, REG_RAX);
+                    }
                     int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                                 ? ra->reg[inst->dst] : -1;
                     if (dr_gp >= 0 && dr_gp != REG_RDX)
@@ -2799,11 +2887,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                gp_spill_area);
                 ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH1, ra_xmm,
                                gp_spill_area);
-                /* Map the FCMP ordering to the matching setcc byte. */
+                /* Map the FCMP ordering to the matching setcc byte.  Only
+                 * seta/setae read false when the compare is unordered (CF and
+                 * ZF are both set then), so a<b and a<=b are evaluated as
+                 * b>a and b>=a with the ucomi operands swapped rather than
+                 * with setb/setbe, which NaN would satisfy. */
                 uint8_t cc;
+                int swap = 0;
                 switch (inst->is_unsigned) {
-                case 0: cc = 0x92; break; /* LT → setb */
-                case 1: cc = 0x96; break; /* LE → setbe */
+                case 0: cc = 0x97; swap = 1; break; /* LT: a<b ↔ b>a → seta */
+                case 1: cc = 0x93; swap = 1; break; /* LE: a<=b ↔ b>=a → setae */
                 case 2: cc = 0x97; break; /* GT → seta */
                 case 3: cc = 0x93; break; /* GE → setae */
                 case 4: cc = 0x94; break; /* EQ → sete */
@@ -2814,9 +2907,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * the compare: ucomi sets the flags, and setcc reads them — a
                  * post-compare xor would clobber ZF/CF and break the result. */
                 emit_xor_rr(&out->text, REG_RDX);
-                emit_sse_ucomi(&out->text, XMM_SCRATCH0, XMM_SCRATCH1,
-                               is_float);
+                if (inst->is_unsigned >= 4) emit_xor_rr(&out->text, REG_RAX);
+                if (swap)
+                    emit_sse_ucomi(&out->text, XMM_SCRATCH1, XMM_SCRATCH0,
+                                   is_float);
+                else
+                    emit_sse_ucomi(&out->text, XMM_SCRATCH0, XMM_SCRATCH1,
+                                   is_float);
                 emit_setcc_r(&out->text, cc, REG_RDX);
+                /* Unordered (either operand NaN) sets ZF=PF=CF=1, which reads
+                 * as equal.  The ordered relations already come out false
+                 * there, but equality has to exclude PF explicitly: a == b is
+                 * ZF && !PF, a != b is !ZF || PF. */
+                if (inst->is_unsigned == 4) {
+                    emit_setcc_r(&out->text, 0x9B, REG_RAX); /* setnp */
+                    emit_and_rr(&out->text, REG_RDX, REG_RAX);
+                } else if (inst->is_unsigned == 5) {
+                    emit_setcc_r(&out->text, 0x9A, REG_RAX); /* setp */
+                    emit_or_rr(&out->text, REG_RDX, REG_RAX);
+                }
                 if (dr >= 0 && dr != REG_RDX)
                     emit_mov_rr(&out->text, dr, REG_RDX);
                 spill_if_needed(&out->text, inst->dst,
@@ -2825,22 +2934,48 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_SITOFP: {
+                /* imm carries the source integer width and is_unsigned its
+                 * signedness; inst->width is the destination float width. */
+                int src_w = inst->imm ? (int)inst->imm : 4;
+                int src_u = inst->is_unsigned;
                 if (value_is_ld(fn, inst->dst)) {
                     /* int→long double.  Load int into a GP reg, store into dst's
-                     * slot, fild dword from the slot (pushes ld to st0), fstpt
-                     * the result back into dst's slot.  Clobbers RAX/RCX. */
+                     * slot, fild from the slot (pushes ld to st0), fstpt the
+                     * result back into dst's slot.  Clobbers RAX/RCX/RDX. */
                     int pdr = (ra && inst->a >= 0 && inst->a < ra->num_values)
                               ? ra->reg[inst->a] : -1;
                     int src = (pdr >= 0) ? pdr : REG_RAX;
                     if (pdr < 0) emit_load_spill(&out->text, REG_RAX, spill_offset(ra->spill_slot[inst->a]));
-                    emit_ld_from_gp_int(&out->text, src, inst->dst, ld_off);
+                    emit_ld_from_gp_int(&out->text, src, inst->dst, ld_off,
+                                        src_w, src_u);
                     break;
                 }
-                /* dst (float) = (float)a, a = signed int.  Load a into a GP
-                 * scratch, cvtsi2sd, then optionally narrow to float. */
+                /* dst (float) = (float)a.  Load a into a GP scratch, cvtsi2sd,
+                 * then optionally narrow to float. */
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                int is_64 = (inst->width == 8);
-                emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX, is_64);
+                if (src_u && src_w == 8) {
+                    /* cvtsi2sd is signed.  Above 2^63 convert u/2 (rounding
+                     * the odd bit into it so no low bit is lost) and double
+                     * the result. */
+                    emit_test_rr(&out->text, REG_RAX);
+                    size_t j_big = emit_jcc_rel32(&out->text, 0x88); /* js */
+                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX, 1);
+                    size_t j_done = emit_jmp_rel32(&out->text);
+                    patch_rel32(&out->text, j_big, out->text.len);
+                    emit_mov_rr(&out->text, REG_RDX, REG_RAX);
+                    emit_and_imm32(&out->text, REG_RDX, 1);
+                    emit_shr_imm8(&out->text, REG_RAX, 1);
+                    emit_or_rr(&out->text, REG_RAX, REG_RDX);
+                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX, 1);
+                    emit_sse_arith(&out->text, 0x58 /* add */, XMM_SCRATCH0,
+                                   XMM_SCRATCH0, 0);
+                    patch_rel32(&out->text, j_done, out->text.len);
+                } else {
+                    if (src_u && src_w < 8)
+                        mask_to_width(&out->text, REG_RAX, src_w, 1);
+                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX,
+                                      src_w == 8 || src_u);
+                }
                 if (inst->width == 4)
                     emit_sse_cvtsd2ss(&out->text, XMM_SCRATCH0, XMM_SCRATCH0);
                 if (dr >= 0 && dr != XMM_SCRATCH0)
@@ -2851,6 +2986,48 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_FPTOSI: {
+                if (value_is_ld(fn, inst->a) && inst->is_unsigned
+                    && inst->width == 8) {
+                    /* long double→unsigned long.  fisttp is a signed store and
+                     * yields the integer indefinite above 2^63, so split the
+                     * range the same way the SSE path does.  2^63 is built as
+                     * 2^62+2^62 because no immediate can hold it. */
+                    int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
+                                ? ra->reg[inst->dst] : -1;
+                    int dst_reg = (dr_gp >= 0) ? dr_gp : REG_RAX;
+                    emit_sub_rsp_imm32(&out->text, 16);
+                    emit_mov_imm64(&out->text, REG_RAX,
+                                   (int64_t)0x4000000000000000LL);
+                    emit_store_rsp_off(&out->text, REG_RAX, 0);
+                    emit_lea_rsp0(&out->text, REG_RCX);
+                    emit_byte(&out->text, 0xDF);
+                    emit_modrm(&out->text, 0, 5, REG_RCX & 7); /* fild qword */
+                    emit_byte(&out->text, 0xD8); emit_byte(&out->text, 0xC0); /* fadd st0,st0 */
+                    emit_ld_load(&out->text, inst->a, ld_off); /* st0=a, st1=2^63 */
+                    emit_byte(&out->text, 0xDB); emit_byte(&out->text, 0xF1); /* fcomi st0,st1 */
+                    size_t j_small = emit_jcc_rel32(&out->text, 0x82); /* jb */
+                    emit_byte(&out->text, 0xD8); emit_byte(&out->text, 0xE1); /* fsub st0,st1 */
+                    emit_lea_rsp0(&out->text, REG_RCX);
+                    emit_byte(&out->text, 0xDD);
+                    emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp qword */
+                    emit_load_base_off(&out->text, dst_reg, REG_RCX, 0);
+                    emit_mov_imm64(&out->text, REG_RDX,
+                                   (int64_t)0x8000000000000000ULL);
+                    emit_bitxor_rr(&out->text, dst_reg, REG_RDX);
+                    size_t j_done = emit_jmp_rel32(&out->text);
+                    patch_rel32(&out->text, j_small, out->text.len);
+                    emit_lea_rsp0(&out->text, REG_RCX);
+                    emit_byte(&out->text, 0xDD);
+                    emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp qword */
+                    emit_load_base_off(&out->text, dst_reg, REG_RCX, 0);
+                    patch_rel32(&out->text, j_done, out->text.len);
+                    emit_byte(&out->text, 0xDD); emit_byte(&out->text, 0xD8); /* fstp st0 (drop 2^63) */
+                    emit_add_rsp_imm32(&out->text, 16);
+                    if (dr_gp >= 0 && dr_gp != dst_reg)
+                        emit_mov_rr(&out->text, dr_gp, dst_reg);
+                    spill_if_needed(&out->text, inst->dst, dst_reg, ra);
+                    break;
+                }
                 if (value_is_ld(fn, inst->a)) {
                     /* long double→int.  Load ld a into st0, sub a small scratch
                      * on the stack, fisttp dword to it, read into a GP reg.  Uses
@@ -2862,16 +3039,27 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8D);
                     emit_modrm(&out->text, 0, REG_RCX & 7, 4);
                     emit_byte(&out->text, 0x24);
-                    emit_byte(&out->text, 0xDB);
-                    emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp dword [rsp] */
+                    /* fisttp m32int (DB /1) vs m64int (DD /1): the store must
+                     * match the target width, since the value is read back as
+                     * a full 64-bit word below. */
+                    emit_byte(&out->text, inst->width == 8 ? 0xDD : 0xDB);
+                    emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp [rsp] */
                     int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                                 ? ra->reg[inst->dst] : -1;
                     int dst_reg = (dr_gp >= 0) ? dr_gp : REG_RAX;
-                    /* mov dst_reg, [rsp] */
-                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B);
+                    /* mov dst_reg, [rsp] — REX.R must come from the register,
+                     * otherwise r8-r15 encode as their low-3-bit twin (r8
+                     * would silently become rax). */
+                    emit_rex_wrb(&out->text, 1, dst_reg, REG_RSP);
+                    emit_byte(&out->text, 0x8B);
                     emit_modrm(&out->text, 0, dst_reg & 7, 4);
                     emit_byte(&out->text, 0x24);
                     emit_add_rsp_imm32(&out->text, 8);
+                    /* A narrow fisttp only wrote the low bytes of the scratch,
+                     * and the read above took the whole word. */
+                    if (inst->width < 8)
+                        mask_to_width(&out->text, dst_reg, inst->width,
+                                      inst->is_unsigned);
                     if (dr_gp >= 0 && dr_gp != dst_reg)
                         emit_mov_rr(&out->text, dr_gp, dst_reg);
                     spill_if_needed(&out->text, inst->dst,
@@ -2884,11 +3072,43 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
                                gp_spill_area);
                 int src_float = (inst->imm == 4);
-                int dst_64 = (inst->width == 8);
-                if (src_float)
-                    emit_sse_cvtss2si(&out->text, REG_RAX, XMM_SCRATCH0, dst_64);
-                else
-                    emit_sse_cvtsd2si(&out->text, REG_RAX, XMM_SCRATCH0, dst_64);
+                if (inst->is_unsigned && inst->width == 8) {
+                    /* unsigned long: cvttss/sd2si is a *signed* conversion and
+                     * saturates to 0x8000000000000000 above 2^63, so split the
+                     * range: below 2^63 convert directly, at or above it
+                     * subtract 2^63, convert, and put the top bit back. */
+                    int64_t bias = src_float ? (int64_t)0x5F000000
+                                             : (int64_t)0x43E0000000000000LL;
+                    emit_float_const(&out->text, XMM_SCRATCH1, bias);
+                    emit_sse_ucomi(&out->text, XMM_SCRATCH0, XMM_SCRATCH1, src_float);
+                    size_t j_big = emit_jcc_rel32(&out->text, 0x83); /* jae */
+                    if (src_float)
+                        emit_sse_cvtss2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
+                    else
+                        emit_sse_cvtsd2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
+                    size_t j_done = emit_jmp_rel32(&out->text);
+                    patch_rel32(&out->text, j_big, out->text.len);
+                    emit_sse_arith(&out->text, 0x5C /* sub */, XMM_SCRATCH0,
+                                   XMM_SCRATCH1, src_float);
+                    if (src_float)
+                        emit_sse_cvtss2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
+                    else
+                        emit_sse_cvtsd2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
+                    emit_mov_imm64(&out->text, REG_RCX, (int64_t)0x8000000000000000ULL);
+                    emit_bitxor_rr(&out->text, REG_RAX, REG_RCX);
+                    patch_rel32(&out->text, j_done, out->text.len);
+                } else {
+                    /* Convert at 64 bits even for narrower targets: a 32-bit
+                     * cvtt* saturates a value like 3e9 that the target's
+                     * unsigned range holds fine, and leaves a negative result
+                     * zero-extended rather than sign-extended. */
+                    if (src_float)
+                        emit_sse_cvtss2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
+                    else
+                        emit_sse_cvtsd2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
+                    mask_to_width(&out->text, REG_RAX, inst->width,
+                                  inst->is_unsigned);
+                }
                 if (dr >= 0 && dr != REG_RAX)
                     emit_mov_rr(&out->text, dr, REG_RAX);
                 spill_if_needed(&out->text, inst->dst,

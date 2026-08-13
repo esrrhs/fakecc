@@ -48,6 +48,12 @@ floats/float_basic.c
 floats/float_double.c
 floats/float_cmp.c
 floats/float_cast.c
+floats/float_nan_compare.c
+floats/float_compound_assign.c
+floats/float_global_init.c
+floats/float_unsigned_convert.c
+floats/longdouble_param.c
+runtime/printf_float.c
 control_flow/for_basic.c
 control_flow/for_break_continue.c
 control_flow/goto_basic.c

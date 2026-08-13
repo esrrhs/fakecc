@@ -84,7 +84,7 @@ typedef struct {
     IROpcode op;
     IRValue  dst;      /* meaningless for IR_RETURN/IR_BR/IR_LABEL, fill -1 */
     IRValue  a, b;     /* source operands; IR_CONST only uses imm */
-    int      imm;      /* CONST value, LABEL id, BR/CBR target, PARAM index */
+    int64_t  imm;      /* CONST value, LABEL id, BR/CBR target, PARAM index */
     SourceLoc loc;
     /* IR_CALL only: callee name + argument SSA values.  NULL for other ops. */
     char    *call_name;

@@ -258,7 +258,7 @@ struct ExprArray {
     size_t cap;
 };typedef struct ExprArray ExprArray;
 union __anon_u_1 {
-        int int_val;
+        long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
         struct { char *name; } var;
@@ -301,7 +301,7 @@ struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
 struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
 struct __anon_compound_23 { Type target_type; Expr *init; };
 
-        int int_val;
+        long long int_val;
         struct __anon_bin_4 bin;
         struct __anon_un_5 un;
         struct __anon_var_6 var;
@@ -331,7 +331,8 @@ struct __anon_compound_23 { Type target_type; Expr *init; };
     Type va_arg_type;
     union __anon_u_3 u;
 };
-Expr *expr_new_int(int v, SourceLoc loc);
+Expr *expr_new_int(long long v, SourceLoc loc);
+Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -573,6 +574,8 @@ extern void abort(void);
 extern int atoi(const char *s);
 extern long atol(const char *s);
 extern long strtol(const char *s, char **end, int base);
+extern unsigned long strtoul(const char *s, char **end, int base);
+extern unsigned long long strtoull(const char *s, char **end, int base);
 extern double strtod(const char *s, char **end);
 extern long double strtold(const char *nptr, char **endptr);
 extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
@@ -1087,7 +1090,7 @@ const Type *typedef_registry_find(const TypedefRegistry *r, const char *name) {
         if (strcmp(r->data[i].name, name) == 0) return &r->data[i].type;
     return ((void*)0);
 }
-Expr *expr_new_int(int v, SourceLoc loc) {
+Expr *expr_new_int(long long v, SourceLoc loc) {
     Expr *e = malloc(sizeof(Expr));
     if (!e) {
         fprintf(stderr, "fakecc: out of memory\n");
@@ -1098,6 +1101,11 @@ Expr *expr_new_int(int v, SourceLoc loc) {
     e->type = type_default_int();
     memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.int_val = v;
+    return e;
+}
+Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc) {
+    Expr *e = expr_new_int(v, loc);
+    e->type = type_make_int(width, is_unsigned);
     return e;
 }
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc) {

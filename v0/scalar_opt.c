@@ -93,7 +93,7 @@ struct IRInst {
     IRValue dst;
     IRValue a;
     IRValue b;
-    int imm;
+    int64_t imm;
     SourceLoc loc;
     char *call_name;
     IRValue call_args[32];
@@ -428,7 +428,7 @@ struct ExprArray {
     size_t cap;
 };typedef struct ExprArray ExprArray;
 union __anon_u_1 {
-        int int_val;
+        long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
         struct { char *name; } var;
@@ -471,7 +471,7 @@ struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
 struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
 struct __anon_compound_23 { Type target_type; Expr *init; };
 
-        int int_val;
+        long long int_val;
         struct __anon_bin_4 bin;
         struct __anon_un_5 un;
         struct __anon_var_6 var;
@@ -501,7 +501,8 @@ struct __anon_compound_23 { Type target_type; Expr *init; };
     Type va_arg_type;
     union __anon_u_3 u;
 };
-Expr *expr_new_int(int v, SourceLoc loc);
+Expr *expr_new_int(long long v, SourceLoc loc);
+Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -750,6 +751,8 @@ extern void abort(void);
 extern int atoi(const char *s);
 extern long atol(const char *s);
 extern long strtol(const char *s, char **end, int base);
+extern unsigned long strtoul(const char *s, char **end, int base);
+extern unsigned long long strtoull(const char *s, char **end, int base);
 extern double strtod(const char *s, char **end);
 extern long double strtold(const char *nptr, char **endptr);
 extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
@@ -768,17 +771,26 @@ extern char *strstr(const char *a, const char *b);
 extern char *strcpy(char *dst, const char *src);
 extern char *strncpy(char *dst, const char *src, size_t n);
 extern char *strerror(int n);
-static int const_value(const IRInstArray *insts, IRValue v, int *found) {
+static int64_t const_value(const IRInstArray *insts, IRValue v, int *found) {
     *found = 0;
     if (v < 0) return 0;
     for (size_t i = 0; i < insts->len; i++) {
         IRInst *inst = &insts->data[i];
         if (inst->dst == v && inst->op == IR_CONST) {
+            if (inst->is_float) return 0;
             *found = 1;
             return inst->imm;
         }
     }
     return 0;
+}
+static int64_t trunc_to_width(int64_t v, int width, int is_unsigned) {
+    if (width >= 8 || width <= 0) return v;
+    uint64_t mask = (width == 1) ? 0xFFULL : (width == 2) ? 0xFFFFULL : 0xFFFFFFFFULL;
+    uint64_t u = (uint64_t)v & mask;
+    if (is_unsigned) return (int64_t)u;
+    uint64_t sign = (mask >> 1) + 1;
+    return (u & sign) ? (int64_t)(u | ~mask) : (int64_t)u;
 }
 static int has_side_effect(IROpcode op) {
     return op == IR_RETURN || op == IR_STORE || op == IR_STORE_PTR ||
@@ -802,43 +814,61 @@ int scalar_constfold(IRFunction *fn) {
         case IR_SHR: {
 int lf;
 int rf;
-            int lv = const_value(&fn->insts, inst->a, &lf);
-            int rv = const_value(&fn->insts, inst->b, &rf);
+            int64_t lv = const_value(&fn->insts, inst->a, &lf);
+            int64_t rv = const_value(&fn->insts, inst->b, &rf);
             if (!lf || !rf) break;
+            if (inst->is_float) break;
+            int w = inst->width ? inst->width : 4;
+            int uns = inst->is_unsigned ? 1 : 0;
+            uint64_t lu = (uint64_t)trunc_to_width(lv, w, uns);
+            uint64_t ru = (uint64_t)trunc_to_width(rv, w, uns);
+            int64_t ls = trunc_to_width(lv, w, uns), rs = trunc_to_width(rv, w, uns);
             if (inst->op == IR_SHL || inst->op == IR_SHR) {
-                if (rv < 0 || rv >= 32) continue;
+                if (rs < 0 || rs >= w * 8) continue;
             }
-            int result;
+            int64_t result;
             switch (inst->op) {
-            case IR_ADD: result = lv + rv; break;
-            case IR_SUB: result = lv - rv; break;
-            case IR_MUL: result = lv * rv; break;
-            case IR_DIV: if (rv == 0) continue; result = lv / rv; break;
-            case IR_MOD: if (rv == 0) continue; result = lv % rv; break;
-            case IR_BAND: result = lv & rv; break;
-            case IR_BOR: result = lv | rv; break;
-            case IR_BXOR: result = lv ^ rv; break;
-            case IR_SHL: result = lv << rv; break;
-            case IR_SHR: result = lv >> rv; break;
+            case IR_ADD: result = (int64_t)(lu + ru); break;
+            case IR_SUB: result = (int64_t)(lu - ru); break;
+            case IR_MUL: result = (int64_t)(lu * ru); break;
+            case IR_DIV:
+                if (rs == 0) continue;
+                if (uns) result = (int64_t)(lu / ru);
+                else { if (rs == -1) continue; result = ls / rs; }
+                break;
+            case IR_MOD:
+                if (rs == 0) continue;
+                if (uns) result = (int64_t)(lu % ru);
+                else { if (rs == -1) continue; result = ls % rs; }
+                break;
+            case IR_BAND: result = (int64_t)(lu & ru); break;
+            case IR_BOR: result = (int64_t)(lu | ru); break;
+            case IR_BXOR: result = (int64_t)(lu ^ ru); break;
+            case IR_SHL: result = (int64_t)(lu << rs); break;
+            case IR_SHR: result = uns ? (int64_t)(lu >> rs) : (ls >> rs); break;
             default: continue;
             }
             inst->op = IR_CONST;
             inst->a = -1;
             inst->b = -1;
-            inst->imm = result;
+            inst->imm = trunc_to_width(result, w, uns);
             changed = 1;
             break;
         }
         case IR_NEG:
         case IR_BNOT: {
             int f;
-            int v = const_value(&fn->insts, inst->a, &f);
+            int64_t v = const_value(&fn->insts, inst->a, &f);
             if (!f) break;
+            if (inst->is_float) break;
+            int w = inst->width ? inst->width : 4;
+            int uns = inst->is_unsigned ? 1 : 0;
+            uint64_t uv = (uint64_t)trunc_to_width(v, w, uns);
             int is_neg = (inst->op == IR_NEG);
             inst->op = IR_CONST;
             inst->a = -1;
             inst->b = -1;
-            inst->imm = is_neg ? -v : ~v;
+            inst->imm = trunc_to_width((int64_t)(is_neg ? -uv : ~uv), w, uns);
             changed = 1;
             break;
         }
@@ -897,10 +927,11 @@ int scalar_peephole(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_ADD || inst->op == IR_SUB || inst->op == IR_MUL) {
+            if (inst->is_float) continue;
 int lf;
 int rf;
-            int lv = const_value(&fn->insts, inst->a, &lf);
-            int rv = const_value(&fn->insts, inst->b, &rf);
+            int64_t lv = const_value(&fn->insts, inst->a, &lf);
+            int64_t rv = const_value(&fn->insts, inst->b, &rf);
             if (inst->op == IR_ADD) {
                 if (lf && lv == 0) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
                 else if (rf && rv == 0) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
