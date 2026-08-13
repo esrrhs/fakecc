@@ -88,7 +88,30 @@ long atol(const char *s) {
     return strtol(s, 0, 10);
 }
 
-double strtod(const char *s, char **end) {
+/* 10^k as an exact long double, for k <= LD_POW10_EXACT.  10^27 = 2^27 * 5^27
+ * and 5^27 < 2^64, so every power up to that fits the x87 64-bit mantissa with
+ * no rounding; the loop below therefore only multiplies exact values. */
+static long double pow10_exact(int k) {
+    long double p = 1.0L;
+    while (k > 0) {
+        p = p * 10.0L;
+        k = k - 1;
+    }
+    return p;
+}
+
+/* Parse a decimal floating literal by accumulating the digits as an exact
+ * integer mantissa and applying the decimal exponent in as few scalings as
+ * possible.  Scaling digit by digit (v += 0.1 * d, place *= 0.1) instead
+ * compounds the representation error of 0.1 across every fraction digit, so
+ * "7.125" — a value with an exact binary form — came back as 7.12499...  The
+ * compiler parses every float literal in its input through here, so that error
+ * would land in the constants of every program the self-hosted compiler builds.
+ *
+ * Only integer-valued literals appear below, which parse exactly under both
+ * this implementation and the host's, keeping the bootstrap a fixed point. */
+static long double strtofp_body(const char *s, char **end) {
+    const char *start = s;
     while (isspace((unsigned char)*s)) s = s + 1;
     int neg = 0;
     if (*s == '+') s = s + 1;
@@ -96,24 +119,40 @@ double strtod(const char *s, char **end) {
         neg = 1;
         s = s + 1;
     }
-    double v = 0.0;
+
+    long double mant = 0.0L;
     int any = 0;
+    int ndig = 0;   /* digits folded into mant; 19 exceeds the mantissa */
+    int dexp = 0;   /* power of ten still to apply to mant */
     while (isdigit((unsigned char)*s)) {
         any = 1;
-        v = v * 10.0 + (double)(*s - '0');
+        if (ndig < 19) {
+            mant = mant * 10.0L + (long double)(*s - '0');
+            ndig = ndig + 1;
+        } else {
+            dexp = dexp + 1;
+        }
         s = s + 1;
     }
     if (*s == '.') {
         s = s + 1;
-        double place = 0.1;
         while (isdigit((unsigned char)*s)) {
             any = 1;
-            v = v + place * (double)(*s - '0');
-            place = place * 0.1;
+            if (ndig < 19) {
+                mant = mant * 10.0L + (long double)(*s - '0');
+                ndig = ndig + 1;
+                dexp = dexp - 1;
+            }
             s = s + 1;
         }
     }
+    if (!any) {
+        if (end) *end = (char *)start;
+        return 0.0L;
+    }
+
     if (*s == 'e' || *s == 'E') {
+        const char *epos = s;
         s = s + 1;
         int eneg = 0;
         if (*s == '+') s = s + 1;
@@ -121,28 +160,46 @@ double strtod(const char *s, char **end) {
             eneg = 1;
             s = s + 1;
         }
-        int exp = 0;
-        while (isdigit((unsigned char)*s)) {
-            exp = exp * 10 + (*s - '0');
-            s = s + 1;
+        if (isdigit((unsigned char)*s)) {
+            int exp = 0;
+            while (isdigit((unsigned char)*s)) {
+                if (exp < 100000) exp = exp * 10 + (*s - '0');
+                s = s + 1;
+            }
+            if (eneg) dexp = dexp - exp;
+            else dexp = dexp + exp;
+        } else {
+            s = epos;   /* no digits after 'e': the exponent is not part of it */
         }
-        double pow10 = 1.0;
-        int i = 0;
-        while (i < exp) {
-            pow10 = pow10 * 10.0;
-            i = i + 1;
-        }
-        if (eneg) v = v / pow10;
-        else v = v * pow10;
     }
     if (end) *end = (char *)s;
-    if (neg) v = -v;
-    if (!any) return 0.0;
-    return v;
+
+    long double chunk = pow10_exact(27);
+    while (dexp >= 27) {
+        mant = mant * chunk;
+        dexp = dexp - 27;
+    }
+    while (dexp <= -27) {
+        mant = mant / chunk;
+        dexp = dexp + 27;
+    }
+    if (dexp > 0) mant = mant * pow10_exact(dexp);
+    else if (dexp < 0) mant = mant / pow10_exact(-dexp);
+
+    if (neg) mant = -mant;
+    return mant;
+}
+
+double strtod(const char *s, char **end) {
+    return (double)strtofp_body(s, end);
+}
+
+float strtof(const char *s, char **end) {
+    return (float)strtofp_body(s, end);
 }
 
 long double strtold(const char *s, char **end) {
-    return (long double)strtod(s, end);
+    return strtofp_body(s, end);
 }
 
 static void qsort_swap(char *a, char *b, size_t sz) {

@@ -961,6 +961,7 @@ extern long strtol(const char *s, char **end, int base);
 extern unsigned long strtoul(const char *s, char **end, int base);
 extern unsigned long long strtoull(const char *s, char **end, int base);
 extern double strtod(const char *s, char **end);
+extern float strtof(const char *s, char **end);
 extern long double strtold(const char *nptr, char **endptr);
 extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
 extern char *getenv(const char *name);
@@ -1608,6 +1609,12 @@ static int value_is_ld(const IRFunction *fn, int v) {
     if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
     if (v >= fn->value_meta_cap) return 0;
     return fn->value_width[v] == 16;
+}
+static int value_width_of(const IRFunction *fn, int v) {
+    if (v < 0) return 0;
+    if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
+    if (v >= fn->value_meta_cap) return 0;
+    return fn->value_width[v];
 }
 static void emit_ld_addr(Buffer *b, int reg, int ld_off) {
     emit_lea_rbp(b, reg, ld_off);
@@ -3274,11 +3281,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
             case IR_FPEXT: {
                 if (value_is_ld(fn, inst->dst)) {
+                    int src_is_f32 = value_width_of(fn, inst->a) == 4;
                     ensure_reg_xmm(&out->text, inst->a, 14, ra_xmm,
                                    gp_spill_area);
                     emit_ld_addr(&out->text, REG_RCX, ld_off[inst->dst]);
-                    emit_sse_store_via_ptr(&out->text, REG_RCX, 14, 0);
-                    emit_byte(&out->text, 0xDD);
+                    emit_sse_store_via_ptr(&out->text, REG_RCX, 14,
+                                           src_is_f32);
+                    emit_byte(&out->text, src_is_f32 ? 0xD9 : 0xDD);
                     emit_modrm(&out->text, 0, 0, REG_RCX & 7);
                     emit_x87_fstptRCX(&out->text);
                     break;
@@ -3294,11 +3303,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
             case IR_FPTRUNC: {
                 if (value_is_ld(fn, inst->a)) {
+                    int dst_is_f32 = inst->width == 4;
                     emit_ld_load(&out->text, inst->a, ld_off);
                     emit_ld_addr(&out->text, REG_RCX, ld_off[inst->a]);
-                    emit_byte(&out->text, 0xDD);
+                    emit_byte(&out->text, dst_is_f32 ? 0xD9 : 0xDD);
                     emit_modrm(&out->text, 0, 3, REG_RCX & 7);
-                    emit_sse_load_via_ptr(&out->text, 14, REG_RCX, 0);
+                    emit_sse_load_via_ptr(&out->text, 14, REG_RCX,
+                                          dst_is_f32);
                     if (dr >= 0 && dr != 14)
                         emit_sse_mov_rr(&out->text, dr, 14);
                     spill_if_needed_xmm(&out->text, inst->dst, 14,

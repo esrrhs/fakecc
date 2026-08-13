@@ -930,6 +930,14 @@ static int value_is_ld(const IRFunction *fn, int v) {
     return fn->value_width[v] == 16;
 }
 
+/* Byte width recorded for SSA value `v` (0 when unknown). */
+static int value_width_of(const IRFunction *fn, int v) {
+    if (v < 0) return 0;
+    if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
+    if (v >= fn->value_meta_cap) return 0;
+    return fn->value_width[v];
+}
+
 /* Materialize the address of long-double value `v`'s 16-byte slot into GP
  * register `reg`.  ld_off[v] is the rbp-relative offset assigned in the
  * prologue (negative for locals/results, positive for stack-passed params). */
@@ -3120,12 +3128,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (value_is_ld(fn, inst->dst)) {
                     /* double (or float)→long double.  Load the SSE value into
                      * XMM scratch, store to dst's slot, fld qword/dword from
-                     * the slot (pushes ld to st0), fstpt back to dst's slot. */
+                     * the slot (pushes ld to st0), fstpt back to dst's slot.
+                     * The store and the fld must agree on the source width:
+                     * a float source occupies only the low 4 bytes. */
+                    int src_is_f32 = value_width_of(fn, inst->a) == 4;
                     ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
                                    gp_spill_area);
                     emit_ld_addr(&out->text, REG_RCX, ld_off[inst->dst]);
-                    emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0, 0);
-                    emit_byte(&out->text, 0xDD); /* fld qword [rcx] */
+                    emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0,
+                                           src_is_f32);
+                    /* fld dword/qword [rcx] */
+                    emit_byte(&out->text, src_is_f32 ? 0xD9 : 0xDD);
                     emit_modrm(&out->text, 0, 0, REG_RCX & 7);
                     emit_x87_fstptRCX(&out->text); /* fstpt [rcx] */
                     break;
@@ -3147,11 +3160,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      * st0, fstp qword into the source slot's first 8 bytes (the
                      * source is consumed, so reusing it as scratch is safe),
                      * load into XMM scratch → dst home. */
+                    int dst_is_f32 = inst->width == 4;
                     emit_ld_load(&out->text, inst->a, ld_off); /* fldt → st0 */
                     emit_ld_addr(&out->text, REG_RCX, ld_off[inst->a]);
-                    emit_byte(&out->text, 0xDD); /* fstp qword [rcx] */
+                    /* fstp dword/qword [rcx] — narrowing happens here, so the
+                     * store size must match the destination's float width. */
+                    emit_byte(&out->text, dst_is_f32 ? 0xD9 : 0xDD);
                     emit_modrm(&out->text, 0, 3, REG_RCX & 7);
-                    emit_sse_load_via_ptr(&out->text, XMM_SCRATCH0, REG_RCX, 0);
+                    emit_sse_load_via_ptr(&out->text, XMM_SCRATCH0, REG_RCX,
+                                          dst_is_f32);
                     if (dr >= 0 && dr != XMM_SCRATCH0)
                         emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
                     spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,

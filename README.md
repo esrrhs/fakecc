@@ -77,7 +77,7 @@ ldd hello          # 「不是动态可执行文件」— 无 libc
 | `malloc.c` | `mmap` freelist：`malloc` / `free` / `calloc` / `realloc` |
 | `stdio.c` | 迷你 `FILE`、`stdin`/`stdout`/`stderr`、缓冲、`fopen`/`fread`/`fwrite`/`puts`/`putchar`/… |
 | `printf.c` | `printf` / `fprintf` / `snprintf` / `v*`（`%s%c%d%i%u%x%o%p%f%e%g`、`-+ 0#` 标志、`*` 宽度/精度） |
-| `stdlib.c` | `exit`（先 fflush）/ `abort` / `strto*`（含 `strtoul`/`strtoull`）/ `qsort` / `chmod` / `getenv` |
+| `stdlib.c` | `exit`（先 fflush）/ `abort` / `strto*`（含 `strtoul`/`strtoull`、`strtod`/`strtof`/`strtold`）/ `qsort` / `chmod` / `getenv` |
 
 - 查找顺序：`FAKECC_RT` → `./rt` → `<argv0>/rt` → `<argv0>/../rt`
 - `-nostdlib`：不链 `rt/`；再加 `-lc` 即走系统 libc（调试 / 互操作用）
@@ -133,6 +133,7 @@ gcc 只出现在：编 Stage0，以及 `translate.py` 里对 `src/*.c` 做预处
 
 - **DWARF 位置列表在块重排时可能偏保守**：`-g` 已提供行号、标量/指针/具名 struct（含成员 DIE，`print p.x` / `q->x` 可用）、位置列表，以及 `DW_OP_entry_value` + `DW_TAG_call_site`（优化后外层帧参数可恢复）。位置列表按线性指令流推导，块的入口值靠 φ 标记补齐，块被重排时个别范围可能偏保守。
 - **工程主体仍是 `src/` + translate**：方言尚未成为唯一源码树；Stage0 仍需 gcc。
+- **`rt/printf` 不认 `%Lf` 的 `L`**：长度修饰符被吃掉但实参仍按 `double` 取，long double 变参会打成 0；`va_arg(ap, long double)` 同样未走 SysV 的 MEMORY 类（16 字节栈槽），暂不支持。
 - **`rt/` 的浮点打印只有 18 位有效数字**：`%f`/`%e`/`%g` 从 long double 展开十进制，足以覆盖 double 的 17 位；超出部分（如 `%f` 打印 `1e300`）按展开末尾补零，而不是 glibc 的精确二进制值。
 
 ## 调试工具
