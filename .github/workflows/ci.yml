@@ -13,21 +13,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # An unoptimized build exercises almost none of the optimizer, and the
+        # compiler's own sources turned out to be sensitive to it: a by-value
+        # struct parameter that clang -O1 mutated in place silently broke every
+        # array.  Build each compiler at -O2 as well so that class of bug fails
+        # here instead of in whatever release build hits it first.
         config:
           - label: ubuntu-latest · gcc
             os: ubuntu-latest
             cc: gcc
             cxx: g++
+            cflags: ""
+          - label: ubuntu-latest · gcc -O2
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+            cflags: "-O2"
           - label: ubuntu-24.04 · clang
             os: ubuntu-24.04
             cc: clang
             cxx: clang++
+            cflags: ""
+          - label: ubuntu-24.04 · clang -O2
+            os: ubuntu-24.04
+            cc: clang
+            cxx: clang++
+            cflags: "-O2"
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build
+        run: cmake -S . -B build -DCMAKE_C_FLAGS="${{ matrix.config.cflags }}"
         env:
           CC: ${{ matrix.config.cc }}
           CXX: ${{ matrix.config.cxx }}

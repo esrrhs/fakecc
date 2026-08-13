@@ -51,7 +51,7 @@ static void test_elf_magic(void) {
     FILE *f = fopen(out, "rb");
     T_ASSERT(f != NULL);
     unsigned char magic[4];
-    fread(magic, 1, 4, f);
+    T_ASSERT_EQ_INT((int)fread(magic, 1, 4, f), 4);
     fclose(f);
     T_ASSERT(magic[0] == 0x7f);
     T_ASSERT(magic[1] == 'E');
@@ -68,7 +68,7 @@ static void test_elf_machine(void) {
     T_ASSERT(f != NULL);
     fseek(f, 18, SEEK_SET); /* e_machine at offset 18 */
     uint16_t machine;
-    fread(&machine, 2, 1, f);
+    T_ASSERT_EQ_INT((int)fread(&machine, 2, 1, f), 1);
     fclose(f);
     T_ASSERT_EQ_INT((int)machine, 62); /* EM_X86_64 */
     unlink(out);

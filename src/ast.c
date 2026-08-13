@@ -91,12 +91,23 @@ void type_free(Type *t) {
 extern const StructRegistry *get_ir_structs(void);
 
 int type_size(Type t) {
-    switch (t.kind) {
+    /* Walk array nesting through a pointer instead of recursing on the
+     * by-value parameter.  Self-recursion here is rewritten by clang into a
+     * loop that overwrites its own argument slot; because that slot is not
+     * given a private copy, both this function and its caller then read a
+     * mutated Type.  Never writing to `t` keeps the parameter intact. */
+    const Type *p = &t;
+    int count = 1;
+    while (p->kind == TY_ARRAY && p->elem_type) {
+        count *= p->length;
+        p = p->elem_type;
+    }
+    switch (p->kind) {
     case TY_VOID:   return 0;
-    case TY_INT:    return t.width;
-    case TY_FLOAT:  return t.width;  /* 4 for float, 8 for double */
-    case TY_PTR:    return 8;
-    case TY_ARRAY:  return type_size(*t.elem_type) * t.length;
+    case TY_INT:    return count * p->width;
+    case TY_FLOAT:  return count * p->width;  /* 4 for float, 8 for double */
+    case TY_PTR:    return count * 8;
+    case TY_ARRAY:  return 0;   /* array without an element type — malformed */
     case TY_STRUCT: {
         /* The cached width can be stale for self-referential structs (e.g.
          * Stmt): they are cloned while still being parsed, freezing width==0
@@ -104,14 +115,14 @@ int type_size(Type t) {
          * time the registry holds the final size — use it.  During parsing
          * g_ir_tu is NULL, so guard the lookup; the fallback to t.width is
          * correct there (the struct is not finished yet anyway). */
-        if (t.tag) {
+        if (p->tag) {
             const StructRegistry *reg = get_ir_structs();
             if (reg) {
-                const StructDef *sd = struct_registry_find_c(reg, t.tag);
-                if (sd && sd->size > 0) return sd->size;
+                const StructDef *sd = struct_registry_find_c(reg, p->tag);
+                if (sd && sd->size > 0) return count * sd->size;
             }
         }
-        return t.width;
+        return count * p->width;
     }
     case TY_FUNC:   return 0;        /* sizeof a function is undefined */
     }
@@ -299,12 +310,15 @@ static int align_up(int x, int align) {
 /* Natural alignment of a type: 1/2/4/8 for scalars, elem's alignment for
  * arrays, max member alignment for structs. */
 int type_align(Type t) {
-    switch (t.kind) {
+    /* Pointer walk rather than self-recursion — see type_size(). */
+    const Type *p = &t;
+    while (p->kind == TY_ARRAY && p->elem_type) p = p->elem_type;
+    switch (p->kind) {
     case TY_VOID:  return 1;    /* void has no size; alignment is a no-op */
-    case TY_INT:   return t.width;
-    case TY_FLOAT: return t.width;  /* float aligns to 4, double to 8 */
+    case TY_INT:   return p->width;
+    case TY_FLOAT: return p->width;  /* float aligns to 4, double to 8 */
     case TY_PTR:   return 8;
-    case TY_ARRAY: return type_align(*t.elem_type);
+    case TY_ARRAY: return 1;    /* array without an element type — malformed */
     case TY_STRUCT: return 8;   /* conservative — structs align to 8 */
     case TY_FUNC:  return 1;    /* bare function has no size */
     }
