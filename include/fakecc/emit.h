@@ -102,10 +102,10 @@ int  emit_obj_read(const char *path, EmitModule *m);
  * with a PLT/GOT is produced; otherwise a static executable.
  *
  * `needed` / `num_needed` are DT_NEEDED sonames (e.g. "libc.so.6", "libfoo.so"),
- * typically derived from `-l` flags.  When the link is dynamic and
- * `nodefaultlibs` is 0, "libc.so.6" is added automatically if absent — matching
- * gcc's default hosted link.  Pass `nodefaultlibs=1` to emit only the explicit
- * list (may be empty).  `needed` may be NULL when `num_needed` is 0.
+ * typically derived from `-l` flags.  Defaults never auto-add libc — the driver
+ * links builtin `rt/` instead (Go-like freestanding).  Pass `-l` for optional
+ * dynamic interop.  `nodefaultlibs` is retained as a no-op for compatibility.
+ * `needed` may be NULL when `num_needed` is 0.
  *
  * `lib_paths` / `num_lib_paths` come from `-L` (and directories of explicit `.so`
  * inputs).  When non-empty on a dynamic link they are joined with ':' into

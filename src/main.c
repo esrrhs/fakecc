@@ -67,13 +67,16 @@ static void module_free(EmitModule *m) {
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: fakecc [-c] [-nodefaultlibs] [-LDIR]... [-lLIB]...\n"
+            "usage: fakecc [-c] [-nostdlib] [-nodefaultlibs] [-LDIR]... [-lLIB]...\n"
             "              <input...> -o <output>\n"
-            "  -lLIB           link against libLIB.so (DT_NEEDED)\n"
+            "  (default)       link builtin rt/ (freestanding; no DT_NEEDED)\n"
+            "  -nostdlib       do not link builtin rt/; use -l for system libs\n"
+            "  -lLIB           link against libLIB.so (DT_NEEDED; optional interop)\n"
             "  -l:SONAME       link against exact soname SONAME\n"
             "  -LDIR           add DIR to the shared-library search path\n"
             "                  (link-time check for -l; also DT_RUNPATH)\n"
-            "  -nodefaultlibs  do not auto-link libc.so.6 on dynamic links\n");
+            "  -nodefaultlibs  accepted for compatibility (default already skips libc)\n"
+            "  FAKECC_RT       override path to the rt/ directory\n");
     exit(1);
 }
 
@@ -178,9 +181,79 @@ static void require_libs_found(char **needed, int num_needed,
     }
 }
 
+static int file_readable(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static char *path_join(const char *a, const char *b) {
+    size_t na = strlen(a), nb = strlen(b);
+    int slash = (na > 0 && a[na - 1] != '/');
+    char *p = malloc(na + (size_t)slash + nb + 1);
+    if (!p) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+    memcpy(p, a, na);
+    if (slash) p[na++] = '/';
+    memcpy(p + na, b, nb + 1);
+    return p;
+}
+
+/* Builtin freestanding runtime sources (FakeCC dialect under rt/). */
+static int num_rt_files(void) { return 6; }
+
+static const char *rt_file_at(int i) {
+    if (i == 0) return "string.c";
+    if (i == 1) return "ctype.c";
+    if (i == 2) return "malloc.c";
+    if (i == 3) return "stdio.c";
+    if (i == 4) return "printf.c";
+    if (i == 5) return "stdlib.c";
+    return "";
+}
+
+/* Locate rt/: FAKECC_RT, ./rt, <argv0-dir>/rt, <argv0-dir>/../rt. */
+static char *find_rt_dir(const char *argv0) {
+    const char *env = getenv("FAKECC_RT");
+    if (env && env[0]) {
+        char *probe = path_join(env, "string.c");
+        int ok = file_readable(probe);
+        free(probe);
+        if (ok) return xstrdup(env);
+    }
+    if (file_readable("rt/string.c")) return xstrdup("rt");
+
+    char *basedir = dir_of(argv0);
+    {
+        char *cand = path_join(basedir, "rt");
+        char *probe = path_join(cand, "string.c");
+        int ok = file_readable(probe);
+        free(probe);
+        if (ok) {
+            free(basedir);
+            return cand;
+        }
+        free(cand);
+    }
+    {
+        char *cand = path_join(basedir, "../rt");
+        char *probe = path_join(cand, "string.c");
+        int ok = file_readable(probe);
+        free(probe);
+        if (ok) {
+            free(basedir);
+            return cand;
+        }
+        free(cand);
+    }
+    free(basedir);
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     int compile_only = 0;
     int nodefaultlibs = 0;
+    int nostdlib = 0;
     const char *output_path = NULL;
     const char **inputs = NULL;
     int ninputs = 0;
@@ -194,6 +267,8 @@ int main(int argc, char **argv) {
             compile_only = 1;
         } else if (strcmp(argv[i], "-nodefaultlibs") == 0) {
             nodefaultlibs = 1;
+        } else if (strcmp(argv[i], "-nostdlib") == 0) {
+            nostdlib = 1;
         } else if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) usage();
             output_path = argv[++i];
@@ -234,8 +309,9 @@ int main(int argc, char **argv) {
             fprintf(stderr, "fakecc: -c requires exactly one input\n");
             exit(1);
         }
-        if (num_needed > 0 || num_lib_paths > 0 || nodefaultlibs) {
-            fprintf(stderr, "fakecc: -l / -L / -nodefaultlibs are link-time options\n");
+        if (num_needed > 0 || num_lib_paths > 0 || nodefaultlibs || nostdlib) {
+            fprintf(stderr,
+                    "fakecc: -l / -L / -nostdlib / -nodefaultlibs are link-time options\n");
             exit(1);
         }
         EmitModule em;
@@ -250,8 +326,25 @@ int main(int argc, char **argv) {
 
     require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
 
-    EmitModule *mods = malloc(ninputs * sizeof(EmitModule));
-    EmitModule **mod_ptrs = malloc(ninputs * sizeof(EmitModule *));
+    int nrt = nostdlib ? 0 : num_rt_files();
+    char *rt_dir = NULL;
+    if (nrt > 0) {
+        rt_dir = find_rt_dir(argv[0]);
+        if (!rt_dir) {
+            fprintf(stderr,
+                    "fakecc: cannot find rt/ (set FAKECC_RT or run from the source tree)\n");
+            exit(1);
+        }
+    }
+
+    int nmods = ninputs + nrt;
+    EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
+    EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
+    if (!mods || !mod_ptrs) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
+
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
@@ -264,14 +357,24 @@ int main(int argc, char **argv) {
         mod_ptrs[i] = &mods[i];
     }
 
-    emit_link(mod_ptrs, ninputs, output_path,
+    for (int i = 0; i < nrt; i++) {
+        char *path = path_join(rt_dir, rt_file_at(i));
+        char *src = read_file(path);
+        compile_source(src, path, &mods[ninputs + i]);
+        free(src);
+        free(path);
+        mod_ptrs[ninputs + i] = &mods[ninputs + i];
+    }
+
+    emit_link(mod_ptrs, (size_t)nmods, output_path,
               (const char **)needed, (size_t)num_needed, nodefaultlibs,
               (const char **)lib_paths, (size_t)num_lib_paths);
 
-    for (int i = 0; i < ninputs; i++) module_free(&mods[i]);
+    for (int i = 0; i < nmods; i++) module_free(&mods[i]);
     free(mod_ptrs);
     free(mods);
     free(inputs);
+    free(rt_dir);
     for (int i = 0; i < num_needed; i++) free(needed[i]);
     free(needed);
     for (int i = 0; i < num_lib_paths; i++) free(lib_paths[i]);

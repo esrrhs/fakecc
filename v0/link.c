@@ -80,7 +80,9 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
 void emit_obj(const EmitModule *m, const char *path);
 int emit_obj_read(const char *path, EmitModule *m);
-void emit_link(EmitModule **mods, size_t n, const char *path);
+void emit_link(EmitModule **mods, size_t n, const char *path,
+               const char **needed, size_t num_needed, int nodefaultlibs,
+               const char **lib_paths, size_t num_lib_paths);
 void emit_elf(const EmitModule *m, const char *path);
 typedef struct FILE FILE;
 extern FILE *stderr;
@@ -115,6 +117,7 @@ extern long strtol(const char *s, char **end, int base);
 extern double strtod(const char *s, char **end);
 extern long double strtold(const char *nptr, char **endptr);
 extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
+extern char *getenv(const char *name);
 extern void *memcpy(void *dst, const void *src, size_t n);
 extern void *memmove(void *dst, const void *src, size_t n);
 extern void *memset(void *dst, int c, size_t n);
@@ -252,7 +255,16 @@ static int ext_find_or_add(char ***ext, int *num_ext, const char *name) {
     (*ext)[(*num_ext)++] = xstrdup(name);
     return *num_ext - 1;
 }
-void emit_link(EmitModule **mods, size_t n, const char *path) {
+static void needed_add(char ***needed, int *num, const char *soname) {
+    for (int i = 0; i < *num; i++)
+        if (strcmp((*needed)[i], soname) == 0) return;
+    *needed = realloc(*needed, ((size_t)*num + 1) * sizeof(char *));
+    if (!*needed) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    (*needed)[(*num)++] = xstrdup(soname);
+}
+void emit_link(EmitModule **mods, size_t n, const char *path,
+               const char **needed_in, size_t num_needed_in, int nodefaultlibs,
+               const char **lib_paths, size_t num_lib_paths) {
 Buffer text;
 Buffer rodata;
 Buffer data;
@@ -301,11 +313,24 @@ Buffer data;
         for (size_t r = 0; r < m->num_relocs; r++) {
             if (m->relocs[r].type == 9) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
-            if (!sinfo[gsi].defined) {
-                const char *nm = m->syms[m->relocs[r].sym].name
-                                 ? m->syms[m->relocs[r].sym].name : "";
-                reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
+            if (sinfo[gsi].defined) continue;
+            const char *nm = m->syms[m->relocs[r].sym].name
+                             ? m->syms[m->relocs[r].sym].name : "";
+            int resolved = 0;
+            for (size_t mi = 0; mi < n && !resolved; mi++) {
+                EmitModule *om = mods[mi];
+                for (size_t mj = 0; mj < om->num_syms; mj++) {
+                    size_t ogsi = mod_sym_base[mi] + mj;
+                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
+                        && om->syms[mj].name
+                        && strcmp(om->syms[mj].name, nm) == 0) {
+                        resolved = 1;
+                        break;
+                    }
+                }
             }
+            if (!resolved)
+                reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
     }
     char **data_ext_list = ((void*)0);
@@ -324,6 +349,7 @@ Buffer data;
         }
     }
     int *data_got_external = num_data_ext ? xcalloc(num_data_ext, sizeof(int)) : ((void*)0);
+    int num_true_data_ext = 0;
     for (int j = 0; j < num_data_ext; j++) {
         const char *nm = data_ext_list[j];
         int found = 0;
@@ -340,16 +366,46 @@ Buffer data;
             }
         }
         data_got_external[j] = !found;
+        if (!found) num_true_data_ext++;
+    }
+    int need_dynamic = (num_ext > 0 || num_true_data_ext > 0);
+    char **needed = ((void*)0);
+    int num_needed = 0;
+    for (size_t i = 0; i < num_needed_in; i++)
+        needed_add(&needed, &num_needed, needed_in[i]);
+    (void)nodefaultlibs;
+    char *runpath = ((void*)0);
+    if (need_dynamic && num_lib_paths > 0) {
+        size_t len = 1;
+        for (size_t i = 0; i < num_lib_paths; i++)
+            len += strlen(lib_paths[i]) + (i > 0 ? 1 : 0);
+        runpath = malloc(len);
+        if (!runpath) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        size_t pos = 0;
+        for (size_t i = 0; i < num_lib_paths; i++) {
+            if (i > 0) runpath[pos++] = ':';
+            size_t n = strlen(lib_paths[i]);
+            memcpy(runpath + pos, lib_paths[i], n);
+            pos += n;
+        }
+        runpath[pos] = '\0';
     }
     int exit_ext_idx = -1;
-    if (num_ext > 0 || num_data_ext > 0)
+    int have_libc = 0;
+    for (int i = 0; i < num_needed; i++) {
+        if (strcmp(needed[i], "libc.so.6") == 0) { have_libc = 1; break; }
+    }
+    if (need_dynamic && have_libc)
         exit_ext_idx = ext_find_or_add(&ext_list, &num_ext, "exit");
     size_t *plt_entry_off = num_ext ? xcalloc(num_ext, sizeof(size_t)) : ((void*)0);
     size_t *plt_got_fixup = num_ext ? xcalloc(num_ext, sizeof(size_t)) : ((void*)0);
     size_t plt0_got_fixup[2];
-    size_t plt0_off = emit_plt0(&text, plt0_got_fixup);
-    for (int e = 0; e < num_ext; e++)
-        plt_entry_off[e] = emit_plt_entry(&text, e, plt0_off, &plt_got_fixup[e]);
+    size_t plt0_off = 0;
+    if (num_ext > 0) {
+        plt0_off = emit_plt0(&text, plt0_got_fixup);
+        for (int e = 0; e < num_ext; e++)
+            plt_entry_off[e] = emit_plt_entry(&text, e, plt0_off, &plt_got_fixup[e]);
+    }
 Buffer dynstr;
 Buffer dynsym;
 Buffer hash;
@@ -358,15 +414,28 @@ Buffer rela_dyn;
 Buffer dynamic;
     buffer_init(&dynstr); buffer_init(&dynsym); buffer_init(&hash);
     buffer_init(&rela_plt); buffer_init(&rela_dyn); buffer_init(&dynamic);
-    size_t interp_len = (num_ext > 0 || num_data_ext > 0) ? sizeof(INTERP_PATH) : 0;
-    int num_dynsym_ext = num_ext + num_data_ext;
-    if (num_dynsym_ext > 0) {
+    size_t interp_len = need_dynamic ? sizeof(INTERP_PATH) : 0;
+    int num_dynsym_ext = num_ext + num_true_data_ext;
+    size_t needed_str_bytes = 0;
+    size_t runpath_str_bytes = 0;
+    size_t runpath_dynstr_off = 0;
+    if (need_dynamic) {
         buf_u8(&dynstr, 0);
-        buf_bytes(&dynstr, "libc.so.6", sizeof("libc.so.6"));
+        for (int i = 0; i < num_needed; i++) {
+            buf_bytes(&dynstr, needed[i], strlen(needed[i]) + 1);
+            needed_str_bytes += strlen(needed[i]) + 1;
+        }
+        if (runpath) {
+            runpath_dynstr_off = dynstr.len;
+            buf_bytes(&dynstr, runpath, strlen(runpath) + 1);
+            runpath_str_bytes = strlen(runpath) + 1;
+        }
         for (int i = 0; i < num_ext; i++)
             buf_bytes(&dynstr, ext_list[i], strlen(ext_list[i]) + 1);
-        for (int j = 0; j < num_data_ext; j++)
+        for (int j = 0; j < num_data_ext; j++) {
+            if (!data_got_external[j]) continue;
             buf_bytes(&dynstr, data_ext_list[j], strlen(data_ext_list[j]) + 1);
+        }
         buf_pad(&dynsym, 24);
         for (int k = 0; k < num_dynsym_ext; k++) {
             buf_u32(&dynsym, 0);
@@ -376,15 +445,25 @@ Buffer dynamic;
             buf_u64(&dynsym, 0);
             buf_u64(&dynsym, 0);
         }
-        size_t nsyms = 1 + num_dynsym_ext;
+        size_t nsyms = 1 + (size_t)num_dynsym_ext;
         size_t nbucket = (nsyms < 2) ? 1 : 3;
         uint32_t *bucket = calloc(nbucket, sizeof(uint32_t));
         uint32_t *chain = calloc(nsyms, sizeof(uint32_t));
         for (size_t i = 0; i < nsyms; i++) {
-            const char *nm;
-            if (i == 0) nm = "";
-            else if ((int)(i - 1) < num_ext) nm = ext_list[i - 1];
-            else nm = data_ext_list[i - 1 - num_ext];
+            const char *nm = "";
+            if (i > 0) {
+                int idx = (int)(i - 1);
+                if (idx < num_ext) nm = ext_list[idx];
+                else {
+                    int want = idx - num_ext;
+                    int seen = 0;
+                    for (int j = 0; j < num_data_ext; j++) {
+                        if (!data_got_external[j]) continue;
+                        if (seen == want) { nm = data_ext_list[j]; break; }
+                        seen++;
+                    }
+                }
+            }
             uint32_t b = (uint32_t)(elf_hash(nm) % nbucket);
             chain[i] = bucket[b];
             bucket[b] = (uint32_t)i;
@@ -399,11 +478,15 @@ Buffer dynamic;
             buf_u64(&rela_plt, ((uint64_t)(i + 1) << 32) | 7);
             buf_u64(&rela_plt, 0);
         }
-        for (int j = 0; j < num_data_ext; j++) {
-            if (!data_got_external[j]) continue;
-            buf_u64(&rela_dyn, 0);
-            buf_u64(&rela_dyn, ((uint64_t)(1 + num_ext + j) << 32) | 6);
-            buf_u64(&rela_dyn, 0);
+        {
+            int dyn_sym_i = 1 + num_ext;
+            for (int j = 0; j < num_data_ext; j++) {
+                if (!data_got_external[j]) continue;
+                buf_u64(&rela_dyn, 0);
+                buf_u64(&rela_dyn, ((uint64_t)dyn_sym_i << 32) | 6);
+                buf_u64(&rela_dyn, 0);
+                dyn_sym_i++;
+            }
         }
     }
     uint16_t phnum_max = 4;
@@ -411,8 +494,9 @@ Buffer dynamic;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + 22;
     size_t dynamic_size = 0;
-    if (num_ext > 0 || num_data_ext > 0) {
-        dynamic_size = (size_t)(11 + (num_data_ext > 0 ? 3 : 0)) * 16;
+    if (need_dynamic) {
+        dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0)
+                                + (num_true_data_ext > 0 ? 3 : 0)) * 16;
     }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
         + rela_plt.len + rela_dyn.len + dynamic_size;
@@ -546,43 +630,56 @@ Buffer dynamic;
             memcpy(data.data + patch_in_data, &value, 8);
         }
     }
-    for (int f = 0; f < 2; f++) {
-        uint64_t target = got_vaddr + (1 + f) * 8;
-        uint64_t rip_next = code_vaddr + plt0_got_fixup[f] + 4;
-        int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
-        memcpy(text.data + plt0_got_fixup[f], &disp, 4);
-    }
-    for (int e = 0; e < num_ext; e++) {
-        uint64_t target = got_vaddr + (3 + e) * 8;
-        uint64_t rip_next = code_vaddr + plt_got_fixup[e] + 4;
-        int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
-        memcpy(text.data + plt_got_fixup[e], &disp, 4);
+    if (num_ext > 0) {
+        for (int f = 0; f < 2; f++) {
+            uint64_t target = got_vaddr + (1 + f) * 8;
+            uint64_t rip_next = code_vaddr + plt0_got_fixup[f] + 4;
+            int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
+            memcpy(text.data + plt0_got_fixup[f], &disp, 4);
+        }
+        for (int e = 0; e < num_ext; e++) {
+            uint64_t target = got_vaddr + (3 + e) * 8;
+            uint64_t rip_next = code_vaddr + plt_got_fixup[e] + 4;
+            int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
+            memcpy(text.data + plt_got_fixup[e], &disp, 4);
+        }
     }
     uint64_t main_addr = 0;
+    uint64_t exit_static_addr = 0;
     int found_main = 0;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
             const EmitSymbol *sym = &m->syms[j];
-            if (sym->name && strcmp(sym->name, "main") == 0 &&
-                sym->shndx == 1 && sym->binding == 1 ) {
+            if (!sym->name || sym->shndx != 1 || sym->binding != 1)
+                continue;
+            if (strcmp(sym->name, "main") == 0) {
                 main_addr = code_vaddr + mod_text_off[i] + sym->value;
                 found_main = 1;
             }
+            if (strcmp(sym->name, "exit") == 0)
+                exit_static_addr = code_vaddr + mod_text_off[i] + sym->value;
         }
     }
     if (!found_main) {
         fprintf(stderr, "fakecc: no 'main' function found\n");
         exit(1);
     }
-    if (num_dynsym_ext > 0) {
+    if (need_dynamic) {
         {
-            size_t acc = 1 + sizeof("libc.so.6");
-            for (int k = 0; k < num_dynsym_ext; k++) {
+            size_t acc = 1 + needed_str_bytes + runpath_str_bytes;
+            int k = 0;
+            for (int i = 0; i < num_ext; i++, k++) {
                 uint32_t noff = (uint32_t)acc;
                 memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
-                const char *nm = (k < num_ext) ? ext_list[k] : data_ext_list[k - num_ext];
-                acc += strlen(nm) + 1;
+                acc += strlen(ext_list[i]) + 1;
+            }
+            for (int j = 0; j < num_data_ext; j++) {
+                if (!data_got_external[j]) continue;
+                uint32_t noff = (uint32_t)acc;
+                memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                acc += strlen(data_ext_list[j]) + 1;
+                k++;
             }
         }
         for (int i = 0; i < num_ext; i++) {
@@ -606,7 +703,18 @@ Buffer dynamic;
         size_t rela_dyn_off = rela_plt_off + rela_plt.len;
         size_t dynamic_off = rela_dyn_off + rela_dyn.len;
         uint64_t dynstr_vaddr = rx_base_vaddr + dynstr_off;
-        buf_u64(&dynamic, 1); buf_u64(&dynamic, 1);
+        {
+            size_t off = 1;
+            for (int i = 0; i < num_needed; i++) {
+                buf_u64(&dynamic, 1);
+                buf_u64(&dynamic, off);
+                off += strlen(needed[i]) + 1;
+            }
+        }
+        if (runpath) {
+            buf_u64(&dynamic, 29);
+            buf_u64(&dynamic, runpath_dynstr_off);
+        }
         buf_u64(&dynamic, 5); buf_u64(&dynamic, dynstr_vaddr);
         buf_u64(&dynamic, 6); buf_u64(&dynamic, rx_base_vaddr + dynsym_off);
         buf_u64(&dynamic, 11); buf_u64(&dynamic, 24);
@@ -616,7 +724,7 @@ Buffer dynamic;
         buf_u64(&dynamic, 2); buf_u64(&dynamic, rela_plt.len);
         buf_u64(&dynamic, 20); buf_u64(&dynamic, 7);
         buf_u64(&dynamic, 23); buf_u64(&dynamic, rx_base_vaddr + rela_plt_off);
-        if (num_data_ext > 0) {
+        if (num_true_data_ext > 0) {
             buf_u64(&dynamic, 7); buf_u64(&dynamic, rx_base_vaddr + rela_dyn_off);
             buf_u64(&dynamic, 8); buf_u64(&dynamic, rela_dyn.len);
             buf_u64(&dynamic, 9); buf_u64(&dynamic, 24);
@@ -624,9 +732,12 @@ Buffer dynamic;
         buf_u64(&dynamic, 0); buf_u64(&dynamic, 0);
         Buffer rx;
         buffer_init(&rx);
-        uint64_t exit_plt_vaddr = (exit_ext_idx >= 0)
-            ? code_vaddr + plt_entry_off[exit_ext_idx] : 0;
-        gen_start(&rx, base + start_offset, main_addr, exit_plt_vaddr);
+        uint64_t exit_call = 0;
+        if (exit_ext_idx >= 0)
+            exit_call = code_vaddr + plt_entry_off[exit_ext_idx];
+        else if (exit_static_addr)
+            exit_call = exit_static_addr;
+        gen_start(&rx, base + start_offset, main_addr, exit_call);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t interp_off = rx.len;
@@ -674,25 +785,38 @@ Buffer dynamic;
         uint64_t entry = base + start_offset;
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr, 0);
+        gen_start(&rx, base + start_offset, main_addr, exit_static_addr);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
+        size_t got_bytes = 0;
+        Buffer got;
+        buffer_init(&got);
+        if (num_data_ext > 0) {
+            got_bytes = (size_t)(3 + num_data_ext) * 8;
+            buf_u64(&got, 0);
+            buf_u64(&got, 0);
+            buf_u64(&got, 0);
+            for (int j = 0; j < num_data_ext; j++)
+                buf_u64(&got, data_got_addr[j]);
+        }
         Buffer elf;
         buffer_init(&elf);
-        uint16_t phnum = (data.len > 0 || bss_size > 0) ? 2 : 1;
+        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0);
+        uint16_t phnum = has_rw ? 2 : 1;
         write_ehdr(&elf, entry, 64, phnum);
         write_phdr(&elf, 1, 4 | 1, 0, base,
                    rx_filesz, rx_filesz, 0x1000);
-        if (data.len > 0 || bss_size > 0) {
+        if (has_rw) {
             write_phdr(&elf, 1, 4 | 2, data_file_offset, data_vaddr,
-                       data.len, data.len + bss_size, 0x1000);
+                       data.len + got_bytes, data.len + got_bytes + bss_size, 0x1000);
         }
         while (elf.len < hdr_size)
             buf_u8(&elf, 0);
         buf_bytes(&elf, rx.data, rx.len);
-        if (data.len > 0 || bss_size > 0) {
+        if (has_rw) {
             while (elf.len < data_file_offset) buf_u8(&elf, 0);
             buf_bytes(&elf, data.data, data.len);
+            buf_bytes(&elf, got.data, got.len);
             for (size_t i = 0; i < bss_size; i++) buf_u8(&elf, 0);
         }
         FILE *f = fopen(path, "wb");
@@ -700,7 +824,7 @@ Buffer dynamic;
         fwrite(elf.data, 1, elf.len, f);
         fclose(f);
         chmod(path, 0755);
-        buffer_free(&rx); buffer_free(&elf);
+        buffer_free(&rx); buffer_free(&got); buffer_free(&elf);
     }
     buffer_free(&dynstr); buffer_free(&dynsym); buffer_free(&hash);
     buffer_free(&rela_plt); buffer_free(&rela_dyn); buffer_free(&dynamic);
@@ -708,6 +832,9 @@ Buffer dynamic;
     free(ext_list);
     for (int j = 0; j < num_data_ext; j++) free(data_ext_list[j]);
     free(data_ext_list);
+    for (int i = 0; i < num_needed; i++) free(needed[i]);
+    free(needed);
+    free(runpath);
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
     free(mod_text_off); free(mod_rodata_off); free(mod_data_off); free(mod_bss_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);

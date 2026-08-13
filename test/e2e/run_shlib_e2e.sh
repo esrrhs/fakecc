@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Shared-library link tests: -l / -l: / -nodefaultlibs / passing a .so path.
+# Shared-library link tests: -l / -l: / -nostdlib / -nodefaultlibs / .so path.
+# Default link is freestanding (builtin rt/, no DT_NEEDED).  -lc is opt-in.
 set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
@@ -53,35 +54,44 @@ extern int definitely_missing_xyz(void);
 int main(void) { return definitely_missing_xyz(); }
 EOF
 
-# 1) Explicit -lc (same as the hosted default) with printf.
+# 1) Opt-in libc via -nostdlib -lc (cgo-style escape hatch).
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_printf.c" -lc -o "$TMP/p" 2>"$TMP/err" \
-    || { fail "explicit -lc compile"; }
+timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_printf.c" -nostdlib -lc -o "$TMP/p" 2>"$TMP/err" \
+    || { fail "nostdlib -lc compile: $(head -1 "$TMP/err")"; }
 if [ -x "$TMP/p" ]; then
     got=0; timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
-    if [ "$got" = "0" ]; then pass "explicit -lc printf"; else fail "explicit -lc run (exit $got)"; fi
+    if [ "$got" = "0" ]; then pass "nostdlib -lc printf"; else fail "nostdlib -lc run (exit $got)"; fi
     if has_needed "$TMP/p" "libc.so.6"; then
-        pass "explicit -lc DT_NEEDED libc.so.6"
+        pass "nostdlib -lc DT_NEEDED libc.so.6"
     else
-        fail "explicit -lc missing DT_NEEDED libc.so.6"
+        fail "nostdlib -lc missing DT_NEEDED libc.so.6"
     fi
 fi
 
-# 2) Default hosted link still pulls libc without -lc.
+# 2) Default freestanding: printf via rt/, no DT_NEEDED.
 rm -f "$TMP/p"
 timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_printf.c" -o "$TMP/p" 2>"$TMP/err" \
-    || { fail "default libc compile"; }
+    || { fail "default rt compile: $(head -1 "$TMP/err")"; }
 if [ -x "$TMP/p" ]; then
-    got=0; timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
-    if [ "$got" = "0" ]; then pass "default libc printf"; else fail "default libc run (exit $got)"; fi
-    if has_needed "$TMP/p" "libc.so.6"; then
-        pass "default DT_NEEDED libc.so.6"
+    got=0; out=$(timeout "$RUN_TIMEOUT" "$TMP/p" 2>/dev/null) || got=$?
+    if [ "$got" = "0" ] && [ "$out" = "hi" ]; then
+        pass "default rt printf"
     else
-        fail "default missing DT_NEEDED libc.so.6"
+        fail "default rt printf (exit $got out='$out')"
+    fi
+    if has_needed "$TMP/p" "libc.so.6"; then
+        fail "default should not DT_NEEDED libc.so.6"
+    else
+        pass "default omits libc.so.6"
+    fi
+    if ! LANG=C readelf -l "$TMP/p" 2>/dev/null | grep -q 'INTERP'; then
+        pass "default is static ELF"
+    else
+        fail "default should be static (has INTERP)"
     fi
 fi
 
-# 3) Custom shared library via -L + -ladd (DT_RUNPATH; no LD_LIBRARY_PATH).
+# 3) Custom shared library via -L + -ladd (DT_RUNPATH; no libc by default).
 rm -f "$TMP/p"
 timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_add.c" -L"$TMP" -ladd -o "$TMP/p" 2>"$TMP/err" \
     || { fail "-L -ladd compile: $(head -1 "$TMP/err")"; }
@@ -92,9 +102,9 @@ if [ -x "$TMP/p" ]; then
         fail "-L -ladd missing DT_NEEDED libadd.so"
     fi
     if has_needed "$TMP/p" "libc.so.6"; then
-        pass "-L -ladd keeps default libc.so.6"
+        fail "-L -ladd should not pull libc.so.6"
     else
-        fail "-L -ladd should still default-link libc.so.6"
+        pass "-L -ladd omits libc.so.6"
     fi
     if has_runpath "$TMP/p" "$TMP"; then
         pass "-L -ladd DT_RUNPATH"
@@ -143,7 +153,7 @@ if [ -x "$TMP/p" ]; then
     if [ "$got" = "42" ]; then pass ".so path run via RUNPATH"; else fail ".so path run (exit $got)"; fi
 fi
 
-# 5) -nodefaultlibs + -L -ladd: no libc DT_NEEDED; still runs (syscall exit).
+# 5) -nodefaultlibs + -L -ladd: still no libc (alias / compatibility).
 rm -f "$TMP/p"
 timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_add.c" -nodefaultlibs -L"$TMP" -ladd -o "$TMP/p" 2>"$TMP/err" \
     || { fail "-nodefaultlibs -L -ladd compile"; }
@@ -163,27 +173,27 @@ if [ -x "$TMP/p" ]; then
     if [ "$got" = "42" ]; then pass "-nodefaultlibs -L -ladd run"; else fail "-nodefaultlibs -L -ladd run (exit $got)"; fi
 fi
 
-# 6) -nodefaultlibs with an unresolved symbol: runtime must fail.
+# 6) -nostdlib with an unresolved symbol: runtime must fail (no rt, no libc).
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_missing.c" -nodefaultlibs -o "$TMP/p" 2>"$TMP/err"
+timeout "$CC_TIMEOUT" "$FAKECC" "$TMP/main_missing.c" -nostdlib -o "$TMP/p" 2>"$TMP/err"
 cc_rc=$?
 if [ "$cc_rc" != "0" ]; then
-    pass "-nodefaultlibs missing-sym rejected at link"
+    pass "-nostdlib missing-sym rejected at link"
 elif [ -x "$TMP/p" ]; then
     if has_needed "$TMP/p" "libc.so.6"; then
-        fail "-nodefaultlibs missing-sym still linked libc"
+        fail "-nostdlib missing-sym still linked libc"
     else
-        pass "-nodefaultlibs missing-sym omits libc"
+        pass "-nostdlib missing-sym omits libc"
     fi
     got=0
     timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null 2>"$TMP/run.err" || got=$?
     if [ "$got" = "0" ]; then
-        fail "-nodefaultlibs missing-sym unexpectedly ran OK"
+        fail "-nostdlib missing-sym unexpectedly ran OK"
     else
-        pass "-nodefaultlibs missing-sym fails at runtime (exit $got)"
+        pass "-nostdlib missing-sym fails at runtime (exit $got)"
     fi
 else
-    fail "-nodefaultlibs missing-sym: no binary and no error"
+    fail "-nostdlib missing-sym: no binary and no error"
 fi
 
 exit $FAIL

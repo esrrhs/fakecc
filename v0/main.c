@@ -80,7 +80,9 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
 void emit_obj(const EmitModule *m, const char *path);
 int emit_obj_read(const char *path, EmitModule *m);
-void emit_link(EmitModule **mods, size_t n, const char *path);
+void emit_link(EmitModule **mods, size_t n, const char *path,
+               const char **needed, size_t num_needed, int nodefaultlibs,
+               const char **lib_paths, size_t num_lib_paths);
 void emit_elf(const EmitModule *m, const char *path);
 typedef int IRValue;
 enum IROpcode {
@@ -752,6 +754,7 @@ extern long strtol(const char *s, char **end, int base);
 extern double strtod(const char *s, char **end);
 extern long double strtold(const char *nptr, char **endptr);
 extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
+extern char *getenv(const char *name);
 extern void *memcpy(void *dst, const void *src, size_t n);
 extern void *memmove(void *dst, const void *src, size_t n);
 extern void *memset(void *dst, int c, size_t n);
@@ -808,20 +811,211 @@ static void module_free(EmitModule *m) {
     emit_module_free(m);
 }
 static void usage(void) {
-    fprintf(stderr, "usage: fakecc [-c] <input...> -o <output>\n");
+    fprintf(stderr,
+            "usage: fakecc [-c] [-nostdlib] [-nodefaultlibs] [-LDIR]... [-lLIB]...\n"
+            "              <input...> -o <output>\n"
+            "  (default)       link builtin rt/ (freestanding; no DT_NEEDED)\n"
+            "  -nostdlib       do not link builtin rt/; use -l for system libs\n"
+            "  -lLIB           link against libLIB.so (DT_NEEDED; optional interop)\n"
+            "  -l:SONAME       link against exact soname SONAME\n"
+            "  -LDIR           add DIR to the shared-library search path\n"
+            "                  (link-time check for -l; also DT_RUNPATH)\n"
+            "  -nodefaultlibs  accepted for compatibility (default already skips libc)\n"
+            "  FAKECC_RT       override path to the rt/ directory\n");
     exit(1);
+}
+static int ends_with(const char *s, const char *suf) {
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && strcmp(s + n - m, suf) == 0;
+}
+static int is_system_soname(const char *soname) {
+    return strcmp(soname, "libc.so.6") == 0
+        || strcmp(soname, "libm.so.6") == 0
+        || strcmp(soname, "libdl.so.2") == 0
+        || strcmp(soname, "libpthread.so.0") == 0;
+}
+static char *soname_from_l(const char *arg) {
+    if (!arg || !*arg) {
+        fprintf(stderr, "fakecc: -l requires a library name\n");
+        exit(1);
+    }
+    if (arg[0] == ':')
+        return xstrdup(arg + 1);
+    if (strcmp(arg, "c") == 0) return xstrdup("libc.so.6");
+    if (strcmp(arg, "m") == 0) return xstrdup("libm.so.6");
+    if (strcmp(arg, "dl") == 0) return xstrdup("libdl.so.2");
+    if (strcmp(arg, "pthread") == 0) return xstrdup("libpthread.so.0");
+    {
+        size_t n = strlen(arg);
+        char *s = malloc(n + 8);
+        if (!s) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+        memcpy(s, "lib", 3);
+        memcpy(s + 3, arg, n);
+        memcpy(s + 3 + n, ".so", 4);
+        return s;
+    }
+}
+static char *soname_from_so_path(const char *path) {
+    const char *base = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '/') base = p + 1;
+    return xstrdup(base);
+}
+static char *dir_of(const char *path) {
+    const char *slash = ((void*)0);
+    for (const char *p = path; *p; p++)
+        if (*p == '/') slash = p;
+    if (!slash) return xstrdup(".");
+    if (slash == path) return xstrdup("/");
+    {
+        size_t n = (size_t)(slash - path);
+        char *d = malloc(n + 1);
+        if (!d) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+        memcpy(d, path, n);
+        d[n] = '\0';
+        return d;
+    }
+}
+static void paths_add(char ***paths, int *n, const char *dir) {
+    for (int i = 0; i < *n; i++)
+        if (strcmp((*paths)[i], dir) == 0) return;
+    *paths = realloc(*paths, ((size_t)*n + 1) * sizeof(char *));
+    if (!*paths) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+    (*paths)[(*n)++] = xstrdup(dir);
+}
+static int lib_in_dir(const char *dir, const char *soname) {
+    size_t nd = strlen(dir), ns = strlen(soname);
+    char *path = malloc(nd + 1 + ns + 1);
+    if (!path) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+    memcpy(path, dir, nd);
+    path[nd] = '/';
+    memcpy(path + nd + 1, soname, ns + 1);
+    FILE *f = fopen(path, "rb");
+    int ok = f != ((void*)0);
+    if (f) fclose(f);
+    free(path);
+    return ok;
+}
+static void require_libs_found(char **needed, int num_needed,
+                               char **lib_paths, int num_lib_paths) {
+    if (num_lib_paths == 0) return;
+    for (int i = 0; i < num_needed; i++) {
+        if (is_system_soname(needed[i])) continue;
+        int found = 0;
+        for (int d = 0; d < num_lib_paths; d++) {
+            if (lib_in_dir(lib_paths[d], needed[i])) { found = 1; break; }
+        }
+        if (!found) {
+            fprintf(stderr, "fakecc: cannot find -l library '%s'\n", needed[i]);
+            exit(1);
+        }
+    }
+}
+static int file_readable(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+static char *path_join(const char *a, const char *b) {
+    size_t na = strlen(a), nb = strlen(b);
+    int slash = (na > 0 && a[na - 1] != '/');
+    char *p = malloc(na + (size_t)slash + nb + 1);
+    if (!p) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+    memcpy(p, a, na);
+    if (slash) p[na++] = '/';
+    memcpy(p + na, b, nb + 1);
+    return p;
+}
+static int num_rt_files(void) { return 6; }
+static const char *rt_file_at(int i) {
+    if (i == 0) return "string.c";
+    if (i == 1) return "ctype.c";
+    if (i == 2) return "malloc.c";
+    if (i == 3) return "stdio.c";
+    if (i == 4) return "printf.c";
+    if (i == 5) return "stdlib.c";
+    return "";
+}
+static char *find_rt_dir(const char *argv0) {
+    const char *env = getenv("FAKECC_RT");
+    if (env && env[0]) {
+        char *probe = path_join(env, "string.c");
+        int ok = file_readable(probe);
+        free(probe);
+        if (ok) return xstrdup(env);
+    }
+    if (file_readable("rt/string.c")) return xstrdup("rt");
+    char *basedir = dir_of(argv0);
+    {
+        char *cand = path_join(basedir, "rt");
+        char *probe = path_join(cand, "string.c");
+        int ok = file_readable(probe);
+        free(probe);
+        if (ok) {
+            free(basedir);
+            return cand;
+        }
+        free(cand);
+    }
+    {
+        char *cand = path_join(basedir, "../rt");
+        char *probe = path_join(cand, "string.c");
+        int ok = file_readable(probe);
+        free(probe);
+        if (ok) {
+            free(basedir);
+            return cand;
+        }
+        free(cand);
+    }
+    free(basedir);
+    return ((void*)0);
 }
 int main(int argc, char **argv) {
     int compile_only = 0;
+    int nodefaultlibs = 0;
+    int nostdlib = 0;
     const char *output_path = ((void*)0);
     const char **inputs = ((void*)0);
     int ninputs = 0;
+    char **needed = ((void*)0);
+    int num_needed = 0;
+    char **lib_paths = ((void*)0);
+    int num_lib_paths = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0) {
             compile_only = 1;
+        } else if (strcmp(argv[i], "-nodefaultlibs") == 0) {
+            nodefaultlibs = 1;
+        } else if (strcmp(argv[i], "-nostdlib") == 0) {
+            nostdlib = 1;
         } else if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) usage();
             output_path = argv[++i];
+        } else if (strcmp(argv[i], "-L") == 0) {
+            if (i + 1 >= argc) usage();
+            paths_add(&lib_paths, &num_lib_paths, argv[++i]);
+        } else if (argv[i][0] == '-' && argv[i][1] == 'L') {
+            paths_add(&lib_paths, &num_lib_paths, argv[i] + 2);
+        } else if (strcmp(argv[i], "-l") == 0) {
+            if (i + 1 >= argc) usage();
+            needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
+            needed[num_needed++] = soname_from_l(argv[++i]);
+        } else if (argv[i][0] == '-' && argv[i][1] == 'l') {
+            needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
+            needed[num_needed++] = soname_from_l(argv[i] + 2);
+        } else if (ends_with(argv[i], ".so")) {
+            needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
+            needed[num_needed++] = soname_from_so_path(argv[i]);
+            {
+                char *d = dir_of(argv[i]);
+                paths_add(&lib_paths, &num_lib_paths, d);
+                free(d);
+            }
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "fakecc: unknown option '%s'\n", argv[i]);
+            usage();
         } else {
             inputs = realloc(inputs, (ninputs + 1) * sizeof(char *));
             inputs[ninputs++] = argv[i];
@@ -833,16 +1027,38 @@ int main(int argc, char **argv) {
             fprintf(stderr, "fakecc: -c requires exactly one input\n");
             exit(1);
         }
+        if (num_needed > 0 || num_lib_paths > 0 || nodefaultlibs || nostdlib) {
+            fprintf(stderr,
+                    "fakecc: -l / -L / -nostdlib / -nodefaultlibs are link-time options\n");
+            exit(1);
+        }
         EmitModule em;
         char *src = read_file(inputs[0]);
         compile_source(src, inputs[0], &em);
         free(src);
         emit_obj(&em, output_path);
         module_free(&em);
+        free(inputs);
         return 0;
     }
-    EmitModule *mods = malloc(ninputs * sizeof(EmitModule));
-    EmitModule **mod_ptrs = malloc(ninputs * sizeof(EmitModule *));
+    require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
+    int nrt = nostdlib ? 0 : num_rt_files();
+    char *rt_dir = ((void*)0);
+    if (nrt > 0) {
+        rt_dir = find_rt_dir(argv[0]);
+        if (!rt_dir) {
+            fprintf(stderr,
+                    "fakecc: cannot find rt/ (set FAKECC_RT or run from the source tree)\n");
+            exit(1);
+        }
+    }
+    int nmods = ninputs + nrt;
+    EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
+    EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
+    if (!mods || !mod_ptrs) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
@@ -854,10 +1070,25 @@ int main(int argc, char **argv) {
         }
         mod_ptrs[i] = &mods[i];
     }
-    emit_link(mod_ptrs, ninputs, output_path);
-    for (int i = 0; i < ninputs; i++) module_free(&mods[i]);
+    for (int i = 0; i < nrt; i++) {
+        char *path = path_join(rt_dir, rt_file_at(i));
+        char *src = read_file(path);
+        compile_source(src, path, &mods[ninputs + i]);
+        free(src);
+        free(path);
+        mod_ptrs[ninputs + i] = &mods[ninputs + i];
+    }
+    emit_link(mod_ptrs, (size_t)nmods, output_path,
+              (const char **)needed, (size_t)num_needed, nodefaultlibs,
+              (const char **)lib_paths, (size_t)num_lib_paths);
+    for (int i = 0; i < nmods; i++) module_free(&mods[i]);
     free(mod_ptrs);
     free(mods);
     free(inputs);
+    free(rt_dir);
+    for (int i = 0; i < num_needed; i++) free(needed[i]);
+    free(needed);
+    for (int i = 0; i < num_lib_paths; i++) free(lib_paths[i]);
+    free(lib_paths);
     return 0;
 }

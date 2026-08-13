@@ -569,6 +569,7 @@ extern long strtol(const char *s, char **end, int base);
 extern double strtod(const char *s, char **end);
 extern long double strtold(const char *nptr, char **endptr);
 extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
+extern char *getenv(const char *name);
 extern void *memcpy(void *dst, const void *src, size_t n);
 extern void *memmove(void *dst, const void *src, size_t n);
 extern void *memset(void *dst, int c, size_t n);
