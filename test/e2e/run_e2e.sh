@@ -37,6 +37,8 @@ CC_EXTRA=$(echo "$CC_EXTRA" | tr -s ' ' | sed 's/^ //; s/ $//')
 
 SUITE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CASE_DIR="$SUITE_DIR/cases"
+# Package fixtures for import error / multi-file package tests (not e2e cases).
+export FAKECC_PKG="${SUITE_DIR}/pkg_fixtures${FAKECC_PKG:+:$FAKECC_PKG}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 

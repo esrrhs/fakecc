@@ -1,23 +1,19 @@
 /* exit, abort, atoi, strto*, qsort, chmod — FakeCC dialect. */
-package main;
+package std;
 
-typedef unsigned long size_t;
-typedef struct FILE FILE;
+import types;
+import io;
+import str;
+import ctype;
+import mem;
 
-extern int fflush(FILE *f);
-extern FILE *stdout;
-extern FILE *stderr;
-extern void free(void *p);
-extern void *malloc(size_t n);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern int isspace(int c);
-extern int isdigit(int c);
+typedef types.size_t size_t;
+typedef io.FILE FILE;
 
 void exit(int code) {
-    extern void __rt_stdio_init(void);
-    __rt_stdio_init();
-    fflush(stdout);
-    fflush(stderr);
+    io.__rt_stdio_init();
+    io.fflush(io.stdout);
+    io.fflush(io.stderr);
     __syscall(231, (long)code);
 }
 
@@ -30,7 +26,7 @@ void abort(void) {
  * overflow rather than clamping to LONG_MAX/ULLONG_MAX. */
 static unsigned long long strtou_body(const char *s, char **end, int base,
                                       int *neg) {
-    while (isspace((unsigned char)*s)) s = s + 1;
+    while (ctype.isspace((unsigned char)*s)) s = s + 1;
     *neg = 0;
     if (*s == '+') s = s + 1;
     else if (*s == '-') {
@@ -112,7 +108,7 @@ static long double pow10_exact(int k) {
  * this implementation and the host's, keeping the bootstrap a fixed point. */
 static long double strtofp_body(const char *s, char **end) {
     const char *start = s;
-    while (isspace((unsigned char)*s)) s = s + 1;
+    while (ctype.isspace((unsigned char)*s)) s = s + 1;
     int neg = 0;
     if (*s == '+') s = s + 1;
     else if (*s == '-') {
@@ -124,7 +120,7 @@ static long double strtofp_body(const char *s, char **end) {
     int any = 0;
     int ndig = 0;   /* digits folded into mant; 19 exceeds the mantissa */
     int dexp = 0;   /* power of ten still to apply to mant */
-    while (isdigit((unsigned char)*s)) {
+    while (ctype.isdigit((unsigned char)*s)) {
         any = 1;
         if (ndig < 19) {
             mant = mant * 10.0L + (long double)(*s - '0');
@@ -136,7 +132,7 @@ static long double strtofp_body(const char *s, char **end) {
     }
     if (*s == '.') {
         s = s + 1;
-        while (isdigit((unsigned char)*s)) {
+        while (ctype.isdigit((unsigned char)*s)) {
             any = 1;
             if (ndig < 19) {
                 mant = mant * 10.0L + (long double)(*s - '0');
@@ -160,9 +156,9 @@ static long double strtofp_body(const char *s, char **end) {
             eneg = 1;
             s = s + 1;
         }
-        if (isdigit((unsigned char)*s)) {
+        if (ctype.isdigit((unsigned char)*s)) {
             int exp = 0;
-            while (isdigit((unsigned char)*s)) {
+            while (ctype.isdigit((unsigned char)*s)) {
                 if (exp < 100000) exp = exp * 10 + (*s - '0');
                 s = s + 1;
             }
@@ -208,9 +204,9 @@ static void qsort_swap(char *a, char *b, size_t sz) {
     while (left > 0) {
         size_t n = left;
         if (n > 64) n = 64;
-        memcpy(tmp, a, n);
-        memcpy(a, b, n);
-        memcpy(b, tmp, n);
+        str.memcpy(tmp, a, n);
+        str.memcpy(a, b, n);
+        str.memcpy(b, tmp, n);
         a = a + n;
         b = b + n;
         left = left - n;

@@ -1,15 +1,14 @@
 // expect: 0
-// Allocate with extern libc malloc, write through the pointer, free, and
-// verify the bytes we wrote.  Exercises the PLT with pointer args + return.
+// Allocate with mem.malloc, write through the pointer, mem.free, and
+// verify the bytes we wrote.
 package main;
-extern void *malloc(long n);
-extern void free(void *p);
+import mem;
 int main(void) {
-    int *p = (int *)malloc(8);
+    int *p = (int *)mem.malloc(8);
     if (p == 0) return 1;
     p[0] = 11;
     p[1] = 22;
-    if (p[0] != 11 || p[1] != 22) { free(p); return 2; }
-    free(p);
+    if (p[0] != 11 || p[1] != 22) { mem.free(p); return 2; }
+    mem.free(p);
     return 0;
 }

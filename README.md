@@ -26,9 +26,9 @@
 |---|---|---|
 | 预处理器 | `#include` / `#define` / `#if` / … | **整个消失** |
 | 宏 | 对象宏、函数宏、`#`、`##` | **全部不存在** |
-| 头文件 | `.h`、前向声明 | 用 `extern` / 多文件链接；跨 package 的 `import` 仍在规划 |
-| 包组织 | 无 | 文件顶部 `package main;`（当前实现） |
-| 标准库 | 系统 libc | **默认内置 `rt/`**（裸 syscall）；`-nostdlib -lc` 可选走系统库 |
+| 头文件 | `.h`、前向声明 | 用 `extern` / 多文件链接；跨 package 用 `import` |
+| 包组织 | 无 | 文件顶部 `package name;`；`import pkg;` 后写 `pkg.sym` / `pkg.Type` |
+| 标准库 | 系统 libc | **默认内置 `rt/` 分包**（裸 syscall）；`-nostdlib -lc` 可选走系统库 |
 | 条件编译 | `#if` / `#ifdef` | 第一版不引入 |
 
 ### 最小程序
@@ -43,7 +43,16 @@ int main() {
 
 ```c
 package main;
-extern int printf(const char *fmt, ...);
+import fmt;
+int main(void) {
+    fmt.printf("hello %d\n", 42);
+    return 0;
+}
+```
+
+```c
+package main;
+extern int printf(const char *fmt, ...);  /* 仍可用：与 gcc .o / -lc 互操作 */
 int main(void) {
     printf("hello %d\n", 42);
     return 0;
@@ -68,16 +77,19 @@ ldd hello          # 「不是动态可执行文件」— 无 libc
 
 ## 零依赖 runtime（`rt/`）
 
-默认链接时，驱动自动编译并静态链上 `rt/`（FakeCC 方言，约 950 行）：
+默认链接时，驱动自动编译并静态链上 `rt/`（FakeCC 方言）。每个子目录是一个 package，目录名即包名；包内文件互相可见，跨包用限定名：
 
-| 文件 | 内容 |
-|---|---|
-| `string.c` | `memcpy` / `memset` / `strlen` / `strcmp` / … |
-| `ctype.c` | `isdigit` / `isspace` / … |
-| `malloc.c` | `mmap` freelist：`malloc` / `free` / `calloc` / `realloc` |
-| `stdio.c` | 迷你 `FILE`、`stdin`/`stdout`/`stderr`、缓冲、`fopen`/`fread`/`fwrite`/`puts`/`putchar`/… |
-| `printf.c` | `printf` / `fprintf` / `snprintf` / `v*`（`%s%c%d%i%u%x%o%p%f%e%g`、`-+ 0#` 标志、`*` 宽度/精度） |
-| `stdlib.c` | `exit`（先 fflush）/ `abort` / `strto*`（含 `strtoul`/`strtoull`、`strtod`/`strtof`/`strtold`）/ `qsort` / `chmod` / `getenv` |
+| 包 | 文件 | 内容 |
+|---|---|---|
+| `types` | `types/types.c` | 共享 `size_t` / `ssize_t`（其它 rt 包 `import types` 再 typedef） |
+| `str` | `str/string.c` | `memcpy` / `memset` / `strlen` / `strcmp` / … |
+| `ctype` | `ctype/ctype.c` | `isdigit` / `isspace` / … |
+| `mem` | `mem/malloc.c` | `mmap` freelist：`malloc` / `free` / `calloc` / `realloc` |
+| `io` | `io/stdio.c` | 迷你 `FILE`、`stdin`/`stdout`/`stderr`、缓冲、`fopen`/`fread`/… |
+| `fmt` | `fmt/printf.c` | `printf` / `fprintf` / `snprintf` / `v*` |
+| `std` | `std/stdlib.c` | `exit` / `abort` / `strto*` / `qsort` / `getenv` |
+
+用户侧：`import fmt;` 之后写 `fmt.printf(...)`。ELF 符号不改名（`fmt.printf` 仍链接到 `printf`），因此原有的 `extern int printf(...);` 写法继续可用。
 
 - 查找顺序：`FAKECC_RT` → `./rt` → `<argv0>/rt` → `<argv0>/../rt`
 - `-nostdlib`：不链 `rt/`；再加 `-lc` 即走系统 libc（调试 / 互操作用）
@@ -127,7 +139,7 @@ gcc 只出现在：编 Stage0，以及 `translate.py` 里对 `src/*.c` 做预处
 | 链接 | 多文件 / `.o`；默认静态链 `rt/`；可选 `-l`/`-L`/`.so` |
 | I/O | `__syscall`；`printf`/`malloc`/FILE 来自 `rt/` |
 
-跨 package 的 `import` / 导出可见性规则仍是语言方向，**尚未实现**（当前用多文件 + `extern`）。
+跨 package 的 `import` / 限定名已实现（目录即包；同包文件互见；`static` 包私有）。
 
 ## 已知缺陷
 

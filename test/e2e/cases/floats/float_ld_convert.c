@@ -5,8 +5,8 @@
 // expect_stdout: 325 7125 350 -125 650 14250 0 25 50
 package main;
 
-extern int printf(const char *fmt, ...);
 
+import fmt;
 static long double widen_f(float f) { return (long double)f; }
 static float narrow_ld(long double x) { return (float)x; }
 
@@ -18,17 +18,17 @@ int main() {
     float nf = narrow_ld(3.5L);
     float neg = (float)(-1.25L);
 
-    printf("%ld %ld %ld %ld ",
+    fmt.printf("%ld %ld %ld %ld ",
            (long)(a * 100), (long)(b * 1000),
            (long)(nf * 100), (long)(neg * 100));
 
     float back = (float)(widen_f(f) * 2);
     double dback = (double)(b * 2);
-    printf("%ld %ld ", (long)(back * 100), (long)(dback * 1000));
+    fmt.printf("%ld %ld ", (long)(back * 100), (long)(dback * 1000));
 
     float arr[3];
     for (int i = 0; i < 3; i++) arr[i] = (float)((long double)i / 4.0L);
-    printf("%ld %ld %ld\n",
+    fmt.printf("%ld %ld %ld\n",
            (long)(arr[0] * 100), (long)(arr[1] * 100), (long)(arr[2] * 100));
 
     if ((long)(nf * 100) != 350) return 1;

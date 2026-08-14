@@ -1,4 +1,5 @@
 #include "fakecc/sema.h"
+#include "fakecc/pkg.h"
 #include "fakecc/common.h"
 
 #include <stdio.h>
@@ -7,6 +8,8 @@
 
 /* Set by sema_check; provides the module StructRegistry for member lookups. */
 static const StructRegistry *g_sema_structs = NULL;
+static PkgContext *g_sema_pkg = NULL;
+static const TranslationUnit *g_sema_tu = NULL;
 
 /* Return type of the function currently being type-checked.  Set per-function
  * before check_stmt_list so ST_RETURN can enforce the void/non-void rules. */
@@ -52,6 +55,109 @@ static const FunSig *ftab_find(const FunTable *t, const char *name) {
     for (size_t i = 0; i < t->len; i++)
         if (strcmp(t->data[i].name, name) == 0) return &t->data[i];
     return NULL;
+}
+
+static int tu_imports(const TranslationUnit *tu, const char *name) {
+    for (size_t i = 0; i < tu->imports.len; i++)
+        if (strcmp(tu->imports.data[i].name, name) == 0) return 1;
+    return 0;
+}
+
+/* Push a package export into the FunTable as an external signature so call
+ * checking sees it like an `extern` decl. */
+static void ftab_push_export(FunTable *t, const PkgFuncExport *ex) {
+    if (ftab_find(t, ex->name)) return;
+    if (t->len >= t->cap) {
+        t->cap = t->cap ? t->cap * 2 : 8;
+        t->data = realloc(t->data, t->cap * sizeof(FunSig));
+        if (!t->data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    FunSig *s = &t->data[t->len++];
+    s->name = ex->name;
+    s->arity = ex->arity;
+    s->is_variadic = ex->is_variadic;
+    s->is_external = 1;
+    s->ret_type = ex->ret_type;
+    s->loc = ex->loc;
+    for (int i = 0; i < s->arity && i < 16; i++)
+        s->param_types[i] = ex->param_types[i];
+}
+
+/* Ensure an extern FunctionDecl exists so ir.c's g_ir_tu scan treats calls
+ * as direct. Must run before the per-function check loop (reallocating
+ * tu->functions mid-check invalidates FunctionDecl pointers). */
+static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) {
+    for (size_t i = 0; i < tu->functions.len; i++)
+        if (strcmp(tu->functions.data[i].name, ex->name) == 0)
+            return;
+    if (tu->functions.len >= tu->functions.cap) {
+        size_t nc = tu->functions.cap ? tu->functions.cap * 2 : 4;
+        tu->functions.data = realloc(tu->functions.data,
+                                     nc * sizeof(FunctionDecl));
+        if (!tu->functions.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        tu->functions.cap = nc;
+    }
+    FunctionDecl *fn = &tu->functions.data[tu->functions.len++];
+    memset(fn, 0, sizeof(*fn));
+    fn->name = xstrdup(ex->name);
+    fn->ret_type = type_clone(ex->ret_type);
+    param_array_init(&fn->params);
+    for (int i = 0; i < ex->arity && i < 16; i++)
+        param_array_push(&fn->params, "", type_clone(ex->param_types[i]),
+                         ex->loc);
+    fn->loc = ex->loc;
+    fn->is_variadic = ex->is_variadic;
+    fn->is_extern = 1;
+    fn->is_static = 0;
+}
+
+static void import_pkg_funcs(TranslationUnit *tu, FunTable *ft, Package *pkg) {
+    if (!pkg) return;
+    for (size_t i = 0; i < pkg->nfuncs; i++) {
+        ftab_push_export(ft, &pkg->funcs[i]);
+        tu_ensure_extern_func(tu, &pkg->funcs[i]);
+    }
+}
+
+static void tu_ensure_extern_global(TranslationUnit *tu, const PkgGlobalExport *ex) {
+    for (size_t i = 0; i < tu->globals.len; i++) {
+        Stmt *s = &tu->globals.data[i];
+        if (s->kind == ST_DECL && s->u.decl.name
+            && strcmp(s->u.decl.name, ex->name) == 0)
+            return;
+    }
+    Stmt s;
+    memset(&s, 0, sizeof(s));
+    s.kind = ST_DECL;
+    s.loc = ex->loc;
+    s.u.decl.name = xstrdup(ex->name);
+    s.u.decl.type = type_clone(ex->type);
+    s.u.decl.init = NULL;
+    s.u.decl.storage_class = 2; /* extern */
+    stmt_array_push(&tu->globals, s);
+}
+
+static void import_pkg_globals(TranslationUnit *tu, Package *pkg) {
+    if (!pkg) return;
+    for (size_t i = 0; i < pkg->nglobals; i++)
+        tu_ensure_extern_global(tu, &pkg->globals[i]);
+}
+
+/* Resolve name in package `pkg_name`'s export table. Returns 1 and fills
+ * out_func / out_global (one of them non-NULL) on hit. */
+static int pkg_resolve_sym(const char *pkg_name, const char *sym,
+                           const PkgFuncExport **out_func,
+                           const PkgGlobalExport **out_global) {
+    *out_func = NULL;
+    *out_global = NULL;
+    if (!g_sema_pkg) return 0;
+    Package *pkg = pkg_find(g_sema_pkg, pkg_name);
+    if (!pkg) return 0;
+    const PkgFuncExport *f = pkg_find_func(pkg, sym);
+    if (f) { *out_func = f; return 1; }
+    const PkgGlobalExport *g = pkg_find_global(pkg, sym);
+    if (g) { *out_global = g; return 1; }
+    return 0;
 }
 
 /* A value has va_list type iff it is the builtin __va_list_tag struct. */
@@ -254,7 +360,7 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc);
 
 /* Annotate e->type via type-checking; also returns a clone for use in callers. */
-static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
+static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
     if (!e) return type_default_int();
     switch (e->kind) {
     case EX_INT_LIT:
@@ -374,6 +480,38 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_VAR: {
+        /* Qualified: pkg.sym */
+        if (e->u.var.pkg) {
+            if (!g_sema_tu || !tu_imports(g_sema_tu, e->u.var.pkg)) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "package '%s' was not imported", e->u.var.pkg);
+            }
+            const PkgFuncExport *pf = NULL;
+            const PkgGlobalExport *pg = NULL;
+            if (!pkg_resolve_sym(e->u.var.pkg, e->u.var.name, &pf, &pg)) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "package '%s' has no exported symbol '%s'",
+                       e->u.var.pkg, e->u.var.name);
+            }
+            if (pf) {
+                ftab_push_export(ft, pf);
+                const Type **ptys = NULL;
+                if (pf->arity > 0) {
+                    ptys = malloc(pf->arity * sizeof(Type *));
+                    if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                    for (int i = 0; i < pf->arity; i++)
+                        ptys[i] = &pf->param_types[i];
+                }
+                Type fn = type_make_func(pf->ret_type, (Type **)ptys, pf->arity);
+                free(ptys);
+                Type fp = type_make_ptr(fn);
+                type_free(&fn);
+                set_type(e, fp);
+                return type_clone(e->type);
+            }
+            set_type(e, type_clone(pg->type));
+            return type_clone(e->type);
+        }
         const Sym *sym = symtable_find(st, e->u.var.name);
         if (sym) {
             set_type(e, type_clone(sym->type));
@@ -397,8 +535,43 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
             set_type(e, fp);
             return type_clone(e->type);
         }
-        die_at(e->loc.file, e->loc.line, e->loc.col,
-               "use of undeclared variable '%s'", e->u.var.name);
+        /* Same-package fallback: look up in the current package's exports. */
+        if (g_sema_pkg && g_sema_tu && g_sema_tu->package.name) {
+            const PkgFuncExport *pf = NULL;
+            const PkgGlobalExport *pg = NULL;
+            if (pkg_resolve_sym(g_sema_tu->package.name, e->u.var.name, &pf, &pg)) {
+                if (pf) {
+                    ftab_push_export(ft, pf);
+                    const Type **ptys = NULL;
+                    if (pf->arity > 0) {
+                        ptys = malloc(pf->arity * sizeof(Type *));
+                        if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                        for (int i = 0; i < pf->arity; i++)
+                            ptys[i] = &pf->param_types[i];
+                    }
+                    Type fn = type_make_func(pf->ret_type, (Type **)ptys, pf->arity);
+                    free(ptys);
+                    Type fp = type_make_ptr(fn);
+                    type_free(&fn);
+                    set_type(e, fp);
+                    return type_clone(e->type);
+                }
+                set_type(e, type_clone(pg->type));
+                return type_clone(e->type);
+            }
+        }
+        {
+            const char *hint = g_sema_pkg
+                ? pkg_suggest_export(g_sema_pkg, e->u.var.name) : NULL;
+            if (hint) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "use of undeclared '%s'; did you mean '%s.%s'? "
+                       "(add 'import %s;')",
+                       e->u.var.name, hint, e->u.var.name, hint);
+            }
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "use of undeclared variable '%s'", e->u.var.name);
+        }
     }
     case EX_ASSIGN: {
         if (e->u.assign.lvalue->kind != EX_VAR &&
@@ -730,6 +903,23 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_MEMBER: {
+        /* Package-qualified name: `fmt.printf` parsed as member access.
+         * Prefer a real local/global struct variable of that name; otherwise
+         * rewrite to a qualified EX_VAR so IR sees a direct-call EX_VAR. */
+        if (e->u.member.obj->kind == EX_VAR
+            && e->u.member.obj->u.var.pkg == NULL
+            && g_sema_tu
+            && tu_imports(g_sema_tu, e->u.member.obj->u.var.name)
+            && !symtable_find(st, e->u.member.obj->u.var.name)) {
+            char *pkg = xstrdup(e->u.member.obj->u.var.name);
+            char *name = xstrdup(e->u.member.name);
+            expr_free(e->u.member.obj);
+            free(e->u.member.name);
+            e->kind = EX_VAR;
+            e->u.var.name = name;
+            e->u.var.pkg = pkg;
+            return check_expr(e, st, ft);
+        }
         Type ot = check_expr(e->u.member.obj, st, ft);
         if (ot.kind != TY_STRUCT) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -893,14 +1083,14 @@ static Type check_expr(Expr *e, const SymTable *st, const FunTable *ft) {
     return type_default_int();
 }
 
-static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
+static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                        size_t scope_mark, int *has_return);
 
 static int g_sema_loop_depth = 0;
 static LabelSet *g_sema_labels = NULL;
 
 static void check_stmt_list(StmtArray *body, SymTable *st,
-                            const FunTable *ft, int *has_return) {
+                            FunTable *ft, int *has_return) {
     size_t mark = symtable_enter_scope(st);
     for (size_t i = 0; i < body->len; i++)
         check_stmt(&body->data[i], st, ft, mark, has_return);
@@ -936,6 +1126,12 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     if (e->kind == EX_VAR && globals) {
         const Sym *s = symtable_find(globals, e->u.var.name);
         if (s && s->type.is_const) return 1;
+    }
+    /* Address of a file-scope object: `FILE *stdout = &_rt_stdout`. */
+    if (e->kind == EX_ADDR && e->u.addr.operand
+        && e->u.addr.operand->kind == EX_VAR && globals) {
+        if (symtable_find(globals, e->u.addr.operand->u.var.name))
+            return 1;
     }
     return 0;
 }
@@ -1165,7 +1361,7 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
     }
 }
 
-static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
+static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                        size_t scope_mark, int *has_return) {
     Type discard;
     switch (s->kind) {
@@ -1338,14 +1534,15 @@ static void check_stmt(Stmt *s, SymTable *st, const FunTable *ft,
     }
 }
 
-void sema_check(const TranslationUnit *tu_const, int require_main) {
+void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
+                       PkgContext *ctx) {
     TranslationUnit *tu = (TranslationUnit *)tu_const;
     g_sema_structs = &tu->structs;
+    g_sema_pkg = ctx;
+    g_sema_tu = tu_const;
 
-    if (tu->package.name == NULL || strcmp(tu->package.name, "main") != 0) {
-        die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
-               "package must be 'main'");
-    }
+    /* Package name is unrestricted; the linker still requires a `main`
+     * symbol for executables. */
 
     FunTable ft;
     ftab_init(&ft);
@@ -1383,6 +1580,23 @@ void sema_check(const TranslationUnit *tu_const, int require_main) {
     if (!has_main && require_main) {
         die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
                "no 'main' function defined");
+    }
+
+    /* Import every function from imported packages and from the current
+     * package (sibling files) before checking bodies — see tu_ensure_extern_func. */
+    /* Same-package sibling exports are visible unqualified.  Imported
+     * packages are NOT — those require pkg.sym (see EX_VAR / EX_MEMBER). */
+    if (g_sema_pkg && tu->package.name) {
+        Package *cur = pkg_find(g_sema_pkg, tu->package.name);
+        import_pkg_funcs(tu, &ft, cur);
+        import_pkg_globals(tu, cur);
+    }
+    /* Extern globals from imports so irsymtable can GADDR them (io.stdout). */
+    if (g_sema_pkg) {
+        for (size_t i = 0; i < tu->imports.len; i++) {
+            Package *ip = pkg_find(g_sema_pkg, tu->imports.data[i].name);
+            import_pkg_globals(tu, ip);
+        }
     }
 
     /* Type-check global variable declarations.  Store their names in a
@@ -1501,4 +1715,11 @@ void sema_check(const TranslationUnit *tu_const, int require_main) {
 
     ftab_free(&ft);
     symtable_free(&globals);
+    g_sema_pkg = NULL;
+    g_sema_tu = NULL;
+    g_sema_structs = NULL;
+}
+
+void sema_check(const TranslationUnit *tu, int require_main) {
+    sema_check_in_pkg(tu, require_main, NULL);
 }

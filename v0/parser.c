@@ -261,7 +261,7 @@ union __anon_u_1 {
         long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
-        struct { char *name; } var;
+        struct { char *name; char *pkg; } var;
         struct { Expr *lvalue; Expr *rvalue; } assign;
         struct { Expr *callee; ExprArray args; } call;
         struct { char *bytes; int len; } str;
@@ -282,7 +282,7 @@ union __anon_u_1 {
         struct { Type target_type; Expr *init; } compound;
     };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
 struct __anon_un_5 { UnaryOp op; Expr *operand; };
-struct __anon_var_6 { char *name; };
+struct __anon_var_6 { char *name; char *pkg; };
 struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
 struct __anon_call_8 { Expr *callee; ExprArray args; };
 struct __anon_str_9 { char *bytes; int len; };
@@ -336,6 +336,7 @@ Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc)
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
+Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
 Expr *expr_new_call(Expr *callee, SourceLoc loc);
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
@@ -456,6 +457,18 @@ struct PackageDecl {
     char *name;
     SourceLoc loc;
 };typedef struct PackageDecl PackageDecl;
+struct ImportDecl {
+    char *name;
+    SourceLoc loc;
+};typedef struct ImportDecl ImportDecl;
+struct ImportArray {
+    ImportDecl *data;
+    size_t len;
+    size_t cap;
+};typedef struct ImportArray ImportArray;
+void import_array_init(ImportArray *a);
+void import_array_push(ImportArray *a, const char *name, SourceLoc loc);
+void import_array_free(ImportArray *a);
 struct StructMember {
     char *name;
     Type type;
@@ -534,6 +547,7 @@ TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type ty
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
 struct TranslationUnit {
     PackageDecl package;
+    ImportArray imports;
     StmtArray globals;
     FunctionArray functions;
     StructRegistry structs;
@@ -542,7 +556,70 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
+struct PkgContext;
 void parse(const TokenArray *tokens, TranslationUnit *tu);
+void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
+                  struct PkgContext *ctx);
+typedef struct Package Package;
+typedef struct PkgContext PkgContext;
+struct PkgFuncExport {
+    char *name;
+    Type ret_type;
+    Type param_types[16];
+    int arity;
+    int is_variadic;
+    int is_extern;
+    SourceLoc loc;
+    TranslationUnit *tu;
+};typedef struct PkgFuncExport PkgFuncExport;
+struct PkgGlobalExport {
+    char *name;
+    Type type;
+    int is_extern;
+    SourceLoc loc;
+    TranslationUnit *tu;
+};typedef struct PkgGlobalExport PkgGlobalExport;
+struct Package {
+    char *name;
+    char *dir;
+    TranslationUnit *files;
+    size_t nfiles;
+    int owns_files;
+    PkgFuncExport *funcs;
+    size_t nfuncs;
+    PkgGlobalExport *globals;
+    size_t nglobals;
+    TypedefRegistry typedefs;
+    StructRegistry structs;
+    EnumRegistry enums;
+};
+struct PkgContext {
+    char **search_paths;
+    int npaths;
+    Package **pkgs;
+    size_t npkgs;
+    size_t cap_pkgs;
+    char **loading;
+    size_t nloading;
+    size_t cap_loading;
+};
+void pkg_ctx_init(PkgContext *ctx);
+void pkg_ctx_free(PkgContext *ctx);
+void pkg_ctx_add_path(PkgContext *ctx, const char *dir);
+Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc);
+Package *pkg_register_tus(PkgContext *ctx, const char *name,
+                          TranslationUnit **tus, size_t ntus);
+Package *pkg_find(const PkgContext *ctx, const char *name);
+const PkgFuncExport *pkg_find_func(const Package *pkg, const char *name);
+const PkgGlobalExport *pkg_find_global(const Package *pkg, const char *name);
+const Type *pkg_find_typedef(const Package *pkg, const char *name);
+const StructDef *pkg_find_struct(const Package *pkg, const char *name);
+const EnumDef *pkg_find_enum(const Package *pkg, const char *name);
+const EnumConstant *pkg_find_enum_const(const Package *pkg, const char *name);
+void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src);
+void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
+                        const Package *pkg);
+const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
 extern int isdigit(int c);
 extern int isalpha(int c);
 extern int isalnum(int c);
@@ -605,6 +682,7 @@ struct Parser {
     const TokenArray *tokens;
     size_t pos;
     TranslationUnit *tu;
+    PkgContext *pkg_ctx;
     StmtArray prepend;
     int anon_counter;
 };typedef struct Parser Parser;
@@ -649,6 +727,51 @@ static int skip_attribute(Parser *p) {
     }
     return 1;
 }
+static int tu_has_import(const TranslationUnit *tu, const char *name) {
+    for (size_t i = 0; i < tu->imports.len; i++)
+        if (strcmp(tu->imports.data[i].name, name) == 0) return 1;
+    return 0;
+}
+static const Type *resolve_pkg_typedef(Parser *p, const char *pkg_name,
+                                       const char *type_name) {
+    if (!p->pkg_ctx) return ((void*)0);
+    Package *pkg = pkg_find(p->pkg_ctx, pkg_name);
+    if (!pkg) return ((void*)0);
+    const Type *t = pkg_find_typedef(pkg, type_name);
+    if (!t) {
+        for (size_t f = 0; f < pkg->nfiles; f++) {
+            TranslationUnit *sib = &pkg->files[f];
+            if (sib == p->tu) continue;
+            t = typedef_registry_find(&sib->typedefs, type_name);
+            if (t) break;
+        }
+    }
+    if (!t) return ((void*)0);
+    if (t->kind == TY_STRUCT && t->tag) {
+        const StructDef *sd = pkg_find_struct(pkg, t->tag);
+        if (!sd) {
+            for (size_t f = 0; f < pkg->nfiles && !sd; f++)
+                sd = struct_registry_find_c(&pkg->files[f].structs, t->tag);
+        }
+        if (sd) pkg_clone_struct_into(&p->tu->structs, sd);
+    } else if (t->kind == TY_PTR && t->pointee && t->pointee->kind == TY_STRUCT
+               && t->pointee->tag) {
+        const StructDef *sd = pkg_find_struct(pkg, t->pointee->tag);
+        if (!sd) {
+            for (size_t f = 0; f < pkg->nfiles && !sd; f++)
+                sd = struct_registry_find_c(&pkg->files[f].structs,
+                                           t->pointee->tag);
+        }
+        if (sd) pkg_clone_struct_into(&p->tu->structs, sd);
+    }
+    return t;
+}
+static const Type *find_typedef_with_fallback(Parser *p, const char *name) {
+    const Type *t = typedef_registry_find(&p->tu->typedefs, name);
+    if (t) return t;
+    if (!p->pkg_ctx || !p->tu->package.name) return ((void*)0);
+    return resolve_pkg_typedef(p, p->tu->package.name, name);
+}
 static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
     if (k == TK_KW_VOID || k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
@@ -658,9 +781,32 @@ static int is_type_start(const Parser *p, size_t pos) {
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN
         || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE)
         return 1;
-    if (k == TK_IDENT
-        && typedef_registry_find(&p->tu->typedefs, p->tokens->data[pos].text))
-        return 1;
+    if (k == TK_IDENT) {
+        const char *text = p->tokens->data[pos].text;
+        if (typedef_registry_find(&p->tu->typedefs, text))
+            return 1;
+        if (pos + 2 < p->tokens->len
+            && p->tokens->data[pos + 1].kind == TK_DOT
+            && p->tokens->data[pos + 2].kind == TK_IDENT
+            && tu_has_import(p->tu, text)
+            && p->pkg_ctx) {
+            Package *pkg = pkg_find(p->pkg_ctx, text);
+            if (pkg && pkg_find_typedef(pkg, p->tokens->data[pos + 2].text))
+                return 1;
+        }
+        if (p->pkg_ctx && p->tu->package.name) {
+            Package *cur = pkg_find(p->pkg_ctx, p->tu->package.name);
+            if (cur && pkg_find_typedef(cur, text))
+                return 1;
+            if (cur) {
+                for (size_t f = 0; f < cur->nfiles; f++) {
+                    if (&cur->files[f] == p->tu) continue;
+                    if (typedef_registry_find(&cur->files[f].typedefs, text))
+                        return 1;
+                }
+            }
+        }
+    }
     return 0;
 }
 static Type parse_specifiers(Parser *p) {
@@ -795,7 +941,30 @@ static Type parse_specifiers(Parser *p) {
         return t;
     }
     if (peek(p)->kind == TK_IDENT) {
-        const Type *alias = typedef_registry_find(&p->tu->typedefs, peek(p)->text);
+        if (tu_has_import(p->tu, peek(p)->text)
+            && p->pos + 2 < p->tokens->len
+            && p->tokens->data[p->pos + 1].kind == TK_DOT
+            && p->tokens->data[p->pos + 2].kind == TK_IDENT) {
+            const char *pkg_name = peek(p)->text;
+            const char *type_name = p->tokens->data[p->pos + 2].text;
+            SourceLoc loc = peek(p)->loc;
+            const Type *alias = resolve_pkg_typedef(p, pkg_name, type_name);
+            if (!alias) {
+                die_at(loc.file, loc.line, loc.col,
+                       "package '%s' has no type '%s'", pkg_name, type_name);
+            }
+            advance(p);
+            advance(p);
+            advance(p);
+            Type t = type_clone(*alias);
+            if (t.kind == TY_STRUCT && t.tag) {
+                const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
+                if (sd) t.width = sd->size;
+            }
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
+        const Type *alias = find_typedef_with_fallback(p, peek(p)->text);
         if (alias) {
             advance(p);
             Type t = type_clone(*alias);
@@ -2407,11 +2576,12 @@ static PackageDecl parse_package_decl(Parser *p) {
     pd.loc = kw->loc;
     return pd;
 }
-void parse(const TokenArray *tokens, TranslationUnit *tu) {
+void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx) {
     Parser p;
     p.tokens = tokens;
     p.pos = 0;
     p.tu = tu;
+    p.pkg_ctx = ctx;
     stmt_array_init(&p.prepend);
     p.anon_counter = 0;
     if (peek(&p)->kind != TK_KW_PACKAGE) {
@@ -2420,10 +2590,28 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
                "expected 'package' declaration at start of file");
     }
     tu->package = parse_package_decl(&p);
-    if (peek(&p)->kind == TK_KW_IMPORT) {
-        const Token *t = peek(&p);
-        die_at(t->loc.file, t->loc.line, t->loc.col,
-               "'import' is not supported yet");
+    while (peek(&p)->kind == TK_KW_IMPORT) {
+        const Token *kw = peek(&p);
+        advance(&p);
+        const Token *ident = peek(&p);
+        if (ident->kind != TK_IDENT) {
+            die_at(ident->loc.file, ident->loc.line, ident->loc.col,
+                   "expected package name after 'import'");
+        }
+        advance(&p);
+        expect_kind(&p, TK_SEMICOLON, "';'");
+        if (!ctx) {
+            die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                   "'import' requires a package search path (driver bug)");
+        }
+        for (size_t i = 0; i < tu->imports.len; i++) {
+            if (strcmp(tu->imports.data[i].name, ident->text) == 0) {
+                die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                       "duplicate import of package '%s'", ident->text);
+            }
+        }
+        import_array_push(&tu->imports, ident->text, kw->loc);
+        pkg_load(ctx, ident->text, kw->loc);
     }
     while (peek(&p)->kind != TK_EOF) {
         for (size_t i = 0; i < p.prepend.len; i++)
@@ -2563,4 +2751,7 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
         stmt_array_push(&tu->globals, p.prepend.data[i]);
     p.prepend.len = 0;
     stmt_array_free(&p.prepend);
+}
+void parse(const TokenArray *tokens, TranslationUnit *tu) {
+    parse_in_pkg(tokens, tu, ((void*)0));
 }

@@ -261,7 +261,7 @@ union __anon_u_1 {
         long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
-        struct { char *name; } var;
+        struct { char *name; char *pkg; } var;
         struct { Expr *lvalue; Expr *rvalue; } assign;
         struct { Expr *callee; ExprArray args; } call;
         struct { char *bytes; int len; } str;
@@ -282,7 +282,7 @@ union __anon_u_1 {
         struct { Type target_type; Expr *init; } compound;
     };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
 struct __anon_un_5 { UnaryOp op; Expr *operand; };
-struct __anon_var_6 { char *name; };
+struct __anon_var_6 { char *name; char *pkg; };
 struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
 struct __anon_call_8 { Expr *callee; ExprArray args; };
 struct __anon_str_9 { char *bytes; int len; };
@@ -336,6 +336,7 @@ Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc)
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
+Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
 Expr *expr_new_call(Expr *callee, SourceLoc loc);
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
@@ -456,6 +457,18 @@ struct PackageDecl {
     char *name;
     SourceLoc loc;
 };typedef struct PackageDecl PackageDecl;
+struct ImportDecl {
+    char *name;
+    SourceLoc loc;
+};typedef struct ImportDecl ImportDecl;
+struct ImportArray {
+    ImportDecl *data;
+    size_t len;
+    size_t cap;
+};typedef struct ImportArray ImportArray;
+void import_array_init(ImportArray *a);
+void import_array_push(ImportArray *a, const char *name, SourceLoc loc);
+void import_array_free(ImportArray *a);
 struct StructMember {
     char *name;
     Type type;
@@ -534,6 +547,7 @@ TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type ty
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
 struct TranslationUnit {
     PackageDecl package;
+    ImportArray imports;
     StmtArray globals;
     FunctionArray functions;
     StructRegistry structs;
@@ -832,6 +846,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
     sd->members = ((void*)0); sd->num_members = 0; sd->cap_members = 0;
     sd->size = 0; sd->align = 1; sd->loc = loc;
     sd->bf_unit_type = 0; sd->bf_unit_used = 0; sd->bf_unit_offset = 0;
+    sd->canonical_type = ((void*)0);
     return sd;
 }
 StructDef *struct_registry_find(StructRegistry *r, const char *tag) {
@@ -1149,6 +1164,12 @@ Expr *expr_new_var(const char *name, SourceLoc loc) {
     e->type = type_default_int();
     memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.var.name = xstrdup(name);
+    e->u.var.pkg = ((void*)0);
+    return e;
+}
+Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc) {
+    Expr *e = expr_new_var(name, loc);
+    e->u.var.pkg = xstrdup(pkg);
     return e;
 }
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
@@ -1304,6 +1325,7 @@ void expr_free(Expr *e) {
         break;
     case EX_VAR:
         free(e->u.var.name);
+        free(e->u.var.pkg);
         break;
     case EX_ASSIGN:
         expr_free(e->u.assign.lvalue);
@@ -1471,11 +1493,35 @@ void stmt_array_free(StmtArray *a) {
     a->len = 0;
     a->cap = 0;
 }
+void import_array_init(ImportArray *a) {
+    a->data = ((void*)0);
+    a->len = 0;
+    a->cap = 0;
+}
+void import_array_push(ImportArray *a, const char *name, SourceLoc loc) {
+    if (a->len >= a->cap) {
+        a->cap = a->cap ? a->cap * 2 : 4;
+        a->data = realloc(a->data, a->cap * sizeof(ImportDecl));
+        if (!a->data) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+    }
+    a->data[a->len].name = xstrdup(name);
+    a->data[a->len].loc = loc;
+    a->len++;
+}
+void import_array_free(ImportArray *a) {
+    for (size_t i = 0; i < a->len; i++)
+        free(a->data[i].name);
+    free(a->data);
+    a->data = ((void*)0);
+    a->len = 0;
+    a->cap = 0;
+}
 void tu_init(TranslationUnit *tu) {
     tu->package.name = ((void*)0);
     tu->package.loc.file = ((void*)0);
     tu->package.loc.line = 0;
     tu->package.loc.col = 0;
+    import_array_init(&tu->imports);
     stmt_array_init(&tu->globals);
     tu->functions.data = ((void*)0);
     tu->functions.len = 0;
@@ -1495,6 +1541,7 @@ void tu_init(TranslationUnit *tu) {
 }
 void tu_free(TranslationUnit *tu) {
     free(tu->package.name);
+    import_array_free(&tu->imports);
     stmt_array_free(&tu->globals);
     for (size_t i = 0; i < tu->functions.len; i++) {
         free(tu->functions.data[i].name);

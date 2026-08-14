@@ -77,7 +77,7 @@ run_multi 42 "$TMP/mul.o" "$TMP/main.o"
 
 # Cross-file libc call (PLT).  (`return;` required — void functions without
 # an explicit return hit a pre-existing codegen bug, unrelated to linking.)
-echo 'package main; extern int printf(const char *f,...); void hi(){ printf("x"); return; }' > "$TMP/p.c"
+echo 'package main; import fmt; void hi(){ fmt.printf("x"); return; }' > "$TMP/p.c"
 echo 'package main; void hi(); int main(){ hi(); return 5; }' > "$TMP/q.c"
 run_multi 5 "$TMP/p.c" "$TMP/q.c"
 
@@ -121,6 +121,11 @@ echo 'package main; static int helper(void) { return 3; } int left(void) { retur
 echo 'package main; static int helper(void) { return 4; } int right(void) { return helper(); }' > "$TMP/st_b.c"
 echo 'package main; int left(void); int right(void); int main(void) { return left() * 10 + right(); }' > "$TMP/st_m.c"
 run_multi 34 "$TMP/st_a.c" "$TMP/st_b.c" "$TMP/st_m.c"
+
+# Same-package multi-file: no `extern` — siblings are visible via package scope.
+echo 'package main; int add(int a, int b) { return a + b; }' > "$TMP/pkg_a.c"
+echo 'package main; int main(void) { return add(20, 22); }' > "$TMP/pkg_b.c"
+run_multi 42 "$TMP/pkg_a.c" "$TMP/pkg_b.c"
 
 # Negative: no main → linker must reject.
 echo 'package main; int foo(void) { return 1; }' > "$TMP/nomain.c"

@@ -288,6 +288,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
     sd->members = NULL; sd->num_members = 0; sd->cap_members = 0;
     sd->size = 0; sd->align = 1; sd->loc = loc;
     sd->bf_unit_type = 0; sd->bf_unit_used = 0; sd->bf_unit_offset = 0;
+    sd->canonical_type = NULL;
     return sd;
 }
 
@@ -686,6 +687,13 @@ Expr *expr_new_var(const char *name, SourceLoc loc) {
     e->type = type_default_int();
     memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     e->u.var.name = xstrdup(name);
+    e->u.var.pkg = NULL;
+    return e;
+}
+
+Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc) {
+    Expr *e = expr_new_var(name, loc);
+    e->u.var.pkg = xstrdup(pkg);
     return e;
 }
 
@@ -854,6 +862,7 @@ void expr_free(Expr *e) {
         break;
     case EX_VAR:
         free(e->u.var.name);
+        free(e->u.var.pkg);
         break;
     case EX_ASSIGN:
         expr_free(e->u.assign.lvalue);
@@ -1036,11 +1045,38 @@ void stmt_array_free(StmtArray *a) {
 /* TranslationUnit lifetime                                            */
 /* ------------------------------------------------------------------ */
 
+void import_array_init(ImportArray *a) {
+    a->data = NULL;
+    a->len = 0;
+    a->cap = 0;
+}
+
+void import_array_push(ImportArray *a, const char *name, SourceLoc loc) {
+    if (a->len >= a->cap) {
+        a->cap = a->cap ? a->cap * 2 : 4;
+        a->data = realloc(a->data, a->cap * sizeof(ImportDecl));
+        if (!a->data) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+    }
+    a->data[a->len].name = xstrdup(name);
+    a->data[a->len].loc = loc;
+    a->len++;
+}
+
+void import_array_free(ImportArray *a) {
+    for (size_t i = 0; i < a->len; i++)
+        free(a->data[i].name);
+    free(a->data);
+    a->data = NULL;
+    a->len = 0;
+    a->cap = 0;
+}
+
 void tu_init(TranslationUnit *tu) {
     tu->package.name = NULL;
     tu->package.loc.file = NULL;
     tu->package.loc.line = 0;
     tu->package.loc.col = 0;
+    import_array_init(&tu->imports);
     stmt_array_init(&tu->globals);
     tu->functions.data = NULL;
     tu->functions.len = 0;
@@ -1065,6 +1101,7 @@ void tu_init(TranslationUnit *tu) {
 
 void tu_free(TranslationUnit *tu) {
     free(tu->package.name);
+    import_array_free(&tu->imports);
     stmt_array_free(&tu->globals);
     for (size_t i = 0; i < tu->functions.len; i++) {
         free(tu->functions.data[i].name);

@@ -4,8 +4,8 @@
 // expect_stdout: 15 -25 10 35 20 45
 package main;
 
-extern int printf(const char *fmt, ...);
 
+import fmt;
 double g_a = 1.5;
 double g_b = -2.5;
 double g_int = 1;
@@ -14,7 +14,7 @@ long double g_ld = 2.0L;
 double g_arr[2] = { 1.0, 3.5 };
 
 int main() {
-    printf("%ld %ld %ld %ld %ld %ld\n",
+    fmt.printf("%ld %ld %ld %ld %ld %ld\n",
            (long)(g_a * 10), (long)(g_b * 10), (long)(g_int * 10),
            (long)(g_f * 10), (long)(g_ld * 10),
            (long)((g_arr[0] + g_arr[1]) * 10));

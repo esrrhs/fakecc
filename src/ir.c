@@ -1518,6 +1518,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                  * variable, which crashes at runtime. */
                 if (e->u.call.callee->type.kind == TY_FUNC) {
                     is_direct = 1;
+                } else if (e->u.call.callee->u.var.pkg) {
+                    /* Package-qualified name (fmt.printf) — always a direct
+                     * named call; the defining TU is linked separately. */
+                    is_direct = 1;
                 } else if (g_ir_tu) {
                     for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
                         if (strcmp(g_ir_tu->functions.data[i].name, cname) == 0) {
@@ -2598,6 +2602,14 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             memcpy(bytes, src->init_bytes, n);
             return;
         }
+    }
+    /* `T *p = &g` — link-time address of a file-scope object. */
+    if (e->kind == EX_ADDR && e->u.addr.operand
+        && e->u.addr.operand->kind == EX_VAR && ty->kind == TY_PTR && g) {
+        add_global_fixup(g, (int)(bytes - g->init_bytes),
+                         e->u.addr.operand->u.var.name);
+        memset(bytes, 0, sz);
+        return;
     }
     die_at(loc.file, loc.line, loc.col,
            "global '%s' initializer must be a compile-time constant", ctx);

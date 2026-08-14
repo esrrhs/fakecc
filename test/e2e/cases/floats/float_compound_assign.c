@@ -4,8 +4,8 @@
 // expect_stdout: 25 80 20 75 125 150 25 50
 package main;
 
-extern int printf(const char *fmt, ...);
 
+import fmt;
 double g_d = 2.5;
 struct S { double x; float y; };
 
@@ -32,7 +32,7 @@ int main() {
     double m = 2.0;
     int i = 3;
     m += i;                 /* 5.0 */
-    printf("%ld %ld %ld %ld %ld %ld %ld %ld\n",
+    fmt.printf("%ld %ld %ld %ld %ld %ld %ld %ld\n",
            (long)(a * 10), (long)(f * 10), (long)(g_d * 10),
            (long)(arr[1] * 100), (long)(s.x * 100), (long)(s.y * 100),
            (long)(ld * 10), (long)(m * 10));
