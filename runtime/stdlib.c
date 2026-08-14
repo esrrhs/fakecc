@@ -1,19 +1,10 @@
 /* exit, abort, atoi, strto*, qsort, chmod — FakeCC dialect. */
-package std;
-
-import types;
-import io;
-import str;
-import ctype;
-import mem;
-
-typedef types.size_t size_t;
-typedef io.FILE FILE;
+package runtime;
 
 void exit(int code) {
-    io.__rt_stdio_init();
-    io.fflush(io.stdout);
-    io.fflush(io.stderr);
+    __rt_stdio_init();
+    fflush(stdout);
+    fflush(stderr);
     __syscall(231, (long)code);
 }
 
@@ -26,7 +17,7 @@ void abort(void) {
  * overflow rather than clamping to LONG_MAX/ULLONG_MAX. */
 static unsigned long long strtou_body(const char *s, char **end, int base,
                                       int *neg) {
-    while (ctype.isspace((unsigned char)*s)) s = s + 1;
+    while (isspace((unsigned char)*s)) s = s + 1;
     *neg = 0;
     if (*s == '+') s = s + 1;
     else if (*s == '-') {
@@ -108,7 +99,7 @@ static long double pow10_exact(int k) {
  * this implementation and the host's, keeping the bootstrap a fixed point. */
 static long double strtofp_body(const char *s, char **end) {
     const char *start = s;
-    while (ctype.isspace((unsigned char)*s)) s = s + 1;
+    while (isspace((unsigned char)*s)) s = s + 1;
     int neg = 0;
     if (*s == '+') s = s + 1;
     else if (*s == '-') {
@@ -120,7 +111,7 @@ static long double strtofp_body(const char *s, char **end) {
     int any = 0;
     int ndig = 0;   /* digits folded into mant; 19 exceeds the mantissa */
     int dexp = 0;   /* power of ten still to apply to mant */
-    while (ctype.isdigit((unsigned char)*s)) {
+    while (isdigit((unsigned char)*s)) {
         any = 1;
         if (ndig < 19) {
             mant = mant * 10.0L + (long double)(*s - '0');
@@ -132,7 +123,7 @@ static long double strtofp_body(const char *s, char **end) {
     }
     if (*s == '.') {
         s = s + 1;
-        while (ctype.isdigit((unsigned char)*s)) {
+        while (isdigit((unsigned char)*s)) {
             any = 1;
             if (ndig < 19) {
                 mant = mant * 10.0L + (long double)(*s - '0');
@@ -156,9 +147,9 @@ static long double strtofp_body(const char *s, char **end) {
             eneg = 1;
             s = s + 1;
         }
-        if (ctype.isdigit((unsigned char)*s)) {
+        if (isdigit((unsigned char)*s)) {
             int exp = 0;
-            while (ctype.isdigit((unsigned char)*s)) {
+            while (isdigit((unsigned char)*s)) {
                 if (exp < 100000) exp = exp * 10 + (*s - '0');
                 s = s + 1;
             }
@@ -204,9 +195,9 @@ static void qsort_swap(char *a, char *b, size_t sz) {
     while (left > 0) {
         size_t n = left;
         if (n > 64) n = 64;
-        str.memcpy(tmp, a, n);
-        str.memcpy(a, b, n);
-        str.memcpy(b, tmp, n);
+        memcpy(tmp, a, n);
+        memcpy(a, b, n);
+        memcpy(b, tmp, n);
         a = a + n;
         b = b + n;
         left = left - n;

@@ -5,7 +5,7 @@
 #include "fakecc/common.h"
 
 /* Package loader: directory-per-package, Go-style `import name;`.
- * Qualification (fmt.printf) is a front-end concept only — ELF symbols stay
+ * Qualification (runtime.printf) is a front-end concept only — ELF symbols stay
  * unmangled, so an imported name resolves to the same linker symbol as an
  * `extern` declaration of the same identifier. */
 
@@ -44,7 +44,7 @@ struct Package {
     PkgGlobalExport *globals;
     size_t nglobals;
     /* Aggregated type registries: clones of non-private typedefs/structs/enums
-     * from every file. Used for qualified type names (io.FILE) and for
+     * from every file. Used for qualified type names (runtime.FILE) and for
      * same-package unqualified fallback. */
     TypedefRegistry typedefs;
     StructRegistry structs;
@@ -74,8 +74,9 @@ void pkg_ctx_add_path(PkgContext *ctx, const char *dir);
 Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc);
 
 /* Register already-parsed TUs as package `name` for same-package visibility.
- * Does not take ownership of the TUs (caller frees them). Dies if `name` is
- * already loaded (e.g. a directory package). */
+ * Does not take ownership of the TUs (caller frees them).  If `name` is
+ * already loaded (e.g. builtin rt), the TUs' exports are merged into that
+ * package (first name wins) instead of being dropped. */
 Package *pkg_register_tus(PkgContext *ctx, const char *name,
                           TranslationUnit **tus, size_t ntus);
 

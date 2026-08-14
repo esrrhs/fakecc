@@ -1,10 +1,10 @@
-// str.memmove: like str.memcpy but handles overlapping regions.  The classic
+// runtime.memmove: like runtime.memcpy but handles overlapping regions.  The classic
 // bug is copying forward when dst > src, which overwrites bytes of
 // src before they are read.  Test both directions of overlap plus
 // the non-overlapping case, and verify the return value.
 // expect: 0
 package main;
-import str;
+import runtime;
 int main() {
     char a[5];
     char b[5];
@@ -12,7 +12,7 @@ int main() {
 
     /* non-overlapping */
     a[0] = 'a'; a[1] = 'b'; a[2] = 'c'; a[3] = 'd'; a[4] = 0;
-    r = (char *)str.memmove(b, a, 5);
+    r = (char *)runtime.memmove(b, a, 5);
     if (r != b) return 1;
     if (b[0] != 'a' || b[1] != 'b' || b[2] != 'c' || b[3] != 'd') return 2;
 
@@ -20,7 +20,7 @@ int main() {
        buf = "12345", move it +1 -> expect "112345". */
     char buf[6];
     buf[0] = '1'; buf[1] = '2'; buf[2] = '3'; buf[3] = '4'; buf[4] = '5'; buf[5] = 0;
-    r = (char *)str.memmove(buf + 1, buf, 5);
+    r = (char *)runtime.memmove(buf + 1, buf, 5);
     if (r != buf + 1) return 3;
     if (buf[0] != '1') return 4;
     if (buf[1] != '1') return 5;   /* original buf[0] */
@@ -33,7 +33,7 @@ int main() {
        c = "abcde", move it -1 -> expect "bcde\0". */
     char c[6];
     c[0] = 'a'; c[1] = 'b'; c[2] = 'c'; c[3] = 'd'; c[4] = 'e'; c[5] = 0;
-    r = (char *)str.memmove(c, c + 1, 5);
+    r = (char *)runtime.memmove(c, c + 1, 5);
     if (r != c) return 10;
     if (c[0] != 'b') return 11;
     if (c[1] != 'c') return 12;

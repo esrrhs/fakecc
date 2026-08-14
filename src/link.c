@@ -632,7 +632,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     int need_dynamic = (num_ext > 0 || num_true_data_ext > 0);
 
     /* ---- Shared-library DT_NEEDED list (from -l only; no automatic libc) ----
-     * Builtin rt/ supplies the hosted stdlib.  System libs are opt-in via -l,
+     * Builtin runtime/ supplies the hosted stdlib.  System libs are opt-in via -l,
      * like cgo.  `-nodefaultlibs` is retained as a no-op alias for scripts
      * that still pass it (defaults already skip libc). */
     char **needed = NULL;

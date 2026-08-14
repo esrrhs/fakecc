@@ -243,7 +243,7 @@ int  emit_obj_read(const char *path, EmitModule *m);
  *
  * `needed` / `num_needed` are DT_NEEDED sonames (e.g. "libc.so.6", "libfoo.so"),
  * typically derived from `-l` flags.  Defaults never auto-add libc — the driver
- * links builtin `rt/` instead (Go-like freestanding).  Pass `-l` for optional
+ * links builtin `runtime/` instead (Go-like freestanding).  Pass `-l` for optional
  * dynamic interop.  `nodefaultlibs` is retained as a no-op for compatibility.
  * `needed` may be NULL when `num_needed` is 0.
  *

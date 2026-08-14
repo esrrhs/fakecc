@@ -1,16 +1,16 @@
-// str.memset: fills n bytes of dst with byte c and returns dst.  Used
+// runtime.memset: fills n bytes of dst with byte c and returns dst.  Used
 // everywhere; a wrong byte mask or wrong count leaves gaps.  Test a
 // high byte (0xAB) and the common zero-fill, and check the return
 // value.
 // expect: 0
 package main;
-import str;
+import runtime;
 int main() {
     char buf[8];
     int i;
     char *r;
 
-    r = (char *)str.memset(buf, 0xAB, 8);
+    r = (char *)runtime.memset(buf, 0xAB, 8);
     if (r != buf) return 1;
     i = 0;
     while (i < 8) {
@@ -19,7 +19,7 @@ int main() {
     }
 
     /* zero fill, the common case */
-    r = (char *)str.memset(buf, 0, 8);
+    r = (char *)runtime.memset(buf, 0, 8);
     if (r != buf) return 3;
     i = 0;
     while (i < 8) {

@@ -3,7 +3,7 @@
 package main;
 
 
-import io;
+import runtime;
 int test_many_phi(int n, int a0, int a1, int a2, int a3, int a4,
                   int a5, int a6, int a7, int a8, int a9) {
     int v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15;
@@ -15,7 +15,7 @@ int test_many_phi(int n, int a0, int a1, int a2, int a3, int a4,
     flag=0; i=0;
 L:
     if(i>=n) goto done;
-    io.puts("lp");
+    runtime.puts("lp");
     if(flag==0) flag=i+100;
     v0=v0+1; v1=v1+1; v2=v2+1; v3=v3+1;
     v4=v4+1; v5=v5+1; v6=v6+1; v7=v7+1;

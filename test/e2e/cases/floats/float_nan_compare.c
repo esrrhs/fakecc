@@ -6,13 +6,13 @@
 package main;
 
 
-import fmt;
+import runtime;
 int main() {
     double huge = 1e308;
     double inf = huge * 10.0;
     double nan = inf - inf;
     double one = 1.0;
-    fmt.printf("%d%d%d%d%d%d %d%d%d%d%d%d %d%d%d%d%d%d\n",
+    runtime.printf("%d%d%d%d%d%d %d%d%d%d%d%d %d%d%d%d%d%d\n",
            nan < one, nan <= one, nan > one, nan >= one, nan == one, nan != one,
            one < nan, one <= nan, one > nan, one >= nan, one == nan, one != nan,
            nan < nan, nan <= nan, nan > nan, nan >= nan, nan == nan, nan != nan);

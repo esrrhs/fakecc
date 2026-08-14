@@ -345,6 +345,70 @@ static char **list_c_files(const char *dir, size_t *nout) {
     return names;
 }
 
+/* Fold one TU's non-static decls into the package export tables (first wins). */
+static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
+    for (size_t i = 0; i < tu->functions.len; i++) {
+        FunctionDecl *fn = &tu->functions.data[i];
+        if (fn->is_static) continue;
+        if (pkg_find_func(pkg, fn->name)) continue;
+        pkg->funcs = xrealloc(pkg->funcs,
+                              (pkg->nfuncs + 1) * sizeof(PkgFuncExport));
+        PkgFuncExport *e = &pkg->funcs[pkg->nfuncs++];
+        memset(e, 0, sizeof(*e));
+        e->name = xstrdup(fn->name);
+        e->ret_type = type_clone(fn->ret_type);
+        e->arity = (int)fn->params.len;
+        e->is_variadic = fn->is_variadic;
+        e->is_extern = fn->is_extern;
+        e->loc = fn->loc;
+        e->tu = tu;
+        for (int k = 0; k < e->arity && k < 16; k++)
+            e->param_types[k] = type_clone(fn->params.data[k].type);
+    }
+
+    for (size_t i = 0; i < tu->globals.len; i++) {
+        Stmt *s = &tu->globals.data[i];
+        if (s->kind != ST_DECL) continue;
+        if (s->u.decl.storage_class == 1) continue; /* static */
+        if (pkg_find_global(pkg, s->u.decl.name)) continue;
+        pkg->globals = xrealloc(pkg->globals,
+                                (pkg->nglobals + 1) * sizeof(PkgGlobalExport));
+        PkgGlobalExport *e = &pkg->globals[pkg->nglobals++];
+        memset(e, 0, sizeof(*e));
+        e->name = xstrdup(s->u.decl.name);
+        e->type = type_clone(s->u.decl.type);
+        e->is_extern = (s->u.decl.storage_class == 2);
+        e->loc = s->loc;
+        e->tu = tu;
+    }
+
+    /* Skip compiler-injected va_list / __va_list_tag — every TU has its own
+     * copy from tu_init. */
+    for (size_t i = 0; i < tu->typedefs.len; i++) {
+        TypedefEntry *te = &tu->typedefs.data[i];
+        if (strcmp(te->name, "va_list") == 0) continue;
+        if (typedef_registry_find(&pkg->typedefs, te->name)) continue;
+        typedef_registry_add(&pkg->typedefs, te->name, type_clone(te->type));
+    }
+    for (size_t i = 0; i < tu->structs.len; i++) {
+        StructDef *sd = &tu->structs.data[i];
+        if (strcmp(sd->tag, "__va_list_tag") == 0) continue;
+        if (sd->tag && strncmp(sd->tag, "__anon_", 7) == 0) continue;
+        if (struct_registry_find(&pkg->structs, sd->tag)) continue;
+        pkg_clone_struct_into(&pkg->structs, sd);
+    }
+    for (size_t i = 0; i < tu->enums.len; i++) {
+        EnumDef *ed = &tu->enums.data[i];
+        if (!ed->tag) continue;
+        if (ed->tag && strncmp(ed->tag, "__anon_", 7) == 0) continue;
+        if (enum_registry_find(&pkg->enums, ed->tag)) continue;
+        EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
+        for (int c = 0; c < ed->num_constants; c++)
+            enum_def_push_constant(ne, ed->constants[c].name, 1,
+                                   ed->constants[c].value, ed->loc);
+    }
+}
+
 static void build_exports(Package *pkg) {
     typedef_registry_init(&pkg->typedefs);
     struct_registry_init(&pkg->structs);
@@ -354,73 +418,8 @@ static void build_exports(Package *pkg) {
     pkg->globals = NULL;
     pkg->nglobals = 0;
 
-    for (size_t f = 0; f < pkg->nfiles; f++) {
-        TranslationUnit *tu = &pkg->files[f];
-
-        /* Functions: non-static only. */
-        for (size_t i = 0; i < tu->functions.len; i++) {
-            FunctionDecl *fn = &tu->functions.data[i];
-            if (fn->is_static) continue;
-            if (pkg_find_func(pkg, fn->name)) continue; /* first wins */
-            pkg->funcs = xrealloc(pkg->funcs,
-                                  (pkg->nfuncs + 1) * sizeof(PkgFuncExport));
-            PkgFuncExport *e = &pkg->funcs[pkg->nfuncs++];
-            memset(e, 0, sizeof(*e));
-            e->name = xstrdup(fn->name);
-            e->ret_type = type_clone(fn->ret_type);
-            e->arity = (int)fn->params.len;
-            e->is_variadic = fn->is_variadic;
-            e->is_extern = fn->is_extern;
-            e->loc = fn->loc;
-            e->tu = tu;
-            for (int k = 0; k < e->arity && k < 16; k++)
-                e->param_types[k] = type_clone(fn->params.data[k].type);
-        }
-
-        /* Globals: non-static ST_DECL. */
-        for (size_t i = 0; i < tu->globals.len; i++) {
-            Stmt *s = &tu->globals.data[i];
-            if (s->kind != ST_DECL) continue;
-            if (s->u.decl.storage_class == 1) continue; /* static */
-            if (pkg_find_global(pkg, s->u.decl.name)) continue;
-            pkg->globals = xrealloc(pkg->globals,
-                                    (pkg->nglobals + 1) * sizeof(PkgGlobalExport));
-            PkgGlobalExport *e = &pkg->globals[pkg->nglobals++];
-            memset(e, 0, sizeof(*e));
-            e->name = xstrdup(s->u.decl.name);
-            e->type = type_clone(s->u.decl.type);
-            e->is_extern = (s->u.decl.storage_class == 2);
-            e->loc = s->loc;
-            e->tu = tu;
-        }
-
-        /* Aggregate typedefs / structs / enums into the package registries.
-         * Skip the compiler-injected va_list / __va_list_tag — every TU has
-         * its own copy from tu_init. */
-        for (size_t i = 0; i < tu->typedefs.len; i++) {
-            TypedefEntry *te = &tu->typedefs.data[i];
-            if (strcmp(te->name, "va_list") == 0) continue;
-            if (typedef_registry_find(&pkg->typedefs, te->name)) continue;
-            typedef_registry_add(&pkg->typedefs, te->name, type_clone(te->type));
-        }
-        for (size_t i = 0; i < tu->structs.len; i++) {
-            StructDef *sd = &tu->structs.data[i];
-            if (strcmp(sd->tag, "__va_list_tag") == 0) continue;
-            if (sd->tag && strncmp(sd->tag, "__anon_", 7) == 0) continue;
-            if (struct_registry_find(&pkg->structs, sd->tag)) continue;
-            pkg_clone_struct_into(&pkg->structs, sd);
-        }
-        for (size_t i = 0; i < tu->enums.len; i++) {
-            EnumDef *ed = &tu->enums.data[i];
-            if (!ed->tag) continue;
-            if (ed->tag && strncmp(ed->tag, "__anon_", 7) == 0) continue;
-            if (enum_registry_find(&pkg->enums, ed->tag)) continue;
-            EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
-            for (int c = 0; c < ed->num_constants; c++)
-                enum_def_push_constant(ne, ed->constants[c].name, 1,
-                                       ed->constants[c].value, ed->loc);
-        }
-    }
+    for (size_t f = 0; f < pkg->nfiles; f++)
+        add_tu_exports(pkg, &pkg->files[f]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -460,6 +459,7 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
     pkg->name = xstrdup(name);
     pkg->dir = dir;
     pkg->files = xmalloc(nnames * sizeof(TranslationUnit));
+    memset(pkg->files, 0, nnames * sizeof(TranslationUnit));
     pkg->nfiles = nnames;
     pkg->owns_files = 1;
 
@@ -508,10 +508,13 @@ Package *pkg_register_tus(PkgContext *ctx, const char *name,
     if (!name || !ntus) return NULL;
     Package *exist = pkg_find(ctx, name);
     if (exist) {
-        fprintf(stderr,
-                "fakecc: cannot register package '%s': already loaded from '%s'\n",
-                name, exist->dir ? exist->dir : "(memory)");
-        exit(1);
+        /* Command-line files that reuse a directory package's name (typically
+         * `package runtime`) still contribute exports, so siblings resolve against
+         * the user's symbols rather than only the preloaded runtime.  The TUs
+         * stay owned by the driver — do not append them to exist->files. */
+        for (size_t i = 0; i < ntus; i++)
+            add_tu_exports(exist, tus[i]);
+        return exist;
     }
     Package *pkg = xmalloc(sizeof(Package));
     memset(pkg, 0, sizeof(*pkg));

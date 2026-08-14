@@ -903,7 +903,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_MEMBER: {
-        /* Package-qualified name: `fmt.printf` parsed as member access.
+        /* Package-qualified name: `runtime.printf` parsed as member access.
          * Prefer a real local/global struct variable of that name; otherwise
          * rewrite to a qualified EX_VAR so IR sees a direct-call EX_VAR. */
         if (e->u.member.obj->kind == EX_VAR
@@ -1591,11 +1591,16 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         import_pkg_funcs(tu, &ft, cur);
         import_pkg_globals(tu, cur);
     }
-    /* Extern globals from imports so irsymtable can GADDR them (io.stdout). */
+    /* Imported packages: extern globals (runtime.stdout) and extern function
+     * decls so IR can FADDR `runtime.printf` used as a value.  Do not push
+     * imported funcs into FunTable — that would make `printf` work bare. */
     if (g_sema_pkg) {
         for (size_t i = 0; i < tu->imports.len; i++) {
             Package *ip = pkg_find(g_sema_pkg, tu->imports.data[i].name);
             import_pkg_globals(tu, ip);
+            if (!ip) continue;
+            for (size_t f = 0; f < ip->nfuncs; f++)
+                tu_ensure_extern_func(tu, &ip->funcs[f]);
         }
     }
 

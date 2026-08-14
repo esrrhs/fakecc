@@ -1,41 +1,41 @@
 // ctype is* family: character classification.  Pin the representative
-// true/false cases for ctype.isdigit, ctype.isalpha, ctype.isalnum, ctype.isxdigit and ctype.isspace,
+// true/false cases for runtime.isdigit, runtime.isalpha, runtime.isalnum, runtime.isxdigit and runtime.isspace,
 // including boundary bytes and a byte well outside each class.
 // expect: 0
 package main;
-import ctype;
+import runtime;
 int main() {
-    /* ctype.isdigit */
-    if (!ctype.isdigit('0')) return 1;
-    if (!ctype.isdigit('9')) return 2;
-    if (ctype.isdigit('/')) return 3;  /* one below '0' */
-    if (ctype.isdigit(':')) return 4;  /* one above '9' */
-    if (ctype.isdigit('a')) return 5;
+    /* runtime.isdigit */
+    if (!runtime.isdigit('0')) return 1;
+    if (!runtime.isdigit('9')) return 2;
+    if (runtime.isdigit('/')) return 3;  /* one below '0' */
+    if (runtime.isdigit(':')) return 4;  /* one above '9' */
+    if (runtime.isdigit('a')) return 5;
 
-    /* ctype.isalpha */
-    if (!ctype.isalpha('a')) return 6;
-    if (!ctype.isalpha('Z')) return 7;
-    if (ctype.isalpha('`')) return 8;  /* one below 'a' */
-    if (ctype.isalpha('{')) return 9;  /* one above 'z' */
-    if (ctype.isalpha('0')) return 10;
+    /* runtime.isalpha */
+    if (!runtime.isalpha('a')) return 6;
+    if (!runtime.isalpha('Z')) return 7;
+    if (runtime.isalpha('`')) return 8;  /* one below 'a' */
+    if (runtime.isalpha('{')) return 9;  /* one above 'z' */
+    if (runtime.isalpha('0')) return 10;
 
-    /* ctype.isalnum: digits or letters */
-    if (!ctype.isalnum('5')) return 11;
-    if (!ctype.isalnum('m')) return 12;
-    if (ctype.isalnum(' ')) return 13;
+    /* runtime.isalnum: digits or letters */
+    if (!runtime.isalnum('5')) return 11;
+    if (!runtime.isalnum('m')) return 12;
+    if (runtime.isalnum(' ')) return 13;
 
-    /* ctype.isxdigit: 0-9, a-f, A-F */
-    if (!ctype.isxdigit('0')) return 14;
-    if (!ctype.isxdigit('f')) return 15;
-    if (!ctype.isxdigit('F')) return 16;
-    if (ctype.isxdigit('g')) return 17;  /* one above 'f' */
-    if (ctype.isxdigit('z')) return 18;
+    /* runtime.isxdigit: 0-9, a-f, A-F */
+    if (!runtime.isxdigit('0')) return 14;
+    if (!runtime.isxdigit('f')) return 15;
+    if (!runtime.isxdigit('F')) return 16;
+    if (runtime.isxdigit('g')) return 17;  /* one above 'f' */
+    if (runtime.isxdigit('z')) return 18;
 
-    /* ctype.isspace */
-    if (!ctype.isspace(' ')) return 19;
-    if (!ctype.isspace('\t')) return 20;
-    if (!ctype.isspace('\n')) return 21;
-    if (ctype.isspace('a')) return 22;
+    /* runtime.isspace */
+    if (!runtime.isspace(' ')) return 19;
+    if (!runtime.isspace('\t')) return 20;
+    if (!runtime.isspace('\n')) return 21;
+    if (runtime.isspace('a')) return 22;
 
     return 0;
 }

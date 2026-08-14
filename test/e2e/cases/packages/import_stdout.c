@@ -1,8 +1,7 @@
 // expect: 0
 package main;
-import fmt;
-import io;
+import runtime;
 int main(void) {
-    fmt.fprintf(io.stdout, "hi\n");
+    runtime.fprintf(runtime.stdout, "hi\n");
     return 0;
 }

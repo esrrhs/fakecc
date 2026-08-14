@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared-library link tests: -l / -l: / -nostdlib / -nodefaultlibs / .so path.
-# Default link is freestanding (builtin rt/, no DT_NEEDED).  -lc is opt-in.
+# Default link is freestanding (builtin runtime/, no DT_NEEDED).  -lc is opt-in.
 set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
@@ -53,9 +53,9 @@ EOF
 
 cat > "$TMP/main_fmt.c" <<'EOF'
 package main;
-import fmt;
+import runtime;
 int main(void) {
-    int n = fmt.printf("hi\n");
+    int n = runtime.printf("hi\n");
     if (n != 3) return 1;
     return 0;
 }
@@ -81,7 +81,7 @@ if [ -x "$TMP/p" ]; then
     fi
 fi
 
-# 2) Default freestanding: printf via rt/, no DT_NEEDED.
+# 2) Default freestanding: printf via runtime/, no DT_NEEDED.
 rm -f "$TMP/p"
 timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_fmt.c" -o "$TMP/p" 2>"$TMP/err" \
     || { fail "default rt compile: $(head -1 "$TMP/err")"; }

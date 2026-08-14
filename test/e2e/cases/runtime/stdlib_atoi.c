@@ -1,14 +1,14 @@
-// std.atoi: converts a decimal string to int.  Implemented on top of std.strtol,
+// runtime.atoi: converts a decimal string to int.  Implemented on top of runtime.strtol,
 // so it skips leading whitespace and honours a leading sign.  Pin the
 // positive, negative, whitespace-prefixed, plus-sign, and zero cases.
 // expect: 0
 package main;
-import std;
+import runtime;
 int main() {
-    if (std.atoi("42") != 42) return 1;
-    if (std.atoi("-7") != -7) return 2;
-    if (std.atoi("  123") != 123) return 3; /* leading whitespace skipped */
-    if (std.atoi("+5") != 5) return 4;
-    if (std.atoi("0") != 0) return 5;
+    if (runtime.atoi("42") != 42) return 1;
+    if (runtime.atoi("-7") != -7) return 2;
+    if (runtime.atoi("  123") != 123) return 3; /* leading whitespace skipped */
+    if (runtime.atoi("+5") != 5) return 4;
+    if (runtime.atoi("0") != 0) return 5;
     return 0;
 }

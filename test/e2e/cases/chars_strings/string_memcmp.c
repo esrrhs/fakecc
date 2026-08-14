@@ -1,11 +1,11 @@
-// str.memcmp: lexicographic compare of the first n bytes, returning
+// runtime.memcmp: lexicographic compare of the first n bytes, returning
 // <0 / 0 / >0 from the first differing byte interpreted as unsigned
 // char.  A common bug compares as signed char, which flips the sign
 // for any byte >= 0x80.  Pin the sign for high bytes and the n==0
 // edge case.
 // expect: 0
 package main;
-import str;
+import runtime;
 int main() {
     char x[4], y[4], z[4];
     unsigned char p[1], q[1];
@@ -15,16 +15,16 @@ int main() {
     z[0] = 'a'; z[1] = 'b'; z[2] = 'c'; z[3] = 0;
 
     /* a < b */
-    if (str.memcmp(x, y, 3) >= 0) return 1;
+    if (runtime.memcmp(x, y, 3) >= 0) return 1;
     /* a > b */
-    if (str.memcmp(y, x, 3) <= 0) return 2;
+    if (runtime.memcmp(y, x, 3) <= 0) return 2;
     /* equal */
-    if (str.memcmp(x, z, 3) != 0) return 3;
+    if (runtime.memcmp(x, z, 3) != 0) return 3;
     /* n == 0 is always equal, even if pointers differ */
-    if (str.memcmp(x, y, 0) != 0) return 4;
+    if (runtime.memcmp(x, y, 0) != 0) return 4;
     /* high bytes: 0xFF (255) must be > 0x01 as unsigned char */
     p[0] = 0xFF; q[0] = 0x01;
-    if (str.memcmp(p, q, 1) <= 0) return 5;
-    if (str.memcmp(q, p, 1) >= 0) return 6;
+    if (runtime.memcmp(p, q, 1) <= 0) return 5;
+    if (runtime.memcmp(q, p, 1) >= 0) return 6;
     return 0;
 }

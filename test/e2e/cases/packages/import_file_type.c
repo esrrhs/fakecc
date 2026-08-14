@@ -1,10 +1,8 @@
 // expect: 0
 package main;
-import io;
-import fmt;
+import runtime;
 int main(void) {
-    io.__rt_stdio_init();
-    io.FILE *f = io.stdout;
-    fmt.fprintf(f, "x\n");
+    runtime.FILE *f = runtime.stdout;
+    runtime.fprintf(f, "x\n");
     return 0;
 }

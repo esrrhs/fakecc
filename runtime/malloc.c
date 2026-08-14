@@ -1,8 +1,5 @@
 /* mmap-backed freelist allocator — FakeCC dialect. */
-package mem;
-
-import types;
-typedef types.size_t size_t;
+package runtime;
 
 struct chunk {
     size_t size;
@@ -33,28 +30,6 @@ static void heap_grow(size_t need) {
     c->free = 1;
     c->next = heap_head;
     heap_head = c;
-}
-
-/* Local byte copy/zero — avoid importing str (which imports mem for strdup). */
-static void *local_memcpy(void *dst, const void *src, size_t n) {
-    char *d = (char *)dst;
-    const char *s = (const char *)src;
-    size_t i = 0;
-    while (i < n) {
-        d[i] = s[i];
-        i = i + 1;
-    }
-    return dst;
-}
-
-static void *local_memset(void *dst, int c, size_t n) {
-    char *d = (char *)dst;
-    size_t i = 0;
-    while (i < n) {
-        d[i] = (char)c;
-        i = i + 1;
-    }
-    return dst;
 }
 
 void *malloc(size_t n) {
@@ -109,7 +84,7 @@ void *calloc(size_t n, size_t m) {
     size_t total = n * m;
     void *p = malloc(total);
     if (p == 0) return 0;
-    local_memset(p, 0, total);
+    memset(p, 0, total);
     return p;
 }
 
@@ -125,7 +100,7 @@ void *realloc(void *p, size_t n) {
     if (q == 0) return 0;
     size_t copy = c->size;
     if (copy > n) copy = n;
-    local_memcpy(q, p, copy);
+    memcpy(q, p, copy);
     free(p);
     return q;
 }

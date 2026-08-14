@@ -1,27 +1,9 @@
 /* Minimal FILE stdio over Linux syscalls — FakeCC dialect. */
-package io;
+package runtime;
 
-import types;
-import mem;
-import str;
-
-typedef types.size_t size_t;
-typedef types.ssize_t ssize_t;
-
-struct FILE {
-    int fd;
-    int writable;
-    int eof;
-    int err;
-    int buf_len;
-    int buf_cap;
-    char buf[1024];
-};
-typedef struct FILE FILE;
-
-static struct FILE _rt_stdin = { 0, 0, 0, 0, 0, 1024 };
-static struct FILE _rt_stdout = { 1, 1, 0, 0, 0, 1024 };
-static struct FILE _rt_stderr = { 2, 1, 0, 0, 0, 1024 };
+static FILE _rt_stdin = { 0, 0, 0, 0, 0, 1024 };
+static FILE _rt_stdout = { 1, 1, 0, 0, 0, 1024 };
+static FILE _rt_stderr = { 2, 1, 0, 0, 0, 1024 };
 FILE *stdin = &_rt_stdin;
 FILE *stdout = &_rt_stdout;
 FILE *stderr = &_rt_stderr;
@@ -150,12 +132,12 @@ FILE *fopen(const char *path, const char *mode) {
     }
     long fd = __syscall(2, (long)path, (long)flags, 420); /* 0644 */
     if (fd < 0) return 0;
-    FILE *f = (FILE *)mem.malloc(sizeof(FILE));
+    FILE *f = (FILE *)malloc(sizeof(FILE));
     if (f == 0) {
         __syscall(3, fd);
         return 0;
     }
-    str.memset(f, 0, sizeof(FILE));
+    memset(f, 0, sizeof(FILE));
     f->fd = (int)fd;
     f->writable = writable;
     f->buf_cap = 1024;
@@ -166,7 +148,7 @@ int fclose(FILE *f) {
     if (f == 0) return -1;
     fflush(f);
     long r = __syscall(3, (long)f->fd);
-    if (f != stdin && f != stdout && f != stderr) mem.free(f);
+    if (f != stdin && f != stdout && f != stderr) free(f);
     return r < 0 ? -1 : 0;
 }
 

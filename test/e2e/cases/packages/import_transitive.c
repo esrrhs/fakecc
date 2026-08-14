@@ -1,8 +1,8 @@
 // expect: 0
-/* Transitive import: fmt pulls in io; we only import fmt but call through it. */
+/* One import covers the whole runtime package. */
 package main;
-import fmt;
+import runtime;
 int main(void) {
-    fmt.printf("ok\n");
+    runtime.printf("ok\n");
     return 0;
 }

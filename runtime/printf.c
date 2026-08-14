@@ -7,20 +7,12 @@
  * Asking for more digits than that (e.g. %.25f, or %f on 1e300) prints the
  * extra positions as the expansion happens to end, rather than the exact
  * binary value glibc would show. */
-package fmt;
-
-import types;
-import io;
-import str;
-import mem;
-
-typedef types.size_t size_t;
-typedef io.FILE FILE;
+package runtime;
 
 extern void *__fakecc_va_copy(void *dst, void *src);
 
 static void ensure_stdio(void) {
-    io.__rt_stdio_init();
+    __rt_stdio_init();
 }
 
 static int emit_ch(char **bufp, size_t *left, int *count, FILE *f, char ch) {
@@ -36,7 +28,7 @@ static int emit_ch(char **bufp, size_t *left, int *count, FILE *f, char ch) {
         return 0;
     }
     if (f) {
-        if (io.fputc((unsigned char)ch, f) < 0) return -1;
+        if (fputc((unsigned char)ch, f) < 0) return -1;
     }
     return 0;
 }
@@ -364,7 +356,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
         if (spec == 's') {
             sbody = va_arg(ap, char *);
             if (sbody == 0) sbody = "(null)";
-            blen = (int)str.strlen(sbody);
+            blen = (int)strlen(sbody);
             if (precision >= 0 && blen > precision) blen = precision;
         } else if (spec == 'c') {
             body[0] = (char)va_arg(ap, int);
@@ -409,7 +401,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             /* The sign comes from the bit, not a comparison, so that -0.0 and
              * a negative NaN print with their '-' the way C requires. */
             unsigned long long dbits;
-            str.memcpy((void *)&dbits, (void *)&dv, 8);
+            memcpy((void *)&dbits, (void *)&dv, 8);
             int neg = (dbits >> 63) != 0;
             long double a = (long double)dv;
             if (neg) a = -a;
@@ -491,20 +483,20 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
     char *outbuf = stack;
     int heap = 0;
     if (need + 1 > 512) {
-        outbuf = (char *)mem.malloc((size_t)need + 1);
+        outbuf = (char *)malloc((size_t)need + 1);
         if (outbuf == 0) return -1;
         heap = 1;
     }
     vsnprintf(outbuf, (size_t)need + 1, fmt, ap);
     int i = 0;
     while (i < need) {
-        if (io.fputc((unsigned char)outbuf[i], f) < 0) {
-            if (heap) mem.free(outbuf);
+        if (fputc((unsigned char)outbuf[i], f) < 0) {
+            if (heap) free(outbuf);
             return -1;
         }
         i = i + 1;
     }
-    if (heap) mem.free(outbuf);
+    if (heap) free(outbuf);
     return need;
 }
 
@@ -540,7 +532,7 @@ int printf(const char *fmt, ...) {
     ensure_stdio();
     va_list ap;
     va_start(ap, fmt);
-    int r = vfprintf(io.stdout, fmt, ap);
+    int r = vfprintf(stdout, fmt, ap);
     va_end(ap);
     return r;
 }

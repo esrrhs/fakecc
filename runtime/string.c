@@ -1,10 +1,5 @@
 /* Builtin freestanding string/memory routines — FakeCC dialect, no libc. */
-package str;
-
-import types;
-import mem;
-
-typedef types.size_t size_t;
+package runtime;
 
 void *memcpy(void *dst, const void *src, size_t n) {
     char *d = (char *)dst;
@@ -140,7 +135,7 @@ char *strstr(const char *hay, const char *needle) {
 
 char *strdup(const char *s) {
     size_t n = strlen(s);
-    char *p = (char *)mem.malloc(n + 1);
+    char *p = (char *)malloc(n + 1);
     if (p == 0) return 0;
     memcpy(p, s, n + 1);
     return p;

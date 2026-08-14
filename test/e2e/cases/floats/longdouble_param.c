@@ -6,7 +6,7 @@
 package main;
 
 
-import fmt;
+import runtime;
 static long double id1(long double a) { return a; }
 static long double id2(int x, long double a) { return a; }
 static long double id3(char *s, long double a, int prec) { (void)s; (void)prec; return a; }
@@ -17,7 +17,7 @@ int main() {
     char buf[8];
     double d = 3.75;
     long double v = (long double)d;
-    fmt.printf("%ld %ld %ld %ld %ld\n",
+    runtime.printf("%ld %ld %ld %ld %ld\n",
            (long)(id1(v) * 100), (long)(id2(7, v) * 100),
            (long)(id3(buf, v, 6) * 100), (long)(negate(v) * 100),
            (long)(from_u64(1000ULL)));

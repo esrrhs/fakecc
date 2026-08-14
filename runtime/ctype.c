@@ -1,5 +1,5 @@
 /* ctype — FakeCC dialect. */
-package ctype;
+package runtime;
 
 int isdigit(int c) {
     return c >= '0' && c <= '9';

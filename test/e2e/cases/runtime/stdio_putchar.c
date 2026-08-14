@@ -1,12 +1,12 @@
-// io.putchar: writes a single character to io.stdout.  Pin a few characters
+// runtime.putchar: writes a single character to runtime.stdout.  Pin a few characters
 // including 'A', 'B', and a newline.
 // expect: 0
 // expect_stdout: AB
 package main;
-import io;
+import runtime;
 int main() {
-    if (io.putchar('A') < 0) return 1;
-    if (io.putchar('B') < 0) return 2;
-    if (io.putchar('\n') < 0) return 3;
+    if (runtime.putchar('A') < 0) return 1;
+    if (runtime.putchar('B') < 0) return 2;
+    if (runtime.putchar('\n') < 0) return 3;
     return 0;
 }

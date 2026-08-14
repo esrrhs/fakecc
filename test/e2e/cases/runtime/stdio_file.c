@@ -1,43 +1,43 @@
-// stdio file I/O: io.fopen/io.fclose/io.fwrite/io.fread/io.fseek/io.ftell over a real
+// stdio file I/O: runtime.fopen/runtime.fclose/runtime.fwrite/runtime.fread/runtime.fseek/runtime.ftell over a real
 // file in a temporary location.  Pin that bytes written can be read
-// back, that io.fseek+io.ftell track the offset, and that io.fileno returns the
+// back, that runtime.fseek+runtime.ftell track the offset, and that runtime.fileno returns the
 // expected descriptor numbers for the standard streams.
 // expect: 0
 package main;
 
-import io;
+import runtime;
 int main() {
     char buf[16];
     long n;
-    io.FILE *f;
+    runtime.FILE *f;
 
     /* write a file */
-    f = io.fopen("/tmp/fakecc_stdio_test.dat", "w");
+    f = runtime.fopen("/tmp/fakecc_stdio_test.dat", "w");
     if (f == 0) return 1;
-    if (io.fwrite("abcd", 1, 4, f) != 4) { io.fclose(f); return 2; }
-    if (io.fclose(f) != 0) return 3;
+    if (runtime.fwrite("abcd", 1, 4, f) != 4) { runtime.fclose(f); return 2; }
+    if (runtime.fclose(f) != 0) return 3;
 
     /* read it back */
-    f = io.fopen("/tmp/fakecc_stdio_test.dat", "r");
+    f = runtime.fopen("/tmp/fakecc_stdio_test.dat", "r");
     if (f == 0) return 4;
-    n = io.fread(buf, 1, 16, f);
-    if (n != 4) { io.fclose(f); return 5; }
+    n = runtime.fread(buf, 1, 16, f);
+    if (n != 4) { runtime.fclose(f); return 5; }
     if (buf[0] != 'a' || buf[1] != 'b' || buf[2] != 'c' || buf[3] != 'd') {
-        io.fclose(f); return 6;
+        runtime.fclose(f); return 6;
     }
 
-    /* io.fseek to offset 1 (SEEK_SET=0), io.ftell reports 1, next read is 'b' */
-    if (io.fseek(f, 1, 0) != 0) { io.fclose(f); return 7; }
-    if (io.ftell(f) != 1) { io.fclose(f); return 8; }
-    n = io.fread(buf, 1, 1, f);
-    if (n != 1 || buf[0] != 'b') { io.fclose(f); return 9; }
+    /* runtime.fseek to offset 1 (SEEK_SET=0), runtime.ftell reports 1, next read is 'b' */
+    if (runtime.fseek(f, 1, 0) != 0) { runtime.fclose(f); return 7; }
+    if (runtime.ftell(f) != 1) { runtime.fclose(f); return 8; }
+    n = runtime.fread(buf, 1, 1, f);
+    if (n != 1 || buf[0] != 'b') { runtime.fclose(f); return 9; }
 
-    if (io.fclose(f) != 0) return 10;
+    if (runtime.fclose(f) != 0) return 10;
 
-    /* io.fileno of the standard streams */
-    if (io.fileno(io.stdin) != 0) return 11;
-    if (io.fileno(io.stdout) != 1) return 12;
-    if (io.fileno(io.stderr) != 2) return 13;
+    /* runtime.fileno of the standard streams */
+    if (runtime.fileno(runtime.stdin) != 0) return 11;
+    if (runtime.fileno(runtime.stdout) != 1) return 12;
+    if (runtime.fileno(runtime.stderr) != 2) return 13;
 
     return 0;
 }
