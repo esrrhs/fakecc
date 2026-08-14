@@ -564,6 +564,11 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             const char *hint = g_sema_pkg
                 ? pkg_suggest_export(g_sema_pkg, e->u.var.name) : NULL;
             if (hint) {
+                if (g_sema_tu && tu_imports(g_sema_tu, hint)) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "use of undeclared '%s'; did you mean '%s.%s'?",
+                           e->u.var.name, hint, e->u.var.name);
+                }
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "use of undeclared '%s'; did you mean '%s.%s'? "
                        "(add 'import %s;')",

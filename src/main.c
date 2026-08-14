@@ -405,7 +405,10 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    /* Phase 1: parse all user sources (imports resolve via pkg cache). */
+    /* Phase 1: parse user sources, then fold each TU into its package so the
+     * next file's parse can see sibling typedefs/structs (directory packages
+     * already do this file-by-file inside pkg_load).  Registering only after
+     * every file is parsed leaves CLI same-package types invisible at parse. */
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
@@ -415,46 +418,11 @@ int main(int argc, char **argv) {
             char *src = read_file(inputs[i]);
             parse_source(src, inputs[i], &user_tus[i], &pkg);
             free(src);
-        }
-    }
-
-    /* Group parsed user TUs by package name so same-package siblings see
-     * each other without `extern` (plan: lookup fallback via export table). */
-    {
-        char **seen = NULL;
-        int nseen = 0;
-        for (int i = 0; i < ninputs; i++) {
-            if (!user_tus[i].package.name) continue;
-            const char *pname = user_tus[i].package.name;
-            int already = 0;
-            for (int s = 0; s < nseen; s++)
-                if (strcmp(seen[s], pname) == 0) { already = 1; break; }
-            if (already) continue;
-            seen = realloc(seen, ((size_t)nseen + 1) * sizeof(char *));
-            if (!seen) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
-            seen[nseen++] = xstrdup(pname);
-
-            TranslationUnit **group = NULL;
-            size_t ng = 0;
-            for (int j = 0; j < ninputs; j++) {
-                if (user_tus[j].package.name
-                    && strcmp(user_tus[j].package.name, pname) == 0) {
-                    group = realloc(group, (ng + 1) * sizeof(TranslationUnit *));
-                    if (!group) {
-                        fprintf(stderr, "fakecc: out of memory\n");
-                        exit(1);
-                    }
-                    group[ng++] = &user_tus[j];
-                }
+            if (user_tus[i].package.name) {
+                TranslationUnit *one = &user_tus[i];
+                pkg_register_tus(&pkg, user_tus[i].package.name, &one, 1);
             }
-            /* Always register: if the name is already a directory package
-             * (runtime preload), pkg_register_tus folds these TUs into its export
-             * table so command-line siblings still see each other. */
-            pkg_register_tus(&pkg, pname, group, ng);
-            free(group);
         }
-        for (int s = 0; s < nseen; s++) free(seen[s]);
-        free(seen);
     }
 
     /* Phase 2: sema + codegen user modules. */

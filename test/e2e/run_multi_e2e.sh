@@ -127,6 +127,11 @@ echo 'package main; int add(int a, int b) { return a + b; }' > "$TMP/pkg_a.c"
 echo 'package main; int main(void) { return add(20, 22); }' > "$TMP/pkg_b.c"
 run_multi 42 "$TMP/pkg_a.c" "$TMP/pkg_b.c"
 
+# Same-package typedef from an earlier CLI file must be visible at parse time.
+echo 'package main; typedef int my_i; my_i val(void) { return 7; }' > "$TMP/td_a.c"
+echo 'package main; my_i val(void); int main(void) { return val(); }' > "$TMP/td_b.c"
+run_multi 7 "$TMP/td_a.c" "$TMP/td_b.c"
+
 # Command-line files that reuse the builtin `runtime` package name still see each
 # other (exports are merged into the preloaded package, not dropped).
 echo 'package runtime; int helper(void) { return 40; }' > "$TMP/rt_a.c"

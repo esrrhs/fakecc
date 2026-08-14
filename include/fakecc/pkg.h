@@ -76,7 +76,8 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc);
 /* Register already-parsed TUs as package `name` for same-package visibility.
  * Does not take ownership of the TUs (caller frees them).  If `name` is
  * already loaded (e.g. builtin rt), the TUs' exports are merged into that
- * package (first name wins) instead of being dropped. */
+ * package (first name wins) instead of being dropped.
+ * Safe to call after each CLI file is parsed so later siblings see typedefs. */
 Package *pkg_register_tus(PkgContext *ctx, const char *name,
                           TranslationUnit **tus, size_t ntus);
 

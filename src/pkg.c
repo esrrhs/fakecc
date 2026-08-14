@@ -508,10 +508,8 @@ Package *pkg_register_tus(PkgContext *ctx, const char *name,
     if (!name || !ntus) return NULL;
     Package *exist = pkg_find(ctx, name);
     if (exist) {
-        /* Command-line files that reuse a directory package's name (typically
-         * `package runtime`) still contribute exports, so siblings resolve against
-         * the user's symbols rather than only the preloaded runtime.  The TUs
-         * stay owned by the driver — do not append them to exist->files. */
+        /* Merge exports (first name wins).  Do not append to exist->files:
+         * directory packages own those TUs; CLI TUs stay with the driver. */
         for (size_t i = 0; i < ntus; i++)
             add_tu_exports(exist, tus[i]);
         return exist;
