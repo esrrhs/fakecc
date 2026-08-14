@@ -90,6 +90,13 @@ int emit_module_find_symbol(EmitModule *m, const char *name) {
 }
 
 int emit_module_add_undefined(EmitModule *m, const char *name) {
+    if (!name) {
+        /* No relocatable name (e.g. a long-double IR_CONST whose call_name
+         * was not set): emit an unnamed absolute undefined symbol rather than
+         * dereference NULL in strcmp.  It will not be referenced by name. */
+        return emit_module_add_symbol(m, NULL, 1 /* STB_GLOBAL */,
+                                      0 /* STT_NOTYPE */, SECT_UNDEF, 0, 0);
+    }
     /* Reuse an existing undefined symbol of the same name if present. */
     for (size_t i = 0; i < m->num_syms; i++) {
         if (m->syms[i].name && strcmp(m->syms[i].name, name) == 0 &&
