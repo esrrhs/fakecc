@@ -583,7 +583,7 @@ union __anon_u_1 {
         long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
-        struct { char *name; } var;
+        struct { char *name; char *pkg; } var;
         struct { Expr *lvalue; Expr *rvalue; } assign;
         struct { Expr *callee; ExprArray args; } call;
         struct { char *bytes; int len; } str;
@@ -604,7 +604,7 @@ union __anon_u_1 {
         struct { Type target_type; Expr *init; } compound;
     };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
 struct __anon_un_5 { UnaryOp op; Expr *operand; };
-struct __anon_var_6 { char *name; };
+struct __anon_var_6 { char *name; char *pkg; };
 struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
 struct __anon_call_8 { Expr *callee; ExprArray args; };
 struct __anon_str_9 { char *bytes; int len; };
@@ -658,6 +658,7 @@ Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc)
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
+Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
 Expr *expr_new_call(Expr *callee, SourceLoc loc);
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
@@ -778,6 +779,18 @@ struct PackageDecl {
     char *name;
     SourceLoc loc;
 };typedef struct PackageDecl PackageDecl;
+struct ImportDecl {
+    char *name;
+    SourceLoc loc;
+};typedef struct ImportDecl ImportDecl;
+struct ImportArray {
+    ImportDecl *data;
+    size_t len;
+    size_t cap;
+};typedef struct ImportArray ImportArray;
+void import_array_init(ImportArray *a);
+void import_array_push(ImportArray *a, const char *name, SourceLoc loc);
+void import_array_free(ImportArray *a);
 struct StructMember {
     char *name;
     Type type;
@@ -856,6 +869,7 @@ TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type ty
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
 struct TranslationUnit {
     PackageDecl package;
+    ImportArray imports;
     StmtArray globals;
     FunctionArray functions;
     StructRegistry structs;

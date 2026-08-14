@@ -1,8 +1,8 @@
 // expect: 0
 package main;
 
-extern int puts(const char *s);
 
+import runtime;
 // This test exercises the φ-merge-across-call pattern:
 // Variables initialized before a loop, conditionally modified
 // inside a loop containing a function call, read after the loop.
@@ -22,7 +22,7 @@ L:
     if (i >= n) goto done;
 
     // Function call inside loop — values live across call
-    puts("loop");
+    runtime.puts("loop");
 
     // Carry variables across the call (forces register pressure)
     v0 = v0 + 1;
@@ -75,7 +75,7 @@ int test_goto_continue(int n) {
 
 loop_head:
     if (i >= n) goto done2;
-    puts("loop2");
+    runtime.puts("loop2");
     t0 = t0 + 1;
     t1 = t1 + 1;
     t2 = t2 + 1;

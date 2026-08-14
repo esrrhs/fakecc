@@ -169,7 +169,7 @@ struct Expr {
         long long int_val;                             /* EX_INT_LIT — value in the literal's own type */
         struct { BinOp op; Expr *l, *r; } bin;        /* EX_BINOP */
         struct { UnaryOp op; Expr *operand; } un;     /* EX_UNARY */
-        struct { char *name; } var;                    /* EX_VAR */
+        struct { char *name; char *pkg; } var;         /* EX_VAR — pkg NULL = unqualified; else pkg.name */
         struct { Expr *lvalue; Expr *rvalue; } assign;/* EX_ASSIGN */
         struct { Expr *callee; ExprArray args; } call;/* EX_CALL — owns callee expr + args */
         struct { char *bytes; int len; } str;         /* EX_STR — bytes owns strdup'd data, len excludes trailing NUL */
@@ -200,6 +200,8 @@ Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc)
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
+/* Qualified name: pkg.name (e.g. runtime.printf). Both strings are strdup'd. */
+Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
 Expr *expr_new_call(Expr *callee, SourceLoc loc);
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
@@ -326,6 +328,21 @@ typedef struct {
     SourceLoc loc;
 } PackageDecl;
 
+typedef struct {
+    char *name;         /* strdup'd package name from `import IDENT;` */
+    SourceLoc loc;
+} ImportDecl;
+
+typedef struct {
+    ImportDecl *data;
+    size_t len;
+    size_t cap;
+} ImportArray;
+
+void import_array_init(ImportArray *a);
+void import_array_push(ImportArray *a, const char *name, SourceLoc loc);
+void import_array_free(ImportArray *a);
+
 /* Struct definition: tag + ordered member list.  Each member has a name,
  * a Type (owned), a computed byte offset within the struct, and a size.
  * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield
@@ -451,6 +468,7 @@ const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
 
 typedef struct {
     PackageDecl package;
+    ImportArray imports; /* `import IDENT;` after the package decl */
     StmtArray globals;   /* ST_DECL at file scope (globals) */
     FunctionArray functions;
     StructRegistry structs;

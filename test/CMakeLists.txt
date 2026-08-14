@@ -66,6 +66,10 @@ add_executable(test_debug unit/test_debug.c)
 target_link_libraries(test_debug PRIVATE fakecc_core test_framework)
 add_test(NAME test_debug COMMAND test_debug)
 
+add_executable(test_pkg unit/test_pkg.c)
+target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
+add_test(NAME test_pkg COMMAND test_pkg)
+
 # --- e2e tests ---
 #
 # Each suite runs once per optimization level.  -O0 keeps scalars in memory and

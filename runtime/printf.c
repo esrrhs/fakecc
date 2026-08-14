@@ -7,23 +7,11 @@
  * Asking for more digits than that (e.g. %.25f, or %f on 1e300) prints the
  * extra positions as the expansion happens to end, rather than the exact
  * binary value glibc would show. */
-package main;
+package runtime;
 
-typedef unsigned long size_t;
-typedef struct FILE FILE;
-
-extern FILE *stdout;
-extern FILE *stderr;
-extern int fputc(int c, FILE *f);
-extern int fflush(FILE *f);
-extern size_t strlen(const char *s);
-extern void *memcpy(void *dst, const void *src, size_t n);
 extern void *__fakecc_va_copy(void *dst, void *src);
-extern void *malloc(size_t n);
-extern void free(void *p);
 
 static void ensure_stdio(void) {
-    extern void __rt_stdio_init(void);
     __rt_stdio_init();
 }
 
@@ -484,6 +472,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
 }
 
 int vfprintf(FILE *f, const char *fmt, va_list ap) {
+    ensure_stdio();
     /* Size then emit — simple two-pass using a stack buffer for small, heap for large. */
     va_list ap2;
     __fakecc_va_copy((void *)&ap2, (void *)&ap);
@@ -491,23 +480,23 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
     va_end(ap2);
     if (need < 0) return -1;
     char stack[512];
-    char *mem = stack;
+    char *outbuf = stack;
     int heap = 0;
     if (need + 1 > 512) {
-        mem = (char *)malloc((size_t)need + 1);
-        if (mem == 0) return -1;
+        outbuf = (char *)malloc((size_t)need + 1);
+        if (outbuf == 0) return -1;
         heap = 1;
     }
-    vsnprintf(mem, (size_t)need + 1, fmt, ap);
+    vsnprintf(outbuf, (size_t)need + 1, fmt, ap);
     int i = 0;
     while (i < need) {
-        if (fputc((unsigned char)mem[i], f) < 0) {
-            if (heap) free(mem);
+        if (fputc((unsigned char)outbuf[i], f) < 0) {
+            if (heap) free(outbuf);
             return -1;
         }
         i = i + 1;
     }
-    if (heap) free(mem);
+    if (heap) free(outbuf);
     return need;
 }
 

@@ -1,20 +1,7 @@
 /* exit, abort, atoi, strto*, qsort, chmod — FakeCC dialect. */
-package main;
-
-typedef unsigned long size_t;
-typedef struct FILE FILE;
-
-extern int fflush(FILE *f);
-extern FILE *stdout;
-extern FILE *stderr;
-extern void free(void *p);
-extern void *malloc(size_t n);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern int isspace(int c);
-extern int isdigit(int c);
+package runtime;
 
 void exit(int code) {
-    extern void __rt_stdio_init(void);
     __rt_stdio_init();
     fflush(stdout);
     fflush(stderr);

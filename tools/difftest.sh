@@ -35,7 +35,17 @@ FAIL=0
 for src in "$@"; do
     name=$(basename "$src" .c)
 
-    sed 's/^package main;//' "$src" > "$WORK/$name.gcc.c"
+    {
+        echo '#include <stdio.h>'
+        echo '#include <stdlib.h>'
+        echo '#include <string.h>'
+        echo '#include <ctype.h>'
+        sed -E \
+            -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
+            -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
+            -e 's/\b(fmt|io|str|mem|ctype|std|types|rt|runtime)\.//g' \
+            "$src"
+    } > "$WORK/$name.gcc.c"
     if ! gcc -std=c99 -w -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
         printf '%-28s SKIP (gcc rejected: %s)\n' "$name" "$(head -1 "$WORK/$name.gcc.err")"
         continue

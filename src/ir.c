@@ -1211,6 +1211,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
              * (e.g. `add` used as a value, or `&add`) decays to a function
              * pointer; emit an FADDR so the function's address is loaded
              * (patched against the code symbol table, not .data). */
+            if (e->u.var.pkg) {
+                /* Qualified import (runtime.printf): ELF name is unmangled. */
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_FADDR, v, -1, -1, 0, 8, 1, e->loc);
+                fn->insts.data[fn->insts.len - 1].call_name = xstrdup(e->u.var.name);
+                return v;
+            }
             if (g_ir_tu) {
                 for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
                     if (strcmp(g_ir_tu->functions.data[i].name, e->u.var.name) == 0) {
@@ -1517,6 +1524,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                  * indirect calls through an uninitialized function-pointer
                  * variable, which crashes at runtime. */
                 if (e->u.call.callee->type.kind == TY_FUNC) {
+                    is_direct = 1;
+                } else if (e->u.call.callee->u.var.pkg) {
+                    /* Package-qualified name (runtime.printf) — always a direct
+                     * named call; the defining TU is linked separately. */
                     is_direct = 1;
                 } else if (g_ir_tu) {
                     for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
@@ -2598,6 +2609,14 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             memcpy(bytes, src->init_bytes, n);
             return;
         }
+    }
+    /* `T *p = &g` — link-time address of a file-scope object. */
+    if (e->kind == EX_ADDR && e->u.addr.operand
+        && e->u.addr.operand->kind == EX_VAR && ty->kind == TY_PTR && g) {
+        add_global_fixup(g, (int)(bytes - g->init_bytes),
+                         e->u.addr.operand->u.var.name);
+        memset(bytes, 0, sz);
+        return;
     }
     die_at(loc.file, loc.line, loc.col,
            "global '%s' initializer must be a compile-time constant", ctx);

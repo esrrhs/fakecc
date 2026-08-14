@@ -334,6 +334,10 @@ int emit_module_find_symbol(EmitModule *m, const char *name) {
     return -1;
 }
 int emit_module_add_undefined(EmitModule *m, const char *name) {
+    if (!name) {
+        return emit_module_add_symbol(m, ((void*)0), 1 ,
+                                      0 , 0, 0, 0);
+    }
     for (size_t i = 0; i < m->num_syms; i++) {
         if (m->syms[i].name && strcmp(m->syms[i].name, name) == 0 &&
             m->syms[i].shndx == 0)

@@ -5,6 +5,7 @@
 #include "fakecc/lexer.h"
 #include "fakecc/opt.h"
 #include "fakecc/parser.h"
+#include "fakecc/pkg.h"
 #include "fakecc/sema.h"
 #include "fakecc/token.h"
 
@@ -33,23 +34,26 @@ static char *read_file(const char *path) {
     return buf;
 }
 
-/* Compile one .c source into an EmitModule. */
-static void compile_source(const char *source, const char *filename,
-                           EmitModule *out, int opt_level, int want_debug) {
+/* Lex + parse one source file into `tu` (sema/codegen happen later). */
+static void parse_source(const char *source, const char *filename,
+                         TranslationUnit *tu, PkgContext *pkg) {
     TokenArray tokens;
     token_array_init(&tokens);
     lex(source, filename, &tokens);
+    tu_init(tu);
+    parse_in_pkg(&tokens, tu, pkg);
+    token_array_free(&tokens);
+}
 
-    TranslationUnit tu;
-    tu_init(&tu);
-    parse(&tokens, &tu);
-
-    /* The linker verifies `main` globally; individual TUs need not define it. */
-    sema_check(&tu, 0);
+/* Sema → IR → opt → codegen for an already-parsed TU. */
+static void lower_tu(TranslationUnit *tu, const char *filename,
+                     EmitModule *out, int opt_level, int want_debug,
+                     PkgContext *pkg) {
+    sema_check_in_pkg(tu, 0, pkg);
 
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir, opt_level == 0);
+    ir_generate(tu, &ir, opt_level == 0);
 
     opt(&ir, opt_level, want_debug);
 
@@ -59,8 +63,6 @@ static void compile_source(const char *source, const char *filename,
     codegen(&ir, out, want_debug);
 
     ir_module_free(&ir);
-    tu_free(&tu);
-    token_array_free(&tokens);
 }
 
 static void module_free(EmitModule *m) {
@@ -71,18 +73,19 @@ static void usage(void) {
     fprintf(stderr,
             "usage: fakecc [-c] [-g] [-O0|-O1] [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
-            "  (default)       link builtin rt/ (freestanding; no DT_NEEDED)\n"
+            "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
             "  -g              emit DWARF debug info (line numbers, variables);\n"
             "                  independent of -O, never changes generated code\n"
             "  -O0             keep locals in memory (skip SSA promotion)\n"
             "  -O1             default: SSA promotion + folding + DCE\n"
-            "  -nostdlib       do not link builtin rt/; use -l for system libs\n"
+            "  -nostdlib       do not link builtin runtime/; use -l for system libs\n"
             "  -lLIB           link against libLIB.so (DT_NEEDED; optional interop)\n"
             "  -l:SONAME       link against exact soname SONAME\n"
             "  -LDIR           add DIR to the shared-library search path\n"
             "                  (link-time check for -l; also DT_RUNPATH)\n"
             "  -nodefaultlibs  accepted for compatibility (default already skips libc)\n"
-            "  FAKECC_RT       override path to the rt/ directory\n");
+            "  FAKECC_RT       override path to the runtime/ directory\n"
+            "  FAKECC_PKG      colon-separated package search path\n");
     exit(1);
 }
 
@@ -169,7 +172,7 @@ static int lib_in_dir(const char *dir, const char *soname) {
     return ok;
 }
 
-/* For non-system -l libs, require a hit in one of the -L directories when any
+/* For non-system -l libs, require a hit in one of the -L dirs when any
  * -L was given (gcc-like "cannot find -lfoo"). */
 static void require_libs_found(char **needed, int num_needed,
                                char **lib_paths, int num_lib_paths) {
@@ -205,20 +208,10 @@ static char *path_join(const char *a, const char *b) {
     return p;
 }
 
-/* Builtin freestanding runtime sources (FakeCC dialect under rt/). */
-static int num_rt_files(void) { return 6; }
+/* Builtin freestanding runtime: one package, directory runtime/. */
+static const char *rt_pkg_name(void) { return "runtime"; }
 
-static const char *rt_file_at(int i) {
-    if (i == 0) return "string.c";
-    if (i == 1) return "ctype.c";
-    if (i == 2) return "malloc.c";
-    if (i == 3) return "stdio.c";
-    if (i == 4) return "printf.c";
-    if (i == 5) return "stdlib.c";
-    return "";
-}
-
-/* Locate rt/: FAKECC_RT, ./rt, <argv0-dir>/rt, <argv0-dir>/../rt. */
+/* Locate runtime/: FAKECC_RT, ./runtime, <argv0-dir>/runtime, <argv0-dir>/../runtime. */
 static char *find_rt_dir(const char *argv0) {
     const char *env = getenv("FAKECC_RT");
     if (env && env[0]) {
@@ -227,11 +220,11 @@ static char *find_rt_dir(const char *argv0) {
         free(probe);
         if (ok) return xstrdup(env);
     }
-    if (file_readable("rt/string.c")) return xstrdup("rt");
+    if (file_readable("runtime/string.c")) return xstrdup("runtime");
 
     char *basedir = dir_of(argv0);
     {
-        char *cand = path_join(basedir, "rt");
+        char *cand = path_join(basedir, "runtime");
         char *probe = path_join(cand, "string.c");
         int ok = file_readable(probe);
         free(probe);
@@ -242,7 +235,7 @@ static char *find_rt_dir(const char *argv0) {
         free(cand);
     }
     {
-        char *cand = path_join(basedir, "../rt");
+        char *cand = path_join(basedir, "../runtime");
         char *probe = path_join(cand, "string.c");
         int ok = file_readable(probe);
         free(probe);
@@ -254,6 +247,22 @@ static char *find_rt_dir(const char *argv0) {
     }
     free(basedir);
     return NULL;
+}
+
+/* FAKECC_PKG is a colon-separated list of package-root directories. */
+static void add_pkg_env_paths(PkgContext *ctx) {
+    const char *env = getenv("FAKECC_PKG");
+    if (!env || !env[0]) return;
+    char *copy = xstrdup(env);
+    char *p = copy;
+    while (*p) {
+        char *colon = strchr(p, ':');
+        if (colon) *colon = '\0';
+        if (*p) pkg_ctx_add_path(ctx, p);
+        if (!colon) break;
+        p = colon + 1;
+    }
+    free(copy);
 }
 
 int main(int argc, char **argv) {
@@ -319,6 +328,25 @@ int main(int argc, char **argv) {
 
     if (ninputs == 0 || output_path == NULL) usage();
 
+    PkgContext pkg;
+    pkg_ctx_init(&pkg);
+    add_pkg_env_paths(&pkg);
+
+    char *rt_dir = find_rt_dir(argv[0]);
+    /* import runtime looks up a directory named runtime next to each search path. */
+    if (rt_dir) {
+        char *parent = dir_of(rt_dir);
+        pkg_ctx_add_path(&pkg, parent);
+        free(parent);
+    }
+    /* Also search next to each input so user packages resolve. */
+    for (int i = 0; i < ninputs; i++) {
+        if (ends_with(inputs[i], ".o")) continue;
+        char *d = dir_of(inputs[i]);
+        pkg_ctx_add_path(&pkg, d);
+        free(d);
+    }
+
     if (compile_only) {
         if (ninputs != 1) {
             fprintf(stderr, "fakecc: -c requires exactly one input\n");
@@ -329,56 +357,130 @@ int main(int argc, char **argv) {
                     "fakecc: -l / -L / -nostdlib / -nodefaultlibs are link-time options\n");
             exit(1);
         }
-        EmitModule em;
+        TranslationUnit tu;
         char *src = read_file(inputs[0]);
-        compile_source(src, inputs[0], &em, opt_level, want_debug);
+        parse_source(src, inputs[0], &tu, &pkg);
         free(src);
+        EmitModule em;
+        lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+        tu_free(&tu);
         emit_obj(&em, output_path);
         module_free(&em);
         free(inputs);
+        free(rt_dir);
+        pkg_ctx_free(&pkg);
         return 0;
     }
 
     require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
 
-    int nrt = nostdlib ? 0 : num_rt_files();
-    char *rt_dir = NULL;
-    if (nrt > 0) {
-        rt_dir = find_rt_dir(argv[0]);
+    int nrt = 0;
+    if (!nostdlib) {
         if (!rt_dir) {
             fprintf(stderr,
-                    "fakecc: cannot find rt/ (set FAKECC_RT or run from the source tree)\n");
+                    "fakecc: cannot find runtime/ (set FAKECC_RT or run from the source tree)\n");
             exit(1);
         }
+        nrt = 1;
     }
 
-    int nmods = ninputs + nrt;
+    /* Preload builtin rt so its TUs are parsed once and cached. */
+    SourceLoc zloc = {0};
+    if (nrt)
+        pkg_load(&pkg, rt_pkg_name(), zloc);
+
+    /* Count modules: user inputs + every file of the rt package. */
+    int nrt_files = 0;
+    if (nrt) {
+        Package *p = pkg_find(&pkg, rt_pkg_name());
+        nrt_files = (int)p->nfiles;
+    }
+
+    int nmods = ninputs + nrt_files;
     EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
-    if (!mods || !mod_ptrs) {
+    TranslationUnit *user_tus = malloc((size_t)ninputs * sizeof(TranslationUnit));
+    if (!mods || !mod_ptrs || !user_tus) {
         fprintf(stderr, "fakecc: out of memory\n");
         exit(1);
     }
 
+    /* Phase 1: parse all user sources (imports resolve via pkg cache). */
+    for (int i = 0; i < ninputs; i++) {
+        size_t len = strlen(inputs[i]);
+        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
+            /* .o inputs have no TU; mark package.name NULL as a sentinel. */
+            memset(&user_tus[i], 0, sizeof(user_tus[i]));
+        } else {
+            char *src = read_file(inputs[i]);
+            parse_source(src, inputs[i], &user_tus[i], &pkg);
+            free(src);
+        }
+    }
+
+    /* Group parsed user TUs by package name so same-package siblings see
+     * each other without `extern` (plan: lookup fallback via export table). */
+    {
+        char **seen = NULL;
+        int nseen = 0;
+        for (int i = 0; i < ninputs; i++) {
+            if (!user_tus[i].package.name) continue;
+            const char *pname = user_tus[i].package.name;
+            int already = 0;
+            for (int s = 0; s < nseen; s++)
+                if (strcmp(seen[s], pname) == 0) { already = 1; break; }
+            if (already) continue;
+            seen = realloc(seen, ((size_t)nseen + 1) * sizeof(char *));
+            if (!seen) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+            seen[nseen++] = xstrdup(pname);
+
+            TranslationUnit **group = NULL;
+            size_t ng = 0;
+            for (int j = 0; j < ninputs; j++) {
+                if (user_tus[j].package.name
+                    && strcmp(user_tus[j].package.name, pname) == 0) {
+                    group = realloc(group, (ng + 1) * sizeof(TranslationUnit *));
+                    if (!group) {
+                        fprintf(stderr, "fakecc: out of memory\n");
+                        exit(1);
+                    }
+                    group[ng++] = &user_tus[j];
+                }
+            }
+            /* Always register: if the name is already a directory package
+             * (runtime preload), pkg_register_tus folds these TUs into its export
+             * table so command-line siblings still see each other. */
+            pkg_register_tus(&pkg, pname, group, ng);
+            free(group);
+        }
+        for (int s = 0; s < nseen; s++) free(seen[s]);
+        free(seen);
+    }
+
+    /* Phase 2: sema + codegen user modules. */
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
             if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
         } else {
-            char *src = read_file(inputs[i]);
-            compile_source(src, inputs[i], &mods[i], opt_level, want_debug);
-            free(src);
+            lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg);
+            tu_free(&user_tus[i]);
         }
         mod_ptrs[i] = &mods[i];
     }
+    free(user_tus);
 
-    for (int i = 0; i < nrt; i++) {
-        char *path = path_join(rt_dir, rt_file_at(i));
-        char *src = read_file(path);
-        compile_source(src, path, &mods[ninputs + i], opt_level, 0);
-        free(src);
-        free(path);
-        mod_ptrs[ninputs + i] = &mods[ninputs + i];
+    /* Phase 3: codegen already-parsed rt package files. */
+    int mi = ninputs;
+    if (nrt) {
+        Package *p = pkg_find(&pkg, rt_pkg_name());
+        for (size_t f = 0; f < p->nfiles; f++) {
+            char *fake = path_join(p->dir, "_.c");
+            lower_tu(&p->files[f], fake, &mods[mi], opt_level, 0, &pkg);
+            free(fake);
+            mod_ptrs[mi] = &mods[mi];
+            mi++;
+        }
     }
 
     emit_link(mod_ptrs, (size_t)nmods, output_path,
@@ -394,5 +496,6 @@ int main(int argc, char **argv) {
     free(needed);
     for (int i = 0; i < num_lib_paths; i++) free(lib_paths[i]);
     free(lib_paths);
+    pkg_ctx_free(&pkg);
     return 0;
 }

@@ -38,7 +38,8 @@ static void __fakecc_va_copy(void *dst, void *src){
 
 def preprocess(path):
     """Run gcc -E -P with fake system headers; return preprocessed text."""
-    cmd = ["gcc", "-E", "-P", "-nostdinc", "-I", FAKE, "-I", INC, path]
+    cmd = ["gcc", "-E", "-P", "-nostdinc", "-DFAKECC_SELFHOST",
+           "-I", FAKE, "-I", INC, path]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         sys.stderr.write(f"PREPROCESS FAIL {path}:\n{r.stderr}\n")

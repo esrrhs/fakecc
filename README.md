@@ -26,9 +26,9 @@
 |---|---|---|
 | 预处理器 | `#include` / `#define` / `#if` / … | **整个消失** |
 | 宏 | 对象宏、函数宏、`#`、`##` | **全部不存在** |
-| 头文件 | `.h`、前向声明 | 用 `extern` / 多文件链接；跨 package 的 `import` 仍在规划 |
-| 包组织 | 无 | 文件顶部 `package main;`（当前实现） |
-| 标准库 | 系统 libc | **默认内置 `rt/`**（裸 syscall）；`-nostdlib -lc` 可选走系统库 |
+| 头文件 | `.h`、前向声明 | 用 `extern` / 多文件链接；跨 package 用 `import` |
+| 包组织 | 无 | 文件顶部 `package name;`；`import pkg;` 后写 `pkg.sym` / `pkg.Type` |
+| 标准库 | 系统 libc | **默认内置 `runtime/` 一个包**（裸 syscall）；`-nostdlib -lc` 可选走系统库 |
 | 条件编译 | `#if` / `#ifdef` | 第一版不引入 |
 
 ### 最小程序
@@ -43,7 +43,16 @@ int main() {
 
 ```c
 package main;
-extern int printf(const char *fmt, ...);
+import runtime;
+int main(void) {
+    runtime.printf("hello %d\n", 42);
+    return 0;
+}
+```
+
+```c
+package main;
+extern int printf(const char *fmt, ...);  /* 仍可用：与 gcc .o / -lc 互操作 */
 int main(void) {
     printf("hello %d\n", 42);
     return 0;
@@ -66,21 +75,24 @@ ldd hello          # 「不是动态可执行文件」— 无 libc
 - **中端**：统一 SSA IR（CFG、支配树、mem2reg、constfold/DCE/peephole、寄存器分配）
 - **后端**：x86-64 编码器 + 内嵌 ELF 写入器 / 链接器（不调用外部 `as`/`ld`）
 
-## 零依赖 runtime（`rt/`）
+## 零依赖 runtime（`runtime/`）
 
-默认链接时，驱动自动编译并静态链上 `rt/`（FakeCC 方言，约 950 行）：
+默认链接时，驱动自动编译并静态链上 `runtime/`（FakeCC 方言）。整个目录是一个 package（`package runtime;`），目录内文件互相可见；用户侧 `import runtime;` 后写 `runtime.printf` / `runtime.FILE`。
 
 | 文件 | 内容 |
 |---|---|
+| `builtin.c` | `size_t` / `ssize_t` / `FILE`（按文件名最先解析，供同包其余文件使用） |
 | `string.c` | `memcpy` / `memset` / `strlen` / `strcmp` / … |
 | `ctype.c` | `isdigit` / `isspace` / … |
 | `malloc.c` | `mmap` freelist：`malloc` / `free` / `calloc` / `realloc` |
-| `stdio.c` | 迷你 `FILE`、`stdin`/`stdout`/`stderr`、缓冲、`fopen`/`fread`/`fwrite`/`puts`/`putchar`/… |
-| `printf.c` | `printf` / `fprintf` / `snprintf` / `v*`（`%s%c%d%i%u%x%o%p%f%e%g`、`-+ 0#` 标志、`*` 宽度/精度） |
-| `stdlib.c` | `exit`（先 fflush）/ `abort` / `strto*`（含 `strtoul`/`strtoull`、`strtod`/`strtof`/`strtold`）/ `qsort` / `chmod` / `getenv` |
+| `stdio.c` | `stdin`/`stdout`/`stderr`、缓冲、`fopen`/`fread`/… |
+| `printf.c` | `printf` / `fprintf` / `snprintf` / `v*` |
+| `stdlib.c` | `exit` / `abort` / `strto*` / `qsort` / `getenv` |
 
-- 查找顺序：`FAKECC_RT` → `./rt` → `<argv0>/rt` → `<argv0>/../rt`
-- `-nostdlib`：不链 `rt/`；再加 `-lc` 即走系统 libc（调试 / 互操作用）
+用户侧：`import runtime;` 之后写 `runtime.printf(...)`。ELF 符号不改名（`runtime.printf` 仍链接到 `printf`），因此原有的 `extern int printf(...);` 写法继续可用。
+
+- 查找顺序：`FAKECC_RT` → `./runtime` → `<argv0>/runtime` → `<argv0>/../runtime`
+- `-nostdlib`：不链 `runtime/`；再加 `-lc` 即走系统 libc（调试 / 互操作用）
 - `-l` / `-L` / 直接传 `.so`：可选动态依赖，`-L` 写入 `DT_RUNPATH`
 
 Stage0（`build/fakecc`，gcc 编）本身仍依赖系统 libc；**它编出来的程序**和自举产物 `v0/fakecc-1` 默认是静态零依赖 ELF。
@@ -106,7 +118,7 @@ Stage0（`build/fakecc`，gcc 编）本身仍依赖系统 libc；**它编出来�
 主体源码仍是 `src/*.c`（C99，给 gcc 做 Stage0）；`v0/translate.py` 机械翻译成 FakeCC 方言后自举：
 
 - **Stage 0** — gcc 编译 `src/` → `build/fakecc`
-- **Stage 1** — Stage0 编译 `v0/*.c`（+ 默认 `rt/`）→ `fakecc-1`
+- **Stage 1** — Stage0 编译 `v0/*.c`（+ 默认 `runtime/`）→ `fakecc-1`
 - **Stage 2** — `fakecc-1` 再编译同一份 → `fakecc-2`；与 `fakecc-1` 逐字节相同即不动点
 
 ```bash
@@ -124,17 +136,17 @@ gcc 只出现在：编 Stage0，以及 `translate.py` 里对 `src/*.c` 做预处
 | 字面量 | 十进制 / `0x` / 八进制 `0`、后缀、`float`/`double`（SSE）、`long double`（x87，16 字节） |
 | 表达式 / 语句 | 完整运算符、指针算术、cast、`sizeof`/`_Alignof`、复合字面量；`if`/`while`/`for`/`do`/`switch`/`goto`/… |
 | 函数 | 多函数、递归、最多 16 参数（SysV 前 6 寄存器）、变参（`va_list`） |
-| 链接 | 多文件 / `.o`；默认静态链 `rt/`；可选 `-l`/`-L`/`.so` |
-| I/O | `__syscall`；`printf`/`malloc`/FILE 来自 `rt/` |
+| 链接 | 多文件 / `.o`；默认静态链 `runtime/`；可选 `-l`/`-L`/`.so` |
+| I/O | `__syscall`；`printf`/`malloc`/FILE 来自 `runtime/` |
 
-跨 package 的 `import` / 导出可见性规则仍是语言方向，**尚未实现**（当前用多文件 + `extern`）。
+跨 package 的 `import` / 限定名已实现（目录即包；同包文件互见；`static` 包私有）。
 
 ## 已知缺陷
 
 - **DWARF 位置列表在块重排时可能偏保守**：`-g` 已提供行号、标量/指针/具名 struct（含成员 DIE，`print p.x` / `q->x` 可用）、位置列表，以及 `DW_OP_entry_value` + `DW_TAG_call_site`（优化后外层帧参数可恢复）。位置列表按线性指令流推导，块的入口值靠 φ 标记补齐，块被重排时个别范围可能偏保守。
 - **工程主体仍是 `src/` + translate**：方言尚未成为唯一源码树；Stage0 仍需 gcc。
-- **`rt/printf` 不认 `%Lf` 的 `L`**：长度修饰符被吃掉但实参仍按 `double` 取，long double 变参会打成 0；`va_arg(ap, long double)` 同样未走 SysV 的 MEMORY 类（16 字节栈槽），暂不支持。
-- **`rt/` 的浮点打印只有 18 位有效数字**：`%f`/`%e`/`%g` 从 long double 展开十进制，足以覆盖 double 的 17 位；超出部分（如 `%f` 打印 `1e300`）按展开末尾补零，而不是 glibc 的精确二进制值。
+- **`runtime/printf` 不认 `%Lf` 的 `L`**：长度修饰符被吃掉但实参仍按 `double` 取，long double 变参会打成 0；`va_arg(ap, long double)` 同样未走 SysV 的 MEMORY 类（16 字节栈槽），暂不支持。
+- **`runtime/` 的浮点打印只有 18 位有效数字**：`%f`/`%e`/`%g` 从 long double 展开十进制，足以覆盖 double 的 17 位；超出部分（如 `%f` 打印 `1e300`）按展开末尾补零，而不是 glibc 的精确二进制值。
 
 ## 调试工具
 

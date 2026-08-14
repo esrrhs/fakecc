@@ -24,6 +24,7 @@ add_library(fakecc_core
     src/debug.c
     src/emit.c
     src/link.c
+    src/pkg.c
 )
 target_include_directories(fakecc_core PUBLIC include)
 

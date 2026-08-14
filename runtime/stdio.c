@@ -1,30 +1,12 @@
 /* Minimal FILE stdio over Linux syscalls — FakeCC dialect. */
-package main;
+package runtime;
 
-typedef unsigned long size_t;
-typedef long ssize_t;
-
-extern void *malloc(size_t n);
-extern void free(void *p);
-extern void *memset(void *dst, int c, size_t n);
-
-struct FILE {
-    int fd;
-    int writable;
-    int eof;
-    int err;
-    int buf_len;
-    int buf_cap;
-    char buf[1024];
-};
-typedef struct FILE FILE;
-
-static struct FILE _rt_stdin;
-static struct FILE _rt_stdout;
-static struct FILE _rt_stderr;
-FILE *stdin;
-FILE *stdout;
-FILE *stderr;
+static FILE _rt_stdin = { 0, 0, 0, 0, 0, 1024 };
+static FILE _rt_stdout = { 1, 1, 0, 0, 0, 1024 };
+static FILE _rt_stderr = { 2, 1, 0, 0, 0, 1024 };
+FILE *stdin = &_rt_stdin;
+FILE *stdout = &_rt_stdout;
+FILE *stderr = &_rt_stderr;
 
 static int rt_stdio_ready;
 

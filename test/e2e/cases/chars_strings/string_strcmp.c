@@ -1,26 +1,26 @@
-// strcmp: lexicographic compare of two C strings, returning <0/0/>0
+// runtime.strcmp: lexicographic compare of two C strings, returning <0/0/>0
 // from the first differing byte interpreted as unsigned char.  The
 // classic bug treats bytes >= 0x80 as negative and flips the sign.
 // Pin equal/less/greater, the prefix rule, and the high-byte sign.
 // expect: 0
 package main;
-extern int strcmp(const char *a, const char *b);
+import runtime;
 int main() {
     unsigned char p[2], q[2];
 
     /* equal */
-    if (strcmp("foo", "foo") != 0) return 1;
+    if (runtime.strcmp("foo", "foo") != 0) return 1;
     /* a < b */
-    if (strcmp("abc", "abd") >= 0) return 2;
+    if (runtime.strcmp("abc", "abd") >= 0) return 2;
     /* a > b */
-    if (strcmp("abd", "abc") <= 0) return 3;
+    if (runtime.strcmp("abd", "abc") <= 0) return 3;
     /* prefix: shorter is less */
-    if (strcmp("ab", "abc") >= 0) return 4;
-    if (strcmp("abc", "ab") <= 0) return 5;
+    if (runtime.strcmp("ab", "abc") >= 0) return 4;
+    if (runtime.strcmp("abc", "ab") <= 0) return 5;
     /* high byte: 0xFF (255) must be > 0x7F (127) as unsigned char */
     p[0] = 0xFF; p[1] = 0;
     q[0] = 0x7F; q[1] = 0;
-    if (strcmp((char *)p, (char *)q) <= 0) return 6;
-    if (strcmp((char *)q, (char *)p) >= 0) return 7;
+    if (runtime.strcmp((char *)p, (char *)q) <= 0) return 6;
+    if (runtime.strcmp((char *)q, (char *)p) >= 0) return 7;
     return 0;
 }

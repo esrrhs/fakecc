@@ -1,7 +1,5 @@
 /* mmap-backed freelist allocator — FakeCC dialect. */
-package main;
-
-typedef unsigned long size_t;
+package runtime;
 
 struct chunk {
     size_t size;
@@ -33,9 +31,6 @@ static void heap_grow(size_t need) {
     c->next = heap_head;
     heap_head = c;
 }
-
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 
 void *malloc(size_t n) {
     if (n == 0) n = 1;

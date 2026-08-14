@@ -583,7 +583,7 @@ union __anon_u_1 {
         long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
         struct { UnaryOp op; Expr *operand; } un;
-        struct { char *name; } var;
+        struct { char *name; char *pkg; } var;
         struct { Expr *lvalue; Expr *rvalue; } assign;
         struct { Expr *callee; ExprArray args; } call;
         struct { char *bytes; int len; } str;
@@ -604,7 +604,7 @@ union __anon_u_1 {
         struct { Type target_type; Expr *init; } compound;
     };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
 struct __anon_un_5 { UnaryOp op; Expr *operand; };
-struct __anon_var_6 { char *name; };
+struct __anon_var_6 { char *name; char *pkg; };
 struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
 struct __anon_call_8 { Expr *callee; ExprArray args; };
 struct __anon_str_9 { char *bytes; int len; };
@@ -658,6 +658,7 @@ Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc)
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
+Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc);
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
 Expr *expr_new_call(Expr *callee, SourceLoc loc);
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
@@ -778,6 +779,18 @@ struct PackageDecl {
     char *name;
     SourceLoc loc;
 };typedef struct PackageDecl PackageDecl;
+struct ImportDecl {
+    char *name;
+    SourceLoc loc;
+};typedef struct ImportDecl ImportDecl;
+struct ImportArray {
+    ImportDecl *data;
+    size_t len;
+    size_t cap;
+};typedef struct ImportArray ImportArray;
+void import_array_init(ImportArray *a);
+void import_array_push(ImportArray *a, const char *name, SourceLoc loc);
+void import_array_free(ImportArray *a);
 struct StructMember {
     char *name;
     Type type;
@@ -856,6 +869,7 @@ TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type ty
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
 struct TranslationUnit {
     PackageDecl package;
+    ImportArray imports;
     StmtArray globals;
     FunctionArray functions;
     StructRegistry structs;
@@ -869,8 +883,74 @@ const StructRegistry *get_ir_structs(void);
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 void lex(const char *source, const char *filename, TokenArray *out);
 void opt(IRModule *ir, int opt_level, int want_debug);
+struct PkgContext;
 void parse(const TokenArray *tokens, TranslationUnit *tu);
+void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
+                  struct PkgContext *ctx);
+typedef struct Package Package;
+typedef struct PkgContext PkgContext;
+struct PkgFuncExport {
+    char *name;
+    Type ret_type;
+    Type param_types[16];
+    int arity;
+    int is_variadic;
+    int is_extern;
+    SourceLoc loc;
+    TranslationUnit *tu;
+};typedef struct PkgFuncExport PkgFuncExport;
+struct PkgGlobalExport {
+    char *name;
+    Type type;
+    int is_extern;
+    SourceLoc loc;
+    TranslationUnit *tu;
+};typedef struct PkgGlobalExport PkgGlobalExport;
+struct Package {
+    char *name;
+    char *dir;
+    TranslationUnit *files;
+    size_t nfiles;
+    int owns_files;
+    PkgFuncExport *funcs;
+    size_t nfuncs;
+    PkgGlobalExport *globals;
+    size_t nglobals;
+    TypedefRegistry typedefs;
+    StructRegistry structs;
+    EnumRegistry enums;
+};
+struct PkgContext {
+    char **search_paths;
+    int npaths;
+    Package **pkgs;
+    size_t npkgs;
+    size_t cap_pkgs;
+    char **loading;
+    size_t nloading;
+    size_t cap_loading;
+};
+void pkg_ctx_init(PkgContext *ctx);
+void pkg_ctx_free(PkgContext *ctx);
+void pkg_ctx_add_path(PkgContext *ctx, const char *dir);
+Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc);
+Package *pkg_register_tus(PkgContext *ctx, const char *name,
+                          TranslationUnit **tus, size_t ntus);
+Package *pkg_find(const PkgContext *ctx, const char *name);
+const PkgFuncExport *pkg_find_func(const Package *pkg, const char *name);
+const PkgGlobalExport *pkg_find_global(const Package *pkg, const char *name);
+const Type *pkg_find_typedef(const Package *pkg, const char *name);
+const StructDef *pkg_find_struct(const Package *pkg, const char *name);
+const EnumDef *pkg_find_enum(const Package *pkg, const char *name);
+const EnumConstant *pkg_find_enum_const(const Package *pkg, const char *name);
+void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src);
+void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
+                        const Package *pkg);
+const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
+struct PkgContext;
 void sema_check(const TranslationUnit *tu, int require_main);
+void sema_check_in_pkg(const TranslationUnit *tu, int require_main,
+                       struct PkgContext *ctx);
 typedef struct FILE FILE;
 extern FILE *stderr;
 extern FILE *stdin;
@@ -943,26 +1023,28 @@ static char *read_file(const char *path) {
     fclose(f);
     return buf;
 }
-static void compile_source(const char *source, const char *filename,
-                           EmitModule *out, int opt_level, int want_debug) {
+static void parse_source(const char *source, const char *filename,
+                         TranslationUnit *tu, PkgContext *pkg) {
     TokenArray tokens;
     token_array_init(&tokens);
     lex(source, filename, &tokens);
-    TranslationUnit tu;
-    tu_init(&tu);
-    parse(&tokens, &tu);
-    sema_check(&tu, 0);
+    tu_init(tu);
+    parse_in_pkg(&tokens, tu, pkg);
+    token_array_free(&tokens);
+}
+static void lower_tu(TranslationUnit *tu, const char *filename,
+                     EmitModule *out, int opt_level, int want_debug,
+                     PkgContext *pkg) {
+    sema_check_in_pkg(tu, 0, pkg);
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir, opt_level == 0);
+    ir_generate(tu, &ir, opt_level == 0);
     opt(&ir, opt_level, want_debug);
     emit_module_init(out);
     if (want_debug)
         out->dbg_tu_name = xstrdup(filename);
     codegen(&ir, out, want_debug);
     ir_module_free(&ir);
-    tu_free(&tu);
-    token_array_free(&tokens);
 }
 static void module_free(EmitModule *m) {
     emit_module_free(m);
@@ -971,7 +1053,7 @@ static void usage(void) {
     fprintf(stderr,
             "usage: fakecc [-c] [-g] [-O0|-O1] [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
-            "  (default)       link builtin rt/ (freestanding; no DT_NEEDED)\n"
+            "  (default)       link builtin rt/ packages (freestanding; no DT_NEEDED)\n"
             "  -g              emit DWARF debug info (line numbers, variables);\n"
             "                  independent of -O, never changes generated code\n"
             "  -O0             keep locals in memory (skip SSA promotion)\n"
@@ -982,7 +1064,8 @@ static void usage(void) {
             "  -LDIR           add DIR to the shared-library search path\n"
             "                  (link-time check for -l; also DT_RUNPATH)\n"
             "  -nodefaultlibs  accepted for compatibility (default already skips libc)\n"
-            "  FAKECC_RT       override path to the rt/ directory\n");
+            "  FAKECC_RT       override path to the rt/ directory\n"
+            "  FAKECC_PKG      colon-separated package search path\n");
     exit(1);
 }
 static int ends_with(const char *s, const char *suf) {
@@ -1088,29 +1171,30 @@ static char *path_join(const char *a, const char *b) {
     memcpy(p + na, b, nb + 1);
     return p;
 }
-static int num_rt_files(void) { return 6; }
-static const char *rt_file_at(int i) {
-    if (i == 0) return "string.c";
-    if (i == 1) return "ctype.c";
-    if (i == 2) return "malloc.c";
-    if (i == 3) return "stdio.c";
-    if (i == 4) return "printf.c";
-    if (i == 5) return "stdlib.c";
+static int num_rt_pkgs(void) { return 7; }
+static const char *rt_pkg_at(int i) {
+    if (i == 0) return "types";
+    if (i == 1) return "str";
+    if (i == 2) return "ctype";
+    if (i == 3) return "mem";
+    if (i == 4) return "io";
+    if (i == 5) return "fmt";
+    if (i == 6) return "std";
     return "";
 }
 static char *find_rt_dir(const char *argv0) {
     const char *env = getenv("FAKECC_RT");
     if (env && env[0]) {
-        char *probe = path_join(env, "string.c");
+        char *probe = path_join(env, "str/string.c");
         int ok = file_readable(probe);
         free(probe);
         if (ok) return xstrdup(env);
     }
-    if (file_readable("rt/string.c")) return xstrdup("rt");
+    if (file_readable("rt/str/string.c")) return xstrdup("rt");
     char *basedir = dir_of(argv0);
     {
         char *cand = path_join(basedir, "rt");
-        char *probe = path_join(cand, "string.c");
+        char *probe = path_join(cand, "str/string.c");
         int ok = file_readable(probe);
         free(probe);
         if (ok) {
@@ -1121,7 +1205,7 @@ static char *find_rt_dir(const char *argv0) {
     }
     {
         char *cand = path_join(basedir, "../rt");
-        char *probe = path_join(cand, "string.c");
+        char *probe = path_join(cand, "str/string.c");
         int ok = file_readable(probe);
         free(probe);
         if (ok) {
@@ -1132,6 +1216,20 @@ static char *find_rt_dir(const char *argv0) {
     }
     free(basedir);
     return ((void*)0);
+}
+static void add_pkg_env_paths(PkgContext *ctx) {
+    const char *env = getenv("FAKECC_PKG");
+    if (!env || !env[0]) return;
+    char *copy = xstrdup(env);
+    char *p = copy;
+    while (*p) {
+        char *colon = strchr(p, ':');
+        if (colon) *colon = '\0';
+        if (*p) pkg_ctx_add_path(ctx, p);
+        if (!colon) break;
+        p = colon + 1;
+    }
+    free(copy);
 }
 int main(int argc, char **argv) {
     int compile_only = 0;
@@ -1191,6 +1289,18 @@ int main(int argc, char **argv) {
         }
     }
     if (ninputs == 0 || output_path == ((void*)0)) usage();
+    PkgContext pkg;
+    pkg_ctx_init(&pkg);
+    add_pkg_env_paths(&pkg);
+    char *rt_dir = find_rt_dir(argv[0]);
+    if (rt_dir)
+        pkg_ctx_add_path(&pkg, rt_dir);
+    for (int i = 0; i < ninputs; i++) {
+        if (ends_with(inputs[i], ".o")) continue;
+        char *d = dir_of(inputs[i]);
+        pkg_ctx_add_path(&pkg, d);
+        free(d);
+    }
     if (compile_only) {
         if (ninputs != 1) {
             fprintf(stderr, "fakecc: -c requires exactly one input\n");
@@ -1201,51 +1311,107 @@ int main(int argc, char **argv) {
                     "fakecc: -l / -L / -nostdlib / -nodefaultlibs are link-time options\n");
             exit(1);
         }
-        EmitModule em;
+        TranslationUnit tu;
         char *src = read_file(inputs[0]);
-        compile_source(src, inputs[0], &em, opt_level, want_debug);
+        parse_source(src, inputs[0], &tu, &pkg);
         free(src);
+        EmitModule em;
+        lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+        tu_free(&tu);
         emit_obj(&em, output_path);
         module_free(&em);
         free(inputs);
+        free(rt_dir);
+        pkg_ctx_free(&pkg);
         return 0;
     }
     require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
-    int nrt = nostdlib ? 0 : num_rt_files();
-    char *rt_dir = ((void*)0);
-    if (nrt > 0) {
-        rt_dir = find_rt_dir(argv[0]);
-        if (!rt_dir) {
-            fprintf(stderr,
-                    "fakecc: cannot find rt/ (set FAKECC_RT or run from the source tree)\n");
-            exit(1);
-        }
+    int nrt = nostdlib ? 0 : num_rt_pkgs();
+    if (nrt > 0 && !rt_dir) {
+        fprintf(stderr,
+                "fakecc: cannot find rt/ (set FAKECC_RT or run from the source tree)\n");
+        exit(1);
     }
-    int nmods = ninputs + nrt;
+    SourceLoc zloc = {0};
+    for (int i = 0; i < nrt; i++)
+        pkg_load(&pkg, rt_pkg_at(i), zloc);
+    int nrt_files = 0;
+    for (int i = 0; i < nrt; i++) {
+        Package *p = pkg_find(&pkg, rt_pkg_at(i));
+        nrt_files += (int)p->nfiles;
+    }
+    int nmods = ninputs + nrt_files;
     EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
-    if (!mods || !mod_ptrs) {
+    TranslationUnit *user_tus = malloc((size_t)ninputs * sizeof(TranslationUnit));
+    if (!mods || !mod_ptrs || !user_tus) {
         fprintf(stderr, "fakecc: out of memory\n");
         exit(1);
     }
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
-            if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
+            memset(&user_tus[i], 0, sizeof(user_tus[i]));
         } else {
             char *src = read_file(inputs[i]);
-            compile_source(src, inputs[i], &mods[i], opt_level, want_debug);
+            parse_source(src, inputs[i], &user_tus[i], &pkg);
             free(src);
+        }
+    }
+    {
+        char **seen = ((void*)0);
+        int nseen = 0;
+        for (int i = 0; i < ninputs; i++) {
+            if (!user_tus[i].package.name) continue;
+            const char *pname = user_tus[i].package.name;
+            int already = 0;
+            for (int s = 0; s < nseen; s++)
+                if (strcmp(seen[s], pname) == 0) { already = 1; break; }
+            if (already) continue;
+            seen = realloc(seen, ((size_t)nseen + 1) * sizeof(char *));
+            if (!seen) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+            seen[nseen++] = xstrdup(pname);
+            TranslationUnit **group = ((void*)0);
+            size_t ng = 0;
+            for (int j = 0; j < ninputs; j++) {
+                if (user_tus[j].package.name
+                    && strcmp(user_tus[j].package.name, pname) == 0) {
+                    group = realloc(group, (ng + 1) * sizeof(TranslationUnit *));
+                    if (!group) {
+                        fprintf(stderr, "fakecc: out of memory\n");
+                        exit(1);
+                    }
+                    group[ng++] = &user_tus[j];
+                }
+            }
+            if (!pkg_find(&pkg, pname))
+                pkg_register_tus(&pkg, pname, group, ng);
+            free(group);
+        }
+        for (int s = 0; s < nseen; s++) free(seen[s]);
+        free(seen);
+    }
+    for (int i = 0; i < ninputs; i++) {
+        size_t len = strlen(inputs[i]);
+        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
+            if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
+        } else {
+            lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg);
+            tu_free(&user_tus[i]);
         }
         mod_ptrs[i] = &mods[i];
     }
+    free(user_tus);
+    int mi = ninputs;
     for (int i = 0; i < nrt; i++) {
-        char *path = path_join(rt_dir, rt_file_at(i));
-        char *src = read_file(path);
-        compile_source(src, path, &mods[ninputs + i], opt_level, 0);
-        free(src);
-        free(path);
-        mod_ptrs[ninputs + i] = &mods[ninputs + i];
+        Package *p = pkg_find(&pkg, rt_pkg_at(i));
+        for (size_t f = 0; f < p->nfiles; f++) {
+            char *fake = path_join(p->dir, "_.c");
+            lower_tu(&p->files[f], fake, &mods[mi], opt_level, 0, &pkg);
+            free(fake);
+            mod_ptrs[mi] = &mods[mi];
+            mi++;
+        }
     }
     emit_link(mod_ptrs, (size_t)nmods, output_path,
               (const char **)needed, (size_t)num_needed, nodefaultlibs,
@@ -1259,5 +1425,6 @@ int main(int argc, char **argv) {
     free(needed);
     for (int i = 0; i < num_lib_paths; i++) free(lib_paths[i]);
     free(lib_paths);
+    pkg_ctx_free(&pkg);
     return 0;
 }

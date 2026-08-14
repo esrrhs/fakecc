@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared-library link tests: -l / -l: / -nostdlib / -nodefaultlibs / .so path.
-# Default link is freestanding (builtin rt/, no DT_NEEDED).  -lc is opt-in.
+# Default link is freestanding (builtin runtime/, no DT_NEEDED).  -lc is opt-in.
 set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
@@ -51,6 +51,16 @@ int main(void) {
 }
 EOF
 
+cat > "$TMP/main_fmt.c" <<'EOF'
+package main;
+import runtime;
+int main(void) {
+    int n = runtime.printf("hi\n");
+    if (n != 3) return 1;
+    return 0;
+}
+EOF
+
 cat > "$TMP/main_missing.c" <<'EOF'
 package main;
 extern int definitely_missing_xyz(void);
@@ -71,9 +81,9 @@ if [ -x "$TMP/p" ]; then
     fi
 fi
 
-# 2) Default freestanding: printf via rt/, no DT_NEEDED.
+# 2) Default freestanding: printf via runtime/, no DT_NEEDED.
 rm -f "$TMP/p"
-timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_printf.c" -o "$TMP/p" 2>"$TMP/err" \
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_fmt.c" -o "$TMP/p" 2>"$TMP/err" \
     || { fail "default rt compile: $(head -1 "$TMP/err")"; }
 if [ -x "$TMP/p" ]; then
     got=0; out=$(timeout "$RUN_TIMEOUT" "$TMP/p" 2>/dev/null) || got=$?

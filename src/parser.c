@@ -1,4 +1,5 @@
 #include "fakecc/parser.h"
+#include "fakecc/pkg.h"
 #include "fakecc/common.h"
 
 #include <ctype.h>
@@ -14,6 +15,7 @@ typedef struct {
     const TokenArray *tokens;
     size_t pos;
     TranslationUnit *tu;   /* backing TU — parser writes structs directly */
+    PkgContext *pkg_ctx;   /* NULL → imports are rejected */
     /* Prepended statements: multi-declarators (`int a, b;`) parse as several
      * ST_DECLs but a statement slot holds one — the trailing declarators are
      * queued here and flushed into the enclosing stmt-list before the next
@@ -85,10 +87,64 @@ static int skip_attribute(Parser *p) {
     return 1;
 }
 
-/* Recognize an integer type at the current position.
- *   [signed|unsigned] (char|short|int|long)
- * Also accepts bare "signed" / "unsigned" (= int).
- * Returns Type; emits a diagnostic if no type keyword is present. */
+/* True if `name` appears in this TU's import list. */
+static int tu_has_import(const TranslationUnit *tu, const char *name) {
+    for (size_t i = 0; i < tu->imports.len; i++)
+        if (strcmp(tu->imports.data[i].name, name) == 0) return 1;
+    return 0;
+}
+
+/* Resolve a typedef from an imported package or (for unqualified names) from
+ * the current package's already-parsed sibling files / export table.
+ * Ensures any referenced StructDef is cloned into the local TU; does NOT
+ * inject a local typedef alias (so `typedef io.FILE FILE;` can bind the name). */
+static const Type *resolve_pkg_typedef(Parser *p, const char *pkg_name,
+                                       const char *type_name) {
+    if (!p->pkg_ctx) return NULL;
+    Package *pkg = pkg_find(p->pkg_ctx, pkg_name);
+    if (!pkg) return NULL;
+    const Type *t = pkg_find_typedef(pkg, type_name);
+    if (!t) {
+        /* Same-package siblings may not have exports built yet — search
+         * already-parsed files directly. */
+        for (size_t f = 0; f < pkg->nfiles; f++) {
+            TranslationUnit *sib = &pkg->files[f];
+            if (sib == p->tu) continue;
+            t = typedef_registry_find(&sib->typedefs, type_name);
+            if (t) break;
+        }
+    }
+    if (!t) return NULL;
+    /* Clone referenced structs into the local registry for member layout. */
+    if (t->kind == TY_STRUCT && t->tag) {
+        const StructDef *sd = pkg_find_struct(pkg, t->tag);
+        if (!sd) {
+            for (size_t f = 0; f < pkg->nfiles && !sd; f++)
+                sd = struct_registry_find_c(&pkg->files[f].structs, t->tag);
+        }
+        if (sd) pkg_clone_struct_into(&p->tu->structs, sd);
+    } else if (t->kind == TY_PTR && t->pointee && t->pointee->kind == TY_STRUCT
+               && t->pointee->tag) {
+        const StructDef *sd = pkg_find_struct(pkg, t->pointee->tag);
+        if (!sd) {
+            for (size_t f = 0; f < pkg->nfiles && !sd; f++)
+                sd = struct_registry_find_c(&pkg->files[f].structs,
+                                           t->pointee->tag);
+        }
+        if (sd) pkg_clone_struct_into(&p->tu->structs, sd);
+    }
+    return t;
+}
+
+/* Look up an unqualified typedef: local first, then current package. */
+static const Type *find_typedef_with_fallback(Parser *p, const char *name) {
+    const Type *t = typedef_registry_find(&p->tu->typedefs, name);
+    if (t) return t;
+    if (!p->pkg_ctx || !p->tu->package.name) return NULL;
+    return resolve_pkg_typedef(p, p->tu->package.name, name);
+}
+
+/* Recognize a type at position `pos` (keywords, typedefs, pkg.Type). */
 static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
     if (k == TK_KW_VOID || k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
@@ -98,10 +154,34 @@ static int is_type_start(const Parser *p, size_t pos) {
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN
         || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE)
         return 1;
-    /* A typedef name looks like an ordinary identifier. */
-    if (k == TK_IDENT
-        && typedef_registry_find(&p->tu->typedefs, p->tokens->data[pos].text))
-        return 1;
+    if (k == TK_IDENT) {
+        const char *text = p->tokens->data[pos].text;
+        if (typedef_registry_find(&p->tu->typedefs, text))
+            return 1;
+        /* pkg.Type — IDENT '.' IDENT where IDENT is an imported package. */
+        if (pos + 2 < p->tokens->len
+            && p->tokens->data[pos + 1].kind == TK_DOT
+            && p->tokens->data[pos + 2].kind == TK_IDENT
+            && tu_has_import(p->tu, text)
+            && p->pkg_ctx) {
+            Package *pkg = pkg_find(p->pkg_ctx, text);
+            if (pkg && pkg_find_typedef(pkg, p->tokens->data[pos + 2].text))
+                return 1;
+        }
+        /* Same-package unqualified typedef (siblings / export table). */
+        if (p->pkg_ctx && p->tu->package.name) {
+            Package *cur = pkg_find(p->pkg_ctx, p->tu->package.name);
+            if (cur && pkg_find_typedef(cur, text))
+                return 1;
+            if (cur) {
+                for (size_t f = 0; f < cur->nfiles; f++) {
+                    if (&cur->files[f] == p->tu) continue;
+                    if (typedef_registry_find(&cur->files[f].typedefs, text))
+                        return 1;
+                }
+            }
+        }
+    }
     return 0;
 }
 
@@ -265,9 +345,33 @@ static Type parse_specifiers(Parser *p) {
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         return t;
     }
-    /* typedef name — resolve to the aliased type. */
+    /* typedef name — local, pkg.Type, or same-package fallback. */
     if (peek(p)->kind == TK_IDENT) {
-        const Type *alias = typedef_registry_find(&p->tu->typedefs, peek(p)->text);
+        /* Qualified: pkg.Type */
+        if (tu_has_import(p->tu, peek(p)->text)
+            && p->pos + 2 < p->tokens->len
+            && p->tokens->data[p->pos + 1].kind == TK_DOT
+            && p->tokens->data[p->pos + 2].kind == TK_IDENT) {
+            const char *pkg_name = peek(p)->text;
+            const char *type_name = p->tokens->data[p->pos + 2].text;
+            SourceLoc loc = peek(p)->loc;
+            const Type *alias = resolve_pkg_typedef(p, pkg_name, type_name);
+            if (!alias) {
+                die_at(loc.file, loc.line, loc.col,
+                       "package '%s' has no type '%s'", pkg_name, type_name);
+            }
+            advance(p); /* pkg */
+            advance(p); /* . */
+            advance(p); /* Type */
+            Type t = type_clone(*alias);
+            if (t.kind == TY_STRUCT && t.tag) {
+                const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
+                if (sd) t.width = sd->size;
+            }
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
+        const Type *alias = find_typedef_with_fallback(p, peek(p)->text);
         if (alias) {
             advance(p);
             Type t = type_clone(*alias);
@@ -2250,11 +2354,12 @@ static PackageDecl parse_package_decl(Parser *p) {
     return pd;
 }
 
-void parse(const TokenArray *tokens, TranslationUnit *tu) {
+void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx) {
     Parser p;
     p.tokens = tokens;
     p.pos = 0;
     p.tu = tu;
+    p.pkg_ctx = ctx;
     stmt_array_init(&p.prepend);
     p.anon_counter = 0;
 
@@ -2267,11 +2372,29 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
 
     tu->package = parse_package_decl(&p);
 
-    /* reject import in Slice 1 */
-    if (peek(&p)->kind == TK_KW_IMPORT) {
-        const Token *t = peek(&p);
-        die_at(t->loc.file, t->loc.line, t->loc.col,
-               "'import' is not supported yet");
+    /* Zero or more `import IDENT;` — each eagerly loads that package. */
+    while (peek(&p)->kind == TK_KW_IMPORT) {
+        const Token *kw = peek(&p);
+        advance(&p);
+        const Token *ident = peek(&p);
+        if (ident->kind != TK_IDENT) {
+            die_at(ident->loc.file, ident->loc.line, ident->loc.col,
+                   "expected package name after 'import'");
+        }
+        advance(&p);
+        expect_kind(&p, TK_SEMICOLON, "';'");
+        if (!ctx) {
+            die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                   "'import' requires a package search path (driver bug)");
+        }
+        for (size_t i = 0; i < tu->imports.len; i++) {
+            if (strcmp(tu->imports.data[i].name, ident->text) == 0) {
+                die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                       "duplicate import of package '%s'", ident->text);
+            }
+        }
+        import_array_push(&tu->imports, ident->text, kw->loc);
+        pkg_load(ctx, ident->text, kw->loc);
     }
 
     /* At file scope: each top-level declaration starts with a type OR
@@ -2396,7 +2519,8 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
                         advance(&p);
                     } while (depth > 0 && peek(&p)->kind != TK_EOF);
                 }
-            } else if (tk == TK_IDENT && typedef_registry_find(&tu->typedefs, peek(&p)->text)) {
+            } else if (tk == TK_IDENT
+                       && find_typedef_with_fallback(&p, peek(&p)->text)) {
                 advance(&p);
             } else {
                 break;
@@ -2453,4 +2577,8 @@ void parse(const TokenArray *tokens, TranslationUnit *tu) {
         stmt_array_push(&tu->globals, p.prepend.data[i]);
     p.prepend.len = 0;
     stmt_array_free(&p.prepend);
+}
+
+void parse(const TokenArray *tokens, TranslationUnit *tu) {
+    parse_in_pkg(tokens, tu, NULL);
 }

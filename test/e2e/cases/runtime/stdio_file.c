@@ -1,53 +1,43 @@
-// stdio file I/O: fopen/fclose/fwrite/fread/fseek/ftell over a real
+// stdio file I/O: runtime.fopen/runtime.fclose/runtime.fwrite/runtime.fread/runtime.fseek/runtime.ftell over a real
 // file in a temporary location.  Pin that bytes written can be read
-// back, that fseek+ftell track the offset, and that fileno returns the
+// back, that runtime.fseek+runtime.ftell track the offset, and that runtime.fileno returns the
 // expected descriptor numbers for the standard streams.
 // expect: 0
 package main;
-typedef struct FILE FILE;
-extern FILE *fopen(const char *path, const char *mode);
-extern int fclose(FILE *f);
-extern long fwrite(const void *p, long sz, long nm, FILE *f);
-extern long fread(void *p, long sz, long nm, FILE *f);
-extern int fseek(FILE *f, long off, int whence);
-extern long ftell(FILE *f);
-extern int fileno(FILE *f);
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *stderr;
 
+import runtime;
 int main() {
     char buf[16];
     long n;
-    FILE *f;
+    runtime.FILE *f;
 
     /* write a file */
-    f = fopen("/tmp/fakecc_stdio_test.dat", "w");
+    f = runtime.fopen("/tmp/fakecc_stdio_test.dat", "w");
     if (f == 0) return 1;
-    if (fwrite("abcd", 1, 4, f) != 4) { fclose(f); return 2; }
-    if (fclose(f) != 0) return 3;
+    if (runtime.fwrite("abcd", 1, 4, f) != 4) { runtime.fclose(f); return 2; }
+    if (runtime.fclose(f) != 0) return 3;
 
     /* read it back */
-    f = fopen("/tmp/fakecc_stdio_test.dat", "r");
+    f = runtime.fopen("/tmp/fakecc_stdio_test.dat", "r");
     if (f == 0) return 4;
-    n = fread(buf, 1, 16, f);
-    if (n != 4) { fclose(f); return 5; }
+    n = runtime.fread(buf, 1, 16, f);
+    if (n != 4) { runtime.fclose(f); return 5; }
     if (buf[0] != 'a' || buf[1] != 'b' || buf[2] != 'c' || buf[3] != 'd') {
-        fclose(f); return 6;
+        runtime.fclose(f); return 6;
     }
 
-    /* fseek to offset 1 (SEEK_SET=0), ftell reports 1, next read is 'b' */
-    if (fseek(f, 1, 0) != 0) { fclose(f); return 7; }
-    if (ftell(f) != 1) { fclose(f); return 8; }
-    n = fread(buf, 1, 1, f);
-    if (n != 1 || buf[0] != 'b') { fclose(f); return 9; }
+    /* runtime.fseek to offset 1 (SEEK_SET=0), runtime.ftell reports 1, next read is 'b' */
+    if (runtime.fseek(f, 1, 0) != 0) { runtime.fclose(f); return 7; }
+    if (runtime.ftell(f) != 1) { runtime.fclose(f); return 8; }
+    n = runtime.fread(buf, 1, 1, f);
+    if (n != 1 || buf[0] != 'b') { runtime.fclose(f); return 9; }
 
-    if (fclose(f) != 0) return 10;
+    if (runtime.fclose(f) != 0) return 10;
 
-    /* fileno of the standard streams */
-    if (fileno(stdin) != 0) return 11;
-    if (fileno(stdout) != 1) return 12;
-    if (fileno(stderr) != 2) return 13;
+    /* runtime.fileno of the standard streams */
+    if (runtime.fileno(runtime.stdin) != 0) return 11;
+    if (runtime.fileno(runtime.stdout) != 1) return 12;
+    if (runtime.fileno(runtime.stderr) != 2) return 13;
 
     return 0;
 }

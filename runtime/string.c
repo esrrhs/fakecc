@@ -1,7 +1,5 @@
 /* Builtin freestanding string/memory routines — FakeCC dialect, no libc. */
-package main;
-
-typedef unsigned long size_t;
+package runtime;
 
 void *memcpy(void *dst, const void *src, size_t n) {
     char *d = (char *)dst;
@@ -134,8 +132,6 @@ char *strstr(const char *hay, const char *needle) {
     }
     return 0;
 }
-
-extern void *malloc(size_t n);
 
 char *strdup(const char *s) {
     size_t n = strlen(s);
