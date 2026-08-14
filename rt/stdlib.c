@@ -219,24 +219,32 @@ static void qsort_swap(char *a, char *b, size_t sz) {
 
 static void qsort_rec(char *base, size_t n, size_t sz,
                       int (*cmp)(const void *, const void *)) {
-    if (n < 2) return;
-    char *pivot = base + (n / 2) * sz;
-    size_t i = 0;
-    size_t j = n - 1;
-    while (1) {
-        while (cmp(base + i * sz, pivot) < 0) i = i + 1;
-        while (cmp(base + j * sz, pivot) > 0) j = j - 1;
-        if (i >= j) break;
-        qsort_swap(base + i * sz, base + j * sz, sz);
-        if (pivot == base + i * sz) pivot = base + j * sz;
-        else if (pivot == base + j * sz) pivot = base + i * sz;
-        i = i + 1;
-        if (j == 0) break;
-        j = j - 1;
+    /* Lomuto partition: pivot = last element.  Every element left of the
+     * final pivot slot is < pivot, every element right is >= pivot, so the
+     * pivot lands at a strictly interior index and both sides are smaller
+     * than n — the old Hoare scheme could return mid == n on a sorted pair
+     * (pivot == max), recursing on (base, n) forever.  Tail-call the larger
+     * partition so stack depth stays O(log n). */
+    while (n > 1) {
+        char *pivot = base + (n - 1) * sz;
+        size_t i;
+        size_t store = 0;
+        for (i = 0; i < n - 1; i = i + 1) {
+            if (cmp(base + i * sz, pivot) < 0) {
+                if (i != store) qsort_swap(base + i * sz, base + store * sz, sz);
+                store = store + 1;
+            }
+        }
+        if (store != n - 1) qsort_swap(base + store * sz, pivot, sz);
+        if (store < n - store - 1) {
+            qsort_rec(base, store, sz, cmp);
+            base = base + (store + 1) * sz;
+            n = n - store - 1;
+        } else {
+            qsort_rec(base + (store + 1) * sz, n - store - 1, sz, cmp);
+            n = store;
+        }
     }
-    size_t mid = j + 1;
-    qsort_rec(base, mid, sz, cmp);
-    qsort_rec(base + mid * sz, n - mid, sz, cmp);
 }
 
 void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *)) {
