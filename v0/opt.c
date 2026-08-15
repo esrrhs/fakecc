@@ -143,6 +143,11 @@ struct IRDebugVar {
     int alloca_ssa;
     int param_idx;
 };typedef struct IRDebugVar IRDebugVar;
+struct ExtractedMarker {
+    int var;
+    int value;
+    int pos;
+};typedef struct ExtractedMarker ExtractedMarker;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -840,6 +845,59 @@ struct RAResult {
 RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
+typedef struct FILE FILE;
+extern FILE *stderr;
+extern FILE *stdin;
+extern FILE *stdout;
+extern int fprintf(FILE *f, const char *fmt, ...);
+extern int vfprintf(FILE *f, const char *fmt, va_list ap);
+extern int printf(const char *fmt, ...);
+extern int sprintf(char *buf, const char *fmt, ...);
+extern int snprintf(char *buf, size_t n, const char *fmt, ...);
+extern int fputs(const char *s, FILE *f);
+extern int fputc(int c, FILE *f);
+extern int fflush(FILE *f);
+extern int puts(const char *s);
+extern int putchar(int c);
+extern FILE *fopen(const char *p, const char *m);
+extern int fclose(FILE *f);
+extern size_t fwrite(const void *p, size_t n, size_t m, FILE *f);
+extern size_t fread(void *p, size_t n, size_t m, FILE *f);
+extern void perror(const char *s);
+extern int fileno(FILE *f);
+extern int fseek(FILE *f, long off, int whence);
+extern long ftell(FILE *f);
+typedef long fpos_t;
+extern void *malloc(size_t n);
+extern void *realloc(void *p, size_t n);
+extern void *calloc(size_t n, size_t m);
+extern void free(void *p);
+extern void exit(int code);
+extern void abort(void);
+extern int atoi(const char *s);
+extern long atol(const char *s);
+extern long strtol(const char *s, char **end, int base);
+extern unsigned long strtoul(const char *s, char **end, int base);
+extern unsigned long long strtoull(const char *s, char **end, int base);
+extern double strtod(const char *s, char **end);
+extern float strtof(const char *s, char **end);
+extern long double strtold(const char *nptr, char **endptr);
+extern void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void*, const void*));
+extern char *getenv(const char *name);
+extern void *memcpy(void *dst, const void *src, size_t n);
+extern void *memmove(void *dst, const void *src, size_t n);
+extern void *memset(void *dst, int c, size_t n);
+extern int memcmp(const void *a, const void *b, size_t n);
+extern size_t strlen(const char *s);
+extern char *strdup(const char *s);
+extern int strcmp(const char *a, const char *b);
+extern int strncmp(const char *a, const char *b, size_t n);
+extern char *strchr(const char *s, int c);
+extern char *strrchr(const char *s, int c);
+extern char *strstr(const char *a, const char *b);
+extern char *strcpy(char *dst, const char *src);
+extern char *strncpy(char *dst, const char *src, size_t n);
+extern char *strerror(int n);
 static void pin_scalar_allocas(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
@@ -854,6 +912,63 @@ static void pin_scalar_allocas(IRFunction *fn) {
         if (inst->alloca_bytes < 1) inst->alloca_bytes = 8;
     }
 }
+static void extract_markers(IRFunction *fn, ExtractedMarker **out, int *nout) {
+    *out = ((void*)0);
+    *nout = 0;
+    int pos = 0;
+    size_t w = 0;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        IRInst *in = &fn->insts.data[i];
+        if (in->op != IR_DBG_VALUE) {
+            fn->insts.data[w++] = *in;
+            pos++;
+            continue;
+        }
+        *out = xrealloc(*out, ((size_t)*nout + 1) * sizeof(ExtractedMarker));
+        (*out)[*nout].var = (int)in->imm;
+        (*out)[*nout].value = in->a;
+        (*out)[*nout].pos = pos;
+        (*nout)++;
+    }
+    fn->insts.len = w;
+}
+static void reinsert_markers(IRFunction *fn, ExtractedMarker *markers, int nmarkers) {
+    IRInstArray out;
+    out.len = 0;
+    out.cap = fn->insts.len + (size_t)nmarkers;
+    out.data = xmalloc(out.cap * sizeof(IRInst));
+    int mi = 0;
+    int real = 0;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        while (mi < nmarkers && markers[mi].pos == real) {
+            IRInst marker;
+            memset(&marker, 0, sizeof(marker));
+            marker.op = IR_DBG_VALUE;
+            marker.dst = -1;
+            marker.imm = markers[mi].var;
+            marker.a = markers[mi].value;
+            if (out.len >= out.cap) { out.cap *= 2; out.data = xrealloc(out.data, out.cap * sizeof(IRInst)); }
+            out.data[out.len++] = marker;
+            mi++;
+        }
+        if (out.len >= out.cap) { out.cap *= 2; out.data = xrealloc(out.data, out.cap * sizeof(IRInst)); }
+        out.data[out.len++] = fn->insts.data[i];
+        real++;
+    }
+    while (mi < nmarkers && markers[mi].pos == real) {
+        IRInst marker;
+        memset(&marker, 0, sizeof(marker));
+        marker.op = IR_DBG_VALUE;
+        marker.dst = -1;
+        marker.imm = markers[mi].var;
+        marker.a = markers[mi].value;
+        if (out.len >= out.cap) { out.cap *= 2; out.data = xrealloc(out.data, out.cap * sizeof(IRInst)); }
+        out.data[out.len++] = marker;
+        mi++;
+    }
+    free(fn->insts.data);
+    fn->insts = out;
+}
 void opt(IRModule *ir, int opt_level, int want_debug) {
     for (size_t i = 0; i < ir->functions.len; i++) {
         IRFunction *fn = &ir->functions.data[i];
@@ -861,8 +976,20 @@ void opt(IRModule *ir, int opt_level, int want_debug) {
             pin_scalar_allocas(fn);
         else
             opt_mem2reg(fn, want_debug);
-        scalar_cleanup(fn);
-        fn->ra = reg_alloc(fn);
-        fn->ra_xmm = reg_alloc_xmm(fn);
+        if (want_debug) {
+            scalar_cleanup(fn);
+            ExtractedMarker *markers = ((void*)0);
+            int nmarkers = 0;
+            extract_markers(fn, &markers, &nmarkers);
+            fn->ra = reg_alloc(fn);
+            fn->ra_xmm = reg_alloc_xmm(fn);
+            if (nmarkers > 0)
+                reinsert_markers(fn, markers, nmarkers);
+            free(markers);
+        } else {
+            scalar_cleanup(fn);
+            fn->ra = reg_alloc(fn);
+            fn->ra_xmm = reg_alloc_xmm(fn);
+        }
     }
 }

@@ -359,6 +359,25 @@ struct SectionLayout {
     size_t data_len;
     size_t bss_file_offset;
     size_t bss_size;
+    int have_dynamic;
+    size_t dynstr_off;
+    size_t dynsym_off;
+    size_t hash_off;
+    size_t rela_plt_off;
+    size_t rela_dyn_off;
+    size_t dynamic_off;
+    size_t dynstr_size;
+    size_t dynsym_size;
+    size_t hash_size;
+    size_t rela_plt_size;
+    size_t rela_dyn_size;
+    size_t dynamic_size;
+    uint64_t dynstr_vaddr;
+    uint64_t dynsym_vaddr;
+    uint64_t hash_vaddr;
+    uint64_t rela_plt_vaddr;
+    uint64_t rela_dyn_vaddr;
+    uint64_t dynamic_vaddr;
 };typedef struct SectionLayout SectionLayout;
 static void finalize_sections(
     Buffer *elf, EmitModule **mods, size_t n,
@@ -489,6 +508,16 @@ Buffer debug_frame;
         shname_debug_frame = append_string(&shstrtab, ".debug_frame");
         shname_debug_loc = append_string(&shstrtab, ".debug_loc");
     }
+    uint32_t shname_dynstr = 0, shname_dynsym = 0, shname_hash = 0;
+    uint32_t shname_rela_plt = 0, shname_rela_dyn = 0, shname_dynamic = 0;
+    if (lay->have_dynamic) {
+        shname_dynstr = append_string(&shstrtab, ".dynstr");
+        shname_dynsym = append_string(&shstrtab, ".dynsym");
+        shname_hash = append_string(&shstrtab, ".hash");
+        shname_rela_plt = append_string(&shstrtab, ".rela.plt");
+        shname_rela_dyn = append_string(&shstrtab, ".rela.dyn");
+        shname_dynamic = append_string(&shstrtab, ".dynamic");
+    }
     while (elf->len & 7) buf_u8(elf, 0);
     size_t off_symtab = elf->len;
     buf_bytes(elf, symtab.data, symtab.len);
@@ -544,7 +573,29 @@ Buffer debug_frame;
         write_shdr_exec(elf, shname_debug_loc, 1, 0, 0,
                         off_debug_loc, debug_loc.len, 0, 0, 1, 0);
     }
-    uint16_t shnum = (uint16_t)(have_dbg ? 14 : 8);
+    int dyn_base = have_dbg ? 14 : 8;
+    if (lay->have_dynamic) {
+        write_shdr_exec(elf, shname_dynstr, 3, 0x2,
+                        lay->dynstr_vaddr, lay->dynstr_off, lay->dynstr_size,
+                        0, 0, 1, 0);
+        write_shdr_exec(elf, shname_dynsym, 11, 0x2,
+                        lay->dynsym_vaddr, lay->dynsym_off, lay->dynsym_size,
+                        dyn_base + 0, 1, 8, 24);
+        write_shdr_exec(elf, shname_hash, 5, 0x2,
+                        lay->hash_vaddr, lay->hash_off, lay->hash_size,
+                        dyn_base + 1, 0, 4, 4);
+        write_shdr_exec(elf, shname_rela_plt, 4, 0x2,
+                        lay->rela_plt_vaddr, lay->rela_plt_off,
+                        lay->rela_plt_size, dyn_base + 1, 1, 8, 24);
+        write_shdr_exec(elf, shname_rela_dyn, 4, 0x2,
+                        lay->rela_dyn_vaddr, lay->rela_dyn_off,
+                        lay->rela_dyn_size, dyn_base + 1, 3, 8, 24);
+        write_shdr_exec(elf, shname_dynamic, 6,
+                        0x2 | 0x1, lay->dynamic_vaddr,
+                        lay->dynamic_off, lay->dynamic_size,
+                        dyn_base + 0, 0, 8, 16);
+    }
+    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + (lay->have_dynamic ? 6 : 0));
     uint16_t shstrndx = 7;
     memcpy(elf->data + 40, &shoff, sizeof(shoff));
     memcpy(elf->data + 60, &shnum, sizeof(shnum));
@@ -1168,6 +1219,25 @@ Buffer dynamic;
         lay.data_len = data.len;
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
+        lay.have_dynamic = 1;
+        lay.dynstr_off = hdr_size + dynstr_off;
+        lay.dynsym_off = hdr_size + dynsym_off;
+        lay.hash_off = hdr_size + hash_off;
+        lay.rela_plt_off = hdr_size + rela_plt_off;
+        lay.rela_dyn_off = hdr_size + rela_dyn_off;
+        lay.dynamic_off = hdr_size + dynamic_off;
+        lay.dynstr_size = dynstr.len;
+        lay.dynsym_size = dynsym.len;
+        lay.hash_size = hash.len;
+        lay.rela_plt_size = rela_plt.len;
+        lay.rela_dyn_size = rela_dyn.len;
+        lay.dynamic_size = dynamic.len;
+        lay.dynstr_vaddr = rx_base_vaddr + dynstr_off;
+        lay.dynsym_vaddr = rx_base_vaddr + dynsym_off;
+        lay.hash_vaddr = rx_base_vaddr + hash_off;
+        lay.rela_plt_vaddr = rx_base_vaddr + rela_plt_off;
+        lay.rela_dyn_vaddr = rx_base_vaddr + rela_dyn_off;
+        lay.dynamic_vaddr = rx_base_vaddr + dynamic_off;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
         FILE *f = fopen(path, "wb");
@@ -1226,6 +1296,7 @@ Buffer dynamic;
         lay.data_len = data.len;
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
+        lay.have_dynamic = 0;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
         FILE *f = fopen(path, "wb");

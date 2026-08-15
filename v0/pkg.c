@@ -1088,5 +1088,8 @@ Package *pkg_register_tus(PkgContext *ctx, const char *name,
         pkg->files[i] = *tus[i];
     pkgs_push(ctx, pkg);
     build_exports(pkg);
+    free(pkg->files);
+    pkg->files = ((void*)0);
+    pkg->nfiles = 0;
     return pkg;
 }

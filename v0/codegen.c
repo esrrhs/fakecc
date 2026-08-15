@@ -295,6 +295,11 @@ struct IRDebugVar {
     int alloca_ssa;
     int param_idx;
 };typedef struct IRDebugVar IRDebugVar;
+struct ExtractedMarker {
+    int var;
+    int value;
+    int pos;
+};typedef struct ExtractedMarker ExtractedMarker;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -1948,6 +1953,18 @@ static void cv_entry_reg(Buffer *b, int dwarf_reg) {
     buffer_append(b, inner.data, inner.len);
     buffer_free(&inner);
 }
+static int resolve_alloca_slot(const IRFunction *fn, IRValue v, size_t at) {
+    if (v < 0) return -1;
+    for (size_t i = at; i > 0; ) {
+        i--;
+        const IRInst *ins = &fn->insts.data[i];
+        if (ins->dst != v) continue;
+        if (ins->op == IR_ADDR) return ins->a;
+        if (ins->op == IR_LOAD) return resolve_alloca_slot(fn, ins->a, i);
+        return -1;
+    }
+    return -1;
+}
 static int ssa_is_param(const IRFunction *fn, IRValue v, int param_idx, size_t at) {
     if (v < 0 || param_idx < 0) return 0;
     int dbg_i = -1;
@@ -1973,6 +1990,18 @@ static int ssa_is_param(const IRFunction *fn, IRValue v, int param_idx, size_t a
             return ins->a == v;
         if (ins->op == IR_PARAM && (int)ins->imm == param_idx && ins->dst == v)
             return 1;
+        if ((ins->op == IR_LOAD || ins->op == IR_LOAD_PTR) && ins->dst == v) {
+            int slot = resolve_alloca_slot(fn, ins->a, i);
+            if (slot < 0) return 0;
+            for (size_t j = i; j > 0; ) {
+                j--;
+                const IRInst *s = &fn->insts.data[j];
+                if ((s->op == IR_STORE || s->op == IR_STORE_PTR)
+                    && resolve_alloca_slot(fn, s->a, j) == slot)
+                    return ssa_is_param(fn, s->b, param_idx, j);
+            }
+            return 0;
+        }
     }
     return 0;
 }
@@ -2016,6 +2045,17 @@ static int synth_call_value(const IRFunction *fn, IRValue v, size_t at,
             cv_sleb(out, (int64_t)def->imm);
         }
         return 1;
+    case IR_LOAD: {
+        int slot = def->a;
+        for (size_t i = at; i > 0; ) {
+            i--;
+            const IRInst *s = &fn->insts.data[i];
+            if (s->op == IR_STORE && s->a == slot)
+                return synth_call_value(fn, s->b, i, param_entry_dwarf,
+                                        nparams, out, depth + 1);
+        }
+        return 0;
+    }
     case IR_COPY:
     case IR_SEXT:
     case IR_ZEXT:
@@ -2198,6 +2238,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (fn->insts.data[j].op == IR_PARAM) nparams++;
             else break;
         }
+        if (nparams > 64) nparams = 64;
         int arrive_reg[64];
         int arrive_is_xmm[64];
         int stack_off[64];
@@ -2759,6 +2800,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 int nargs = inst->call_nargs;
+                if (nargs > 32) nargs = 32;
                 int target_reg[32];
                 int target_is_xmm[32];
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
@@ -2881,8 +2923,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                                       entry_dwarf, nparams,
                                                       &cv, 0)
                                     || cv.len == 0) {
-                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31)
+                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31) {
                                         cv_u8(&cv, (uint8_t)(0x50 + cp->dwarf_reg));
+                                        cv_u8(&cv, 0x93);
+                                        cv_uleb(&cv, 4);
+                                    }
                                 }
                                 cp->value_expr_len = cv.len;
                                 if (cv.len) {
@@ -2933,8 +2978,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                                       entry_dwarf, nparams,
                                                       &cv, 0)
                                     || cv.len == 0) {
-                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31)
+                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31) {
                                         cv_u8(&cv, (uint8_t)(0x50 + cp->dwarf_reg));
+                                        cv_u8(&cv, 0x93);
+                                        cv_uleb(&cv, 4);
+                                    }
                                 }
                                 cp->value_expr_len = cv.len;
                                 if (cv.len) {
@@ -3395,8 +3443,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 dv.loc_kind = DBG_LOC_NONE;
                 if (idv->alloca_ssa >= 0 && idv->alloca_ssa < fn->next_value_id
                     && alloca_off[idv->alloca_ssa] != 0) {
-                    dv.loc_kind = DBG_LOC_FBREG;
-                    dv.rbp_offset = alloca_off[idv->alloca_ssa];
+                    if (idv->kind == IR_DBG_PARAM && idv->param_idx >= 0
+                        && idv->param_idx < nparams
+                        && arrive_reg[idv->param_idx] >= 0) {
+                        int p = idv->param_idx;
+                        int dreg = arrive_is_xmm[p] ? (17 + arrive_reg[p])
+                                                     : reg_to_dwarf(arrive_reg[p]);
+                        dbg_var_add_range(&dv, start_offset, prologue_end_pc,
+                                          DBG_LOC_REG, 0, dreg);
+                        dbg_var_add_range(&dv, prologue_end_pc, fn_end_pc,
+                                          DBG_LOC_FBREG,
+                                          alloca_off[idv->alloca_ssa], -1);
+                    } else {
+                        dv.loc_kind = DBG_LOC_FBREG;
+                        dv.rbp_offset = alloca_off[idv->alloca_ssa];
+                    }
                 } else if (idv->kind == IR_DBG_PARAM && idv->param_idx >= 0
                            && idv->param_idx < nparams) {
                     int p = idv->param_idx;

@@ -295,6 +295,11 @@ struct IRDebugVar {
     int alloca_ssa;
     int param_idx;
 };typedef struct IRDebugVar IRDebugVar;
+struct ExtractedMarker {
+    int var;
+    int value;
+    int pos;
+};typedef struct ExtractedMarker ExtractedMarker;
 struct IRFunction {
     char *name;
     IRInstArray insts;
@@ -1332,16 +1337,8 @@ int main(int argc, char **argv) {
     SourceLoc zloc = {0};
     if (nrt)
         pkg_load(&pkg, rt_pkg_name(), zloc);
-    int nrt_files = 0;
-    if (nrt) {
-        Package *p = pkg_find(&pkg, rt_pkg_name());
-        nrt_files = (int)p->nfiles;
-    }
-    int nmods = ninputs + nrt_files;
-    EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
-    EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
     TranslationUnit *user_tus = malloc((size_t)ninputs * sizeof(TranslationUnit));
-    if (!mods || !mod_ptrs || !user_tus) {
+    if (!user_tus) {
         fprintf(stderr, "fakecc: out of memory\n");
         exit(1);
     }
@@ -1359,6 +1356,19 @@ int main(int argc, char **argv) {
             }
         }
     }
+    int nlinked_files = 0;
+    for (size_t p = 0; p < pkg.npkgs; p++) {
+        Package *pp = pkg.pkgs[p];
+        if (!pp->owns_files) continue;
+        nlinked_files += (int)pp->nfiles;
+    }
+    int nmods = ninputs + nlinked_files;
+    EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
+    EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
+    if (!mods || !mod_ptrs) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
@@ -1371,11 +1381,12 @@ int main(int argc, char **argv) {
     }
     free(user_tus);
     int mi = ninputs;
-    if (nrt) {
-        Package *p = pkg_find(&pkg, rt_pkg_name());
-        for (size_t f = 0; f < p->nfiles; f++) {
-            char *fake = path_join(p->dir, "_.c");
-            lower_tu(&p->files[f], fake, &mods[mi], opt_level, 0, &pkg);
+    for (size_t p = 0; p < pkg.npkgs; p++) {
+        Package *pp = pkg.pkgs[p];
+        if (!pp->owns_files) continue;
+        for (size_t f = 0; f < pp->nfiles; f++) {
+            char *fake = path_join(pp->dir, "_.c");
+            lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg);
             free(fake);
             mod_ptrs[mi] = &mods[mi];
             mi++;

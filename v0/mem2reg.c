@@ -143,6 +143,11 @@ struct IRDebugVar {
     int alloca_ssa;
     int param_idx;
 };typedef struct IRDebugVar IRDebugVar;
+struct ExtractedMarker {
+    int var;
+    int value;
+    int pos;
+};typedef struct ExtractedMarker ExtractedMarker;
 struct IRFunction {
     char *name;
     IRInstArray insts;
