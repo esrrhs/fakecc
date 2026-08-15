@@ -94,6 +94,18 @@ static int ends_with(const char *s, const char *suf) {
     return n >= m && strcmp(s + n - m, suf) == 0;
 }
 
+/* Is `name` one of the user's own package names (the `names` array, of length
+ * `nnames`)?  Those packages' TUs are the user inputs, codegen'd in Phase 2;
+ * their cached copies must be skipped in Phase 3 to avoid double codegen. */
+static int is_user_pkg(const char *name, char **names, int nnames) {
+    if (!name) return 0;
+    for (int i = 0; i < nnames; i++) {
+        if (names[i] && strcmp(names[i], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 static int is_system_soname(const char *soname) {
     return strcmp(soname, "libc.so.6") == 0
         || strcmp(soname, "libm.so.6") == 0
@@ -389,18 +401,8 @@ int main(int argc, char **argv) {
     if (nrt)
         pkg_load(&pkg, rt_pkg_name(), zloc);
 
-    /* Count modules: user inputs + every file of the rt package. */
-    int nrt_files = 0;
-    if (nrt) {
-        Package *p = pkg_find(&pkg, rt_pkg_name());
-        nrt_files = (int)p->nfiles;
-    }
-
-    int nmods = ninputs + nrt_files;
-    EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
-    EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
     TranslationUnit *user_tus = malloc((size_t)ninputs * sizeof(TranslationUnit));
-    if (!mods || !mod_ptrs || !user_tus) {
+    if (!user_tus) {
         fprintf(stderr, "fakecc: out of memory\n");
         exit(1);
     }
@@ -425,6 +427,37 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Snapshot the user's own package names before Phase 2's tu_free releases
+     * user_tus[i].package.name.  Both the link-file count and Phase 3 consult
+     * this snapshot to skip the user's own package (its TUs are the user
+     * inputs, codegen'd in Phase 2). */
+    char **user_pkg_names = NULL;
+    int n_user_pkg = 0;
+    for (int i = 0; i < ninputs; i++) {
+        if (user_tus[i].package.name) {
+            user_pkg_names = xrealloc(user_pkg_names, ((size_t)n_user_pkg + 1) * sizeof(char *));
+            user_pkg_names[n_user_pkg++] = xstrdup(user_tus[i].package.name);
+        }
+    }
+
+    /* Count package files to link: every loaded package except the user's own.
+     * This covers both the builtin rt and any package pulled in by `import`
+     * (transitively, since pkg_load resolves imports recursively). */
+    int nlinked_files = 0;
+    for (size_t p = 0; p < pkg.npkgs; p++) {
+        Package *pp = pkg.pkgs[p];
+        if (is_user_pkg(pp->name, user_pkg_names, n_user_pkg)) continue;
+        nlinked_files += (int)pp->nfiles;
+    }
+
+    int nmods = ninputs + nlinked_files;
+    EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
+    EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
+    if (!mods || !mod_ptrs) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
+
     /* Phase 2: sema + codegen user modules. */
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
@@ -438,18 +471,23 @@ int main(int argc, char **argv) {
     }
     free(user_tus);
 
-    /* Phase 3: codegen already-parsed rt package files. */
+    /* Phase 3: codegen already-parsed package files (builtin rt + any package
+     * pulled in by `import`).  User's own package is skipped via the snapshot
+     * — its TUs were codegen'd in Phase 2. */
     int mi = ninputs;
-    if (nrt) {
-        Package *p = pkg_find(&pkg, rt_pkg_name());
-        for (size_t f = 0; f < p->nfiles; f++) {
-            char *fake = path_join(p->dir, "_.c");
-            lower_tu(&p->files[f], fake, &mods[mi], opt_level, 0, &pkg);
+    for (size_t p = 0; p < pkg.npkgs; p++) {
+        Package *pp = pkg.pkgs[p];
+        if (is_user_pkg(pp->name, user_pkg_names, n_user_pkg)) continue;
+        for (size_t f = 0; f < pp->nfiles; f++) {
+            char *fake = path_join(pp->dir, "_.c");
+            lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg);
             free(fake);
             mod_ptrs[mi] = &mods[mi];
             mi++;
         }
     }
+    for (int i = 0; i < n_user_pkg; i++) free(user_pkg_names[i]);
+    free(user_pkg_names);
 
     emit_link(mod_ptrs, (size_t)nmods, output_path,
               (const char **)needed, (size_t)num_needed, nodefaultlibs,

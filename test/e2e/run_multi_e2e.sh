@@ -9,6 +9,9 @@ CC_EXTRA="${CC_FLAGS:-} $*"
 CC_TIMEOUT=${CC_TIMEOUT:-30}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 FAIL=0
+SUITE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Package fixtures for import tests (same role as in run_e2e.sh).
+export FAKECC_PKG="${SUITE_DIR}/pkg_fixtures${FAKECC_PKG:+:$FAKECC_PKG}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -148,5 +151,25 @@ echo 'package main; int b(void) { return 2; }' > "$TMP/nm2.c"
 "$FAKECC" $CC_EXTRA -c "$TMP/nm1.c" -o "$TMP/nm1.o"
 "$FAKECC" $CC_EXTRA -c "$TMP/nm2.c" -o "$TMP/nm2.o"
 run_multi_fail "$TMP/nm1.o" "$TMP/nm2.o"
+
+# --- User-package imports.  `import` now auto-links the package's code: only
+# the user's own source is passed on the command line.  FAKECC_PKG points at the
+# fixtures directory so `import <name>` resolves. ---
+
+# Import a user package and call its functions (calc.c auto-linked).
+echo 'package main; import calc; int main(void) { return calc.add(2, 3) + calc.mul(6, 7) - 47; }' > "$TMP/up_main.c"
+run_multi 0 "$TMP/up_main.c"
+
+# Import a package's typedef'd type, use it as a local, pass it by value.
+echo 'package main; import point; int main(void) { point.Pt p; p.x = 3; p.y = 4; return point.sum(p) - 7; }' > "$TMP/upt_main.c"
+run_multi 0 "$TMP/upt_main.c"
+
+# Import a multi-file package: one import must expose both files' exports.
+echo 'package main; import vec; int main(void) { return vec.scale(5) + vec.add(10, 20) - 45; }' > "$TMP/upm_main.c"
+run_multi 0 "$TMP/upm_main.c"
+
+# Negative: directory whose files disagree on the package name.
+echo 'package main; import dup; int main(void) { return 0; }' > "$TMP/updup_main.c"
+run_multi_fail "$TMP/updup_main.c"
 
 exit $FAIL
