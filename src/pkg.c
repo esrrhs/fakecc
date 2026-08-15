@@ -527,5 +527,13 @@ Package *pkg_register_tus(PkgContext *ctx, const char *name,
         pkg->files[i] = *tus[i];
     pkgs_push(ctx, pkg);
     build_exports(pkg);
+    /* Exports are deep-cloned into pkg->funcs/globals/typedefs/...; the shallow
+     * copies are no longer needed.  Drop them now so they never dangle once the
+     * driver frees its TUs in Phase 2 (owns_files is already 0, so pkg_ctx_free
+     * will not free them).  After this the package is identified as a user
+     * package solely by owns_files == 0. */
+    free(pkg->files);
+    pkg->files = NULL;
+    pkg->nfiles = 0;
     return pkg;
 }

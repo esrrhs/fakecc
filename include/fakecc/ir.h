@@ -161,6 +161,17 @@ typedef struct {
     int param_idx;        /* SysV param index for IR_DBG_PARAM; -1 else */
 } IRDebugVar;
 
+/* Debug marker held outside fn->insts during register allocation.  Says "from
+ * here on, dbg_var `var` lives in SSA value `value`"; `pos` is the number of
+ * real (non-marker) instructions that precede it in the post-cleanup array, so
+ * opt() can put it back at the exact same spot after regalloc.  `value` is
+ * already remapped to compacted ids by scalar_cleanup's scalar_renumber. */
+typedef struct {
+    int var;     /* dbg_var index */
+    int value;   /* SSA value ref (post-renumbering) */
+    int pos;     /* number of real instructions before this marker */
+} ExtractedMarker;
+
 typedef struct {
     char *name;       /* function name, xstrdup'd */
     IRInstArray insts;
