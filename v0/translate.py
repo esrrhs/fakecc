@@ -734,7 +734,7 @@ def strip_runtime_externs(body):
     return "\n".join(result)
 
 
-def translate_file(src_path, out_path, pkg_defs=None):
+def translate_file(src_path, out_path):
     text = preprocess(src_path)
     text = strip_attributes(text)
     text = strip_va_copy_extern(text)
@@ -746,7 +746,6 @@ def translate_file(src_path, out_path, pkg_defs=None):
     # Join multiline function prototypes split before semicolon (e.g. die_at(...)\n    ;)
     body = re.sub(r'(\))\s*\n\s*(;)', r'\1\2', body)
     body = cleanup_unused_definitions(body)
-    body = strip_runtime_externs(body)
     body = qualify_runtime_calls(body)
     preamble = ('package main;\n'
                 'import runtime;\n'
