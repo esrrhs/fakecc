@@ -573,55 +573,24 @@ def hoist_local_structs(text):
 
 
 def cleanup_unused_definitions(body):
-    """Drop type definitions and extern declarations unreferenced in this file.
-    Under fakecc's package-main semantics, cross-file globals are visible
-    without extern, and types from ir.h are only needed if referenced."""
-    lines = body.split("\n")
-    # Pass 1: find definition ranges and names.
-    definitions = []  # (start, end, kind, name)
-    i = 0
-    while i < len(lines):
-        s = lines[i].strip()
-        m = re.match(r'(?:typedef\s+)?(?:struct|union|enum)\s+([A-Za-z_]\w*)\s*\{', s)
-        if m:
-            tag = m.group(1)
-            if '};' not in s:
-                j = i + 1
-                while j < len(lines) and '};' not in lines[j]:
-                    j += 1
-                i = j
-            definitions.append((i, i, "type", tag))
-            i += 1
-            continue
-        em = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*\(', s)
-        if em:
-            definitions.append((i, i, "extern", em.group(1)))
-        i += 1
-    if not definitions:
-        return body
-    # Pass 2: usage text (definitions removed).
-    skip = set()
-    for s, e, _, _ in definitions:
-        for k in range(s, e + 1):
-            skip.add(k)
-    usage = "\n".join(lines[k] for k in range(len(lines)) if k not in skip)
-    # Pass 3: which are used.
-    used = set()
-    for s, e, kind, name in definitions:
-        if kind == "extern":
-            if re.search(r'\b' + re.escape(name) + r'\s*\(', usage):
-                used.add((s, e, kind, name))
-        else:
-            if re.search(r'\b' + re.escape(name) + r'\b', usage):
-                used.add((s, e, kind, name))
-    # Pass 4: rebuild, dropping unused.
+    """Drop extern declarations unreferenced in this file.  We intentionally do
+    NOT remove type definitions (struct/union/enum/typedef): determining
+    whether a type is truly unused requires whole-program analysis (a type
+    may be used as a field in another file's struct, or via a pointer the
+    scanner can't see), and misclassification breaks compilation.  Extern
+    function declarations are safe to drop because an unused extern has no
+    call sites to silence."""
     result = []
-    for idx, ln in enumerate(lines):
-        dropped = any((s, e, k, n) not in used and s <= idx <= e
-                      for s, e, k, n in definitions)
-        if not dropped:
-            result.append(ln)
+    for ln in body.split("\n"):
+        s = ln.strip()
+        m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*\(', s)
+        if m:
+            name = m.group(1)
+            if not re.search(r'\b' + re.escape(name) + r'\s*\(', body):
+                continue
+        result.append(ln)
     return "\n".join(result)
+
 
 
 # Functions provided by the builtin runtime/ package.  Calls to these are
@@ -633,8 +602,9 @@ RUNTIME_FUNCS = frozenset({
     "ftell", "fwrite", "getenv", "isalnum", "isalpha", "isdigit", "isspace",
     "isxdigit", "malloc", "memcmp", "memcpy", "memmove", "memset", "perror",
     "printf", "putchar", "puts", "qsort", "realloc", "snprintf", "sprintf",
-    "strcmp", "strchr", "strlen", "strncmp", "strtod", "strtof", "strtold",
-    "strtol", "strtoul", "strtoull", "vfprintf", "vsnprintf", "vsprintf",
+    "strcmp", "strchr", "strcpy", "strdup", "strerror", "strlen", "strncmp",
+    "strncpy", "strrchr", "strstr", "strtod", "strtof", "strtold", "strtol",
+    "strtoul", "strtoull", "vfprintf", "vsnprintf", "vsprintf",
 })
 
 
@@ -707,26 +677,25 @@ def qualify_runtime_calls(body):
                 result.append(word)
                 i = j
                 continue
+            # Check if we're inside an extern declaration — don't rewrite those.
+            line_start = body.rfind("\n", 0, i) + 1
+            line_so_far = body[line_start:i].lstrip()
+            is_extern_decl = line_so_far.startswith("extern")
             # Check if followed by '(' (possibly with whitespace)
             m = j
             while m < n and body[m] in " \t":
                 m += 1
-            if word in RUNTIME_FUNCS and m < n and body[m] == "(":
+            if word in RUNTIME_FUNCS and m < n and body[m] == "(" and not is_extern_decl:
                 result.append("runtime.")
                 result.append(word)
                 i = j
                 continue
             # Rewrite references to runtime globals (stderr, stdin, stdout).
-            # Skip the extern declaration line itself (handled by strip_runtime_externs).
-            if word in RUNTIME_GLOBALS and m < n and body[m] != ";":
-                # Check we're not in an extern declaration.
-                line_start = body.rfind("\n", 0, i) + 1
-                line_prefix = body[line_start:i].lstrip()
-                if not line_prefix.startswith("extern"):
-                    result.append("runtime.")
-                    result.append(word)
-                    i = j
-                    continue
+            if word in RUNTIME_GLOBALS and m < n and body[m] != ";" and not is_extern_decl:
+                result.append("runtime.")
+                result.append(word)
+                i = j
+                continue
             result.append(word)
             i = j
             continue
@@ -747,9 +716,16 @@ def strip_runtime_externs(body):
     for ln in lines:
         s = ln.strip()
         # extern functions: extern int fprintf(FILE *f, ...);
-        m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*\(', s)
-        if m and m.group(1) in RUNTIME_FUNCS:
-            continue
+        # The function name is the identifier right before the opening '(' of
+        # the parameter list — find the last '(' that isn't followed by ')'
+        # (i.e. the outer parameter list, not a function-pointer parameter).
+        if s.startswith("extern"):
+            # Find the matching '(' for the function's parameter list: it's the
+            # first '(' that is directly preceded by the function name (no '*'
+            # between name and '(' means it's not a function pointer).
+            m = re.search(r'\b([A-Za-z_]\w*)\s*\((?!\s*\*)', s)
+            if m and m.group(1) in RUNTIME_FUNCS:
+                continue
         # extern global variables: extern FILE *stderr;
         m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*;', s)
         if m and m.group(1) in RUNTIME_GLOBALS:
@@ -770,8 +746,8 @@ def translate_file(src_path, out_path, pkg_defs=None):
     # Join multiline function prototypes split before semicolon (e.g. die_at(...)\n    ;)
     body = re.sub(r'(\))\s*\n\s*(;)', r'\1\2', body)
     body = cleanup_unused_definitions(body)
-    body = qualify_runtime_calls(body)
     body = strip_runtime_externs(body)
+    body = qualify_runtime_calls(body)
     preamble = ('package main;\n'
                 'import runtime;\n'
                 '/* Generated by v0/translate.py from src/ — do not edit. */\n'
