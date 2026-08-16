@@ -49,9 +49,14 @@ fi
 # semantics make sibling files' symbols visible unqualified only when they
 # are compiled together; `-c` on a single file sees none of its siblings and
 # would need per-file `extern` declarations.  Compiling as a unit avoids that.
+# ir.c is listed first: it owns all ir.h type definitions, and same-package
+# sibling types are visible only to files parsed later.
 echo "=== compiling and linking with $FAKECC ==="
-srcs=""
-for m in $MODULES; do srcs="$srcs $OUT/$m.c"; done
+srcs="$OUT/ir.c"
+for m in $MODULES; do
+    [ "$m" = "ir" ] && continue
+    srcs="$srcs $OUT/$m.c"
+done
 if [ "$LINK_WITH_GCC" = "1" ]; then
     # gcc cannot link fakecc's .o directly; build fakecc's objects then link.
     # Fall back to per-file compile here (gcc link path is a debug escape hatch).

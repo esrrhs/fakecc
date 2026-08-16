@@ -929,25 +929,26 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
     for (size_t i = 0; i < tu->typedefs.len; i++) {
         TypedefEntry *te = &tu->typedefs.data[i];
         if (runtime.strcmp(te->name, "va_list") == 0) continue;
-        if (typedef_registry_find(&pkg->typedefs, te->name)) continue;
-        typedef_registry_add(&pkg->typedefs, te->name, type_clone(te->type));
+        if (!typedef_registry_find(&pkg->typedefs, te->name))
+            typedef_registry_add(&pkg->typedefs, te->name, type_clone(te->type));
     }
     for (size_t i = 0; i < tu->structs.len; i++) {
         StructDef *sd = &tu->structs.data[i];
         if (runtime.strcmp(sd->tag, "__va_list_tag") == 0) continue;
         if (sd->tag && runtime.strncmp(sd->tag, "__anon_", 7) == 0) continue;
-        if (struct_registry_find(&pkg->structs, sd->tag)) continue;
-        pkg_clone_struct_into(&pkg->structs, sd);
+        if (!struct_registry_find(&pkg->structs, sd->tag))
+            pkg_clone_struct_into(&pkg->structs, sd);
     }
     for (size_t i = 0; i < tu->enums.len; i++) {
         EnumDef *ed = &tu->enums.data[i];
         if (!ed->tag) continue;
         if (ed->tag && runtime.strncmp(ed->tag, "__anon_", 7) == 0) continue;
-        if (enum_registry_find(&pkg->enums, ed->tag)) continue;
-        EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
-        for (int c = 0; c < ed->num_constants; c++)
-            enum_def_push_constant(ne, ed->constants[c].name, 1,
-                                   ed->constants[c].value, ed->loc);
+        if (!enum_registry_find(&pkg->enums, ed->tag)) {
+            EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
+            for (int c = 0; c < ed->num_constants; c++)
+                enum_def_push_constant(ne, ed->constants[c].name, 1,
+                                       ed->constants[c].value, ed->loc);
+        }
     }
 }
 static void build_exports(Package *pkg) {

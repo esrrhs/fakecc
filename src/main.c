@@ -396,9 +396,9 @@ int main(int argc, char **argv) {
     }
 
     /* Phase 1: parse user sources, then fold each TU into its package so the
-     * next file's parse can see sibling typedefs/structs (directory packages
-     * already do this file-by-file inside pkg_load).  Registering only after
-     * every file is parsed leaves CLI same-package types invisible at parse. */
+     * next file's parse can see sibling typedefs/structs.  Same-package types
+     * are visible via is_type_start -> pkg_find_struct/typedef regardless of
+     * parse order. */
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
