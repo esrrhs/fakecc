@@ -632,7 +632,6 @@ void type_free(Type *t) {
         runtime.free(t->func_params); t->func_params = ((void*)0);
     }
 }
-extern const StructRegistry *get_ir_structs(void);
 int type_size(Type t) {
     const Type *p = &t;
     int count = 1;

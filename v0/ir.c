@@ -784,7 +784,6 @@ void ir_module_free(IRModule *m) {
             runtime.free(dv->members);
         }
         runtime.free(m->functions.data[i].dbg_vars);
-        extern void ra_result_free(void *ra);
         if (m->functions.data[i].ra)
             ra_result_free(m->functions.data[i].ra);
         if (m->functions.data[i].ra_xmm)

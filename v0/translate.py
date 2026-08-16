@@ -573,22 +573,21 @@ def hoist_local_structs(text):
 
 
 def cleanup_unused_definitions(body):
-    """Drop extern declarations for symbols provided by the runtime package.
-    v0 files are compiled as a unit (all together), so fakecc's package-main
-    semantics expose sibling-file symbols unqualified — no extern needed for
-    those.  Runtime symbols are also available via `import runtime;`.  We keep
-    externs for src-internal cross-file references (e.g. get_ir_structs) as
-    a safety net, though the package system should resolve them too."""
+    """Drop all extern declarations.  v0 files are compiled as a unit (all
+    together, not `-c` per file), so fakecc's package-main semantics expose
+    sibling files' symbols unqualified — cross-file references like
+    get_ir_structs resolve without extern.  Runtime symbols are also
+    available via `import runtime;` with qualified calls.  Nothing is left
+    that needs an extern."""
     result = []
     for ln in body.split("\n"):
         s = ln.strip()
-        if s.startswith("extern"):
-            # Check if this extern is for a runtime function/global
-            m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*[\(;]', s)
-            if m and m.group(1) in RUNTIME_FUNCS:
-                continue
-            if m and m.group(1) in RUNTIME_GLOBALS:
-                continue
+        # A real extern declaration starts with `extern` followed by a type
+        # keyword or qualifier (not an identifier like `extern_sym`).
+        if re.match(r'^extern\s+(?:int|void|char|long|short|float|double|'
+                    r'unsigned|signed|size_t|ptrdiff_t|ssize_t|intptr_t|'
+                    r'uintptr_t|const|struct|enum|FILE)\b', s):
+            continue
         result.append(ln)
     return "\n".join(result)
 
