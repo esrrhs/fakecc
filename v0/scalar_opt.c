@@ -745,7 +745,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *memset(void *dst, int c, size_t n);
 static int64_t const_value(const IRInstArray *insts, IRValue v, int *found) {
     *found = 0;
     if (v < 0) return 0;
@@ -855,7 +854,7 @@ int rf;
 }
 int scalar_dce(IRFunction *fn) {
     char *used = xmalloc(fn->next_value_id * sizeof(char));
-    memset(used, 0, fn->next_value_id * sizeof(char));
+    runtime.memset(used, 0, fn->next_value_id * sizeof(char));
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;

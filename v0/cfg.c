@@ -755,7 +755,6 @@ void cfg_free(CFG *g);
 int cfg_find_label(const CFG *g, int label);
 void cfg_link(CFG *g, int from, int to);
 int *cfg_rpo(const CFG *g);
-extern void *calloc(size_t n, size_t m);
 static void cfg_init(CFG *g) {
     g->blocks = ((void*)0);
     g->num = 0;
@@ -863,7 +862,7 @@ void cfg_build(CFG *g, const IRInstArray *insts) {
 int *cfg_rpo(const CFG *g) {
     size_t n = g->num;
     if (n == 0) return ((void*)0);
-    char *visited = calloc(n, 1);
+    char *visited = runtime.calloc(n, 1);
     if (!visited) return ((void*)0);
     int *postorder = xmalloc(n * sizeof(int));
     size_t po_len = 0;

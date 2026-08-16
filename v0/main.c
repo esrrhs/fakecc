@@ -964,11 +964,7 @@ extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *fopen(const char *p, const char *m);
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
 extern char *getenv(const char *name);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 extern char *strchr(const char *s, int c);
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -979,7 +975,7 @@ static char *read_file(const char *path) {
     runtime.fseek(f, 0, 2);
     long size = runtime.ftell(f);
     runtime.fseek(f, 0, 0);
-    char *buf = malloc((size_t)size + 1);
+    char *buf = runtime.malloc((size_t)size + 1);
     if (!buf) {
         runtime.fprintf(stderr, "fakecc: out of memory\n");
         runtime.exit(1);
@@ -1057,11 +1053,11 @@ static char *soname_from_l(const char *arg) {
     if (runtime.strcmp(arg, "pthread") == 0) return xstrdup("libpthread.so.0");
     {
         size_t n = runtime.strlen(arg);
-        char *s = malloc(n + 8);
+        char *s = runtime.malloc(n + 8);
         if (!s) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
-        memcpy(s, "lib", 3);
-        memcpy(s + 3, arg, n);
-        memcpy(s + 3 + n, ".so", 4);
+        runtime.memcpy(s, "lib", 3);
+        runtime.memcpy(s + 3, arg, n);
+        runtime.memcpy(s + 3 + n, ".so", 4);
         return s;
     }
 }
@@ -1079,9 +1075,9 @@ static char *dir_of(const char *path) {
     if (slash == path) return xstrdup("/");
     {
         size_t n = (size_t)(slash - path);
-        char *d = malloc(n + 1);
+        char *d = runtime.malloc(n + 1);
         if (!d) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
-        memcpy(d, path, n);
+        runtime.memcpy(d, path, n);
         d[n] = '\0';
         return d;
     }
@@ -1089,17 +1085,17 @@ static char *dir_of(const char *path) {
 static void paths_add(char ***paths, int *n, const char *dir) {
     for (int i = 0; i < *n; i++)
         if (runtime.strcmp((*paths)[i], dir) == 0) return;
-    *paths = realloc(*paths, ((size_t)*n + 1) * sizeof(char *));
+    *paths = runtime.realloc(*paths, ((size_t)*n + 1) * sizeof(char *));
     if (!*paths) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
     (*paths)[(*n)++] = xstrdup(dir);
 }
 static int lib_in_dir(const char *dir, const char *soname) {
     size_t nd = runtime.strlen(dir), ns = runtime.strlen(soname);
-    char *path = malloc(nd + 1 + ns + 1);
+    char *path = runtime.malloc(nd + 1 + ns + 1);
     if (!path) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
-    memcpy(path, dir, nd);
+    runtime.memcpy(path, dir, nd);
     path[nd] = '/';
-    memcpy(path + nd + 1, soname, ns + 1);
+    runtime.memcpy(path + nd + 1, soname, ns + 1);
     FILE *f = fopen(path, "rb");
     int ok = f != ((void*)0);
     if (f) runtime.fclose(f);
@@ -1130,11 +1126,11 @@ static int file_readable(const char *path) {
 static char *path_join(const char *a, const char *b) {
     size_t na = runtime.strlen(a), nb = runtime.strlen(b);
     int slash = (na > 0 && a[na - 1] != '/');
-    char *p = malloc(na + (size_t)slash + nb + 1);
+    char *p = runtime.malloc(na + (size_t)slash + nb + 1);
     if (!p) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
-    memcpy(p, a, na);
+    runtime.memcpy(p, a, na);
     if (slash) p[na++] = '/';
-    memcpy(p + na, b, nb + 1);
+    runtime.memcpy(p + na, b, nb + 1);
     return p;
 }
 static const char *rt_pkg_name(void) { return "runtime"; }
@@ -1223,13 +1219,13 @@ int main(int argc, char **argv) {
             paths_add(&lib_paths, &num_lib_paths, argv[i] + 2);
         } else if (runtime.strcmp(argv[i], "-l") == 0) {
             if (i + 1 >= argc) usage();
-            needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
+            needed = runtime.realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
             needed[num_needed++] = soname_from_l(argv[++i]);
         } else if (argv[i][0] == '-' && argv[i][1] == 'l') {
-            needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
+            needed = runtime.realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
             needed[num_needed++] = soname_from_l(argv[i] + 2);
         } else if (ends_with(argv[i], ".so")) {
-            needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
+            needed = runtime.realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
             needed[num_needed++] = soname_from_so_path(argv[i]);
             {
                 char *d = dir_of(argv[i]);
@@ -1240,7 +1236,7 @@ int main(int argc, char **argv) {
             runtime.fprintf(stderr, "fakecc: unknown option '%s'\n", argv[i]);
             usage();
         } else {
-            inputs = realloc(inputs, (ninputs + 1) * sizeof(char *));
+            inputs = runtime.realloc(inputs, (ninputs + 1) * sizeof(char *));
             inputs[ninputs++] = argv[i];
         }
     }
@@ -1297,7 +1293,7 @@ int main(int argc, char **argv) {
     SourceLoc zloc = {0};
     if (nrt)
         pkg_load(&pkg, rt_pkg_name(), zloc);
-    TranslationUnit *user_tus = malloc((size_t)ninputs * sizeof(TranslationUnit));
+    TranslationUnit *user_tus = runtime.malloc((size_t)ninputs * sizeof(TranslationUnit));
     if (!user_tus) {
         runtime.fprintf(stderr, "fakecc: out of memory\n");
         runtime.exit(1);
@@ -1305,7 +1301,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ninputs; i++) {
         size_t len = runtime.strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
-            memset(&user_tus[i], 0, sizeof(user_tus[i]));
+            runtime.memset(&user_tus[i], 0, sizeof(user_tus[i]));
         } else {
             char *src = read_file(inputs[i]);
             parse_source(src, inputs[i], &user_tus[i], &pkg);
@@ -1323,8 +1319,8 @@ int main(int argc, char **argv) {
         nlinked_files += (int)pp->nfiles;
     }
     int nmods = ninputs + nlinked_files;
-    EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
-    EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
+    EmitModule *mods = runtime.malloc((size_t)nmods * sizeof(EmitModule));
+    EmitModule **mod_ptrs = runtime.malloc((size_t)nmods * sizeof(EmitModule *));
     if (!mods || !mod_ptrs) {
         runtime.fprintf(stderr, "fakecc: out of memory\n");
         runtime.exit(1);

@@ -37,9 +37,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
-extern void *memcpy(void *dst, const void *src, size_t n);
 void buffer_init(Buffer *b) {
     b->data = ((void*)0);
     b->len = 0;
@@ -55,7 +52,7 @@ static void buffer_grow(Buffer *b, size_t need) {
     if (b->len + need <= b->cap) return;
     size_t new_cap = b->cap ? b->cap * 2 : 256;
     while (new_cap < b->len + need) new_cap *= 2;
-    b->data = realloc(b->data, new_cap);
+    b->data = runtime.realloc(b->data, new_cap);
     if (!b->data) {
         runtime.fprintf(stderr, "fakecc: out of memory\n");
         runtime.exit(1);
@@ -64,7 +61,7 @@ static void buffer_grow(Buffer *b, size_t need) {
 }
 void buffer_append(Buffer *b, const char *s, size_t n) {
     buffer_grow(b, n);
-    memcpy(b->data + b->len, s, n);
+    runtime.memcpy(b->data + b->len, s, n);
     b->len += n;
 }
 void buffer_appendf(Buffer *b, const char *fmt, ...) {
@@ -85,7 +82,7 @@ void buffer_appendf(Buffer *b, const char *fmt, ...) {
     va_end(ap);
 }
 void *xmalloc(size_t n) {
-    void *p = malloc(n);
+    void *p = runtime.malloc(n);
     if (!p) {
         runtime.fprintf(stderr, "fakecc: out of memory\n");
         runtime.exit(1);
@@ -93,7 +90,7 @@ void *xmalloc(size_t n) {
     return p;
 }
 void *xrealloc(void *p, size_t n) {
-    void *q = realloc(p, n);
+    void *q = runtime.realloc(p, n);
     if (!q) {
         runtime.fprintf(stderr, "fakecc: out of memory\n");
         runtime.exit(1);
@@ -102,12 +99,12 @@ void *xrealloc(void *p, size_t n) {
 }
 char *xstrdup(const char *s) {
     size_t len = runtime.strlen(s) + 1;
-    char *d = malloc(len);
+    char *d = runtime.malloc(len);
     if (!d) {
         runtime.fprintf(stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
-    memcpy(d, s, len);
+    runtime.memcpy(d, s, len);
     return d;
 }
 void die_at(const char *file, int line, int col, const char *fmt, ...) {

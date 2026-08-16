@@ -851,7 +851,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *memset(void *dst, int c, size_t n);
 static void pin_scalar_allocas(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
@@ -896,7 +895,7 @@ static void reinsert_markers(IRFunction *fn, ExtractedMarker *markers, int nmark
     for (size_t i = 0; i < fn->insts.len; i++) {
         while (mi < nmarkers && markers[mi].pos == real) {
             IRInst marker;
-            memset(&marker, 0, sizeof(marker));
+            runtime.memset(&marker, 0, sizeof(marker));
             marker.op = IR_DBG_VALUE;
             marker.dst = -1;
             marker.imm = markers[mi].var;
@@ -911,7 +910,7 @@ static void reinsert_markers(IRFunction *fn, ExtractedMarker *markers, int nmark
     }
     while (mi < nmarkers && markers[mi].pos == real) {
         IRInst marker;
-        memset(&marker, 0, sizeof(marker));
+        runtime.memset(&marker, 0, sizeof(marker));
         marker.op = IR_DBG_VALUE;
         marker.dst = -1;
         marker.imm = markers[mi].var;

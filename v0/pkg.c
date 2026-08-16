@@ -629,8 +629,6 @@ extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *fopen(const char *p, const char *m);
 typedef long fpos_t;
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 static long pkg_open(const char *path, long flags) {
     return __syscall(2, (long)path, flags, 0);
 }
@@ -646,7 +644,7 @@ struct pkg_dirent64 {
     char d_name[1];
 };
 void pkg_ctx_init(PkgContext *ctx) {
-    memset(ctx, 0, sizeof(*ctx));
+    runtime.memset(ctx, 0, sizeof(*ctx));
 }
 void pkg_ctx_free(PkgContext *ctx) {
     for (int i = 0; i < ctx->npaths; i++) runtime.free(ctx->search_paths[i]);
@@ -680,7 +678,7 @@ void pkg_ctx_free(PkgContext *ctx) {
     runtime.free(ctx->pkgs);
     for (size_t i = 0; i < ctx->nloading; i++) runtime.free(ctx->loading[i]);
     runtime.free(ctx->loading);
-    memset(ctx, 0, sizeof(*ctx));
+    runtime.memset(ctx, 0, sizeof(*ctx));
 }
 void pkg_ctx_add_path(PkgContext *ctx, const char *dir) {
     if (!dir || !dir[0]) return;
@@ -779,9 +777,9 @@ static char *path_join(const char *a, const char *b) {
     size_t na = runtime.strlen(a), nb = runtime.strlen(b);
     int slash = (na > 0 && a[na - 1] != '/');
     char *p = xmalloc(na + (size_t)slash + nb + 1);
-    memcpy(p, a, na);
+    runtime.memcpy(p, a, na);
     if (slash) p[na++] = '/';
-    memcpy(p + na, b, nb + 1);
+    runtime.memcpy(p + na, b, nb + 1);
     return p;
 }
 static char *read_file(const char *path) {
@@ -906,7 +904,7 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         pkg->funcs = xrealloc(pkg->funcs,
                               (pkg->nfuncs + 1) * sizeof(PkgFuncExport));
         PkgFuncExport *e = &pkg->funcs[pkg->nfuncs++];
-        memset(e, 0, sizeof(*e));
+        runtime.memset(e, 0, sizeof(*e));
         e->name = xstrdup(fn->name);
         e->ret_type = type_clone(fn->ret_type);
         e->arity = (int)fn->params.len;
@@ -925,7 +923,7 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         pkg->globals = xrealloc(pkg->globals,
                                 (pkg->nglobals + 1) * sizeof(PkgGlobalExport));
         PkgGlobalExport *e = &pkg->globals[pkg->nglobals++];
-        memset(e, 0, sizeof(*e));
+        runtime.memset(e, 0, sizeof(*e));
         e->name = xstrdup(s->u.decl.name);
         e->type = type_clone(s->u.decl.type);
         e->is_extern = (s->u.decl.storage_class == 2);
@@ -988,11 +986,11 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
                "package '%s' directory '%s' has no .c files", name, dir);
     }
     Package *pkg = xmalloc(sizeof(Package));
-    memset(pkg, 0, sizeof(*pkg));
+    runtime.memset(pkg, 0, sizeof(*pkg));
     pkg->name = xstrdup(name);
     pkg->dir = dir;
     pkg->files = xmalloc(nnames * sizeof(TranslationUnit));
-    memset(pkg->files, 0, nnames * sizeof(TranslationUnit));
+    runtime.memset(pkg->files, 0, nnames * sizeof(TranslationUnit));
     pkg->nfiles = nnames;
     pkg->owns_files = 1;
     pkgs_push(ctx, pkg);
@@ -1034,7 +1032,7 @@ Package *pkg_register_tus(PkgContext *ctx, const char *name,
         return exist;
     }
     Package *pkg = xmalloc(sizeof(Package));
-    memset(pkg, 0, sizeof(*pkg));
+    runtime.memset(pkg, 0, sizeof(*pkg));
     pkg->name = xstrdup(name);
     pkg->dir = ((void*)0);
     pkg->owns_files = 0;

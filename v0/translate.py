@@ -628,11 +628,12 @@ def cleanup_unused_definitions(body):
 # rewritten to qualified `runtime.<name>` form so the file can drop its
 # per-file `extern` declarations and rely on `import runtime;` instead.
 RUNTIME_FUNCS = frozenset({
-    "abort", "atoi", "atol", "chmod", "exit", "fclose", "fflush", "fileno",
-    "fprintf", "fputc", "fputs", "fread", "free", "fseek", "ftell", "fwrite",
-    "isalnum", "isalpha", "isdigit", "isspace", "isxdigit", "memcmp",
-    "perror", "printf", "putchar", "puts", "qsort", "snprintf", "sprintf",
-    "strcmp", "strlen", "strncmp", "strtod", "strtof", "strtol", "vfprintf",
+    "abort", "atoi", "atol", "calloc", "chmod", "exit", "fclose", "fflush",
+    "fileno", "fprintf", "fputc", "fputs", "fread", "free", "fseek", "ftell",
+    "fwrite", "isalnum", "isalpha", "isdigit", "isspace", "isxdigit",
+    "malloc", "memcmp", "memcpy", "memmove", "memset", "perror", "printf",
+    "putchar", "puts", "qsort", "realloc", "snprintf", "sprintf", "strcmp",
+    "strlen", "strncmp", "strtod", "strtof", "strtol", "vfprintf",
     "vsnprintf", "vsprintf",
 })
 

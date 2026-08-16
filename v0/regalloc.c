@@ -798,8 +798,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 struct RegClass {
     const int *regs;
     int nregs;
@@ -949,14 +947,14 @@ static void bs_init(BitSet *b, int nv) {
     b->nv = nv;
     b->num_words = (nv + 63) / 64;
     b->w = xmalloc((size_t)b->num_words * sizeof(uint64_t));
-    memset(b->w, 0, (size_t)b->num_words * sizeof(uint64_t));
+    runtime.memset(b->w, 0, (size_t)b->num_words * sizeof(uint64_t));
 }
 static void bs_free(BitSet *b) {
     runtime.free(b->w);
     b->w = ((void*)0);
 }
 static void bs_clear(BitSet *b) {
-    memset(b->w, 0, (size_t)b->num_words * sizeof(uint64_t));
+    runtime.memset(b->w, 0, (size_t)b->num_words * sizeof(uint64_t));
 }
 static int bs_test(const BitSet *b, int v) {
     return (int)((b->w[v >> 6] >> (v & 63)) & 1);
@@ -978,7 +976,7 @@ static int bs_or_changed(BitSet *dst, const BitSet *src) {
     return changed;
 }
 static void bs_copy(BitSet *dst, const BitSet *src) {
-    memcpy(dst->w, src->w, (size_t)dst->num_words * sizeof(uint64_t));
+    runtime.memcpy(dst->w, src->w, (size_t)dst->num_words * sizeof(uint64_t));
 }
 static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                             BitSet *use_b, BitSet *def_b) {
@@ -1189,8 +1187,8 @@ static int *compute_mcs_order(const InterfGraph *g) {
     int *order = xmalloc(n * sizeof(int));
     int *weight = xmalloc(n * sizeof(int));
     int *picked = xmalloc(n * sizeof(int));
-    memset(weight, 0, n * sizeof(int));
-    memset(picked, 0, n * sizeof(int));
+    runtime.memset(weight, 0, n * sizeof(int));
+    runtime.memset(picked, 0, n * sizeof(int));
     for (int pos = n - 1; pos >= 0; pos--) {
         int best = -1, best_w = -1;
         for (int v = 0; v < n; v++) {
@@ -1335,7 +1333,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     int *order = compute_mcs_order(&g);
     int *colors = xmalloc(nv * sizeof(int));
     int *spill_slots = xmalloc(nv * sizeof(int));
-    memset(spill_slots, 0, nv * sizeof(int));
+    runtime.memset(spill_slots, 0, nv * sizeof(int));
     int num_spills = 0;
     greedy_color(&g, order, liv, &cfg, forbid_mask,
                  colors, spill_slots, &num_spills, cls);

@@ -141,9 +141,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
-extern void *memcpy(void *dst, const void *src, size_t n);
 void token_array_init(TokenArray *a) {
     a->data = ((void*)0);
     a->len = 0;
@@ -161,7 +158,7 @@ void token_array_free(TokenArray *a) {
 void token_array_push(TokenArray *a, Token t) {
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 16;
-        a->data = realloc(a->data, new_cap * sizeof(Token));
+        a->data = runtime.realloc(a->data, new_cap * sizeof(Token));
         if (!a->data) {
             runtime.fprintf(stderr, "fakecc: out of memory\n");
             runtime.exit(1);
@@ -327,8 +324,8 @@ lex_loop_head:
             size_t len = pos - start;
             Token t;
             t.kind = TK_CHAR_LITERAL;
-            t.text = malloc(len + 1);
-            memcpy(t.text, source + start, len);
+            t.text = runtime.malloc(len + 1);
+            runtime.memcpy(t.text, source + start, len);
             t.text[len] = '\0';
             t.loc.file = filename;
             t.loc.line = start_line;
@@ -362,8 +359,8 @@ lex_loop_head:
             size_t len = pos - start;
             Token t;
             t.kind = TK_STRING_LITERAL;
-            t.text = malloc(len + 1);
-            memcpy(t.text, source + start, len);
+            t.text = runtime.malloc(len + 1);
+            runtime.memcpy(t.text, source + start, len);
             t.text[len] = '\0';
             t.loc.file = filename;
             t.loc.line = start_line;
@@ -421,8 +418,8 @@ lex_loop_head:
             size_t len = pos - start;
             Token t;
             t.kind = is_float ? TK_FLOAT_LITERAL : TK_INT_LITERAL;
-            t.text = malloc(len + 1);
-            memcpy(t.text, source + start, len);
+            t.text = runtime.malloc(len + 1);
+            runtime.memcpy(t.text, source + start, len);
             t.text[len] = '\0';
             t.loc.file = filename;
             t.loc.line = start_line;
@@ -449,8 +446,8 @@ lex_loop_head:
             size_t len = pos - start;
             Token t;
             t.kind = TK_FLOAT_LITERAL;
-            t.text = malloc(len + 1);
-            memcpy(t.text, source + start, len);
+            t.text = runtime.malloc(len + 1);
+            runtime.memcpy(t.text, source + start, len);
             t.text[len] = '\0';
             t.loc.file = filename;
             t.loc.line = start_line;
@@ -469,8 +466,8 @@ lex_loop_head:
             size_t len = pos - start;
             Token t;
             t.kind = keyword_kind(source + start, len);
-            t.text = malloc(len + 1);
-            memcpy(t.text, source + start, len);
+            t.text = runtime.malloc(len + 1);
+            runtime.memcpy(t.text, source + start, len);
             t.text[len] = '\0';
             t.loc.file = filename;
             t.loc.line = start_line;
@@ -740,7 +737,7 @@ lex_loop_head:
             case ':': t.kind = TK_COLON; break;
             default: t.kind = TK_EOF; break;
             }
-            t.text = malloc(2);
+            t.text = runtime.malloc(2);
             t.text[0] = c;
             t.text[1] = '\0';
             t.loc.file = filename;
@@ -758,7 +755,7 @@ lex_loop_head:
     }
     Token eof;
     eof.kind = TK_EOF;
-    eof.text = malloc(1);
+    eof.text = runtime.malloc(1);
     eof.text[0] = '\0';
     eof.loc.file = filename;
     eof.loc.line = line;

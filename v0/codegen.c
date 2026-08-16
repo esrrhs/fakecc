@@ -952,9 +952,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 static void emit_byte(Buffer *b, uint8_t val) {
     buffer_append(b, (const char *)&val, 1);
 }
@@ -1072,7 +1069,7 @@ static void emit_add_imm32(Buffer *b, int reg, int32_t imm) {
 }
 static void patch_rel32(Buffer *b, size_t patch_off, size_t target_off) {
     int32_t rel = (int32_t)((int64_t)target_off - (int64_t)(patch_off + 4));
-    memcpy(b->data + patch_off, &rel, 4);
+    runtime.memcpy(b->data + patch_off, &rel, 4);
 }
 static void emit_test_rr(Buffer *b, int r) {
     emit_rex_wrb(b, 1, r, r);
@@ -2063,7 +2060,7 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     size_t *global_off = ((void*)0);
     if (ir->globals.len > 0) {
-        global_off = malloc(ir->globals.len * sizeof(size_t));
+        global_off = runtime.malloc(ir->globals.len * sizeof(size_t));
         if (!global_off) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     for (size_t gi = 0; gi < ir->globals.len; gi++) {
@@ -2092,7 +2089,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         global_off[gi] = off;
         if (want_debug && !g->is_readonly) {
             DebugVar gv;
-            memset(&gv, 0, sizeof(gv));
+            runtime.memset(&gv, 0, sizeof(gv));
             gv.name = g->name;
             gv.file = (char *)g->loc.file;
             gv.line = g->loc.line;
@@ -2854,7 +2851,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 entry_dwarf[p] = reg_to_dwarf(arrive_reg[p]);
                         }
                         DebugCallSite cs;
-                        memset(&cs, 0, sizeof(cs));
+                        runtime.memset(&cs, 0, sizeof(cs));
                         cs.call_pc = aft - 5;
                         cs.return_pc = aft;
                         cs.callee_name = inst->call_name
@@ -2869,7 +2866,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             for (int k = 0; k < nargs; k++) {
                                 if (target_reg[k] < 0) continue;
                                 DebugCallSiteParam *cp = &cs.params[pi++];
-                                memset(cp, 0, sizeof(*cp));
+                                runtime.memset(cp, 0, sizeof(*cp));
                                 if (target_is_xmm[k])
                                     cp->dwarf_reg = 17 + target_reg[k];
                                 else
@@ -2888,7 +2885,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 cp->value_expr_len = cv.len;
                                 if (cv.len) {
                                     cp->value_expr = xmalloc(cv.len);
-                                    memcpy(cp->value_expr, cv.data, cv.len);
+                                    runtime.memcpy(cp->value_expr, cv.data, cv.len);
                                 }
                                 buffer_free(&cv);
                             }
@@ -2910,7 +2907,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 entry_dwarf[p] = reg_to_dwarf(arrive_reg[p]);
                         }
                         DebugCallSite cs;
-                        memset(&cs, 0, sizeof(cs));
+                        runtime.memset(&cs, 0, sizeof(cs));
                         cs.call_pc = call_pc;
                         cs.return_pc = aft;
                         cs.callee_name = ((void*)0);
@@ -2924,7 +2921,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             for (int k = 0; k < nargs; k++) {
                                 if (target_reg[k] < 0) continue;
                                 DebugCallSiteParam *cp = &cs.params[pi++];
-                                memset(cp, 0, sizeof(*cp));
+                                runtime.memset(cp, 0, sizeof(*cp));
                                 if (target_is_xmm[k])
                                     cp->dwarf_reg = 17 + target_reg[k];
                                 else
@@ -2943,7 +2940,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 cp->value_expr_len = cv.len;
                                 if (cv.len) {
                                     cp->value_expr = xmalloc(cv.len);
-                                    memcpy(cp->value_expr, cv.data, cv.len);
+                                    runtime.memcpy(cp->value_expr, cv.data, cv.len);
                                 }
                                 buffer_free(&cv);
                             }
@@ -3365,7 +3362,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             for (size_t di = 0; di < fn->num_dbg_vars; di++) {
                 const IRDebugVar *idv = &fn->dbg_vars[di];
                 DebugVar dv;
-                memset(&dv, 0, sizeof(dv));
+                runtime.memset(&dv, 0, sizeof(dv));
                 dv.name = idv->name;
                 dv.file = (char *)idv->loc.file;
                 dv.line = idv->loc.line;
@@ -3383,7 +3380,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     for (int mi = 0; mi < idv->num_members; mi++) {
                         const IRDebugMember *im = &idv->members[mi];
                         DebugMember *dm = &dv.members[mi];
-                        memset(dm, 0, sizeof(*dm));
+                        runtime.memset(dm, 0, sizeof(*dm));
                         dm->name = im->name;
                         dm->offset = im->offset;
                         dm->bit_width = im->bit_width;
@@ -3472,7 +3469,7 @@ int dreg;
                 runtime.exit(1);
             }
             int32_t rel32 = (int32_t)rel;
-            memcpy(out->text.data + p->patch_off, &rel32, 4);
+            runtime.memcpy(out->text.data + p->patch_off, &rel32, 4);
         }
         runtime.free(patches);
         runtime.free(label_off);
@@ -3507,7 +3504,7 @@ int dreg;
             runtime.exit(1);
         }
         int32_t rel32 = (int32_t)rel;
-        memcpy(out->text.data + cp->patch_off, &rel32, 4);
+        runtime.memcpy(out->text.data + cp->patch_off, &rel32, 4);
         runtime.free(cp->callee);
     }
     runtime.free(call_patches);
@@ -3535,7 +3532,7 @@ int dreg;
             runtime.exit(1);
         }
         int32_t rel32 = (int32_t)rel;
-        memcpy(out->text.data + fp->patch_off, &rel32, 4);
+        runtime.memcpy(out->text.data + fp->patch_off, &rel32, 4);
         runtime.free(fp->fn_name);
     }
     runtime.free(fnaddr_patches);

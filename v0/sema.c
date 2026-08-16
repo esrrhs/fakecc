@@ -627,9 +627,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 static const StructRegistry *g_sema_structs = ((void*)0);
 static PkgContext *g_sema_pkg = ((void*)0);
 static const TranslationUnit *g_sema_tu = ((void*)0);
@@ -653,7 +650,7 @@ static void ftab_free(FunTable *t) { runtime.free(t->data); t->data = ((void*)0)
 static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     if (t->len >= t->cap) {
         t->cap = t->cap ? t->cap * 2 : 8;
-        t->data = realloc(t->data, t->cap * sizeof(FunSig));
+        t->data = runtime.realloc(t->data, t->cap * sizeof(FunSig));
         if (!t->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     FunSig *s = &t->data[t->len++];
@@ -680,7 +677,7 @@ static void ftab_push_export(FunTable *t, const PkgFuncExport *ex) {
     if (ftab_find(t, ex->name)) return;
     if (t->len >= t->cap) {
         t->cap = t->cap ? t->cap * 2 : 8;
-        t->data = realloc(t->data, t->cap * sizeof(FunSig));
+        t->data = runtime.realloc(t->data, t->cap * sizeof(FunSig));
         if (!t->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     FunSig *s = &t->data[t->len++];
@@ -699,13 +696,13 @@ static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) 
             return;
     if (tu->functions.len >= tu->functions.cap) {
         size_t nc = tu->functions.cap ? tu->functions.cap * 2 : 4;
-        tu->functions.data = realloc(tu->functions.data,
+        tu->functions.data = runtime.realloc(tu->functions.data,
                                      nc * sizeof(FunctionDecl));
         if (!tu->functions.data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         tu->functions.cap = nc;
     }
     FunctionDecl *fn = &tu->functions.data[tu->functions.len++];
-    memset(fn, 0, sizeof(*fn));
+    runtime.memset(fn, 0, sizeof(*fn));
     fn->name = xstrdup(ex->name);
     fn->ret_type = type_clone(ex->ret_type);
     param_array_init(&fn->params);
@@ -732,7 +729,7 @@ static void tu_ensure_extern_global(TranslationUnit *tu, const PkgGlobalExport *
             return;
     }
     Stmt s;
-    memset(&s, 0, sizeof(s));
+    runtime.memset(&s, 0, sizeof(s));
     s.kind = ST_DECL;
     s.loc = ex->loc;
     s.u.decl.name = xstrdup(ex->name);
@@ -777,7 +774,7 @@ static void labelset_free(LabelSet *ls) {
 static void labelset_add(LabelSet *ls, const char *name) {
     if (ls->len >= ls->cap) {
         ls->cap = ls->cap ? ls->cap * 2 : 8;
-        ls->names = realloc(ls->names, ls->cap * sizeof(char *));
+        ls->names = runtime.realloc(ls->names, ls->cap * sizeof(char *));
         if (!ls->names) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     ls->names[ls->len++] = xstrdup(name);
@@ -838,7 +835,7 @@ static void symtable_free(SymTable *st) {
 static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc loc) {
     if (st->len >= st->cap) {
         st->cap = st->cap ? st->cap * 2 : 8;
-        st->data = realloc(st->data, st->cap * sizeof(Sym));
+        st->data = runtime.realloc(st->data, st->cap * sizeof(Sym));
         if (!st->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     st->data[st->len].name = name ? xstrdup(name) : ((void*)0);
@@ -1026,7 +1023,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ftab_push_export(ft, pf);
                 const Type **ptys = ((void*)0);
                 if (pf->arity > 0) {
-                    ptys = malloc(pf->arity * sizeof(Type *));
+                    ptys = runtime.malloc(pf->arity * sizeof(Type *));
                     if (!ptys) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
                     for (int i = 0; i < pf->arity; i++)
                         ptys[i] = &pf->param_types[i];
@@ -1050,7 +1047,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         if (sig) {
             const Type **ptys = ((void*)0);
             if (sig->arity > 0) {
-                ptys = malloc(sig->arity * sizeof(Type *));
+                ptys = runtime.malloc(sig->arity * sizeof(Type *));
                 if (!ptys) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
                 for (int i = 0; i < sig->arity; i++)
                     ptys[i] = &sig->param_types[i];
@@ -1070,7 +1067,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                     ftab_push_export(ft, pf);
                     const Type **ptys = ((void*)0);
                     if (pf->arity > 0) {
-                        ptys = malloc(pf->arity * sizeof(Type *));
+                        ptys = runtime.malloc(pf->arity * sizeof(Type *));
                         if (!ptys) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
                         for (int i = 0; i < pf->arity; i++)
                             ptys[i] = &pf->param_types[i];
@@ -1663,7 +1660,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
                        target->tag, name);
         }
     }
-    Expr **out = malloc(N * sizeof(Expr *));
+    Expr **out = runtime.malloc(N * sizeof(Expr *));
     for (int i = 0; i < N; i++)
         out[i] = expr_new_int(0, loc);
     int cursor = 0;
@@ -1695,7 +1692,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             while (take < want && i + take < n
                    && list->u.init_list.desig_kind[i + take] == -1)
                 take++;
-            Expr **sub = malloc(take * sizeof(Expr *));
+            Expr **sub = runtime.malloc(take * sizeof(Expr *));
             for (int k = 0; k < take; k++)
                 sub[k] = list->u.init_list.elements[i + k];
             elem = expr_new_init_list(sub, take, elem->loc);
@@ -1788,7 +1785,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             && s->u.decl.type.elem_type->width == 1) {
             Expr *str = s->u.decl.init;
             int n = str->u.str.len + 1;
-            Expr **elems = malloc(n * sizeof(Expr *));
+            Expr **elems = runtime.malloc(n * sizeof(Expr *));
             for (int i = 0; i < n - 1; i++)
                 elems[i] = expr_new_int((unsigned char)str->u.str.bytes[i],
                                         str->loc);

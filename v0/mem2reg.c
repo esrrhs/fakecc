@@ -807,8 +807,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *calloc(size_t n, size_t m);
-extern void *memset(void *dst, int c, size_t n);
 static int block_has_phi_for(const BlockPhiInfo *bp, int alloca_slot) {
     for (size_t i = 0; i < bp->num_phis; i++)
         if (bp->phis[i].alloca_slot == alloca_slot) return 1;
@@ -839,11 +837,11 @@ BlockPhiInfo *mem2reg_place_phis(
 {
     size_t n = cfg->num;
     BlockPhiInfo *bp = xmalloc(n * sizeof(BlockPhiInfo));
-    memset(bp, 0, n * sizeof(BlockPhiInfo));
+    runtime.memset(bp, 0, n * sizeof(BlockPhiInfo));
     if (num_alloca == 0) return bp;
     for (size_t ai = 0; ai < num_alloca; ai++) {
         int slot = alloca_slots[ai];
-        char *is_def = calloc(n, 1);
+        char *is_def = runtime.calloc(n, 1);
         if (!is_def) continue;
         int *wl = ((void*)0);
         size_t wl_len = 0, wl_cap = 0;
@@ -935,7 +933,7 @@ void mem2reg_writeback(
                 int var = dbg_var_for_slot(fn, phi->alloca_slot);
                 if (var < 0) continue;
                 IRInst marker;
-                memset(&marker, 0, sizeof(marker));
+                runtime.memset(&marker, 0, sizeof(marker));
                 marker.width = 8;
                 marker.loc = phi->loc;
                 make_dbg_value(&marker, var, phi->dst);
@@ -1103,7 +1101,7 @@ void mem2reg_rename(
     int want_debug)
 {
     size_t ninst = fn->insts.len;
-    *dead = calloc(ninst, 1);
+    *dead = runtime.calloc(ninst, 1);
     if (!*dead) {
         runtime.fprintf(stderr, "fakecc: out of memory\n");
         runtime.exit(1);
@@ -1133,7 +1131,7 @@ int opt_mem2reg(IRFunction *fn, int want_debug)
     domtree_build(&dt, &cfg);
     const IRInstArray *insts = &fn->insts;
     char *pinned = xmalloc(fn->next_value_id * sizeof(char));
-    memset(pinned, 0, fn->next_value_id * sizeof(char));
+    runtime.memset(pinned, 0, fn->next_value_id * sizeof(char));
     for (size_t i = 0; i < insts->len; i++) {
         const IRInst *ii = &insts->data[i];
         if (ii->op == IR_ALLOCA && ii->alloca_bytes > 0 && ii->dst >= 0)
@@ -1164,7 +1162,7 @@ int opt_mem2reg(IRFunction *fn, int want_debug)
     char **block_stores = xmalloc(cfg.num * sizeof(char *));
     for (size_t bi = 0; bi < cfg.num; bi++) {
         block_stores[bi] = xmalloc(num_alloca * sizeof(char));
-        memset(block_stores[bi], 0, num_alloca * sizeof(char));
+        runtime.memset(block_stores[bi], 0, num_alloca * sizeof(char));
     }
     for (size_t i = 0; i < insts->len; i++) {
         if (insts->data[i].op != IR_STORE) continue;

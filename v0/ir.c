@@ -740,12 +740,7 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
-extern void *calloc(size_t n, size_t m);
 extern long double strtold(const char *nptr, char **endptr);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 IRModule *g_ir_module = ((void*)0);
 int g_str_counter = 0;
 int g_flt_counter = 0;
@@ -821,7 +816,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
                                        SourceLoc loc) {
     if (m->globals.len >= m->globals.cap) {
         size_t nc = m->globals.cap ? m->globals.cap * 2 : 4;
-        m->globals.data = realloc(m->globals.data, nc * sizeof(IRGlobal));
+        m->globals.data = runtime.realloc(m->globals.data, nc * sizeof(IRGlobal));
         if (!m->globals.data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->globals.cap = nc;
     }
@@ -840,7 +835,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
 static void add_global_fixup(IRGlobal *g, int offset, const char *sym) {
     if (g->num_fixups >= g->cap_fixups) {
         size_t nc = g->cap_fixups ? g->cap_fixups * 2 : 4;
-        g->fixups = realloc(g->fixups, nc * sizeof(GlobalFixup));
+        g->fixups = runtime.realloc(g->fixups, nc * sizeof(GlobalFixup));
         if (!g->fixups) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         g->cap_fixups = (int)nc;
     }
@@ -851,7 +846,7 @@ static void add_global_fixup(IRGlobal *g, int offset, const char *sym) {
 static void ir_inst_array_push(IRInstArray *a, IRInst inst) {
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 8;
-        a->data = realloc(a->data, new_cap * sizeof(IRInst));
+        a->data = runtime.realloc(a->data, new_cap * sizeof(IRInst));
         if (!a->data) {
             runtime.fprintf(stderr, "fakecc: out of memory\n");
             runtime.exit(1);
@@ -864,7 +859,7 @@ static void ir_func_array_push(IRFunctionArray *a, IRFunction fn) {
     fn.ra = ((void*)0);
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 4;
-        a->data = realloc(a->data, new_cap * sizeof(IRFunction));
+        a->data = runtime.realloc(a->data, new_cap * sizeof(IRFunction));
         if (!a->data) {
             runtime.fprintf(stderr, "fakecc: out of memory\n");
             runtime.exit(1);
@@ -882,9 +877,9 @@ static void set_value_type(IRFunction *fn, IRValue v, int width, int is_unsigned
         int old_cap = fn->value_meta_cap;
         int new_cap = old_cap ? old_cap * 2 : 16;
         while (new_cap <= v) new_cap *= 2;
-        fn->value_width = realloc(fn->value_width, new_cap * sizeof(int));
-        fn->value_is_unsigned = realloc(fn->value_is_unsigned, new_cap * sizeof(int));
-        fn->value_is_float = realloc(fn->value_is_float, new_cap * sizeof(int));
+        fn->value_width = runtime.realloc(fn->value_width, new_cap * sizeof(int));
+        fn->value_is_unsigned = runtime.realloc(fn->value_is_unsigned, new_cap * sizeof(int));
+        fn->value_is_float = runtime.realloc(fn->value_is_float, new_cap * sizeof(int));
         if (!fn->value_width || !fn->value_is_unsigned || !fn->value_is_float) {
             runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1);
         }
@@ -1061,7 +1056,7 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     inst.float_imm = 0;
     inst.is_float = 0;
     inst.force_stack = 0;
-    memset(inst.call_arg_on_stack, 0, sizeof(inst.call_arg_on_stack));
+    runtime.memset(inst.call_arg_on_stack, 0, sizeof(inst.call_arg_on_stack));
     ir_inst_array_push(&fn->insts, inst);
     if (dst >= 0) set_value_type(fn, dst, width ? width : 4, is_unsigned);
 }
@@ -1076,8 +1071,8 @@ static void emit_inst_f(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
 static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
     char name[32];
     runtime.snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
-    char *init = malloc(10);
-    memcpy(init, &val, 10);
+    char *init = runtime.malloc(10);
+    runtime.memcpy(init, &val, 10);
     ir_module_push_global(g_ir_module, name, 10, init, 1, 1, loc);
     IRValue v = new_value(fn);
     emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, loc);
@@ -1089,7 +1084,7 @@ static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
 static IRValue emit_float_const(IRFunction *fn, int width, int64_t bits, SourceLoc loc) {
     if (width == 16) {
         double d;
-        memcpy(&d, &bits, sizeof d);
+        runtime.memcpy(&d, &bits, sizeof d);
         return emit_ld_const(fn, (long double)d, loc);
     }
     IRValue v = new_value(fn);
@@ -1247,7 +1242,7 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
                             int pinned, Type ty) {
     if (st->len >= st->cap) {
         size_t new_cap = st->cap ? st->cap * 2 : 8;
-        st->data = realloc(st->data, new_cap * sizeof(IRSlot));
+        st->data = runtime.realloc(st->data, new_cap * sizeof(IRSlot));
         if (!st->data) {
             runtime.fprintf(stderr, "fakecc: out of memory\n");
             runtime.exit(1);
@@ -1287,7 +1282,7 @@ static void ir_dbg_fill_struct(IRDebugVar *dv, Type ty) {
     for (int i = 0; i < sd->num_members; i++) {
         const StructMember *sm = &sd->members[i];
         IRDebugMember *m = &dv->members[i];
-        memset(m, 0, sizeof(*m));
+        runtime.memset(m, 0, sizeof(*m));
         m->name = sm->name ? xstrdup(sm->name) : xstrdup("");
         m->offset = sm->offset;
         m->bit_width = sm->bit_width;
@@ -1306,12 +1301,12 @@ static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
                            int param_idx) {
     if (fn->num_dbg_vars >= fn->cap_dbg_vars) {
         size_t nc = fn->cap_dbg_vars ? fn->cap_dbg_vars * 2 : 4;
-        fn->dbg_vars = realloc(fn->dbg_vars, nc * sizeof(IRDebugVar));
+        fn->dbg_vars = runtime.realloc(fn->dbg_vars, nc * sizeof(IRDebugVar));
         if (!fn->dbg_vars) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         fn->cap_dbg_vars = nc;
     }
     IRDebugVar *dv = &fn->dbg_vars[fn->num_dbg_vars++];
-    memset(dv, 0, sizeof(*dv));
+    runtime.memset(dv, 0, sizeof(*dv));
     dv->name = xstrdup(name);
     dv->loc = loc;
     dv->kind = kind;
@@ -1482,16 +1477,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (w == 16)
             return emit_ld_const(fn, strtold(e->u.float_text, ((void*)0)), e->loc);
         int64_t bits = 0;
-        if (w == 4) { float f = (float)runtime.strtod(e->u.float_text, ((void*)0)); memcpy(&bits, &f, sizeof(f)); }
-        else { double d = runtime.strtod(e->u.float_text, ((void*)0)); memcpy(&bits, &d, sizeof(d)); }
+        if (w == 4) { float f = (float)runtime.strtod(e->u.float_text, ((void*)0)); runtime.memcpy(&bits, &f, sizeof(f)); }
+        else { double d = runtime.strtod(e->u.float_text, ((void*)0)); runtime.memcpy(&bits, &d, sizeof(d)); }
         return emit_float_const(fn, w, bits, e->loc);
     }
     case EX_STR: {
         char name[32];
         runtime.snprintf(name, sizeof name, "__str.%d", g_str_counter++);
         int bytes = e->u.str.len + 1;
-        char *init = malloc(bytes);
-        memcpy(init, e->u.str.bytes, bytes);
+        char *init = runtime.malloc(bytes);
+        runtime.memcpy(init, e->u.str.bytes, bytes);
         ir_module_push_global(g_ir_module, name, bytes, init, 1, 1, e->loc);
         return emit_gaddr(fn, name, e->loc);
     }
@@ -1867,7 +1862,7 @@ IRValue pr;
                     && e->u.call.args.len >= 2)
                     last = lower_expr(fn, st, e->u.call.args.data[1]);
                 IRInst inst;
-                memset(&inst, 0, sizeof(inst));
+                runtime.memset(&inst, 0, sizeof(inst));
                 inst.op = IR_CALL;
                 inst.a = -1; inst.b = -1; inst.imm = 0;
                 inst.loc = e->loc;
@@ -1897,7 +1892,7 @@ IRValue pr;
         IRValue arg_vals[32];
         unsigned char arg_on_stack[32];
         int nargs = 0;
-        memset(arg_on_stack, 0, sizeof(arg_on_stack));
+        runtime.memset(arg_on_stack, 0, sizeof(arg_on_stack));
         int is_void_pre = (e->type.width == 0);
         int is_ret_struct_pre = (!is_void_pre && e->type.kind == TY_STRUCT);
         SysVRegClass ret_cls_pre[2];
@@ -1979,7 +1974,7 @@ IRValue pr;
         }
         int total_nargs = nargs + (ret_in_mem ? 1 : 0);
         IRInst inst;
-        memset(&inst, 0, sizeof(inst));
+        runtime.memset(&inst, 0, sizeof(inst));
         inst.op = IR_CALL;
         inst.dst = ret_in_mem ? -1
                  : (is_ret_struct && ret_nreg > 0) ? ret_lo
@@ -2196,8 +2191,8 @@ IRValue pr;
                 one = emit_ld_const(fn, 1.0L, e->loc);
             } else {
                 int64_t bits;
-                if (lw == 4) { float f = 1.0f; bits = 0; memcpy(&bits, &f, sizeof f); }
-                else { double d = 1.0; memcpy(&bits, &d, sizeof d); }
+                if (lw == 4) { float f = 1.0f; bits = 0; runtime.memcpy(&bits, &f, sizeof f); }
+                else { double d = 1.0; runtime.memcpy(&bits, &d, sizeof d); }
                 one = emit_float_const(fn, lw, bits, e->loc);
             }
             IRValue neu = emit_bin_w(fn, is_inc ? IR_FADD : IR_FSUB, old, one,
@@ -2354,8 +2349,8 @@ static int labelmap_find(const LabelMap *lm, const char *name) {
 static void labelmap_add(LabelMap *lm, const char *name, int id) {
     if (lm->len >= lm->cap) {
         lm->cap = lm->cap ? lm->cap * 2 : 8;
-        lm->names = realloc(lm->names, lm->cap * sizeof(char *));
-        lm->ids = realloc(lm->ids, lm->cap * sizeof(int));
+        lm->names = runtime.realloc(lm->names, lm->cap * sizeof(char *));
+        lm->ids = runtime.realloc(lm->ids, lm->cap * sizeof(int));
         if (!lm->names || !lm->ids) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     lm->names[lm->len] = xstrdup(name);
@@ -2413,7 +2408,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         if (s->u.decl.storage_class == 1) {
             int sz = type_size(dty);
             if (sz <= 0) sz = 8;
-            char *bytes = calloc(sz, 1);
+            char *bytes = runtime.calloc(sz, 1);
             if (!bytes) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
             char mangled[256];
             runtime.snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
@@ -2732,7 +2727,7 @@ static int g_pending_rodata_cap = 0;
 static void queue_rodata(const char *name, char *bytes, int size, SourceLoc loc) {
     if (g_pending_rodata_len >= g_pending_rodata_cap) {
         int nc = g_pending_rodata_cap ? g_pending_rodata_cap * 2 : 4;
-        g_pending_rodata = realloc(g_pending_rodata, nc * sizeof(PendingRodata));
+        g_pending_rodata = runtime.realloc(g_pending_rodata, nc * sizeof(PendingRodata));
         if (!g_pending_rodata) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         g_pending_rodata_cap = nc;
     }
@@ -2812,13 +2807,13 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         long double fv;
         if (fold_const_float(e, &fv)) {
             if (ty->width == 16) {
-                memcpy(bytes, &fv, 10);
+                runtime.memcpy(bytes, &fv, 10);
             } else if (ty->width == 4) {
                 float f = (float)fv;
-                memcpy(bytes, &f, sizeof f);
+                runtime.memcpy(bytes, &f, sizeof f);
             } else {
                 double d = (double)fv;
-                memcpy(bytes, &d, sizeof d);
+                runtime.memcpy(bytes, &d, sizeof d);
             }
             return;
         }
@@ -2840,19 +2835,19 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         char name[32];
         runtime.snprintf(name, sizeof name, "__str.%d", g_str_counter++);
         int nbytes = e->u.str.len + 1;
-        char *init = malloc(nbytes);
+        char *init = runtime.malloc(nbytes);
         if (!init) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
-        memcpy(init, e->u.str.bytes, nbytes);
+        runtime.memcpy(init, e->u.str.bytes, nbytes);
         queue_rodata(name, init, nbytes, loc);
         add_global_fixup(g, (int)(bytes - g->init_bytes), name);
-        memset(bytes, 0, sz);
+        runtime.memset(bytes, 0, sz);
         return;
     }
     if (e->kind == EX_STR && ty->kind == TY_ARRAY && ty->elem_type
         && ty->elem_type->width == 1) {
         int n = e->u.str.len;
         if (n > sz - 1) n = sz - 1;
-        memcpy(bytes, e->u.str.bytes, n);
+        runtime.memcpy(bytes, e->u.str.bytes, n);
         bytes[n] = '\0';
         return;
     }
@@ -2864,11 +2859,11 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                 }
                 int off = (int)(bytes - g->init_bytes);
                 add_global_fixup(g, off, src->name);
-                memset(bytes, 0, sz);
+                runtime.memset(bytes, 0, sz);
                 return;
             }
             int n = sz < src->size ? sz : src->size;
-            memcpy(bytes, src->init_bytes, n);
+            runtime.memcpy(bytes, src->init_bytes, n);
             return;
         }
     }
@@ -2876,7 +2871,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         && e->u.addr.operand->kind == EX_VAR && ty->kind == TY_PTR && g) {
         add_global_fixup(g, (int)(bytes - g->init_bytes),
                          e->u.addr.operand->u.var.name);
-        memset(bytes, 0, sz);
+        runtime.memset(bytes, 0, sz);
         return;
     }
     die_at(loc.file, loc.line, loc.col,
@@ -2954,7 +2949,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         if (s->u.decl.storage_class == 2) continue;
         int sz = type_size(s->u.decl.type);
         if (sz <= 0) sz = 8;
-        char *bytes = calloc(sz, 1);
+        char *bytes = runtime.calloc(sz, 1);
         if (!bytes) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         int is_static = (s->u.decl.storage_class == 1);
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,

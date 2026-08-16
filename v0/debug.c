@@ -218,10 +218,6 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 struct FuncDieRef { char *name; uint32_t off; };
 typedef struct FuncDieRef FuncDieRef;
 static void d_u8(Buffer *b, uint8_t v) { buffer_append(b, (const char *)&v, 1); }
@@ -275,7 +271,7 @@ void emit_module_add_dbg_line(EmitModule *m, const char *file, int line,
     }
     if (m->num_dbg_lines >= m->cap_dbg_lines) {
         size_t nc = m->cap_dbg_lines ? m->cap_dbg_lines * 2 : 16;
-        m->dbg_lines = realloc(m->dbg_lines, nc * sizeof(DebugLineEntry));
+        m->dbg_lines = runtime.realloc(m->dbg_lines, nc * sizeof(DebugLineEntry));
         if (!m->dbg_lines) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_dbg_lines = nc;
     }
@@ -289,12 +285,12 @@ int emit_module_add_dbg_func(EmitModule *m, const char *name,
                              const char *file, int line, size_t start_pc) {
     if (m->num_dbg_funcs >= m->cap_dbg_funcs) {
         size_t nc = m->cap_dbg_funcs ? m->cap_dbg_funcs * 2 : 4;
-        m->dbg_funcs = realloc(m->dbg_funcs, nc * sizeof(DebugFunc));
+        m->dbg_funcs = runtime.realloc(m->dbg_funcs, nc * sizeof(DebugFunc));
         if (!m->dbg_funcs) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_dbg_funcs = nc;
     }
     DebugFunc *f = &m->dbg_funcs[m->num_dbg_funcs];
-    memset(f, 0, sizeof(*f));
+    runtime.memset(f, 0, sizeof(*f));
     f->name = xstrdup(name ? name : "");
     f->file = file ? xstrdup(file) : ((void*)0);
     f->line = line;
@@ -334,7 +330,7 @@ static void debug_members_free(DebugMember *members, size_t n) {
     runtime.free(members);
 }
 static void debug_var_copy(DebugVar *dst, const DebugVar *src) {
-    memset(dst, 0, sizeof(*dst));
+    runtime.memset(dst, 0, sizeof(*dst));
     dst->name = src->name ? xstrdup(src->name) : ((void*)0);
     dst->file = src->file ? xstrdup(src->file) : ((void*)0);
     dst->line = src->line;
@@ -356,7 +352,7 @@ static void debug_var_copy(DebugVar *dst, const DebugVar *src) {
     dst->entry_dwarf_reg = src->entry_dwarf_reg;
     if (src->num_ranges > 0) {
         dst->ranges = xmalloc(src->num_ranges * sizeof(DebugLocRange));
-        memcpy(dst->ranges, src->ranges,
+        runtime.memcpy(dst->ranges, src->ranges,
                src->num_ranges * sizeof(DebugLocRange));
         dst->num_ranges = src->num_ranges;
         dst->cap_ranges = src->num_ranges;
@@ -393,14 +389,14 @@ void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v) {
     DebugFunc *f = &m->dbg_funcs[func_idx];
     if (f->num_vars >= f->cap_vars) {
         size_t nc = f->cap_vars ? f->cap_vars * 2 : 4;
-        f->vars = realloc(f->vars, nc * sizeof(DebugVar));
+        f->vars = runtime.realloc(f->vars, nc * sizeof(DebugVar));
         if (!f->vars) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         f->cap_vars = nc;
     }
     debug_var_copy(&f->vars[f->num_vars++], v);
 }
 static void debug_call_site_copy(DebugCallSite *dst, const DebugCallSite *src) {
-    memset(dst, 0, sizeof(*dst));
+    runtime.memset(dst, 0, sizeof(*dst));
     dst->call_pc = src->call_pc;
     dst->return_pc = src->return_pc;
     dst->callee_name = src->callee_name ? xstrdup(src->callee_name) : ((void*)0);
@@ -413,7 +409,7 @@ static void debug_call_site_copy(DebugCallSite *dst, const DebugCallSite *src) {
             if (src->params[i].value_expr_len > 0) {
                 dst->params[i].value_expr =
                     xmalloc(src->params[i].value_expr_len);
-                memcpy(dst->params[i].value_expr, src->params[i].value_expr,
+                runtime.memcpy(dst->params[i].value_expr, src->params[i].value_expr,
                        src->params[i].value_expr_len);
             } else {
                 dst->params[i].value_expr = ((void*)0);
@@ -427,7 +423,7 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
     DebugFunc *f = &m->dbg_funcs[func_idx];
     if (f->num_call_sites >= f->cap_call_sites) {
         size_t nc = f->cap_call_sites ? f->cap_call_sites * 2 : 4;
-        f->call_sites = realloc(f->call_sites, nc * sizeof(DebugCallSite));
+        f->call_sites = runtime.realloc(f->call_sites, nc * sizeof(DebugCallSite));
         if (!f->call_sites) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         f->cap_call_sites = nc;
     }
@@ -436,7 +432,7 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
 void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v) {
     if (m->num_dbg_globals >= m->cap_dbg_globals) {
         size_t nc = m->cap_dbg_globals ? m->cap_dbg_globals * 2 : 4;
-        m->dbg_globals = realloc(m->dbg_globals, nc * sizeof(DebugVar));
+        m->dbg_globals = runtime.realloc(m->dbg_globals, nc * sizeof(DebugVar));
         if (!m->dbg_globals) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_dbg_globals = nc;
     }
@@ -453,9 +449,9 @@ static int deser_str(const unsigned char **p, const unsigned char *end, char **o
     uint32_t n = (uint32_t)((*p)[0] | ((*p)[1] << 8) | ((*p)[2] << 16) | ((*p)[3] << 24));
     *p += 4;
     if (*p + n > end) return -1;
-    *out = malloc(n + 1);
+    *out = runtime.malloc(n + 1);
     if (!*out) return -1;
-    memcpy(*out, *p, n);
+    runtime.memcpy(*out, *p, n);
     (*out)[n] = '\0';
     *p += n;
     return 0;
@@ -511,7 +507,7 @@ static void ser_var(Buffer *b, const DebugVar *v) {
     }
 }
 static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar *v) {
-    memset(v, 0, sizeof(*v));
+    runtime.memset(v, 0, sizeof(*v));
     if (deser_str(p, end, &v->name) < 0) return -1;
     if (deser_str(p, end, &v->file) < 0) return -1;
     if (*p + 4 > end) return -1;
@@ -537,7 +533,7 @@ static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar
         v->num_members = nmembers;
         for (uint32_t i = 0; i < nmembers; i++) {
             DebugMember *m = &v->members[i];
-            memset(m, 0, sizeof(*m));
+            runtime.memset(m, 0, sizeof(*m));
             if (deser_str(p, end, &m->name) < 0) return -1;
             if (*p + 4 + 4 + 4 + 1 + 4 + 1 > end) return -1;
             m->offset = (int)rd32(p);
@@ -662,7 +658,7 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
         uint32_t ncs = rd32(&p);
         for (uint32_t j = 0; j < ncs; j++) {
             DebugCallSite cs;
-            memset(&cs, 0, sizeof(cs));
+            runtime.memset(&cs, 0, sizeof(cs));
             if (p + 16 > end) return -1;
             cs.call_pc = (size_t)rd64(&p);
             cs.return_pc = (size_t)rd64(&p);
@@ -683,7 +679,7 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
                     if (elen > 0) {
                         if (p + elen > end) { debug_call_site_release(&cs); return -1; }
                         cs.params[k].value_expr = xmalloc(elen);
-                        memcpy(cs.params[k].value_expr, p, elen);
+                        runtime.memcpy(cs.params[k].value_expr, p, elen);
                         p += elen;
                     } else {
                         cs.params[k].value_expr = ((void*)0);
@@ -745,7 +741,7 @@ static TypeDie *type_die_push(TypeDieCache *c, DebugTypeTag tag, int width,
                               const char *type_name, uint32_t off) {
     if (c->len >= c->cap) {
         size_t nc = c->cap ? c->cap * 2 : 8;
-        c->data = realloc(c->data, nc * sizeof(TypeDie));
+        c->data = runtime.realloc(c->data, nc * sizeof(TypeDie));
         if (!c->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         c->cap = nc;
     }
@@ -1036,7 +1032,7 @@ static void emit_debug_line(const EmitModule *m, uint64_t text_base, Buffer *lin
         for (size_t j = 0; j < nfiles; j++)
             if (runtime.strcmp(files[j], f) == 0) { found = 1; break; }
         if (!found) {
-            if (nfiles >= cfiles) { cfiles = cfiles ? cfiles * 2 : 4; files = realloc(files, cfiles * sizeof(char *)); }
+            if (nfiles >= cfiles) { cfiles = cfiles ? cfiles * 2 : 4; files = runtime.realloc(files, cfiles * sizeof(char *)); }
             files[nfiles++] = f;
         }
     }
@@ -1045,12 +1041,12 @@ static void emit_debug_line(const EmitModule *m, uint64_t text_base, Buffer *lin
         for (size_t j = 0; j < nfiles; j++)
             if (runtime.strcmp(files[j], m->dbg_tu_name) == 0) { found = 1; break; }
         if (!found) {
-            if (nfiles >= cfiles) { cfiles = cfiles ? cfiles * 2 : 4; files = realloc(files, cfiles * sizeof(char *)); }
+            if (nfiles >= cfiles) { cfiles = cfiles ? cfiles * 2 : 4; files = runtime.realloc(files, cfiles * sizeof(char *)); }
             files[nfiles++] = m->dbg_tu_name;
         }
     }
     if (nfiles == 0) {
-        files = realloc(files, sizeof(char *));
+        files = runtime.realloc(files, sizeof(char *));
         files[0] = m->dbg_tu_name ? m->dbg_tu_name : "unknown.c";
         nfiles = 1;
     }
@@ -1071,7 +1067,7 @@ static void emit_debug_line(const EmitModule *m, uint64_t text_base, Buffer *lin
     }
     d_u8(&hdr, 0);
     uint32_t header_length = (uint32_t)(hdr.len - (header_length_off + 4));
-    memcpy(hdr.data + header_length_off, &header_length, 4);
+    runtime.memcpy(hdr.data + header_length_off, &header_length, 4);
     Buffer prog; buffer_init(&prog);
     int cur_file = 1, cur_line = 1, have_set_addr = 0;
     uint64_t cur_addr = text_base;
@@ -1108,7 +1104,7 @@ static void emit_debug_line(const EmitModule *m, uint64_t text_base, Buffer *lin
     }
     d_u8(&prog, 0); d_uleb(&prog, 1); d_u8(&prog, 1);
     uint32_t unit_length = (uint32_t)(hdr.len - 4 + prog.len);
-    memcpy(hdr.data, &unit_length, 4);
+    runtime.memcpy(hdr.data, &unit_length, 4);
     d_bytes(line, hdr.data, hdr.len);
     d_bytes(line, prog.data, prog.len);
     buffer_free(&hdr); buffer_free(&prog); runtime.free(files);
@@ -1138,7 +1134,7 @@ static void emit_debug_frame(const EmitModule *m, uint64_t text_base, Buffer *fr
     d_u8(frame, (uint8_t)(0x80 | 16)); d_uleb(frame, 1);
     while ((frame->len - cie_start) & 7) d_u8(frame, 0x00);
     uint32_t cie_len = (uint32_t)(frame->len - cie_start - 4);
-    memcpy(frame->data + cie_start, &cie_len, 4);
+    runtime.memcpy(frame->data + cie_start, &cie_len, 4);
     for (size_t i = 0; i < m->num_dbg_funcs; i++) {
         const DebugFunc *f = &m->dbg_funcs[i];
         size_t fde_start = frame->len;
@@ -1157,7 +1153,7 @@ static void emit_debug_frame(const EmitModule *m, uint64_t text_base, Buffer *fr
         d_u8(frame, 0x0d); d_uleb(frame, 6);
         while ((frame->len - fde_start) & 7) d_u8(frame, 0x00);
         uint32_t fde_len = (uint32_t)(frame->len - fde_start - 4);
-        memcpy(frame->data + fde_start, &fde_len, 4);
+        runtime.memcpy(frame->data + fde_start, &fde_len, 4);
     }
 }
 static int dwarf_reg_is_caller_saved(int dreg) {
@@ -1172,7 +1168,7 @@ static int dwarf_reg_is_caller_saved(int dreg) {
 }
 static void refine_param_ranges(DebugVar *out, const DebugVar *v,
                                 const DebugFunc *f) {
-    memset(out, 0, sizeof(*out));
+    runtime.memset(out, 0, sizeof(*out));
     *out = *v;
     out->ranges = ((void*)0);
     out->num_ranges = 0;
@@ -1185,7 +1181,7 @@ static void refine_param_ranges(DebugVar *out, const DebugVar *v,
     if (v->entry_dwarf_reg < 0) {
         if (v->num_ranges > 0) {
             out->ranges = xmalloc(v->num_ranges * sizeof(DebugLocRange));
-            memcpy(out->ranges, v->ranges, v->num_ranges * sizeof(DebugLocRange));
+            runtime.memcpy(out->ranges, v->ranges, v->num_ranges * sizeof(DebugLocRange));
             out->num_ranges = v->num_ranges;
             out->cap_ranges = v->num_ranges;
         }
@@ -1207,7 +1203,7 @@ static void refine_param_ranges(DebugVar *out, const DebugVar *v,
         if (r.pc_end <= r.pc_start) continue;
         if (nclipped >= cclipped) {
             cclipped = cclipped ? cclipped * 2 : 4;
-            clipped = realloc(clipped, cclipped * sizeof(DebugLocRange));
+            clipped = runtime.realloc(clipped, cclipped * sizeof(DebugLocRange));
         }
         clipped[nclipped++] = r;
     }
@@ -1228,7 +1224,7 @@ static void refine_param_ranges(DebugVar *out, const DebugVar *v,
             }
         }
         if (r.pc_end > r.pc_start) {
-            clipped = realloc(clipped, sizeof(DebugLocRange));
+            clipped = runtime.realloc(clipped, sizeof(DebugLocRange));
             clipped[0] = r;
             nclipped = 1;
         }
@@ -1238,7 +1234,7 @@ static void refine_param_ranges(DebugVar *out, const DebugVar *v,
         if (clipped[i].pc_start > cursor) {
             if (out->num_ranges >= out->cap_ranges) {
                 out->cap_ranges = out->cap_ranges ? out->cap_ranges * 2 : 4;
-                out->ranges = realloc(out->ranges,
+                out->ranges = runtime.realloc(out->ranges,
                                       out->cap_ranges * sizeof(DebugLocRange));
             }
             DebugLocRange *er = &out->ranges[out->num_ranges++];
@@ -1250,7 +1246,7 @@ static void refine_param_ranges(DebugVar *out, const DebugVar *v,
         }
         if (out->num_ranges >= out->cap_ranges) {
             out->cap_ranges = out->cap_ranges ? out->cap_ranges * 2 : 4;
-            out->ranges = realloc(out->ranges,
+            out->ranges = runtime.realloc(out->ranges,
                                   out->cap_ranges * sizeof(DebugLocRange));
         }
         out->ranges[out->num_ranges++] = clipped[i];
@@ -1259,7 +1255,7 @@ static void refine_param_ranges(DebugVar *out, const DebugVar *v,
     if (cursor < f->end_pc) {
         if (out->num_ranges >= out->cap_ranges) {
             out->cap_ranges = out->cap_ranges ? out->cap_ranges * 2 : 4;
-            out->ranges = realloc(out->ranges,
+            out->ranges = runtime.realloc(out->ranges,
                                   out->cap_ranges * sizeof(DebugLocRange));
         }
         DebugLocRange *er = &out->ranges[out->num_ranges++];
@@ -1296,7 +1292,7 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
     d_u16(debug_info, 4);
     d_u32(debug_info, 0);
     d_u8(debug_info, 8);
-    TypeDieCache tcache; memset(&tcache, 0, sizeof(tcache));
+    TypeDieCache tcache; runtime.memset(&tcache, 0, sizeof(tcache));
     d_uleb(debug_info, 1);
     d_u32(debug_info, tu_name);
     d_u32(debug_info, comp_dir);
@@ -1323,7 +1319,7 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
         if (f->name && f->name[0]) {
             if (nfrefs >= cfrefs) {
                 cfrefs = cfrefs ? cfrefs * 2 : 8;
-                frefs = realloc(frefs, cfrefs * sizeof(FuncDieRef));
+                frefs = runtime.realloc(frefs, cfrefs * sizeof(FuncDieRef));
             }
             frefs[nfrefs].name = f->name;
             frefs[nfrefs].off = func_die_off;
@@ -1397,7 +1393,7 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
     runtime.free(frefs);
     d_u8(debug_info, 0);
     uint32_t info_len = (uint32_t)(debug_info->len - info_len_off - 4);
-    memcpy(debug_info->data + info_len_off, &info_len, 4);
+    runtime.memcpy(debug_info->data + info_len_off, &info_len, 4);
     d_bytes(debug_str, strs.buf.data, strs.buf.len);
     strtab_free(&strs);
     for (size_t i = 0; i < tcache.len; i++) runtime.free(tcache.data[i].type_name);

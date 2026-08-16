@@ -219,18 +219,13 @@ extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *fopen(const char *p, const char *m);
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
-extern void *calloc(size_t n, size_t m);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 static const char INTERP_PATH[] = "/lib64/ld-linux-x86-64.so.2";
 struct SymInfo { int defined; int shndx; size_t value; uint8_t binding; };
 typedef struct SymInfo SymInfo;
 static void emit_byte(Buffer *b, uint8_t v) { buffer_append(b, (const char *)&v, 1); }
 static void emit_int32(Buffer *b, int32_t v) { buffer_append(b, (const char *)&v, 4); }
 static void *xcalloc(size_t nmemb, size_t size) {
-    void *p = calloc(nmemb, size);
+    void *p = runtime.calloc(nmemb, size);
     if (!p) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     return p;
 }
@@ -244,7 +239,7 @@ static void write_ehdr(Buffer *b, uint64_t entry, uint64_t phoff,
                        uint16_t phnum) {
     buffer_append(b, "\x7f" "ELF", 4);
     char ident[12];
-    memset(ident, 0, 12);
+    runtime.memset(ident, 0, 12);
     ident[0] = 2;
     ident[1] = 1;
     ident[2] = 1;
@@ -555,9 +550,9 @@ Buffer debug_frame;
     }
     uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + (lay->have_dynamic ? 6 : 0));
     uint16_t shstrndx = 7;
-    memcpy(elf->data + 40, &shoff, sizeof(shoff));
-    memcpy(elf->data + 60, &shnum, sizeof(shnum));
-    memcpy(elf->data + 62, &shstrndx, sizeof(shstrndx));
+    runtime.memcpy(elf->data + 40, &shoff, sizeof(shoff));
+    runtime.memcpy(elf->data + 60, &shnum, sizeof(shnum));
+    runtime.memcpy(elf->data + 62, &shstrndx, sizeof(shstrndx));
     if (have_dbg) {
         dbg.text.len = 0;
         emit_module_free(&dbg);
@@ -626,20 +621,20 @@ static size_t emit_plt_entry(Buffer *code, size_t idx, size_t plt0_off,
     size_t pjmp = code->len;
     emit_int32(code, 0);
     int32_t rel = (int32_t)plt0_off - (int32_t)(pjmp + 4);
-    memcpy(code->data + pjmp, &rel, 4);
+    runtime.memcpy(code->data + pjmp, &rel, 4);
     return start;
 }
 static int ext_find_or_add(char ***ext, int *num_ext, const char *name) {
     for (int e = 0; e < *num_ext; e++)
         if (runtime.strcmp((*ext)[e], name) == 0) return e;
-    *ext = realloc(*ext, ((size_t)*num_ext + 1) * sizeof(char *));
+    *ext = runtime.realloc(*ext, ((size_t)*num_ext + 1) * sizeof(char *));
     (*ext)[(*num_ext)++] = xstrdup(name);
     return *num_ext - 1;
 }
 static void needed_add(char ***needed, int *num, const char *soname) {
     for (int i = 0; i < *num; i++)
         if (runtime.strcmp((*needed)[i], soname) == 0) return;
-    *needed = realloc(*needed, ((size_t)*num + 1) * sizeof(char *));
+    *needed = runtime.realloc(*needed, ((size_t)*num + 1) * sizeof(char *));
     if (!*needed) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     (*needed)[(*num)++] = xstrdup(soname);
 }
@@ -761,13 +756,13 @@ Buffer data;
         size_t len = 1;
         for (size_t i = 0; i < num_lib_paths; i++)
             len += runtime.strlen(lib_paths[i]) + (i > 0 ? 1 : 0);
-        runpath = malloc(len);
+        runpath = runtime.malloc(len);
         if (!runpath) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         size_t pos = 0;
         for (size_t i = 0; i < num_lib_paths; i++) {
             if (i > 0) runpath[pos++] = ':';
             size_t n = runtime.strlen(lib_paths[i]);
-            memcpy(runpath + pos, lib_paths[i], n);
+            runtime.memcpy(runpath + pos, lib_paths[i], n);
             pos += n;
         }
         runpath[pos] = '\0';
@@ -829,8 +824,8 @@ Buffer dynamic;
         }
         size_t nsyms = 1 + (size_t)num_dynsym_ext;
         size_t nbucket = (nsyms < 2) ? 1 : 3;
-        uint32_t *bucket = calloc(nbucket, sizeof(uint32_t));
-        uint32_t *chain = calloc(nsyms, sizeof(uint32_t));
+        uint32_t *bucket = runtime.calloc(nbucket, sizeof(uint32_t));
+        uint32_t *chain = runtime.calloc(nsyms, sizeof(uint32_t));
         for (size_t i = 0; i < nsyms; i++) {
             const char *nm = "";
             if (i > 0) {
@@ -949,7 +944,7 @@ Buffer dynamic;
                 int dgidx = reloc_data_got_idx[gsi];
                 uint64_t got_slot_vaddr = got_vaddr + (3 + num_ext + dgidx) * 8;
                 int32_t disp = (int32_t)(got_slot_vaddr - (P + 4));
-                memcpy(text.data + patch_in_text, &disp, 4);
+                runtime.memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
             size_t gsi = mod_sym_base[i] + rel->sym;
@@ -980,7 +975,7 @@ Buffer dynamic;
                 }
             }
             int32_t disp = (int32_t)(S + rel->addend - P);
-            memcpy(text.data + patch_in_text, &disp, 4);
+            runtime.memcpy(text.data + patch_in_text, &disp, 4);
         }
     }
     for (size_t i = 0; i < n; i++) {
@@ -1016,7 +1011,7 @@ Buffer dynamic;
                 }
             }
             uint64_t value = S + rel->addend;
-            memcpy(data.data + patch_in_data, &value, 8);
+            runtime.memcpy(data.data + patch_in_data, &value, 8);
         }
     }
     if (num_ext > 0) {
@@ -1024,13 +1019,13 @@ Buffer dynamic;
             uint64_t target = got_vaddr + (1 + f) * 8;
             uint64_t rip_next = code_vaddr + plt0_got_fixup[f] + 4;
             int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
-            memcpy(text.data + plt0_got_fixup[f], &disp, 4);
+            runtime.memcpy(text.data + plt0_got_fixup[f], &disp, 4);
         }
         for (int e = 0; e < num_ext; e++) {
             uint64_t target = got_vaddr + (3 + e) * 8;
             uint64_t rip_next = code_vaddr + plt_got_fixup[e] + 4;
             int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
-            memcpy(text.data + plt_got_fixup[e], &disp, 4);
+            runtime.memcpy(text.data + plt_got_fixup[e], &disp, 4);
         }
     }
     uint64_t main_addr = 0;
@@ -1060,27 +1055,27 @@ Buffer dynamic;
             int k = 0;
             for (int i = 0; i < num_ext; i++, k++) {
                 uint32_t noff = (uint32_t)acc;
-                memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                runtime.memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
                 acc += runtime.strlen(ext_list[i]) + 1;
             }
             for (int j = 0; j < num_data_ext; j++) {
                 if (!data_got_external[j]) continue;
                 uint32_t noff = (uint32_t)acc;
-                memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                runtime.memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
                 acc += runtime.strlen(data_ext_list[j]) + 1;
                 k++;
             }
         }
         for (int i = 0; i < num_ext; i++) {
             uint64_t roff = got_vaddr + (3 + i) * 8;
-            memcpy(rela_plt.data + (size_t)i * 24, &roff, 8);
+            runtime.memcpy(rela_plt.data + (size_t)i * 24, &roff, 8);
         }
         {
             int rdj = 0;
             for (int j = 0; j < num_data_ext; j++) {
                 if (!data_got_external[j]) continue;
                 uint64_t roff = got_vaddr + (3 + num_ext + j) * 8;
-                memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
+                runtime.memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
                 rdj++;
             }
         }

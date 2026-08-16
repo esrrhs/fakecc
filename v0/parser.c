@@ -627,11 +627,7 @@ extern FILE *stderr;
 extern FILE *stdin;
 extern FILE *stdout;
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
 extern unsigned long long strtoull(const char *s, char **end, int base);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 struct Parser {
     const TokenArray *tokens;
     size_t pos;
@@ -1055,7 +1051,7 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
 static Type make_func_type(Type ret, ParamArray *params) {
     Type **ptys = ((void*)0);
     if (params->len > 0) {
-        ptys = malloc(params->len * sizeof(Type *));
+        ptys = runtime.malloc(params->len * sizeof(Type *));
         if (!ptys) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         for (size_t i = 0; i < params->len; i++)
             ptys[i] = &params->data[i].type;
@@ -1750,7 +1746,7 @@ int is_unsigned;
             size_t slen = runtime.strlen(src);
             if (slen >= 1 && src[0] == '"') { src++; slen--; }
             if (slen >= 1 && src[slen-1] == '"') slen--;
-            char *seg = malloc(slen + 1);
+            char *seg = runtime.malloc(slen + 1);
             int slen2 = 0;
             for (size_t i = 0; i < slen; i++) {
                 char c = src[i];
@@ -1791,8 +1787,8 @@ int is_unsigned;
                     seg[slen2++] = c;
                 }
             }
-            buf = realloc(buf, (size_t)total + slen2 + 1);
-            memcpy(buf + total, seg, slen2);
+            buf = runtime.realloc(buf, (size_t)total + slen2 + 1);
+            runtime.memcpy(buf + total, seg, slen2);
             total += slen2;
             runtime.free(seg);
             advance(p);
@@ -1887,10 +1883,10 @@ static Expr *parse_init_list(Parser *p) {
         }
         if (num >= cap) {
             cap = cap ? cap * 2 : 8;
-            elements = realloc(elements, cap * sizeof(Expr *));
-            dkind = realloc(dkind, cap * sizeof(int));
-            dindex = realloc(dindex, cap * sizeof(int));
-            dmember = realloc(dmember, cap * sizeof(char *));
+            elements = runtime.realloc(elements, cap * sizeof(Expr *));
+            dkind = runtime.realloc(dkind, cap * sizeof(int));
+            dindex = runtime.realloc(dindex, cap * sizeof(int));
+            dmember = runtime.realloc(dmember, cap * sizeof(char *));
         }
         elements[num] = elem;
         dkind[num] = kind;
@@ -1958,7 +1954,7 @@ static Stmt parse_stmt(Parser *p) {
         if (peek(p)->kind == TK_SEMICOLON) {
             advance(p);
             Stmt s;
-            memset(&s, 0, sizeof(s));
+            runtime.memset(&s, 0, sizeof(s));
             s.kind = ST_BLOCK;
             s.loc = decl_loc;
             stmt_array_init(&s.u.block);
@@ -2684,7 +2680,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
             FunctionDecl fn = parse_function_decl(&p);
             if (tu->functions.len >= tu->functions.cap) {
                 size_t new_cap = tu->functions.cap ? tu->functions.cap * 2 : 4;
-                tu->functions.data = realloc(tu->functions.data,
+                tu->functions.data = runtime.realloc(tu->functions.data,
                                              new_cap * sizeof(FunctionDecl));
                 tu->functions.cap = new_cap;
             }

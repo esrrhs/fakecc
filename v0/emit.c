@@ -219,10 +219,6 @@ extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *fopen(const char *p, const char *m);
 typedef long fpos_t;
-extern void *malloc(size_t n);
-extern void *realloc(void *p, size_t n);
-extern void *memcpy(void *dst, const void *src, size_t n);
-extern void *memset(void *dst, int c, size_t n);
 void emit_module_init(EmitModule *m) {
     buffer_init(&m->text);
     buffer_init(&m->rodata);
@@ -270,7 +266,7 @@ int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
                            size_t size) {
     if (m->num_syms >= m->cap_syms) {
         size_t nc = m->cap_syms ? m->cap_syms * 2 : 8;
-        m->syms = realloc(m->syms, nc * sizeof(EmitSymbol));
+        m->syms = runtime.realloc(m->syms, nc * sizeof(EmitSymbol));
         if (!m->syms) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_syms = nc;
     }
@@ -308,7 +304,7 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend) {
     if (m->num_relocs >= m->cap_relocs) {
         size_t nc = m->cap_relocs ? m->cap_relocs * 2 : 8;
-        m->relocs = realloc(m->relocs, nc * sizeof(EmitReloc));
+        m->relocs = runtime.realloc(m->relocs, nc * sizeof(EmitReloc));
         if (!m->relocs) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_relocs = nc;
     }
@@ -322,7 +318,7 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend) {
     if (m->num_data_relocs >= m->cap_data_relocs) {
         size_t nc = m->cap_data_relocs ? m->cap_data_relocs * 2 : 8;
-        m->data_relocs = realloc(m->data_relocs, nc * sizeof(EmitReloc));
+        m->data_relocs = runtime.realloc(m->data_relocs, nc * sizeof(EmitReloc));
         if (!m->data_relocs) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_data_relocs = nc;
     }
@@ -341,7 +337,7 @@ static void buf_pad(Buffer *b, size_t n) { while (n--) buf_u8(b, 0); }
 static void write_ehdr(Buffer *b, uint16_t type, uint16_t shnum) {
     buffer_append(b, "\x7f" "ELF", 4);
     char ident[12];
-    memset(ident, 0, 12);
+    runtime.memset(ident, 0, 12);
     ident[0] = 2;
     ident[1] = 1;
     ident[2] = 1;
@@ -414,7 +410,7 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_pad(&symtab, 24);
     uint32_t sym_bss = (uint32_t)(symtab.len / 24);
     buf_pad(&symtab, 24);
-    int *sym_remap = malloc(m->num_syms * sizeof(int));
+    int *sym_remap = runtime.malloc(m->num_syms * sizeof(int));
     if (!sym_remap) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
     for (size_t i = 0; i < m->num_syms; i++) sym_remap[i] = -1;
     for (size_t i = 0; i < m->num_syms; i++) {
@@ -447,10 +443,10 @@ void emit_obj(const EmitModule *m, const char *path) {
         buf_u64(&symtab, s->size);
     }
     uint8_t sec_info = (0 << 4) | 3;
-    memcpy(symtab.data + sym_text * 24 + 4, &sec_info, 1);
-    memcpy(symtab.data + sym_rodata * 24 + 4, &sec_info, 1);
-    memcpy(symtab.data + sym_data * 24 + 4, &sec_info, 1);
-    memcpy(symtab.data + sym_bss * 24 + 4, &sec_info, 1);
+    runtime.memcpy(symtab.data + sym_text * 24 + 4, &sec_info, 1);
+    runtime.memcpy(symtab.data + sym_rodata * 24 + 4, &sec_info, 1);
+    runtime.memcpy(symtab.data + sym_data * 24 + 4, &sec_info, 1);
+    runtime.memcpy(symtab.data + sym_bss * 24 + 4, &sec_info, 1);
     Buffer rela_text;
     buffer_init(&rela_text);
     for (size_t i = 0; i < m->num_relocs; i++) {
@@ -509,11 +505,11 @@ void emit_obj(const EmitModule *m, const char *path) {
     buffer_init(&elf);
     write_ehdr(&elf, 1, shnum);
     uint64_t shoff_val = shoff;
-    memcpy(elf.data + 40, &shoff_val, 8);
+    runtime.memcpy(elf.data + 40, &shoff_val, 8);
     uint16_t shnum_val = shnum;
-    memcpy(elf.data + 60, &shnum_val, 2);
+    runtime.memcpy(elf.data + 60, &shnum_val, 2);
     uint16_t shstrndx_val = shstrndx;
-    memcpy(elf.data + 62, &shstrndx_val, 2);
+    runtime.memcpy(elf.data + 62, &shstrndx_val, 2);
     buf_bytes(&elf, body.data, body.len);
     buf_pad(&elf, 64);
     write_shdr(&elf, shname_text, 1, 0x2 | 0x4,
@@ -580,7 +576,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
     runtime.fseek(f, 0, 2);
     long fsize = runtime.ftell(f);
     runtime.fseek(f, 0, 0);
-    unsigned char *buf = malloc((size_t)fsize);
+    unsigned char *buf = runtime.malloc((size_t)fsize);
     size_t nread = runtime.fread(buf, 1, (size_t)fsize, f);
     runtime.fclose(f);
     if (nread != (size_t)fsize) {
@@ -629,17 +625,17 @@ int emit_obj_read(const char *path, EmitModule *m) {
     if (text_idx >= 0) {
         const unsigned char *sh = buf + shoff + (size_t)text_idx * shentsize;
         uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        m->text.data = malloc(sz); memcpy(m->text.data, buf + off, sz); m->text.len = sz; m->text.cap = sz;
+        m->text.data = runtime.malloc(sz); runtime.memcpy(m->text.data, buf + off, sz); m->text.len = sz; m->text.cap = sz;
     }
     if (rodata_idx >= 0) {
         const unsigned char *sh = buf + shoff + (size_t)rodata_idx * shentsize;
         uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        m->rodata.data = malloc(sz); memcpy(m->rodata.data, buf + off, sz); m->rodata.len = sz; m->rodata.cap = sz;
+        m->rodata.data = runtime.malloc(sz); runtime.memcpy(m->rodata.data, buf + off, sz); m->rodata.len = sz; m->rodata.cap = sz;
     }
     if (data_idx >= 0) {
         const unsigned char *sh = buf + shoff + (size_t)data_idx * shentsize;
         uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        m->data.data = malloc(sz); memcpy(m->data.data, buf + off, sz); m->data.len = sz; m->data.cap = sz;
+        m->data.data = runtime.malloc(sz); runtime.memcpy(m->data.data, buf + off, sz); m->data.len = sz; m->data.cap = sz;
     }
     if (bss_idx >= 0) {
         const unsigned char *sh = buf + shoff + (size_t)bss_idx * shentsize;
