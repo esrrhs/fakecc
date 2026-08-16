@@ -573,20 +573,21 @@ def hoist_local_structs(text):
 
 
 def cleanup_unused_definitions(body):
-    """Drop extern declarations unreferenced in this file.  We intentionally do
-    NOT remove type definitions (struct/union/enum/typedef): determining
-    whether a type is truly unused requires whole-program analysis (a type
-    may be used as a field in another file's struct, or via a pointer the
-    scanner can't see), and misclassification breaks compilation.  Extern
-    function declarations are safe to drop because an unused extern has no
-    call sites to silence."""
+    """Drop extern declarations for symbols provided by the runtime package.
+    v0 files are compiled as a unit (all together), so fakecc's package-main
+    semantics expose sibling-file symbols unqualified — no extern needed for
+    those.  Runtime symbols are also available via `import runtime;`.  We keep
+    externs for src-internal cross-file references (e.g. get_ir_structs) as
+    a safety net, though the package system should resolve them too."""
     result = []
     for ln in body.split("\n"):
         s = ln.strip()
-        m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*\(', s)
-        if m:
-            name = m.group(1)
-            if not re.search(r'\b' + re.escape(name) + r'\s*\(', body):
+        if s.startswith("extern"):
+            # Check if this extern is for a runtime function/global
+            m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*[\(;]', s)
+            if m and m.group(1) in RUNTIME_FUNCS:
+                continue
+            if m and m.group(1) in RUNTIME_GLOBALS:
                 continue
         result.append(ln)
     return "\n".join(result)
