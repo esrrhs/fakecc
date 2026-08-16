@@ -35,15 +35,12 @@ python3 "$ROOT/v0/translate.py" >/dev/null || exit 1
 build_with() {
     local cc="$1" outdir="$2"
     mkdir -p "$outdir"
-    for m in $MODULES; do
-        "$cc" "$ROOT/v0/$m.c" -c -o "$outdir/$m.o" 2>"$outdir/$m.err" || {
-            echo "  FAIL $m: $(head -1 "$outdir/$m.err")" >&2
-            return 1
-        }
-    done
-    "$cc" $(for m in $MODULES; do echo "$outdir/$m.o"; done) \
-          -o "$outdir/fakecc" 2>"$outdir/link.err" || {
-        echo "  LINK FAIL: $(head -1 "$outdir/link.err")" >&2
+    # Compile all modules together in one invocation so fakecc's package-main
+    # semantics expose sibling files' symbols unqualified (no per-file extern).
+    local srcs=""
+    for m in $MODULES; do srcs="$srcs $ROOT/v0/$m.c"; done
+    "$cc" $srcs -o "$outdir/fakecc" 2>"$outdir/build.err" || {
+        echo "  BUILD FAIL: $(head -1 "$outdir/build.err")" >&2
         return 1
     }
 }
@@ -57,32 +54,18 @@ build_with "$WORK/s1/fakecc" "$WORK/s2" || exit 1
 echo "    -> $WORK/s2/fakecc"
 
 echo
-echo "=== comparing stage 1 and stage 2 objects ==="
-same=0
-diff_mods=""
-for m in $MODULES; do
-    if cmp -s "$WORK/s1/$m.o" "$WORK/s2/$m.o"; then
-        same=$((same + 1))
-    else
-        diff_mods="$diff_mods $m"
-        printf '  %-12s DIFFERS (%s vs %s bytes)\n' "$m" \
-               "$(stat -c%s "$WORK/s1/$m.o")" "$(stat -c%s "$WORK/s2/$m.o")"
-    fi
-done
+echo "=== comparing stage 1 and stage 2 binaries ==="
+if cmp -s "$WORK/s1/fakecc" "$WORK/s2/fakecc"; then
+    echo "binaries byte-identical"
+else
+    echo "NOT a fixed point — stage 1 and stage 2 binaries differ"
+    echo "  stage 1: $(stat -c%s "$WORK/s1/fakecc") bytes"
+    echo "  stage 2: $(stat -c%s "$WORK/s2/fakecc") bytes"
+    exit 1
+fi
 
 echo
-if [ -n "$diff_mods" ]; then
-    echo "NOT a fixed point — $same/$(echo $MODULES | wc -w) identical, differing:$diff_mods"
-    exit 1
-fi
-echo "all $same modules byte-identical"
-
-if ! cmp -s "$WORK/s1/fakecc" "$WORK/s2/fakecc"; then
-    echo "NOT a fixed point — objects match but the linked binaries differ"
-    exit 1
-fi
-
-echo "FIXED POINT REACHED: objects and linked binary are byte-identical"
+echo "FIXED POINT REACHED: linked binaries are byte-identical"
 cp "$WORK/s1/fakecc" "$ROOT/v0/fakecc-1"
 cp "$WORK/s2/fakecc" "$ROOT/v0/fakecc-2"
 echo "wrote v0/fakecc-1 and v0/fakecc-2"
