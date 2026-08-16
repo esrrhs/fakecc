@@ -623,11 +623,7 @@ void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
                         const Package *pkg);
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
-extern unsigned long long strtoull(const char *s, char **end, int base);
 struct Parser {
     const TokenArray *tokens;
     size_t pos;
@@ -1052,7 +1048,7 @@ static Type make_func_type(Type ret, ParamArray *params) {
     Type **ptys = ((void*)0);
     if (params->len > 0) {
         ptys = runtime.malloc(params->len * sizeof(Type *));
-        if (!ptys) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!ptys) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         for (size_t i = 0; i < params->len; i++)
             ptys[i] = &params->data[i].type;
     }
@@ -1661,7 +1657,7 @@ static int int_literal_value(const char *text) {
 }
 static unsigned long long int_literal_typed(const char *text, int *out_width,
                                             int *out_unsigned) {
-    unsigned long long v = strtoull(text, ((void*)0), 0);
+    unsigned long long v = runtime.strtoull(text, ((void*)0), 0);
     int suffix_u = 0, suffix_l = 0;
     for (const char *s = text; *s; s++) {
         if (*s == 'u' || *s == 'U') suffix_u = 1;

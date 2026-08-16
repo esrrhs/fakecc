@@ -959,17 +959,11 @@ void sema_check(const TranslationUnit *tu, int require_main);
 void sema_check_in_pkg(const TranslationUnit *tu, int require_main,
                        struct PkgContext *ctx);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *fopen(const char *p, const char *m);
 typedef long fpos_t;
-extern char *getenv(const char *name);
-extern char *strchr(const char *s, int c);
 static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = runtime.fopen(path, "rb");
     if (!f) {
-        runtime.fprintf(stderr, "fakecc: cannot open '%s'\n", path);
+        runtime.fprintf(runtime.stderr, "fakecc: cannot open '%s'\n", path);
         runtime.exit(1);
     }
     runtime.fseek(f, 0, 2);
@@ -977,7 +971,7 @@ static char *read_file(const char *path) {
     runtime.fseek(f, 0, 0);
     char *buf = runtime.malloc((size_t)size + 1);
     if (!buf) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     size_t nread = runtime.fread(buf, 1, (size_t)size, f);
@@ -1012,7 +1006,7 @@ static void module_free(EmitModule *m) {
     emit_module_free(m);
 }
 static void usage(void) {
-    runtime.fprintf(stderr,
+    runtime.fprintf(runtime.stderr,
             "usage: fakecc [-c] [-g] [-O0|-O1] [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
@@ -1042,7 +1036,7 @@ static int is_system_soname(const char *soname) {
 }
 static char *soname_from_l(const char *arg) {
     if (!arg || !*arg) {
-        runtime.fprintf(stderr, "fakecc: -l requires a library name\n");
+        runtime.fprintf(runtime.stderr, "fakecc: -l requires a library name\n");
         runtime.exit(1);
     }
     if (arg[0] == ':')
@@ -1054,7 +1048,7 @@ static char *soname_from_l(const char *arg) {
     {
         size_t n = runtime.strlen(arg);
         char *s = runtime.malloc(n + 8);
-        if (!s) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+        if (!s) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
         runtime.memcpy(s, "lib", 3);
         runtime.memcpy(s + 3, arg, n);
         runtime.memcpy(s + 3 + n, ".so", 4);
@@ -1076,7 +1070,7 @@ static char *dir_of(const char *path) {
     {
         size_t n = (size_t)(slash - path);
         char *d = runtime.malloc(n + 1);
-        if (!d) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+        if (!d) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
         runtime.memcpy(d, path, n);
         d[n] = '\0';
         return d;
@@ -1086,17 +1080,17 @@ static void paths_add(char ***paths, int *n, const char *dir) {
     for (int i = 0; i < *n; i++)
         if (runtime.strcmp((*paths)[i], dir) == 0) return;
     *paths = runtime.realloc(*paths, ((size_t)*n + 1) * sizeof(char *));
-    if (!*paths) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+    if (!*paths) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
     (*paths)[(*n)++] = xstrdup(dir);
 }
 static int lib_in_dir(const char *dir, const char *soname) {
     size_t nd = runtime.strlen(dir), ns = runtime.strlen(soname);
     char *path = runtime.malloc(nd + 1 + ns + 1);
-    if (!path) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+    if (!path) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
     runtime.memcpy(path, dir, nd);
     path[nd] = '/';
     runtime.memcpy(path + nd + 1, soname, ns + 1);
-    FILE *f = fopen(path, "rb");
+    FILE *f = runtime.fopen(path, "rb");
     int ok = f != ((void*)0);
     if (f) runtime.fclose(f);
     runtime.free(path);
@@ -1112,13 +1106,13 @@ static void require_libs_found(char **needed, int num_needed,
             if (lib_in_dir(lib_paths[d], needed[i])) { found = 1; break; }
         }
         if (!found) {
-            runtime.fprintf(stderr, "fakecc: cannot find -l library '%s'\n", needed[i]);
+            runtime.fprintf(runtime.stderr, "fakecc: cannot find -l library '%s'\n", needed[i]);
             runtime.exit(1);
         }
     }
 }
 static int file_readable(const char *path) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = runtime.fopen(path, "rb");
     if (!f) return 0;
     runtime.fclose(f);
     return 1;
@@ -1127,7 +1121,7 @@ static char *path_join(const char *a, const char *b) {
     size_t na = runtime.strlen(a), nb = runtime.strlen(b);
     int slash = (na > 0 && a[na - 1] != '/');
     char *p = runtime.malloc(na + (size_t)slash + nb + 1);
-    if (!p) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+    if (!p) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
     runtime.memcpy(p, a, na);
     if (slash) p[na++] = '/';
     runtime.memcpy(p + na, b, nb + 1);
@@ -1135,7 +1129,7 @@ static char *path_join(const char *a, const char *b) {
 }
 static const char *rt_pkg_name(void) { return "runtime"; }
 static char *find_rt_dir(const char *argv0) {
-    const char *env = getenv("FAKECC_RT");
+    const char *env = runtime.getenv("FAKECC_RT");
     if (env && env[0]) {
         char *probe = path_join(env, "string.c");
         int ok = file_readable(probe);
@@ -1170,12 +1164,12 @@ static char *find_rt_dir(const char *argv0) {
     return ((void*)0);
 }
 static void add_pkg_env_paths(PkgContext *ctx) {
-    const char *env = getenv("FAKECC_PKG");
+    const char *env = runtime.getenv("FAKECC_PKG");
     if (!env || !env[0]) return;
     char *copy = xstrdup(env);
     char *p = copy;
     while (*p) {
-        char *colon = strchr(p, ':');
+        char *colon = runtime.strchr(p, ':');
         if (colon) *colon = '\0';
         if (*p) pkg_ctx_add_path(ctx, p);
         if (!colon) break;
@@ -1233,7 +1227,7 @@ int main(int argc, char **argv) {
                 runtime.free(d);
             }
         } else if (argv[i][0] == '-') {
-            runtime.fprintf(stderr, "fakecc: unknown option '%s'\n", argv[i]);
+            runtime.fprintf(runtime.stderr, "fakecc: unknown option '%s'\n", argv[i]);
             usage();
         } else {
             inputs = runtime.realloc(inputs, (ninputs + 1) * sizeof(char *));
@@ -1258,11 +1252,11 @@ int main(int argc, char **argv) {
     }
     if (compile_only) {
         if (ninputs != 1) {
-            runtime.fprintf(stderr, "fakecc: -c requires exactly one input\n");
+            runtime.fprintf(runtime.stderr, "fakecc: -c requires exactly one input\n");
             runtime.exit(1);
         }
         if (num_needed > 0 || num_lib_paths > 0 || nodefaultlibs || nostdlib) {
-            runtime.fprintf(stderr,
+            runtime.fprintf(runtime.stderr,
                     "fakecc: -l / -L / -nostdlib / -nodefaultlibs are link-time options\n");
             runtime.exit(1);
         }
@@ -1284,7 +1278,7 @@ int main(int argc, char **argv) {
     int nrt = 0;
     if (!nostdlib) {
         if (!rt_dir) {
-            runtime.fprintf(stderr,
+            runtime.fprintf(runtime.stderr,
                     "fakecc: cannot find runtime/ (set FAKECC_RT or run from the source tree)\n");
             runtime.exit(1);
         }
@@ -1295,7 +1289,7 @@ int main(int argc, char **argv) {
         pkg_load(&pkg, rt_pkg_name(), zloc);
     TranslationUnit *user_tus = runtime.malloc((size_t)ninputs * sizeof(TranslationUnit));
     if (!user_tus) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     for (int i = 0; i < ninputs; i++) {
@@ -1322,7 +1316,7 @@ int main(int argc, char **argv) {
     EmitModule *mods = runtime.malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = runtime.malloc((size_t)nmods * sizeof(EmitModule *));
     if (!mods || !mod_ptrs) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     for (int i = 0; i < ninputs; i++) {

@@ -214,9 +214,6 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 struct FuncDieRef { char *name; uint32_t off; };
 typedef struct FuncDieRef FuncDieRef;
@@ -272,7 +269,7 @@ void emit_module_add_dbg_line(EmitModule *m, const char *file, int line,
     if (m->num_dbg_lines >= m->cap_dbg_lines) {
         size_t nc = m->cap_dbg_lines ? m->cap_dbg_lines * 2 : 16;
         m->dbg_lines = runtime.realloc(m->dbg_lines, nc * sizeof(DebugLineEntry));
-        if (!m->dbg_lines) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!m->dbg_lines) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_dbg_lines = nc;
     }
     DebugLineEntry *e = &m->dbg_lines[m->num_dbg_lines++];
@@ -286,7 +283,7 @@ int emit_module_add_dbg_func(EmitModule *m, const char *name,
     if (m->num_dbg_funcs >= m->cap_dbg_funcs) {
         size_t nc = m->cap_dbg_funcs ? m->cap_dbg_funcs * 2 : 4;
         m->dbg_funcs = runtime.realloc(m->dbg_funcs, nc * sizeof(DebugFunc));
-        if (!m->dbg_funcs) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!m->dbg_funcs) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_dbg_funcs = nc;
     }
     DebugFunc *f = &m->dbg_funcs[m->num_dbg_funcs];
@@ -390,7 +387,7 @@ void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v) {
     if (f->num_vars >= f->cap_vars) {
         size_t nc = f->cap_vars ? f->cap_vars * 2 : 4;
         f->vars = runtime.realloc(f->vars, nc * sizeof(DebugVar));
-        if (!f->vars) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!f->vars) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         f->cap_vars = nc;
     }
     debug_var_copy(&f->vars[f->num_vars++], v);
@@ -424,7 +421,7 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
     if (f->num_call_sites >= f->cap_call_sites) {
         size_t nc = f->cap_call_sites ? f->cap_call_sites * 2 : 4;
         f->call_sites = runtime.realloc(f->call_sites, nc * sizeof(DebugCallSite));
-        if (!f->call_sites) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!f->call_sites) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         f->cap_call_sites = nc;
     }
     debug_call_site_copy(&f->call_sites[f->num_call_sites++], cs);
@@ -433,7 +430,7 @@ void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v) {
     if (m->num_dbg_globals >= m->cap_dbg_globals) {
         size_t nc = m->cap_dbg_globals ? m->cap_dbg_globals * 2 : 4;
         m->dbg_globals = runtime.realloc(m->dbg_globals, nc * sizeof(DebugVar));
-        if (!m->dbg_globals) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!m->dbg_globals) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_dbg_globals = nc;
     }
     debug_var_copy(&m->dbg_globals[m->num_dbg_globals++], v);
@@ -742,7 +739,7 @@ static TypeDie *type_die_push(TypeDieCache *c, DebugTypeTag tag, int width,
     if (c->len >= c->cap) {
         size_t nc = c->cap ? c->cap * 2 : 8;
         c->data = runtime.realloc(c->data, nc * sizeof(TypeDie));
-        if (!c->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!c->data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         c->cap = nc;
     }
     TypeDie *td = &c->data[c->len++];

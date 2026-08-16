@@ -33,9 +33,6 @@ void *xrealloc(void *p, size_t n);
 void die_at(const char *file, int line, int col, const char *fmt, ...);
 
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 void buffer_init(Buffer *b) {
     b->data = ((void*)0);
@@ -54,7 +51,7 @@ static void buffer_grow(Buffer *b, size_t need) {
     while (new_cap < b->len + need) new_cap *= 2;
     b->data = runtime.realloc(b->data, new_cap);
     if (!b->data) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     b->cap = new_cap;
@@ -72,7 +69,7 @@ void buffer_appendf(Buffer *b, const char *fmt, ...) {
     int n = runtime.vsnprintf(((void*)0), 0, fmt, ap2);
     va_end(ap2);
     if (n < 0) {
-        runtime.fprintf(stderr, "fakecc: vsnprintf failed\n");
+        runtime.fprintf(runtime.stderr, "fakecc: vsnprintf failed\n");
         runtime.exit(1);
     }
     size_t need = (size_t)n;
@@ -84,7 +81,7 @@ void buffer_appendf(Buffer *b, const char *fmt, ...) {
 void *xmalloc(size_t n) {
     void *p = runtime.malloc(n);
     if (!p) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     return p;
@@ -92,7 +89,7 @@ void *xmalloc(size_t n) {
 void *xrealloc(void *p, size_t n) {
     void *q = runtime.realloc(p, n);
     if (!q) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     return q;
@@ -101,7 +98,7 @@ char *xstrdup(const char *s) {
     size_t len = runtime.strlen(s) + 1;
     char *d = runtime.malloc(len);
     if (!d) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     runtime.memcpy(d, s, len);
@@ -110,9 +107,9 @@ char *xstrdup(const char *s) {
 void die_at(const char *file, int line, int col, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    runtime.fprintf(stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
-    runtime.vfprintf(stderr, fmt, ap);
-    runtime.fprintf(stderr, "\n");
+    runtime.fprintf(runtime.stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
+    runtime.vfprintf(runtime.stderr, fmt, ap);
+    runtime.fprintf(runtime.stderr, "\n");
     va_end(ap);
     runtime.exit(1);
 }

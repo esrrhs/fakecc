@@ -214,10 +214,6 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *fopen(const char *p, const char *m);
 typedef long fpos_t;
 void emit_module_init(EmitModule *m) {
     buffer_init(&m->text);
@@ -267,7 +263,7 @@ int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
     if (m->num_syms >= m->cap_syms) {
         size_t nc = m->cap_syms ? m->cap_syms * 2 : 8;
         m->syms = runtime.realloc(m->syms, nc * sizeof(EmitSymbol));
-        if (!m->syms) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!m->syms) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_syms = nc;
     }
     EmitSymbol *s = &m->syms[m->num_syms];
@@ -305,7 +301,7 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
     if (m->num_relocs >= m->cap_relocs) {
         size_t nc = m->cap_relocs ? m->cap_relocs * 2 : 8;
         m->relocs = runtime.realloc(m->relocs, nc * sizeof(EmitReloc));
-        if (!m->relocs) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!m->relocs) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_relocs = nc;
     }
     EmitReloc *r = &m->relocs[m->num_relocs++];
@@ -319,7 +315,7 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
     if (m->num_data_relocs >= m->cap_data_relocs) {
         size_t nc = m->cap_data_relocs ? m->cap_data_relocs * 2 : 8;
         m->data_relocs = runtime.realloc(m->data_relocs, nc * sizeof(EmitReloc));
-        if (!m->data_relocs) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!m->data_relocs) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->cap_data_relocs = nc;
     }
     EmitReloc *r = &m->data_relocs[m->num_data_relocs++];
@@ -411,7 +407,7 @@ void emit_obj(const EmitModule *m, const char *path) {
     uint32_t sym_bss = (uint32_t)(symtab.len / 24);
     buf_pad(&symtab, 24);
     int *sym_remap = runtime.malloc(m->num_syms * sizeof(int));
-    if (!sym_remap) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!sym_remap) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     for (size_t i = 0; i < m->num_syms; i++) sym_remap[i] = -1;
     for (size_t i = 0; i < m->num_syms; i++) {
         const EmitSymbol *s = &m->syms[i];
@@ -541,8 +537,8 @@ void emit_obj(const EmitModule *m, const char *path) {
     }
     (void)shstrndx; (void)symtab_idx; (void)strtab_idx; (void)first_global;
     (void)shname_fakecc_dbg;
-    FILE *f = fopen(path, "wb");
-    if (!f) { runtime.fprintf(stderr, "fakecc: cannot write '%s'\n", path); runtime.exit(1); }
+    FILE *f = runtime.fopen(path, "wb");
+    if (!f) { runtime.fprintf(runtime.stderr, "fakecc: cannot write '%s'\n", path); runtime.exit(1); }
     runtime.fwrite(elf.data, 1, elf.len, f);
     runtime.fclose(f);
     runtime.free(sym_remap);
@@ -571,8 +567,8 @@ static uint16_t rd_u16(const unsigned char *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
 }
 int emit_obj_read(const char *path, EmitModule *m) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { runtime.fprintf(stderr, "fakecc: cannot open '%s'\n", path); return -1; }
+    FILE *f = runtime.fopen(path, "rb");
+    if (!f) { runtime.fprintf(runtime.stderr, "fakecc: cannot open '%s'\n", path); return -1; }
     runtime.fseek(f, 0, 2);
     long fsize = runtime.ftell(f);
     runtime.fseek(f, 0, 0);
@@ -580,13 +576,13 @@ int emit_obj_read(const char *path, EmitModule *m) {
     size_t nread = runtime.fread(buf, 1, (size_t)fsize, f);
     runtime.fclose(f);
     if (nread != (size_t)fsize) {
-        runtime.fprintf(stderr, "fakecc: short read on '%s'\n", path); runtime.free(buf); return -1;
+        runtime.fprintf(runtime.stderr, "fakecc: short read on '%s'\n", path); runtime.free(buf); return -1;
     }
     if (fsize < 64 || buf[0] != 0x7f || buf[1] != 'E' || buf[2] != 'L' || buf[3] != 'F') {
-        runtime.fprintf(stderr, "fakecc: '%s' is not an ELF object\n", path); runtime.free(buf); return -1;
+        runtime.fprintf(runtime.stderr, "fakecc: '%s' is not an ELF object\n", path); runtime.free(buf); return -1;
     }
     if (rd_u16(buf + 16) != 1) {
-        runtime.fprintf(stderr, "fakecc: '%s' is not a relocatable object\n", path); runtime.free(buf); return -1;
+        runtime.fprintf(runtime.stderr, "fakecc: '%s' is not a relocatable object\n", path); runtime.free(buf); return -1;
     }
     uint64_t shoff = rd_u64(buf + 40);
     uint16_t shentsize = rd_u16(buf + 58);
@@ -702,7 +698,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
         const unsigned char *sh = buf + shoff + (size_t)fakecc_dbg_idx * shentsize;
         uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
         if (sz > 0 && debug_deserialize(m, buf + off, (size_t)sz) != 0) {
-            runtime.fprintf(stderr, "fakecc: warning: ignoring corrupt .fakecc_dbg in '%s'\n",
+            runtime.fprintf(runtime.stderr, "fakecc: warning: ignoring corrupt .fakecc_dbg in '%s'\n",
                     path);
         }
     }

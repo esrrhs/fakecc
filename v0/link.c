@@ -214,10 +214,6 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *fopen(const char *p, const char *m);
 typedef long fpos_t;
 static const char INTERP_PATH[] = "/lib64/ld-linux-x86-64.so.2";
 struct SymInfo { int defined; int shndx; size_t value; uint8_t binding; };
@@ -226,7 +222,7 @@ static void emit_byte(Buffer *b, uint8_t v) { buffer_append(b, (const char *)&v,
 static void emit_int32(Buffer *b, int32_t v) { buffer_append(b, (const char *)&v, 4); }
 static void *xcalloc(size_t nmemb, size_t size) {
     void *p = runtime.calloc(nmemb, size);
-    if (!p) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!p) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     return p;
 }
 static void buf_u8(Buffer *b, uint8_t v) { buffer_append(b, (const char *)&v, 1); }
@@ -635,7 +631,7 @@ static void needed_add(char ***needed, int *num, const char *soname) {
     for (int i = 0; i < *num; i++)
         if (runtime.strcmp((*needed)[i], soname) == 0) return;
     *needed = runtime.realloc(*needed, ((size_t)*num + 1) * sizeof(char *));
-    if (!*needed) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!*needed) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     (*needed)[(*num)++] = xstrdup(soname);
 }
 void emit_link(EmitModule **mods, size_t n, const char *path,
@@ -757,7 +753,7 @@ Buffer data;
         for (size_t i = 0; i < num_lib_paths; i++)
             len += runtime.strlen(lib_paths[i]) + (i > 0 ? 1 : 0);
         runpath = runtime.malloc(len);
-        if (!runpath) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!runpath) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         size_t pos = 0;
         for (size_t i = 0; i < num_lib_paths; i++) {
             if (i > 0) runpath[pos++] = ':';
@@ -1046,7 +1042,7 @@ Buffer dynamic;
         }
     }
     if (!found_main) {
-        runtime.fprintf(stderr, "fakecc: no 'main' function found\n");
+        runtime.fprintf(runtime.stderr, "fakecc: no 'main' function found\n");
         runtime.exit(1);
     }
     if (need_dynamic) {
@@ -1193,8 +1189,8 @@ Buffer dynamic;
         lay.dynamic_vaddr = rx_base_vaddr + dynamic_off;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
-        FILE *f = fopen(path, "wb");
-        if (!f) { runtime.fprintf(stderr, "fakecc: cannot write '%s'\n", path); runtime.exit(1); }
+        FILE *f = runtime.fopen(path, "wb");
+        if (!f) { runtime.fprintf(runtime.stderr, "fakecc: cannot write '%s'\n", path); runtime.exit(1); }
         runtime.fwrite(elf.data, 1, elf.len, f);
         runtime.fclose(f);
         runtime.chmod(path, 0755);
@@ -1252,8 +1248,8 @@ Buffer dynamic;
         lay.have_dynamic = 0;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
-        FILE *f = fopen(path, "wb");
-        if (!f) { runtime.fprintf(stderr, "fakecc: cannot write '%s'\n", path); runtime.exit(1); }
+        FILE *f = runtime.fopen(path, "wb");
+        if (!f) { runtime.fprintf(runtime.stderr, "fakecc: cannot write '%s'\n", path); runtime.exit(1); }
         runtime.fwrite(elf.data, 1, elf.len, f);
         runtime.fclose(f);
         runtime.chmod(path, 0755);

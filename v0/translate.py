@@ -629,12 +629,12 @@ def cleanup_unused_definitions(body):
 # per-file `extern` declarations and rely on `import runtime;` instead.
 RUNTIME_FUNCS = frozenset({
     "abort", "atoi", "atol", "calloc", "chmod", "exit", "fclose", "fflush",
-    "fileno", "fprintf", "fputc", "fputs", "fread", "free", "fseek", "ftell",
-    "fwrite", "isalnum", "isalpha", "isdigit", "isspace", "isxdigit",
-    "malloc", "memcmp", "memcpy", "memmove", "memset", "perror", "printf",
-    "putchar", "puts", "qsort", "realloc", "snprintf", "sprintf", "strcmp",
-    "strlen", "strncmp", "strtod", "strtof", "strtol", "vfprintf",
-    "vsnprintf", "vsprintf",
+    "fileno", "fopen", "fprintf", "fputc", "fputs", "fread", "free", "fseek",
+    "ftell", "fwrite", "getenv", "isalnum", "isalpha", "isdigit", "isspace",
+    "isxdigit", "malloc", "memcmp", "memcpy", "memmove", "memset", "perror",
+    "printf", "putchar", "puts", "qsort", "realloc", "snprintf", "sprintf",
+    "strcmp", "strchr", "strlen", "strncmp", "strtod", "strtof", "strtold",
+    "strtol", "strtoul", "strtoull", "vfprintf", "vsnprintf", "vsprintf",
 })
 
 
@@ -716,12 +716,27 @@ def qualify_runtime_calls(body):
                 result.append(word)
                 i = j
                 continue
+            # Rewrite references to runtime globals (stderr, stdin, stdout).
+            # Skip the extern declaration line itself (handled by strip_runtime_externs).
+            if word in RUNTIME_GLOBALS and m < n and body[m] != ";":
+                # Check we're not in an extern declaration.
+                line_start = body.rfind("\n", 0, i) + 1
+                line_prefix = body[line_start:i].lstrip()
+                if not line_prefix.startswith("extern"):
+                    result.append("runtime.")
+                    result.append(word)
+                    i = j
+                    continue
             result.append(word)
             i = j
             continue
         result.append(c)
         i += 1
     return "".join(result)
+
+
+# Global variables provided by the builtin runtime/ package.
+RUNTIME_GLOBALS = frozenset({"stdin", "stdout", "stderr"})
 
 
 def strip_runtime_externs(body):
@@ -731,14 +746,19 @@ def strip_runtime_externs(body):
     result = []
     for ln in lines:
         s = ln.strip()
-        m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*[\(;]', s)
+        # extern functions: extern int fprintf(FILE *f, ...);
+        m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*\(', s)
         if m and m.group(1) in RUNTIME_FUNCS:
+            continue
+        # extern global variables: extern FILE *stderr;
+        m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*;', s)
+        if m and m.group(1) in RUNTIME_GLOBALS:
             continue
         result.append(ln)
     return "\n".join(result)
 
 
-def translate_file(src_path, out_path):
+def translate_file(src_path, out_path, pkg_defs=None):
     text = preprocess(src_path)
     text = strip_attributes(text)
     text = strip_va_copy_extern(text)

@@ -847,9 +847,6 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 static void pin_scalar_allocas(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {

@@ -794,9 +794,6 @@ int cfg_find_label(const CFG *g, int label);
 void cfg_link(CFG *g, int from, int to);
 int *cfg_rpo(const CFG *g);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 struct RegClass {
     const int *regs;

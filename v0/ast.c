@@ -559,9 +559,6 @@ struct TranslationUnit {
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 Type type_clone(Type t) {
     Type r = t;
@@ -570,7 +567,7 @@ Type type_clone(Type t) {
             r.pointee = t.pointee;
         } else {
             r.pointee = runtime.malloc(sizeof(Type));
-            if (!r.pointee) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            if (!r.pointee) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
             *r.pointee = type_clone(*t.pointee);
         }
     } else {
@@ -581,7 +578,7 @@ Type type_clone(Type t) {
             r.elem_type = t.elem_type;
         } else {
             r.elem_type = runtime.malloc(sizeof(Type));
-            if (!r.elem_type) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            if (!r.elem_type) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
             *r.elem_type = type_clone(*t.elem_type);
         }
     } else {
@@ -593,7 +590,7 @@ Type type_clone(Type t) {
             r.func_ret = t.func_ret;
         } else {
             r.func_ret = runtime.malloc(sizeof(Type));
-            if (!r.func_ret) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            if (!r.func_ret) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
             *r.func_ret = type_clone(*t.func_ret);
         }
     } else {
@@ -601,7 +598,7 @@ Type type_clone(Type t) {
     }
     if (t.kind == TY_FUNC && t.func_nparams > 0 && t.func_params) {
         r.func_params = runtime.malloc(t.func_nparams * sizeof(Type));
-        if (!r.func_params) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!r.func_params) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         for (int i = 0; i < t.func_nparams; i++)
             r.func_params[i] = type_clone(t.func_params[i]);
     } else {
@@ -669,7 +666,7 @@ Type type_make_ptr(Type pointee) {
     t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0;
     t.pointee = runtime.malloc(sizeof(Type));
-    if (!t.pointee) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!t.pointee) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     *t.pointee = type_clone(pointee);
     return t;
 }
@@ -700,7 +697,7 @@ Type type_make_array(Type elem, int length) {
     t.pointee = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0;
     t.elem_type = runtime.malloc(sizeof(Type));
-    if (!t.elem_type) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!t.elem_type) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     *t.elem_type = type_clone(elem);
     return t;
 }
@@ -716,12 +713,12 @@ Type type_make_func(Type ret, Type * *params, int nparams) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
     t.func_ret = runtime.malloc(sizeof(Type));
-    if (!t.func_ret) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!t.func_ret) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     *t.func_ret = type_clone(ret);
     t.func_nparams = nparams;
     if (nparams > 0) {
         t.func_params = runtime.malloc(nparams * sizeof(Type));
-        if (!t.func_params) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!t.func_params) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         for (int i = 0; i < nparams; i++)
             t.func_params[i] = type_clone(*params[i]);
     } else {
@@ -791,7 +788,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
     if (r->len >= r->cap) {
         size_t nc = r->cap ? r->cap * 2 : 4;
         r->data = runtime.realloc(r->data, nc * sizeof(StructDef));
-        if (!r->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!r->data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         r->cap = nc;
     }
     StructDef *sd = &r->data[r->len++];
@@ -902,7 +899,7 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
     if (sd->num_members >= sd->cap_members) {
         int nc = sd->cap_members ? sd->cap_members * 2 : 4;
         sd->members = runtime.realloc(sd->members, nc * sizeof(StructMember));
-        if (!sd->members) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!sd->members) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         sd->cap_members = nc;
     }
     int a = type_align(ty);
@@ -960,7 +957,7 @@ void switch_push_case(Stmt *s, int is_default, int value) {
         int nc = s->u.switch_s.cap_cases ? s->u.switch_s.cap_cases * 2 : 4;
         s->u.switch_s.cases = runtime.realloc(s->u.switch_s.cases,
                                       nc * sizeof(SwitchCase));
-        if (!s->u.switch_s.cases) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!s->u.switch_s.cases) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         s->u.switch_s.cap_cases = nc;
     }
     SwitchCase *c = &s->u.switch_s.cases[s->u.switch_s.num_cases++];
@@ -986,7 +983,7 @@ EnumDef *enum_registry_add(EnumRegistry *r, const char *tag, SourceLoc loc) {
     if (r->len >= r->cap) {
         size_t nc = r->cap ? r->cap * 2 : 4;
         r->data = runtime.realloc(r->data, nc * sizeof(EnumDef));
-        if (!r->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!r->data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         r->cap = nc;
     }
     EnumDef *ed = &r->data[r->len++];
@@ -1007,7 +1004,7 @@ int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
     if (ed->num_constants >= ed->cap_constants) {
         int nc = ed->cap_constants ? ed->cap_constants * 2 : 4;
         ed->constants = runtime.realloc(ed->constants, nc * sizeof(EnumConstant));
-        if (!ed->constants) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!ed->constants) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         ed->cap_constants = nc;
     }
     int assigned;
@@ -1047,7 +1044,7 @@ TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type ty
     if (r->len >= r->cap) {
         size_t nc = r->cap ? r->cap * 2 : 4;
         r->data = runtime.realloc(r->data, nc * sizeof(TypedefEntry));
-        if (!r->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!r->data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         r->cap = nc;
     }
     TypedefEntry *e = &r->data[r->len++];
@@ -1063,7 +1060,7 @@ const Type *typedef_registry_find(const TypedefRegistry *r, const char *name) {
 Expr *expr_new_int(long long v, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
     if (!e) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     e->kind = EX_INT_LIT;
@@ -1081,7 +1078,7 @@ Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc)
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
     if (!e) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     e->kind = EX_BINOP;
@@ -1096,7 +1093,7 @@ Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc) {
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
     if (!e) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     e->kind = EX_UNARY;
@@ -1110,7 +1107,7 @@ Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc) {
 Expr *expr_new_var(const char *name, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
     if (!e) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     e->kind = EX_VAR;
@@ -1129,7 +1126,7 @@ Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc) {
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
     if (!e) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     e->kind = EX_ASSIGN;
@@ -1143,7 +1140,7 @@ Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
 Expr *expr_new_call(Expr *callee, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
     if (!e) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     e->kind = EX_CALL;
@@ -1163,12 +1160,12 @@ void expr_call_set_callee(Expr *e, Expr *callee) {
 }
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!e) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     e->kind = EX_STR;
     e->loc = loc;
     e->type = type_default_int();
     e->u.str.bytes = runtime.malloc(len + 1);
-    if (!e->u.str.bytes) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!e->u.str.bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     runtime.memcpy(e->u.str.bytes, bytes, len);
     e->u.str.bytes[len] = '\0';
     e->u.str.len = len;
@@ -1186,13 +1183,13 @@ void expr_call_push_arg(Expr *e, Expr *arg) {
     if (a->len >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
         a->data = runtime.realloc(a->data, a->cap * sizeof(Expr *));
-        if (!a->data) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+        if (!a->data) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
     }
     a->data[a->len++] = arg;
 }
 static Expr *expr_alloc(ExprKind k, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    if (!e) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     e->kind = k; e->loc = loc; e->type = type_default_int();
     runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
     return e;
@@ -1411,7 +1408,7 @@ void stmt_free(Stmt *s) {
 Stmt *stmt_alloc(void) {
     Stmt *s = runtime.malloc(sizeof(Stmt));
     if (!s) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     return s;
@@ -1431,7 +1428,7 @@ void stmt_array_push(StmtArray *a, Stmt s) {
         size_t new_cap = a->cap ? a->cap * 2 : 8;
         a->data = runtime.realloc(a->data, new_cap * sizeof(Stmt));
         if (!a->data) {
-            runtime.fprintf(stderr, "fakecc: out of memory\n");
+            runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
             runtime.exit(1);
         }
         a->cap = new_cap;
@@ -1456,7 +1453,7 @@ void import_array_push(ImportArray *a, const char *name, SourceLoc loc) {
     if (a->len >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
         a->data = runtime.realloc(a->data, a->cap * sizeof(ImportDecl));
-        if (!a->data) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+        if (!a->data) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
     }
     a->data[a->len].name = xstrdup(name);
     a->data[a->len].loc = loc;
@@ -1515,7 +1512,7 @@ void param_array_push(ParamArray *a, const char *name, Type type, SourceLoc loc)
     if (a->len >= a->cap) {
         a->cap = a->cap ? a->cap * 2 : 4;
         a->data = runtime.realloc(a->data, a->cap * sizeof(Param));
-        if (!a->data) { runtime.fprintf(stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+        if (!a->data) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
     }
     a->data[a->len].name = xstrdup(name);
     a->data[a->len].type = type;

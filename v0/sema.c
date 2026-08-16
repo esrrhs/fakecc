@@ -623,9 +623,6 @@ void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
                         const Package *pkg);
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 static const StructRegistry *g_sema_structs = ((void*)0);
 static PkgContext *g_sema_pkg = ((void*)0);
@@ -651,7 +648,7 @@ static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     if (t->len >= t->cap) {
         t->cap = t->cap ? t->cap * 2 : 8;
         t->data = runtime.realloc(t->data, t->cap * sizeof(FunSig));
-        if (!t->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!t->data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     FunSig *s = &t->data[t->len++];
     s->name = fn->name;
@@ -678,7 +675,7 @@ static void ftab_push_export(FunTable *t, const PkgFuncExport *ex) {
     if (t->len >= t->cap) {
         t->cap = t->cap ? t->cap * 2 : 8;
         t->data = runtime.realloc(t->data, t->cap * sizeof(FunSig));
-        if (!t->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!t->data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     FunSig *s = &t->data[t->len++];
     s->name = ex->name;
@@ -698,7 +695,7 @@ static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) 
         size_t nc = tu->functions.cap ? tu->functions.cap * 2 : 4;
         tu->functions.data = runtime.realloc(tu->functions.data,
                                      nc * sizeof(FunctionDecl));
-        if (!tu->functions.data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!tu->functions.data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         tu->functions.cap = nc;
     }
     FunctionDecl *fn = &tu->functions.data[tu->functions.len++];
@@ -775,7 +772,7 @@ static void labelset_add(LabelSet *ls, const char *name) {
     if (ls->len >= ls->cap) {
         ls->cap = ls->cap ? ls->cap * 2 : 8;
         ls->names = runtime.realloc(ls->names, ls->cap * sizeof(char *));
-        if (!ls->names) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!ls->names) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     ls->names[ls->len++] = xstrdup(name);
 }
@@ -836,7 +833,7 @@ static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc l
     if (st->len >= st->cap) {
         st->cap = st->cap ? st->cap * 2 : 8;
         st->data = runtime.realloc(st->data, st->cap * sizeof(Sym));
-        if (!st->data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!st->data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     st->data[st->len].name = name ? xstrdup(name) : ((void*)0);
     st->data[st->len].type = type_clone(type);
@@ -1024,7 +1021,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 const Type **ptys = ((void*)0);
                 if (pf->arity > 0) {
                     ptys = runtime.malloc(pf->arity * sizeof(Type *));
-                    if (!ptys) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                    if (!ptys) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
                     for (int i = 0; i < pf->arity; i++)
                         ptys[i] = &pf->param_types[i];
                 }
@@ -1048,7 +1045,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             const Type **ptys = ((void*)0);
             if (sig->arity > 0) {
                 ptys = runtime.malloc(sig->arity * sizeof(Type *));
-                if (!ptys) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                if (!ptys) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
                 for (int i = 0; i < sig->arity; i++)
                     ptys[i] = &sig->param_types[i];
             }
@@ -1068,7 +1065,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                     const Type **ptys = ((void*)0);
                     if (pf->arity > 0) {
                         ptys = runtime.malloc(pf->arity * sizeof(Type *));
-                        if (!ptys) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                        if (!ptys) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
                         for (int i = 0; i < pf->arity; i++)
                             ptys[i] = &pf->param_types[i];
                     }

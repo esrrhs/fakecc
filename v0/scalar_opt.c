@@ -741,9 +741,6 @@ int scalar_peephole(IRFunction *fn);
 void scalar_renumber(IRFunction *fn);
 void scalar_cleanup(IRFunction *fn);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 static int64_t const_value(const IRInstArray *insts, IRValue v, int *found) {
     *found = 0;

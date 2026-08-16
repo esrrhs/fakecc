@@ -624,10 +624,6 @@ void parse(const TokenArray *tokens, TranslationUnit *tu);
 void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
                   struct PkgContext *ctx);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *fopen(const char *p, const char *m);
 typedef long fpos_t;
 static long pkg_open(const char *path, long flags) {
     return __syscall(2, (long)path, flags, 0);
@@ -783,9 +779,9 @@ static char *path_join(const char *a, const char *b) {
     return p;
 }
 static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = runtime.fopen(path, "rb");
     if (!f) {
-        runtime.fprintf(stderr, "fakecc: cannot open '%s'\n", path);
+        runtime.fprintf(runtime.stderr, "fakecc: cannot open '%s'\n", path);
         runtime.exit(1);
     }
     runtime.fseek(f, 0, 2);
@@ -861,7 +857,7 @@ static void pkgs_push(PkgContext *ctx, Package *p) {
 static char **list_c_files(const char *dir, size_t *nout) {
     long fd = pkg_open(dir, 0 | 65536);
     if (fd < 0) {
-        runtime.fprintf(stderr, "fakecc: cannot open package directory '%s'\n", dir);
+        runtime.fprintf(runtime.stderr, "fakecc: cannot open package directory '%s'\n", dir);
         runtime.exit(1);
     }
     char **names = ((void*)0);

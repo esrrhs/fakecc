@@ -137,9 +137,6 @@ void token_array_free(TokenArray *a);
 void token_array_push(TokenArray *a, Token t);
 void lex(const char *source, const char *filename, TokenArray *out);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 void token_array_init(TokenArray *a) {
     a->data = ((void*)0);
@@ -160,7 +157,7 @@ void token_array_push(TokenArray *a, Token t) {
         size_t new_cap = a->cap ? a->cap * 2 : 16;
         a->data = runtime.realloc(a->data, new_cap * sizeof(Token));
         if (!a->data) {
-            runtime.fprintf(stderr, "fakecc: out of memory\n");
+            runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
             runtime.exit(1);
         }
         a->cap = new_cap;

@@ -736,11 +736,7 @@ void tu_free(TranslationUnit *tu);
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 const StructRegistry *get_ir_structs(void);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
-extern long double strtold(const char *nptr, char **endptr);
 IRModule *g_ir_module = ((void*)0);
 int g_str_counter = 0;
 int g_flt_counter = 0;
@@ -817,7 +813,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     if (m->globals.len >= m->globals.cap) {
         size_t nc = m->globals.cap ? m->globals.cap * 2 : 4;
         m->globals.data = runtime.realloc(m->globals.data, nc * sizeof(IRGlobal));
-        if (!m->globals.data) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!m->globals.data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         m->globals.cap = nc;
     }
     IRGlobal *g = &m->globals.data[m->globals.len++];
@@ -836,7 +832,7 @@ static void add_global_fixup(IRGlobal *g, int offset, const char *sym) {
     if (g->num_fixups >= g->cap_fixups) {
         size_t nc = g->cap_fixups ? g->cap_fixups * 2 : 4;
         g->fixups = runtime.realloc(g->fixups, nc * sizeof(GlobalFixup));
-        if (!g->fixups) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!g->fixups) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         g->cap_fixups = (int)nc;
     }
     g->fixups[g->num_fixups].offset = offset;
@@ -848,7 +844,7 @@ static void ir_inst_array_push(IRInstArray *a, IRInst inst) {
         size_t new_cap = a->cap ? a->cap * 2 : 8;
         a->data = runtime.realloc(a->data, new_cap * sizeof(IRInst));
         if (!a->data) {
-            runtime.fprintf(stderr, "fakecc: out of memory\n");
+            runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
             runtime.exit(1);
         }
         a->cap = new_cap;
@@ -861,7 +857,7 @@ static void ir_func_array_push(IRFunctionArray *a, IRFunction fn) {
         size_t new_cap = a->cap ? a->cap * 2 : 4;
         a->data = runtime.realloc(a->data, new_cap * sizeof(IRFunction));
         if (!a->data) {
-            runtime.fprintf(stderr, "fakecc: out of memory\n");
+            runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
             runtime.exit(1);
         }
         a->cap = new_cap;
@@ -881,7 +877,7 @@ static void set_value_type(IRFunction *fn, IRValue v, int width, int is_unsigned
         fn->value_is_unsigned = runtime.realloc(fn->value_is_unsigned, new_cap * sizeof(int));
         fn->value_is_float = runtime.realloc(fn->value_is_float, new_cap * sizeof(int));
         if (!fn->value_width || !fn->value_is_unsigned || !fn->value_is_float) {
-            runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1);
+            runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1);
         }
         for (int i = old_cap; i < new_cap; i++) {
             fn->value_width[i] = 4;
@@ -1244,7 +1240,7 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
         size_t new_cap = st->cap ? st->cap * 2 : 8;
         st->data = runtime.realloc(st->data, new_cap * sizeof(IRSlot));
         if (!st->data) {
-            runtime.fprintf(stderr, "fakecc: out of memory\n");
+            runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
             runtime.exit(1);
         }
         st->cap = new_cap;
@@ -1302,7 +1298,7 @@ static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
     if (fn->num_dbg_vars >= fn->cap_dbg_vars) {
         size_t nc = fn->cap_dbg_vars ? fn->cap_dbg_vars * 2 : 4;
         fn->dbg_vars = runtime.realloc(fn->dbg_vars, nc * sizeof(IRDebugVar));
-        if (!fn->dbg_vars) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!fn->dbg_vars) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         fn->cap_dbg_vars = nc;
     }
     IRDebugVar *dv = &fn->dbg_vars[fn->num_dbg_vars++];
@@ -1475,7 +1471,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     case EX_FLOAT_LIT: {
         int w = e->type.width ? e->type.width : 8;
         if (w == 16)
-            return emit_ld_const(fn, strtold(e->u.float_text, ((void*)0)), e->loc);
+            return emit_ld_const(fn, runtime.strtold(e->u.float_text, ((void*)0)), e->loc);
         int64_t bits = 0;
         if (w == 4) { float f = (float)runtime.strtod(e->u.float_text, ((void*)0)); runtime.memcpy(&bits, &f, sizeof(f)); }
         else { double d = runtime.strtod(e->u.float_text, ((void*)0)); runtime.memcpy(&bits, &d, sizeof(d)); }
@@ -2351,7 +2347,7 @@ static void labelmap_add(LabelMap *lm, const char *name, int id) {
         lm->cap = lm->cap ? lm->cap * 2 : 8;
         lm->names = runtime.realloc(lm->names, lm->cap * sizeof(char *));
         lm->ids = runtime.realloc(lm->ids, lm->cap * sizeof(int));
-        if (!lm->names || !lm->ids) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!lm->names || !lm->ids) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     lm->names[lm->len] = xstrdup(name);
     lm->ids[lm->len] = id;
@@ -2409,7 +2405,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             int sz = type_size(dty);
             if (sz <= 0) sz = 8;
             char *bytes = runtime.calloc(sz, 1);
-            if (!bytes) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
             char mangled[256];
             runtime.snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
                      s->u.decl.name);
@@ -2637,7 +2633,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
     case ST_GOTO: {
         int id = labelmap_find(g_ir_label_map, s->u.goto_s.target);
         if (id < 0) {
-            runtime.fprintf(stderr, "fakecc: goto to unknown label '%s'\n",
+            runtime.fprintf(runtime.stderr, "fakecc: goto to unknown label '%s'\n",
                     s->u.goto_s.target);
             runtime.exit(1);
         }
@@ -2647,7 +2643,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
     case ST_LABEL: {
         int id = labelmap_find(g_ir_label_map, s->u.label_s.name);
         if (id < 0) {
-            runtime.fprintf(stderr, "fakecc: label '%s' has no assigned id\n",
+            runtime.fprintf(runtime.stderr, "fakecc: label '%s' has no assigned id\n",
                     s->u.label_s.name);
             runtime.exit(1);
         }
@@ -2728,7 +2724,7 @@ static void queue_rodata(const char *name, char *bytes, int size, SourceLoc loc)
     if (g_pending_rodata_len >= g_pending_rodata_cap) {
         int nc = g_pending_rodata_cap ? g_pending_rodata_cap * 2 : 4;
         g_pending_rodata = runtime.realloc(g_pending_rodata, nc * sizeof(PendingRodata));
-        if (!g_pending_rodata) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!g_pending_rodata) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         g_pending_rodata_cap = nc;
     }
     g_pending_rodata[g_pending_rodata_len].name = xstrdup(name);
@@ -2748,7 +2744,7 @@ static void flush_rodata(IRModule *m) {
 static int fold_const_float(const Expr *e, long double *out) {
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT) {
-        *out = strtold(e->u.float_text, ((void*)0));
+        *out = runtime.strtold(e->u.float_text, ((void*)0));
         return 1;
     }
     if (e->kind == EX_CAST)
@@ -2836,7 +2832,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         runtime.snprintf(name, sizeof name, "__str.%d", g_str_counter++);
         int nbytes = e->u.str.len + 1;
         char *init = runtime.malloc(nbytes);
-        if (!init) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!init) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         runtime.memcpy(init, e->u.str.bytes, nbytes);
         queue_rodata(name, init, nbytes, loc);
         add_global_fixup(g, (int)(bytes - g->init_bytes), name);
@@ -2950,7 +2946,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         int sz = type_size(s->u.decl.type);
         if (sz <= 0) sz = 8;
         char *bytes = runtime.calloc(sz, 1);
-        if (!bytes) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         int is_static = (s->u.decl.storage_class == 1);
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
                                             0, is_static, s->loc);

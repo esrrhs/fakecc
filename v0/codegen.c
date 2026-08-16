@@ -948,9 +948,6 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 static void emit_byte(Buffer *b, uint8_t val) {
     buffer_append(b, (const char *)&val, 1);
@@ -1619,7 +1616,7 @@ static int spill_offset_xmm(int slot, int gp_spill_area) {
 static void ensure_reg_xmm(Buffer *b, int v, int dst_xmm, const RAResult *ra_xmm,
                            int gp_spill_area) {
     if (!ra_xmm || v < 0 || v >= ra_xmm->num_values) {
-        runtime.fprintf(stderr, "fakecc: float value %d has no XMM home\n", v);
+        runtime.fprintf(runtime.stderr, "fakecc: float value %d has no XMM home\n", v);
         runtime.exit(1);
     }
     int vr = ra_xmm->reg[v];
@@ -2061,7 +2058,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     size_t *global_off = ((void*)0);
     if (ir->globals.len > 0) {
         global_off = runtime.malloc(ir->globals.len * sizeof(size_t));
-        if (!global_off) { runtime.fprintf(stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        if (!global_off) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     }
     for (size_t gi = 0; gi < ir->globals.len; gi++) {
         const IRGlobal *g = &ir->globals.data[gi];
@@ -2590,7 +2587,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (inst->a >= 0 && inst->a < fn->next_value_id)
                     off = alloca_off[inst->a];
                 if (off == 0) {
-                    runtime.fprintf(stderr, "fakecc: IR_ADDR on non-pinned alloca %d\n", inst->a);
+                    runtime.fprintf(runtime.stderr, "fakecc: IR_ADDR on non-pinned alloca %d\n", inst->a);
                     runtime.exit(1);
                 }
                 if (dr >= 0) {
@@ -3460,12 +3457,12 @@ int dreg;
             Patch *p = &patches[pi];
             if (p->label < 0 || p->label >= nlabels ||
                 label_off[p->label] == (size_t)-1) {
-                runtime.fprintf(stderr, "fakecc: unresolved label %d in codegen\n", p->label);
+                runtime.fprintf(runtime.stderr, "fakecc: unresolved label %d in codegen\n", p->label);
                 runtime.exit(1);
             }
             int64_t rel = (int64_t)label_off[p->label] - (int64_t)p->after_off;
             if (rel < (-2147483647-1) || rel > 2147483647) {
-                runtime.fprintf(stderr, "fakecc: branch displacement out of range\n");
+                runtime.fprintf(runtime.stderr, "fakecc: branch displacement out of range\n");
                 runtime.exit(1);
             }
             int32_t rel32 = (int32_t)rel;
@@ -3500,7 +3497,7 @@ int dreg;
         }
         int64_t rel = (int64_t)target - (int64_t)cp->after_off;
         if (rel < (-2147483647-1) || rel > 2147483647) {
-            runtime.fprintf(stderr, "fakecc: call displacement out of range\n");
+            runtime.fprintf(runtime.stderr, "fakecc: call displacement out of range\n");
             runtime.exit(1);
         }
         int32_t rel32 = (int32_t)rel;
@@ -3528,7 +3525,7 @@ int dreg;
         }
         int64_t rel = (int64_t)target - (int64_t)(fp->patch_off + 4);
         if (rel < (-2147483647-1) || rel > 2147483647) {
-            runtime.fprintf(stderr, "fakecc: function address displacement out of range\n");
+            runtime.fprintf(runtime.stderr, "fakecc: function address displacement out of range\n");
             runtime.exit(1);
         }
         int32_t rel32 = (int32_t)rel;

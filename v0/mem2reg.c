@@ -803,9 +803,6 @@ void mem2reg_writeback(
     int want_debug);
 int opt_mem2reg(IRFunction *fn, int want_debug);
 typedef struct FILE FILE;
-extern FILE *stderr;
-extern FILE *stdin;
-extern FILE *stdout;
 typedef long fpos_t;
 static int block_has_phi_for(const BlockPhiInfo *bp, int alloca_slot) {
     for (size_t i = 0; i < bp->num_phis; i++)
@@ -1103,7 +1100,7 @@ void mem2reg_rename(
     size_t ninst = fn->insts.len;
     *dead = runtime.calloc(ninst, 1);
     if (!*dead) {
-        runtime.fprintf(stderr, "fakecc: out of memory\n");
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
     char *d = *dead;
