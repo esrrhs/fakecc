@@ -624,6 +624,10 @@ void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
 typedef struct FILE FILE;
 typedef long fpos_t;
+static TranslationUnit *g_parser_tu = ((void*)0);
+const StructRegistry *get_parser_structs(void) {
+    return g_parser_tu ? &g_parser_tu->structs : ((void*)0);
+}
 struct Parser {
     const TokenArray *tokens;
     size_t pos;
@@ -2546,6 +2550,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
     p.pkg_ctx = ctx;
     stmt_array_init(&p.prepend);
     p.anon_counter = 0;
+    g_parser_tu = tu;
     if (peek(&p)->kind != TK_KW_PACKAGE) {
         const Token *t = peek(&p);
         die_at(t->loc.file, t->loc.line, t->loc.col,
@@ -2714,6 +2719,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
         stmt_array_push(&tu->globals, p.prepend.data[i]);
     p.prepend.len = 0;
     stmt_array_free(&p.prepend);
+    g_parser_tu = ((void*)0);
 }
 void parse(const TokenArray *tokens, TranslationUnit *tu) {
     parse_in_pkg(tokens, tu, ((void*)0));

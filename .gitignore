@@ -67,6 +67,9 @@ build*/
 *_plan.md
 plan_*.md
 
+# Generated test manifest (difftest now runs all cases, no curated list needed)
+test/e2e/difftest_manifest.txt
+
 # Stage 1 bootstrap build products (binaries — sources committed, these are reproducible)
 v0/*.o
 v0/*.err

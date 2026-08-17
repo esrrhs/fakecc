@@ -648,6 +648,7 @@ int type_size(Type t) {
     case TY_STRUCT: {
         if (p->tag) {
             const StructRegistry *reg = get_ir_structs();
+            if (!reg) reg = get_parser_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
                 if (sd && sd->size > 0) return count * sd->size;
@@ -820,7 +821,17 @@ int type_align(Type t) {
     case TY_FLOAT: return p->width;
     case TY_PTR: return 8;
     case TY_ARRAY: return 1;
-    case TY_STRUCT: return 8;
+    case TY_STRUCT: {
+        if (p->tag) {
+            const StructRegistry *reg = get_ir_structs();
+            if (!reg) reg = get_parser_structs();
+            if (reg) {
+                const StructDef *sd = struct_registry_find_c(reg, p->tag);
+                if (sd && sd->align > 0) return sd->align;
+            }
+        }
+        return 8;
+    }
     case TY_FUNC: return 1;
     }
     return 1;

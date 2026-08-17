@@ -87,8 +87,8 @@ void type_free(Type *t) {
     }
 }
 
-/* Declared in ir.c; returns live struct registry during lowering, NULL otherwise. */
 extern const StructRegistry *get_ir_structs(void);
+extern const StructRegistry *get_parser_structs(void);
 
 int type_size(Type t) {
     /* Walk array nesting through a pointer instead of recursing on the
@@ -109,14 +109,9 @@ int type_size(Type t) {
     case TY_PTR:    return count * 8;
     case TY_ARRAY:  return 0;   /* array without an element type — malformed */
     case TY_STRUCT: {
-        /* The cached width can be stale for self-referential structs (e.g.
-         * Stmt): they are cloned while still being parsed, freezing width==0
-         * before struct_def_finish() sets the real size.  At copy/lowering
-         * time the registry holds the final size — use it.  During parsing
-         * g_ir_tu is NULL, so guard the lookup; the fallback to t.width is
-         * correct there (the struct is not finished yet anyway). */
         if (p->tag) {
             const StructRegistry *reg = get_ir_structs();
+            if (!reg) reg = get_parser_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
                 if (sd && sd->size > 0) return count * sd->size;
@@ -320,7 +315,17 @@ int type_align(Type t) {
     case TY_FLOAT: return p->width;  /* float aligns to 4, double to 8 */
     case TY_PTR:   return 8;
     case TY_ARRAY: return 1;    /* array without an element type — malformed */
-    case TY_STRUCT: return 8;   /* conservative — structs align to 8 */
+    case TY_STRUCT: {
+        if (p->tag) {
+            const StructRegistry *reg = get_ir_structs();
+            if (!reg) reg = get_parser_structs();
+            if (reg) {
+                const StructDef *sd = struct_registry_find_c(reg, p->tag);
+                if (sd && sd->align > 0) return sd->align;
+            }
+        }
+        return 8;   /* fallback if incomplete/unknown */
+    }
     case TY_FUNC:  return 1;    /* bare function has no size */
     }
     return 1;

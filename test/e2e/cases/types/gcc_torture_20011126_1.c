@@ -1,0 +1,23 @@
+// expect: 0
+// Ported from GCC C-Torture: gcc.c-torture/execute/20011126-1.c
+package main;
+
+/* Produced a overflow in ifcvt.c, causing S to contain 0xffffffff7fffffff.  */
+
+int a = 1;
+
+int main ()
+{
+  long long s;
+
+  s = a;
+  if (s < 0)
+    s = -2147483648LL;
+  else
+    s = 2147483647LL;
+
+  if (s < 0)
+    return 1;
+
+  return 0;
+}

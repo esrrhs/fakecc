@@ -10,6 +10,6 @@ int main() {
     if (_Alignof(double) != 8) return 2;
     if (_Alignof(char) != 1) return 3;
     if (_Alignof(int *) != 8) return 4;
-    if (_Alignof(struct S) != 8) return 5;
+    if (_Alignof(struct S) != 4) return 5;
     return 0;
 }
