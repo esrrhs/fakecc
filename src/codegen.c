@@ -2336,6 +2336,30 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
 
+            case IR_LADDR: {
+                /* dst = &&label — emit `lea r, [rip+0]` and record a label patch.
+                 * imm = label_id.  The patch resolution (label_off[id] - after_off)
+                 * gives the RIP-relative displacement to the label's code offset. */
+                int target = dr >= 0 ? dr : REG_RAX;
+                size_t patch = emit_lea_rip(&out->text, target);
+                size_t after = out->text.len;
+                ADD_PATCH(patch, inst->imm, after);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+
+            case IR_JMP_PTR: {
+                /* goto *ptr — emit `jmp *r11` (FF /4 with ModRM 0xE3).
+                 * We load the pointer into R11 first. */
+                ensure_reg(&out->text, inst->a, REG_R11, ra);
+                /* REX.B for R11 */
+                emit_byte(&out->text, 0x41);
+                emit_byte(&out->text, 0xFF);
+                emit_byte(&out->text, 0xE3);  /* ModRM: mod=11 reg=4(/4) rm=011 → 11100011 = 0xE3 */
+                break;
+            }
+
             case IR_FADDR: {
                 /* dst = &function; function name in inst->call_name.  Emit
                  * `lea r, [rip+0]` and record an FnAddrPatch resolved against

@@ -392,7 +392,14 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         }
         BinOp op = e->u.bin.op;
         Type res;
-        if (op == BOP_AND || op == BOP_OR) {
+        if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
+            (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
+            if (op == BOP_EQ || op == BOP_NE) {
+                res = type_make_int(4, 0);
+            } else {
+                res = type_clone(lt.kind == TY_STRUCT ? lt : rt);
+            }
+        } else if (op == BOP_AND || op == BOP_OR) {
             /* Logical && / ||: both operands must be scalar (int, float, or
              * pointer).  Result is always int 0 or 1. */
             if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR)
@@ -462,8 +469,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
             set_type(e->u.un.operand, type_clone(ot));
         }
-        /* Bitwise NOT requires an integer operand; +/- on pointer is handled
-         * in BOP. Here -, +, ~ require scalar integer; reject pointer. */
+        /* Bitwise NOT requires an integer operand (or complex for conjugate ~x);
+         * +/- on pointer is handled in BOP. Here -, +, ~ require scalar integer; reject pointer. */
+        if (e->u.un.op == UOP_BITNOT && ot.kind == TY_STRUCT && ot.tag && strncmp(ot.tag, "__complex_", 10) == 0) {
+            set_type(e, ot);
+            return type_clone(e->type);
+        }
         if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT)
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "bitwise NOT requires an integer operand");
@@ -563,6 +574,28 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 return type_clone(e->type);
             }
         }
+        if (strncmp(e->u.var.name, "__builtin_", 10) == 0) {
+            /* Auto-synthesize common GCC builtins */
+            const char *bname = e->u.var.name;
+            Type ret = type_default_int();
+            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0)
+                ret = type_make_void();
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0)
+                ret = type_make_ptr(type_make_void());
+            else if (strcmp(bname, "__builtin_strlen") == 0)
+                ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_fabs") == 0)
+                ret = type_make_float(8);
+            else if (strcmp(bname, "__builtin_fabsf") == 0)
+                ret = type_make_float(4);
+            else if (strcmp(bname, "__builtin_fabsl") == 0)
+                ret = type_make_float(16);
+            Type fn = type_make_func(ret, NULL, 0);
+            Type fp = type_make_ptr(fn);
+            type_free(&fn);
+            set_type(e, fp);
+            return type_clone(e->type);
+        }
         {
             const char *hint = g_sema_pkg
                 ? pkg_suggest_export(g_sema_pkg, e->u.var.name) : NULL;
@@ -621,6 +654,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         BinOp op = e->u.comp.op;
         int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
                            || op == BOP_DIV);
+        int is_complex = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
         if (op == BOP_ADD || op == BOP_SUB) {
             /* Pointer arithmetic: p += n, p -= n (n must be int). */
             if (lt.kind == TY_PTR && rt.kind != TY_INT)
@@ -628,7 +662,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
         }
-        if (lt.kind != TY_PTR
+        if (lt.kind != TY_PTR && !is_complex
             && !(arith_float && (lt.kind == TY_FLOAT || rt.kind == TY_FLOAT))) {
             if (lt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
@@ -1101,6 +1135,16 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         set_type(e, res_type);
         return type_clone(e->type);
     }
+    case EX_LABEL_ADDR: {
+        /* &&label yields a void* */
+        Type t; memset(&t, 0, sizeof(t));
+        t.kind = TY_PTR;
+        t.width = 8;
+        t.pointee = malloc(sizeof(Type));
+        *t.pointee = type_make_void();
+        set_type(e, t);
+        return type_clone(e->type);
+    }
     }
     return type_default_int();
 }
@@ -1126,6 +1170,11 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     if (e->kind == EX_INT_LIT) return 1;
     if (e->kind == EX_FLOAT_LIT) return 1;
     if (e->kind == EX_STR) return 1;
+    if (e->kind == EX_LABEL_ADDR) return 1;
+    if (e->kind == EX_COMPOUND_LITERAL)
+        return is_const_init(e->u.compound.init, globals);
+    if (e->kind == EX_BINOP)
+        return is_const_init(e->u.bin.l, globals) && is_const_init(e->u.bin.r, globals);
     if (e->kind == EX_CAST)
         return is_const_init(e->u.cast.operand, globals);
     /* -1.5 / +1.5: fold_const_int below rejects these, since the operand is
@@ -1494,7 +1543,11 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         g_sema_loop_depth--;
         break;
     case ST_GOTO:
-        if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
+        if (s->u.goto_s.target_expr) {
+            /* computed goto: goto *ptr_expr; — check the expression */
+            Type t = check_expr(s->u.goto_s.target_expr, st, ft);
+            type_free(&t);
+        } else if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "use of undeclared label '%s'", s->u.goto_s.target);
         }

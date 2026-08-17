@@ -861,6 +861,12 @@ Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc) {
     return e;
 }
 
+Expr *expr_new_label_addr(const char *label, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_LABEL_ADDR, loc);
+    e->u.label_addr.label = xstrdup(label);
+    return e;
+}
+
 void expr_free(Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -952,6 +958,9 @@ void expr_free(Expr *e) {
             free(e->u.stmt_expr.stmts);
         }
         break;
+    case EX_LABEL_ADDR:
+        free(e->u.label_addr.label);
+        break;
     }
     type_free(&e->type);
     free(e);
@@ -990,6 +999,7 @@ void stmt_free(Stmt *s) {
         break;
     case ST_GOTO:
         free(s->u.goto_s.target);
+        expr_free(s->u.goto_s.target_expr);
         break;
     case ST_LABEL:
         free(s->u.label_s.name);

@@ -88,6 +88,8 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_LADDR,
+    IR_JMP_PTR,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -244,6 +246,9 @@ enum TokenKind {
     TK_KW_INLINE,
     TK_KW_ALIGNOF,
     TK_KW_LONG_DOUBLE,
+    TK_KW_COMPLEX,
+    TK_KW_REAL,
+    TK_KW_IMAG,
     TK_IDENT,
     TK_INT_LITERAL,
     TK_FLOAT_LITERAL,
@@ -400,6 +405,8 @@ enum ExprKind {
     EX_INIT_LIST,
     EX_FLOAT_LIT,
     EX_COMPOUND_LITERAL,
+    EX_STMT_EXPR,
+    EX_LABEL_ADDR,
 };typedef enum ExprKind ExprKind;
 enum BinOp {
     BOP_ADD,
@@ -427,6 +434,7 @@ enum UnaryOp {
     UOP_BITNOT,
     UOP_NOT,
 };typedef enum UnaryOp UnaryOp;
+typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
 struct ExprArray {
@@ -457,6 +465,8 @@ union __anon_u_1 {
         struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
         char *float_text;
         struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
     };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
 struct __anon_un_5 { UnaryOp op; Expr *operand; };
 struct __anon_var_6 { char *name; char *pkg; };
@@ -477,6 +487,8 @@ struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
 struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
 struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
 struct __anon_compound_23 { Type target_type; Expr *init; };
+struct __anon_stmt_expr_24 { StmtArray *stmts; };
+struct __anon_label_addr_25 { char *label; };
 
         long long int_val;
         struct __anon_bin_4 bin;
@@ -500,6 +512,8 @@ struct __anon_compound_23 { Type target_type; Expr *init; };
         struct __anon_init_list_22 init_list;
         char *float_text;
         struct __anon_compound_23 compound;
+        struct __anon_stmt_expr_24 stmt_expr;
+        struct __anon_label_addr_25 label_addr;
     };
 
     ExprKind kind;
@@ -532,6 +546,8 @@ Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc);
 Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc);
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc);
+Expr *expr_new_label_addr(const char *label, SourceLoc loc);
 void expr_call_push_arg(Expr *e, Expr *arg);
 void expr_call_set_callee(Expr *e, Expr *callee);
 void expr_free(Expr *e);
@@ -556,7 +572,7 @@ struct StmtArray {
     Stmt *data;
     size_t len;
     size_t cap;
-};typedef struct StmtArray StmtArray;
+};
 struct SwitchCase {
     int is_default;
     int value;
@@ -571,34 +587,34 @@ union __anon_u_2 {
         struct { Expr *cond; Stmt *body; } do_s;
         struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
         StmtArray block;
-        struct { char *target; } goto_s;
+        struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    };struct Stmt {union __anon_u_24 {struct __anon_decl_25 { char *name; Type type; Expr *init; int storage_class; };
-struct __anon_if_s_26 { Expr *cond; Stmt *then_s; Stmt *else_s; };
-struct __anon_while_s_27 { Expr *cond; Stmt *body; };
-struct __anon_do_s_28 { Expr *cond; Stmt *body; };
-struct __anon_for_s_29 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
-struct __anon_goto_s_30 { char *target; };
-struct __anon_label_s_31 { char *name; Stmt *stmt; };
-struct __anon_switch_s_32 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
+    };struct Stmt {union __anon_u_26 {struct __anon_decl_27 { char *name; Type type; Expr *init; int storage_class; };
+struct __anon_if_s_28 { Expr *cond; Stmt *then_s; Stmt *else_s; };
+struct __anon_while_s_29 { Expr *cond; Stmt *body; };
+struct __anon_do_s_30 { Expr *cond; Stmt *body; };
+struct __anon_for_s_31 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
+struct __anon_goto_s_32 { char *target; Expr *target_expr; };
+struct __anon_label_s_33 { char *name; Stmt *stmt; };
+struct __anon_switch_s_34 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
 
-        struct __anon_decl_25 decl;
+        struct __anon_decl_27 decl;
         Expr *expr;
         Expr *value;
-        struct __anon_if_s_26 if_s;
-        struct __anon_while_s_27 while_s;
-        struct __anon_do_s_28 do_s;
-        struct __anon_for_s_29 for_s;
+        struct __anon_if_s_28 if_s;
+        struct __anon_while_s_29 while_s;
+        struct __anon_do_s_30 do_s;
+        struct __anon_for_s_31 for_s;
         StmtArray block;
-        struct __anon_goto_s_30 goto_s;
-        struct __anon_label_s_31 label_s;
-        struct __anon_switch_s_32 switch_s;
+        struct __anon_goto_s_32 goto_s;
+        struct __anon_label_s_33 label_s;
+        struct __anon_switch_s_34 switch_s;
     };
 
     StmtKind kind;
     SourceLoc loc;
-    union __anon_u_24 u;
+    union __anon_u_26 u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);

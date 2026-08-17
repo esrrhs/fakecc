@@ -156,7 +156,8 @@ static int is_type_start(const Parser *p, size_t pos) {
         || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN
-        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE)
+        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE
+        || k == TK_KW_COMPLEX)
         return 1;
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
@@ -193,15 +194,34 @@ static int is_type_start(const Parser *p, size_t pos) {
     return 0;
 }
 
+static Type get_or_create_complex_type(Parser *p, Type base) {
+    char tag[64];
+    int bw = base.width ? base.width : 4;
+    const char *bname = (base.kind == TY_FLOAT)
+        ? (bw == 4 ? "float" : (bw == 8 ? "double" : "ldouble"))
+        : (bw == 1 ? "char" : (bw == 2 ? "short" : (bw == 8 ? "long" : "int")));
+    snprintf(tag, sizeof(tag), "__complex_%s", bname);
+    StructDef *sd = struct_registry_find(&p->tu->structs, tag);
+    if (!sd) {
+        SourceLoc loc; memset(&loc, 0, sizeof(loc));
+        sd = struct_registry_add(&p->tu->structs, tag, loc);
+        struct_def_push_member(sd, "__real", type_clone(base), 0);
+        struct_def_push_member(sd, "__imag", type_clone(base), 0);
+        struct_def_finish(sd);
+    }
+    return type_make_struct(tag, sd->size);
+}
+
 /* Parse specifiers: const + base type (void/struct/union/enum/typedef/int).
  * This is the old `parse_type` minus the trailing `*` chain — pointers and
  * other declarator suffixes are handled separately by `parse_declarator`. */
-static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile, int *is_restrict) {
+static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile, int *is_restrict, int *is_complex) {
     for (;;) {
         if (peek(p)->kind == TK_KW_CONST) { *is_const = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_VOLATILE) { *is_volatile = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_RESTRICT) { *is_restrict = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (is_complex && peek(p)->kind == TK_KW_COMPLEX) { *is_complex = 1; advance(p); }
         else break;
     }
 }
@@ -210,16 +230,17 @@ static Type parse_specifiers(Parser *p) {
     /* Type qualifiers — flag the resulting type.  `const` gates assignment in
      * sema; `volatile`/`restrict` are no-ops without an optimizer (stored for
      * completeness).  All three may appear in any order (C permits mixing). */
-    int is_const = 0, is_volatile = 0, is_restrict = 0;
-    parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+    int is_const = 0, is_volatile = 0, is_restrict = 0, is_complex = 0;
+    parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
 
     /* void — only meaningful as a return type or as void* (pointer to void).
      * A lone `void` variable is rejected later in sema. */
     if (peek(p)->kind == TK_KW_VOID) {
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_void();
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     /* struct [Tag] — if Tag is present, it's a use of a (possibly forward)
@@ -237,9 +258,10 @@ static Type parse_specifiers(Parser *p) {
             /* parse_struct_body may realloc the registry (nested anonymous
              * structs/unions), invalidating sd — re-fetch before reading size. */
             sd = struct_registry_find(&p->tu->structs, tag);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_make_struct(tag, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         const Token *tag = peek(p);
@@ -258,16 +280,18 @@ static Type parse_specifiers(Parser *p) {
             StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_make_struct(tag->text, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         int size = sd ? sd->size : 0;
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     /* union [Tag] — same as struct: a Tag is a use, `{` begins an anonymous
@@ -281,9 +305,10 @@ static Type parse_specifiers(Parser *p) {
             sd->is_union = 1;
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_make_struct(tag, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         const Token *tag = peek(p);
@@ -303,31 +328,35 @@ static Type parse_specifiers(Parser *p) {
             sd->is_union = 1;
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_make_struct(tag->text, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         int size = sd ? sd->size : 0;
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     /* float / double — TY_FLOAT with width 4 or 8. */
     if (peek(p)->kind == TK_KW_FLOAT) {
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_float(4);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     if (peek(p)->kind == TK_KW_DOUBLE) {
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_float(8);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     /* long double — TY_FLOAT with width 16 (x87 80-bit extended).  Detected by
@@ -338,9 +367,10 @@ static Type parse_specifiers(Parser *p) {
         && p->tokens->data[p->pos + 1].kind == TK_KW_DOUBLE) {
         advance(p); /* consume `long` */
         advance(p); /* consume `double` */
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_float(16);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     /* enum Tag — treated as int for the type system. */
@@ -354,9 +384,10 @@ static Type parse_specifiers(Parser *p) {
             snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
             EnumDef *ed = enum_registry_add(&p->tu->enums, tag, peek(p)->loc);
             parse_enum_body(p, ed);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_default_int();
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         const Token *tag = peek(p);
@@ -369,9 +400,10 @@ static Type parse_specifiers(Parser *p) {
             EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, peek(p)->loc);
             parse_enum_body(p, ed);
         }
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_default_int();
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     /* typedef name — local, pkg.Type, or same-package fallback. */
@@ -397,8 +429,9 @@ static Type parse_specifiers(Parser *p) {
                 const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
                 if (sd) t.width = sd->size;
             }
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         const Type *alias = find_typedef_with_fallback(p, peek(p)->text);
@@ -413,8 +446,9 @@ static Type parse_specifiers(Parser *p) {
                 const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
                 if (sd) t.width = sd->size;
             }
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
     }
@@ -422,9 +456,10 @@ static Type parse_specifiers(Parser *p) {
     /* _Bool — standalone, takes no signed/unsigned/long modifier. */
     if (peek(p)->kind == TK_KW_BOOL) {
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_bool();
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
 
@@ -444,6 +479,7 @@ static Type parse_specifiers(Parser *p) {
         else if (k == TK_KW_VOLATILE) { is_volatile = 1; advance(p); }
         else if (k == TK_KW_RESTRICT) { is_restrict = 1; advance(p); }
         else if (k == TK_KW_INLINE) { advance(p); }
+        else if (k == TK_KW_COMPLEX) { is_complex = 1; advance(p); }
         else if (k == TK_KW_SIGNED) { is_signed = 1; has_type = 1; advance(p); }
         else if (k == TK_KW_UNSIGNED) { is_unsigned = 1; has_type = 1; advance(p); }
         else if (k == TK_KW_CHAR) { is_char = 1; has_type = 1; advance(p); }
@@ -454,6 +490,12 @@ static Type parse_specifiers(Parser *p) {
     }
 
     if (!has_type) {
+        if (is_complex) {
+            /* Bare _Complex defaults to _Complex double */
+            Type t = get_or_create_complex_type(p, type_make_float(8));
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
         const Token *t = peek(p);
         die_at(t->loc.file, t->loc.line, t->loc.col,
                "expected type but got '%s'", t->text);
@@ -470,6 +512,7 @@ static Type parse_specifiers(Parser *p) {
 
     Type t = type_make_int(width, is_unsigned);
     t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+    if (is_complex) t = get_or_create_complex_type(p, t);
     return t;
 }
 
@@ -1212,6 +1255,18 @@ static Expr *parse_mul(Parser *p) {
 /* unary-expr = ("+"|"-"|"&"|"*"|"~") unary-expr | sizeof unary-or-type | primary { postfix } */
 static Expr *parse_unary(Parser *p) {
     TokenKind k = peek(p)->kind;
+    if (k == TK_KW_REAL) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *op = parse_unary(p);
+        return expr_new_member(op, "__real", loc);
+    }
+    if (k == TK_KW_IMAG) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *op = parse_unary(p);
+        return expr_new_member(op, "__imag", loc);
+    }
     if (k == TK_PLUS || k == TK_MINUS) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
@@ -1234,6 +1289,17 @@ static Expr *parse_unary(Parser *p) {
         int is_inc = (k == TK_INC);
         advance(p);
         return expr_new_inc_dec(parse_unary(p), is_inc, 1 /* prefix */, loc);
+    }
+    if (k == TK_ANDAND) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        const Token *lbl = peek(p);
+        if (!is_name_token(lbl->kind)) {
+            die_at(lbl->loc.file, lbl->loc.line, lbl->loc.col,
+                   "expected label name after '&&' but got '%s'", lbl->text ? lbl->text : "NULL");
+        }
+        advance(p);
+        return expr_new_label_addr(lbl->text, loc);
     }
     if (k == TK_AMP) {
         SourceLoc loc = peek(p)->loc;
@@ -1470,10 +1536,54 @@ static int char_literal_value(const char *text) {
     return (unsigned char)text[1];
 }
 
+static int is_imag_literal(const char *text) {
+    if (!text) return 0;
+    for (const char *s = text; *s; s++) {
+        if (*s == 'i' || *s == 'I' || *s == 'j' || *s == 'J') return 1;
+    }
+    return 0;
+}
+
+static Expr *make_imag_literal(Parser *p, const char *text, SourceLoc loc) {
+    int is_float = 0;
+    int is_ld = 0;
+    for (const char *s = text; *s; s++) {
+        if (*s == 'f' || *s == 'F') is_float = 1;
+        if (*s == 'l' || *s == 'L') is_ld = 1;
+    }
+    Type base = is_float ? type_make_float(4) : (is_ld ? type_make_float(16) : type_make_float(8));
+    Type cty = get_or_create_complex_type(p, base);
+
+    /* Clean imag string by stripping i/I/j/J */
+    char clean[64];
+    size_t ci = 0;
+    for (size_t i = 0; text[i] && ci + 1 < sizeof(clean); i++) {
+        if (text[i] != 'i' && text[i] != 'I' && text[i] != 'j' && text[i] != 'J')
+            clean[ci++] = text[i];
+    }
+    clean[ci] = '\0';
+    if (ci == 0 || (ci == 1 && (clean[0] == 'f' || clean[0] == 'F' || clean[0] == 'l' || clean[0] == 'L'))) {
+        snprintf(clean, sizeof(clean), "1.0");
+    }
+
+    Expr *er = expr_new_float_lit("0.0", base.width, loc);
+    Expr *ei = expr_new_float_lit(clean, base.width, loc);
+    Expr **elems = malloc(2 * sizeof(Expr *));
+    elems[0] = er;
+    elems[1] = ei;
+    Expr *init = expr_new_init_list(elems, 2, loc);
+    return expr_new_compound_literal(cty, init, loc);
+}
+
 /* primary-expr = INT_LITERAL | CHAR_LITERAL | IDENT [ "(" arg-list? ")" ]  | "(" (type ")" unary | expr ")" ) | ... */
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
+        if (is_imag_literal(t->text)) {
+            Expr *e = make_imag_literal(p, t->text, t->loc);
+            advance(p);
+            return parse_postfix(p, e);
+        }
         int width, is_unsigned;
         unsigned long long v = int_literal_typed(t->text, &width, &is_unsigned);
         Expr *e = expr_new_int_typed((long long)v, width, is_unsigned, t->loc);
@@ -1481,6 +1591,11 @@ static Expr *parse_primary(Parser *p) {
         return parse_postfix(p, e);
     }
     if (t->kind == TK_FLOAT_LITERAL) {
+        if (is_imag_literal(t->text)) {
+            Expr *e = make_imag_literal(p, t->text, t->loc);
+            advance(p);
+            return parse_postfix(p, e);
+        }
         int width = 8;
         float_literal_width(t->text, &width); /* classify width (4/8/16) */
         Expr *e = expr_new_float_lit(t->text, width, t->loc);
@@ -1736,7 +1851,7 @@ static int is_function_declaration_lookahead(Parser *p) {
             tk == TK_KW_SIGNED || tk == TK_KW_UNSIGNED ||
             tk == TK_KW_VOID || tk == TK_KW_INT || tk == TK_KW_CHAR ||
             tk == TK_KW_SHORT || tk == TK_KW_LONG || tk == TK_KW_FLOAT ||
-            tk == TK_KW_DOUBLE || tk == TK_KW_BOOL) {
+            tk == TK_KW_DOUBLE || tk == TK_KW_BOOL || tk == TK_KW_COMPLEX) {
             advance(p);
         } else if (tk == TK_KW_STRUCT || tk == TK_KW_UNION || tk == TK_KW_ENUM) {
             advance(p);
@@ -2034,6 +2149,18 @@ static Stmt parse_stmt(Parser *p) {
     if (k == TK_KW_GOTO) {
         const Token *kw = peek(p);
         advance(p);  /* consume "goto" */
+        /* GNU C indirect (computed) goto: goto *expr; */
+        if (peek(p)->kind == TK_STAR) {
+            advance(p);  /* consume '*' */
+            Expr *target = parse_expr(p);
+            expect_kind(p, TK_SEMICOLON, "';'");
+            Stmt s;
+            s.kind = ST_GOTO;
+            s.loc = kw->loc;
+            s.u.goto_s.target = NULL;
+            s.u.goto_s.target_expr = target;
+            return s;
+        }
         const Token *label = peek(p);
         if (label->kind != TK_IDENT) {
             die_at(label->loc.file, label->loc.line, label->loc.col,
@@ -2045,6 +2172,7 @@ static Stmt parse_stmt(Parser *p) {
         s.kind = ST_GOTO;
         s.loc = kw->loc;
         s.u.goto_s.target = xstrdup(label->text);
+        s.u.goto_s.target_expr = NULL;
         return s;
     }
     if (k == TK_LBRACE) {

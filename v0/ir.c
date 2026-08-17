@@ -88,6 +88,8 @@ enum IROpcode {
     IR_TRUNC,
     IR_GADDR,
     IR_FADDR,
+    IR_LADDR,
+    IR_JMP_PTR,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -244,6 +246,9 @@ enum TokenKind {
     TK_KW_INLINE,
     TK_KW_ALIGNOF,
     TK_KW_LONG_DOUBLE,
+    TK_KW_COMPLEX,
+    TK_KW_REAL,
+    TK_KW_IMAG,
     TK_IDENT,
     TK_INT_LITERAL,
     TK_FLOAT_LITERAL,
@@ -400,6 +405,8 @@ enum ExprKind {
     EX_INIT_LIST,
     EX_FLOAT_LIT,
     EX_COMPOUND_LITERAL,
+    EX_STMT_EXPR,
+    EX_LABEL_ADDR,
 };typedef enum ExprKind ExprKind;
 enum BinOp {
     BOP_ADD,
@@ -427,6 +434,7 @@ enum UnaryOp {
     UOP_BITNOT,
     UOP_NOT,
 };typedef enum UnaryOp UnaryOp;
+typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
 struct ExprArray {
@@ -457,6 +465,8 @@ union __anon_u_1 {
         struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
         char *float_text;
         struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
     };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
 struct __anon_un_5 { UnaryOp op; Expr *operand; };
 struct __anon_var_6 { char *name; char *pkg; };
@@ -477,6 +487,8 @@ struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
 struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
 struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
 struct __anon_compound_23 { Type target_type; Expr *init; };
+struct __anon_stmt_expr_24 { StmtArray *stmts; };
+struct __anon_label_addr_25 { char *label; };
 
         long long int_val;
         struct __anon_bin_4 bin;
@@ -500,6 +512,8 @@ struct __anon_compound_23 { Type target_type; Expr *init; };
         struct __anon_init_list_22 init_list;
         char *float_text;
         struct __anon_compound_23 compound;
+        struct __anon_stmt_expr_24 stmt_expr;
+        struct __anon_label_addr_25 label_addr;
     };
 
     ExprKind kind;
@@ -532,6 +546,8 @@ Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc);
 Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc);
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc);
+Expr *expr_new_label_addr(const char *label, SourceLoc loc);
 void expr_call_push_arg(Expr *e, Expr *arg);
 void expr_call_set_callee(Expr *e, Expr *callee);
 void expr_free(Expr *e);
@@ -556,7 +572,7 @@ struct StmtArray {
     Stmt *data;
     size_t len;
     size_t cap;
-};typedef struct StmtArray StmtArray;
+};
 struct SwitchCase {
     int is_default;
     int value;
@@ -571,34 +587,34 @@ union __anon_u_2 {
         struct { Expr *cond; Stmt *body; } do_s;
         struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
         StmtArray block;
-        struct { char *target; } goto_s;
+        struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    };struct Stmt {union __anon_u_24 {struct __anon_decl_25 { char *name; Type type; Expr *init; int storage_class; };
-struct __anon_if_s_26 { Expr *cond; Stmt *then_s; Stmt *else_s; };
-struct __anon_while_s_27 { Expr *cond; Stmt *body; };
-struct __anon_do_s_28 { Expr *cond; Stmt *body; };
-struct __anon_for_s_29 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
-struct __anon_goto_s_30 { char *target; };
-struct __anon_label_s_31 { char *name; Stmt *stmt; };
-struct __anon_switch_s_32 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
+    };struct Stmt {union __anon_u_26 {struct __anon_decl_27 { char *name; Type type; Expr *init; int storage_class; };
+struct __anon_if_s_28 { Expr *cond; Stmt *then_s; Stmt *else_s; };
+struct __anon_while_s_29 { Expr *cond; Stmt *body; };
+struct __anon_do_s_30 { Expr *cond; Stmt *body; };
+struct __anon_for_s_31 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
+struct __anon_goto_s_32 { char *target; Expr *target_expr; };
+struct __anon_label_s_33 { char *name; Stmt *stmt; };
+struct __anon_switch_s_34 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
 
-        struct __anon_decl_25 decl;
+        struct __anon_decl_27 decl;
         Expr *expr;
         Expr *value;
-        struct __anon_if_s_26 if_s;
-        struct __anon_while_s_27 while_s;
-        struct __anon_do_s_28 do_s;
-        struct __anon_for_s_29 for_s;
+        struct __anon_if_s_28 if_s;
+        struct __anon_while_s_29 while_s;
+        struct __anon_do_s_30 do_s;
+        struct __anon_for_s_31 for_s;
         StmtArray block;
-        struct __anon_goto_s_30 goto_s;
-        struct __anon_label_s_31 label_s;
-        struct __anon_switch_s_32 switch_s;
+        struct __anon_goto_s_32 goto_s;
+        struct __anon_label_s_33 label_s;
+        struct __anon_switch_s_34 switch_s;
     };
 
     StmtKind kind;
     SourceLoc loc;
-    union __anon_u_24 u;
+    union __anon_u_26 u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
@@ -743,6 +759,15 @@ int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = ((void*)0);
 const TranslationUnit *g_ir_tu = ((void*)0);
 static int g_ir_pin_locals = 0;
+static const FunctionDecl *g_ir_cur_fd = ((void*)0);
+struct LabelMap {
+    char **names;
+    int *ids;
+    size_t len;
+    size_t cap;
+};typedef struct LabelMap LabelMap;
+static int labelmap_find(const LabelMap *lm, const char *name);
+static LabelMap *g_ir_label_map = ((void*)0);
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : ((void*)0);
 }
@@ -949,7 +974,25 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
         return expr_takes_addr_of(e->u.compound.init, name);
     case EX_ALIGNOF_TYPE:
         return 0;
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                if (stmt_takes_addr_of(&e->u.stmt_expr.stmts->data[i], name)) return 1;
+        }
+        return 0;
+    case EX_LABEL_ADDR:
+        return 0;
     }
+    return 0;
+}
+static int expr_has_label_addr(const Expr *e) {
+    if (!e) return 0;
+    if (e->kind == EX_LABEL_ADDR) return 1;
+    if (e->kind == EX_INIT_LIST) {
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            if (expr_has_label_addr(e->u.init_list.elements[i])) return 1;
+    }
+    if (e->kind == EX_CAST) return expr_has_label_addr(e->u.cast.operand);
     return 0;
 }
 static int stmt_takes_addr_of(const Stmt *s, const char *name) {
@@ -969,7 +1012,7 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
         return expr_takes_addr_of(s->u.do_s.cond, name)
             || stmt_takes_addr_of(s->u.do_s.body, name);
     case ST_GOTO:
-        return 0;
+        return s->u.goto_s.target_expr && expr_takes_addr_of(s->u.goto_s.target_expr, name);
     case ST_LABEL:
         return stmt_takes_addr_of(s->u.label_s.stmt, name);
     case ST_SWITCH:
@@ -1015,9 +1058,64 @@ static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
     }
     return 0;
 }
+static int member_field_is_array(const Expr *e) {
+    if (e->kind != EX_MEMBER) return 0;
+    if (e->u.member.obj->type.kind != TY_STRUCT) return 0;
+    const char *tag = e->u.member.obj->type.tag;
+    if (!tag) return 0;
+    const StructDef *sd = struct_registry_find_c(g_ir_structs, tag);
+    if (!sd) return 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        if (runtime.strcmp(sd->members[i].name, e->u.member.name) == 0)
+            return sd->members[i].type.kind == TY_ARRAY;
+    }
+    return 0;
+}
+static int stmt_has_computed_goto(const Stmt *s) {
+    if (!s) return 0;
+    switch (s->kind) {
+    case ST_DECL: return s->u.decl.init && expr_has_label_addr(s->u.decl.init);
+    case ST_EXPR: return expr_has_label_addr(s->u.expr);
+    case ST_RETURN: return expr_has_label_addr(s->u.value);
+    case ST_GOTO: return s->u.goto_s.target_expr != ((void*)0);
+    case ST_IF:
+        return (s->u.if_s.cond && expr_has_label_addr(s->u.if_s.cond))
+            || stmt_has_computed_goto(s->u.if_s.then_s)
+            || (s->u.if_s.else_s && stmt_has_computed_goto(s->u.if_s.else_s));
+    case ST_WHILE:
+        return (s->u.while_s.cond && expr_has_label_addr(s->u.while_s.cond))
+            || stmt_has_computed_goto(s->u.while_s.body);
+    case ST_DO_WHILE:
+        return (s->u.do_s.cond && expr_has_label_addr(s->u.do_s.cond))
+            || stmt_has_computed_goto(s->u.do_s.body);
+    case ST_FOR:
+        return (s->u.for_s.init && stmt_has_computed_goto(s->u.for_s.init))
+            || (s->u.for_s.cond && expr_has_label_addr(s->u.for_s.cond))
+            || (s->u.for_s.step && expr_has_label_addr(s->u.for_s.step))
+            || stmt_has_computed_goto(s->u.for_s.body);
+    case ST_LABEL: return stmt_has_computed_goto(s->u.label_s.stmt);
+    case ST_SWITCH:
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                if (stmt_has_computed_goto(&s->u.switch_s.cases[i].stmts.data[j])) return 1;
+        return 0;
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            if (stmt_has_computed_goto(&s->u.block.data[i])) return 1;
+        return 0;
+    default: return 0;
+    }
+}
+static int fd_has_computed_goto(const FunctionDecl *fd) {
+    if (!fd) return 0;
+    for (size_t i = 0; i < fd->body.len; i++)
+        if (stmt_has_computed_goto(&fd->body.data[i])) return 1;
+    return 0;
+}
 static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) {
     if (ty.kind == TY_ARRAY) return 1;
     if (ty.kind == TY_STRUCT) return 1;
+    if (fd_has_computed_goto(fd)) return 1;
     for (size_t i = 0; i < fd->body.len; i++)
         if (stmt_takes_addr_of(&fd->body.data[i], name)) return 1;
     return 0;
@@ -1336,6 +1434,8 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 }
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
+static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
+                       const FunctionDecl *cur_fd);
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g);
@@ -1986,6 +2086,22 @@ IRValue pr;
                 inst.call_name = xstrdup(cname);
             } else if (runtime.strcmp(cname, "__builtin_ctzll") == 0) {
                 inst.call_name = xstrdup(cname);
+            } else if (runtime.strncmp(cname, "__builtin_", 10) == 0) {
+                if (runtime.strcmp(cname, "__builtin_abort") == 0) inst.call_name = xstrdup("abort");
+                else if (runtime.strcmp(cname, "__builtin_exit") == 0) inst.call_name = xstrdup("exit");
+                else if (runtime.strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("abort");
+                else if (runtime.strcmp(cname, "__builtin_memset") == 0) inst.call_name = xstrdup("memset");
+                else if (runtime.strcmp(cname, "__builtin_memcpy") == 0) inst.call_name = xstrdup("memcpy");
+                else if (runtime.strcmp(cname, "__builtin_memcmp") == 0) inst.call_name = xstrdup("memcmp");
+                else if (runtime.strcmp(cname, "__builtin_strcmp") == 0) inst.call_name = xstrdup("strcmp");
+                else if (runtime.strcmp(cname, "__builtin_strncmp") == 0) inst.call_name = xstrdup("strncmp");
+                else if (runtime.strcmp(cname, "__builtin_strlen") == 0) inst.call_name = xstrdup("strlen");
+                else if (runtime.strcmp(cname, "__builtin_strcpy") == 0) inst.call_name = xstrdup("strcpy");
+                else if (runtime.strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");
+                else if (runtime.strcmp(cname, "__builtin_fabs") == 0) inst.call_name = xstrdup("fabs");
+                else if (runtime.strcmp(cname, "__builtin_fabsf") == 0) inst.call_name = xstrdup("fabsf");
+                else if (runtime.strcmp(cname, "__builtin_fabsl") == 0) inst.call_name = xstrdup("fabsl");
+                else inst.call_name = xstrdup(cname + 10);
             } else {
                 int is_direct = 0;
                 if (e->u.call.callee->type.kind == TY_FUNC) {
@@ -2107,6 +2223,7 @@ IRValue pr;
         IRValue addr = lower_lvalue_addr(fn, st, e);
         if (e->type.kind == TY_STRUCT) return addr;
         if (e->type.kind == TY_ARRAY) return addr;
+        if (e->type.kind == TY_PTR && member_field_is_array(e)) return addr;
         int bit_width = 0, bit_offset = 0, unit_width = 0;
         int is_bf = member_bitfield(e, &bit_width, &bit_offset, &unit_width);
         int w = is_bf ? (unit_width ? unit_width : 4)
@@ -2210,6 +2327,54 @@ IRValue pr;
             }
         }
         IRValue addr = lower_lvalue_addr(fn, st, lv);
+        int bf_width = 0, bf_offset = 0, bf_unit = 0;
+        if (lv->kind == EX_MEMBER
+            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit)) {
+            int uw = bf_unit ? bf_unit : 4;
+            int mask = (1 << bf_width) - 1;
+            IRValue unit = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
+            IRValue old_bf;
+            if (bf_offset > 0) {
+                IRValue sh = new_value(fn);
+                emit_inst_w(fn, IR_CONST, sh, -1, -1, bf_offset, 8, 1, e->loc);
+                IRValue shifted = new_value(fn);
+                emit_inst_w(fn, IR_SHR, shifted, unit, sh, 0, uw, 1, e->loc);
+                old_bf = shifted;
+            } else {
+                old_bf = unit;
+            }
+            IRValue m_mask = new_value(fn);
+            emit_inst_w(fn, IR_CONST, m_mask, -1, -1, mask, uw, 1, e->loc);
+            IRValue old_val = new_value(fn);
+            emit_inst_w(fn, IR_BAND, old_val, old_bf, m_mask, 0, uw, 1, e->loc);
+            IRValue one = new_value(fn);
+            emit_inst_w(fn, IR_CONST, one, -1, -1, 1, uw, 1, e->loc);
+            IRValue new_val = new_value(fn);
+            emit_inst_w(fn, is_inc ? IR_ADD : IR_SUB, new_val, old_val, one, 0, uw, 1, e->loc);
+            IRValue new_masked = new_value(fn);
+            emit_inst_w(fn, IR_BAND, new_masked, new_val, m_mask, 0, uw, 1, e->loc);
+            IRValue shifted_new;
+            if (bf_offset > 0) {
+                IRValue sh2 = new_value(fn);
+                emit_inst_w(fn, IR_CONST, sh2, -1, -1, bf_offset, 8, 1, e->loc);
+                shifted_new = new_value(fn);
+                emit_inst_w(fn, IR_SHL, shifted_new, new_masked, sh2, 0, uw, 1, e->loc);
+            } else {
+                shifted_new = new_masked;
+            }
+            IRValue clr = new_value(fn);
+            emit_inst_w(fn, IR_CONST, clr, -1, -1, ~(mask << bf_offset), uw, 1, e->loc);
+            IRValue unit_cleared = new_value(fn);
+            emit_inst_w(fn, IR_BAND, unit_cleared, unit, clr, 0, uw, 1, e->loc);
+            IRValue unit_new = new_value(fn);
+            emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_new, 0, uw, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, unit_new, 0, uw, 1, e->loc);
+            IRValue ret_bf = is_prefix ? new_masked : old_val;
+            return coerce(fn, ret_bf, uw, 1,
+                          lv->type.width ? lv->type.width : 4,
+                          lv->type.is_unsigned, e->loc);
+        }
         IRValue old = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
         IRValue s = new_value(fn);
@@ -2305,6 +2470,34 @@ IRValue pr;
         if (target.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
+    case EX_STMT_EXPR: {
+        size_t mark = st->len;
+        IRValue res = -1;
+        const StmtArray *stmts = e->u.stmt_expr.stmts;
+        if (stmts) {
+            for (size_t i = 0; i < stmts->len; i++) {
+                const Stmt *s = &stmts->data[i];
+                if (i == stmts->len - 1 && s->kind == ST_EXPR && s->u.expr) {
+                    res = lower_expr(fn, st, s->u.expr);
+                } else {
+                    lower_stmt(fn, st, s, g_ir_cur_fd);
+                }
+            }
+        }
+        st->len = mark;
+        return res;
+    }
+    case EX_LABEL_ADDR: {
+        const char *lbl_name = e->u.label_addr.label;
+        int lbl_id = g_ir_label_map ? labelmap_find(g_ir_label_map, lbl_name) : -1;
+        if (lbl_id < 0) {
+            runtime.fprintf(runtime.stderr, "fakecc: &&%s: undeclared label\n", lbl_name);
+            runtime.exit(1);
+        }
+        IRValue dst = new_value(fn);
+        emit_inst(fn, IR_LADDR, dst, -1, -1, lbl_id, e->loc);
+        return dst;
+    }
     default: break;
     }
     return -1;
@@ -2322,12 +2515,6 @@ static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
                      SourceLoc loc) {
     emit_inst(fn, IR_CBR, -1, cond, f_label, t_label, loc);
 }
-struct LabelMap {
-    char **names;
-    int *ids;
-    size_t len;
-    size_t cap;
-};typedef struct LabelMap LabelMap;
 static void labelmap_init(LabelMap *lm) {
     lm->names = ((void*)0); lm->ids = ((void*)0); lm->len = 0; lm->cap = 0;
 }
@@ -2383,7 +2570,6 @@ static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s) {
         break;
     }
 }
-static LabelMap *g_ir_label_map = ((void*)0);
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                        const FunctionDecl *cur_fd);
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
@@ -2400,7 +2586,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 irsymtable_push_global(st, s->u.decl.name, dty);
             break;
         }
-        if (s->u.decl.storage_class == 1) {
+        if (s->u.decl.storage_class == 1 && s->u.decl.init && expr_has_label_addr(s->u.decl.init)) {
+        } else if (s->u.decl.storage_class == 1) {
             int sz = type_size(dty);
             if (sz <= 0) sz = 8;
             char *bytes = runtime.calloc(sz, 1);
@@ -2630,13 +2817,18 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_GOTO: {
-        int id = labelmap_find(g_ir_label_map, s->u.goto_s.target);
-        if (id < 0) {
-            runtime.fprintf(runtime.stderr, "fakecc: goto to unknown label '%s'\n",
-                    s->u.goto_s.target);
-            runtime.exit(1);
+        if (s->u.goto_s.target_expr) {
+            IRValue ptr = lower_expr(fn, st, s->u.goto_s.target_expr);
+            emit_inst(fn, IR_JMP_PTR, -1, ptr, -1, -1, s->loc);
+        } else {
+            int id = labelmap_find(g_ir_label_map, s->u.goto_s.target);
+            if (id < 0) {
+                runtime.fprintf(runtime.stderr, "fakecc: goto to unknown label '%s'\n",
+                        s->u.goto_s.target);
+                runtime.exit(1);
+            }
+            emit_br(fn, id, s->loc);
         }
-        emit_br(fn, id, s->loc);
         break;
     }
     case ST_LABEL: {
@@ -2893,12 +3085,43 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
             if (!sd) die_at(loc.file, loc.line, loc.col,
                             "unknown struct 'struct %s'", ty->tag);
             for (int i = 0; i < n; i++) {
+                const StructMember *sm = &sd->members[i];
                 IRValue off = new_value(fn);
-                emit_inst_w(fn, IR_CONST, off, -1, -1,
-                            sd->members[i].offset, 8, 1, loc);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, sm->offset, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
-                lower_init_list(fn, st, ptr, &sd->members[i].type,
-                                e->u.init_list.elements[i], loc);
+                if (sm->bit_width > 0) {
+                    int uw = type_size(sm->type);
+                    int mask = (1 << sm->bit_width) - 1;
+                    IRValue rv = lower_expr(fn, st, e->u.init_list.elements[i]);
+                    int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+                    IRValue m_mask = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, m_mask, -1, -1, mask, uw, 1, loc);
+                    IRValue val_masked = new_value(fn);
+                    IRValue rv_coerced = coerce(fn, rv, rw, ru, uw, 1, loc);
+                    emit_inst_w(fn, IR_BAND, val_masked, rv_coerced, m_mask, 0, uw, 1, loc);
+                    IRValue shifted_val;
+                    if (sm->bit_offset > 0) {
+                        IRValue shift_v = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, shift_v, -1, -1, sm->bit_offset, 8, 1, loc);
+                        shifted_val = new_value(fn);
+                        emit_inst_w(fn, IR_SHL, shifted_val, val_masked, shift_v, 0, uw, 1, loc);
+                    } else {
+                        shifted_val = val_masked;
+                    }
+                    IRValue unit_old = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, unit_old, ptr, -1, 0, uw, 1, loc);
+                    IRValue clr_mask = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, clr_mask, -1, -1,
+                                ~(mask << sm->bit_offset), uw, 1, loc);
+                    IRValue unit_cleared = new_value(fn);
+                    emit_inst_w(fn, IR_BAND, unit_cleared, unit_old, clr_mask, 0, uw, 1, loc);
+                    IRValue unit_new = new_value(fn);
+                    emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_val, 0, uw, 1, loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, ptr, unit_new, 0, uw, 1, loc);
+                } else {
+                    lower_init_list(fn, st, ptr, &sm->type,
+                                    e->u.init_list.elements[i], loc);
+                }
             }
             break;
         }
@@ -3128,10 +3351,28 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         LabelMap lm;
         labelmap_init(&lm);
         g_ir_label_map = &lm;
+        g_ir_cur_fd = fd;
         for (size_t j = 0; j < fd->body.len; j++)
             assign_label_ids(&irfn, &lm, &fd->body.data[j]);
         for (size_t j = 0; j < fd->body.len; j++) {
             lower_stmt(&irfn, &st, &fd->body.data[j], fd);
+        }
+        int needs_ret = 1;
+        if (irfn.insts.len > 0) {
+            IROpcode last_op = irfn.insts.data[irfn.insts.len - 1].op;
+            if (last_op == IR_RETURN || last_op == IR_BR)
+                needs_ret = 0;
+        }
+        if (needs_ret) {
+            if (fd->ret_type.kind == TY_VOID) {
+                emit_inst_w(&irfn, IR_RETURN, -1, -1, -1, 0, 0, 0, fd->loc);
+            } else {
+                IRValue zero = new_value(&irfn);
+                int rw = fd->ret_type.width ? fd->ret_type.width : 4;
+                int ru = fd->ret_type.is_unsigned;
+                emit_inst_w(&irfn, IR_CONST, zero, -1, -1, 0, rw, ru, fd->loc);
+                emit_inst_w(&irfn, IR_RETURN, -1, zero, -1, 0, rw, ru, fd->loc);
+            }
         }
         g_ir_label_map = ((void*)0);
         labelmap_free(&lm);

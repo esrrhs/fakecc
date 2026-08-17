@@ -69,6 +69,9 @@ enum TokenKind {
     TK_KW_INLINE,
     TK_KW_ALIGNOF,
     TK_KW_LONG_DOUBLE,
+    TK_KW_COMPLEX,
+    TK_KW_REAL,
+    TK_KW_IMAG,
     TK_IDENT,
     TK_INT_LITERAL,
     TK_FLOAT_LITERAL,
@@ -225,6 +228,8 @@ enum ExprKind {
     EX_INIT_LIST,
     EX_FLOAT_LIT,
     EX_COMPOUND_LITERAL,
+    EX_STMT_EXPR,
+    EX_LABEL_ADDR,
 };typedef enum ExprKind ExprKind;
 enum BinOp {
     BOP_ADD,
@@ -252,6 +257,7 @@ enum UnaryOp {
     UOP_BITNOT,
     UOP_NOT,
 };typedef enum UnaryOp UnaryOp;
+typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
 struct ExprArray {
@@ -282,6 +288,8 @@ union __anon_u_1 {
         struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
         char *float_text;
         struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
     };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
 struct __anon_un_5 { UnaryOp op; Expr *operand; };
 struct __anon_var_6 { char *name; char *pkg; };
@@ -302,6 +310,8 @@ struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
 struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
 struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
 struct __anon_compound_23 { Type target_type; Expr *init; };
+struct __anon_stmt_expr_24 { StmtArray *stmts; };
+struct __anon_label_addr_25 { char *label; };
 
         long long int_val;
         struct __anon_bin_4 bin;
@@ -325,6 +335,8 @@ struct __anon_compound_23 { Type target_type; Expr *init; };
         struct __anon_init_list_22 init_list;
         char *float_text;
         struct __anon_compound_23 compound;
+        struct __anon_stmt_expr_24 stmt_expr;
+        struct __anon_label_addr_25 label_addr;
     };
 
     ExprKind kind;
@@ -357,6 +369,8 @@ Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc);
 Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc);
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc);
+Expr *expr_new_label_addr(const char *label, SourceLoc loc);
 void expr_call_push_arg(Expr *e, Expr *arg);
 void expr_call_set_callee(Expr *e, Expr *callee);
 void expr_free(Expr *e);
@@ -381,7 +395,7 @@ struct StmtArray {
     Stmt *data;
     size_t len;
     size_t cap;
-};typedef struct StmtArray StmtArray;
+};
 struct SwitchCase {
     int is_default;
     int value;
@@ -396,34 +410,34 @@ union __anon_u_2 {
         struct { Expr *cond; Stmt *body; } do_s;
         struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
         StmtArray block;
-        struct { char *target; } goto_s;
+        struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    };struct Stmt {union __anon_u_24 {struct __anon_decl_25 { char *name; Type type; Expr *init; int storage_class; };
-struct __anon_if_s_26 { Expr *cond; Stmt *then_s; Stmt *else_s; };
-struct __anon_while_s_27 { Expr *cond; Stmt *body; };
-struct __anon_do_s_28 { Expr *cond; Stmt *body; };
-struct __anon_for_s_29 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
-struct __anon_goto_s_30 { char *target; };
-struct __anon_label_s_31 { char *name; Stmt *stmt; };
-struct __anon_switch_s_32 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
+    };struct Stmt {union __anon_u_26 {struct __anon_decl_27 { char *name; Type type; Expr *init; int storage_class; };
+struct __anon_if_s_28 { Expr *cond; Stmt *then_s; Stmt *else_s; };
+struct __anon_while_s_29 { Expr *cond; Stmt *body; };
+struct __anon_do_s_30 { Expr *cond; Stmt *body; };
+struct __anon_for_s_31 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
+struct __anon_goto_s_32 { char *target; Expr *target_expr; };
+struct __anon_label_s_33 { char *name; Stmt *stmt; };
+struct __anon_switch_s_34 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
 
-        struct __anon_decl_25 decl;
+        struct __anon_decl_27 decl;
         Expr *expr;
         Expr *value;
-        struct __anon_if_s_26 if_s;
-        struct __anon_while_s_27 while_s;
-        struct __anon_do_s_28 do_s;
-        struct __anon_for_s_29 for_s;
+        struct __anon_if_s_28 if_s;
+        struct __anon_while_s_29 while_s;
+        struct __anon_do_s_30 do_s;
+        struct __anon_for_s_31 for_s;
         StmtArray block;
-        struct __anon_goto_s_30 goto_s;
-        struct __anon_label_s_31 label_s;
-        struct __anon_switch_s_32 switch_s;
+        struct __anon_goto_s_32 goto_s;
+        struct __anon_label_s_33 label_s;
+        struct __anon_switch_s_34 switch_s;
     };
 
     StmtKind kind;
     SourceLoc loc;
-    union __anon_u_24 u;
+    union __anon_u_26 u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
@@ -820,6 +834,8 @@ struct SymTable {
     size_t len;
     size_t cap;
 };typedef struct SymTable SymTable;
+static void check_stmt(Stmt *s, SymTable *st, FunTable *ft, size_t scope_mark, int *has_return);
+static void check_stmt_list(StmtArray *body, SymTable *st, FunTable *ft, int *has_return);
 static void symtable_init(SymTable *st) { st->data = ((void*)0); st->len = 0; st->cap = 0; }
 static void symtable_free(SymTable *st) {
     for (size_t i = 0; i < st->len; i++) {
@@ -924,7 +940,14 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         }
         BinOp op = e->u.bin.op;
         Type res;
-        if (op == BOP_AND || op == BOP_OR) {
+        if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) ||
+            (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) {
+            if (op == BOP_EQ || op == BOP_NE) {
+                res = type_make_int(4, 0);
+            } else {
+                res = type_clone(lt.kind == TY_STRUCT ? lt : rt);
+            }
+        } else if (op == BOP_AND || op == BOP_OR) {
             if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR)
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be scalar",
@@ -1079,6 +1102,27 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 set_type(e, type_clone(pg->type));
                 return type_clone(e->type);
             }
+        }
+        if (runtime.strncmp(e->u.var.name, "__builtin_", 10) == 0) {
+            const char *bname = e->u.var.name;
+            Type ret = type_default_int();
+            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0)
+                ret = type_make_void();
+            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0)
+                ret = type_make_ptr(type_make_void());
+            else if (runtime.strcmp(bname, "__builtin_strlen") == 0)
+                ret = type_make_int(8, 1);
+            else if (runtime.strcmp(bname, "__builtin_fabs") == 0)
+                ret = type_make_float(8);
+            else if (runtime.strcmp(bname, "__builtin_fabsf") == 0)
+                ret = type_make_float(4);
+            else if (runtime.strcmp(bname, "__builtin_fabsl") == 0)
+                ret = type_make_float(16);
+            Type fn = type_make_func(ret, ((void*)0), 0);
+            Type fp = type_make_ptr(fn);
+            type_free(&fn);
+            set_type(e, fp);
+            return type_clone(e->type);
         }
         {
             const char *hint = g_sema_pkg
@@ -1532,6 +1576,29 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         set_type(e, type_clone(e->u.compound.target_type));
         return type_clone(e->type);
     }
+    case EX_STMT_EXPR: {
+        int has_ret = 0;
+        check_stmt_list(e->u.stmt_expr.stmts, (SymTable *)st, ft, &has_ret);
+        Type res_type = type_make_void();
+        if (e->u.stmt_expr.stmts && e->u.stmt_expr.stmts->len > 0) {
+            Stmt *last = &e->u.stmt_expr.stmts->data[e->u.stmt_expr.stmts->len - 1];
+            if (last->kind == ST_EXPR && last->u.expr) {
+                type_free(&res_type);
+                res_type = type_clone(last->u.expr->type);
+            }
+        }
+        set_type(e, res_type);
+        return type_clone(e->type);
+    }
+    case EX_LABEL_ADDR: {
+        Type t; runtime.memset(&t, 0, sizeof(t));
+        t.kind = TY_PTR;
+        t.width = 8;
+        t.pointee = runtime.malloc(sizeof(Type));
+        *t.pointee = type_make_void();
+        set_type(e, t);
+        return type_clone(e->type);
+    }
     }
     return type_default_int();
 }
@@ -1551,6 +1618,7 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     if (e->kind == EX_INT_LIT) return 1;
     if (e->kind == EX_FLOAT_LIT) return 1;
     if (e->kind == EX_STR) return 1;
+    if (e->kind == EX_LABEL_ADDR) return 1;
     if (e->kind == EX_CAST)
         return is_const_init(e->u.cast.operand, globals);
     if (e->kind == EX_UNARY
@@ -1802,6 +1870,14 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         break;
     }
     case ST_EXPR:
+        if (s->u.expr && s->u.expr->kind == EX_CALL
+            && s->u.expr->u.call.callee
+            && s->u.expr->u.call.callee->kind == EX_VAR) {
+            const char *cname = s->u.expr->u.call.callee->u.var.name;
+            if (runtime.strcmp(cname, "exit") == 0 || runtime.strcmp(cname, "abort") == 0) {
+                *has_return = 1;
+            }
+        }
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
     case ST_RETURN:
@@ -1839,7 +1915,10 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         g_sema_loop_depth--;
         break;
     case ST_GOTO:
-        if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
+        if (s->u.goto_s.target_expr) {
+            Type t = check_expr(s->u.goto_s.target_expr, st, ft);
+            type_free(&t);
+        } else if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "use of undeclared label '%s'", s->u.goto_s.target);
         }

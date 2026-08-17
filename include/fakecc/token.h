@@ -41,6 +41,9 @@ typedef enum {
     TK_KW_INLINE,        /* "inline" */
     TK_KW_ALIGNOF,       /* "_Alignof" */
     TK_KW_LONG_DOUBLE,   /* "long double" — recognized via lookahead in parser */
+    TK_KW_COMPLEX,       /* "_Complex" / "__complex__" — GNU C complex type qualifier */
+    TK_KW_REAL,          /* "__real__" / "__real" — real part of complex */
+    TK_KW_IMAG,          /* "__imag__" / "__imag" — imaginary part of complex */
     TK_IDENT,
     TK_INT_LITERAL,
     TK_FLOAT_LITERAL,    /* 1.5, 1.5f, 1e10, .5, 2. — text kept for strtod */

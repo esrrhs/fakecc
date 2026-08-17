@@ -84,12 +84,16 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "switch", 6) == 0) return TK_KW_SWITCH;
         if (memcmp(s, "extern", 6) == 0) return TK_KW_EXTERN;
         if (memcmp(s, "inline", 6) == 0) return TK_KW_INLINE;
+        /* __real / __imag (without trailing __) */
+        if (memcmp(s, "__real", 6) == 0) return TK_KW_REAL;
+        if (memcmp(s, "__imag", 6) == 0) return TK_KW_IMAG;
         break;
     case 7:
         if (memcmp(s, "package", 7) == 0) return TK_KW_PACKAGE;
         if (memcmp(s, "default", 7) == 0) return TK_KW_DEFAULT;
         if (memcmp(s, "typedef", 7) == 0) return TK_KW_TYPEDEF;
         if (memcmp(s, "alignof", 7) == 0) return TK_KW_ALIGNOF;
+        if (memcmp(s, "__const", 7) == 0) return TK_KW_CONST;
         break;
     case 8:
         if (memcmp(s, "unsigned", 8) == 0) return TK_KW_UNSIGNED;
@@ -97,12 +101,30 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "volatile", 8) == 0) return TK_KW_VOLATILE;
         if (memcmp(s, "restrict", 8) == 0) return TK_KW_RESTRICT;
         if (memcmp(s, "_Alignof", 8) == 0) return TK_KW_ALIGNOF;
+        if (memcmp(s, "_Complex", 8) == 0) return TK_KW_COMPLEX;
+        if (memcmp(s, "__real__", 8) == 0) return TK_KW_REAL;
+        if (memcmp(s, "__imag__", 8) == 0) return TK_KW_IMAG;
+        if (memcmp(s, "__signed", 8) == 0) return TK_KW_SIGNED;
+        if (memcmp(s, "__inline", 8) == 0) return TK_KW_INLINE;
         break;
     case 9:
         if (memcmp(s, "__alignof", 9) == 0) return TK_KW_ALIGNOF;
+        if (memcmp(s, "__const__", 9) == 0) return TK_KW_CONST;
+        if (memcmp(s, "__complex", 9) == 0) return TK_KW_COMPLEX;
+        break;
+    case 10:
+        if (memcmp(s, "__signed__", 10) == 0) return TK_KW_SIGNED;
+        if (memcmp(s, "__inline__", 10) == 0) return TK_KW_INLINE;
+        if (memcmp(s, "__volatile", 10) == 0) return TK_KW_VOLATILE;
+        if (memcmp(s, "__restrict", 10) == 0) return TK_KW_RESTRICT;
         break;
     case 11:
         if (memcmp(s, "__alignof__", 11) == 0) return TK_KW_ALIGNOF;
+        if (memcmp(s, "__complex__", 11) == 0) return TK_KW_COMPLEX;
+        break;
+    case 12:
+        if (memcmp(s, "__volatile__", 12) == 0) return TK_KW_VOLATILE;
+        if (memcmp(s, "__restrict__", 12) == 0) return TK_KW_RESTRICT;
         break;
     default:
         break;
@@ -328,26 +350,16 @@ lex_loop_head:
                 }
                 while (isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
-            /* Suffix (integer): optional u/U (unsigned) + optional l/L or ll/LL
-             * (long / long long), in either order.  Accepts 123, 123u, 123l,
-             * 123ll, 123ull, 123uLL, 123llu, etc. */
-            if (!is_float) {
-                int saw_u = 0, saw_l = 0;
-                for (;;) {
-                    if ((source[pos] == 'u' || source[pos] == 'U') && !saw_u) {
-                        saw_u = 1; pos++; col++;
-                    } else if ((source[pos] == 'l' || source[pos] == 'L')
-                               && saw_l < 2) {
-                        saw_l++; pos++; col++;
-                    } else break;
-                }
-            } else {
-                /* Suffix (floating): f/F = float, l/L = long double. */
-                if (source[pos] == 'f' || source[pos] == 'F') {
+            /* Suffix (integer / float / imaginary) */
+            for (;;) {
+                char sc = source[pos];
+                if (sc == 'u' || sc == 'U' || sc == 'l' || sc == 'L' ||
+                    sc == 'f' || sc == 'F' || sc == 'i' || sc == 'I' ||
+                    sc == 'j' || sc == 'J') {
+                    if (sc == 'f' || sc == 'F' || sc == 'i' || sc == 'I' || sc == 'j' || sc == 'J')
+                        is_float = 1;
                     pos++; col++;
-                } else if (source[pos] == 'l' || source[pos] == 'L') {
-                    pos++; col++;  /* long double */
-                }
+                } else break;
             }
             size_t len = pos - start;
             Token t;
@@ -377,8 +389,13 @@ lex_loop_head:
                 }
                 while (isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
-            if (source[pos] == 'f' || source[pos] == 'F') { pos++; col++; }
-            else if (source[pos] == 'l' || source[pos] == 'L') { pos++; col++; }
+            for (;;) {
+                char sc = source[pos];
+                if (sc == 'f' || sc == 'F' || sc == 'l' || sc == 'L' ||
+                    sc == 'i' || sc == 'I' || sc == 'j' || sc == 'J') {
+                    pos++; col++;
+                } else break;
+            }
             size_t len = pos - start;
             Token t;
             t.kind = TK_FLOAT_LITERAL;
