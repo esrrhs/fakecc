@@ -468,15 +468,20 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
      * the Package shell (files filled in as we go). Exports come later. */
     pkgs_push(ctx, pkg);
 
+    TokenArray *all_tokens = xmalloc(nnames * sizeof(TokenArray));
     for (size_t i = 0; i < nnames; i++) {
         char *path = path_join(dir, names[i]);
         char *src = read_file(path);
-        TokenArray tokens;
-        token_array_init(&tokens);
-        lex(src, path, &tokens);
+        token_array_init(&all_tokens[i]);
+        lex(src, path, &all_tokens[i]);
         tu_init(&pkg->files[i]);
+        free(src);
+        (void)path;
+    }
+
+    for (size_t i = 0; i < nnames; i++) {
         /* parse_in_pkg resolves imports recursively via this same ctx. */
-        parse_in_pkg(&tokens, &pkg->files[i], ctx);
+        parse_in_pkg(&all_tokens[i], &pkg->files[i], ctx);
 
         if (!pkg->files[i].package.name
             || strcmp(pkg->files[i].package.name, name) != 0) {
@@ -489,14 +494,10 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
                    name);
         }
 
-        token_array_free(&tokens);
-        free(src);
-        /* Keep `path` alive: SourceLoc.file points into it for diagnostics.
-         * Leak is intentional for the process lifetime (same as main.c
-         * input paths). */
-        (void)path;
+        token_array_free(&all_tokens[i]);
         free(names[i]);
     }
+    free(all_tokens);
     free(names);
 
     build_exports(pkg);

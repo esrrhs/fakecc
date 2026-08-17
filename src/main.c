@@ -399,21 +399,39 @@ int main(int argc, char **argv) {
      * next file's parse can see sibling typedefs/structs.  Same-package types
      * are visible via is_type_start -> pkg_find_struct/typedef regardless of
      * parse order. */
+    TokenArray *user_tokens = malloc((size_t)ninputs * sizeof(TokenArray));
+    if (!user_tokens) {
+        fprintf(stderr, "fakecc: out of memory\n");
+        exit(1);
+    }
+    for (int i = 0; i < ninputs; i++) {
+        size_t len = strlen(inputs[i]);
+        tu_init(&user_tus[i]);
+        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
+            token_array_init(&user_tokens[i]);
+        } else {
+            char *src = read_file(inputs[i]);
+            token_array_init(&user_tokens[i]);
+            lex(src, inputs[i], &user_tokens[i]);
+            free(src);
+        }
+    }
+
     for (int i = 0; i < ninputs; i++) {
         size_t len = strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
             /* .o inputs have no TU; mark package.name NULL as a sentinel. */
             memset(&user_tus[i], 0, sizeof(user_tus[i]));
         } else {
-            char *src = read_file(inputs[i]);
-            parse_source(src, inputs[i], &user_tus[i], &pkg);
-            free(src);
+            parse_in_pkg(&user_tokens[i], &user_tus[i], &pkg);
             if (user_tus[i].package.name) {
                 TranslationUnit *one = &user_tus[i];
                 pkg_register_tus(&pkg, user_tus[i].package.name, &one, 1);
             }
         }
+        token_array_free(&user_tokens[i]);
     }
+    free(user_tokens);
 
     /* Count package files to link: every loaded package except the user's own.
      * A package is "the user's own" when owns_files == 0 — its TUs were the CLI
