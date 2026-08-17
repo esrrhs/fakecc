@@ -57,8 +57,15 @@ dkms.conf
 # debug information files
 *.dwo
 
-# Plan documents (not part of the repo)
+# Core dumps, logs & errors
+vgcore.*
+*.log
+*.err
+
+# Build directories & plan documents
+build*/
 *_plan.md
+plan_*.md
 
 # Stage 1 bootstrap build products (binaries — sources committed, these are reproducible)
 v0/*.o
@@ -71,3 +78,6 @@ v0/__pycache__/
 *.o
 bootstrap_test
 all_defines.txt
+calltest
+test_*
+

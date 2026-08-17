@@ -2,50 +2,24 @@
 # End-to-end tests: compile each case, run it, compare the exit code with the
 # `// expect:` annotation.  Cases annotated `// expect_error` must be rejected
 # with a diagnostic.
-#
-# Cases live in cases/<category>/*.c and are discovered recursively, so adding
-# a case is just dropping a file into the right category directory.
-#
-# Extra compiler flags come from CC_FLAGS, which is how the suite is run once
-# per optimization level: the -O0 and -O1 pipelines differ enough (scalars in
-# memory vs promoted to SSA) that passing under one says little about the other.
-#
-# A case may also assert its output, one line per annotation:
-#
-#     // expect_stdout: hello 42
-#
-# Checking only the exit code is not enough on its own.  It let a real bug sit
-# in the suite unnoticed: the entry stub exited via a raw syscall, so libc never
-# flushed stdout and printf() wrote nothing — while the test that "covered"
-# printf passed, because it only inspected the return value.
-#
-# Both the compile and the run are bounded by a timeout, and the compiler's
-# exit status is checked before its output is executed.  That matters when the
-# compiler under test is a bootstrap build that may crash or loop: without it,
-# a failed compile leaves the previous case's binary in place and the suite
-# either reports a stale result or hangs forever.
+
 set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
 shift || true
 CC_TIMEOUT=${CC_TIMEOUT:-30}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
-# Remaining arguments are extra compiler flags (e.g. -O0), as is CC_FLAGS.
-# Kept as a word-split string so an empty flag set stays safe under `set -u`.
+JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+
 CC_EXTRA="${CC_FLAGS:-} $*"
 CC_EXTRA=$(echo "$CC_EXTRA" | tr -s ' ' | sed 's/^ //; s/ $//')
 
 SUITE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CASE_DIR="$SUITE_DIR/cases"
-# Package fixtures for import error / multi-file package tests (not e2e cases).
 export FAKECC_PKG="${SUITE_DIR}/pkg_fixtures${FAKECC_PKG:+:$FAKECC_PKG}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-FAIL=0
-n_pass=0 n_fail=0
-
-# Describe a compiler exit status: ok / diagnostic / timeout / signal.
 cc_status_desc() {
     case "$1" in
         0)   echo "ok" ;;
@@ -54,73 +28,82 @@ cc_status_desc() {
         *)   echo "compiler exited $1" ;;
     esac
 }
+export -f cc_status_desc
+export FAKECC CC_EXTRA CC_TIMEOUT RUN_TIMEOUT CASE_DIR WORK
 
-label="$CC_EXTRA"
-echo "--- e2e: $(basename "$CASE_DIR")/**  flags: ${label:-(default)} ---"
+run_single_case() {
+    local src="$1"
+    local name=${src#"$CASE_DIR"/}
+    local out="$WORK/$(echo "${name%.c}" | tr / _)"
+    local cc_err="$WORK/$(echo "${name%.c}" | tr / _).cc_err"
+    local run_out="$WORK/$(echo "${name%.c}" | tr / _).run_out"
+    local run_want="$WORK/$(echo "${name%.c}" | tr / _).run_want"
 
-while IFS= read -r src; do
-    name=${src#"$CASE_DIR"/}
-    out="$WORK/$(echo "${name%.c}" | tr / _)"
-    rm -f "$out"
-
-    timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$src" -o "$out" 2>"$WORK/cc.err"
-    cc_rc=$?
+    timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$src" -o "$out" 2>"$cc_err"
+    local cc_rc=$?
 
     if grep -q '^// expect_error' "$src"; then
-        # A rejected program must produce a diagnostic, not a crash or a hang.
         if [ "$cc_rc" = "0" ]; then
             echo "FAIL $name (expected compile error, but succeeded)"
-            n_fail=$((n_fail + 1)); FAIL=1
+            return 1
         elif [ "$cc_rc" -ge 124 ]; then
             echo "FAIL $name (expected a diagnostic, got: $(cc_status_desc $cc_rc))"
-            n_fail=$((n_fail + 1)); FAIL=1
+            return 1
         else
             echo "PASS $name"
-            n_pass=$((n_pass + 1))
+            return 0
         fi
-        continue
     fi
 
     if [ "$cc_rc" != "0" ]; then
-        echo "FAIL $name ($(cc_status_desc $cc_rc)): $(head -1 "$WORK/cc.err")"
-        n_fail=$((n_fail + 1)); FAIL=1
-        continue
+        echo "FAIL $name ($(cc_status_desc $cc_rc)): $(head -1 "$cc_err")"
+        return 1
     fi
     if [ ! -x "$out" ]; then
         echo "FAIL $name (compiler reported success but produced no executable)"
-        n_fail=$((n_fail + 1)); FAIL=1
-        continue
+        return 1
     fi
 
+    local expect
     expect=$(sed -n 's|^// expect: \([0-9]*\)|\1|p' "$src" | head -1)
-    got=0
-    timeout "$RUN_TIMEOUT" "$out" >"$WORK/run.out" 2>/dev/null || got=$?
+    local got=0
+    timeout "$RUN_TIMEOUT" "$out" >"$run_out" 2>/dev/null || got=$?
     if [ "$got" = "124" ]; then
         echo "FAIL $name (program did not terminate within ${RUN_TIMEOUT}s)"
-        n_fail=$((n_fail + 1)); FAIL=1
-        continue
+        return 1
     fi
     if [ "$got" != "$expect" ]; then
         echo "FAIL $name (expected $expect, got $got)"
-        n_fail=$((n_fail + 1)); FAIL=1
-        continue
+        return 1
     fi
 
-    # Optional stdout assertion: one `// expect_stdout:` line per output line.
     if grep -q '^// expect_stdout:' "$src"; then
-        sed -n 's|^// expect_stdout: \{0,1\}\(.*\)$|\1|p' "$src" > "$WORK/run.want"
-        if ! cmp -s "$WORK/run.want" "$WORK/run.out"; then
+        sed -n 's|^// expect_stdout: \{0,1\}\(.*\)$|\1|p' "$src" > "$run_want"
+        if ! cmp -s "$run_want" "$run_out"; then
             echo "FAIL $name (stdout mismatch)"
-            echo "  want: $(tr '\n' '|' < "$WORK/run.want")"
-            echo "  got:  $(tr '\n' '|' < "$WORK/run.out")"
-            n_fail=$((n_fail + 1)); FAIL=1
-            continue
+            echo "  want: $(tr '\n' '|' < "$run_want")"
+            echo "  got:  $(tr '\n' '|' < "$run_out")"
+            return 1
         fi
     fi
 
     echo "PASS $name"
-    n_pass=$((n_pass + 1))
-done < <(find "$CASE_DIR" -name '*.c' | sort)
+    return 0
+}
+export -f run_single_case
+
+label="$CC_EXTRA"
+echo "--- e2e: $(basename "$CASE_DIR")/**  flags: ${label:-(default)} ---"
+
+find "$CASE_DIR" -name '*.c' | sort | xargs -P "$JOBS" -n 1 bash -c 'run_single_case "$@"' _ > "$WORK/results.log"
+
+n_pass=$(grep -c '^PASS ' "$WORK/results.log" || true)
+n_fail=$(grep -c '^FAIL ' "$WORK/results.log" || true)
+
+cat "$WORK/results.log" | sort
 
 echo "--- e2e${label:+ ($label)}: $n_pass passed, $n_fail failed, $((n_pass + n_fail)) total ---"
-exit $FAIL
+
+if [ "$n_fail" -ne 0 ]; then
+    exit 1
+fi
