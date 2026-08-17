@@ -69,6 +69,9 @@ enum TokenKind {
     TK_KW_INLINE,
     TK_KW_ALIGNOF,
     TK_KW_LONG_DOUBLE,
+    TK_KW_COMPLEX,
+    TK_KW_REAL,
+    TK_KW_IMAG,
     TK_IDENT,
     TK_INT_LITERAL,
     TK_FLOAT_LITERAL,
@@ -225,6 +228,8 @@ enum ExprKind {
     EX_INIT_LIST,
     EX_FLOAT_LIT,
     EX_COMPOUND_LITERAL,
+    EX_STMT_EXPR,
+    EX_LABEL_ADDR,
 };typedef enum ExprKind ExprKind;
 enum BinOp {
     BOP_ADD,
@@ -252,6 +257,7 @@ enum UnaryOp {
     UOP_BITNOT,
     UOP_NOT,
 };typedef enum UnaryOp UnaryOp;
+typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
 struct ExprArray {
@@ -282,6 +288,8 @@ union __anon_u_1 {
         struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
         char *float_text;
         struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
     };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
 struct __anon_un_5 { UnaryOp op; Expr *operand; };
 struct __anon_var_6 { char *name; char *pkg; };
@@ -302,6 +310,8 @@ struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
 struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
 struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
 struct __anon_compound_23 { Type target_type; Expr *init; };
+struct __anon_stmt_expr_24 { StmtArray *stmts; };
+struct __anon_label_addr_25 { char *label; };
 
         long long int_val;
         struct __anon_bin_4 bin;
@@ -325,6 +335,8 @@ struct __anon_compound_23 { Type target_type; Expr *init; };
         struct __anon_init_list_22 init_list;
         char *float_text;
         struct __anon_compound_23 compound;
+        struct __anon_stmt_expr_24 stmt_expr;
+        struct __anon_label_addr_25 label_addr;
     };
 
     ExprKind kind;
@@ -357,6 +369,8 @@ Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc);
 Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc);
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc);
+Expr *expr_new_label_addr(const char *label, SourceLoc loc);
 void expr_call_push_arg(Expr *e, Expr *arg);
 void expr_call_set_callee(Expr *e, Expr *callee);
 void expr_free(Expr *e);
@@ -381,7 +395,7 @@ struct StmtArray {
     Stmt *data;
     size_t len;
     size_t cap;
-};typedef struct StmtArray StmtArray;
+};
 struct SwitchCase {
     int is_default;
     int value;
@@ -396,34 +410,34 @@ union __anon_u_2 {
         struct { Expr *cond; Stmt *body; } do_s;
         struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
         StmtArray block;
-        struct { char *target; } goto_s;
+        struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    };struct Stmt {union __anon_u_24 {struct __anon_decl_25 { char *name; Type type; Expr *init; int storage_class; };
-struct __anon_if_s_26 { Expr *cond; Stmt *then_s; Stmt *else_s; };
-struct __anon_while_s_27 { Expr *cond; Stmt *body; };
-struct __anon_do_s_28 { Expr *cond; Stmt *body; };
-struct __anon_for_s_29 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
-struct __anon_goto_s_30 { char *target; };
-struct __anon_label_s_31 { char *name; Stmt *stmt; };
-struct __anon_switch_s_32 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
+    };struct Stmt {union __anon_u_26 {struct __anon_decl_27 { char *name; Type type; Expr *init; int storage_class; };
+struct __anon_if_s_28 { Expr *cond; Stmt *then_s; Stmt *else_s; };
+struct __anon_while_s_29 { Expr *cond; Stmt *body; };
+struct __anon_do_s_30 { Expr *cond; Stmt *body; };
+struct __anon_for_s_31 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
+struct __anon_goto_s_32 { char *target; Expr *target_expr; };
+struct __anon_label_s_33 { char *name; Stmt *stmt; };
+struct __anon_switch_s_34 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
 
-        struct __anon_decl_25 decl;
+        struct __anon_decl_27 decl;
         Expr *expr;
         Expr *value;
-        struct __anon_if_s_26 if_s;
-        struct __anon_while_s_27 while_s;
-        struct __anon_do_s_28 do_s;
-        struct __anon_for_s_29 for_s;
+        struct __anon_if_s_28 if_s;
+        struct __anon_while_s_29 while_s;
+        struct __anon_do_s_30 do_s;
+        struct __anon_for_s_31 for_s;
         StmtArray block;
-        struct __anon_goto_s_30 goto_s;
-        struct __anon_label_s_31 label_s;
-        struct __anon_switch_s_32 switch_s;
+        struct __anon_goto_s_32 goto_s;
+        struct __anon_label_s_33 label_s;
+        struct __anon_switch_s_34 switch_s;
     };
 
     StmtKind kind;
     SourceLoc loc;
-    union __anon_u_24 u;
+    union __anon_u_26 u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
@@ -649,6 +663,9 @@ static void parse_struct_body(Parser *p, StructDef *sd);
 static void parse_enum_body(Parser *p, EnumDef *ed);
 static int int_literal_value(const char *text);
 static Type parse_declarator(Parser *p, Type base, char **name_out);
+static FunctionDecl parse_function_decl(Parser *p);
+static void parse_stmt_list(Parser *p, StmtArray *out);
+static Stmt parse_stmt(Parser *p);
 static int skip_attribute(Parser *p);
 static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     const Token *t = peek(p);
@@ -729,7 +746,8 @@ static int is_type_start(const Parser *p, size_t pos) {
         || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN
-        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE)
+        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE
+        || k == TK_KW_COMPLEX)
         return 1;
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
@@ -763,19 +781,42 @@ static int is_type_start(const Parser *p, size_t pos) {
     }
     return 0;
 }
-static Type parse_specifiers(Parser *p) {
-    int is_const = 0, is_volatile = 0, is_restrict = 0;
+static Type get_or_create_complex_type(Parser *p, Type base) {
+    char tag[64];
+    int bw = base.width ? base.width : 4;
+    const char *bname = (base.kind == TY_FLOAT)
+        ? (bw == 4 ? "float" : (bw == 8 ? "double" : "ldouble"))
+        : (bw == 1 ? "char" : (bw == 2 ? "short" : (bw == 8 ? "long" : "int")));
+    runtime.snprintf(tag, sizeof(tag), "__complex_%s", bname);
+    StructDef *sd = struct_registry_find(&p->tu->structs, tag);
+    if (!sd) {
+        SourceLoc loc; runtime.memset(&loc, 0, sizeof(loc));
+        sd = struct_registry_add(&p->tu->structs, tag, loc);
+        struct_def_push_member(sd, "__real", type_clone(base), 0);
+        struct_def_push_member(sd, "__imag", type_clone(base), 0);
+        struct_def_finish(sd);
+    }
+    return type_make_struct(tag, sd->size);
+}
+static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile, int *is_restrict, int *is_complex) {
     for (;;) {
-        if (peek(p)->kind == TK_KW_CONST) { is_const = 1; advance(p); }
-        else if (peek(p)->kind == TK_KW_VOLATILE) { is_volatile = 1; advance(p); }
-        else if (peek(p)->kind == TK_KW_RESTRICT) { is_restrict = 1; advance(p); }
+        if (peek(p)->kind == TK_KW_CONST) { *is_const = 1; advance(p); }
+        else if (peek(p)->kind == TK_KW_VOLATILE) { *is_volatile = 1; advance(p); }
+        else if (peek(p)->kind == TK_KW_RESTRICT) { *is_restrict = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (is_complex && peek(p)->kind == TK_KW_COMPLEX) { *is_complex = 1; advance(p); }
         else break;
     }
+}
+static Type parse_specifiers(Parser *p) {
+    int is_const = 0, is_volatile = 0, is_restrict = 0, is_complex = 0;
+    parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
     if (peek(p)->kind == TK_KW_VOID) {
         advance(p);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_void();
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     if (peek(p)->kind == TK_KW_STRUCT) {
@@ -786,8 +827,10 @@ static Type parse_specifiers(Parser *p) {
             StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_make_struct(tag, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         const Token *tag = peek(p);
@@ -804,14 +847,18 @@ static Type parse_specifiers(Parser *p) {
             StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_make_struct(tag->text, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         int size = sd ? sd->size : 0;
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     if (peek(p)->kind == TK_KW_UNION) {
@@ -823,8 +870,10 @@ static Type parse_specifiers(Parser *p) {
             sd->is_union = 1;
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_make_struct(tag, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         const Token *tag = peek(p);
@@ -842,26 +891,34 @@ static Type parse_specifiers(Parser *p) {
             sd->is_union = 1;
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_make_struct(tag->text, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         int size = sd ? sd->size : 0;
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     if (peek(p)->kind == TK_KW_FLOAT) {
         advance(p);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_float(4);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     if (peek(p)->kind == TK_KW_DOUBLE) {
         advance(p);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_float(8);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     if (peek(p)->kind == TK_KW_LONG
@@ -869,8 +926,10 @@ static Type parse_specifiers(Parser *p) {
         && p->tokens->data[p->pos + 1].kind == TK_KW_DOUBLE) {
         advance(p);
         advance(p);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_float(16);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     if (peek(p)->kind == TK_KW_ENUM) {
@@ -880,8 +939,10 @@ static Type parse_specifiers(Parser *p) {
             runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
             EnumDef *ed = enum_registry_add(&p->tu->enums, tag, peek(p)->loc);
             parse_enum_body(p, ed);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_default_int();
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         const Token *tag = peek(p);
@@ -890,8 +951,14 @@ static Type parse_specifiers(Parser *p) {
                    "expected enum tag but got '%s'", tag->text);
         }
         advance(p);
+        if (peek(p)->kind == TK_LBRACE) {
+            EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, peek(p)->loc);
+            parse_enum_body(p, ed);
+        }
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_default_int();
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
     if (peek(p)->kind == TK_IDENT) {
@@ -915,7 +982,9 @@ static Type parse_specifiers(Parser *p) {
                 const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
                 if (sd) t.width = sd->size;
             }
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
         const Type *alias = find_typedef_with_fallback(p, peek(p)->text);
@@ -926,42 +995,62 @@ static Type parse_specifiers(Parser *p) {
                 const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
                 if (sd) t.width = sd->size;
             }
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
         }
     }
-    int is_unsigned = 0;
-    int saw_sign = 0;
-    int width = -1;
     if (peek(p)->kind == TK_KW_BOOL) {
         advance(p);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_bool();
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
     }
-    TokenKind k = peek(p)->kind;
-    if (k == TK_KW_SIGNED) { is_unsigned = 0; saw_sign = 1; advance(p); }
-    else if (k == TK_KW_UNSIGNED) { is_unsigned = 1; saw_sign = 1; advance(p); }
-    k = peek(p)->kind;
-    switch (k) {
-    case TK_KW_CHAR: advance(p); width = 1; break;
-    case TK_KW_SHORT: advance(p); width = 2; break;
-    case TK_KW_INT: advance(p); width = 4; break;
-    case TK_KW_LONG:
-        advance(p); width = 8;
-        if (peek(p)->kind == TK_KW_LONG) advance(p);
-        if (peek(p)->kind == TK_KW_INT) advance(p);
-        break;
-    default:
-        if (saw_sign) { width = 4; break; }
-        {
-            const Token *t = peek(p);
-            die_at(t->loc.file, t->loc.line, t->loc.col,
-                   "expected type but got '%s'", t->text);
-        }
+    int has_type = 0;
+    int is_long = 0;
+    int is_short = 0;
+    int is_int = 0;
+    int is_char = 0;
+    int is_unsigned = 0;
+    int is_signed = 0;
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k == TK_KW_CONST) { is_const = 1; advance(p); }
+        else if (k == TK_KW_VOLATILE) { is_volatile = 1; advance(p); }
+        else if (k == TK_KW_RESTRICT) { is_restrict = 1; advance(p); }
+        else if (k == TK_KW_INLINE) { advance(p); }
+        else if (k == TK_KW_COMPLEX) { is_complex = 1; advance(p); }
+        else if (k == TK_KW_SIGNED) { is_signed = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_UNSIGNED) { is_unsigned = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_CHAR) { is_char = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_SHORT) { is_short = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_INT) { is_int = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_LONG) { is_long++; has_type = 1; advance(p); }
+        else break;
     }
+    if (!has_type) {
+        if (is_complex) {
+            Type t = get_or_create_complex_type(p, type_make_float(8));
+            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+            return t;
+        }
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "expected type but got '%s'", t->text);
+    }
+    int width = 4;
+    if (is_char) width = 1;
+    else if (is_short) width = 2;
+    else if (is_long >= 1) width = 8;
+    else width = 4;
+    (void)is_int;
+    (void)is_signed;
     Type t = type_make_int(width, is_unsigned);
     t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+    if (is_complex) t = get_or_create_complex_type(p, t);
     return t;
 }
 static Type parse_type(Parser *p, char **name_out);
@@ -1104,19 +1193,27 @@ static ParamArray parse_param_list(Parser *p) {
     }
     return params;
 }
-static int int_literal_value(const char *text);
+static Expr *parse_expr(Parser *p);
 static int parse_array_size(Parser *p) {
-    if (peek(p)->kind == TK_INT_LITERAL) {
-        int v = int_literal_value(peek(p)->text);
-        advance(p);
-        return v;
+    if (peek(p)->kind == TK_RBRACKET) {
+        return 0;
     }
-    if (peek(p)->kind == TK_IDENT) {
+    Expr *e = parse_expr(p);
+    long long val = 0;
+    if (fold_const_int(e, &val)) {
+        expr_free(e);
+        return val > 0 ? (int)val : 1;
+    }
+    if (e->kind == EX_VAR) {
         const EnumConstant *ec =
-            enum_registry_find_constant(&p->tu->enums, peek(p)->text);
-        if (ec) { advance(p); return ec->value; }
+            enum_registry_find_constant(&p->tu->enums, e->u.var.name);
+        if (ec) {
+            expr_free(e);
+            return ec->value > 0 ? ec->value : 1;
+        }
     }
-    return 0;
+    expr_free(e);
+    return 1;
 }
 static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
                                 int *out_array_len, int *out_has_array) {
@@ -1516,6 +1613,18 @@ static Expr *parse_mul(Parser *p) {
 }
 static Expr *parse_unary(Parser *p) {
     TokenKind k = peek(p)->kind;
+    if (k == TK_KW_REAL) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *op = parse_unary(p);
+        return expr_new_member(op, "__real", loc);
+    }
+    if (k == TK_KW_IMAG) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Expr *op = parse_unary(p);
+        return expr_new_member(op, "__imag", loc);
+    }
     if (k == TK_PLUS || k == TK_MINUS) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
@@ -1538,6 +1647,17 @@ static Expr *parse_unary(Parser *p) {
         int is_inc = (k == TK_INC);
         advance(p);
         return expr_new_inc_dec(parse_unary(p), is_inc, 1 , loc);
+    }
+    if (k == TK_ANDAND) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        const Token *lbl = peek(p);
+        if (!is_name_token(lbl->kind)) {
+            die_at(lbl->loc.file, lbl->loc.line, lbl->loc.col,
+                   "expected label name after '&&' but got '%s'", lbl->text ? lbl->text : "NULL");
+        }
+        advance(p);
+        return expr_new_label_addr(lbl->text, loc);
     }
     if (k == TK_AMP) {
         SourceLoc loc = peek(p)->loc;
@@ -1725,9 +1845,48 @@ static int char_literal_value(const char *text) {
     }
     return (unsigned char)text[1];
 }
+static int is_imag_literal(const char *text) {
+    if (!text) return 0;
+    for (const char *s = text; *s; s++) {
+        if (*s == 'i' || *s == 'I' || *s == 'j' || *s == 'J') return 1;
+    }
+    return 0;
+}
+static Expr *make_imag_literal(Parser *p, const char *text, SourceLoc loc) {
+    int is_float = 0;
+    int is_ld = 0;
+    for (const char *s = text; *s; s++) {
+        if (*s == 'f' || *s == 'F') is_float = 1;
+        if (*s == 'l' || *s == 'L') is_ld = 1;
+    }
+    Type base = is_float ? type_make_float(4) : (is_ld ? type_make_float(16) : type_make_float(8));
+    Type cty = get_or_create_complex_type(p, base);
+    char clean[64];
+    size_t ci = 0;
+    for (size_t i = 0; text[i] && ci + 1 < sizeof(clean); i++) {
+        if (text[i] != 'i' && text[i] != 'I' && text[i] != 'j' && text[i] != 'J')
+            clean[ci++] = text[i];
+    }
+    clean[ci] = '\0';
+    if (ci == 0 || (ci == 1 && (clean[0] == 'f' || clean[0] == 'F' || clean[0] == 'l' || clean[0] == 'L'))) {
+        runtime.snprintf(clean, sizeof(clean), "1.0");
+    }
+    Expr *er = expr_new_float_lit("0.0", base.width, loc);
+    Expr *ei = expr_new_float_lit(clean, base.width, loc);
+    Expr **elems = runtime.malloc(2 * sizeof(Expr *));
+    elems[0] = er;
+    elems[1] = ei;
+    Expr *init = expr_new_init_list(elems, 2, loc);
+    return expr_new_compound_literal(cty, init, loc);
+}
 static Expr *parse_primary(Parser *p) {
     const Token *t = peek(p);
     if (t->kind == TK_INT_LITERAL) {
+        if (is_imag_literal(t->text)) {
+            Expr *e = make_imag_literal(p, t->text, t->loc);
+            advance(p);
+            return parse_postfix(p, e);
+        }
 int width;
 int is_unsigned;
         unsigned long long v = int_literal_typed(t->text, &width, &is_unsigned);
@@ -1736,6 +1895,11 @@ int is_unsigned;
         return parse_postfix(p, e);
     }
     if (t->kind == TK_FLOAT_LITERAL) {
+        if (is_imag_literal(t->text)) {
+            Expr *e = make_imag_literal(p, t->text, t->loc);
+            advance(p);
+            return parse_postfix(p, e);
+        }
         int width = 8;
         float_literal_width(t->text, &width);
         Expr *e = expr_new_float_lit(t->text, width, t->loc);
@@ -1818,6 +1982,18 @@ int is_unsigned;
         return parse_postfix(p, expr_new_var(ident->text, ident->loc));
     }
     if (t->kind == TK_LPAREN) {
+        if (p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACE) {
+            SourceLoc loc = peek(p)->loc;
+            advance(p);
+            advance(p);
+            StmtArray stmts;
+            stmt_array_init(&stmts);
+            parse_stmt_list(p, &stmts);
+            expect_kind(p, TK_RBRACE, "'}'");
+            expect_kind(p, TK_RPAREN, "')'");
+            Expr *e = expr_new_stmt_expr(&stmts, loc);
+            return parse_postfix(p, e);
+        }
         if (is_type_start(p, p->pos + 1)) {
             SourceLoc loc = peek(p)->loc;
             advance(p);
@@ -1939,11 +2115,83 @@ static void parse_stmt_list(Parser *p, StmtArray *out) {
         stmt_array_push(out, p->prepend.data[i]);
     p->prepend.len = 0;
 }
+static int is_function_declaration_lookahead(Parser *p) {
+    size_t save = p->pos;
+    for (;;) {
+        TokenKind tk = peek(p)->kind;
+        if (tk == TK_KW_STATIC || tk == TK_KW_EXTERN || tk == TK_KW_INLINE ||
+            tk == TK_KW_CONST || tk == TK_KW_VOLATILE || tk == TK_KW_RESTRICT ||
+            tk == TK_KW_SIGNED || tk == TK_KW_UNSIGNED ||
+            tk == TK_KW_VOID || tk == TK_KW_INT || tk == TK_KW_CHAR ||
+            tk == TK_KW_SHORT || tk == TK_KW_LONG || tk == TK_KW_FLOAT ||
+            tk == TK_KW_DOUBLE || tk == TK_KW_BOOL || tk == TK_KW_COMPLEX) {
+            advance(p);
+        } else if (tk == TK_KW_STRUCT || tk == TK_KW_UNION || tk == TK_KW_ENUM) {
+            advance(p);
+            if (peek(p)->kind == TK_IDENT) advance(p);
+            if (peek(p)->kind == TK_LBRACE) {
+                int depth = 0;
+                do {
+                    if (peek(p)->kind == TK_LBRACE) depth++;
+                    else if (peek(p)->kind == TK_RBRACE) depth--;
+                    advance(p);
+                } while (depth > 0 && peek(p)->kind != TK_EOF);
+            }
+        } else if (tk == TK_IDENT
+                   && find_typedef_with_fallback(p, peek(p)->text)) {
+            advance(p);
+        } else {
+            break;
+        }
+    }
+    while (peek(p)->kind == TK_STAR || peek(p)->kind == TK_KW_CONST ||
+           peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) advance(p);
+    for (;;) { if (!skip_attribute(p)) break; }
+    int saw_name = 0;
+    if (peek(p)->kind == TK_IDENT) {
+        advance(p);
+        saw_name = 1;
+    }
+    for (;;) { if (!skip_attribute(p)) break; }
+    while (peek(p)->kind == TK_LBRACKET) {
+        advance(p);
+        while (peek(p)->kind != TK_RBRACKET && peek(p)->kind != TK_EOF) advance(p);
+        if (peek(p)->kind == TK_RBRACKET) advance(p);
+    }
+    int is_func = (saw_name && peek(p)->kind == TK_LPAREN);
+    p->pos = save;
+    return is_func;
+}
 static Stmt parse_stmt(Parser *p) {
     TokenKind k = peek(p)->kind;
+    if (k == TK_SEMICOLON) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        Stmt s;
+        s.kind = ST_BLOCK;
+        s.loc = loc;
+        stmt_array_init(&s.u.block);
+        return s;
+    }
     if (k == TK_KW_TYPEDEF || is_type_start(p, p->pos)) {
         if (k == TK_KW_TYPEDEF) {
             return parse_typedef_stmt(p);
+        }
+        if (is_function_declaration_lookahead(p)) {
+            FunctionDecl fn = parse_function_decl(p);
+            if (p->tu->functions.len >= p->tu->functions.cap) {
+                size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
+                p->tu->functions.data = runtime.realloc(p->tu->functions.data,
+                                             new_cap * sizeof(FunctionDecl));
+                if (!p->tu->functions.data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                p->tu->functions.cap = new_cap;
+            }
+            p->tu->functions.data[p->tu->functions.len++] = fn;
+            Stmt s;
+            s.kind = ST_BLOCK;
+            s.loc = fn.loc;
+            stmt_array_init(&s.u.block);
+            return s;
         }
         SourceLoc decl_loc = peek(p)->loc;
         int storage_class = 0;
@@ -2141,6 +2389,17 @@ static Stmt parse_stmt(Parser *p) {
     if (k == TK_KW_GOTO) {
         const Token *kw = peek(p);
         advance(p);
+        if (peek(p)->kind == TK_STAR) {
+            advance(p);
+            Expr *target = parse_expr(p);
+            expect_kind(p, TK_SEMICOLON, "';'");
+            Stmt s;
+            s.kind = ST_GOTO;
+            s.loc = kw->loc;
+            s.u.goto_s.target = ((void*)0);
+            s.u.goto_s.target_expr = target;
+            return s;
+        }
         const Token *label = peek(p);
         if (label->kind != TK_IDENT) {
             die_at(label->loc.file, label->loc.line, label->loc.col,
@@ -2152,6 +2411,7 @@ static Stmt parse_stmt(Parser *p) {
         s.kind = ST_GOTO;
         s.loc = kw->loc;
         s.u.goto_s.target = xstrdup(label->text);
+        s.u.goto_s.target_expr = ((void*)0);
         return s;
     }
     if (k == TK_LBRACE) {
@@ -2192,63 +2452,10 @@ static Stmt parse_stmt(Parser *p) {
 static Stmt parse_typedef_stmt(Parser *p) {
     const Token *kw = peek(p);
     advance(p);
-    if (peek(p)->kind == TK_KW_STRUCT || peek(p)->kind == TK_KW_UNION) {
-        TokenKind base = peek(p)->kind;
-        advance(p);
-        if (peek(p)->kind == TK_IDENT
-            && p->tokens->data[p->pos + 1].kind == TK_LBRACE) {
-            const Token *tag = peek(p);
-            advance(p);
-            if (struct_registry_find(&p->tu->structs, tag->text)) {
-                die_at(tag->loc.file, tag->loc.line, tag->loc.col,
-                       "redefinition of '%s'", tag->text);
-            }
-            StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, tag->loc);
-            sd->is_union = (base == TK_KW_UNION);
-            parse_struct_body(p, sd);
-            const Token *name = peek(p);
-            if (name->kind != TK_IDENT) {
-                die_at(name->loc.file, name->loc.line, name->loc.col,
-                       "expected typedef name but got '%s'", name->text);
-            }
-            advance(p);
-            Type ty = type_make_struct(tag->text, sd->size);
-            typedef_registry_add(&p->tu->typedefs, name->text, ty);
-            expect_kind(p, TK_SEMICOLON, "';'");
-            Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
-            stmt_array_init(&s.u.block);
-            return s;
-        }
-        if (peek(p)->kind == TK_LBRACE) {
-            char tag[64];
-            runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
-            StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
-            sd->is_union = (base == TK_KW_UNION);
-            parse_struct_body(p, sd);
-            const Token *name = peek(p);
-            if (name->kind != TK_IDENT) {
-                die_at(name->loc.file, name->loc.line, name->loc.col,
-                       "expected typedef name but got '%s'", name->text);
-            }
-            advance(p);
-            Type ty = type_make_struct(tag, sd->size);
-            typedef_registry_add(&p->tu->typedefs, name->text, ty);
-            expect_kind(p, TK_SEMICOLON, "';'");
-            Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
-            stmt_array_init(&s.u.block);
-            return s;
-        }
-        const Token *tag = peek(p);
-        if (tag->kind != TK_IDENT) {
-            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
-                   "expected struct tag but got '%s'", tag->text);
-        }
-        advance(p);
-        StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
-        int size = sd ? sd->size : 0;
-        Type ty = type_make_struct(tag->text, size);
+    Type base = parse_specifiers(p);
+    for (;;) {
         char *decl_name = ((void*)0);
-        ty = parse_declarator(p, ty, &decl_name);
+        Type ty = parse_declarator(p, type_clone(base), &decl_name);
         const Token *name = peek(p);
         if (!decl_name) {
             if (name->kind != TK_IDENT) {
@@ -2257,108 +2464,20 @@ static Stmt parse_typedef_stmt(Parser *p) {
             }
             decl_name = xstrdup(name->text);
             advance(p);
-        } else if (name->kind == TK_IDENT) {
-            advance(p);
         }
         if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
             die_at(name->loc.file, name->loc.line, name->loc.col,
                    "redefinition of typedef '%s'", decl_name);
         }
         typedef_registry_add(&p->tu->typedefs, decl_name, ty);
-        expect_kind(p, TK_SEMICOLON, "';'");
-        Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
-        stmt_array_init(&s.u.block);
-        return s;
+        runtime.free(decl_name);
+        if (peek(p)->kind == TK_COMMA) {
+            advance(p);
+            continue;
+        }
+        break;
     }
-    if (peek(p)->kind == TK_KW_ENUM) {
-        advance(p);
-        if (peek(p)->kind == TK_IDENT
-            && p->tokens->data[p->pos + 1].kind == TK_LBRACE) {
-            const Token *tag = peek(p);
-            advance(p);
-            if (enum_registry_find(&p->tu->enums, tag->text)) {
-                die_at(tag->loc.file, tag->loc.line, tag->loc.col,
-                       "redefinition of enum '%s'", tag->text);
-            }
-            EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, tag->loc);
-            parse_enum_body(p, ed);
-            const Token *name = peek(p);
-            if (name->kind != TK_IDENT) {
-                die_at(name->loc.file, name->loc.line, name->loc.col,
-                       "expected typedef name but got '%s'", name->text);
-            }
-            advance(p);
-            typedef_registry_add(&p->tu->typedefs, name->text, type_default_int());
-            expect_kind(p, TK_SEMICOLON, "';'");
-            Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
-            stmt_array_init(&s.u.block);
-            return s;
-        }
-        if (peek(p)->kind == TK_LBRACE) {
-            char tag[64];
-            runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
-            EnumDef *ed = enum_registry_add(&p->tu->enums, tag, peek(p)->loc);
-            parse_enum_body(p, ed);
-            const Token *name = peek(p);
-            if (name->kind != TK_IDENT) {
-                die_at(name->loc.file, name->loc.line, name->loc.col,
-                       "expected typedef name but got '%s'", name->text);
-            }
-            advance(p);
-            typedef_registry_add(&p->tu->typedefs, name->text, type_default_int());
-            expect_kind(p, TK_SEMICOLON, "';'");
-            Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
-            stmt_array_init(&s.u.block);
-            return s;
-        }
-        const Token *tag = peek(p);
-        if (tag->kind != TK_IDENT) {
-            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
-                   "expected enum tag but got '%s'", tag->text);
-        }
-        advance(p);
-        char *decl_name = ((void*)0);
-        Type ty = type_default_int();
-        ty = parse_declarator(p, ty, &decl_name);
-        const Token *name = peek(p);
-        if (!decl_name) {
-            if (name->kind != TK_IDENT) {
-                die_at(name->loc.file, name->loc.line, name->loc.col,
-                       "expected typedef name but got '%s'", name->text);
-            }
-            decl_name = xstrdup(name->text);
-            advance(p);
-        } else if (name->kind == TK_IDENT) {
-            advance(p);
-        }
-        if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
-            die_at(name->loc.file, name->loc.line, name->loc.col,
-                   "redefinition of typedef '%s'", decl_name);
-        }
-        typedef_registry_add(&p->tu->typedefs, decl_name, ty);
-        expect_kind(p, TK_SEMICOLON, "';'");
-        Stmt s; s.kind = ST_BLOCK; s.loc = kw->loc;
-        stmt_array_init(&s.u.block);
-        return s;
-    }
-    char *decl_name = ((void*)0);
-    Type ty = parse_type(p, &decl_name);
-    const Token *name = peek(p);
-    if (!decl_name) {
-        if (name->kind != TK_IDENT) {
-            die_at(name->loc.file, name->loc.line, name->loc.col,
-                   "expected typedef name but got '%s'", name->text);
-        }
-        decl_name = xstrdup(name->text);
-        advance(p);
-    } else {
-        if (name->kind == TK_IDENT) advance(p);
-    }
-    if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
-        die_at(name->loc.file, name->loc.line, name->loc.col,
-               "redefinition of typedef '%s'", decl_name);
-    }
-    typedef_registry_add(&p->tu->typedefs, decl_name, ty);
+    type_free(&base);
     expect_kind(p, TK_SEMICOLON, "';'");
     Stmt s;
     s.kind = ST_BLOCK;
@@ -2542,6 +2661,17 @@ static PackageDecl parse_package_decl(Parser *p) {
     pd.loc = kw->loc;
     return pd;
 }
+static int is_definition_only_lookahead(const Parser *p) {
+    if (p->tokens->data[p->pos].kind != TK_LBRACE) return 0;
+    size_t pos = p->pos + 1;
+    int depth = 1;
+    while (pos < p->tokens->len && depth > 0) {
+        if (p->tokens->data[pos].kind == TK_LBRACE) depth++;
+        else if (p->tokens->data[pos].kind == TK_RBRACE) depth--;
+        pos++;
+    }
+    return (pos < p->tokens->len && p->tokens->data[pos].kind == TK_SEMICOLON);
+}
 void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx) {
     Parser p;
     p.tokens = tokens;
@@ -2581,6 +2711,10 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
         pkg_load(ctx, ident->text, kw->loc);
     }
     while (peek(&p)->kind != TK_EOF) {
+        if (peek(&p)->kind == TK_SEMICOLON) {
+            advance(&p);
+            continue;
+        }
         for (size_t i = 0; i < p.prepend.len; i++)
             stmt_array_push(&tu->globals, p.prepend.data[i]);
         p.prepend.len = 0;
@@ -2589,7 +2723,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
             advance(&p);
             const Token *tag = peek(&p);
             if (tag->kind == TK_IDENT) advance(&p);
-            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE) {
+            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
                 if (struct_registry_find(&tu->structs, tag->text)) {
                     die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of struct '%s'", tag->text);
@@ -2607,7 +2741,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
             advance(&p);
             const Token *tag = peek(&p);
             if (tag->kind == TK_IDENT) advance(&p);
-            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE) {
+            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
                 if (struct_registry_find(&tu->structs, tag->text)) {
                     die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of '%s'", tag->text);
@@ -2626,7 +2760,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
             advance(&p);
             const Token *tag = peek(&p);
             if (tag->kind == TK_IDENT) advance(&p);
-            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE) {
+            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
                 if (enum_registry_find(&tu->enums, tag->text)) {
                     die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of enum '%s'", tag->text);
@@ -2644,56 +2778,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
             stmt_free(&s);
             continue;
         }
-        size_t save = p.pos;
-        for (;;) {
-            TokenKind tk = peek(&p)->kind;
-            if (tk == TK_KW_STATIC || tk == TK_KW_EXTERN || tk == TK_KW_INLINE ||
-                tk == TK_KW_CONST || tk == TK_KW_VOLATILE || tk == TK_KW_RESTRICT ||
-                tk == TK_KW_SIGNED || tk == TK_KW_UNSIGNED ||
-                tk == TK_KW_VOID || tk == TK_KW_INT || tk == TK_KW_CHAR ||
-                tk == TK_KW_SHORT || tk == TK_KW_LONG || tk == TK_KW_FLOAT ||
-                tk == TK_KW_DOUBLE || tk == TK_KW_BOOL) {
-                advance(&p);
-            } else if (tk == TK_KW_STRUCT || tk == TK_KW_UNION || tk == TK_KW_ENUM) {
-                advance(&p);
-                if (peek(&p)->kind == TK_IDENT) advance(&p);
-                if (peek(&p)->kind == TK_LBRACE) {
-                    int depth = 0;
-                    do {
-                        if (peek(&p)->kind == TK_LBRACE) depth++;
-                        else if (peek(&p)->kind == TK_RBRACE) depth--;
-                        advance(&p);
-                    } while (depth > 0 && peek(&p)->kind != TK_EOF);
-                }
-            } else if (tk == TK_IDENT
-                       && find_typedef_with_fallback(&p, peek(&p)->text)) {
-                advance(&p);
-            } else {
-                break;
-            }
-        }
-        while (peek(&p)->kind == TK_STAR || peek(&p)->kind == TK_KW_CONST ||
-               peek(&p)->kind == TK_KW_VOLATILE || peek(&p)->kind == TK_KW_RESTRICT) advance(&p);
-        for (;;) { if (!skip_attribute(&p)) break; }
-        int saw_name = 0;
-        if (peek(&p)->kind == TK_LPAREN && p.pos + 1 < p.tokens->len &&
-            (p.tokens->data[p.pos + 1].kind == TK_STAR || p.tokens->data[p.pos + 1].kind == TK_KW_CONST)) {
-            advance(&p);
-            while (peek(&p)->kind == TK_STAR || peek(&p)->kind == TK_KW_CONST) advance(&p);
-            if (peek(&p)->kind == TK_IDENT) { advance(&p); saw_name = 1; }
-            if (peek(&p)->kind == TK_RPAREN) advance(&p);
-        } else {
-            if (peek(&p)->kind == TK_IDENT) { advance(&p); saw_name = 1; }
-        }
-        for (;;) { if (!skip_attribute(&p)) break; }
-        while (peek(&p)->kind == TK_LBRACKET) {
-            advance(&p);
-            while (peek(&p)->kind != TK_RBRACKET && peek(&p)->kind != TK_EOF) advance(&p);
-            if (peek(&p)->kind == TK_RBRACKET) advance(&p);
-        }
-        int is_func = (saw_name && peek(&p)->kind == TK_LPAREN);
-        p.pos = save;
-        if (is_func) {
+        if (is_function_declaration_lookahead(&p)) {
             FunctionDecl fn = parse_function_decl(&p);
             if (tu->functions.len >= tu->functions.cap) {
                 size_t new_cap = tu->functions.cap ? tu->functions.cap * 2 : 4;

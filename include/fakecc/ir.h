@@ -64,6 +64,8 @@ typedef enum {
     IR_TRUNC,       /* dst = trunc(a) to `width` — no-op at register level */
     IR_GADDR,       /* dst = &global; global name in call_name.  Result is 8-byte ptr. */
     IR_FADDR,       /* dst = &function; function name in call_name.  Result is 8-byte ptr. */
+    IR_LADDR,       /* dst = &label; imm = label_id.  Result is 8-byte ptr. */
+    IR_JMP_PTR,     /* jmp *a — indirect jump to pointer value in a */
     /* Debug-only marker (emitted by mem2reg under -g): from here on, source
      * variable `imm` (index into fn->dbg_vars) lives in SSA value `a`.
      *

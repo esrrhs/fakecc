@@ -117,6 +117,8 @@ typedef enum {
     EX_INIT_LIST, /* { e1, e2, ... } — array/struct initializer; valid only as decl.init */
     EX_FLOAT_LIT, /* 1.5, 1e10, .5 — double value (width selects float vs double) */
     EX_COMPOUND_LITERAL, /* (Type){ ... } — compound literal; yields a value of the named type */
+    EX_STMT_EXPR, /* ({ ... }) — GNU statement expression */
+    EX_LABEL_ADDR, /* &&label — GNU C address of label */
 } ExprKind;
 
 typedef enum {
@@ -147,6 +149,7 @@ typedef enum {
     UOP_NOT,     /* !x — logical NOT */
 } UnaryOp;
 
+typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out); /* compile-time int fold */
 
@@ -188,6 +191,8 @@ struct Expr {
         struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list; /* EX_INIT_LIST — owns each element; desig_kind[i]: -1=positional, 0=[index], 1=.member (name in desig_member[i], index in desig_index[i]) */
         char   *float_text;                                    /* EX_FLOAT_LIT — source text (strdup'd), parsed at IR time for precision */
         struct { Type target_type; Expr *init; } compound; /* EX_COMPOUND_LITERAL — target_type owns sub-types; init is an EX_INIT_LIST */
+        struct { StmtArray *stmts; } stmt_expr;            /* EX_STMT_EXPR — GNU statement expression ({ ... }) */
+        struct { char *label; } label_addr;                /* EX_LABEL_ADDR — &&label address of label */
     } u;
 };
 
@@ -220,6 +225,8 @@ Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc);
 Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc);
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc);
+Expr *expr_new_label_addr(const char *label, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_call_set_callee(Expr *e, Expr *callee); /* takes ownership, frees old */
 void  expr_free(Expr *e);
@@ -247,11 +254,11 @@ typedef enum {
 } StmtKind;
 
 typedef struct Stmt Stmt;
-typedef struct StmtArray {
+struct StmtArray {
     Stmt *data;
     size_t len;
     size_t cap;
-} StmtArray;
+};
 
 /* One case arm of a switch.  `is_default` marks the default arm; otherwise
  * `value` is the constant case value.  `stmts` owns the arm's statements. */
@@ -274,7 +281,7 @@ struct Stmt {
         /* ST_FOR: init (may be Stmt or NULL), cond (may be NULL), step (may be NULL). */
         struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
         StmtArray block;                             /* ST_BLOCK — owns its statements */
-        struct { char *target; } goto_s;             /* ST_GOTO */
+        struct { char *target; Expr *target_expr; } goto_s; /* ST_GOTO — target_expr != NULL for indirect goto *expr */
         struct { char *name; Stmt *stmt; } label_s;   /* ST_LABEL — owns stmt */
         struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s; /* ST_SWITCH */
     } u;

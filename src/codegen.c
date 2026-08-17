@@ -2336,6 +2336,30 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
 
+            case IR_LADDR: {
+                /* dst = &&label — emit `lea r, [rip+0]` and record a label patch.
+                 * imm = label_id.  The patch resolution (label_off[id] - after_off)
+                 * gives the RIP-relative displacement to the label's code offset. */
+                int target = dr >= 0 ? dr : REG_RAX;
+                size_t patch = emit_lea_rip(&out->text, target);
+                size_t after = out->text.len;
+                ADD_PATCH(patch, inst->imm, after);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+
+            case IR_JMP_PTR: {
+                /* goto *ptr — emit `jmp *r11` (FF /4 with ModRM 0xE3).
+                 * We load the pointer into R11 first. */
+                ensure_reg(&out->text, inst->a, REG_R11, ra);
+                /* REX.B for R11 */
+                emit_byte(&out->text, 0x41);
+                emit_byte(&out->text, 0xFF);
+                emit_byte(&out->text, 0xE3);  /* ModRM: mod=11 reg=4(/4) rm=011 → 11100011 = 0xE3 */
+                break;
+            }
+
             case IR_FADDR: {
                 /* dst = &function; function name in inst->call_name.  Emit
                  * `lea r, [rip+0]` and record an FnAddrPatch resolved against
@@ -2561,12 +2585,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int need_pad = (n_stack & 1);
                 if (need_pad) emit_sub_rsp_imm32(&out->text, 8);
 
-                /* For indirect calls, load the callee into R11 BEFORE the arg
-                 * dance so it survives the push/pop clobbers.  R11 is
-                 * caller-saved and not a SysV arg reg. */
-                if (!inst->call_name)
-                    ensure_reg(&out->text, inst->call_callee, REG_R11, ra);
-
                 /* Push stack-passed args right-to-left (highest index first)
                  * so they end up at [rsp+8], [rsp+16], ... in order. */
                 for (int k = nargs - 1; k >= 0; k--) {
@@ -2605,6 +2623,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
                         emit_push_r(&out->text, REG_RAX);
                     }
+                }
+                /* For indirect calls, push the callee on top of the dance so
+                 * it cannot clobber or be clobbered by any arg in R11/etc. */
+                if (!inst->call_name) {
+                    ensure_reg(&out->text, inst->call_callee, REG_RAX, ra);
+                    emit_push_r(&out->text, REG_RAX);
+                }
+                /* Pop callee into R11 first. */
+                if (!inst->call_name) {
+                    emit_pop_r(&out->text, REG_R11);
                 }
                 /* Distribute in forward order (arg 0 on top of the dance). */
                 for (int k = 0; k < nargs; k++) {

@@ -1,0 +1,214 @@
+// expect: 0
+package main;
+
+
+extern void* memcpy(void*, const void*, unsigned long);
+extern void* memset(void*, int, unsigned long);
+extern int memcmp(const void*, const void*, unsigned long);
+extern void* memmove(void*, const void*, unsigned long);
+extern int strcmp(const char*, const char*);
+extern int strncmp(const char*, const char*, unsigned long);
+extern unsigned long strlen(const char*);
+extern char* strcpy(char*, const char*);
+extern char* strncpy(char*, const char*, unsigned long);
+extern char* strchr(const char*, int);
+extern char* strrchr(const char*, int);
+extern char* strcat(char*, const char*);
+extern char* strncat(char*, const char*, unsigned long);
+extern char* strstr(const char*, const char*);
+extern int printf(const char*, ...);
+extern int sprintf(char*, const char*, ...);
+extern int snprintf(char*, unsigned long, const char*, ...);
+extern int puts(const char*);
+extern int putchar(int);
+extern void* malloc(unsigned long);
+extern void free(void*);
+extern void* calloc(unsigned long, unsigned long);
+extern void* realloc(void*, unsigned long);
+extern int abs(int);
+extern long labs(long);
+extern int atoi(const char*);
+extern long atol(const char*);
+extern double atof(const char*);
+extern double sqrt(double);
+extern double fabs(double);
+extern double pow(double, double);
+extern double ceil(double);
+extern double floor(double);
+extern void exit(int);
+extern void abort(void);
+extern int rand(void);
+extern void srand(unsigned int);
+
+
+
+static int __fakecc_clz(unsigned int x) {
+    if (!x) return 32;
+    int n = 0;
+    if (!(x & 0xFFFF0000)) { n += 16; x <<= 16; }
+    if (!(x & 0xFF000000)) { n += 8; x <<= 8; }
+    if (!(x & 0xF0000000)) { n += 4; x <<= 4; }
+    if (!(x & 0xC0000000)) { n += 2; x <<= 2; }
+    if (!(x & 0x80000000)) { n += 1; }
+    return n;
+}
+static int __fakecc_clzll(unsigned long long x) {
+    if (!x) return 64;
+    int n = 0;
+    if (!(x & 0xFFFFFFFF00000000ULL)) { n += 32; x <<= 32; }
+    if (!(x & 0xFFFF000000000000ULL)) { n += 16; x <<= 16; }
+    if (!(x & 0xFF00000000000000ULL)) { n += 8; x <<= 8; }
+    if (!(x & 0xF000000000000000ULL)) { n += 4; x <<= 4; }
+    if (!(x & 0xC000000000000000ULL)) { n += 2; x <<= 2; }
+    if (!(x & 0x8000000000000000ULL)) { n += 1; }
+    return n;
+}
+static int __fakecc_ctz(unsigned int x) {
+    if (!x) return 32;
+    int n = 0;
+    if (!(x & 0x0000FFFF)) { n += 16; x >>= 16; }
+    if (!(x & 0x000000FF)) { n += 8; x >>= 8; }
+    if (!(x & 0x0000000F)) { n += 4; x >>= 4; }
+    if (!(x & 0x00000003)) { n += 2; x >>= 2; }
+    if (!(x & 0x00000001)) { n += 1; }
+    return n;
+}
+static int __fakecc_ctzll(unsigned long long x) {
+    if (!x) return 64;
+    int n = 0;
+    if (!(x & 0x00000000FFFFFFFFULL)) { n += 32; x >>= 32; }
+    if (!(x & 0x000000000000FFFFULL)) { n += 16; x >>= 16; }
+    if (!(x & 0x00000000000000FFULL)) { n += 8; x >>= 8; }
+    if (!(x & 0x000000000000000FULL)) { n += 4; x >>= 4; }
+    if (!(x & 0x0000000000000003ULL)) { n += 2; x >>= 2; }
+    if (!(x & 0x0000000000000001ULL)) { n += 1; }
+    return n;
+}
+static int __fakecc_popcount(unsigned int x) {
+    int c = 0;
+    while (x) { c += (x & 1); x >>= 1; }
+    return c;
+}
+static int __fakecc_popcountll(unsigned long long x) {
+    int c = 0;
+    while (x) { c += (x & 1); x >>= 1; }
+    return c;
+}
+static int __fakecc_parity(unsigned int x) {
+    return __fakecc_popcount(x) & 1;
+}
+static int __fakecc_parityll(unsigned long long x) {
+    return __fakecc_popcountll(x) & 1;
+}
+static int __fakecc_ffs(unsigned int x) {
+    if (!x) return 0;
+    return __fakecc_ctz(x) + 1;
+}
+static int __fakecc_ffsll(unsigned long long x) {
+    if (!x) return 0;
+    return __fakecc_ctzll(x) + 1;
+}
+
+
+extern void abort (void);
+extern void * malloc (long unsigned int);
+extern void * calloc (long unsigned int, long unsigned int);
+typedef unsigned int FFelem;
+FFelem FFmul(const FFelem x, const FFelem y)
+{
+  return x;
+}
+struct DUPFFstruct
+{
+  int maxdeg;
+  int deg;
+  FFelem *coeffs;
+};
+typedef struct DUPFFstruct *DUPFF;
+int DUPFFdeg(const DUPFF f)
+{
+  return f->deg;
+}
+DUPFF DUPFFnew(const int maxdeg)
+{
+  DUPFF ans = (DUPFF)malloc(sizeof(struct DUPFFstruct));
+  ans->coeffs = 0;
+  if (maxdeg >= 0) ans->coeffs = (FFelem*)calloc(maxdeg+1,sizeof(FFelem));
+  ans->maxdeg = maxdeg;
+  ans->deg = -1;
+  return ans;
+}
+void DUPFFfree(DUPFF x)
+{
+}
+void DUPFFswap(DUPFF x, DUPFF y)
+{
+}
+DUPFF DUPFFcopy(const DUPFF x)
+{
+  return x;
+}
+void DUPFFshift_add(DUPFF f, const DUPFF g, int deg, const FFelem coeff)
+{
+}
+DUPFF DUPFFexgcd(DUPFF *fcofac, DUPFF *gcofac, const DUPFF f, const DUPFF g)
+{
+  DUPFF u, v, uf, ug, vf, vg;
+  FFelem q, lcu, lcvrecip, p;
+  int df, dg, du, dv;
+  printf("DUPFFexgcd called on degrees %d and %d\n", DUPFFdeg(f), DUPFFdeg(g));
+  if (DUPFFdeg(f) < DUPFFdeg(g)) return DUPFFexgcd(gcofac, fcofac, g, f);
+  if (DUPFFdeg(f) != 2 || DUPFFdeg(g) != 1) abort();
+  if (f->coeffs[0] == 0) return f;
+  p = 2;
+  df = DUPFFdeg(f); if (df < 0) df = 0;
+  dg = DUPFFdeg(g); if (dg < 0) dg = 0;
+  u = DUPFFcopy(f);
+  v = DUPFFcopy(g);
+  uf = DUPFFnew(dg); uf->coeffs[0] = 1; uf->deg = 0;
+  ug = DUPFFnew(df);
+  vf = DUPFFnew(dg);
+  vg = DUPFFnew(df); vg->coeffs[0] = 1; vg->deg = 0;
+  while (DUPFFdeg(v) > 0)
+  {
+    dv = DUPFFdeg(v);
+    lcvrecip = FFmul(1, v->coeffs[dv]);
+    while (DUPFFdeg(u) >= dv)
+    {
+      du = DUPFFdeg(u);
+      lcu = u->coeffs[du];
+      q = FFmul(lcu, lcvrecip);
+      DUPFFshift_add(u, v, du-dv, p-q);
+      DUPFFshift_add(uf, vf, du-dv, p-q);
+      DUPFFshift_add(ug, vg, du-dv, p-q);
+    }
+    
+DUPFFswap(u, v);
+    DUPFFswap(uf, vf);
+    DUPFFswap(ug, vg);
+  }
+  
+if (DUPFFdeg(v) == 0)
+  {
+    DUPFFswap(u, v);
+    DUPFFswap(uf, vf);
+    DUPFFswap(ug, vg);
+  }
+  
+DUPFFfree(vf);
+  DUPFFfree(vg);
+  DUPFFfree(v);
+  *fcofac = uf;
+  *gcofac = ug;
+  return u;
+}
+int main()
+{
+  DUPFF f, g, cf, cg, h;
+  f = DUPFFnew(1); f->coeffs[1] = 1; f->deg = 1;
+  g = DUPFFnew(2); g->coeffs[2] = 1; g->deg = 2;
+  printf("calling DUPFFexgcd on degrees %d and %d\n", DUPFFdeg(f), DUPFFdeg(g)) ;
+  h = DUPFFexgcd(&cf, &cg, f, g);
+  return 0;
+}
+

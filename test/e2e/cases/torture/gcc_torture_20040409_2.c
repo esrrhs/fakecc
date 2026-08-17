@@ -1,0 +1,248 @@
+// expect: 0
+package main;
+
+
+extern void* memcpy(void*, const void*, unsigned long);
+extern void* memset(void*, int, unsigned long);
+extern int memcmp(const void*, const void*, unsigned long);
+extern void* memmove(void*, const void*, unsigned long);
+extern int strcmp(const char*, const char*);
+extern int strncmp(const char*, const char*, unsigned long);
+extern unsigned long strlen(const char*);
+extern char* strcpy(char*, const char*);
+extern char* strncpy(char*, const char*, unsigned long);
+extern char* strchr(const char*, int);
+extern char* strrchr(const char*, int);
+extern char* strcat(char*, const char*);
+extern char* strncat(char*, const char*, unsigned long);
+extern char* strstr(const char*, const char*);
+extern int printf(const char*, ...);
+extern int sprintf(char*, const char*, ...);
+extern int snprintf(char*, unsigned long, const char*, ...);
+extern int puts(const char*);
+extern int putchar(int);
+extern void* malloc(unsigned long);
+extern void free(void*);
+extern void* calloc(unsigned long, unsigned long);
+extern void* realloc(void*, unsigned long);
+extern int abs(int);
+extern long labs(long);
+extern int atoi(const char*);
+extern long atol(const char*);
+extern double atof(const char*);
+extern double sqrt(double);
+extern double fabs(double);
+extern double pow(double, double);
+extern double ceil(double);
+extern double floor(double);
+extern void exit(int);
+extern void abort(void);
+extern int rand(void);
+extern void srand(unsigned int);
+
+
+
+static int __fakecc_clz(unsigned int x) {
+    if (!x) return 32;
+    int n = 0;
+    if (!(x & 0xFFFF0000)) { n += 16; x <<= 16; }
+    if (!(x & 0xFF000000)) { n += 8; x <<= 8; }
+    if (!(x & 0xF0000000)) { n += 4; x <<= 4; }
+    if (!(x & 0xC0000000)) { n += 2; x <<= 2; }
+    if (!(x & 0x80000000)) { n += 1; }
+    return n;
+}
+static int __fakecc_clzll(unsigned long long x) {
+    if (!x) return 64;
+    int n = 0;
+    if (!(x & 0xFFFFFFFF00000000ULL)) { n += 32; x <<= 32; }
+    if (!(x & 0xFFFF000000000000ULL)) { n += 16; x <<= 16; }
+    if (!(x & 0xFF00000000000000ULL)) { n += 8; x <<= 8; }
+    if (!(x & 0xF000000000000000ULL)) { n += 4; x <<= 4; }
+    if (!(x & 0xC000000000000000ULL)) { n += 2; x <<= 2; }
+    if (!(x & 0x8000000000000000ULL)) { n += 1; }
+    return n;
+}
+static int __fakecc_ctz(unsigned int x) {
+    if (!x) return 32;
+    int n = 0;
+    if (!(x & 0x0000FFFF)) { n += 16; x >>= 16; }
+    if (!(x & 0x000000FF)) { n += 8; x >>= 8; }
+    if (!(x & 0x0000000F)) { n += 4; x >>= 4; }
+    if (!(x & 0x00000003)) { n += 2; x >>= 2; }
+    if (!(x & 0x00000001)) { n += 1; }
+    return n;
+}
+static int __fakecc_ctzll(unsigned long long x) {
+    if (!x) return 64;
+    int n = 0;
+    if (!(x & 0x00000000FFFFFFFFULL)) { n += 32; x >>= 32; }
+    if (!(x & 0x000000000000FFFFULL)) { n += 16; x >>= 16; }
+    if (!(x & 0x00000000000000FFULL)) { n += 8; x >>= 8; }
+    if (!(x & 0x000000000000000FULL)) { n += 4; x >>= 4; }
+    if (!(x & 0x0000000000000003ULL)) { n += 2; x >>= 2; }
+    if (!(x & 0x0000000000000001ULL)) { n += 1; }
+    return n;
+}
+static int __fakecc_popcount(unsigned int x) {
+    int c = 0;
+    while (x) { c += (x & 1); x >>= 1; }
+    return c;
+}
+static int __fakecc_popcountll(unsigned long long x) {
+    int c = 0;
+    while (x) { c += (x & 1); x >>= 1; }
+    return c;
+}
+static int __fakecc_parity(unsigned int x) {
+    return __fakecc_popcount(x) & 1;
+}
+static int __fakecc_parityll(unsigned long long x) {
+    return __fakecc_popcountll(x) & 1;
+}
+static int __fakecc_ffs(unsigned int x) {
+    if (!x) return 0;
+    return __fakecc_ctz(x) + 1;
+}
+static int __fakecc_ffsll(unsigned long long x) {
+    if (!x) return 0;
+    return __fakecc_ctzll(x) + 1;
+}
+
+
+extern void abort ();
+int test1(int x)
+{
+  return (x ^ (-2147483647 - 1)) ^ 0x1234;
+}
+unsigned int test1u(unsigned int x)
+{
+  return (x ^ (unsigned int)(-2147483647 - 1)) ^ 0x1234;
+}
+int test2(int x)
+{
+  return (x ^ 0x1234) ^ (-2147483647 - 1);
+}
+unsigned int test2u(unsigned int x)
+{
+  return (x ^ 0x1234) ^ (unsigned int)(-2147483647 - 1);
+}
+unsigned int test3u(unsigned int x)
+{
+  return (x + (unsigned int)(-2147483647 - 1)) ^ 0x1234;
+}
+unsigned int test4u(unsigned int x)
+{
+  return (x ^ 0x1234) + (unsigned int)(-2147483647 - 1);
+}
+unsigned int test5u(unsigned int x)
+{
+  return (x - (unsigned int)(-2147483647 - 1)) ^ 0x1234;
+}
+unsigned int test6u(unsigned int x)
+{
+  return (x ^ 0x1234) - (unsigned int)(-2147483647 - 1);
+}
+int test7(int x)
+{
+  int y = (-2147483647 - 1);
+  int z = 0x1234;
+  return (x ^ y) ^ z;
+}
+unsigned int test7u(unsigned int x)
+{
+  unsigned int y = (unsigned int)(-2147483647 - 1);
+  unsigned int z = 0x1234;
+  return (x ^ y) ^ z;
+}
+int test8(int x)
+{
+  int y = 0x1234;
+  int z = (-2147483647 - 1);
+  return (x ^ y) ^ z;
+}
+unsigned int test8u(unsigned int x)
+{
+  unsigned int y = 0x1234;
+  unsigned int z = (unsigned int)(-2147483647 - 1);
+  return (x ^ y) ^ z;
+}
+unsigned int test9u(unsigned int x)
+{
+  unsigned int y = (unsigned int)(-2147483647 - 1);
+  unsigned int z = 0x1234;
+  return (x + y) ^ z;
+}
+unsigned int test10u(unsigned int x)
+{
+  unsigned int y = 0x1234;
+  unsigned int z = (unsigned int)(-2147483647 - 1);
+  return (x ^ y) + z;
+}
+unsigned int test11u(unsigned int x)
+{
+  unsigned int y = (unsigned int)(-2147483647 - 1);
+  unsigned int z = 0x1234;
+  return (x - y) ^ z;
+}
+unsigned int test12u(unsigned int x)
+{
+  unsigned int y = 0x1234;
+  unsigned int z = (unsigned int)(-2147483647 - 1);
+  return (x ^ y) - z;
+}
+void test(int a, int b)
+{
+  if (test1(a) != b)
+    abort();
+  if (test2(a) != b)
+    abort();
+  if (test7(a) != b)
+    abort();
+  if (test8(a) != b)
+    abort();
+}
+void testu(unsigned int a, unsigned int b)
+{
+  if (test1u(a) != b)
+    abort();
+  if (test2u(a) != b)
+    abort();
+  if (test3u(a) != b)
+    abort();
+  if (test4u(a) != b)
+    abort();
+  if (test5u(a) != b)
+    abort();
+  if (test6u(a) != b)
+    abort();
+  if (test7u(a) != b)
+    abort();
+  if (test8u(a) != b)
+    abort();
+  if (test9u(a) != b)
+    abort();
+  if (test10u(a) != b)
+    abort();
+  if (test11u(a) != b)
+    abort();
+  if (test12u(a) != b)
+    abort();
+}
+int main()
+{
+  test(0x00000000,0x80001234);
+  test(0x00001234,0x80000000);
+  test(0x80000000,0x00001234);
+  test(0x80001234,0x00000000);
+  test(0x7fffffff,0xffffedcb);
+  test(0xffffffff,0x7fffedcb);
+  testu(0x00000000,0x80001234);
+  testu(0x00001234,0x80000000);
+  testu(0x80000000,0x00001234);
+  testu(0x80001234,0x00000000);
+  testu(0x7fffffff,0xffffedcb);
+  testu(0xffffffff,0x7fffedcb);
+  return 0;
+}
+

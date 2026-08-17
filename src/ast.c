@@ -853,6 +853,20 @@ Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc) {
     return e;
 }
 
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_STMT_EXPR, loc);
+    e->u.stmt_expr.stmts = malloc(sizeof(StmtArray));
+    if (!e->u.stmt_expr.stmts) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    *e->u.stmt_expr.stmts = *stmts;
+    return e;
+}
+
+Expr *expr_new_label_addr(const char *label, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_LABEL_ADDR, loc);
+    e->u.label_addr.label = xstrdup(label);
+    return e;
+}
+
 void expr_free(Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -938,6 +952,15 @@ void expr_free(Expr *e) {
     case EX_ALIGNOF_TYPE:
         type_free(&e->u.alignof_t.target);
         break;
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            stmt_array_free(e->u.stmt_expr.stmts);
+            free(e->u.stmt_expr.stmts);
+        }
+        break;
+    case EX_LABEL_ADDR:
+        free(e->u.label_addr.label);
+        break;
     }
     type_free(&e->type);
     free(e);
@@ -976,6 +999,7 @@ void stmt_free(Stmt *s) {
         break;
     case ST_GOTO:
         free(s->u.goto_s.target);
+        expr_free(s->u.goto_s.target_expr);
         break;
     case ST_LABEL:
         free(s->u.label_s.name);
@@ -1200,6 +1224,14 @@ int fold_const_int(const Expr *e, long long *out) {
         case BOP_GE:     *out = (l >= r) ? 1 : 0; return 1;
         default: return 0;  /* BOP_AND/BOP_OR (logical) */
         }
+    }
+    if (e->kind == EX_SIZEOF_TYPE) {
+        *out = type_size(e->u.sizeof_t.target);
+        return 1;
+    }
+    if (e->kind == EX_ALIGNOF_TYPE) {
+        *out = type_align(e->u.alignof_t.target);
+        return 1;
     }
     return 0;
 }

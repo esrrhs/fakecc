@@ -242,6 +242,9 @@ typedef struct {
     size_t cap;
 } SymTable;
 
+static void check_stmt(Stmt *s, SymTable *st, FunTable *ft, size_t scope_mark, int *has_return);
+static void check_stmt_list(StmtArray *body, SymTable *st, FunTable *ft, int *has_return);
+
 static void symtable_init(SymTable *st) { st->data = NULL; st->len = 0; st->cap = 0; }
 
 static void symtable_free(SymTable *st) {
@@ -344,11 +347,17 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
     const Type *at = &arg->type;
     int at_arith = (at->kind == TY_INT || at->kind == TY_FLOAT);
     int pt_arith = (ptype->kind == TY_INT || ptype->kind == TY_FLOAT);
-    if (!at_arith || !pt_arith) return;
+    int at_cplx = (at->kind == TY_STRUCT && at->tag && strncmp(at->tag, "__complex_", 10) == 0);
+    int pt_cplx = (ptype->kind == TY_STRUCT && ptype->tag && strncmp(ptype->tag, "__complex_", 10) == 0);
+    if ((!at_arith && !at_cplx) || (!pt_arith && !pt_cplx)) return;
     /* No-op when the argument already has the parameter's representation. */
-    if (at->kind == ptype->kind && at->width == ptype->width
-        && at->is_unsigned == ptype->is_unsigned)
+    if (at_cplx && pt_cplx) {
+        if (at->tag && ptype->tag && strcmp(at->tag, ptype->tag) == 0)
+            return;
+    } else if (at->kind == ptype->kind && at->width == ptype->width
+        && at->is_unsigned == ptype->is_unsigned && at_cplx == pt_cplx) {
         return;
+    }
     Type target = type_clone(*ptype);
     Expr *cast = expr_new_cast(target, arg, arg->loc);  /* clones target */
     set_type(cast, target);                             /* takes ownership */
@@ -389,7 +398,14 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         }
         BinOp op = e->u.bin.op;
         Type res;
-        if (op == BOP_AND || op == BOP_OR) {
+        if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
+            (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
+            if (op == BOP_EQ || op == BOP_NE) {
+                res = type_make_int(4, 0);
+            } else {
+                res = type_clone(lt.kind == TY_STRUCT ? lt : rt);
+            }
+        } else if (op == BOP_AND || op == BOP_OR) {
             /* Logical && / ||: both operands must be scalar (int, float, or
              * pointer).  Result is always int 0 or 1. */
             if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR)
@@ -459,8 +475,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
             set_type(e->u.un.operand, type_clone(ot));
         }
-        /* Bitwise NOT requires an integer operand; +/- on pointer is handled
-         * in BOP. Here -, +, ~ require scalar integer; reject pointer. */
+        /* Bitwise NOT requires an integer operand (or complex for conjugate ~x);
+         * +/- on pointer is handled in BOP. Here -, +, ~ require scalar integer; reject pointer. */
+        if (e->u.un.op == UOP_BITNOT && ot.kind == TY_STRUCT && ot.tag && strncmp(ot.tag, "__complex_", 10) == 0) {
+            set_type(e, ot);
+            return type_clone(e->type);
+        }
         if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT)
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "bitwise NOT requires an integer operand");
@@ -560,6 +580,28 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 return type_clone(e->type);
             }
         }
+        if (strncmp(e->u.var.name, "__builtin_", 10) == 0) {
+            /* Auto-synthesize common GCC builtins */
+            const char *bname = e->u.var.name;
+            Type ret = type_default_int();
+            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0)
+                ret = type_make_void();
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0)
+                ret = type_make_ptr(type_make_void());
+            else if (strcmp(bname, "__builtin_strlen") == 0)
+                ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_fabs") == 0)
+                ret = type_make_float(8);
+            else if (strcmp(bname, "__builtin_fabsf") == 0)
+                ret = type_make_float(4);
+            else if (strcmp(bname, "__builtin_fabsl") == 0)
+                ret = type_make_float(16);
+            Type fn = type_make_func(ret, NULL, 0);
+            Type fp = type_make_ptr(fn);
+            type_free(&fn);
+            set_type(e, fp);
+            return type_clone(e->type);
+        }
         {
             const char *hint = g_sema_pkg
                 ? pkg_suggest_export(g_sema_pkg, e->u.var.name) : NULL;
@@ -595,7 +637,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                    e->u.assign.lvalue->loc.col,
                    "assignment of read-only variable");
         Type rt = check_expr(e->u.assign.rvalue, st, ft);
-        (void)rt;
+        coerce_arg_to_param(&e->u.assign.rvalue, &lt);
         type_free(&rt);
         set_type(e, lt);
         return type_clone(e->type);
@@ -618,6 +660,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         BinOp op = e->u.comp.op;
         int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
                            || op == BOP_DIV);
+        int is_complex = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
         if (op == BOP_ADD || op == BOP_SUB) {
             /* Pointer arithmetic: p += n, p -= n (n must be int). */
             if (lt.kind == TY_PTR && rt.kind != TY_INT)
@@ -625,7 +668,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
         }
-        if (lt.kind != TY_PTR
+        if (lt.kind != TY_PTR && !is_complex
             && !(arith_float && (lt.kind == TY_FLOAT || rt.kind == TY_FLOAT))) {
             if (lt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
@@ -659,6 +702,18 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 type_free(&at);
             }
             set_type(e, type_make_int(8, 0));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "conjugate builtin takes exactly 1 argument");
+            }
+            Type at = check_expr(e->u.call.args.data[0], st, ft);
+            set_type(e, at);
             return type_clone(e->type);
         }
         /* __builtin_ctzll(x) — count trailing zeros of a nonzero uint64.  The
@@ -1084,6 +1139,30 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         set_type(e, type_clone(e->u.compound.target_type));
         return type_clone(e->type);
     }
+    case EX_STMT_EXPR: {
+        int has_ret = 0;
+        check_stmt_list(e->u.stmt_expr.stmts, (SymTable *)st, ft, &has_ret);
+        Type res_type = type_make_void();
+        if (e->u.stmt_expr.stmts && e->u.stmt_expr.stmts->len > 0) {
+            Stmt *last = &e->u.stmt_expr.stmts->data[e->u.stmt_expr.stmts->len - 1];
+            if (last->kind == ST_EXPR && last->u.expr) {
+                type_free(&res_type);
+                res_type = type_clone(last->u.expr->type);
+            }
+        }
+        set_type(e, res_type);
+        return type_clone(e->type);
+    }
+    case EX_LABEL_ADDR: {
+        /* &&label yields a void* */
+        Type t; memset(&t, 0, sizeof(t));
+        t.kind = TY_PTR;
+        t.width = 8;
+        t.pointee = malloc(sizeof(Type));
+        *t.pointee = type_make_void();
+        set_type(e, t);
+        return type_clone(e->type);
+    }
     }
     return type_default_int();
 }
@@ -1109,6 +1188,11 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     if (e->kind == EX_INT_LIT) return 1;
     if (e->kind == EX_FLOAT_LIT) return 1;
     if (e->kind == EX_STR) return 1;
+    if (e->kind == EX_LABEL_ADDR) return 1;
+    if (e->kind == EX_COMPOUND_LITERAL)
+        return is_const_init(e->u.compound.init, globals);
+    if (e->kind == EX_BINOP)
+        return is_const_init(e->u.bin.l, globals) && is_const_init(e->u.bin.r, globals);
     if (e->kind == EX_CAST)
         return is_const_init(e->u.cast.operand, globals);
     /* -1.5 / +1.5: fold_const_int below rejects these, since the operand is
@@ -1166,7 +1250,7 @@ static int init_elem_may_be_aggregate(const Expr *e) {
     switch (e->kind) {
     case EX_VAR: case EX_CALL: case EX_MEMBER: case EX_INDEX: case EX_DEREF:
     case EX_COMPOUND_LITERAL: case EX_ASSIGN: case EX_TERNARY: case EX_COMMA:
-    case EX_CAST:
+    case EX_CAST: case EX_BINOP:
         return 1;
     default:
         return 0;
@@ -1428,6 +1512,14 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         break;
     }
     case ST_EXPR:
+        if (s->u.expr && s->u.expr->kind == EX_CALL
+            && s->u.expr->u.call.callee
+            && s->u.expr->u.call.callee->kind == EX_VAR) {
+            const char *cname = s->u.expr->u.call.callee->u.var.name;
+            if (strcmp(cname, "exit") == 0 || strcmp(cname, "abort") == 0) {
+                *has_return = 1;
+            }
+        }
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
     case ST_RETURN:
@@ -1442,7 +1534,19 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             if (g_sema_ret_type.kind == TY_VOID)
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "void function cannot return a value");
-            discard = check_expr(s->u.value, st, ft); type_free(&discard);
+            discard = check_expr(s->u.value, st, ft);
+            if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
+                discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
+                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                set_type(c, type_clone(g_sema_ret_type));
+                s->u.value = c;
+            } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
+                       (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
+                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                set_type(c, type_clone(g_sema_ret_type));
+                s->u.value = c;
+            }
+            type_free(&discard);
         }
         *has_return = 1;
         break;
@@ -1469,7 +1573,11 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         g_sema_loop_depth--;
         break;
     case ST_GOTO:
-        if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
+        if (s->u.goto_s.target_expr) {
+            /* computed goto: goto *ptr_expr; — check the expression */
+            Type t = check_expr(s->u.goto_s.target_expr, st, ft);
+            type_free(&t);
+        } else if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "use of undeclared label '%s'", s->u.goto_s.target);
         }
@@ -1715,7 +1823,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         labelset_free(&ls);
 
         /* A void function need not return a value; a non-void function must
-         * have a return statement. */
+         * have a return statement (or terminate via exit/abort). */
         if (!has_return && fn->ret_type.kind != TY_VOID) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "function '%s' must have a return statement",

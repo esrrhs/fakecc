@@ -20,6 +20,18 @@ int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 const TranslationUnit *g_ir_tu = NULL;       /* set by ir_generate */
 static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
+static const FunctionDecl *g_ir_cur_fd = NULL; /* set by ir_generate */
+
+/* Forward declarations for LabelMap and g_ir_label_map used by lower_expr
+ * and lower_stmt (defined later in this file). */
+typedef struct {
+    char **names;
+    int   *ids;
+    size_t len;
+    size_t cap;
+} LabelMap;
+static int labelmap_find(const LabelMap *lm, const char *name);
+static LabelMap *g_ir_label_map = NULL;
 
 /* Return the live struct registry during lowering, NULL outside it.
  * type_size() uses this to refresh stale cached struct widths. */
@@ -269,7 +281,26 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
         return expr_takes_addr_of(e->u.compound.init, name);
     case EX_ALIGNOF_TYPE:
         return 0; /* _Alignof(T) references no variable */
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                if (stmt_takes_addr_of(&e->u.stmt_expr.stmts->data[i], name)) return 1;
+        }
+        return 0;
+    case EX_LABEL_ADDR:
+        return 0; /* &&label references no variable */
     }
+    return 0;
+}
+
+static int expr_has_label_addr(const Expr *e) {
+    if (!e) return 0;
+    if (e->kind == EX_LABEL_ADDR) return 1;
+    if (e->kind == EX_INIT_LIST) {
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            if (expr_has_label_addr(e->u.init_list.elements[i])) return 1;
+    }
+    if (e->kind == EX_CAST) return expr_has_label_addr(e->u.cast.operand);
     return 0;
 }
 
@@ -290,7 +321,7 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
         return expr_takes_addr_of(s->u.do_s.cond, name)
             || stmt_takes_addr_of(s->u.do_s.body, name);
     case ST_GOTO:
-        return 0;
+        return s->u.goto_s.target_expr && expr_takes_addr_of(s->u.goto_s.target_expr, name);
     case ST_LABEL:
         return stmt_takes_addr_of(s->u.label_s.stmt, name);
     case ST_SWITCH:
@@ -361,12 +392,56 @@ static int member_field_is_array(const Expr *e) {
     return 0;
 }
 
+static int stmt_has_computed_goto(const Stmt *s) {
+    if (!s) return 0;
+    switch (s->kind) {
+    case ST_DECL: return s->u.decl.init && expr_has_label_addr(s->u.decl.init);
+    case ST_EXPR: return expr_has_label_addr(s->u.expr);
+    case ST_RETURN: return expr_has_label_addr(s->u.value);
+    case ST_GOTO: return s->u.goto_s.target_expr != NULL;
+    case ST_IF:
+        return (s->u.if_s.cond && expr_has_label_addr(s->u.if_s.cond))
+            || stmt_has_computed_goto(s->u.if_s.then_s)
+            || (s->u.if_s.else_s && stmt_has_computed_goto(s->u.if_s.else_s));
+    case ST_WHILE:
+        return (s->u.while_s.cond && expr_has_label_addr(s->u.while_s.cond))
+            || stmt_has_computed_goto(s->u.while_s.body);
+    case ST_DO_WHILE:
+        return (s->u.do_s.cond && expr_has_label_addr(s->u.do_s.cond))
+            || stmt_has_computed_goto(s->u.do_s.body);
+    case ST_FOR:
+        return (s->u.for_s.init && stmt_has_computed_goto(s->u.for_s.init))
+            || (s->u.for_s.cond && expr_has_label_addr(s->u.for_s.cond))
+            || (s->u.for_s.step && expr_has_label_addr(s->u.for_s.step))
+            || stmt_has_computed_goto(s->u.for_s.body);
+    case ST_LABEL: return stmt_has_computed_goto(s->u.label_s.stmt);
+    case ST_SWITCH:
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                if (stmt_has_computed_goto(&s->u.switch_s.cases[i].stmts.data[j])) return 1;
+        return 0;
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            if (stmt_has_computed_goto(&s->u.block.data[i])) return 1;
+        return 0;
+    default: return 0;
+    }
+}
+
+static int fd_has_computed_goto(const FunctionDecl *fd) {
+    if (!fd) return 0;
+    for (size_t i = 0; i < fd->body.len; i++)
+        if (stmt_has_computed_goto(&fd->body.data[i])) return 1;
+    return 0;
+}
+
 /* Is `name` pinned in the given function body? True iff array-typed
  * (its decl is TY_ARRAY, or param would be TY_PTR — the latter is fine) or
- * `&name` appears anywhere in the function. */
+ * `&name` appears anywhere in the function, or the function uses computed gotos. */
 static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) {
     if (ty.kind == TY_ARRAY) return 1;
     if (ty.kind == TY_STRUCT) return 1;
+    if (fd_has_computed_goto(fd)) return 1;
     for (size_t i = 0; i < fd->body.len; i++)
         if (stmt_takes_addr_of(&fd->body.data[i], name)) return 1;
     return 0;
@@ -755,6 +830,8 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 /* Forward decl. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
+static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
+                       const FunctionDecl *cur_fd);
 
 /* Initializer-list lowering (defined after ir_generate). */
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
@@ -802,12 +879,14 @@ static IRValue convert_numeric(IRFunction *fn, IRValue v,
         /* float → float (width change). */
         op = (dst_w > src_w) ? IR_FPEXT : IR_FPTRUNC;
         emit_inst_f(fn, op, res, v, -1, dst_w, loc);
+        set_value_type(fn, res, dst_w, 0);
         return res;
     }
     if (src_float && !to_float) {
         /* float → int. */
         op = IR_FPTOSI;
         emit_inst_w(fn, op, res, v, -1, src_w, dst_w, dst_u, loc);
+        set_value_type(fn, res, dst_w, dst_u);
         set_value_float(fn, res, 0);
         return res;
     }
@@ -817,6 +896,7 @@ static IRValue convert_numeric(IRFunction *fn, IRValue v,
     op = IR_SITOFP;
     emit_inst_w(fn, op, res, v, -1, src_w, dst_w, get_value_is_unsigned(fn, v),
                 loc);
+    set_value_type(fn, res, dst_w, 0);
     set_value_float(fn, res, 1);
     return res;
 }
@@ -914,6 +994,179 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     return -1;
 }
 
+static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
+
+static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
+                                  Type lt, Type rt, BinOp bop) {
+    int lt_is_cplx = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
+    int rt_is_cplx = (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0);
+    
+    int l_elem_sz = lt_is_cplx ? type_size(lt) / 2 : (lt.kind == TY_PTR ? 8 : (lt.width ? lt.width : 4));
+    int r_elem_sz = rt_is_cplx ? type_size(rt) / 2 : (rt.kind == TY_PTR ? 8 : (rt.width ? rt.width : 4));
+    int l_is_float = lt_is_cplx ? ((strstr(lt.tag, "float") || strstr(lt.tag, "double") || strstr(lt.tag, "ldouble")) ? 1 : 0) : (lt.kind == TY_FLOAT);
+    int r_is_float = rt_is_cplx ? ((strstr(rt.tag, "float") || strstr(rt.tag, "double") || strstr(rt.tag, "ldouble")) ? 1 : 0) : (rt.kind == TY_FLOAT);
+    
+    int is_float = (l_is_float || r_is_float);
+    int elem_sz = l_elem_sz > r_elem_sz ? l_elem_sz : r_elem_sz;
+    if (is_float && elem_sz < 4) elem_sz = 4;
+    
+    int l_is_unsigned = lt_is_cplx ? (strstr(lt.tag, "unsigned") != NULL) : lt.is_unsigned;
+    int r_is_unsigned = rt_is_cplx ? (strstr(rt.tag, "unsigned") != NULL) : rt.is_unsigned;
+    
+    IRValue lv_addr = -1, rv_addr = -1;
+    IRValue l_real, l_imag, r_real, r_imag;
+    
+    /* Load LHS components */
+    if (lt_is_cplx) {
+        lv_addr = lower_expr(fn, st, e->u.bin.l);
+        l_real = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, l_real, lv_addr, -1, 0, l_elem_sz, l_is_unsigned, e->loc);
+        if (l_is_float) set_value_float(fn, l_real, 1);
+        
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, l_elem_sz, 8, 1, e->loc);
+        IRValue iaddr = emit_bin_w(fn, IR_ADD, lv_addr, off, 8, 1, e->loc);
+        l_imag = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, l_imag, iaddr, -1, 0, l_elem_sz, l_is_unsigned, e->loc);
+        if (l_is_float) set_value_float(fn, l_imag, 1);
+    } else {
+        l_real = lower_expr(fn, st, e->u.bin.l);
+        if (l_is_float) {
+            l_imag = emit_float_const(fn, l_elem_sz, 0, e->loc);
+        } else {
+            l_imag = new_value(fn);
+            emit_inst_w(fn, IR_CONST, l_imag, -1, -1, 0, l_elem_sz, l_is_unsigned, e->loc);
+        }
+    }
+    
+    /* Convert LHS to common (elem_sz, is_float) */
+    if (l_is_float != is_float || l_elem_sz != elem_sz) {
+        if (l_is_float && !is_float) {
+            l_real = convert_numeric(fn, l_real, l_elem_sz, elem_sz, 0, 0, e->loc);
+            l_imag = convert_numeric(fn, l_imag, l_elem_sz, elem_sz, 0, 0, e->loc);
+        } else if (!l_is_float && is_float) {
+            l_real = convert_numeric(fn, l_real, l_elem_sz, elem_sz, 0, 1, e->loc);
+            l_imag = convert_numeric(fn, l_imag, l_elem_sz, elem_sz, 0, 1, e->loc);
+        } else if (is_float) {
+            l_real = convert_numeric(fn, l_real, l_elem_sz, elem_sz, 0, 1, e->loc);
+            l_imag = convert_numeric(fn, l_imag, l_elem_sz, elem_sz, 0, 1, e->loc);
+        } else {
+            l_real = coerce(fn, l_real, l_elem_sz, l_is_unsigned, elem_sz, l_is_unsigned, e->loc);
+            l_imag = coerce(fn, l_imag, l_elem_sz, l_is_unsigned, elem_sz, l_is_unsigned, e->loc);
+        }
+    }
+    
+    /* Load RHS components */
+    if (rt_is_cplx) {
+        rv_addr = lower_expr(fn, st, e->u.bin.r);
+        r_real = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, r_real, rv_addr, -1, 0, r_elem_sz, r_is_unsigned, e->loc);
+        if (r_is_float) set_value_float(fn, r_real, 1);
+        
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, r_elem_sz, 8, 1, e->loc);
+        IRValue iaddr = emit_bin_w(fn, IR_ADD, rv_addr, off, 8, 1, e->loc);
+        r_imag = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, r_imag, iaddr, -1, 0, r_elem_sz, r_is_unsigned, e->loc);
+        if (r_is_float) set_value_float(fn, r_imag, 1);
+    } else {
+        r_real = lower_expr(fn, st, e->u.bin.r);
+        if (r_is_float) {
+            r_imag = emit_float_const(fn, r_elem_sz, 0, e->loc);
+        } else {
+            r_imag = new_value(fn);
+            emit_inst_w(fn, IR_CONST, r_imag, -1, -1, 0, r_elem_sz, r_is_unsigned, e->loc);
+        }
+    }
+    
+    /* Convert RHS to common (elem_sz, is_float) */
+    if (r_is_float != is_float || r_elem_sz != elem_sz) {
+        if (r_is_float && !is_float) {
+            r_real = convert_numeric(fn, r_real, r_elem_sz, elem_sz, 0, 0, e->loc);
+            r_imag = convert_numeric(fn, r_imag, r_elem_sz, elem_sz, 0, 0, e->loc);
+        } else if (!r_is_float && is_float) {
+            r_real = convert_numeric(fn, r_real, r_elem_sz, elem_sz, 0, 1, e->loc);
+            r_imag = convert_numeric(fn, r_imag, r_elem_sz, elem_sz, 0, 1, e->loc);
+        } else if (is_float) {
+            r_real = convert_numeric(fn, r_real, r_elem_sz, elem_sz, 0, 1, e->loc);
+            r_imag = convert_numeric(fn, r_imag, r_elem_sz, elem_sz, 0, 1, e->loc);
+        } else {
+            r_real = coerce(fn, r_real, r_elem_sz, r_is_unsigned, elem_sz, r_is_unsigned, e->loc);
+            r_imag = coerce(fn, r_imag, r_elem_sz, r_is_unsigned, elem_sz, r_is_unsigned, e->loc);
+        }
+    }
+    
+    if (bop == BOP_EQ || bop == BOP_NE) {
+        if (is_float) {
+            int cmp_sub = (bop == BOP_EQ) ? 4 : 5;
+            IRValue cmp_r = emit_bin_w(fn, IR_FCMP, l_real, r_real, elem_sz, cmp_sub, e->loc);
+            IRValue cmp_i = emit_bin_w(fn, IR_FCMP, l_imag, r_imag, elem_sz, cmp_sub, e->loc);
+            if (bop == BOP_EQ) return emit_bin_w(fn, IR_BAND, cmp_r, cmp_i, 4, 0, e->loc);
+            else return emit_bin_w(fn, IR_BOR, cmp_r, cmp_i, 4, 0, e->loc);
+        } else {
+            IROpcode cmp_op = (bop == BOP_EQ ? IR_EQ : IR_NE);
+            IRValue cmp_r = emit_bin_w(fn, cmp_op, l_real, r_real, elem_sz, 1, e->loc);
+            IRValue cmp_i = emit_bin_w(fn, cmp_op, l_imag, r_imag, elem_sz, 1, e->loc);
+            if (bop == BOP_EQ) return emit_bin_w(fn, IR_BAND, cmp_r, cmp_i, 4, 0, e->loc);
+            else return emit_bin_w(fn, IR_BOR, cmp_r, cmp_i, 4, 0, e->loc);
+        }
+    }
+    
+    /* Arithmetic operations */
+    IRValue out_r, out_i;
+    IROpcode add_op = is_float ? IR_FADD : IR_ADD;
+    IROpcode sub_op = is_float ? IR_FSUB : IR_SUB;
+    IROpcode mul_op = is_float ? IR_FMUL : IR_MUL;
+    IROpcode div_op = is_float ? IR_FDIV : IR_DIV;
+    
+    if (bop == BOP_ADD) {
+        out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
+        out_i = emit_bin_w(fn, add_op, l_imag, r_imag, elem_sz, 1, e->loc);
+    } else if (bop == BOP_SUB) {
+        out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
+        out_i = emit_bin_w(fn, sub_op, l_imag, r_imag, elem_sz, 1, e->loc);
+    } else if (bop == BOP_MUL) {
+        IRValue r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
+        IRValue r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        out_r = emit_bin_w(fn, sub_op, r1, r2, elem_sz, 1, e->loc);
+        
+        IRValue i1 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
+        IRValue i2 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
+        out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
+    } else if (bop == BOP_DIV) {
+        IRValue d1 = emit_bin_w(fn, mul_op, r_real, r_real, elem_sz, 1, e->loc);
+        IRValue d2 = emit_bin_w(fn, mul_op, r_imag, r_imag, elem_sz, 1, e->loc);
+        IRValue denom = emit_bin_w(fn, add_op, d1, d2, elem_sz, 1, e->loc);
+        
+        IRValue n_r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
+        IRValue n_r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        IRValue num_r = emit_bin_w(fn, add_op, n_r1, n_r2, elem_sz, 1, e->loc);
+        out_r = emit_bin_w(fn, div_op, num_r, denom, elem_sz, 1, e->loc);
+        
+        IRValue n_i1 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
+        IRValue n_i2 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
+        IRValue num_i = emit_bin_w(fn, sub_op, n_i1, n_i2, elem_sz, 1, e->loc);
+        out_i = emit_bin_w(fn, div_op, num_i, denom, elem_sz, 1, e->loc);
+    } else {
+        out_r = l_real; out_i = l_imag;
+    }
+    if (is_float) {
+        set_value_float(fn, out_r, 1);
+        set_value_float(fn, out_i, 1);
+    }
+    
+    /* Allocate stack slot for result struct */
+    int total_sz = elem_sz * 2;
+    IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    emit_inst_w(fn, IR_STORE_PTR, -1, addr, out_r, 0, elem_sz, 1, e->loc);
+    IRValue off = new_value(fn);
+    emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+    IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+    emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, out_i, 0, elem_sz, 1, e->loc);
+    return addr;
+}
+
 /* Lower an expression to a value id, emitting instructions as needed.
  * Sema has annotated e->type; we lower operands and coerce them per UAC. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
@@ -987,6 +1240,42 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return cmp;
         }
         case UOP_BITNOT: {
+            if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
+                strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
+                Type cty = e->u.un.operand->type;
+                int total_sz = type_size(cty);
+                int elem_sz = total_sz / 2;
+                int is_float = (strstr(cty.tag, "float") != NULL || strstr(cty.tag, "double") != NULL || strstr(cty.tag, "ldouble") != NULL);
+                int is_unsigned = (strstr(cty.tag, "unsigned") != NULL);
+                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
+                IRValue vr = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vr, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vr, 1);
+                
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                IRValue iaddr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
+                IRValue vi = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vi, 1);
+                
+                IRValue neg_vi;
+                if (is_float) {
+                    int64_t negzero = (elem_sz == 4) ? (int64_t)0x80000000 : (int64_t)0x8000000000000000LL;
+                    IRValue zero = emit_float_const(fn, elem_sz, negzero, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_FSUB, zero, vi, elem_sz, 0, e->loc);
+                    set_value_float(fn, neg_vi, 1);
+                } else {
+                    neg_vi = emit_bin_w(fn, IR_NEG, vi, -1, elem_sz, 0, e->loc);
+                }
+                
+                IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, vr, 0, elem_sz, 1, e->loc);
+                IRValue out_iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, out_iaddr, neg_vi, 0, elem_sz, 1, e->loc);
+                return addr;
+            }
             IRValue x = lower_expr(fn, st, e->u.un.operand);
             int sw = get_value_width(fn, x);
             int su = get_value_is_unsigned(fn, x);
@@ -1007,6 +1296,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int l_is_ptr = (lt.kind == TY_PTR);
         int r_is_ptr = (rt.kind == TY_PTR);
         BinOp bop = e->u.bin.op;
+        if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
+            (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
+            return lower_complex_binop(fn, st, e, lt, rt, bop);
+        }
         if (bop == BOP_AND || bop == BOP_OR) {
             /* Short-circuit logical operators: lower to control flow writing a
              * temporary alloca, then let mem2reg promote it into a φ-merged
@@ -1310,8 +1603,24 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             } else {
                 return coerced;
             }
+            if (strncmp(lv->type.tag, "__complex_", 10) == 0 &&
+                (e->u.assign.rvalue->type.kind != TY_STRUCT ||
+                 !e->u.assign.rvalue->type.tag ||
+                 strcmp(lv->type.tag, e->u.assign.rvalue->type.tag) != 0)) {
+                /* Scalar to complex assignment or different precision complex */
+                Expr fake_cast;
+                memset(&fake_cast, 0, sizeof(fake_cast));
+                fake_cast.kind = EX_CAST;
+                fake_cast.type = lv->type;
+                fake_cast.loc = e->loc;
+                fake_cast.u.cast.target = lv->type;
+                fake_cast.u.cast.operand = e->u.assign.rvalue;
+                IRValue cplx_rv = lower_expr(fn, st, &fake_cast);
+                emit_struct_copy(fn, dst, cplx_rv, type_size(lv->type), e->loc);
+                return dst;
+            }
             emit_struct_copy(fn, dst, rv, type_size(lv->type), e->loc);
-            return coerced;
+            return dst;
         }
         if (lv->kind == EX_VAR) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
@@ -1371,6 +1680,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return coerced;
     }
     case EX_CALL: {
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
+            Expr fake_un;
+            memset(&fake_un, 0, sizeof(fake_un));
+            fake_un.kind = EX_UNARY;
+            fake_un.type = e->type;
+            fake_un.loc = e->loc;
+            fake_un.u.un.op = UOP_BITNOT;
+            fake_un.u.un.operand = e->u.call.args.data[0];
+            return lower_expr(fn, st, &fake_un);
+        }
         /* The va_start / va_arg / va_end builtins.  They are lowered to a
          * named IR_CALL (call_name = the builtin) so codegen can dispatch by
          * name, exactly like __syscall.  The va_list is already a pointer to
@@ -1534,6 +1856,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             } else if (strcmp(cname, "__builtin_ctzll") == 0) {
                 /* ctz intrinsic — codegen emits a `bsf` + fixup. */
                 inst.call_name = xstrdup(cname);
+            } else if (strncmp(cname, "__builtin_", 10) == 0) {
+                if (strcmp(cname, "__builtin_abort") == 0) inst.call_name = xstrdup("abort");
+                else if (strcmp(cname, "__builtin_exit") == 0) inst.call_name = xstrdup("exit");
+                else if (strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("abort");
+                else if (strcmp(cname, "__builtin_memset") == 0) inst.call_name = xstrdup("memset");
+                else if (strcmp(cname, "__builtin_memcpy") == 0) inst.call_name = xstrdup("memcpy");
+                else if (strcmp(cname, "__builtin_memcmp") == 0) inst.call_name = xstrdup("memcmp");
+                else if (strcmp(cname, "__builtin_strcmp") == 0) inst.call_name = xstrdup("strcmp");
+                else if (strcmp(cname, "__builtin_strncmp") == 0) inst.call_name = xstrdup("strncmp");
+                else if (strcmp(cname, "__builtin_strlen") == 0) inst.call_name = xstrdup("strlen");
+                else if (strcmp(cname, "__builtin_strcpy") == 0) inst.call_name = xstrdup("strcpy");
+                else if (strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");
+                else if (strcmp(cname, "__builtin_fabs") == 0) inst.call_name = xstrdup("fabs");
+                else if (strcmp(cname, "__builtin_fabsf") == 0) inst.call_name = xstrdup("fabsf");
+                else if (strcmp(cname, "__builtin_fabsl") == 0) inst.call_name = xstrdup("fabsl");
+                else inst.call_name = xstrdup(cname + 10);
             } else {
                 int is_direct = 0;
                 /* If the callee's type is a bare function type (TY_FUNC),
@@ -1737,6 +2075,96 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return v;
     }
     case EX_CAST: {
+        if (e->type.kind == TY_STRUCT && e->type.tag && strncmp(e->type.tag, "__complex_", 10) == 0) {
+            Type cty = e->type;
+            int total_sz = type_size(cty);
+            int elem_sz = total_sz / 2;
+            int is_float = (strstr(cty.tag, "float") != NULL || strstr(cty.tag, "double") != NULL || strstr(cty.tag, "ldouble") != NULL);
+            
+            int is_unsigned = (strstr(cty.tag, "unsigned") != NULL);
+            IRValue vr, vi;
+            if (e->u.cast.operand->type.kind == TY_STRUCT && e->u.cast.operand->type.tag &&
+                strncmp(e->u.cast.operand->type.tag, "__complex_", 10) == 0) {
+                /* Complex to complex cast (e.g. float to double, double to int) */
+                IRValue src_addr = lower_expr(fn, st, e->u.cast.operand);
+                int src_elem_sz = type_size(e->u.cast.operand->type) / 2;
+                int src_is_float = (strstr(e->u.cast.operand->type.tag, "float") || strstr(e->u.cast.operand->type.tag, "double") || strstr(e->u.cast.operand->type.tag, "ldouble")) ? 1 : 0;
+                int src_is_unsigned = (strstr(e->u.cast.operand->type.tag, "unsigned") != NULL);
+                vr = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vr, src_addr, -1, 0, src_elem_sz, src_is_unsigned, e->loc);
+                if (src_is_float) set_value_float(fn, vr, 1);
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, src_elem_sz, 8, 1, e->loc);
+                IRValue iaddr = emit_bin_w(fn, IR_ADD, src_addr, off, 8, 1, e->loc);
+                vi = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, src_elem_sz, src_is_unsigned, e->loc);
+                if (src_is_float) set_value_float(fn, vi, 1);
+                
+                if (src_is_float != is_float) {
+                    if (src_is_float) {
+                        vr = convert_numeric(fn, vr, src_elem_sz, elem_sz, is_unsigned, 0, e->loc);
+                        vi = convert_numeric(fn, vi, src_elem_sz, elem_sz, is_unsigned, 0, e->loc);
+                    } else {
+                        vr = convert_numeric(fn, vr, src_elem_sz, elem_sz, 0, 1, e->loc);
+                        vi = convert_numeric(fn, vi, src_elem_sz, elem_sz, 0, 1, e->loc);
+                    }
+                } else if (is_float) {
+                    if (src_elem_sz != elem_sz) {
+                        vr = convert_numeric(fn, vr, src_elem_sz, elem_sz, 0, 1, e->loc);
+                        vi = convert_numeric(fn, vi, src_elem_sz, elem_sz, 0, 1, e->loc);
+                    }
+                } else {
+                    if (src_elem_sz != elem_sz) {
+                        vr = coerce(fn, vr, src_elem_sz, src_is_unsigned, elem_sz, is_unsigned, e->loc);
+                        vi = coerce(fn, vi, src_elem_sz, src_is_unsigned, elem_sz, is_unsigned, e->loc);
+                    }
+                }
+            } else {
+                /* Scalar to complex cast: imag is 0 */
+                vr = lower_expr(fn, st, e->u.cast.operand);
+                if (is_float) {
+                    if (!get_value_is_float(fn, vr) || get_value_width(fn, vr) != elem_sz)
+                        vr = convert_numeric(fn, vr, get_value_width(fn, vr), elem_sz, 0, 1, e->loc);
+                    vi = emit_float_const(fn, elem_sz, 0, e->loc);
+                } else {
+                    if (get_value_is_float(fn, vr)) {
+                        vr = convert_numeric(fn, vr, get_value_width(fn, vr), elem_sz, is_unsigned, 0, e->loc);
+                    } else if (get_value_width(fn, vr) != elem_sz) {
+                        vr = coerce(fn, vr, get_value_width(fn, vr), get_value_is_unsigned(fn, vr), elem_sz, is_unsigned, e->loc);
+                    }
+                    vi = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, vi, -1, -1, 0, elem_sz, is_unsigned, e->loc);
+                }
+            }
+            IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, vr, 0, elem_sz, is_unsigned, e->loc);
+            IRValue off = new_value(fn);
+            emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+            IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, vi, 0, elem_sz, is_unsigned, e->loc);
+            return addr;
+        }
+        if (e->u.cast.operand->type.kind == TY_STRUCT && e->u.cast.operand->type.tag &&
+            strncmp(e->u.cast.operand->type.tag, "__complex_", 10) == 0 &&
+            (e->type.kind == TY_INT || e->type.kind == TY_FLOAT || e->type.is_bool)) {
+            IRValue src_addr = lower_expr(fn, st, e->u.cast.operand);
+            int src_elem_sz = type_size(e->u.cast.operand->type) / 2;
+            int src_is_float = (strstr(e->u.cast.operand->type.tag, "float") || strstr(e->u.cast.operand->type.tag, "double") || strstr(e->u.cast.operand->type.tag, "ldouble")) ? 1 : 0;
+            IRValue vr = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, vr, src_addr, -1, 0, src_elem_sz, 1, e->loc);
+            if (src_is_float) set_value_float(fn, vr, 1);
+            int vw = get_value_width(fn, vr), vu = get_value_is_unsigned(fn, vr), vf = get_value_is_float(fn, vr);
+            int dw = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+            int du = e->type.is_unsigned, df = (e->type.kind == TY_FLOAT);
+            if (e->type.is_bool) {
+                IRValue n = bool_normalize(fn, vr, vw, vu, vf, e->loc);
+                return coerce(fn, n, 4, 0, dw, du, e->loc);
+            }
+            if (vf != df) return convert_numeric(fn, vr, vw, dw, du, df, e->loc);
+            if (df) return (vw == dw) ? vr : convert_numeric(fn, vr, vw, dw, du, 1, e->loc);
+            return coerce(fn, vr, vw, vu, dw, du, e->loc);
+        }
         IRValue x = lower_expr(fn, st, e->u.cast.operand);
         int sw = get_value_width(fn, x), su = get_value_is_unsigned(fn, x);
         int sf = get_value_is_float(fn, x);
@@ -1884,6 +2312,20 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * scale the rvalue by sizeof(pointee). */
         Expr *lv = e->u.comp.lvalue;
         BinOp op = e->u.comp.op;
+        if (lv->type.kind == TY_STRUCT && lv->type.tag && strncmp(lv->type.tag, "__complex_", 10) == 0) {
+            IRValue addr = lower_lvalue_addr(fn, st, lv);
+            Expr fake_bin;
+            memset(&fake_bin, 0, sizeof(fake_bin));
+            fake_bin.kind = EX_BINOP;
+            fake_bin.type = lv->type;
+            fake_bin.loc = e->loc;
+            fake_bin.u.bin.op = op;
+            fake_bin.u.bin.l = lv;
+            fake_bin.u.bin.r = e->u.comp.rvalue;
+            IRValue res_addr = lower_complex_binop(fn, st, &fake_bin, lv->type, e->u.comp.rvalue->type, op);
+            emit_struct_copy(fn, addr, res_addr, type_size(lv->type), e->loc);
+            return addr;
+        }
         int is_ptr = (lv->type.kind == TY_PTR);
         int is_float = (lv->type.kind == TY_FLOAT);
         int lw = is_ptr ? 8 : (lv->type.width ? lv->type.width : 4);
@@ -1981,6 +2423,36 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (target.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
+    case EX_STMT_EXPR: {
+        size_t mark = st->len;
+        IRValue res = -1;
+        const StmtArray *stmts = e->u.stmt_expr.stmts;
+        if (stmts) {
+            for (size_t i = 0; i < stmts->len; i++) {
+                const Stmt *s = &stmts->data[i];
+                if (i == stmts->len - 1 && s->kind == ST_EXPR && s->u.expr) {
+                    res = lower_expr(fn, st, s->u.expr);
+                } else {
+                    lower_stmt(fn, st, s, g_ir_cur_fd);
+                }
+            }
+        }
+        st->len = mark;
+        return res;
+    }
+    case EX_LABEL_ADDR: {
+        /* &&label — emit IR_LADDR with the label's IR id.
+         * The label must have been pre-assigned in the label pre-pass. */
+        const char *lbl_name = e->u.label_addr.label;
+        int lbl_id = g_ir_label_map ? labelmap_find(g_ir_label_map, lbl_name) : -1;
+        if (lbl_id < 0) {
+            fprintf(stderr, "fakecc: &&%s: undeclared label\n", lbl_name);
+            exit(1);
+        }
+        IRValue dst = new_value(fn);
+        emit_inst(fn, IR_LADDR, dst, -1, -1, lbl_id, e->loc);
+        return dst;
+    }
     default: break;   /* EX_INIT_LIST is lowered in ST_DECL, not here */
     }
     /* unreachable */
@@ -2009,14 +2481,41 @@ static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
     emit_inst(fn, IR_CBR, -1, cond, f_label, t_label, loc);
 }
 
+static IRValue lower_condition(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    if (e->type.kind == TY_STRUCT && e->type.tag && strncmp(e->type.tag, "__complex_", 10) == 0) {
+        Type cty = e->type;
+        int elem_sz = type_size(cty) / 2;
+        int is_float = (strstr(cty.tag, "float") || strstr(cty.tag, "double") || strstr(cty.tag, "ldouble")) ? 1 : 0;
+        IRValue addr = lower_expr(fn, st, e);
+        IRValue vr = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, vr, addr, -1, 0, elem_sz, 1, e->loc);
+        if (is_float) set_value_float(fn, vr, 1);
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+        IRValue vi = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, 1, e->loc);
+        if (is_float) set_value_float(fn, vi, 1);
+        
+        IRValue cmp_r, cmp_i;
+        if (is_float) {
+            IRValue zero = emit_float_const(fn, elem_sz, 0, e->loc);
+            cmp_r = emit_bin_w(fn, IR_FCMP, vr, zero, elem_sz, 5 /* NE */, e->loc);
+            cmp_i = emit_bin_w(fn, IR_FCMP, vi, zero, elem_sz, 5 /* NE */, e->loc);
+        } else {
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, elem_sz, 1, e->loc);
+            cmp_r = emit_bin_w(fn, IR_NE, vr, zero, elem_sz, 1, e->loc);
+            cmp_i = emit_bin_w(fn, IR_NE, vi, zero, elem_sz, 1, e->loc);
+        }
+        return emit_bin_w(fn, IR_BOR, cmp_r, cmp_i, 4, 0, e->loc);
+    }
+    return lower_expr(fn, st, e);
+}
+
 /* Label map: label name → IR label id.  Populated by a pre-pass over the
  * function body so forward gotos resolve to ids assigned before lowering. */
-typedef struct {
-    char **names;
-    int   *ids;
-    size_t len;
-    size_t cap;
-} LabelMap;
+/* (LabelMap typedef and g_ir_label_map are forward-declared at the top of this file) */
 
 static void labelmap_init(LabelMap *lm) {
     lm->names = NULL; lm->ids = NULL; lm->len = 0; lm->cap = 0;
@@ -2079,9 +2578,8 @@ static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s) {
     }
 }
 
-/* File-scope pointer to the current function's label map, consulted by
- * lower_stmt when lowering ST_LABEL / ST_GOTO. */
-static LabelMap *g_ir_label_map = NULL;
+/* (g_ir_label_map is declared at the top of this file.) */
+
 
 /* Lower a single statement, emitting instructions as needed. */
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
@@ -2114,8 +2612,12 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         }
 
         /* static local → allocate in static storage via a mangled global
-         * `fn.varname`.  Reads/writes resolve through the global_name path. */
-        if (s->u.decl.storage_class == 1) {
+         * `fn.varname`.  Reads/writes resolve through the global_name path.
+         * Exception: if the initializer contains code label addresses (&&label),
+         * it must be initialized dynamically within the function stack. */
+        if (s->u.decl.storage_class == 1 && s->u.decl.init && expr_has_label_addr(s->u.decl.init)) {
+            /* fall through to local stack allocation + lower_init_list */
+        } else if (s->u.decl.storage_class == 1) {
             int sz = type_size(dty);
             if (sz <= 0) sz = 8;
             char *bytes = calloc(sz, 1);
@@ -2180,16 +2682,28 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                         emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
                     }
                 }
-            } else {
-                IRValue rv = lower_expr(fn, st, s->u.decl.init);
-                /* Slice 13 — struct init from an expression (e.g. `struct S r =
-                 * make(3,4)`): both sides are pointers; copy the bytes instead
-                 * of storing the pointer. */
-                if (dty.kind == TY_STRUCT) {
-                    IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
-                    emit_struct_copy(fn, addr, rv, type_size(dty), s->loc);
+            } else if (dty.kind == TY_STRUCT) {
+                IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
+                if (dty.tag && strncmp(dty.tag, "__complex_", 10) == 0 &&
+                    (s->u.decl.init->type.kind != TY_STRUCT ||
+                     !s->u.decl.init->type.tag ||
+                     strcmp(dty.tag, s->u.decl.init->type.tag) != 0)) {
+                    Expr fake_cast;
+                    memset(&fake_cast, 0, sizeof(fake_cast));
+                    fake_cast.kind = EX_CAST;
+                    fake_cast.type = dty;
+                    fake_cast.loc = s->loc;
+                    fake_cast.u.cast.target = dty;
+                    fake_cast.u.cast.operand = s->u.decl.init;
+                    IRValue cplx_rv = lower_expr(fn, st, &fake_cast);
+                    emit_struct_copy(fn, addr, cplx_rv, type_size(dty), s->loc);
                     break;
                 }
+                IRValue rv = lower_expr(fn, st, s->u.decl.init);
+                emit_struct_copy(fn, addr, rv, type_size(dty), s->loc);
+                break;
+            } else {
+                IRValue rv = lower_expr(fn, st, s->u.decl.init);
                 int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
                 int rf = get_value_is_float(fn, rv);
                 int df = (dty.kind == TY_FLOAT);
@@ -2264,7 +2778,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_IF: {
-        IRValue cond = lower_expr(fn, st, s->u.if_s.cond);
+        IRValue cond = lower_condition(fn, st, s->u.if_s.cond);
         int L_then = new_label(fn);
         int L_end  = new_label(fn);
         int L_else = s->u.if_s.else_s ? new_label(fn) : L_end;
@@ -2285,7 +2799,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         int L_exit = new_label(fn);
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_head, s->loc);
-        IRValue cond = lower_expr(fn, st, s->u.while_s.cond);
+        IRValue cond = lower_condition(fn, st, s->u.while_s.cond);
         emit_cbr(fn, cond, L_body, L_exit, s->loc);
         emit_label(fn, L_body, s->loc);
         push_loop(L_head, L_exit);
@@ -2314,7 +2828,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         pop_loop();
         emit_br(fn, L_cond, s->loc);
         emit_label(fn, L_cond, s->loc);
-        IRValue cond = lower_expr(fn, st, s->u.do_s.cond);
+        IRValue cond = lower_condition(fn, st, s->u.do_s.cond);
         emit_cbr(fn, cond, L_body, L_exit, s->loc);
         emit_label(fn, L_exit, s->loc);
         break;
@@ -2335,10 +2849,9 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 /* Multi-declarator init wrapped in a block by the parser.
                  * Lower its stmts directly so the declarations stay in the
                  * for scope (lower_stmt(ST_BLOCK) would pop them, hiding the
-                 * names from cond/step/body). */
-                StmtArray *blk = &s->u.for_s.init->u.block;
-                for (size_t i = 0; i < blk->len; i++)
-                    lower_stmt(fn, st, &blk->data[i], cur_fd);
+                 * loop variable from cond/step/body). */
+                for (size_t i = 0; i < s->u.for_s.init->u.block.len; i++)
+                    lower_stmt(fn, st, &s->u.for_s.init->u.block.data[i], cur_fd);
             } else {
                 lower_stmt(fn, st, s->u.for_s.init, cur_fd);
             }
@@ -2350,7 +2863,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_head, s->loc);
         if (s->u.for_s.cond) {
-            IRValue cond = lower_expr(fn, st, s->u.for_s.cond);
+            IRValue cond = lower_condition(fn, st, s->u.for_s.cond);
             emit_cbr(fn, cond, L_body, L_exit, s->loc);
         } else {
             emit_br(fn, L_body, s->loc);
@@ -2391,13 +2904,19 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_GOTO: {
-        int id = labelmap_find(g_ir_label_map, s->u.goto_s.target);
-        if (id < 0) {
-            fprintf(stderr, "fakecc: goto to unknown label '%s'\n",
-                    s->u.goto_s.target);
-            exit(1);
+        if (s->u.goto_s.target_expr) {
+            /* Computed goto: goto *expr; — lower the pointer, emit IR_JMP_PTR */
+            IRValue ptr = lower_expr(fn, st, s->u.goto_s.target_expr);
+            emit_inst(fn, IR_JMP_PTR, -1, ptr, -1, -1, s->loc);
+        } else {
+            int id = labelmap_find(g_ir_label_map, s->u.goto_s.target);
+            if (id < 0) {
+                fprintf(stderr, "fakecc: goto to unknown label '%s'\n",
+                        s->u.goto_s.target);
+                exit(1);
+            }
+            emit_br(fn, id, s->loc);
         }
-        emit_br(fn, id, s->loc);
         break;
     }
     case ST_LABEL: {
@@ -2570,6 +3089,52 @@ static int fold_const_float(const Expr *e, long double *out) {
     return 0;
 }
 
+static int fold_const_complex(const Expr *e, long double *r_out, long double *i_out) {
+    if (!e) return 0;
+    if (e->kind == EX_FLOAT_LIT) {
+        *r_out = strtold(e->u.float_text, NULL);
+        *i_out = 0.0;
+        return 1;
+    }
+    if (e->kind == EX_INT_LIT) {
+        *r_out = (long double)e->u.int_val;
+        *i_out = 0.0;
+        return 1;
+    }
+    if (e->kind == EX_COMPOUND_LITERAL && e->u.compound.init && e->u.compound.init->kind == EX_INIT_LIST) {
+        int n = e->u.compound.init->u.init_list.num_elements;
+        long double r = 0.0, i = 0.0, dummy = 0.0;
+        if (n >= 1) fold_const_complex(e->u.compound.init->u.init_list.elements[0], &r, &dummy);
+        if (n >= 2) fold_const_complex(e->u.compound.init->u.init_list.elements[1], &i, &dummy);
+        *r_out = r;
+        *i_out = i;
+        return 1;
+    }
+    if (e->kind == EX_UNARY) {
+        long double r = 0.0, i = 0.0;
+        if (!fold_const_complex(e->u.un.operand, &r, &i)) return 0;
+        if (e->u.un.op == UOP_NEG) { *r_out = -r; *i_out = -i; return 1; }
+        if (e->u.un.op == UOP_POS) { *r_out = r; *i_out = i; return 1; }
+        if (e->u.un.op == UOP_BITNOT) { *r_out = r; *i_out = -i; return 1; }
+    }
+    if (e->kind == EX_BINOP) {
+        long double lr = 0.0, li = 0.0, rr = 0.0, ri = 0.0;
+        if (!fold_const_complex(e->u.bin.l, &lr, &li)) return 0;
+        if (!fold_const_complex(e->u.bin.r, &rr, &ri)) return 0;
+        if (e->u.bin.op == BOP_ADD) { *r_out = lr + rr; *i_out = li + ri; return 1; }
+        if (e->u.bin.op == BOP_SUB) { *r_out = lr - rr; *i_out = li - ri; return 1; }
+        if (e->u.bin.op == BOP_MUL) { *r_out = lr * rr - li * ri; *i_out = lr * ri + li * rr; return 1; }
+        if (e->u.bin.op == BOP_DIV) {
+            long double denom = rr * rr + ri * ri;
+            if (denom == 0.0) return 0;
+            *r_out = (lr * rr + li * ri) / denom;
+            *i_out = (li * rr - lr * ri) / denom;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Pack a compile-time constant initializer into `bytes` (size `sz`) for a
  * global of type `ty`.  Handles integer literals, negated literals, nested
  * initializer lists (positional, per-element/per-member offset), string
@@ -2579,6 +3144,46 @@ static int fold_const_float(const Expr *e, long double *out) {
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g) {
+    if (ty->kind == TY_STRUCT && ty->tag && strncmp(ty->tag, "__complex_", 10) == 0) {
+        long double cr = 0.0, ci = 0.0;
+        if (fold_const_complex(e, &cr, &ci)) {
+            int esz = sz / 2;
+            int is_float = (strstr(ty->tag, "float") || strstr(ty->tag, "double") || strstr(ty->tag, "ldouble")) ? 1 : 0;
+            if (is_float) {
+                if (esz == 16) {
+                    memcpy(bytes, &cr, 10);
+                    memcpy(bytes + esz, &ci, 10);
+                } else if (esz == 4) {
+                    float fr = (float)cr, fi = (float)ci;
+                    memcpy(bytes, &fr, 4);
+                    memcpy(bytes + esz, &fi, 4);
+                } else {
+                    double dr = (double)cr, di = (double)ci;
+                    memcpy(bytes, &dr, 8);
+                    memcpy(bytes + esz, &di, 8);
+                }
+            } else {
+                if (esz == 1) {
+                    char c_r = (char)cr, c_i = (char)ci;
+                    memcpy(bytes, &c_r, 1);
+                    memcpy(bytes + esz, &c_i, 1);
+                } else if (esz == 2) {
+                    short s_r = (short)cr, s_i = (short)ci;
+                    memcpy(bytes, &s_r, 2);
+                    memcpy(bytes + esz, &s_i, 2);
+                } else if (esz == 4) {
+                    int i_r = (int)cr, i_i = (int)ci;
+                    memcpy(bytes, &i_r, 4);
+                    memcpy(bytes + esz, &i_i, 4);
+                } else {
+                    int64_t l_r = (int64_t)cr, l_i = (int64_t)ci;
+                    memcpy(bytes, &l_r, 8);
+                    memcpy(bytes + esz, &l_i, 8);
+                }
+            }
+            return;
+        }
+    }
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
         switch (ty->kind) {
@@ -2604,6 +3209,10 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             pack_init(ir, ty, e->u.init_list.elements[0], bytes, sz, ctx, loc, g);
             break;
         }
+        return;
+    }
+    if (e->kind == EX_COMPOUND_LITERAL) {
+        pack_init(ir, ty, e->u.compound.init, bytes, sz, ctx, loc, g);
         return;
     }
     if (e->kind == EX_CAST) {
@@ -3052,11 +3661,31 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         LabelMap lm;
         labelmap_init(&lm);
         g_ir_label_map = &lm;
+        g_ir_cur_fd = fd;
         for (size_t j = 0; j < fd->body.len; j++)
             assign_label_ids(&irfn, &lm, &fd->body.data[j]);
 
         for (size_t j = 0; j < fd->body.len; j++) {
             lower_stmt(&irfn, &st, &fd->body.data[j], fd);
+        }
+
+        /* If function doesn't end with an IR_RETURN, append a default return. */
+        int needs_ret = 1;
+        if (irfn.insts.len > 0) {
+            IROpcode last_op = irfn.insts.data[irfn.insts.len - 1].op;
+            if (last_op == IR_RETURN || last_op == IR_BR)
+                needs_ret = 0;
+        }
+        if (needs_ret) {
+            if (fd->ret_type.kind == TY_VOID) {
+                emit_inst_w(&irfn, IR_RETURN, -1, -1, -1, 0, 0, 0, fd->loc);
+            } else {
+                IRValue zero = new_value(&irfn);
+                int rw = fd->ret_type.width ? fd->ret_type.width : 4;
+                int ru = fd->ret_type.is_unsigned;
+                emit_inst_w(&irfn, IR_CONST, zero, -1, -1, 0, rw, ru, fd->loc);
+                emit_inst_w(&irfn, IR_RETURN, -1, zero, -1, 0, rw, ru, fd->loc);
+            }
         }
 
         g_ir_label_map = NULL;
