@@ -3,7 +3,7 @@
 package main;
 
 void b (int *);
-void c (int, int);
+int c (int, int);
 void d (int);
 
 int e;

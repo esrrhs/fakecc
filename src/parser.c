@@ -7,9 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* Parser state                                                        */
-/* ------------------------------------------------------------------ */
+static TranslationUnit *g_parser_tu = NULL;
+const StructRegistry *get_parser_structs(void) {
+    return g_parser_tu ? &g_parser_tu->structs : NULL;
+}
 
 typedef struct {
     const TokenArray *tokens;
@@ -2380,6 +2381,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
     stmt_array_init(&p.prepend);
     p.anon_counter = 0;
 
+    g_parser_tu = tu;
     /* must start with package declaration */
     if (peek(&p)->kind != TK_KW_PACKAGE) {
         const Token *t = peek(&p);
@@ -2594,6 +2596,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
         stmt_array_push(&tu->globals, p.prepend.data[i]);
     p.prepend.len = 0;
     stmt_array_free(&p.prepend);
+    g_parser_tu = NULL;
 }
 
 void parse(const TokenArray *tokens, TranslationUnit *tu) {

@@ -51,7 +51,7 @@ for src in "$@"; do
         continue
     fi
     gcc_rc=0
-    timeout "$RUN_TIMEOUT" "$WORK/$name.gcc" >"$WORK/$name.gcc.out" 2>&1 || gcc_rc=$?
+    timeout "$RUN_TIMEOUT" "$WORK/$name.gcc" >"$WORK/$name.gcc.out" 2>"$WORK/$name.gcc.stderr" || gcc_rc=$?
 
     if ! "$FAKECC" $FCC_FLAGS "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
         rc=$?
@@ -66,7 +66,7 @@ for src in "$@"; do
         continue
     fi
     fcc_rc=0
-    timeout "$RUN_TIMEOUT" "$WORK/$name.fcc" >"$WORK/$name.fcc.out" 2>&1 || fcc_rc=$?
+    timeout "$RUN_TIMEOUT" "$WORK/$name.fcc" >"$WORK/$name.fcc.out" 2>"$WORK/$name.fcc.stderr" || fcc_rc=$?
 
     if [ "$fcc_rc" = "124" ] && [ "$gcc_rc" != "124" ]; then
         printf '%-28s DIFF (fakecc build did not terminate; gcc exits %s)\n' "$name" "$gcc_rc"

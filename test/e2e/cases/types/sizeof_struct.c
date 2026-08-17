@@ -20,9 +20,9 @@ int main() {
     /* int + char: 4 + 1 + 3 padding = 8 */
     if ((int)sizeof(struct B) != 8) return 2;
 
-    /* nested under fakecc's 8-byte struct alignment: char(1) + pad(7) +
-       Inner(4@8) + int(4@12) + pad to 8 = 16 */
-    if ((int)sizeof(struct Outer) != 16) return 3;
+    /* nested struct Inner with 4-byte natural alignment:
+       char(1) + pad(3) + Inner(4@4) + int(4@8) = 12 */
+    if ((int)sizeof(struct Outer) != 12) return 3;
 
     /* sizeof does not evaluate its side effect */
     int k = 0;

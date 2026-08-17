@@ -7,6 +7,7 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 FAKECC=${1:-"$ROOT/build/fakecc"}
 shift || true
+MANIFEST=${MANIFEST:-"$ROOT/test/e2e/difftest_manifest.txt"}
 SUITE_DIR="$ROOT/test/e2e/cases"
 # Extra fakecc flags (e.g. -O0); gcc remains the unmodified oracle.
 FCC_FLAGS="${CC_FLAGS:-} $*"
@@ -15,7 +16,6 @@ if [ ! -x "$FAKECC" ]; then
     echo "difftest: fakecc not executable: $FAKECC" >&2
     exit 2
 fi
-
 # Collect every .c case except the gdb/debug suite (which uses gdb
 # breakpoints, not exit codes) and the expect_error cases (rejected
 # by design, gcc would accept them).
