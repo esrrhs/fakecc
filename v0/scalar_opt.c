@@ -897,23 +897,33 @@ int scalar_peephole(IRFunction *fn) {
     int changed = 0;
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
-        if (inst->op == IR_ADD || inst->op == IR_SUB || inst->op == IR_MUL) {
+        if (inst->op == IR_ADD || inst->op == IR_SUB || inst->op == IR_MUL ||
+            inst->op == IR_BAND || inst->op == IR_BOR || inst->op == IR_BXOR) {
             if (inst->is_float) continue;
 int lf;
 int rf;
             int64_t lv = const_value(&fn->insts, inst->a, &lf);
             int64_t rv = const_value(&fn->insts, inst->b, &rf);
             if (inst->op == IR_ADD) {
-                if (lf && lv == 0) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
+                if (lf && lv == 0) { inst->op = IR_COPY; inst->a = inst->b; inst->b = -1; changed = 1; }
                 else if (rf && rv == 0) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
             } else if (inst->op == IR_SUB) {
                 if (rf && rv == 0) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
-                else if (lf && lv == 0) { inst->op = IR_NEG; inst->b = -1; changed = 1; }
+                else if (lf && lv == 0) { inst->op = IR_NEG; inst->a = inst->b; inst->b = -1; changed = 1; }
             } else if (inst->op == IR_MUL) {
                 if (lf && lv == 0) { inst->op = IR_CONST; inst->a = -1; inst->b = -1; inst->imm = 0; changed = 1; }
                 else if (rf && rv == 0) { inst->op = IR_CONST; inst->a = -1; inst->b = -1; inst->imm = 0; changed = 1; }
                 else if (lf && lv == 1) { inst->op = IR_COPY; inst->a = inst->b; inst->b = -1; changed = 1; }
                 else if (rf && rv == 1) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
+            } else if (inst->op == IR_BAND) {
+                if (lf && lv == 0) { inst->op = IR_CONST; inst->a = -1; inst->b = -1; inst->imm = 0; changed = 1; }
+                else if (rf && rv == 0) { inst->op = IR_CONST; inst->a = -1; inst->b = -1; inst->imm = 0; changed = 1; }
+            } else if (inst->op == IR_BOR) {
+                if (lf && lv == 0) { inst->op = IR_COPY; inst->a = inst->b; inst->b = -1; changed = 1; }
+                else if (rf && rv == 0) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
+            } else if (inst->op == IR_BXOR) {
+                if (lf && lv == 0) { inst->op = IR_COPY; inst->a = inst->b; inst->b = -1; changed = 1; }
+                else if (rf && rv == 0) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
             }
         }
     }
