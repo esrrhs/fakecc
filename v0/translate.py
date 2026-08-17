@@ -759,11 +759,9 @@ def translate_file(src_path, out_path, strip_types=False):
 
 
 def strip_type_definitions(body):
-    """Keep all type definitions.  Type deduplication across files requires
-    the compiler to share types at parse time, which fakecc does not yet
-    support (types are per-TU).  Keeping all types in every file is redundant
-    but correct; the compiler's duplicate-definition check (pkg.c) catches
-    accidental conflicts."""
+    """Keep all type definitions in v0 translated files so each file remains
+    self-contained for parsing, while the package system handles pre-tokenization
+    and type sharing dynamically at runtime for non-translated user packages."""
     return body
 
 

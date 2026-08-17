@@ -1292,20 +1292,37 @@ int main(int argc, char **argv) {
         runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
+    TokenArray *user_tokens = runtime.malloc((size_t)ninputs * sizeof(TokenArray));
+    if (!user_tokens) {
+        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
+        runtime.exit(1);
+    }
+    for (int i = 0; i < ninputs; i++) {
+        size_t len = runtime.strlen(inputs[i]);
+        tu_init(&user_tus[i]);
+        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
+            token_array_init(&user_tokens[i]);
+        } else {
+            char *src = read_file(inputs[i]);
+            token_array_init(&user_tokens[i]);
+            lex(src, inputs[i], &user_tokens[i]);
+            runtime.free(src);
+        }
+    }
     for (int i = 0; i < ninputs; i++) {
         size_t len = runtime.strlen(inputs[i]);
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
             runtime.memset(&user_tus[i], 0, sizeof(user_tus[i]));
         } else {
-            char *src = read_file(inputs[i]);
-            parse_source(src, inputs[i], &user_tus[i], &pkg);
-            runtime.free(src);
+            parse_in_pkg(&user_tokens[i], &user_tus[i], &pkg);
             if (user_tus[i].package.name) {
                 TranslationUnit *one = &user_tus[i];
                 pkg_register_tus(&pkg, user_tus[i].package.name, &one, 1);
             }
         }
+        token_array_free(&user_tokens[i]);
     }
+    runtime.free(user_tokens);
     int nlinked_files = 0;
     for (size_t p = 0; p < pkg.npkgs; p++) {
         Package *pp = pkg.pkgs[p];
