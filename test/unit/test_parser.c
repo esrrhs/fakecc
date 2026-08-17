@@ -266,6 +266,15 @@ static void test_decl_with_init(void) {
     tu_free(&tu);
 }
 
+static void test_nested_function(void) {
+    TranslationUnit tu = lex_parse(
+        "package main; int main() { int nested(int x) { return x * 2; } return nested(21); }");
+    T_ASSERT_EQ_INT((int)tu.functions.len, 2);
+    T_ASSERT_STR_EQ(tu.functions.data[0].name, "nested");
+    T_ASSERT_STR_EQ(tu.functions.data[1].name, "main");
+    tu_free(&tu);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -287,5 +296,6 @@ int main(void) {
     test_chained_assign_right_assoc();
     test_var_in_binop();
     test_decl_with_init();
+    test_nested_function();
     return t_finalize();
 }

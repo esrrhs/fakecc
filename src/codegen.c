@@ -2561,12 +2561,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int need_pad = (n_stack & 1);
                 if (need_pad) emit_sub_rsp_imm32(&out->text, 8);
 
-                /* For indirect calls, load the callee into R11 BEFORE the arg
-                 * dance so it survives the push/pop clobbers.  R11 is
-                 * caller-saved and not a SysV arg reg. */
-                if (!inst->call_name)
-                    ensure_reg(&out->text, inst->call_callee, REG_R11, ra);
-
                 /* Push stack-passed args right-to-left (highest index first)
                  * so they end up at [rsp+8], [rsp+16], ... in order. */
                 for (int k = nargs - 1; k >= 0; k--) {
@@ -2605,6 +2599,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
                         emit_push_r(&out->text, REG_RAX);
                     }
+                }
+                /* For indirect calls, push the callee on top of the dance so
+                 * it cannot clobber or be clobbered by any arg in R11/etc. */
+                if (!inst->call_name) {
+                    ensure_reg(&out->text, inst->call_callee, REG_RAX, ra);
+                    emit_push_r(&out->text, REG_RAX);
+                }
+                /* Pop callee into R11 first. */
+                if (!inst->call_name) {
+                    emit_pop_r(&out->text, REG_R11);
                 }
                 /* Distribute in forward order (arg 0 on top of the dance). */
                 for (int k = 0; k < nargs; k++) {

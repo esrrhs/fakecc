@@ -89,6 +89,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "package", 7) == 0) return TK_KW_PACKAGE;
         if (memcmp(s, "default", 7) == 0) return TK_KW_DEFAULT;
         if (memcmp(s, "typedef", 7) == 0) return TK_KW_TYPEDEF;
+        if (memcmp(s, "alignof", 7) == 0) return TK_KW_ALIGNOF;
         break;
     case 8:
         if (memcmp(s, "unsigned", 8) == 0) return TK_KW_UNSIGNED;
@@ -96,6 +97,12 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "volatile", 8) == 0) return TK_KW_VOLATILE;
         if (memcmp(s, "restrict", 8) == 0) return TK_KW_RESTRICT;
         if (memcmp(s, "_Alignof", 8) == 0) return TK_KW_ALIGNOF;
+        break;
+    case 9:
+        if (memcmp(s, "__alignof", 9) == 0) return TK_KW_ALIGNOF;
+        break;
+    case 11:
+        if (memcmp(s, "__alignof__", 11) == 0) return TK_KW_ALIGNOF;
         break;
     default:
         break;
