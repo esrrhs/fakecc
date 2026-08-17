@@ -175,8 +175,12 @@ run_multi 0 "$TMP/upt_main.c"
 echo 'package main; import vec; int main(void) { return vec.scale(5) + vec.add(10, 20) - 45; }' > "$TMP/upm_main.c"
 run_multi 0 "$TMP/upm_main.c"
 
-# Negative: directory whose files disagree on the package name.
-echo 'package main; import dup; int main(void) { return 0; }' > "$TMP/updup_main.c"
-run_multi_fail "$TMP/updup_main.c"
+# Negative: 3-level cyclic package import (cycA -> cycB -> cycC -> cycA)
+mkdir -p "$TMP/pkg/cycA" "$TMP/pkg/cycB" "$TMP/pkg/cycC"
+echo 'package cycA; import cycB; int a_func(void) { return cycB.b_func(); }' > "$TMP/pkg/cycA/a.c"
+echo 'package cycB; import cycC; int b_func(void) { return cycC.c_func(); }' > "$TMP/pkg/cycB/b.c"
+echo 'package cycC; import cycA; int c_func(void) { return cycA.a_func(); }' > "$TMP/pkg/cycC/c.c"
+echo 'package main; import cycA; int main(void) { return cycA.a_func(); }' > "$TMP/cyc_main.c"
+FAKECC_PKG="$TMP/pkg:$FAKECC_PKG" run_multi_fail "$TMP/cyc_main.c"
 
 exit $FAIL

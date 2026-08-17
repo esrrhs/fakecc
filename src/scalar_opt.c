@@ -209,6 +209,11 @@ int scalar_peephole(IRFunction *fn) {
             int lf, rf;
             int64_t lv = const_value(&fn->insts, inst->a, &lf);
             int64_t rv = const_value(&fn->insts, inst->b, &rf);
+            if (inst->a >= 0 && inst->a == inst->b) {
+                if (inst->op == IR_SUB || inst->op == IR_BXOR) {
+                    inst->op = IR_CONST; inst->a = -1; inst->b = -1; inst->imm = 0; changed = 1; continue;
+                }
+            }
             if (inst->op == IR_ADD) {
                 if (lf && lv == 0) { inst->op = IR_COPY; inst->a = inst->b; inst->b = -1; changed = 1; }
                 else if (rf && rv == 0) { inst->op = IR_COPY; inst->b = -1; changed = 1; }
