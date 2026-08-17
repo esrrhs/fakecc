@@ -41,12 +41,27 @@ extern void srand(unsigned int);
 
 void abort (void);
 void exit (int);
-struct s { _Complex unsigned short x; };
-struct s gs = { 100 + 200i };
-struct s __attribute__((noinline)) foo (void) { return gs; }
-int main ()
+typedef __complex__ float cf;
+struct x { char c; cf f; } __attribute__ ((__packed__));
+extern void f2 (struct x*);
+extern void f1 (void);
+int
+main (void)
 {
-  if (foo ().x != gs.x)
-    abort ();
+  f1 ();
   exit (0);
+}
+void
+f1 (void)
+{
+  struct x s;
+  s.f = 1;
+  s.c = 42;
+  f2 (&s);
+}
+void
+f2 (struct x *y)
+{
+  if (y->f != 1 || y->c != 42)
+    abort ();
 }

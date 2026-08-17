@@ -39,14 +39,22 @@ extern void abort(void);
 extern int rand(void);
 extern void srand(unsigned int);
 
-void abort (void);
-void exit (int);
-struct s { _Complex unsigned short x; };
-struct s gs = { 100 + 200i };
-struct s __attribute__((noinline)) foo (void) { return gs; }
-int main ()
+extern void abort (void);
+extern void exit (int);
+__complex__ float foo (void)
 {
-  if (foo ().x != gs.x)
+  __complex__ float f[1];
+  __real__ f[0] = 1.0;
+  __imag__ f[0] = 1.0;
+  f[0] = __builtin_conjf (f[0]);
+  return f[0];
+}
+int main (void)
+{
+  __complex__ double d[1];
+  d[0] = foo ();
+  if (__real__ d[0] != 1.0
+      || __imag__ d[0] != -1.0)
     abort ();
   exit (0);
 }

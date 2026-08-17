@@ -347,11 +347,17 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
     const Type *at = &arg->type;
     int at_arith = (at->kind == TY_INT || at->kind == TY_FLOAT);
     int pt_arith = (ptype->kind == TY_INT || ptype->kind == TY_FLOAT);
-    if (!at_arith || !pt_arith) return;
+    int at_cplx = (at->kind == TY_STRUCT && at->tag && strncmp(at->tag, "__complex_", 10) == 0);
+    int pt_cplx = (ptype->kind == TY_STRUCT && ptype->tag && strncmp(ptype->tag, "__complex_", 10) == 0);
+    if ((!at_arith && !at_cplx) || (!pt_arith && !pt_cplx)) return;
     /* No-op when the argument already has the parameter's representation. */
-    if (at->kind == ptype->kind && at->width == ptype->width
-        && at->is_unsigned == ptype->is_unsigned)
+    if (at_cplx && pt_cplx) {
+        if (at->tag && ptype->tag && strcmp(at->tag, ptype->tag) == 0)
+            return;
+    } else if (at->kind == ptype->kind && at->width == ptype->width
+        && at->is_unsigned == ptype->is_unsigned && at_cplx == pt_cplx) {
         return;
+    }
     Type target = type_clone(*ptype);
     Expr *cast = expr_new_cast(target, arg, arg->loc);  /* clones target */
     set_type(cast, target);                             /* takes ownership */
@@ -631,7 +637,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                    e->u.assign.lvalue->loc.col,
                    "assignment of read-only variable");
         Type rt = check_expr(e->u.assign.rvalue, st, ft);
-        (void)rt;
+        coerce_arg_to_param(&e->u.assign.rvalue, &lt);
         type_free(&rt);
         set_type(e, lt);
         return type_clone(e->type);
@@ -696,6 +702,18 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 type_free(&at);
             }
             set_type(e, type_make_int(8, 0));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "conjugate builtin takes exactly 1 argument");
+            }
+            Type at = check_expr(e->u.call.args.data[0], st, ft);
+            set_type(e, at);
             return type_clone(e->type);
         }
         /* __builtin_ctzll(x) — count trailing zeros of a nonzero uint64.  The
@@ -1232,7 +1250,7 @@ static int init_elem_may_be_aggregate(const Expr *e) {
     switch (e->kind) {
     case EX_VAR: case EX_CALL: case EX_MEMBER: case EX_INDEX: case EX_DEREF:
     case EX_COMPOUND_LITERAL: case EX_ASSIGN: case EX_TERNARY: case EX_COMMA:
-    case EX_CAST:
+    case EX_CAST: case EX_BINOP:
         return 1;
     default:
         return 0;
@@ -1516,7 +1534,19 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             if (g_sema_ret_type.kind == TY_VOID)
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "void function cannot return a value");
-            discard = check_expr(s->u.value, st, ft); type_free(&discard);
+            discard = check_expr(s->u.value, st, ft);
+            if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
+                discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
+                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                set_type(c, type_clone(g_sema_ret_type));
+                s->u.value = c;
+            } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
+                       (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
+                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                set_type(c, type_clone(g_sema_ret_type));
+                s->u.value = c;
+            }
+            type_free(&discard);
         }
         *has_return = 1;
         break;

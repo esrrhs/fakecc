@@ -217,6 +217,7 @@ static Type get_or_create_complex_type(Parser *p, Type base) {
  * other declarator suffixes are handled separately by `parse_declarator`. */
 static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile, int *is_restrict, int *is_complex) {
     for (;;) {
+        if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_CONST) { *is_const = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_VOLATILE) { *is_volatile = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_RESTRICT) { *is_restrict = 1; advance(p); }
@@ -932,6 +933,14 @@ static Type parse_type_abstract(Parser *p) {
     Type t = base;
     while (peek(p)->kind == TK_STAR) {
         advance(p);
+        for (;;) {
+            if (skip_attribute(p)) continue;
+            if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
+                advance(p);
+                continue;
+            }
+            break;
+        }
         Type w = type_make_ptr(t);
         type_free(&t);
         t = w;
@@ -947,7 +956,18 @@ static Type parse_type_name(Parser *p) {
     Type base = parse_specifiers(p);
     /* Prefix pointers. */
     int ptrs = 0;
-    while (peek(p)->kind == TK_STAR) { advance(p); ptrs++; }
+    while (peek(p)->kind == TK_STAR) {
+        advance(p);
+        for (;;) {
+            if (skip_attribute(p)) continue;
+            if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
+                advance(p);
+                continue;
+            }
+            break;
+        }
+        ptrs++;
+    }
     /* Postfix array dimensions. */
     int dims[8], ndims = 0;
     while (peek(p)->kind == TK_LBRACKET) {
@@ -1845,6 +1865,7 @@ static void parse_stmt_list(Parser *p, StmtArray *out) {
 static int is_function_declaration_lookahead(Parser *p) {
     size_t save = p->pos;
     for (;;) {
+        if (skip_attribute(p)) continue;
         TokenKind tk = peek(p)->kind;
         if (tk == TK_KW_STATIC || tk == TK_KW_EXTERN || tk == TK_KW_INLINE ||
             tk == TK_KW_CONST || tk == TK_KW_VOLATILE || tk == TK_KW_RESTRICT ||
@@ -1891,6 +1912,7 @@ static int is_function_declaration_lookahead(Parser *p) {
 }
 
 static Stmt parse_stmt(Parser *p) {
+    for (;;) { if (!skip_attribute(p)) break; }
     TokenKind k = peek(p)->kind;
     /* Null statement: `;` */
     if (k == TK_SEMICOLON) {
@@ -2203,6 +2225,48 @@ static Stmt parse_stmt(Parser *p) {
     if (k == TK_KW_SWITCH) {
         return parse_switch(p);
     }
+    if (k == TK_IDENT && strcmp(peek(p)->text, "__label__") == 0) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        while (peek(p)->kind != TK_SEMICOLON && peek(p)->kind != TK_EOF)
+            advance(p);
+        if (peek(p)->kind == TK_SEMICOLON) advance(p);
+        Stmt s;
+        memset(&s, 0, sizeof(s));
+        s.kind = ST_BLOCK;
+        s.loc = loc;
+        stmt_array_init(&s.u.block);
+        return s;
+    }
+    if (k == TK_IDENT && (strcmp(peek(p)->text, "asm") == 0 ||
+                          strcmp(peek(p)->text, "__asm__") == 0 ||
+                          strcmp(peek(p)->text, "__asm") == 0)) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        while (peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_CONST ||
+               (peek(p)->kind == TK_IDENT && (strcmp(peek(p)->text, "__volatile__") == 0 ||
+                                              strcmp(peek(p)->text, "__volatile") == 0 ||
+                                              strcmp(peek(p)->text, "goto") == 0 ||
+                                              strcmp(peek(p)->text, "__inline__") == 0))) {
+            advance(p);
+        }
+        if (peek(p)->kind == TK_LPAREN) {
+            advance(p);
+            int depth = 1;
+            while (depth > 0 && peek(p)->kind != TK_EOF) {
+                if (peek(p)->kind == TK_LPAREN) depth++;
+                else if (peek(p)->kind == TK_RPAREN) depth--;
+                advance(p);
+            }
+        }
+        if (peek(p)->kind == TK_SEMICOLON) advance(p);
+        Stmt s;
+        memset(&s, 0, sizeof(s));
+        s.kind = ST_BLOCK;
+        s.loc = loc;
+        stmt_array_init(&s.u.block);
+        return s;
+    }
     /* expr-stmt */
     const Token *t = peek(p);
     Stmt s;
@@ -2239,6 +2303,7 @@ static Stmt parse_typedef_stmt(Parser *p) {
         }
         typedef_registry_add(&p->tu->typedefs, decl_name, ty);
         free(decl_name);
+        for (;;) { if (!skip_attribute(p)) break; }
         if (peek(p)->kind == TK_COMMA) {
             advance(p);
             continue;
@@ -2246,6 +2311,7 @@ static Stmt parse_typedef_stmt(Parser *p) {
         break;
     }
     type_free(&base);
+    for (;;) { if (!skip_attribute(p)) break; }
     expect_kind(p, TK_SEMICOLON, "';'");
     Stmt s;
     s.kind = ST_BLOCK;
@@ -2348,6 +2414,7 @@ static Stmt parse_switch(Parser *p) {
 }
 
 static FunctionDecl parse_function_decl(Parser *p) {
+    for (;;) { if (!skip_attribute(p)) break; }
     SourceLoc fn_loc = peek(p)->loc;
     /* Consume an optional leading storage class.  `extern` means a
      * declaration with no body; `static` gives the function LOCAL linkage;
@@ -2356,12 +2423,14 @@ static FunctionDecl parse_function_decl(Parser *p) {
     int is_extern = 0;
     int is_static = 0;
     for (;;) {
+        if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_STATIC) { advance(p); is_static = 1; }
         else if (peek(p)->kind == TK_KW_EXTERN) { advance(p); is_extern = 1; }
         else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
         else break;
     }
     Type ret_ty = parse_type_abstract(p);
+    for (;;) { if (!skip_attribute(p)) break; }
 
     const Token *name = peek(p);
     if (name->kind != TK_IDENT) {
@@ -2443,10 +2512,38 @@ static FunctionDecl parse_function_decl(Parser *p) {
         if (!skip_attribute(p)) break;
     }
 
-    if (fn.is_extern || peek(p)->kind == TK_SEMICOLON) {
+    if (fn.is_extern || peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
         /* Declaration only / forward declaration — no body. */
-        expect_kind(p, TK_SEMICOLON, "';'");
         fn.is_extern = 1;
+        while (peek(p)->kind == TK_COMMA) {
+            advance(p); /* consume ',' */
+            for (;;) { if (!skip_attribute(p)) break; }
+            const Token *next_name = peek(p);
+            if (next_name->kind != TK_IDENT) break;
+            advance(p);
+            FunctionDecl extra_fn;
+            memset(&extra_fn, 0, sizeof(extra_fn));
+            extra_fn.name = xstrdup(next_name->text);
+            extra_fn.ret_type = type_clone(ret_ty);
+            param_array_init(&extra_fn.params);
+            stmt_array_init(&extra_fn.body);
+            extra_fn.loc = next_name->loc;
+            extra_fn.is_extern = 1;
+            extra_fn.is_static = is_static;
+            if (peek(p)->kind == TK_LPAREN) {
+                advance(p);
+                while (peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) advance(p);
+                if (peek(p)->kind == TK_RPAREN) advance(p);
+            }
+            if (p->tu->functions.len >= p->tu->functions.cap) {
+                size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
+                p->tu->functions.data = realloc(p->tu->functions.data,
+                                             new_cap * sizeof(FunctionDecl));
+                p->tu->functions.cap = new_cap;
+            }
+            p->tu->functions.data[p->tu->functions.len++] = extra_fn;
+        }
+        expect_kind(p, TK_SEMICOLON, "';'");
         return fn;
     }
 
@@ -2537,6 +2634,8 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
     /* At file scope: each top-level declaration starts with a type OR
      * with `struct TAG { ... };` — a struct definition (no variable). */
     while (peek(&p)->kind != TK_EOF) {
+        if (skip_attribute(&p)) continue;
+        if (peek(&p)->kind == TK_KW_INLINE) { advance(&p); continue; }
         if (peek(&p)->kind == TK_SEMICOLON) {
             advance(&p);
             continue;

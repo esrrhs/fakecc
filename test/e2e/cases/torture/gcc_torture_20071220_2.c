@@ -39,14 +39,35 @@ extern void abort(void);
 extern int rand(void);
 extern void srand(unsigned int);
 
-void abort (void);
-void exit (int);
-struct s { _Complex unsigned short x; };
-struct s gs = { 100 + 200i };
-struct s __attribute__((noinline)) foo (void) { return gs; }
-int main ()
+extern void abort (void);
+void *__attribute__((noinline))
+baz (void **lab)
 {
-  if (foo ().x != gs.x)
+  asm volatile ("" : "+r" (lab));
+  return *lab;
+}
+static inline
+int bar (void)
+{
+  static void *b[] = { &&addr };
+  baz (b);
+addr:
+  return 17;
+}
+int __attribute__((noinline))
+f1 (void)
+{
+  return bar ();
+}
+int __attribute__((noinline))
+f2 (void)
+{
+  return bar ();
+}
+int
+main (void)
+{
+  if (f1 () != 17 || f1 () != 17 || f2 () != 17 || f2 () != 17)
     abort ();
-  exit (0);
+  return 0;
 }

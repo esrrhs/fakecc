@@ -121,10 +121,14 @@ static TokenKind keyword_kind(const char *s, size_t len) {
     case 11:
         if (memcmp(s, "__alignof__", 11) == 0) return TK_KW_ALIGNOF;
         if (memcmp(s, "__complex__", 11) == 0) return TK_KW_COMPLEX;
+        if (memcmp(s, "__extension", 11) == 0) return TK_KW_INLINE;
         break;
     case 12:
         if (memcmp(s, "__volatile__", 12) == 0) return TK_KW_VOLATILE;
         if (memcmp(s, "__restrict__", 12) == 0) return TK_KW_RESTRICT;
+        break;
+    case 13:
+        if (memcmp(s, "__extension__", 13) == 0) return TK_KW_INLINE;
         break;
     default:
         break;

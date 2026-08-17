@@ -41,12 +41,19 @@ extern void srand(unsigned int);
 
 void abort (void);
 void exit (int);
-struct s { _Complex unsigned short x; };
-struct s gs = { 100 + 200i };
-struct s __attribute__((noinline)) foo (void) { return gs; }
-int main ()
+int
+x (int i)
 {
-  if (foo ().x != gs.x)
-    abort ();
-  exit (0);
+  void *j[] = {&&x, &&y, &&z};
+  goto *j[i];
+ x:return 2;
+ y:return 3;
+ z:return 5;
+}
+int
+main (void)
+{
+  if (x (0) != 2 || x (1) != 3 || x (2) != 5)
+    abort();
+  exit(0);
 }

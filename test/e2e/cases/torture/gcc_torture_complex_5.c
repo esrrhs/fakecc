@@ -41,12 +41,21 @@ extern void srand(unsigned int);
 
 void abort (void);
 void exit (int);
-struct s { _Complex unsigned short x; };
-struct s gs = { 100 + 200i };
-struct s __attribute__((noinline)) foo (void) { return gs; }
-int main ()
+float __complex__
+p (float __complex__ a, float __complex__ b)
 {
-  if (foo ().x != gs.x)
+  return a + b;
+}
+float __complex__ x = 1.0 + 14.0 * (1.0fi);
+float __complex__ y = 7.0 + 5.0 * (1.0fi);
+float __complex__ w = 8.0 + 19.0 * (1.0fi);
+float __complex__ z;
+int
+main (void)
+{
+  z = p (x,y);
+  y = p (x, 1.0f / z);
+  if (z != w)
     abort ();
   exit (0);
 }

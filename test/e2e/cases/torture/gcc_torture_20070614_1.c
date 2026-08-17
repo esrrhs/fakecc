@@ -39,14 +39,31 @@ extern void abort(void);
 extern int rand(void);
 extern void srand(unsigned int);
 
-void abort (void);
-void exit (int);
-struct s { _Complex unsigned short x; };
-struct s gs = { 100 + 200i };
-struct s __attribute__((noinline)) foo (void) { return gs; }
-int main ()
+extern void abort (void);
+_Complex v = 3.0 + 1.0iF;
+void
+foo (_Complex z, int *x)
 {
-  if (foo ().x != gs.x)
+  if (z != v)
     abort ();
-  exit (0);
+}
+_Complex bar (_Complex z) __attribute__ ((pure));
+_Complex
+bar (_Complex z)
+{
+  return v;
+}
+int
+baz (void)
+{
+  int a, i;
+  for (i = 0; i < 6; i++)
+    foo (bar (1.0iF * i), &a);
+  return 0;
+}
+int
+main ()
+{
+  baz ();
+  return 0;
 }
