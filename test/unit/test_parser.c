@@ -275,6 +275,20 @@ static void test_nested_function(void) {
     tu_free(&tu);
 }
 
+static void test_stmt_expr(void) {
+    TranslationUnit tu = lex_parse(
+        "package main; int main() { int x = ({ int a = 1; a + 2; }); return x; }");
+    T_ASSERT_EQ_INT((int)tu.functions.len, 1);
+    T_ASSERT_EQ_INT((int)tu.functions.data[0].body.len, 2);
+    Stmt *s0 = &tu.functions.data[0].body.data[0];
+    T_ASSERT_EQ_INT((int)s0->kind, (int)ST_DECL);
+    T_ASSERT(s0->u.decl.init != NULL);
+    T_ASSERT_EQ_INT((int)s0->u.decl.init->kind, (int)EX_STMT_EXPR);
+    T_ASSERT(s0->u.decl.init->u.stmt_expr.stmts != NULL);
+    T_ASSERT_EQ_INT((int)s0->u.decl.init->u.stmt_expr.stmts->len, 2);
+    tu_free(&tu);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -297,5 +311,6 @@ int main(void) {
     test_var_in_binop();
     test_decl_with_init();
     test_nested_function();
+    test_stmt_expr();
     return t_finalize();
 }

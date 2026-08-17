@@ -853,6 +853,14 @@ Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc) {
     return e;
 }
 
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_STMT_EXPR, loc);
+    e->u.stmt_expr.stmts = malloc(sizeof(StmtArray));
+    if (!e->u.stmt_expr.stmts) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    *e->u.stmt_expr.stmts = *stmts;
+    return e;
+}
+
 void expr_free(Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -937,6 +945,12 @@ void expr_free(Expr *e) {
         break;
     case EX_ALIGNOF_TYPE:
         type_free(&e->u.alignof_t.target);
+        break;
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            stmt_array_free(e->u.stmt_expr.stmts);
+            free(e->u.stmt_expr.stmts);
+        }
         break;
     }
     type_free(&e->type);

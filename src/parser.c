@@ -50,6 +50,8 @@ static void parse_enum_body(Parser *p, EnumDef *ed);
 static int int_literal_value(const char *text);
 static Type parse_declarator(Parser *p, Type base, char **name_out);
 static FunctionDecl parse_function_decl(Parser *p);
+static void parse_stmt_list(Parser *p, StmtArray *out);
+static Stmt parse_stmt(Parser *p);
 
 /* Skip a GCC-style `__attribute__((...))` annotation if present at the current
  * position.  Tokenizes as IDENT `__attribute__`, then `(`, then a balanced
@@ -1569,6 +1571,19 @@ static Expr *parse_primary(Parser *p) {
         return parse_postfix(p, expr_new_var(ident->text, ident->loc));
     }
     if (t->kind == TK_LPAREN) {
+        if (p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACE) {
+            /* GNU C Statement Expression: ({ ... }) */
+            SourceLoc loc = peek(p)->loc;
+            advance(p); /* consume '(' */
+            advance(p); /* consume '{' */
+            StmtArray stmts;
+            stmt_array_init(&stmts);
+            parse_stmt_list(p, &stmts);
+            expect_kind(p, TK_RBRACE, "'}'");
+            expect_kind(p, TK_RPAREN, "')'");
+            Expr *e = expr_new_stmt_expr(&stmts, loc);
+            return parse_postfix(p, e);
+        }
         /* Cast?  (Type) unary   vs.   compound literal (Type){ ... }  vs.  (expr) */
         if (is_type_start(p, p->pos + 1)) {
             SourceLoc loc = peek(p)->loc;

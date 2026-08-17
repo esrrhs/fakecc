@@ -117,6 +117,7 @@ typedef enum {
     EX_INIT_LIST, /* { e1, e2, ... } — array/struct initializer; valid only as decl.init */
     EX_FLOAT_LIT, /* 1.5, 1e10, .5 — double value (width selects float vs double) */
     EX_COMPOUND_LITERAL, /* (Type){ ... } — compound literal; yields a value of the named type */
+    EX_STMT_EXPR, /* ({ ... }) — GNU statement expression */
 } ExprKind;
 
 typedef enum {
@@ -147,6 +148,7 @@ typedef enum {
     UOP_NOT,     /* !x — logical NOT */
 } UnaryOp;
 
+typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out); /* compile-time int fold */
 
@@ -188,6 +190,7 @@ struct Expr {
         struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list; /* EX_INIT_LIST — owns each element; desig_kind[i]: -1=positional, 0=[index], 1=.member (name in desig_member[i], index in desig_index[i]) */
         char   *float_text;                                    /* EX_FLOAT_LIT — source text (strdup'd), parsed at IR time for precision */
         struct { Type target_type; Expr *init; } compound; /* EX_COMPOUND_LITERAL — target_type owns sub-types; init is an EX_INIT_LIST */
+        struct { StmtArray *stmts; } stmt_expr;            /* EX_STMT_EXPR — GNU statement expression ({ ... }) */
     } u;
 };
 
@@ -220,6 +223,7 @@ Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
 Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc);
 Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc);
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc);
 void  expr_call_push_arg(Expr *e, Expr *arg);   /* takes ownership of arg */
 void  expr_call_set_callee(Expr *e, Expr *callee); /* takes ownership, frees old */
 void  expr_free(Expr *e);

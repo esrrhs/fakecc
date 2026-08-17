@@ -242,6 +242,9 @@ typedef struct {
     size_t cap;
 } SymTable;
 
+static void check_stmt(Stmt *s, SymTable *st, FunTable *ft, size_t scope_mark, int *has_return);
+static void check_stmt_list(StmtArray *body, SymTable *st, FunTable *ft, int *has_return);
+
 static void symtable_init(SymTable *st) { st->data = NULL; st->len = 0; st->cap = 0; }
 
 static void symtable_free(SymTable *st) {
@@ -1082,6 +1085,20 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             type_free(&et);
         }
         set_type(e, type_clone(e->u.compound.target_type));
+        return type_clone(e->type);
+    }
+    case EX_STMT_EXPR: {
+        int has_ret = 0;
+        check_stmt_list(e->u.stmt_expr.stmts, (SymTable *)st, ft, &has_ret);
+        Type res_type = type_make_void();
+        if (e->u.stmt_expr.stmts && e->u.stmt_expr.stmts->len > 0) {
+            Stmt *last = &e->u.stmt_expr.stmts->data[e->u.stmt_expr.stmts->len - 1];
+            if (last->kind == ST_EXPR && last->u.expr) {
+                type_free(&res_type);
+                res_type = type_clone(last->u.expr->type);
+            }
+        }
+        set_type(e, res_type);
         return type_clone(e->type);
     }
     }

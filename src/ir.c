@@ -20,6 +20,7 @@ int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 const TranslationUnit *g_ir_tu = NULL;       /* set by ir_generate */
 static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
+static const FunctionDecl *g_ir_cur_fd = NULL; /* set by ir_generate */
 
 /* Return the live struct registry during lowering, NULL outside it.
  * type_size() uses this to refresh stale cached struct widths. */
@@ -269,6 +270,12 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
         return expr_takes_addr_of(e->u.compound.init, name);
     case EX_ALIGNOF_TYPE:
         return 0; /* _Alignof(T) references no variable */
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                if (stmt_takes_addr_of(&e->u.stmt_expr.stmts->data[i], name)) return 1;
+        }
+        return 0;
     }
     return 0;
 }
@@ -755,6 +762,8 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 /* Forward decl. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
+static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
+                       const FunctionDecl *cur_fd);
 
 /* Initializer-list lowering (defined after ir_generate). */
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
@@ -1981,6 +1990,23 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (target.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
+    case EX_STMT_EXPR: {
+        size_t mark = st->len;
+        IRValue res = -1;
+        const StmtArray *stmts = e->u.stmt_expr.stmts;
+        if (stmts) {
+            for (size_t i = 0; i < stmts->len; i++) {
+                const Stmt *s = &stmts->data[i];
+                if (i == stmts->len - 1 && s->kind == ST_EXPR && s->u.expr) {
+                    res = lower_expr(fn, st, s->u.expr);
+                } else {
+                    lower_stmt(fn, st, s, g_ir_cur_fd);
+                }
+            }
+        }
+        st->len = mark;
+        return res;
+    }
     default: break;   /* EX_INIT_LIST is lowered in ST_DECL, not here */
     }
     /* unreachable */
@@ -3052,6 +3078,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         LabelMap lm;
         labelmap_init(&lm);
         g_ir_label_map = &lm;
+        g_ir_cur_fd = fd;
         for (size_t j = 0; j < fd->body.len; j++)
             assign_label_ids(&irfn, &lm, &fd->body.data[j]);
 
