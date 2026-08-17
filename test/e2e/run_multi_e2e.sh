@@ -135,6 +135,13 @@ echo 'package main; typedef int my_i; my_i val(void) { return 7; }' > "$TMP/td_a
 echo 'package main; my_i val(void); int main(void) { return val(); }' > "$TMP/td_b.c"
 run_multi 7 "$TMP/td_a.c" "$TMP/td_b.c"
 
+# Package Pre-scan (P3) test: multi-file imported package where file A uses struct/typedef defined in file B.
+mkdir -p "$TMP/pkg/prescantest"
+echo 'package prescantest; typedef int prescan_int; prescan_int get_val(void) { return 42; }' > "$TMP/pkg/prescantest/b.c"
+echo 'package prescantest; int get_val(void);' > "$TMP/pkg/prescantest/a.c"
+echo 'package main; import prescantest; int main(void) { return prescantest.get_val(); }' > "$TMP/ps_main.c"
+FAKECC_PKG="$TMP/pkg:$FAKECC_PKG" run_multi 42 "$TMP/ps_main.c"
+
 # Command-line files that reuse the builtin `runtime` package name still see each
 # other (exports are merged into the preloaded package, not dropped).
 echo 'package runtime; int helper(void) { return 40; }' > "$TMP/rt_a.c"
