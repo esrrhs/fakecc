@@ -1,0 +1,37 @@
+// expect: 0
+// Ported from GCC C-Torture: gcc.c-torture/execute/20040917-1.c
+package main;
+
+/* submitted by kenneth zadeck */
+
+static int test_var;
+
+/* the idea here is that not only is inlinable, inlinable but since it
+   is static, the cgraph node will not be marked as output.  The
+   current version of the code ignores these cgraph nodes.  */
+
+void not_inlinable()  ;
+
+static void  
+inlinable ()
+{
+  test_var = -10;
+}
+
+void 
+not_inlinable ()
+{
+  inlinable();
+}
+
+int
+main (void)
+{
+  test_var = 10;
+  /* Variable test_var should be considered call-clobbered by the call
+     to not_inlinable().  */
+  not_inlinable ();
+  if (test_var == 10)
+    return 1;
+  return 0;
+}
