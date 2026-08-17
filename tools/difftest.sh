@@ -36,6 +36,7 @@ for src in "$@"; do
     name=$(basename "$src" .c)
 
     {
+        echo '#define _GNU_SOURCE 1'
         echo '#include <stdio.h>'
         echo '#include <stdlib.h>'
         echo '#include <string.h>'
@@ -46,7 +47,7 @@ for src in "$@"; do
             -e 's/\b(fmt|io|str|mem|ctype|std|types|rt|runtime)\.//g' \
             "$src"
     } > "$WORK/$name.gcc.c"
-    if ! gcc -std=c99 -w -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
+    if ! gcc -std=gnu99 -D_GNU_SOURCE -w -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
         printf '%-28s SKIP (gcc rejected: %s)\n' "$name" "$(head -1 "$WORK/$name.gcc.err")"
         continue
     fi
