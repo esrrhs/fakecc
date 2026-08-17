@@ -342,6 +342,25 @@ static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
     return 0;
 }
 
+/* Returns 1 if the EX_MEMBER refers to a struct field whose declared type
+ * is TY_ARRAY.  This is used to detect array-to-pointer decay that sema
+ * performed in-place by overwriting the node's type with TY_PTR: in that
+ * case lower_expr must return the member's address (decay) rather than
+ * loading the pointer value stored there. */
+static int member_field_is_array(const Expr *e) {
+    if (e->kind != EX_MEMBER) return 0;
+    if (e->u.member.obj->type.kind != TY_STRUCT) return 0;
+    const char *tag = e->u.member.obj->type.tag;
+    if (!tag) return 0;
+    const StructDef *sd = struct_registry_find_c(g_ir_structs, tag);
+    if (!sd) return 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        if (strcmp(sd->members[i].name, e->u.member.name) == 0)
+            return sd->members[i].type.kind == TY_ARRAY;
+    }
+    return 0;
+}
+
 /* Is `name` pinned in the given function body? True iff array-typed
  * (its decl is TY_ARRAY, or param would be TY_PTR — the latter is fine) or
  * `&name` appears anywhere in the function. */
@@ -1657,9 +1676,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     }
     case EX_MEMBER: {
         IRValue addr = lower_lvalue_addr(fn, st, e);
-        /* Struct/array members: return address (decay). Scalar/pointer: load. */
+        /* Struct/array members: return address (decay). Scalar/pointer: load.
+         * Also handle array-to-pointer decay performed in-place by sema: the
+         * node's type may be TY_PTR but the underlying struct field is TY_ARRAY
+         * — in that case the member's address IS the pointer value. */
         if (e->type.kind == TY_STRUCT) return addr;
         if (e->type.kind == TY_ARRAY)  return addr;
+        if (e->type.kind == TY_PTR && member_field_is_array(e)) return addr;
         int bit_width = 0, bit_offset = 0, unit_width = 0;
         int is_bf = member_bitfield(e, &bit_width, &bit_offset, &unit_width);
         /* Bitfields are loaded as their storage unit (e.g. 4-byte int), then
@@ -1789,6 +1812,63 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* General path (pinned var, global, deref, index, member): go
          * through the address so the store side-effect reaches memory. */
         IRValue addr = lower_lvalue_addr(fn, st, lv);
+
+        /* Bitfield member: full RMW with masking. */
+        int bf_width = 0, bf_offset = 0, bf_unit = 0;
+        if (lv->kind == EX_MEMBER
+            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit)) {
+            int uw = bf_unit ? bf_unit : 4;
+            int mask = (1 << bf_width) - 1;
+            /* Load the full storage unit. */
+            IRValue unit = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
+            /* Extract the old bitfield value: (unit >> bf_offset) & mask. */
+            IRValue old_bf;
+            if (bf_offset > 0) {
+                IRValue sh = new_value(fn);
+                emit_inst_w(fn, IR_CONST, sh, -1, -1, bf_offset, 8, 1, e->loc);
+                IRValue shifted = new_value(fn);
+                emit_inst_w(fn, IR_SHR, shifted, unit, sh, 0, uw, 1, e->loc);
+                old_bf = shifted;
+            } else {
+                old_bf = unit;
+            }
+            IRValue m_mask = new_value(fn);
+            emit_inst_w(fn, IR_CONST, m_mask, -1, -1, mask, uw, 1, e->loc);
+            IRValue old_val = new_value(fn);
+            emit_inst_w(fn, IR_BAND, old_val, old_bf, m_mask, 0, uw, 1, e->loc);
+            /* Compute new value = (old_val +/- 1) & mask. */
+            IRValue one = new_value(fn);
+            emit_inst_w(fn, IR_CONST, one, -1, -1, 1, uw, 1, e->loc);
+            IRValue new_val = new_value(fn);
+            emit_inst_w(fn, is_inc ? IR_ADD : IR_SUB, new_val, old_val, one, 0, uw, 1, e->loc);
+            IRValue new_masked = new_value(fn);
+            emit_inst_w(fn, IR_BAND, new_masked, new_val, m_mask, 0, uw, 1, e->loc);
+            /* Shift new_masked into position. */
+            IRValue shifted_new;
+            if (bf_offset > 0) {
+                IRValue sh2 = new_value(fn);
+                emit_inst_w(fn, IR_CONST, sh2, -1, -1, bf_offset, 8, 1, e->loc);
+                shifted_new = new_value(fn);
+                emit_inst_w(fn, IR_SHL, shifted_new, new_masked, sh2, 0, uw, 1, e->loc);
+            } else {
+                shifted_new = new_masked;
+            }
+            /* Clear the bitfield in the unit and OR in the new value. */
+            IRValue clr = new_value(fn);
+            emit_inst_w(fn, IR_CONST, clr, -1, -1, ~(mask << bf_offset), uw, 1, e->loc);
+            IRValue unit_cleared = new_value(fn);
+            emit_inst_w(fn, IR_BAND, unit_cleared, unit, clr, 0, uw, 1, e->loc);
+            IRValue unit_new = new_value(fn);
+            emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_new, 0, uw, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, unit_new, 0, uw, 1, e->loc);
+            /* Return old or new bitfield value coerced to the member's type. */
+            IRValue ret_bf = is_prefix ? new_masked : old_val;
+            return coerce(fn, ret_bf, uw, 1,
+                          lv->type.width ? lv->type.width : 4,
+                          lv->type.is_unsigned, e->loc);
+        }
+
         IRValue old = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
         IRValue s = new_value(fn);
@@ -2647,12 +2727,53 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
             if (!sd) die_at(loc.file, loc.line, loc.col,
                             "unknown struct 'struct %s'", ty->tag);
             for (int i = 0; i < n; i++) {
+                const StructMember *sm = &sd->members[i];
                 IRValue off = new_value(fn);
-                emit_inst_w(fn, IR_CONST, off, -1, -1,
-                            sd->members[i].offset, 8, 1, loc);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, sm->offset, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
-                lower_init_list(fn, st, ptr, &sd->members[i].type,
-                                e->u.init_list.elements[i], loc);
+                if (sm->bit_width > 0) {
+                    /* Bitfield member: read-modify-write the storage unit so
+                     * that we don't overwrite adjacent bitfields sharing the
+                     * same storage unit at the same byte offset. */
+                    int uw = type_size(sm->type); /* unit width in bytes */
+                    int mask = (1 << sm->bit_width) - 1;
+                    /* Lower the initializer expression to get the value. */
+                    IRValue rv = lower_expr(fn, st, e->u.init_list.elements[i]);
+                    int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+                    /* Mask the value to the bitfield width. */
+                    IRValue m_mask = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, m_mask, -1, -1, mask, uw, 1, loc);
+                    IRValue val_masked = new_value(fn);
+                    IRValue rv_coerced = coerce(fn, rv, rw, ru, uw, 1, loc);
+                    emit_inst_w(fn, IR_BAND, val_masked, rv_coerced, m_mask, 0, uw, 1, loc);
+                    /* Shift into position. */
+                    IRValue shifted_val;
+                    if (sm->bit_offset > 0) {
+                        IRValue shift_v = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, shift_v, -1, -1, sm->bit_offset, 8, 1, loc);
+                        shifted_val = new_value(fn);
+                        emit_inst_w(fn, IR_SHL, shifted_val, val_masked, shift_v, 0, uw, 1, loc);
+                    } else {
+                        shifted_val = val_masked;
+                    }
+                    /* Read the current unit value. */
+                    IRValue unit_old = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, unit_old, ptr, -1, 0, uw, 1, loc);
+                    /* Clear the bitfield's bits: unit &= ~(mask << bit_offset). */
+                    IRValue clr_mask = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, clr_mask, -1, -1,
+                                ~(mask << sm->bit_offset), uw, 1, loc);
+                    IRValue unit_cleared = new_value(fn);
+                    emit_inst_w(fn, IR_BAND, unit_cleared, unit_old, clr_mask, 0, uw, 1, loc);
+                    /* OR in the new value. */
+                    IRValue unit_new = new_value(fn);
+                    emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_val, 0, uw, 1, loc);
+                    /* Store back. */
+                    emit_inst_w(fn, IR_STORE_PTR, -1, ptr, unit_new, 0, uw, 1, loc);
+                } else {
+                    lower_init_list(fn, st, ptr, &sm->type,
+                                    e->u.init_list.elements[i], loc);
+                }
             }
             break;
         }
