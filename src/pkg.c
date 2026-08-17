@@ -387,25 +387,26 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
     for (size_t i = 0; i < tu->typedefs.len; i++) {
         TypedefEntry *te = &tu->typedefs.data[i];
         if (strcmp(te->name, "va_list") == 0) continue;
-        if (typedef_registry_find(&pkg->typedefs, te->name)) continue;
-        typedef_registry_add(&pkg->typedefs, te->name, type_clone(te->type));
+        if (!typedef_registry_find(&pkg->typedefs, te->name))
+            typedef_registry_add(&pkg->typedefs, te->name, type_clone(te->type));
     }
     for (size_t i = 0; i < tu->structs.len; i++) {
         StructDef *sd = &tu->structs.data[i];
         if (strcmp(sd->tag, "__va_list_tag") == 0) continue;
         if (sd->tag && strncmp(sd->tag, "__anon_", 7) == 0) continue;
-        if (struct_registry_find(&pkg->structs, sd->tag)) continue;
-        pkg_clone_struct_into(&pkg->structs, sd);
+        if (!struct_registry_find(&pkg->structs, sd->tag))
+            pkg_clone_struct_into(&pkg->structs, sd);
     }
     for (size_t i = 0; i < tu->enums.len; i++) {
         EnumDef *ed = &tu->enums.data[i];
         if (!ed->tag) continue;
         if (ed->tag && strncmp(ed->tag, "__anon_", 7) == 0) continue;
-        if (enum_registry_find(&pkg->enums, ed->tag)) continue;
-        EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
-        for (int c = 0; c < ed->num_constants; c++)
-            enum_def_push_constant(ne, ed->constants[c].name, 1,
-                                   ed->constants[c].value, ed->loc);
+        if (!enum_registry_find(&pkg->enums, ed->tag)) {
+            EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
+            for (int c = 0; c < ed->num_constants; c++)
+                enum_def_push_constant(ne, ed->constants[c].name, 1,
+                                       ed->constants[c].value, ed->loc);
+        }
     }
 }
 
@@ -527,5 +528,13 @@ Package *pkg_register_tus(PkgContext *ctx, const char *name,
         pkg->files[i] = *tus[i];
     pkgs_push(ctx, pkg);
     build_exports(pkg);
+    /* Exports are deep-cloned into pkg->funcs/globals/typedefs/...; the shallow
+     * copies are no longer needed.  Drop them now so they never dangle once the
+     * driver frees its TUs in Phase 2 (owns_files is already 0, so pkg_ctx_free
+     * will not free them).  After this the package is identified as a user
+     * package solely by owns_files == 0. */
+    free(pkg->files);
+    pkg->files = NULL;
+    pkg->nfiles = 0;
     return pkg;
 }

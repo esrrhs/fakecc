@@ -168,15 +168,19 @@ static int is_type_start(const Parser *p, size_t pos) {
             if (pkg && pkg_find_typedef(pkg, p->tokens->data[pos + 2].text))
                 return 1;
         }
-        /* Same-package unqualified typedef (siblings / export table). */
+        /* Same-package unqualified typedef or struct (siblings / export table). */
         if (p->pkg_ctx && p->tu->package.name) {
             Package *cur = pkg_find(p->pkg_ctx, p->tu->package.name);
             if (cur && pkg_find_typedef(cur, text))
+                return 1;
+            if (cur && pkg_find_struct(cur, text))
                 return 1;
             if (cur) {
                 for (size_t f = 0; f < cur->nfiles; f++) {
                     if (&cur->files[f] == p->tu) continue;
                     if (typedef_registry_find(&cur->files[f].typedefs, text))
+                        return 1;
+                    if (struct_registry_find(&cur->files[f].structs, text))
                         return 1;
                 }
             }
@@ -2153,6 +2157,19 @@ static int case_constant_value(Parser *p, const char *text) {
     const EnumConstant *ec =
         enum_registry_find_constant(&p->tu->enums, text);
     if (ec) return ec->value;
+    /* Check same-package sibling files and the package export table. */
+    if (p->pkg_ctx && p->tu->package.name) {
+        Package *cur = pkg_find(p->pkg_ctx, p->tu->package.name);
+        if (cur) {
+            ec = enum_registry_find_constant(&cur->enums, text);
+            if (ec) return ec->value;
+            for (size_t f = 0; f < cur->nfiles; f++) {
+                if (&cur->files[f] == p->tu) continue;
+                ec = enum_registry_find_constant(&cur->files[f].enums, text);
+                if (ec) return ec->value;
+            }
+        }
+    }
     {
         const Token *t = peek(p);
         die_at(t->loc.file, t->loc.line, t->loc.col,

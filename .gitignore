@@ -68,3 +68,6 @@ v0/fakecc-1
 v0/fakecc-2
 v0/test_min_build
 v0/__pycache__/
+*.o
+bootstrap_test
+all_defines.txt

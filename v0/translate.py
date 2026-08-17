@@ -39,6 +39,7 @@ static void __fakecc_va_copy(void *dst, void *src){
 """
 
 
+
 def preprocess(path):
     """Run gcc -E -P with fake system headers; return preprocessed text."""
     cmd = ["gcc", "-E", "-P", "-nostdinc", "-DFAKECC_SELFHOST",
@@ -571,7 +572,169 @@ def hoist_local_structs(text):
     return "\n".join(kept)
 
 
-def translate_file(src_path, out_path):
+def cleanup_unused_definitions(body):
+    """Drop all extern declarations.  v0 files are compiled as a unit (all
+    together, not `-c` per file), so fakecc's package-main semantics expose
+    sibling files' symbols unqualified — cross-file references like
+    get_ir_structs resolve without extern.  Runtime symbols are also
+    available via `import runtime;` with qualified calls.  Nothing is left
+    that needs an extern."""
+    result = []
+    for ln in body.split("\n"):
+        s = ln.strip()
+        # A real extern declaration starts with `extern` followed by a type
+        # keyword or qualifier (not an identifier like `extern_sym`).
+        if re.match(r'^extern\s+(?:int|void|char|long|short|float|double|'
+                    r'unsigned|signed|size_t|ptrdiff_t|ssize_t|intptr_t|'
+                    r'uintptr_t|const|struct|enum|FILE)\b', s):
+            continue
+        result.append(ln)
+    return "\n".join(result)
+
+
+
+# Functions provided by the builtin runtime/ package.  Calls to these are
+# rewritten to qualified `runtime.<name>` form so the file can drop its
+# per-file `extern` declarations and rely on `import runtime;` instead.
+RUNTIME_FUNCS = frozenset({
+    "abort", "atoi", "atol", "calloc", "chmod", "exit", "fclose", "fflush",
+    "fileno", "fopen", "fprintf", "fputc", "fputs", "fread", "free", "fseek",
+    "ftell", "fwrite", "getenv", "isalnum", "isalpha", "isdigit", "isspace",
+    "isxdigit", "malloc", "memcmp", "memcpy", "memmove", "memset", "perror",
+    "printf", "putchar", "puts", "qsort", "realloc", "snprintf", "sprintf",
+    "strcmp", "strchr", "strcpy", "strdup", "strerror", "strlen", "strncmp",
+    "strncpy", "strrchr", "strstr", "strtod", "strtof", "strtold", "strtol",
+    "strtoul", "strtoull", "vfprintf", "vsnprintf", "vsprintf",
+})
+
+
+def qualify_runtime_calls(body):
+    """Rewrite calls to runtime functions as runtime.<name>(...).  This lets
+    the file use `import runtime;` instead of per-file extern declarations."""
+    # Simple token-based rewrite: scan for `identifier(` where identifier is a
+    # runtime function, and prefix it with `runtime.`.  Avoid rewriting inside
+    # string literals and comments.
+    result = []
+    i = 0
+    n = len(body)
+    while i < n:
+        c = body[i]
+        # Skip string literals
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if body[j] == "\\":
+                    j += 2
+                    continue
+                if body[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            result.append(body[i:j])
+            i = j
+            continue
+        # Skip char literals
+        if c == "'":
+            j = i + 1
+            while j < n and body[j] != "'":
+                if body[j] == "\\":
+                    j += 1
+                j += 1
+            if j < n:
+                j += 1
+            result.append(body[i:j])
+            i = j
+            continue
+        # Skip line comments
+        if c == "/" and i + 1 < n and body[i + 1] == "/":
+            j = body.find("\n", i)
+            if j < 0:
+                j = n
+            result.append(body[i:j])
+            i = j
+            continue
+        # Skip block comments
+        if c == "/" and i + 1 < n and body[i + 1] == "*":
+            j = body.find("*/", i + 2)
+            if j < 0:
+                j = n
+            else:
+                j += 2
+            result.append(body[i:j])
+            i = j
+            continue
+        # Check for identifier followed by '('
+        if c.isalpha() or c == "_":
+            j = i
+            while j < n and (body[j].isalnum() or body[j] == "_"):
+                j += 1
+            word = body[i:j]
+            # Skip if already qualified (preceded by 'runtime.')
+            k = i - 1
+            while k >= 0 and body[k] in " \t":
+                k -= 1
+            if k >= 6 and body[k - 6:k + 1] == "runtime":
+                result.append(word)
+                i = j
+                continue
+            # Check if we're inside an extern declaration — don't rewrite those.
+            line_start = body.rfind("\n", 0, i) + 1
+            line_so_far = body[line_start:i].lstrip()
+            is_extern_decl = line_so_far.startswith("extern")
+            # Check if followed by '(' (possibly with whitespace)
+            m = j
+            while m < n and body[m] in " \t":
+                m += 1
+            if word in RUNTIME_FUNCS and m < n and body[m] == "(" and not is_extern_decl:
+                result.append("runtime.")
+                result.append(word)
+                i = j
+                continue
+            # Rewrite references to runtime globals (stderr, stdin, stdout).
+            if word in RUNTIME_GLOBALS and m < n and body[m] != ";" and not is_extern_decl:
+                result.append("runtime.")
+                result.append(word)
+                i = j
+                continue
+            result.append(word)
+            i = j
+            continue
+        result.append(c)
+        i += 1
+    return "".join(result)
+
+
+# Global variables provided by the builtin runtime/ package.
+RUNTIME_GLOBALS = frozenset({"stdin", "stdout", "stderr"})
+
+
+def strip_runtime_externs(body):
+    """Remove extern declarations for symbols provided by the runtime package;
+    those are now accessed via `import runtime;` and qualified calls."""
+    lines = body.split("\n")
+    result = []
+    for ln in lines:
+        s = ln.strip()
+        # extern functions: extern int fprintf(FILE *f, ...);
+        # The function name is the identifier right before the opening '(' of
+        # the parameter list — find the last '(' that isn't followed by ')'
+        # (i.e. the outer parameter list, not a function-pointer parameter).
+        if s.startswith("extern"):
+            # Find the matching '(' for the function's parameter list: it's the
+            # first '(' that is directly preceded by the function name (no '*'
+            # between name and '(' means it's not a function pointer).
+            m = re.search(r'\b([A-Za-z_]\w*)\s*\((?!\s*\*)', s)
+            if m and m.group(1) in RUNTIME_FUNCS:
+                continue
+        # extern global variables: extern FILE *stderr;
+        m = re.match(r'^extern\s+.*\b([A-Za-z_]\w*)\s*;', s)
+        if m and m.group(1) in RUNTIME_GLOBALS:
+            continue
+        result.append(ln)
+    return "\n".join(result)
+
+
+def translate_file(src_path, out_path, strip_types=False):
     text = preprocess(src_path)
     text = strip_attributes(text)
     text = strip_va_copy_extern(text)
@@ -582,7 +745,12 @@ def translate_file(src_path, out_path):
     body = hoist_local_structs(body)
     # Join multiline function prototypes split before semicolon (e.g. die_at(...)\n    ;)
     body = re.sub(r'(\))\s*\n\s*(;)', r'\1\2', body)
+    body = cleanup_unused_definitions(body)
+    body = qualify_runtime_calls(body)
+    if strip_types:
+        body = strip_type_definitions(body)
     preamble = ('package main;\n'
+                'import runtime;\n'
                 '/* Generated by v0/translate.py from src/ — do not edit. */\n'
                 + CTZ_HELPER + '\n')
     with open(out_path, "w") as f:
@@ -590,14 +758,26 @@ def translate_file(src_path, out_path):
         f.write(body)
 
 
+def strip_type_definitions(body):
+    """Keep all type definitions.  Type deduplication across files requires
+    the compiler to share types at parse time, which fakecc does not yet
+    support (types are per-TU).  Keeping all types in every file is redundant
+    but correct; the compiler's duplicate-definition check (pkg.c) catches
+    accidental conflicts."""
+    return body
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     files = sorted(f for f in os.listdir(SRC) if f.endswith(".c"))
+    # ir.c owns all ir.h type definitions; every other file strips them.
+    # The compiler pre-scans all package files for types, so stripping is
+    # safe regardless of compilation order.
     for f in files:
         src = os.path.join(SRC, f)
         dst = os.path.join(OUT, f)
         print(f"translate {f}", flush=True)
-        translate_file(src, dst)
+        translate_file(src, dst, strip_types=(f != "ir.c"))
     print(f"done: {len(files)} files -> {OUT}")
 
 

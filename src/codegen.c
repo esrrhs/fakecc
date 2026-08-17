@@ -1377,6 +1377,13 @@ static void cv_sleb(Buffer *b, int64_t v) {
 #define CV_OP_entry_value  0xa3
 
 static void cv_entry_reg(Buffer *b, int dwarf_reg) {
+    /* DW_OP_entry_value's inner expression describes where the value lives at
+     * the call site. gdb 8.2 only accepts a SINGLE DW_OP_reg* op there —
+     * "DW_OP_entry_value is supported only for single DW_OP_reg*". For
+     * registers 0..31 a single DW_OP_regN (0x50+n) satisfies that; for higher
+     * (XMM) registers we must use DW_OP_regx, which gdb rejects inside
+     * entry_value — but those are rare as call args, so we fall back to
+     * regx and accept the gdb limitation for XMM args. */
     Buffer inner; buffer_init(&inner);
     if (dwarf_reg >= 0 && dwarf_reg <= 31)
         cv_u8(&inner, (uint8_t)(CV_OP_reg0 + dwarf_reg));
@@ -1392,6 +1399,22 @@ static void cv_entry_reg(Buffer *b, int dwarf_reg) {
 
 /* Is SSA `v` the live value of formal parameter with SysV index `param_idx`
  * just before instruction index `at`? */
+/* Resolve the alloca slot an SSA value points to: if the value is an
+ * IR_ADDR, return its alloca_slot operand; if it is an IR_Load from a
+ * slot whose defining STORE used an IR_ADDR, resolve transitively. */
+static int resolve_alloca_slot(const IRFunction *fn, IRValue v, size_t at) {
+    if (v < 0) return -1;
+    for (size_t i = at; i > 0; ) {
+        i--;
+        const IRInst *ins = &fn->insts.data[i];
+        if (ins->dst != v) continue;
+        if (ins->op == IR_ADDR) return ins->a;
+        if (ins->op == IR_LOAD) return resolve_alloca_slot(fn, ins->a, i);
+        return -1;
+    }
+    return -1;
+}
+
 static int ssa_is_param(const IRFunction *fn, IRValue v, int param_idx, size_t at) {
     if (v < 0 || param_idx < 0) return 0;
     int dbg_i = -1;
@@ -1410,6 +1433,10 @@ static int ssa_is_param(const IRFunction *fn, IRValue v, int param_idx, size_t a
         }
         return 0;
     }
+    /* Walk backwards from `at`. The value is the parameter's if it traces
+     * back to the IR_PARAM def, following IR_DBG_VALUE markers AND the
+     * spill/reload cycle (IR_STORE to alloca slot, IR_LOAD from it) that -O0
+     * emits for pinned parameters. */
     for (size_t i = at; i > 0; ) {
         i--;
         const IRInst *ins = &fn->insts.data[i];
@@ -1417,6 +1444,23 @@ static int ssa_is_param(const IRFunction *fn, IRValue v, int param_idx, size_t a
             return ins->a == v;
         if (ins->op == IR_PARAM && (int)ins->imm == param_idx && ins->dst == v)
             return 1;
+        /* IR_LOAD dst, slot / IR_LOAD_PTR dst, ptr — dst is a reload of what
+         * was stored at an alloca slot. Resolve the slot both values refer
+         * to (following IR_ADDR) and check if a STORE to that slot wrote the
+         * parameter value. */
+        if ((ins->op == IR_LOAD || ins->op == IR_LOAD_PTR) && ins->dst == v) {
+            int slot = resolve_alloca_slot(fn, ins->a, i);
+            if (slot < 0) return 0;
+            /* Find the last STORE/STORE_PTR whose address resolves to this slot. */
+            for (size_t j = i; j > 0; ) {
+                j--;
+                const IRInst *s = &fn->insts.data[j];
+                if ((s->op == IR_STORE || s->op == IR_STORE_PTR)
+                    && resolve_alloca_slot(fn, s->a, j) == slot)
+                    return ssa_is_param(fn, s->b, param_idx, j);
+            }
+            return 0;
+        }
     }
     return 0;
 }
@@ -1468,6 +1512,18 @@ static int synth_call_value(const IRFunction *fn, IRValue v, size_t at,
             cv_sleb(out, (int64_t)def->imm);
         }
         return 1;
+    case IR_LOAD: {
+        /* -O0 reload from a stack slot — trace what was stored there. */
+        int slot = def->a;
+        for (size_t i = at; i > 0; ) {
+            i--;
+            const IRInst *s = &fn->insts.data[i];
+            if (s->op == IR_STORE && s->a == slot)
+                return synth_call_value(fn, s->b, i, param_entry_dwarf,
+                                        nparams, out, depth + 1);
+        }
+        return 0;
+    }
     case IR_COPY:
     case IR_SEXT:
     case IR_ZEXT:
@@ -1721,6 +1777,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (fn->insts.data[j].op == IR_PARAM) nparams++;
             else break;
         }
+        /* Parser caps params at 16 (parser.c:611); 64 is a 4x guard so a
+         * future relaxation can't silently overflow these stack arrays. */
+        if (nparams > 64) nparams = 64;
         int arrive_reg[64];
         int arrive_is_xmm[64];
         int stack_off[64];
@@ -2460,6 +2519,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * Args that don't fit in their class's registers are passed
                  * on the stack at [rsp+8], [rsp+16], ...  Decide each arg's
                  * target up front. */
+                /* call_nargs is bounded by IR_CALL_MAX_ARGS (ir.h:81); clamp as
+                 * a guard so a raised cap can't overflow these stack arrays. */
+                if (nargs > IR_CALL_MAX_ARGS) nargs = IR_CALL_MAX_ARGS;
                 int target_reg[IR_CALL_MAX_ARGS];   /* native reg code, -1=stack */
                 int target_is_xmm[IR_CALL_MAX_ARGS];
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
@@ -2612,9 +2674,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                     || cv.len == 0) {
                                     /* Fallback: the ABI register at the call
                                      * (best-effort; may fail for outer frames
-                                     * when the reg is caller-saved). */
-                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31)
+                                     * when the reg is caller-saved). gdb 8.2
+                                     * requires DW_OP_reg in a call-value
+                                     * expression to carry DW_OP_piece. */
+                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31) {
                                         cv_u8(&cv, (uint8_t)(CV_OP_reg0 + cp->dwarf_reg));
+                                        cv_u8(&cv, 0x93); /* DW_OP_piece */
+                                        cv_uleb(&cv, 4);  /* int is 4 bytes */
+                                    }
                                 }
                                 cp->value_expr_len = cv.len;
                                 if (cv.len) {
@@ -2667,8 +2734,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                                       entry_dwarf, nparams,
                                                       &cv, 0)
                                     || cv.len == 0) {
-                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31)
+                                    /* Fallback: the ABI register. gdb 8.2
+                                     * requires DW_OP_reg in a call-value
+                                     * expression to carry DW_OP_piece. */
+                                    if (cp->dwarf_reg >= 0 && cp->dwarf_reg <= 31) {
                                         cv_u8(&cv, (uint8_t)(CV_OP_reg0 + cp->dwarf_reg));
+                                        cv_u8(&cv, 0x93); /* DW_OP_piece */
+                                        cv_uleb(&cv, 4);  /* int is 4 bytes */
+                                    }
                                 }
                                 cp->value_expr_len = cv.len;
                                 if (cv.len) {
@@ -3251,10 +3324,29 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
                 if (idv->alloca_ssa >= 0 && idv->alloca_ssa < fn->next_value_id
                     && alloca_off[idv->alloca_ssa] != 0) {
-                    /* Still in memory (array, address-taken, or -O0): one
-                     * stack slot for the variable's whole lifetime. */
-                    dv.loc_kind = DBG_LOC_FBREG;
-                    dv.rbp_offset = alloca_off[idv->alloca_ssa];
+                    /* Still in memory (array, address-taken, or -O0). */
+                    if (idv->kind == IR_DBG_PARAM && idv->param_idx >= 0
+                        && idv->param_idx < nparams
+                        && arrive_reg[idv->param_idx] >= 0) {
+                        /* -O0: the parameter arrives in a register but is
+                         * spilled to the stack slot during the prologue.
+                         * A debugger can stop inside the prologue (before the
+                         * spill), so emit a location list — register during
+                         * the prologue, stack slot from prologue_end_pc on. */
+                        int p = idv->param_idx;
+                        int dreg = arrive_is_xmm[p] ? (17 + arrive_reg[p])
+                                                     : reg_to_dwarf(arrive_reg[p]);
+                        dbg_var_add_range(&dv, start_offset, prologue_end_pc,
+                                          DBG_LOC_REG, 0, dreg);
+                        dbg_var_add_range(&dv, prologue_end_pc, fn_end_pc,
+                                          DBG_LOC_FBREG,
+                                          alloca_off[idv->alloca_ssa], -1);
+                    } else {
+                        /* Arrives on the stack (or not a param): one stack
+                         * slot for the whole lifetime. */
+                        dv.loc_kind = DBG_LOC_FBREG;
+                        dv.rbp_offset = alloca_off[idv->alloca_ssa];
+                    }
                 } else if (idv->kind == IR_DBG_PARAM && idv->param_idx >= 0
                            && idv->param_idx < nparams) {
                     int p = idv->param_idx;
