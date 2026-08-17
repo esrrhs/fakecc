@@ -3059,6 +3059,25 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             lower_stmt(&irfn, &st, &fd->body.data[j], fd);
         }
 
+        /* If function doesn't end with an IR_RETURN, append a default return. */
+        int needs_ret = 1;
+        if (irfn.insts.len > 0) {
+            IROpcode last_op = irfn.insts.data[irfn.insts.len - 1].op;
+            if (last_op == IR_RETURN || last_op == IR_BR)
+                needs_ret = 0;
+        }
+        if (needs_ret) {
+            if (fd->ret_type.kind == TY_VOID) {
+                emit_inst_w(&irfn, IR_RETURN, -1, -1, -1, 0, 0, 0, fd->loc);
+            } else {
+                IRValue zero = new_value(&irfn);
+                int rw = fd->ret_type.width ? fd->ret_type.width : 4;
+                int ru = fd->ret_type.is_unsigned;
+                emit_inst_w(&irfn, IR_CONST, zero, -1, -1, 0, rw, ru, fd->loc);
+                emit_inst_w(&irfn, IR_RETURN, -1, zero, -1, 0, rw, ru, fd->loc);
+            }
+        }
+
         g_ir_label_map = NULL;
         labelmap_free(&lm);
 

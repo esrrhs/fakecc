@@ -1201,5 +1201,13 @@ int fold_const_int(const Expr *e, long long *out) {
         default: return 0;  /* BOP_AND/BOP_OR (logical) */
         }
     }
+    if (e->kind == EX_SIZEOF_TYPE) {
+        *out = type_size(e->u.sizeof_t.target);
+        return 1;
+    }
+    if (e->kind == EX_ALIGNOF_TYPE) {
+        *out = type_align(e->u.alignof_t.target);
+        return 1;
+    }
     return 0;
 }

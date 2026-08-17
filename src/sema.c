@@ -1428,6 +1428,14 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         break;
     }
     case ST_EXPR:
+        if (s->u.expr && s->u.expr->kind == EX_CALL
+            && s->u.expr->u.call.callee
+            && s->u.expr->u.call.callee->kind == EX_VAR) {
+            const char *cname = s->u.expr->u.call.callee->u.var.name;
+            if (strcmp(cname, "exit") == 0 || strcmp(cname, "abort") == 0) {
+                *has_return = 1;
+            }
+        }
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
     case ST_RETURN:
@@ -1715,7 +1723,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         labelset_free(&ls);
 
         /* A void function need not return a value; a non-void function must
-         * have a return statement. */
+         * have a return statement (or terminate via exit/abort). */
         if (!has_return && fn->ret_type.kind != TY_VOID) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "function '%s' must have a return statement",
