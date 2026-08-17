@@ -114,8 +114,8 @@ run_case() {
     args+=(-ex "${cmd//\{src\}/$src}")
   done < <(read_annotations "$src" "gdb")
 
-  local out
-  out=$(timeout "$RUN_TIMEOUT" gdb "${args[@]}" "$bin" 2>&1)
+  local gdb_out="$TMP/gdb_out"
+  timeout "$RUN_TIMEOUT" gdb "${args[@]}" "$bin" >"$gdb_out" 2>&1 || true
 
   # Level-specific expectations use the flag as a suffix: gdb_expect_O0 etc.
   local level_key="gdb_expect${flags//-/_}"
@@ -123,7 +123,7 @@ run_case() {
   local pat bad=0
   while IFS= read -r pat; do
     [ -z "$pat" ] && continue
-    if ! echo "$out" | grep -Eq "$pat"; then
+    if ! grep -Eq "$pat" "$gdb_out"; then
       echo "FAIL $name [$label] (gdb output missing: $pat)"
       bad=1
     fi
@@ -131,14 +131,14 @@ run_case() {
 
   while IFS= read -r pat; do
     [ -z "$pat" ] && continue
-    if echo "$out" | grep -Eq "$pat"; then
+    if grep -Eq "$pat" "$gdb_out"; then
       echo "FAIL $name [$label] (gdb output should not contain: $pat)"
       bad=1
     fi
   done < <(read_annotations "$src" "gdb_reject")
 
   if [ "$bad" != "0" ]; then
-    echo "--- gdb output ---"; echo "$out" | sed 's/^/  /'; echo "---"
+    echo "--- gdb output ---"; sed 's/^/  /' "$gdb_out"; echo "---"
     n_fail=$((n_fail + 1)); FAIL=1; return
   fi
 
