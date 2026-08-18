@@ -66,7 +66,8 @@ typedef enum {
     IR_FADDR,       /* dst = &function; function name in call_name.  Result is 8-byte ptr. */
     IR_LADDR,       /* dst = &label; imm = label_id.  Result is 8-byte ptr. */
     IR_JMP_PTR,     /* jmp *a — indirect jump to pointer value in a */
-    IR_FRAME_ADDR,  /* dst = %rbp — frame pointer */
+    IR_FRAME_ADDR,  /* dst = %rbp — frame pointer (at level imm) */
+    IR_RETURN_ADDR, /* dst = return address (at level imm) */
     IR_DYN_ALLOCA,  /* dst = alloca(a) — dynamic stack allocation of size a */
     /* Debug-only marker (emitted by mem2reg under -g): from here on, source
      * variable `imm` (index into fn->dbg_vars) lives in SSA value `a`.

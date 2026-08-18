@@ -1741,9 +1741,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return -1;
         }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_frame_address") == 0) {
-            if (e->u.call.args.len > 0) lower_expr(fn, st, e->u.call.args.data[0]);
+            long long level = 0;
+            if (e->u.call.args.len > 0) fold_const_int(e->u.call.args.data[0], &level);
             IRValue v = new_value(fn);
-            emit_inst_w(fn, IR_FRAME_ADDR, v, -1, -1, 0, 8, 1, e->loc);
+            emit_inst_w(fn, IR_FRAME_ADDR, v, -1, -1, (int64_t)level, 8, 1, e->loc);
+            set_value_type(fn, v, 8, 1);
+            return v;
+        }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_return_address") == 0) {
+            long long level = 0;
+            if (e->u.call.args.len > 0) fold_const_int(e->u.call.args.data[0], &level);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_RETURN_ADDR, v, -1, -1, (int64_t)level, 8, 1, e->loc);
             set_value_type(fn, v, 8, 1);
             return v;
         }

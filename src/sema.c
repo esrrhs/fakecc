@@ -614,7 +614,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type ret = type_default_int();
             if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0)
                 ret = type_make_void();
-            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0)
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0)
                 ret = type_make_ptr(type_make_void());
             else if (strcmp(bname, "__builtin_strlen") == 0)
                 ret = type_make_int(8, 1);

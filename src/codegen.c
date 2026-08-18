@@ -1133,10 +1133,20 @@ static void emit_load_base_off(Buffer *b, int dst, int base, int off) {
     emit_rex_wrb(b, 1, dst, base);
     emit_byte(b, 0x8B);
     if (off >= -128 && off <= 127) {
-        emit_modrm(b, 1, dst, base);
+        if ((base & 7) == 4) {
+            emit_modrm(b, 1, dst, 4);
+            emit_byte(b, 0x24);
+        } else {
+            emit_modrm(b, 1, dst, base);
+        }
         emit_byte(b, (uint8_t)(off & 0xFF));
     } else {
-        emit_modrm(b, 2, dst, base);
+        if ((base & 7) == 4) {
+            emit_modrm(b, 2, dst, 4);
+            emit_byte(b, 0x24);
+        } else {
+            emit_modrm(b, 2, dst, base);
+        }
         emit_int32(b, off);
     }
 }
@@ -1146,10 +1156,20 @@ static void emit_store_base_off32(Buffer *b, int base, int reg, int off) {
     emit_rex_wrb(b, 0, reg, base);
     emit_byte(b, 0x89);
     if (off >= -128 && off <= 127) {
-        emit_modrm(b, 1, reg, base);
+        if ((base & 7) == 4) {
+            emit_modrm(b, 1, reg, 4);
+            emit_byte(b, 0x24);
+        } else {
+            emit_modrm(b, 1, reg, base);
+        }
         emit_byte(b, (uint8_t)(off & 0xFF));
     } else {
-        emit_modrm(b, 2, reg, base);
+        if ((base & 7) == 4) {
+            emit_modrm(b, 2, reg, 4);
+            emit_byte(b, 0x24);
+        } else {
+            emit_modrm(b, 2, reg, base);
+        }
         emit_int32(b, off);
     }
 }
@@ -1159,10 +1179,20 @@ static void emit_load_base_off32(Buffer *b, int dst, int base, int off) {
     emit_rex_wrb(b, 0, dst, base);
     emit_byte(b, 0x8B);
     if (off >= -128 && off <= 127) {
-        emit_modrm(b, 1, dst, base);
+        if ((base & 7) == 4) {
+            emit_modrm(b, 1, dst, 4);
+            emit_byte(b, 0x24);
+        } else {
+            emit_modrm(b, 1, dst, base);
+        }
         emit_byte(b, (uint8_t)(off & 0xFF));
     } else {
-        emit_modrm(b, 2, dst, base);
+        if ((base & 7) == 4) {
+            emit_modrm(b, 2, dst, 4);
+            emit_byte(b, 0x24);
+        } else {
+            emit_modrm(b, 2, dst, base);
+        }
         emit_int32(b, off);
     }
 }
@@ -2437,6 +2467,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_FRAME_ADDR: {
                 int target = dr >= 0 ? dr : REG_RAX;
                 emit_mov_rr(&out->text, target, REG_RBP);
+                int level = (int)inst->imm;
+                for (int i = 0; i < level; i++) {
+                    emit_load_base_off(&out->text, target, target, 0);
+                }
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+
+            case IR_RETURN_ADDR: {
+                int target = dr >= 0 ? dr : REG_RAX;
+                emit_mov_rr(&out->text, target, REG_RBP);
+                int level = (int)inst->imm;
+                for (int i = 0; i < level; i++) {
+                    emit_load_base_off(&out->text, target, target, 0);
+                }
+                emit_load_base_off(&out->text, target, target, 8);
                 if (dr < 0)
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
