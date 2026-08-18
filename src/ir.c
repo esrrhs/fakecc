@@ -1834,26 +1834,30 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
             if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
-                || strcmp(cname, "va_arg") == 0) {
+                || strcmp(cname, "va_arg") == 0
+                || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_va_end") == 0
+                || strcmp(cname, "__builtin_va_arg") == 0) {
                 IRValue ap = lower_expr(fn, st, e->u.call.args.data[0]);
                 /* va_start's second arg (last named param) must stay live so the
                  * optimizer doesn't eliminate the param as dead.  Lower it and
                  * keep it in call_args (codegen ignores it). */
                 IRValue last = -1;
-                if (strcmp(cname, "va_start") == 0
-                    && e->u.call.args.len >= 2)
+                int is_start = (strcmp(cname, "va_start") == 0 || strcmp(cname, "__builtin_va_start") == 0);
+                int is_end = (strcmp(cname, "va_end") == 0 || strcmp(cname, "__builtin_va_end") == 0);
+                int is_arg = (strcmp(cname, "va_arg") == 0 || strcmp(cname, "__builtin_va_arg") == 0);
+                if (is_start && e->u.call.args.len >= 2)
                     last = lower_expr(fn, st, e->u.call.args.data[1]);
                 IRInst inst;
                 memset(&inst, 0, sizeof(inst));
                 inst.op = IR_CALL;
                 inst.a = -1; inst.b = -1; inst.imm = 0;
                 inst.loc = e->loc;
-                inst.call_name = xstrdup(cname);
+                inst.call_name = xstrdup(is_start ? "va_start" : is_end ? "va_end" : "va_arg");
                 inst.call_callee = -1;
                 inst.call_nargs = (last >= 0) ? 2 : 1;
                 inst.call_args[0] = ap;
                 inst.call_args[1] = last;
-                if (strcmp(cname, "va_arg") == 0) {
+                if (is_arg) {
                     if (e->va_arg_type.kind == TY_STRUCT) {
                         int sz = type_size(e->va_arg_type);
                         if (sz <= 0) sz = 8;

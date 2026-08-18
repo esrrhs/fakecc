@@ -1302,7 +1302,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
-            && runtime.strcmp(e->u.call.callee->u.var.name, "va_start") == 0) {
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "va_start") == 0 ||
+                runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_start") == 0)) {
             if (e->u.call.args.len != 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_start takes exactly 2 arguments (va_list, last_param)");
@@ -1320,7 +1321,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
-            && runtime.strcmp(e->u.call.callee->u.var.name, "va_arg") == 0) {
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "va_arg") == 0 ||
+                runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_arg") == 0)) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_arg takes exactly 2 arguments (va_list, type)");
@@ -1341,7 +1343,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
-            && runtime.strcmp(e->u.call.callee->u.var.name, "va_end") == 0) {
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "va_end") == 0 ||
+                runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_end") == 0)) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_end takes exactly 1 argument (va_list)");

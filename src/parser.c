@@ -1589,7 +1589,8 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
             /* The `va_arg(list, T)` builtin's second argument is a TYPE, not
              * an expression. Detect it by callee name and parse accordingly. */
             int is_va_arg = (lhs->kind == EX_VAR
-                             && strcmp(lhs->u.var.name, "va_arg") == 0);
+                             && (strcmp(lhs->u.var.name, "va_arg") == 0 ||
+                                 strcmp(lhs->u.var.name, "__builtin_va_arg") == 0));
             if (peek(p)->kind != TK_RPAREN) {
                 for (;;) {
                     /* Arguments are assignment-expressions, NOT

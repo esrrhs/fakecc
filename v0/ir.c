@@ -2317,23 +2317,27 @@ IRValue pr;
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
             if (runtime.strcmp(cname, "va_start") == 0 || runtime.strcmp(cname, "va_end") == 0
-                || runtime.strcmp(cname, "va_arg") == 0) {
+                || runtime.strcmp(cname, "va_arg") == 0
+                || runtime.strcmp(cname, "__builtin_va_start") == 0 || runtime.strcmp(cname, "__builtin_va_end") == 0
+                || runtime.strcmp(cname, "__builtin_va_arg") == 0) {
                 IRValue ap = lower_expr(fn, st, e->u.call.args.data[0]);
                 IRValue last = -1;
-                if (runtime.strcmp(cname, "va_start") == 0
-                    && e->u.call.args.len >= 2)
+                int is_start = (runtime.strcmp(cname, "va_start") == 0 || runtime.strcmp(cname, "__builtin_va_start") == 0);
+                int is_end = (runtime.strcmp(cname, "va_end") == 0 || runtime.strcmp(cname, "__builtin_va_end") == 0);
+                int is_arg = (runtime.strcmp(cname, "va_arg") == 0 || runtime.strcmp(cname, "__builtin_va_arg") == 0);
+                if (is_start && e->u.call.args.len >= 2)
                     last = lower_expr(fn, st, e->u.call.args.data[1]);
                 IRInst inst;
                 runtime.memset(&inst, 0, sizeof(inst));
                 inst.op = IR_CALL;
                 inst.a = -1; inst.b = -1; inst.imm = 0;
                 inst.loc = e->loc;
-                inst.call_name = xstrdup(cname);
+                inst.call_name = xstrdup(is_start ? "va_start" : is_end ? "va_end" : "va_arg");
                 inst.call_callee = -1;
                 inst.call_nargs = (last >= 0) ? 2 : 1;
                 inst.call_args[0] = ap;
                 inst.call_args[1] = last;
-                if (runtime.strcmp(cname, "va_arg") == 0) {
+                if (is_arg) {
                     if (e->va_arg_type.kind == TY_STRUCT) {
                         int sz = type_size(e->va_arg_type);
                         if (sz <= 0) sz = 8;

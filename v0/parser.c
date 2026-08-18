@@ -1951,7 +1951,8 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
             advance(p);
             Expr *call = expr_new_call(lhs, loc);
             int is_va_arg = (lhs->kind == EX_VAR
-                             && runtime.strcmp(lhs->u.var.name, "va_arg") == 0);
+                             && (runtime.strcmp(lhs->u.var.name, "va_arg") == 0 ||
+                                 runtime.strcmp(lhs->u.var.name, "__builtin_va_arg") == 0));
             if (peek(p)->kind != TK_RPAREN) {
                 for (;;) {
                     Expr *arg = parse_assign(p);
