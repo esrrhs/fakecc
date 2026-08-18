@@ -3779,18 +3779,34 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                 } else {
                     if (cur_idx < sd->num_members) sm = &sd->members[cur_idx++];
                 }
-                if (!sm) continue;
-                int msz = type_size(sm->type);
-                if (msz == 0 && sm->type.kind == TY_ARRAY && sm->type.elem_type) {
+                if (sm->bit_width > 0) {
+                    long long fv = 0;
                     const Expr *el = e->u.init_list.elements[i];
-                    if (el->kind == EX_STR)
-                        msz = el->u.str.len + 1;
-                    else if (el->kind == EX_INIT_LIST)
-                        msz = el->u.init_list.num_elements * type_size(*sm->type.elem_type);
+                    if (el->kind == EX_INT_LIT) fv = el->u.int_val;
+                    else fold_const_int(el, &fv);
+                    int uw = type_size(sm->type);
+                    if (uw > 8) uw = 8;
+                    if (uw < 1) uw = 1;
+                    uint64_t mask = bitfield_mask64(sm->bit_width);
+                    uint64_t val_masked = ((uint64_t)fv) & mask;
+                    uint64_t unit = 0;
+                    memcpy(&unit, bytes + sm->offset, uw);
+                    unit &= ~(mask << sm->bit_offset);
+                    unit |= (val_masked << sm->bit_offset);
+                    memcpy(bytes + sm->offset, &unit, uw);
+                } else {
+                    int msz = type_size(sm->type);
+                    if (msz == 0 && sm->type.kind == TY_ARRAY && sm->type.elem_type) {
+                        const Expr *el = e->u.init_list.elements[i];
+                        if (el->kind == EX_STR)
+                            msz = el->u.str.len + 1;
+                        else if (el->kind == EX_INIT_LIST)
+                            msz = el->u.init_list.num_elements * type_size(*sm->type.elem_type);
+                    }
+                    pack_init(ir, &sm->type, e->u.init_list.elements[i],
+                              bytes + sm->offset,
+                              msz, ctx, loc, g);
                 }
-                pack_init(ir, &sm->type, e->u.init_list.elements[i],
-                          bytes + sm->offset,
-                          msz, ctx, loc, g);
             }
             break;
         }
