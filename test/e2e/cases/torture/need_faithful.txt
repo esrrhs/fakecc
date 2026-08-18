@@ -4,7 +4,6 @@
 # gcc_torture_* e2e ports). Wrap the original faithfully; if a case
 # fails, fix the compiler. Nested-function tests live in UNSUPPORTED.txt.
 
-20010904-1.c
 20010904-2.c
 20010924-1.c
 20020412-1.c
