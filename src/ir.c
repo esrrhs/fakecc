@@ -2788,7 +2788,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
          * A block-scope `extern` function declaration needs no binding at all:
          * the call site dispatches on the callee's TY_FUNC type, and binding
          * the name as a data global would misroute an address-of. */
-        if (s->u.decl.storage_class == 2) {
+        if (dty.kind == TY_FUNC || s->u.decl.storage_class == 2) {
             if (dty.kind != TY_FUNC)
                 irsymtable_push_global(st, s->u.decl.name, dty);
             break;
@@ -3079,11 +3079,9 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_BLOCK: {
-        size_t mark = st->len;
         for (size_t i = 0; i < s->u.block.len; i++) {
             lower_stmt(fn, st, &s->u.block.data[i], cur_fd);
         }
-        st->len = mark;
         break;
     }
     case ST_GOTO: {

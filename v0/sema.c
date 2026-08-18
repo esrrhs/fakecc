@@ -164,12 +164,14 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int enum_id;
+    int bitfield_width;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -181,13 +183,15 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -467,6 +471,7 @@ struct FunctionDecl {
     StmtArray body;
     SourceLoc loc;
     int is_variadic;
+    int is_unprototyped;
     int is_extern;
     int is_static;
 };typedef struct FunctionDecl FunctionDecl;
@@ -520,6 +525,10 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
 void struct_def_fixup_self_types(StructDef *sd);
+const StructMember *struct_lookup_member(const StructRegistry *reg,
+                                         const StructDef *sd,
+                                         const char *name,
+                                         int *offset_out);
 struct FunctionArray {
     FunctionDecl *data;
     size_t len;
@@ -647,6 +656,7 @@ struct FunSig {
     const char *name;
     int arity;
     int is_variadic;
+    int is_unprototyped;
     int is_external;
     Type ret_type;
     Type param_types[16];
@@ -669,6 +679,7 @@ static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     s->name = fn->name;
     s->arity = (int)fn->params.len;
     s->is_variadic = fn->is_variadic;
+    s->is_unprototyped = fn->is_unprototyped;
     s->is_external = fn->is_extern;
     s->ret_type = fn->ret_type;
     s->loc = fn->loc;
@@ -696,6 +707,7 @@ static void ftab_push_export(FunTable *t, const PkgFuncExport *ex) {
     s->name = ex->name;
     s->arity = ex->arity;
     s->is_variadic = ex->is_variadic;
+    s->is_unprototyped = 0;
     s->is_external = 1;
     s->ret_type = ex->ret_type;
     s->loc = ex->loc;
@@ -723,6 +735,7 @@ static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) 
                          ex->loc);
     fn->loc = ex->loc;
     fn->is_variadic = ex->is_variadic;
+    fn->is_unprototyped = 0;
     fn->is_extern = 1;
     fn->is_static = 0;
 }
@@ -817,6 +830,13 @@ static void collect_labels(LabelSet *ls, const Stmt *s) {
         if (s->u.for_s.init) collect_labels(ls, s->u.for_s.init);
         collect_labels(ls, s->u.for_s.body);
         break;
+    case ST_SWITCH:
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            const SwitchCase *arm = &s->u.switch_s.cases[i];
+            for (size_t j = 0; j < arm->stmts.len; j++)
+                collect_labels(ls, &arm->stmts.data[j]);
+        }
+        break;
     case ST_BLOCK:
         for (size_t i = 0; i < s->u.block.len; i++)
             collect_labels(ls, &s->u.block.data[i]);
@@ -884,22 +904,34 @@ static int type_rank(Type t) {
 }
 static Type integer_promote(Type t) {
     if (t.kind == TY_FLOAT) return t;
+    if (t.bitfield_width > 0 && t.width <= 4) {
+        if (!t.is_unsigned || t.bitfield_width < 32)
+            return type_make_int(4, 0);
+        return type_make_int(4, 1);
+    }
     if (t.width < 4) return type_make_int(4, 0);
     return t;
 }
 static Type usual_arith_conv(Type a, Type b) {
     a = integer_promote(a);
     b = integer_promote(b);
+    int bfw = 0;
+    if (a.bitfield_width > 0 && b.bitfield_width > 0)
+        bfw = a.bitfield_width > b.bitfield_width ? a.bitfield_width : b.bitfield_width;
+    Type res;
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
-        return type_rank(a) >= type_rank(b) ? a : b;
-    if (a.kind == TY_FLOAT) return a;
-    if (b.kind == TY_FLOAT) return b;
-    if (a.width == b.width && a.is_unsigned == b.is_unsigned) return a;
-    if (a.is_unsigned == b.is_unsigned) return a.width > b.width ? a : b;
-    Type u = a.is_unsigned ? a : b;
-    Type s = a.is_unsigned ? b : a;
-    if (u.width >= s.width) return u;
-    return s;
+        res = type_rank(a) >= type_rank(b) ? a : b;
+    else if (a.kind == TY_FLOAT) res = a;
+    else if (b.kind == TY_FLOAT) res = b;
+    else if (a.width == b.width && a.is_unsigned == b.is_unsigned) res = a;
+    else if (a.is_unsigned == b.is_unsigned) res = a.width > b.width ? a : b;
+    else {
+        Type u = a.is_unsigned ? a : b;
+        Type s = a.is_unsigned ? b : a;
+        res = (u.width >= s.width) ? u : s;
+    }
+    res.bitfield_width = bfw;
+    return res;
 }
 static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
 static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
@@ -1134,6 +1166,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_float(4);
             else if (runtime.strcmp(bname, "__builtin_fabsl") == 0)
                 ret = type_make_float(16);
+            else if (runtime.strcmp(bname, "__builtin_bswap64") == 0)
+                ret = type_make_int(8, 1);
+            else if (runtime.strcmp(bname, "__builtin_bswap32") == 0)
+                ret = type_make_int(4, 1);
+            else if (runtime.strcmp(bname, "__builtin_bswap16") == 0)
+                ret = type_make_int(2, 1);
             Type fn = type_make_func(ret, ((void*)0), 0);
             Type fp = type_make_ptr(fn);
             type_free(&fn);
@@ -1314,11 +1352,31 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         }
         Type callee_ty = check_expr(e->u.call.callee, st, ft);
         if (e->u.call.callee->kind == EX_VAR) {
+            const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
             const FunSig *sig = ftab_find(ft, e->u.call.callee->u.var.name);
+            if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC) {
+                const Type *fty = &local_fn_sym->type;
+                type_free(&callee_ty);
+                if ((int)e->u.call.args.len != fty->func_nparams && fty->func_nparams > 0) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "function '%s' takes %d argument%s but %zu given",
+                           e->u.call.callee->u.var.name, fty->func_nparams,
+                           fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
+                }
+                for (size_t i = 0; i < e->u.call.args.len; i++) {
+                    Type at = check_expr(e->u.call.args.data[i], st, ft);
+                    type_free(&at);
+                    if (fty->func_params && (int)i < fty->func_nparams)
+                        coerce_arg_to_param(&e->u.call.args.data[i],
+                                            &fty->func_params[i]);
+                }
+                set_type(e, type_clone(*fty->func_ret));
+                return type_clone(e->type);
+            }
             if (sig) {
                 type_free(&callee_ty);
-                if (sig->is_variadic) {
-                    if ((int)e->u.call.args.len < sig->arity) {
+                if (sig->is_variadic || sig->is_unprototyped) {
+                    if (!sig->is_unprototyped && (int)e->u.call.args.len < sig->arity) {
                         die_at(e->loc.file, e->loc.line, e->loc.col,
                                "function '%s' takes at least %d argument%s but %zu given",
                                e->u.call.callee->u.var.name, sig->arity,
@@ -1403,7 +1461,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
     case EX_ADDR: {
         Type ot = check_expr(e->u.addr.operand, st, ft);
         ExprKind ok = e->u.addr.operand->kind;
-        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER) {
+        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER
+            && ok != EX_COMPOUND_LITERAL) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "cannot take address of rvalue");
         }
@@ -1479,16 +1538,17 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "unknown struct 'struct %s'", ot.tag);
         }
-        const StructMember *m = ((void*)0);
-        for (int i = 0; i < sd->num_members; i++)
-            if (runtime.strcmp(sd->members[i].name, e->u.member.name) == 0)
-                { m = &sd->members[i]; break; }
+        const StructMember *m = struct_lookup_member(g_sema_structs, sd,
+                                                     e->u.member.name, ((void*)0));
         if (!m) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "struct '%s' has no member '%s'", ot.tag, e->u.member.name);
         }
         type_free(&ot);
-        set_type(e, type_clone(m->type));
+        Type mt = type_clone(m->type);
+        if (m->bit_width > 0)
+            mt.bitfield_width = m->bit_width;
+        set_type(e, mt);
         return type_clone(e->type);
     }
     case EX_INC_DEC: {
@@ -1866,7 +1926,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "cannot declare variable '%s' of type void",
                    s->u.decl.name ? s->u.decl.name : "(null)");
-        if (s->u.decl.storage_class == 2) {
+        if (s->u.decl.type.kind == TY_FUNC || s->u.decl.storage_class == 2) {
             symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
             break;
         }
@@ -1905,7 +1965,9 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             && s->u.expr->u.call.callee
             && s->u.expr->u.call.callee->kind == EX_VAR) {
             const char *cname = s->u.expr->u.call.callee->u.var.name;
-            if (runtime.strcmp(cname, "exit") == 0 || runtime.strcmp(cname, "abort") == 0) {
+            if (runtime.strcmp(cname, "exit") == 0 || runtime.strcmp(cname, "abort") == 0
+                || runtime.strcmp(cname, "__builtin_exit") == 0 || runtime.strcmp(cname, "__builtin_abort") == 0
+                || runtime.strcmp(cname, "__builtin_trap") == 0) {
                 *has_return = 1;
             }
         }
@@ -2042,6 +2104,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                 ft.data[idx].is_external = 0;
                 ft.data[idx].arity = (int)fn->params.len;
                 ft.data[idx].is_variadic = fn->is_variadic;
+                ft.data[idx].is_unprototyped = fn->is_unprototyped;
                 ft.data[idx].ret_type = fn->ret_type;
                 ft.data[idx].loc = fn->loc;
                 for (int k = 0; k < ft.data[idx].arity && k < 16; k++)
@@ -2187,9 +2250,21 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         g_sema_labels = ((void*)0);
         labelset_free(&ls);
         if (!has_return && fn->ret_type.kind != TY_VOID) {
-            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                   "function '%s' must have a return statement",
-                   fn->name ? fn->name : "(nullptr)");
+            if (fn->name && runtime.strcmp(fn->name, "main") == 0) {
+                if (fn->body.len > 0) {
+                    const Stmt *last = &fn->body.data[fn->body.len - 1];
+                    if (last->kind == ST_EXPR && last->u.expr && last->u.expr->kind == EX_CALL) {
+                    } else {
+                        die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                               "function '%s' must have a return statement",
+                               fn->name ? fn->name : "(nullptr)");
+                    }
+                } else {
+                    die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                           "function '%s' must have a return statement",
+                           fn->name ? fn->name : "(nullptr)");
+                }
+            }
         }
     }
     ftab_free(&ft);

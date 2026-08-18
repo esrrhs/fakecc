@@ -830,7 +830,27 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type callee_ty = check_expr(e->u.call.callee, st, ft);
         /* Direct call: callee is `EX_VAR` naming a known function. */
         if (e->u.call.callee->kind == EX_VAR) {
+            const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
             const FunSig *sig = ftab_find(ft, e->u.call.callee->u.var.name);
+            if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC) {
+                const Type *fty = &local_fn_sym->type;
+                type_free(&callee_ty);
+                if ((int)e->u.call.args.len != fty->func_nparams && fty->func_nparams > 0) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "function '%s' takes %d argument%s but %zu given",
+                           e->u.call.callee->u.var.name, fty->func_nparams,
+                           fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
+                }
+                for (size_t i = 0; i < e->u.call.args.len; i++) {
+                    Type at = check_expr(e->u.call.args.data[i], st, ft);
+                    type_free(&at);
+                    if (fty->func_params && (int)i < fty->func_nparams)
+                        coerce_arg_to_param(&e->u.call.args.data[i],
+                                            &fty->func_params[i]);
+                }
+                set_type(e, type_clone(*fty->func_ret));
+                return type_clone(e->type);
+            }
             if (sig) {
                 type_free(&callee_ty);
                 if (sig->is_variadic || sig->is_unprototyped) {
@@ -1497,11 +1517,10 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "cannot declare variable '%s' of type void",
                    s->u.decl.name ? s->u.decl.name : "(null)");
-        /* Block-scope `extern` (e.g. `extern void foo();`) is a re-declaration
-         * that refers to a file-scope symbol.  It carries no storage of its own,
-         * so register the name in the scope (a subsequent use resolves through
-         * it) and skip init/storage processing. */
-        if (s->u.decl.storage_class == 2) {
+        /* Block-scope `extern` (e.g. `extern void foo();`) or block-scope function
+         * declaration (e.g. `float fx();`) is a declaration referring to a file-scope
+         * symbol. It carries no local storage, so register the name in scope and break. */
+        if (s->u.decl.type.kind == TY_FUNC || s->u.decl.storage_class == 2) {
             symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
             break;
         }
@@ -1548,7 +1567,9 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             && s->u.expr->u.call.callee
             && s->u.expr->u.call.callee->kind == EX_VAR) {
             const char *cname = s->u.expr->u.call.callee->u.var.name;
-            if (strcmp(cname, "exit") == 0 || strcmp(cname, "abort") == 0) {
+            if (strcmp(cname, "exit") == 0 || strcmp(cname, "abort") == 0
+                || strcmp(cname, "__builtin_exit") == 0 || strcmp(cname, "__builtin_abort") == 0
+                || strcmp(cname, "__builtin_trap") == 0) {
                 *has_return = 1;
             }
         }
@@ -1563,9 +1584,10 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "non-void function must return a value");
         } else {
-            /* GNU C: `return expr;` in a void function is a warning, not an error. */
+            if (g_sema_ret_type.kind == TY_VOID)
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "void function cannot return a value");
             discard = check_expr(s->u.value, st, ft);
-            if (g_sema_ret_type.kind != TY_VOID) {
             if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
                 discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
                 Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
@@ -1576,7 +1598,6 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                 Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
                 set_type(c, type_clone(g_sema_ret_type));
                 s->u.value = c;
-            }
             }
             type_free(&discard);
         }
@@ -1892,9 +1913,27 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         g_sema_labels = NULL;
         labelset_free(&ls);
 
-        /* Falling off a non-void function is undefined in ISO C but accepted
-         * by GCC (and by c-torture); the return register is then garbage. */
-        (void)has_return;
+        /* A void function need not return a value; in fakecc, main must have a
+         * return statement (or terminate via exit/abort/delegating call).
+         * Falling off a non-main function is allowed (returns undefined/garbage). */
+        if (!has_return && fn->ret_type.kind != TY_VOID) {
+            if (fn->name && strcmp(fn->name, "main") == 0) {
+                if (fn->body.len > 0) {
+                    const Stmt *last = &fn->body.data[fn->body.len - 1];
+                    if (last->kind == ST_EXPR && last->u.expr && last->u.expr->kind == EX_CALL) {
+                        /* main ending in call is tolerated */
+                    } else {
+                        die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                               "function '%s' must have a return statement",
+                               fn->name ? fn->name : "(nullptr)");
+                    }
+                } else {
+                    die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                           "function '%s' must have a return statement",
+                           fn->name ? fn->name : "(nullptr)");
+                }
+            }
+        }
     }
 
     ftab_free(&ft);

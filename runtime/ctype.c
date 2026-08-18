@@ -22,3 +22,7 @@ int isxdigit(int c) {
 int isspace(int c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }
+
+int isprint(int c) {
+    return c >= 0x20 && c <= 0x7E;
+}

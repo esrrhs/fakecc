@@ -2096,6 +2096,78 @@ static int is_function_declaration_lookahead(Parser *p) {
     return is_func;
 }
 
+static int is_function_definition_lookahead(Parser *p) {
+    size_t save = p->pos;
+    for (;;) {
+        if (skip_attribute(p)) continue;
+        TokenKind tk = peek(p)->kind;
+        if (tk == TK_KW_STATIC || tk == TK_KW_EXTERN || tk == TK_KW_INLINE ||
+            tk == TK_KW_CONST || tk == TK_KW_VOLATILE || tk == TK_KW_RESTRICT ||
+            tk == TK_KW_SIGNED || tk == TK_KW_UNSIGNED ||
+            tk == TK_KW_VOID || tk == TK_KW_INT || tk == TK_KW_CHAR ||
+            tk == TK_KW_SHORT || tk == TK_KW_LONG || tk == TK_KW_FLOAT ||
+            tk == TK_KW_DOUBLE || tk == TK_KW_BOOL || tk == TK_KW_COMPLEX) {
+            advance(p);
+        } else if (tk == TK_KW_STRUCT || tk == TK_KW_UNION || tk == TK_KW_ENUM) {
+            advance(p);
+            if (peek(p)->kind == TK_IDENT) advance(p);
+            if (peek(p)->kind == TK_LBRACE) {
+                int depth = 0;
+                do {
+                    if (peek(p)->kind == TK_LBRACE) depth++;
+                    else if (peek(p)->kind == TK_RBRACE) depth--;
+                    advance(p);
+                } while (depth > 0 && peek(p)->kind != TK_EOF);
+            }
+        } else if (tk == TK_IDENT
+                   && (strcmp(peek(p)->text, "register") == 0
+                       || strcmp(peek(p)->text, "auto") == 0)) {
+            advance(p);
+        } else if (tk == TK_IDENT
+                   && find_typedef_with_fallback(p, peek(p)->text)) {
+            advance(p);
+        } else {
+            break;
+        }
+    }
+    while (peek(p)->kind == TK_STAR || peek(p)->kind == TK_KW_CONST ||
+           peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) advance(p);
+    for (;;) { if (!skip_attribute(p)) break; }
+    int saw_name = 0;
+    if (peek(p)->kind == TK_IDENT) {
+        advance(p);
+        saw_name = 1;
+    }
+    for (;;) { if (!skip_attribute(p)) break; }
+    while (peek(p)->kind == TK_LBRACKET) {
+        advance(p);
+        while (peek(p)->kind != TK_RBRACKET && peek(p)->kind != TK_EOF) advance(p);
+        if (peek(p)->kind == TK_RBRACKET) advance(p);
+    }
+    int is_def = 0;
+    if (saw_name && peek(p)->kind == TK_LPAREN) {
+        advance(p);
+        int depth = 1;
+        while (depth > 0 && peek(p)->kind != TK_EOF) {
+            if (peek(p)->kind == TK_LPAREN) depth++;
+            else if (peek(p)->kind == TK_RPAREN) depth--;
+            advance(p);
+        }
+        while (skip_attribute(p)) {}
+        /* Handle K&R parameter declarations before '{' */
+        while (is_type_start(p, p->pos)) {
+            advance(p);
+            while (peek(p)->kind != TK_SEMICOLON && peek(p)->kind != TK_EOF) advance(p);
+            if (peek(p)->kind == TK_SEMICOLON) advance(p);
+            while (skip_attribute(p)) {}
+        }
+        while (skip_attribute(p)) {}
+        is_def = (peek(p)->kind == TK_LBRACE);
+    }
+    p->pos = save;
+    return is_def;
+}
+
 static Stmt parse_stmt(Parser *p) {
     for (;;) { if (!skip_attribute(p)) break; }
     TokenKind k = peek(p)->kind;
@@ -2117,7 +2189,7 @@ static Stmt parse_stmt(Parser *p) {
         if (k == TK_KW_TYPEDEF) {
             return parse_typedef_stmt(p);
         }
-        if (is_function_declaration_lookahead(p)) {
+        if (is_function_definition_lookahead(p)) {
             FunctionDecl fn = parse_function_decl(p);
             if (p->tu->functions.len >= p->tu->functions.cap) {
                 size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
@@ -3052,7 +3124,14 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
             /* Global variable: reuse the decl-stmt parser via parse_stmt. */
             Stmt s = parse_stmt(&p);
             if (s.kind == ST_BLOCK) {
-                stmt_free(&s);
+                for (size_t k = 0; k < s.u.block.len; k++) {
+                    if (s.u.block.data[k].kind == ST_DECL) {
+                        stmt_array_push(&tu->globals, s.u.block.data[k]);
+                    } else {
+                        stmt_free(&s.u.block.data[k]);
+                    }
+                }
+                free(s.u.block.data);
             } else if (s.kind != ST_DECL) {
                 die_at(s.loc.file, s.loc.line, s.loc.col,
                        "only variable declarations allowed at file scope (got stmt kind %d, next token '%s')",

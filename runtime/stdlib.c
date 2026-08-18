@@ -12,6 +12,10 @@ void abort(void) {
     __syscall(231, 127);
 }
 
+int abs(int x) { return x < 0 ? -x : x; }
+long labs(long x) { return x < 0 ? -x : x; }
+long long llabs(long long x) { return x < 0 ? -x : x; }
+
 double fabs(double x) { return x < 0.0 ? -x : x; }
 float fabsf(float x) { return x < 0.0f ? -x : x; }
 

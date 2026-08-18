@@ -497,12 +497,14 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int enum_id;
+    int bitfield_width;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -514,13 +516,15 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -800,6 +804,7 @@ struct FunctionDecl {
     StmtArray body;
     SourceLoc loc;
     int is_variadic;
+    int is_unprototyped;
     int is_extern;
     int is_static;
 };typedef struct FunctionDecl FunctionDecl;
@@ -853,6 +858,10 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
 void struct_def_fixup_self_types(StructDef *sd);
+const StructMember *struct_lookup_member(const StructRegistry *reg,
+                                         const StructDef *sd,
+                                         const char *name,
+                                         int *offset_out);
 struct FunctionArray {
     FunctionDecl *data;
     size_t len;
@@ -1790,6 +1799,59 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
     int ap_reg = REG_RAX;
     int dst = inst->dst;
     int is_float = inst->is_float;
+    if (!is_float && inst->imm > 0 && inst->call_nargs >= 2
+        && inst->call_args[1] >= 0) {
+        int nbytes = (int)inst->imm;
+        int n8 = (nbytes + 7) / 8;
+        if (n8 < 1) n8 = 1;
+        int destv = inst->call_args[1];
+        ensure_reg(b, destv, REG_RSI, ra);
+        int ov_step = (nbytes + 7) & ~7;
+        if (ov_step < 8) ov_step = 8;
+        if (!inst->force_stack && n8 <= 2) {
+            emit_load_base_off32(b, REG_RCX, ap_reg, 0);
+            emit_cmp_imm32(b, REG_RCX, 48 - 8 * (n8 - 1));
+            size_t jae_ov = emit_jcc_rel32(b, 0x83);
+            emit_load_base_off(b, REG_R11, ap_reg, 16);
+            emit_add_rr(b, REG_R11, REG_RCX);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            }
+            emit_load_base_off32(b, REG_RCX, ap_reg, 0);
+            emit_add_imm32(b, REG_RCX, 8 * n8);
+            emit_store_base_off32(b, ap_reg, REG_RCX, 0);
+            size_t jmp_end = emit_jmp_rel32(b);
+            size_t ov_off = b->len;
+            patch_rel32(b, jae_ov, ov_off);
+            emit_load_base_off(b, REG_R11, ap_reg, 8);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            }
+            emit_add_imm32(b, REG_R11, ov_step);
+            emit_store_base_off(b, ap_reg, REG_R11, 8);
+            patch_rel32(b, jmp_end, b->len);
+        } else {
+            emit_load_base_off(b, REG_R11, ap_reg, 8);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            }
+            emit_add_imm32(b, REG_R11, ov_step);
+            emit_store_base_off(b, ap_reg, REG_R11, 8);
+        }
+        if (dst >= 0) {
+            if (ra && dst < ra->num_values && ra->reg[dst] >= 0
+                && ra->reg[dst] < 16) {
+                int dr = ra->reg[dst];
+                if (dr != REG_RSI) emit_mov_rr(b, dr, REG_RSI);
+            } else {
+                spill_if_needed(b, dst, REG_RSI, ra);
+            }
+        }
+        return;
+    }
     if (!is_float) {
         emit_load_base_off32(b, REG_RCX, ap_reg, 0);
         emit_cmp_imm32(b, REG_RCX, 48);
@@ -2795,6 +2857,91 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                     } else {
                         spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    }
+                    break;
+                }
+                if (inst->call_name && runtime.strncmp(inst->call_name, "__builtin_", 10) == 0
+                    && (runtime.strstr(inst->call_name, "clz") || runtime.strstr(inst->call_name, "ctz")
+                        || runtime.strstr(inst->call_name, "ffs") || runtime.strstr(inst->call_name, "popcount")
+                        || runtime.strstr(inst->call_name, "parity") || runtime.strstr(inst->call_name, "clrsb")
+                        || runtime.strstr(inst->call_name, "bswap"))) {
+                    const char *bn = inst->call_name;
+                    int w64 = 1;
+                    if (runtime.strstr(bn, "bswap16")) w64 = 0;
+                    else if (runtime.strstr(bn, "bswap32")) w64 = 0;
+                    else if (runtime.strstr(bn, "bswap64")) w64 = 1;
+                    else {
+                        size_t L = runtime.strlen(bn);
+                        if (!(L >= 2 && bn[L-2] == 'l' && bn[L-1] == 'l')
+                            && !(L >= 1 && bn[L-1] == 'l'))
+                            w64 = 0;
+                    }
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    if (!w64 && !runtime.strstr(bn, "bswap16")) {
+                        emit_rex_wrb(&out->text, 0, REG_RCX, REG_RCX);
+                        emit_byte(&out->text, 0x89);
+                        emit_modrm(&out->text, 3, REG_RCX & 7, REG_RCX & 7);
+                    }
+                    if (runtime.strstr(bn, "bswap")) {
+                        if (runtime.strstr(bn, "16")) {
+                            emit_mov_rr(&out->text, REG_RAX, REG_RCX);
+                            emit_and_imm32(&out->text, REG_RAX, 0xFFFF);
+                            emit_byte(&out->text, 0x66);
+                            emit_byte(&out->text, 0xC1);
+                            emit_modrm(&out->text, 3, 1, REG_RAX);
+                            emit_byte(&out->text, 8);
+                        } else {
+                            emit_mov_rr(&out->text, REG_RAX, REG_RCX);
+                            if (w64) emit_rex_wrb(&out->text, 1, 0, REG_RAX);
+                            emit_byte(&out->text, 0x0F);
+                            emit_byte(&out->text, (uint8_t)(0xC8 + (REG_RAX & 7)));
+                        }
+                    } else if (runtime.strstr(bn, "clrsb")) {
+                        emit_mov_rr(&out->text, REG_R11, REG_RCX);
+                        emit_mov_imm(&out->text, REG_RCX, w64 ? 63 : 31);
+                        emit_mov_rr(&out->text, REG_RAX, REG_R11);
+                        emit_rex_wrb(&out->text, w64, 0, REG_RAX);
+                        emit_byte(&out->text, 0xD3);
+                        emit_modrm(&out->text, 3, 7, REG_RAX & 7);
+                        emit_bitxor_rr(&out->text, REG_RAX, REG_R11);
+                        emit_byte(&out->text, 0xF3);
+                        emit_rex_wrb(&out->text, w64, REG_RAX, REG_RAX);
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xBD);
+                        emit_modrm(&out->text, 3, REG_RAX & 7, REG_RAX & 7);
+                        emit_add_imm32(&out->text, REG_RAX, -1);
+                    } else if (runtime.strstr(bn, "ffs")) {
+                        emit_xor_rr(&out->text, REG_RAX);
+                        emit_byte(&out->text, 0xF3);
+                        emit_rex_wrb(&out->text, w64, REG_RDX, REG_RCX);
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xBC);
+                        emit_modrm(&out->text, 3, REG_RDX & 7, REG_RCX & 7);
+                        emit_add_imm32(&out->text, REG_RDX, 1);
+                        emit_test_rr(&out->text, REG_RCX);
+                        emit_rex_wrb(&out->text, 1, REG_RAX, REG_RDX);
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0x45);
+                        emit_modrm(&out->text, 3, REG_RAX & 7, REG_RDX & 7);
+                    } else {
+                        uint8_t opc = 0xBD;
+                        if (runtime.strstr(bn, "ctz")) opc = 0xBC;
+                        else if (runtime.strstr(bn, "popcount") || runtime.strstr(bn, "parity")) opc = 0xB8;
+                        emit_byte(&out->text, 0xF3);
+                        emit_rex_wrb(&out->text, w64, REG_RAX, REG_RCX);
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, opc);
+                        emit_modrm(&out->text, 3, REG_RAX & 7, REG_RCX & 7);
+                        if (runtime.strstr(bn, "parity"))
+                            emit_and_imm32(&out->text, REG_RAX, 1);
+                    }
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX)
+                                emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
                     }
                     break;
                 }

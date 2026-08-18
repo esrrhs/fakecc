@@ -404,23 +404,39 @@ lex_loop_head:
             int start_line = line;
             int start_col = col;
             size_t start = pos;
+            int is_float = 0;
+            int is_hex = 0;
             if (c == '0' && (source[pos + 1] == 'x' || source[pos + 1] == 'X')) {
+                is_hex = 1;
                 pos += 2;
                 col += 2;
                 if (!runtime.isxdigit((unsigned char)source[pos]))
                     die_at(filename, start_line, start_col,
                            "hex literal has no digits");
                 while (runtime.isxdigit((unsigned char)source[pos])) { pos++; col++; }
+                if (source[pos] == '.') {
+                    is_float = 1;
+                    pos++; col++;
+                    while (runtime.isxdigit((unsigned char)source[pos])) { pos++; col++; }
+                }
+                if (source[pos] == 'p' || source[pos] == 'P') {
+                    is_float = 1;
+                    pos++; col++;
+                    if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
+                    if (!runtime.isdigit((unsigned char)source[pos])) {
+                        die_at(filename, line, col, "hex float exponent has no digits");
+                    }
+                    while (runtime.isdigit((unsigned char)source[pos])) { pos++; col++; }
+                }
             } else {
                 while (runtime.isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
-            int is_float = 0;
-            if (source[pos] == '.') {
+            if (!is_hex && source[pos] == '.') {
                 is_float = 1;
                 pos++; col++;
                 while (runtime.isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
-            if (source[pos] == 'e' || source[pos] == 'E') {
+            if (!is_hex && (source[pos] == 'e' || source[pos] == 'E')) {
                 is_float = 1;
                 pos++; col++;
                 if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
