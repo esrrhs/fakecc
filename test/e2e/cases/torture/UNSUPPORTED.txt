@@ -43,3 +43,6 @@ nestfunc-7.c
 20050316-3.c
 20050604-1.c
 20050607-1.c
+
+# POSIX signal handlers and non-call exceptions (signal(SIGFPE)).
+20101011-1.c

@@ -3299,6 +3299,13 @@ static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s) {
         if (s->u.for_s.init) assign_label_ids(fn, lm, s->u.for_s.init);
         assign_label_ids(fn, lm, s->u.for_s.body);
         break;
+    case ST_SWITCH:
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            const SwitchCase *arm = &s->u.switch_s.cases[i];
+            for (size_t j = 0; j < arm->stmts.len; j++)
+                assign_label_ids(fn, lm, &arm->stmts.data[j]);
+        }
+        break;
     case ST_BLOCK:
         for (size_t i = 0; i < s->u.block.len; i++)
             assign_label_ids(fn, lm, &s->u.block.data[i]);
