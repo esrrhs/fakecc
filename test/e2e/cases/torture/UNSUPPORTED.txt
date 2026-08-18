@@ -1,0 +1,31 @@
+# FakeCC unsupported GCC c-torture execute tests
+#
+# Names match gcc/testsuite/gcc.c-torture/execute/*.c (not the
+# gcc_torture_* e2e ports). These are not in the e2e suite and are not
+# pending ports.
+
+# GNU nested functions (functions defined inside functions), including
+# trampolines / static chain / capturing enclosing locals. FakeCC does
+# not implement this extension.
+
+20000822-1.c
+20010209-1.c
+20040520-1.c
+20061220-1.c
+20090219-1.c
+920415-1.c
+920428-2.c
+920501-7.c
+920612-2.c
+921017-1.c
+921215-1.c
+931002-1.c
+comp-goto-2.c
+nest-align-1.c
+nest-stdar-1.c
+nestfunc-1.c
+nestfunc-2.c
+nestfunc-3.c
+nestfunc-5.c
+nestfunc-6.c
+nestfunc-7.c

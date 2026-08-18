@@ -19,6 +19,7 @@ typedef struct {
     const char *name;
     int arity;
     int is_variadic;
+    int is_unprototyped;
     int is_external;   /* 1 = declared `extern`, no definition in this TU */
     Type ret_type;
     Type param_types[16];
@@ -44,6 +45,7 @@ static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     s->name = fn->name;
     s->arity = (int)fn->params.len;
     s->is_variadic = fn->is_variadic;
+    s->is_unprototyped = fn->is_unprototyped;
     s->is_external = fn->is_extern;
     s->ret_type = fn->ret_type;
     s->loc = fn->loc;
@@ -76,6 +78,7 @@ static void ftab_push_export(FunTable *t, const PkgFuncExport *ex) {
     s->name = ex->name;
     s->arity = ex->arity;
     s->is_variadic = ex->is_variadic;
+    s->is_unprototyped = 0;
     s->is_external = 1;
     s->ret_type = ex->ret_type;
     s->loc = ex->loc;
@@ -107,6 +110,7 @@ static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) 
                          ex->loc);
     fn->loc = ex->loc;
     fn->is_variadic = ex->is_variadic;
+    fn->is_unprototyped = 0;
     fn->is_extern = 1;
     fn->is_static = 0;
 }
@@ -221,6 +225,13 @@ static void collect_labels(LabelSet *ls, const Stmt *s) {
         if (s->u.for_s.init) collect_labels(ls, s->u.for_s.init);
         collect_labels(ls, s->u.for_s.body);
         break;
+    case ST_SWITCH:
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            const SwitchCase *arm = &s->u.switch_s.cases[i];
+            for (size_t j = 0; j < arm->stmts.len; j++)
+                collect_labels(ls, &arm->stmts.data[j]);
+        }
+        break;
     case ST_BLOCK:
         for (size_t i = 0; i < s->u.block.len; i++)
             collect_labels(ls, &s->u.block.data[i]);
@@ -304,6 +315,13 @@ static int type_rank(Type t) {
  * Float types are NOT integer-promoted — they keep their type. */
 static Type integer_promote(Type t) {
     if (t.kind == TY_FLOAT) return t;
+    /* C §6.3.1.1: a bit-field of (unsigned) int rank promotes to int if
+     * every value of the field fits in int. */
+    if (t.bitfield_width > 0 && t.width <= 4) {
+        if (!t.is_unsigned || t.bitfield_width < 32)
+            return type_make_int(4, 0);
+        return type_make_int(4, 1);
+    }
     if (t.width < 4) return type_make_int(4, 0);
     return t;
 }
@@ -313,19 +331,25 @@ static Type integer_promote(Type t) {
 static Type usual_arith_conv(Type a, Type b) {
     a = integer_promote(a);
     b = integer_promote(b);
+    int bfw = 0;
+    if (a.bitfield_width > 0 && b.bitfield_width > 0)
+        bfw = a.bitfield_width > b.bitfield_width ? a.bitfield_width : b.bitfield_width;
+    Type res;
     /* Float dominates: if either operand is float, the result is float.
      * double wins over float (higher width). */
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
-        return type_rank(a) >= type_rank(b) ? a : b;
-    if (a.kind == TY_FLOAT) return a;
-    if (b.kind == TY_FLOAT) return b;
-    /* Otherwise the existing integer rules. */
-    if (a.width == b.width && a.is_unsigned == b.is_unsigned) return a;
-    if (a.is_unsigned == b.is_unsigned) return a.width > b.width ? a : b;
-    Type u = a.is_unsigned ? a : b;
-    Type s = a.is_unsigned ? b : a;
-    if (u.width >= s.width) return u;
-    return s;
+        res = type_rank(a) >= type_rank(b) ? a : b;
+    else if (a.kind == TY_FLOAT) res = a;
+    else if (b.kind == TY_FLOAT) res = b;
+    else if (a.width == b.width && a.is_unsigned == b.is_unsigned) res = a;
+    else if (a.is_unsigned == b.is_unsigned) res = a.width > b.width ? a : b;
+    else {
+        Type u = a.is_unsigned ? a : b;
+        Type s = a.is_unsigned ? b : a;
+        res = (u.width >= s.width) ? u : s;
+    }
+    res.bitfield_width = bfw;
+    return res;
 }
 
 /* Set an expr's type (frees previous). Convenience wrapper. */
@@ -600,6 +624,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_fabsl") == 0)
                 ret = type_make_float(16);
+            else if (strcmp(bname, "__builtin_bswap64") == 0)
+                ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_bswap32") == 0)
+                ret = type_make_int(4, 1);
+            else if (strcmp(bname, "__builtin_bswap16") == 0)
+                ret = type_make_int(2, 1);
             Type fn = type_make_func(ret, NULL, 0);
             Type fp = type_make_ptr(fn);
             type_free(&fn);
@@ -803,9 +833,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             const FunSig *sig = ftab_find(ft, e->u.call.callee->u.var.name);
             if (sig) {
                 type_free(&callee_ty);
-                if (sig->is_variadic) {
-                    /* Variadic function: need at least the named params. */
-                    if ((int)e->u.call.args.len < sig->arity) {
+                if (sig->is_variadic || sig->is_unprototyped) {
+                    /* Variadic, or K&R unprototyped `foo()`: extra args are
+                     * allowed.  Unprototyped still requires no *minimum*. */
+                    if (!sig->is_unprototyped && (int)e->u.call.args.len < sig->arity) {
                         die_at(e->loc.file, e->loc.line, e->loc.col,
                                "function '%s' takes at least %d argument%s but %zu given",
                                e->u.call.callee->u.var.name, sig->arity,
@@ -903,7 +934,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type ot = check_expr(e->u.addr.operand, st, ft);
         /* operand must be lvalue */
         ExprKind ok = e->u.addr.operand->kind;
-        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER) {
+        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER
+            && ok != EX_COMPOUND_LITERAL) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "cannot take address of rvalue");
         }
@@ -994,16 +1026,17 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "unknown struct 'struct %s'", ot.tag);
         }
-        const StructMember *m = NULL;
-        for (int i = 0; i < sd->num_members; i++)
-            if (strcmp(sd->members[i].name, e->u.member.name) == 0)
-                { m = &sd->members[i]; break; }
+        const StructMember *m = struct_lookup_member(g_sema_structs, sd,
+                                                     e->u.member.name, NULL);
         if (!m) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "struct '%s' has no member '%s'", ot.tag, e->u.member.name);
         }
         type_free(&ot);
-        set_type(e, type_clone(m->type));
+        Type mt = type_clone(m->type);
+        if (m->bit_width > 0)
+            mt.bitfield_width = m->bit_width;
+        set_type(e, mt);
         return type_clone(e->type);
     }
     case EX_INC_DEC: {
@@ -1530,10 +1563,9 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "non-void function must return a value");
         } else {
-            if (g_sema_ret_type.kind == TY_VOID)
-                die_at(s->loc.file, s->loc.line, s->loc.col,
-                       "void function cannot return a value");
+            /* GNU C: `return expr;` in a void function is a warning, not an error. */
             discard = check_expr(s->u.value, st, ft);
+            if (g_sema_ret_type.kind != TY_VOID) {
             if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
                 discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
                 Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
@@ -1544,6 +1576,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                 Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
                 set_type(c, type_clone(g_sema_ret_type));
                 s->u.value = c;
+            }
             }
             type_free(&discard);
         }
@@ -1676,6 +1709,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                 ft.data[idx].is_external = 0;
                 ft.data[idx].arity = (int)fn->params.len;
                 ft.data[idx].is_variadic = fn->is_variadic;
+                ft.data[idx].is_unprototyped = fn->is_unprototyped;
                 ft.data[idx].ret_type = fn->ret_type;
                 ft.data[idx].loc = fn->loc;
                 for (int k = 0; k < ft.data[idx].arity && k < 16; k++)
@@ -1858,13 +1892,9 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         g_sema_labels = NULL;
         labelset_free(&ls);
 
-        /* A void function need not return a value; a non-void function must
-         * have a return statement (or terminate via exit/abort). */
-        if (!has_return && fn->ret_type.kind != TY_VOID) {
-            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                   "function '%s' must have a return statement",
-                   fn->name ? fn->name : "(nullptr)");
-        }
+        /* Falling off a non-void function is undefined in ISO C but accepted
+         * by GCC (and by c-torture); the return register is then garbage. */
+        (void)has_return;
     }
 
     ftab_free(&ft);

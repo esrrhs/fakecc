@@ -322,29 +322,46 @@ lex_loop_head:
             int start_line = line;
             int start_col = col;
             size_t start = pos;
+            int is_float = 0;
+            int is_hex = 0;
             /* Hex literal: `0x` / `0X` followed by hex digits.  Octal needs
              * no special lexing (`077` is consumed as digits and decoded as
              * octal by strtol(base=0)); only hex stops the digit loop early. */
             if (c == '0' && (source[pos + 1] == 'x' || source[pos + 1] == 'X')) {
+                is_hex = 1;
                 pos += 2;  /* "0x" */
                 col += 2;
                 if (!isxdigit((unsigned char)source[pos]))
                     die_at(filename, start_line, start_col,
                            "hex literal has no digits");
                 while (isxdigit((unsigned char)source[pos])) { pos++; col++; }
+                /* Hex float: 0x1.fp1 / 0x1p1 (binary exponent). */
+                if (source[pos] == '.') {
+                    is_float = 1;
+                    pos++; col++;
+                    while (isxdigit((unsigned char)source[pos])) { pos++; col++; }
+                }
+                if (source[pos] == 'p' || source[pos] == 'P') {
+                    is_float = 1;
+                    pos++; col++;
+                    if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
+                    if (!isdigit((unsigned char)source[pos])) {
+                        die_at(filename, line, col, "hex float exponent has no digits");
+                    }
+                    while (isdigit((unsigned char)source[pos])) { pos++; col++; }
+                }
             } else {
                 while (isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
-            int is_float = 0;
             /* Fractional part: `.` followed by optional digits. Also bare `.`
-             * after digits (e.g. `2.`). */
-            if (source[pos] == '.') {
+             * after digits (e.g. `2.`).  Not used for hex (already handled). */
+            if (!is_hex && source[pos] == '.') {
                 is_float = 1;
                 pos++; col++;
                 while (isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
             /* Exponent: e/E followed by optional sign and digits. */
-            if (source[pos] == 'e' || source[pos] == 'E') {
+            if (!is_hex && (source[pos] == 'e' || source[pos] == 'E')) {
                 is_float = 1;
                 pos++; col++;
                 if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }

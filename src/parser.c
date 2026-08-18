@@ -26,6 +26,8 @@ typedef struct {
      * (`__anon_0`, `__anon_1`, ...).  Each anonymous definition gets a fresh
      * tag so its type is distinct (C semantics). */
     int anon_counter;
+    /* Innermost function currently being parsed; used for __FUNCTION__. */
+    const char *cur_fn_name;
 } Parser;
 
 static const Token *peek(const Parser *p) {
@@ -71,8 +73,9 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 }
 
 static int skip_attribute(Parser *p) {
-    if (peek(p)->kind != TK_IDENT
-        || strcmp(peek(p)->text, "__attribute__") != 0)
+    if (peek(p)->kind != TK_IDENT) return 0;
+    if (strcmp(peek(p)->text, "__attribute__") != 0
+        && strcmp(peek(p)->text, "__attribute") != 0)
         return 0;
     advance(p);  /* consume `__attribute__` */
     if (peek(p)->kind != TK_LPAREN) return 0;
@@ -164,6 +167,8 @@ static int is_type_start(const Parser *p, size_t pos) {
         return 1;
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
+        if (strcmp(text, "register") == 0 || strcmp(text, "auto") == 0)
+            return is_type_start(p, pos + 1);
         if (strcmp(text, "typeof") == 0 || strcmp(text, "__typeof__") == 0 || strcmp(text, "__typeof") == 0)
             return 1;
         if (typedef_registry_find(&p->tu->typedefs, text))
@@ -600,6 +605,15 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
          * is ';', this is a standalone type definition, not a member declaration
          * — consume the ';' and continue to the next member. */
         if (peek(p)->kind == TK_SEMICOLON) {
+            /* C11 anonymous struct/union member: `struct { ... };` inside
+             * another struct, with no field name.  Tagged nested definitions
+             * (`struct S { ... };`) are type-only and are skipped. */
+            if (base.kind == TY_STRUCT && base.tag
+                && strncmp(base.tag, "__anon_", 7) == 0) {
+                sd = struct_registry_find(&p->tu->structs, tag);
+                if (sd)
+                    struct_def_push_member(sd, "", type_clone(base), 0);
+            }
             advance(p);
             type_free(&base);
             continue;
@@ -877,7 +891,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
     Type t;
     if (peek(p)->kind == TK_LPAREN && (p->pos + 1 < p->tokens->len &&
         (p->tokens->data[p->pos + 1].kind == TK_STAR ||
-         (p->tokens->data[p->pos + 1].kind == TK_IDENT && strcmp(p->tokens->data[p->pos + 1].text, "__attribute__") == 0)))) {
+         p->tokens->data[p->pos + 1].kind == TK_LPAREN ||
+         p->tokens->data[p->pos + 1].kind == TK_LBRACKET ||
+         (p->tokens->data[p->pos + 1].kind == TK_IDENT
+          && !is_type_start(p, p->pos + 1))))) {
         /* Grouping: '(' group_content ')'.  The group content's modifiers
          * (prefix `*`, array `[N]`) wrap the group's core type. */
         advance(p);  /* '(' */
@@ -1027,46 +1044,12 @@ static Type parse_type_abstract(Parser *p) {
  * dimensions `[int]` / `[]`, but NOT function types (illegal in a compound
  * literal).  Arrays wrap right-to-left so `int[3][2]` → array(3, array(2)). */
 static Type parse_type_name(Parser *p) {
+    /* Specifiers plus an abstract declarator: pointers, arrays, grouping
+     * `void (*)()`, and function types. */
     Type base = parse_specifiers(p);
-    /* Prefix pointers. */
-    int ptrs = 0;
-    while (peek(p)->kind == TK_STAR) {
-        advance(p);
-        for (;;) {
-            if (skip_attribute(p)) continue;
-            if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
-                advance(p);
-                continue;
-            }
-            break;
-        }
-        ptrs++;
-    }
-    /* Postfix array dimensions. */
-    int dims[8], ndims = 0;
-    while (peek(p)->kind == TK_LBRACKET) {
-        advance(p);
-        int len = parse_array_size(p);
-        expect_kind(p, TK_RBRACKET, "']'");
-        if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
-                                   peek(p)->loc.col, "too many array dimensions");
-        dims[ndims++] = len;
-    }
-    if (ptrs == 0 && ndims == 0)
-        return base; /* plain scalar/struct type */
-    /* Wrap arrays right-to-left around the base type. */
-    Type t = base;
-    for (int i = ndims - 1; i >= 0; i--) {
-        Type w = type_make_array(t, dims[i]);
-        type_free(&t);
-        t = w;
-    }
-    /* Apply prefix pointers around the whole thing. */
-    for (int i = 0; i < ptrs; i++) {
-        Type w = type_make_ptr(t);
-        type_free(&t);
-        t = w;
-    }
+    char *name = NULL;
+    Type t = parse_declarator(p, base, &name);
+    free(name);
     return t;
 }
 
@@ -1750,6 +1733,60 @@ static Expr *parse_primary(Parser *p) {
         advance(p);
         return e;  /* float literal is a primary — no postfix needed */
     }
+    if (t->kind == TK_IDENT
+        && (strcmp(t->text, "L") == 0 || strcmp(t->text, "U") == 0)
+        && p->pos + 1 < p->tokens->len
+        && (p->tokens->data[p->pos + 1].kind == TK_CHAR_LITERAL
+            || p->tokens->data[p->pos + 1].kind == TK_STRING_LITERAL)) {
+        SourceLoc loc = t->loc;
+        advance(p); /* consume L / U */
+        if (peek(p)->kind == TK_CHAR_LITERAL) {
+            Expr *e = expr_new_int(char_literal_value(peek(p)->text), loc);
+            advance(p);
+            return e;
+        }
+        /* Wide string: L"a" "b" → (int[]){'a','b',0} so indexing uses wchar units. */
+        int total = 0;
+        int *wbuf = NULL;
+        while (peek(p)->kind == TK_STRING_LITERAL) {
+            const char *src = peek(p)->text;
+            size_t slen = strlen(src);
+            if (slen >= 1 && src[0] == '"') { src++; slen--; }
+            if (slen >= 1 && src[slen - 1] == '"') slen--;
+            for (size_t i = 0; i < slen; i++) {
+                int ch;
+                if (src[i] == '\\' && i + 1 < slen) {
+                    i++;
+                    switch (src[i]) {
+                    case 'n': ch = '\n'; break;
+                    case 't': ch = '\t'; break;
+                    case 'r': ch = '\r'; break;
+                    case '0': ch = 0; break;
+                    default: ch = (unsigned char)src[i]; break;
+                    }
+                } else {
+                    ch = (unsigned char)src[i];
+                }
+                wbuf = realloc(wbuf, (size_t)(total + 1) * sizeof(int));
+                wbuf[total++] = ch;
+            }
+            advance(p);
+        }
+        wbuf = realloc(wbuf, (size_t)(total + 1) * sizeof(int));
+        wbuf[total] = 0;
+        int n = total + 1;
+        Expr **els = malloc((size_t)n * sizeof(Expr *));
+        for (int i = 0; i < n; i++)
+            els[i] = expr_new_int(wbuf[i], loc);
+        free(wbuf);
+        Type it = type_make_int(4, 0);
+        Type arr = type_make_array(it, n);
+        type_free(&it);
+        Expr *init = expr_new_init_list(els, n, loc);
+        Expr *e = expr_new_compound_literal(arr, init, loc);
+        type_free(&arr);
+        return parse_postfix(p, e);
+    }
     if (t->kind == TK_STRING_LITERAL) {
         /* Token text includes surrounding quotes; strip and process escapes.
          * Adjacent string literals ("a" "b") are concatenated by the parser
@@ -1829,9 +1866,17 @@ static Expr *parse_primary(Parser *p) {
             if (ec)
                 return expr_new_int(ec->value, ident->loc);
         }
+        if (strcmp(ident->text, "__FUNCTION__") == 0
+            || strcmp(ident->text, "__func__") == 0
+            || strcmp(ident->text, "__PRETTY_FUNCTION__") == 0) {
+            const char *nm = p->cur_fn_name ? p->cur_fn_name : "";
+            Expr *e = expr_new_str(nm, (int)strlen(nm), ident->loc);
+            return parse_postfix(p, e);
+        }
         /* A call `IDENT(args)` is built by parse_postfix so that indirect
          * calls (`fp(x)`, `(*fp)(x)`, `arr[i](x)`) parse uniformly. */
-        return parse_postfix(p, expr_new_var(ident->text, ident->loc));
+        Expr *e = expr_new_var(ident->text, ident->loc);
+        return parse_postfix(p, e);
     }
     if (t->kind == TK_LPAREN) {
         if (p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACE) {
@@ -1920,6 +1965,14 @@ static Expr *parse_init_list(Parser *p) {
             expect_kind(p, TK_RBRACKET, "']'");
             expect_kind(p, TK_ASSIGN, "'='");
             kind = 0;
+        } else if (peek(p)->kind == TK_IDENT
+                   && p->pos + 1 < p->tokens->len
+                   && p->tokens->data[p->pos + 1].kind == TK_COLON) {
+            /* Obsolete GNU designated initializer: `field: expr`. */
+            member = xstrdup(peek(p)->text);
+            advance(p); /* name */
+            advance(p); /* ':' */
+            kind = 1;
         }
         Expr *elem;
         if (peek(p)->kind == TK_LBRACE) {
@@ -2014,6 +2067,10 @@ static int is_function_declaration_lookahead(Parser *p) {
                 } while (depth > 0 && peek(p)->kind != TK_EOF);
             }
         } else if (tk == TK_IDENT
+                   && (strcmp(peek(p)->text, "register") == 0
+                       || strcmp(peek(p)->text, "auto") == 0)) {
+            advance(p);
+        } else if (tk == TK_IDENT
                    && find_typedef_with_fallback(p, peek(p)->text)) {
             advance(p);
         } else {
@@ -2080,18 +2137,40 @@ static Stmt parse_stmt(Parser *p) {
         /* Storage class: `static` (persistent) / `extern` (declaration only).
          * `const` is handled inside parse_specifiers. */
         int storage_class = 0; /* 0=default, 1=static, 2=extern */
-        if (peek(p)->kind == TK_KW_STATIC) {
-            storage_class = 1;
-            advance(p);
-        } else if (peek(p)->kind == TK_KW_EXTERN) {
-            storage_class = 2;
-            advance(p);
+        for (;;) {
+            if (peek(p)->kind == TK_KW_STATIC) {
+                storage_class = 1;
+                advance(p);
+            } else if (peek(p)->kind == TK_KW_EXTERN) {
+                storage_class = 2;
+                advance(p);
+            } else if (peek(p)->kind == TK_IDENT
+                       && (strcmp(peek(p)->text, "register") == 0
+                           || strcmp(peek(p)->text, "auto") == 0)) {
+                advance(p);
+            } else break;
         }
         /* Parse the common specifier base type once; each declarator in a
          * comma-separated list (`int a, b, c`) shares this base.  Clone it for
          * each declarator because parse_declarator takes its argument by value
          * and may consume (free) its heap children along some paths. */
         Type base = parse_specifiers(p);
+        /* C allows mixing storage-class specifiers with the type:
+         * `static int x` and `struct S { } static x` are both valid. */
+        for (;;) {
+            if (skip_attribute(p)) continue;
+            if (peek(p)->kind == TK_KW_STATIC) {
+                storage_class = 1;
+                advance(p);
+            } else if (peek(p)->kind == TK_KW_EXTERN) {
+                storage_class = 2;
+                advance(p);
+            } else if (peek(p)->kind == TK_IDENT
+                       && (strcmp(peek(p)->text, "register") == 0
+                           || strcmp(peek(p)->text, "auto") == 0)) {
+                advance(p);
+            } else break;
+        }
         /* A definition-only declaration (`enum { ... };`, `struct { ... };`)
          * has no declarator or variable name — the specifiers consumed the
          * whole definition and the next token is `;`.  Accept it as a no-op. */
@@ -2426,11 +2505,14 @@ static Stmt parse_typedef_stmt(Parser *p) {
             advance(p);
         }
         if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
-            die_at(name->loc.file, name->loc.line, name->loc.col,
-                   "redefinition of typedef '%s'", decl_name);
+            /* C11 / GCC: a typedef that restates the same name is accepted
+             * here so c-torture files that re-include a typedef parse. */
+            free(decl_name);
+            type_free(&ty);
+        } else {
+            typedef_registry_add(&p->tu->typedefs, decl_name, ty);
+            free(decl_name);
         }
-        typedef_registry_add(&p->tu->typedefs, decl_name, ty);
-        free(decl_name);
         for (;;) { if (!skip_attribute(p)) break; }
         if (peek(p)->kind == TK_COMMA) {
             advance(p);
@@ -2557,15 +2639,33 @@ static FunctionDecl parse_function_decl(Parser *p) {
         else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
         else break;
     }
-    Type ret_ty = parse_return_type(p);
-    for (;;) { if (!skip_attribute(p)) break; }
-
-    const Token *name = peek(p);
-    if (name->kind != TK_IDENT) {
-        die_at(name->loc.file, name->loc.line, name->loc.col,
-               "expected function name but got '%s'", name->text);
+    Type ret_ty;
+    const Token *name;
+    if (is_type_start(p, p->pos)
+        || peek(p)->kind == TK_KW_VOID
+        || peek(p)->kind == TK_KW_STRUCT
+        || peek(p)->kind == TK_KW_UNION
+        || peek(p)->kind == TK_KW_ENUM) {
+        ret_ty = parse_return_type(p);
+        for (;;) { if (!skip_attribute(p)) break; }
+        name = peek(p);
+        if (name->kind != TK_IDENT) {
+            die_at(name->loc.file, name->loc.line, name->loc.col,
+                   "expected function name but got '%s'", name->text);
+        }
+        advance(p);
+    } else if (peek(p)->kind == TK_IDENT) {
+        /* GNU89 implicit-int: `s(i){ ... }` / `main(){ ... }`. */
+        ret_ty = type_default_int();
+        name = peek(p);
+        advance(p);
+    } else {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "expected function name but got '%s'", t->text);
+        name = t;
+        ret_ty = type_default_int();
     }
-    advance(p);
 
     expect_kind(p, TK_LPAREN, "'('");
 
@@ -2576,15 +2676,21 @@ static FunctionDecl parse_function_decl(Parser *p) {
     stmt_array_init(&fn.body);
     fn.loc = fn_loc;
     fn.is_variadic = 0;
+    fn.is_unprototyped = 0;
     fn.is_extern = is_extern;
     fn.is_static = is_static;
 
-    /* Parameter list: type declarator ("," type declarator)* — or empty.
-     * The special form `(void)` means "no parameters" (standard C). */
+    /* Parameter list.  Three forms:
+     *   (void)              — prototyped, no parameters
+     *   (int x, char *p)    — prototyped
+     *   (a, b) int a; ...   — K&R identifier list, possibly followed by decls
+     *   ()                  — K&R unprototyped empty list */
+    char *kr_names[16];
+    int nkr = 0;
     if (peek(p)->kind == TK_KW_VOID
         && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
         advance(p);  /* consume `void` */
-    } else if (peek(p)->kind != TK_RPAREN) {
+    } else if (peek(p)->kind != TK_RPAREN && is_type_start(p, p->pos)) {
         for (;;) {
             if (!is_type_start(p, p->pos)) {
                 const Token *t = peek(p);
@@ -2594,12 +2700,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
             char *pname = NULL;
             Type pty = parse_type(p, &pname);
             if (!pname) {
-                /* Unnamed parameter — the declarator produced no name
-                 * (e.g. `int`, `int*`).  Synthesize a name. */
                 pname = xstrdup("");
             }
-            /* Normalize array parameters (`int a[]`, `int a[N]`) to pointers,
-             * matching standard C parameter adjustment. */
             if (pty.kind == TY_ARRAY && pty.elem_type) {
                 Type ptr = type_make_ptr(*pty.elem_type);
                 type_free(&pty);
@@ -2609,8 +2711,6 @@ static FunctionDecl parse_function_decl(Parser *p) {
             free(pname);
             if (peek(p)->kind == TK_COMMA) {
                 advance(p);
-                /* Variadic tail: `...` must be the last thing before ')'.
-                 * Consume it and end the parameter list. */
                 if (peek(p)->kind == TK_ELLIPSIS) {
                     advance(p);
                     fn.is_variadic = 1;
@@ -2624,6 +2724,26 @@ static FunctionDecl parse_function_decl(Parser *p) {
             die_at(fn.loc.file, fn.loc.line, fn.loc.col,
                    "more than 16 parameters not supported");
         }
+    } else if (peek(p)->kind != TK_RPAREN) {
+        /* K&R identifier list: `f(a, b)`. */
+        fn.is_unprototyped = 1;
+        for (;;) {
+            const Token *id = peek(p);
+            if (id->kind != TK_IDENT) {
+                die_at(id->loc.file, id->loc.line, id->loc.col,
+                       "expected parameter name but got '%s'", id->text);
+            }
+            if (nkr >= 16) {
+                die_at(id->loc.file, id->loc.line, id->loc.col,
+                       "more than 16 parameters not supported");
+            }
+            kr_names[nkr++] = xstrdup(id->text);
+            advance(p);
+            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+            break;
+        }
+    } else {
+        fn.is_unprototyped = 1;
     }
 
     if (fn.is_variadic && fn.params.len == 0) {
@@ -2632,6 +2752,66 @@ static FunctionDecl parse_function_decl(Parser *p) {
     }
 
     expect_kind(p, TK_RPAREN, "')'");
+
+    /* K&R declarations between `)` and `{`: `f(a, b) int a; char *b; {`. */
+    if (nkr > 0) {
+        Type kr_ty[16];
+        int kr_set[16];
+        for (int i = 0; i < nkr; i++) {
+            kr_ty[i] = type_default_int();
+            kr_set[i] = 0;
+        }
+        while (peek(p)->kind != TK_LBRACE && peek(p)->kind != TK_SEMICOLON
+               && peek(p)->kind != TK_EOF
+               && (is_type_start(p, p->pos)
+                   || (peek(p)->kind == TK_IDENT
+                       && (strcmp(peek(p)->text, "register") == 0
+                           || strcmp(peek(p)->text, "auto") == 0)))) {
+            if (peek(p)->kind == TK_IDENT
+                && (strcmp(peek(p)->text, "register") == 0
+                    || strcmp(peek(p)->text, "auto") == 0))
+                advance(p);
+            Type base = parse_specifiers(p);
+            for (;;) {
+                char *dname = NULL;
+                Type ty = parse_declarator(p, type_clone(base), &dname);
+                if (!dname) {
+                    const Token *nm = peek(p);
+                    if (nm->kind != TK_IDENT) {
+                        die_at(nm->loc.file, nm->loc.line, nm->loc.col,
+                               "expected parameter name but got '%s'", nm->text);
+                    }
+                    dname = xstrdup(nm->text);
+                    advance(p);
+                }
+                if (ty.kind == TY_ARRAY && ty.elem_type) {
+                    Type ptr = type_make_ptr(*ty.elem_type);
+                    type_free(&ty);
+                    ty = ptr;
+                }
+                int found = 0;
+                for (int i = 0; i < nkr; i++) {
+                    if (strcmp(kr_names[i], dname) == 0) {
+                        if (kr_set[i]) type_free(&kr_ty[i]);
+                        kr_ty[i] = ty;
+                        kr_set[i] = 1;
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found) type_free(&ty);
+                free(dname);
+                if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                break;
+            }
+            expect_kind(p, TK_SEMICOLON, "';'");
+            type_free(&base);
+        }
+        for (int i = 0; i < nkr; i++) {
+            param_array_push(&fn.params, kr_names[i], kr_ty[i], fn.loc);
+            free(kr_names[i]);
+        }
+    }
 
     /* Skip optional GCC `__attribute__((...))` annotations (e.g.
      * `__attribute__((noreturn))`) that may follow the parameter list. */
@@ -2676,7 +2856,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
 
     expect_kind(p, TK_LBRACE, "'{'");
 
+    const char *saved_fn = p->cur_fn_name;
+    p->cur_fn_name = fn.name;
     parse_stmt_list(p, &fn.body);
+    p->cur_fn_name = saved_fn;
 
     expect_kind(p, TK_RBRACE, "'}'");
 
@@ -2722,6 +2905,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
     p.pkg_ctx = ctx;
     stmt_array_init(&p.prepend);
     p.anon_counter = 0;
+    p.cur_fn_name = NULL;
 
     g_parser_tu = tu;
     /* must start with package declaration */

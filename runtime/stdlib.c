@@ -12,6 +12,35 @@ void abort(void) {
     __syscall(231, 127);
 }
 
+double fabs(double x) { return x < 0.0 ? -x : x; }
+float fabsf(float x) { return x < 0.0f ? -x : x; }
+
+double floor(double x) {
+    if (x >= 0.0) return (double)(long long)x;
+    long long i = (long long)x;
+    if ((double)i == x) return (double)i;
+    return (double)(i - 1);
+}
+float floorf(float x) { return (float)floor((double)x); }
+
+double ceil(double x) {
+    double f = floor(x);
+    if (f == x) return f;
+    return f + 1.0;
+}
+
+double sqrt(double x) {
+    if (x <= 0.0) return 0.0;
+    double g = x;
+    int n = 0;
+    while (n < 40) {
+        g = 0.5 * (g + x / g);
+        n = n + 1;
+    }
+    return g;
+}
+
+
 /* Shared body of the strto* family: parses [ws][sign][base prefix][digits] and
  * returns the magnitude, with the sign reported through *neg.  Wraparound on
  * overflow rather than clamping to LONG_MAX/ULLONG_MAX. */

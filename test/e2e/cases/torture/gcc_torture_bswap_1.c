@@ -1,7 +1,6 @@
 // expect: 0
 package main;
 
-
 extern void* memcpy(void*, const void*, unsigned long);
 extern void* memset(void*, int, unsigned long);
 extern int memcmp(const void*, const void*, unsigned long);
@@ -16,9 +15,11 @@ extern char* strrchr(const char*, int);
 extern char* strcat(char*, const char*);
 extern char* strncat(char*, const char*, unsigned long);
 extern char* strstr(const char*, const char*);
+extern void* memchr(const void*, int, unsigned long);
 extern int printf(const char*, ...);
 extern int sprintf(char*, const char*, ...);
 extern int snprintf(char*, unsigned long, const char*, ...);
+extern int fprintf(void*, const char*, ...);
 extern int puts(const char*);
 extern int putchar(int);
 extern void* malloc(unsigned long);
@@ -39,82 +40,25 @@ extern void exit(int);
 extern void abort(void);
 extern int rand(void);
 extern void srand(unsigned int);
+extern int isprint(int);
+extern void *stdin;
+extern void *stdout;
+extern void *stderr;
+extern int open(const char*, int, ...);
+extern int close(int);
+extern long read(int, void*, unsigned long);
+extern int unlink(const char*);
+extern char* tmpnam(char*);
 
+/* Test __builtin_bswap64 . */
 
-
-static int __fakecc_clz(unsigned int x) {
-    if (!x) return 32;
-    int n = 0;
-    if (!(x & 0xFFFF0000)) { n += 16; x <<= 16; }
-    if (!(x & 0xFF000000)) { n += 8; x <<= 8; }
-    if (!(x & 0xF0000000)) { n += 4; x <<= 4; }
-    if (!(x & 0xC0000000)) { n += 2; x <<= 2; }
-    if (!(x & 0x80000000)) { n += 1; }
-    return n;
-}
-static int __fakecc_clzll(unsigned long long x) {
-    if (!x) return 64;
-    int n = 0;
-    if (!(x & 0xFFFFFFFF00000000ULL)) { n += 32; x <<= 32; }
-    if (!(x & 0xFFFF000000000000ULL)) { n += 16; x <<= 16; }
-    if (!(x & 0xFF00000000000000ULL)) { n += 8; x <<= 8; }
-    if (!(x & 0xF000000000000000ULL)) { n += 4; x <<= 4; }
-    if (!(x & 0xC000000000000000ULL)) { n += 2; x <<= 2; }
-    if (!(x & 0x8000000000000000ULL)) { n += 1; }
-    return n;
-}
-static int __fakecc_ctz(unsigned int x) {
-    if (!x) return 32;
-    int n = 0;
-    if (!(x & 0x0000FFFF)) { n += 16; x >>= 16; }
-    if (!(x & 0x000000FF)) { n += 8; x >>= 8; }
-    if (!(x & 0x0000000F)) { n += 4; x >>= 4; }
-    if (!(x & 0x00000003)) { n += 2; x >>= 2; }
-    if (!(x & 0x00000001)) { n += 1; }
-    return n;
-}
-static int __fakecc_ctzll(unsigned long long x) {
-    if (!x) return 64;
-    int n = 0;
-    if (!(x & 0x00000000FFFFFFFFULL)) { n += 32; x >>= 32; }
-    if (!(x & 0x000000000000FFFFULL)) { n += 16; x >>= 16; }
-    if (!(x & 0x00000000000000FFULL)) { n += 8; x >>= 8; }
-    if (!(x & 0x000000000000000FULL)) { n += 4; x >>= 4; }
-    if (!(x & 0x0000000000000003ULL)) { n += 2; x >>= 2; }
-    if (!(x & 0x0000000000000001ULL)) { n += 1; }
-    return n;
-}
-static int __fakecc_popcount(unsigned int x) {
-    int c = 0;
-    while (x) { c += (x & 1); x >>= 1; }
-    return c;
-}
-static int __fakecc_popcountll(unsigned long long x) {
-    int c = 0;
-    while (x) { c += (x & 1); x >>= 1; }
-    return c;
-}
-static int __fakecc_parity(unsigned int x) {
-    return __fakecc_popcount(x) & 1;
-}
-static int __fakecc_parityll(unsigned long long x) {
-    return __fakecc_popcountll(x) & 1;
-}
-static int __fakecc_ffs(unsigned int x) {
-    if (!x) return 0;
-    return __fakecc_ctz(x) + 1;
-}
-static int __fakecc_ffsll(unsigned long long x) {
-    if (!x) return 0;
-    return __fakecc_ctzll(x) + 1;
-}
-
-
-unsigned long long g(unsigned long long a) ;
+unsigned long long g(unsigned long long a) __attribute__((noinline));
 unsigned long long g(unsigned long long a)
 {
-  return ((unsigned long long)((((unsigned long long)(a) & 0xffULL) << 56) | (((unsigned long long)(a) & 0xff00ULL) << 40) | (((unsigned long long)(a) & 0xff0000ULL) << 24) | (((unsigned long long)(a) & 0xff000000ULL) << 8) | (((unsigned long long)(a) >> 8) & 0xff000000ULL) | (((unsigned long long)(a) >> 24) & 0xff0000ULL) | (((unsigned long long)(a) >> 40) & 0xff00ULL) | (((unsigned long long)(a) >> 56) & 0xffULL)));
+  return __builtin_bswap64(a);
 }
+
+
 unsigned long long f(unsigned long long c)
 {
   union {
@@ -132,9 +76,11 @@ unsigned long long f(unsigned long long c)
   b.b[7] = a.b[0];
   return b.a;
 }
+
 int main(void)
 {
   unsigned long long i;
+  /* The rest of the testcase assumes 8 byte long long. */
   if (sizeof(i) != sizeof(char)*8)
     return 0;
   if (f(0x12) != g(0x12))
@@ -155,4 +101,3 @@ int main(void)
     abort();
   return 0;
 }
-
