@@ -2259,6 +2259,25 @@ IRValue pr;
             fn->has_dyn_alloca = 1;
             return v;
         }
+        if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_classify_type") == 0) {
+            int tc = -1;
+            if (e->u.call.args.len > 0) {
+                const Type *t = &e->u.call.args.data[0]->type;
+                if (t->kind == TY_FLOAT) tc = 8;
+                else if (t->kind == TY_INT) tc = 1;
+                else if (t->kind == TY_PTR) tc = 5;
+                else if (t->kind == TY_STRUCT) {
+                    const StructDef *sd = struct_registry_find_c(g_ir_structs, t->tag);
+                    tc = (sd && sd->is_union) ? 13 : 12;
+                }
+                else if (t->kind == TY_ARRAY) tc = 14;
+                else if (t->kind == TY_VOID) tc = 0;
+            }
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, tc, 4, 0, e->loc);
+            set_value_type(fn, v, 4, 0);
+            return v;
+        }
         if (e->u.call.callee->kind == EX_VAR &&
             (runtime.strcmp(e->u.call.callee->u.var.name, "abs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "labs") == 0 ||

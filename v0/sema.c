@@ -1172,6 +1172,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 1);
             else if (runtime.strcmp(bname, "__builtin_bswap16") == 0)
                 ret = type_make_int(2, 1);
+            else if (runtime.strcmp(bname, "__builtin_classify_type") == 0)
+                ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_abs") == 0 || runtime.strcmp(bname, "abs") == 0)
                 ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_labs") == 0 || runtime.strcmp(bname, "__builtin_llabs") == 0 || runtime.strcmp(bname, "labs") == 0 || runtime.strcmp(bname, "llabs") == 0)

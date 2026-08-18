@@ -33,3 +33,4 @@ nestfunc-7.c
 
 # GNU variable-length structures (VLAs inside struct definitions).
 20020412-1.c
+20040308-1.c

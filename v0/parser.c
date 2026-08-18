@@ -924,10 +924,14 @@ static Type parse_specifiers(Parser *p) {
     }
     if (peek(p)->kind == TK_KW_STRUCT) {
         advance(p);
+        int attr_align = 0, attr_packed = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed)) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
             runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
             StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
+            if (attr_align > sd->align) sd->align = attr_align;
+            if (attr_packed) sd->align = 1;
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
@@ -942,12 +946,15 @@ static Type parse_specifiers(Parser *p) {
                    "expected struct tag but got '%s'", tag->text);
         }
         advance(p);
+        while (parse_attribute(p, &attr_align, &attr_packed)) {}
         if (peek(p)->kind == TK_LBRACE) {
             if (struct_registry_find(&p->tu->structs, tag->text)) {
                 die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                        "redefinition of struct '%s'", tag->text);
             }
             StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
+            if (attr_align > sd->align) sd->align = attr_align;
+            if (attr_packed) sd->align = 1;
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
@@ -966,11 +973,15 @@ static Type parse_specifiers(Parser *p) {
     }
     if (peek(p)->kind == TK_KW_UNION) {
         advance(p);
+        int attr_align = 0, attr_packed = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed)) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
             runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
             StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
             sd->is_union = 1;
+            if (attr_align > sd->align) sd->align = attr_align;
+            if (attr_packed) sd->align = 1;
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
@@ -985,6 +996,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected union tag but got '%s'", tag->text);
         }
         advance(p);
+        while (parse_attribute(p, &attr_align, &attr_packed)) {}
         if (peek(p)->kind == TK_LBRACE) {
             if (struct_registry_find(&p->tu->structs, tag->text)) {
                 die_at(tag->loc.file, tag->loc.line, tag->loc.col,
@@ -992,6 +1004,8 @@ static Type parse_specifiers(Parser *p) {
             }
             StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
             sd->is_union = 1;
+            if (attr_align > sd->align) sd->align = attr_align;
+            if (attr_packed) sd->align = 1;
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
