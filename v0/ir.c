@@ -2089,8 +2089,16 @@ IRValue pr;
     case EX_TERNARY: {
         int rw = e->type.width ? e->type.width : 4;
         int ru = e->type.is_unsigned;
-        IRValue slot = new_value(fn);
-        emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, rw, ru, e->loc);
+        int rf = (e->type.kind == TY_FLOAT);
+        int use_ptr = (rw > 8);
+        IRValue slot, addr = -1;
+        if (use_ptr) {
+            slot = emit_alloca(fn, rw, 8, 1, e->loc);
+            addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        } else {
+            slot = new_value(fn);
+            emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, rw, ru, e->loc);
+        }
         int L_then = new_label(fn);
         int L_else = new_label(fn);
         int L_done = new_label(fn);
@@ -2098,19 +2106,29 @@ IRValue pr;
         emit_cbr(fn, cond, L_then, L_else, e->loc);
         emit_label(fn, L_then, e->loc);
         IRValue tv = lower_expr(fn, st, e->u.tern.then);
-        int tw = get_value_width(fn, tv), tu = get_value_is_unsigned(fn, tv);
-        IRValue tc = coerce(fn, tv, tw, tu, rw, ru, e->loc);
-        emit_inst_w(fn, IR_STORE, -1, slot, tc, 0, rw, ru, e->loc);
+        int tw = get_value_width(fn, tv), tu = get_value_is_unsigned(fn, tv), tf = get_value_is_float(fn, tv);
+        IRValue tc;
+        if (tf != rf) tc = convert_numeric(fn, tv, tw, rw, ru, rf, e->loc);
+        else if (rf) tc = (tw == rw) ? tv : convert_numeric(fn, tv, tw, rw, ru, 1, e->loc);
+        else tc = coerce(fn, tv, tw, tu, rw, ru, e->loc);
+        if (use_ptr) emit_inst_w(fn, IR_STORE_PTR, -1, addr, tc, 0, rw, ru, e->loc);
+        else emit_inst_w(fn, IR_STORE, -1, slot, tc, 0, rw, ru, e->loc);
         emit_br(fn, L_done, e->loc);
         emit_label(fn, L_else, e->loc);
         IRValue ev = lower_expr(fn, st, e->u.tern.else_);
-        int ew = get_value_width(fn, ev), eu = get_value_is_unsigned(fn, ev);
-        IRValue ec = coerce(fn, ev, ew, eu, rw, ru, e->loc);
-        emit_inst_w(fn, IR_STORE, -1, slot, ec, 0, rw, ru, e->loc);
+        int ew = get_value_width(fn, ev), eu = get_value_is_unsigned(fn, ev), ef = get_value_is_float(fn, ev);
+        IRValue ec;
+        if (ef != rf) ec = convert_numeric(fn, ev, ew, rw, ru, rf, e->loc);
+        else if (rf) ec = (ew == rw) ? ev : convert_numeric(fn, ev, ew, rw, ru, 1, e->loc);
+        else ec = coerce(fn, ev, ew, eu, rw, ru, e->loc);
+        if (use_ptr) emit_inst_w(fn, IR_STORE_PTR, -1, addr, ec, 0, rw, ru, e->loc);
+        else emit_inst_w(fn, IR_STORE, -1, slot, ec, 0, rw, ru, e->loc);
         emit_br(fn, L_done, e->loc);
         emit_label(fn, L_done, e->loc);
         IRValue result = new_value(fn);
-        emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, rw, ru, e->loc);
+        if (use_ptr) emit_inst_w(fn, IR_LOAD_PTR, result, addr, -1, 0, rw, ru, e->loc);
+        else emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, rw, ru, e->loc);
+        if (rf) set_value_float(fn, result, 1);
         return result;
     }
     case EX_VAR: {
@@ -2328,6 +2346,42 @@ IRValue pr;
             emit_inst_w(fn, IR_CONST, v, -1, -1, tc, 4, 0, e->loc);
             set_value_type(fn, v, 4, 0);
             return v;
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_signbit") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_signbitf") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_signbitl") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "signbit") == 0) &&
+            e->u.call.args.len > 0) {
+            Expr *a0 = e->u.call.args.data[0];
+            Type aty = a0->type;
+            if (aty.kind == TY_FLOAT) {
+                IRValue fv = lower_expr(fn, st, a0);
+                IRValue slot = emit_alloca(fn, 16, 8, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, fv, 0, aty.width, 1, e->loc);
+                int sign_byte_off = (aty.width == 4) ? 3 : (aty.width == 8) ? 7 : 9;
+                IRValue sign_byte_addr = emit_add_const(fn, addr, sign_byte_off, e->loc);
+                IRValue bval = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, bval, sign_byte_addr, -1, 0, 1, 1, e->loc);
+                IRValue s7 = new_value(fn);
+                emit_inst_w(fn, IR_CONST, s7, -1, -1, 7, 8, 1, e->loc);
+                IRValue sign = emit_bin_w(fn, IR_SHR, bval, s7, 1, 1, e->loc);
+                return coerce(fn, sign, 1, 1, 4, 0, e->loc);
+            } else if (aty.kind == TY_INT) {
+                IRValue iv = lower_expr(fn, st, a0);
+                if (aty.is_unsigned) {
+                    IRValue zero = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
+                    return zero;
+                }
+                int iw = get_value_width(fn, iv), iu = get_value_is_unsigned(fn, iv);
+                IRValue iv8 = coerce(fn, iv, iw, iu, 8, 0, e->loc);
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 8, 0, e->loc);
+                IRValue lt = emit_bin_w(fn, IR_LT, iv8, zero, 8, 0, e->loc);
+                return coerce(fn, lt, 8, 0, 4, 0, e->loc);
+            }
         }
         if (e->u.call.callee->kind == EX_VAR &&
             (runtime.strcmp(e->u.call.callee->u.var.name, "abs") == 0 ||
