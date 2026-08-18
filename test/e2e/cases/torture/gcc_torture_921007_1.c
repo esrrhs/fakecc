@@ -41,7 +41,7 @@ extern void srand(unsigned int);
 
 void abort(void);
 void exit(int);
-static int strcmp(){return-1;}
+static int my_strcmp(){return-1;}
 int
 main(void)
 {

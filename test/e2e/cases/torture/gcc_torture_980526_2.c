@@ -112,7 +112,7 @@ static int __fakecc_ffsll(unsigned long long x) {
 
 void abort (void);
 void exit (int);
-typedef unsigned int dev_t;
+typedef unsigned int my_dev_t;
 typedef unsigned int kdev_t;
 static  kdev_t to_kdev_t(int dev)
 {
@@ -144,7 +144,7 @@ char * getname(const char * filename)
  a9 = (unsigned int)(filename) *13 + 5;
  return (char *)(a1*a2+a3*a4+a5*a6+a7*a8+a9);
 }
-int sys_mknod(const char * filename, int mode, dev_t dev)
+int sys_mknod(const char * filename, int mode, my_dev_t dev)
 {
  int error;
  char * tmp;

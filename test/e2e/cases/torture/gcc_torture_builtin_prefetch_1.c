@@ -41,7 +41,7 @@ extern void srand(unsigned int);
 
 void exit (int);
 enum locality { none, low, moderate, high };
-enum rws { read, write, read_shared };
+enum rws { rws_read, rws_write, rws_read_shared };
 int arr[10];
 void
 good_const (const int *p)
@@ -58,14 +58,14 @@ good_const (const int *p)
 void
 good_enum (const int *p)
 {
-    __builtin_prefetch (p, read, none);
-    __builtin_prefetch (p, read, low);
-    __builtin_prefetch (p, read, moderate);
-    __builtin_prefetch (p, read, high);
-    __builtin_prefetch (p, write, none);
-    __builtin_prefetch (p, write, low);
-    __builtin_prefetch (p, write, moderate);
-    __builtin_prefetch (p, write, high);
+    __builtin_prefetch (p, rws_read, none);
+    __builtin_prefetch (p, rws_read, low);
+    __builtin_prefetch (p, rws_read, moderate);
+    __builtin_prefetch (p, rws_read, high);
+    __builtin_prefetch (p, rws_write, none);
+    __builtin_prefetch (p, rws_write, low);
+    __builtin_prefetch (p, rws_write, moderate);
+    __builtin_prefetch (p, rws_write, high);
 }
 void
 good_expr (const int *p)

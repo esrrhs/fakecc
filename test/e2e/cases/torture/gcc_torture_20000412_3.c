@@ -43,6 +43,7 @@ typedef struct {
   char y;
   char x[32];
 } X;
+int f(X x, X y);
 int z (void)
 {
   X xxx;

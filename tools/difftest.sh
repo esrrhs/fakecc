@@ -51,12 +51,14 @@ difftest_one() {
         echo '#include <string.h>'
         echo '#include <ctype.h>'
         echo '#include <stdarg.h>'
+        echo '#include <stdint.h>'
         echo '#include <unistd.h>'
         echo '#include <sys/stat.h>'
+        echo '#define __syscall syscall'
         sed -E \
             -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
             -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
-            -e 's/\b(fmt|io|str|mem|ctype|std|types|rt|runtime)\.//g' \
+            -e 's/\b(runtime|fmt|io|ctype)\.//g' \
             "$src"
     } > "$WORK/$name.gcc.c"
     if ! gcc -std=gnu99 -D_GNU_SOURCE -w -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then

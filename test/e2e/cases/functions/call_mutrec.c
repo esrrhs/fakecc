@@ -1,5 +1,6 @@
 // expect: 1
 package main;
+int is_even(int n);
 int is_odd(int n) {
     if (n == 0) { return 0; }
     return is_even(n - 1);
