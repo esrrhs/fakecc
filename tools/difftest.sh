@@ -50,6 +50,9 @@ difftest_one() {
         echo '#include <stdlib.h>'
         echo '#include <string.h>'
         echo '#include <ctype.h>'
+        echo '#include <stdarg.h>'
+        echo '#include <unistd.h>'
+        echo '#include <sys/stat.h>'
         sed -E \
             -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
             -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
