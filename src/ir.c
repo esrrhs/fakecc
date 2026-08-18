@@ -136,7 +136,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
 /* Record a pointer-slot fixup on global `g`: the slot at byte offset `offset`
  * within g->init_bytes must be patched with the link-time address of symbol
  * `sym` (an array/struct global decaying to a pointer). */
-static void add_global_fixup(IRGlobal *g, int offset, const char *sym) {
+static void add_global_fixup(IRGlobal *g, int offset, const char *sym, int addend) {
     if (g->num_fixups >= g->cap_fixups) {
         size_t nc = g->cap_fixups ? g->cap_fixups * 2 : 4;
         g->fixups = realloc(g->fixups, nc * sizeof(GlobalFixup));
@@ -145,6 +145,7 @@ static void add_global_fixup(IRGlobal *g, int offset, const char *sym) {
     }
     g->fixups[g->num_fixups].offset = offset;
     g->fixups[g->num_fixups].sym = xstrdup(sym);
+    g->fixups[g->num_fixups].addend = addend;
     g->num_fixups++;
 }
 
@@ -1517,6 +1518,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return result;
     }
     case EX_VAR: {
+        if (strcmp(e->u.var.name, "NULL") == 0) {
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 8, 1, e->loc);
+            return v;
+        }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
             /* Not a variable — is it a function name?  A function lvalue
@@ -1692,6 +1698,27 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             fake_un.u.un.op = UOP_BITNOT;
             fake_un.u.un.operand = e->u.call.args.data[0];
             return lower_expr(fn, st, &fake_un);
+        }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_prefetch") == 0) {
+            for (size_t i = 0; i < e->u.call.args.len; i++)
+                lower_expr(fn, st, e->u.call.args.data[i]);
+            return -1;
+        }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_frame_address") == 0) {
+            if (e->u.call.args.len > 0) lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_FRAME_ADDR, v, -1, -1, 0, 8, 1, e->loc);
+            set_value_type(fn, v, 8, 1);
+            return v;
+        }
+        if (e->u.call.callee->kind == EX_VAR && (strcmp(e->u.call.callee->u.var.name, "__builtin_alloca") == 0 ||
+                                                strcmp(e->u.call.callee->u.var.name, "alloca") == 0)) {
+            IRValue sz = lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_DYN_ALLOCA, v, sz, -1, 0, 8, 1, e->loc);
+            set_value_type(fn, v, 8, 1);
+            fn->has_dyn_alloca = 1;
+            return v;
         }
         /* The va_start / va_arg / va_end builtins.  They are lowered to a
          * named IR_CALL (call_name = the builtin) so codegen can dispatch by
@@ -3141,9 +3168,182 @@ static int fold_const_complex(const Expr *e, long double *r_out, long double *i_
  * literals for `char[]="..."`, cast expressions, and references to previously
  * packed const globals.  `ir` is the module whose globals may be referenced.
  * Sema guarantees every element is constant. */
+static int get_global_elem_size(const Expr *e) {
+    if (!e) return 1;
+    if (e->type.kind == TY_PTR && e->type.pointee)
+        return type_size(*e->type.pointee);
+    if (e->type.kind == TY_ARRAY && e->type.elem_type)
+        return type_size(*e->type.elem_type);
+    if (e->kind == EX_VAR && g_ir_tu) {
+        for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+            if (g_ir_tu->globals.data[i].kind == ST_DECL &&
+                strcmp(g_ir_tu->globals.data[i].u.decl.name, e->u.var.name) == 0) {
+                Type gt = g_ir_tu->globals.data[i].u.decl.type;
+                if (gt.kind == TY_ARRAY && gt.elem_type)
+                    return type_size(*gt.elem_type);
+                if (gt.kind == TY_PTR && gt.pointee)
+                    return type_size(*gt.pointee);
+            }
+        }
+    }
+    if (e->kind == EX_BINOP) {
+        return get_global_elem_size(e->u.bin.l);
+    }
+    if (e->kind == EX_CAST) {
+        return get_global_elem_size(e->u.cast.operand);
+    }
+    return 1;
+}
+
+static Type get_global_obj_struct_type(const Expr *e) {
+    Type t = e->type;
+    if (t.kind == TY_VOID && e->kind == EX_DEREF) {
+        return get_global_obj_struct_type(e->u.deref.operand);
+    }
+    if (t.kind == TY_VOID && e->kind == EX_VAR && g_ir_tu) {
+        for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+            if (g_ir_tu->globals.data[i].kind == ST_DECL &&
+                strcmp(g_ir_tu->globals.data[i].u.decl.name, e->u.var.name) == 0) {
+                t = g_ir_tu->globals.data[i].u.decl.type;
+                break;
+            }
+        }
+    }
+    if (t.kind == TY_VOID && e->kind == EX_BINOP) {
+        return get_global_obj_struct_type(e->u.bin.l);
+    }
+    if (t.kind == TY_PTR && t.pointee)
+        t = *t.pointee;
+    else if (t.kind == TY_ARRAY && t.elem_type)
+        t = *t.elem_type;
+    return t;
+}
+
+static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out_offset) {
+    if (!e) return 0;
+    if (e->kind == EX_CAST) {
+        return eval_global_addr_offset(e->u.cast.operand, out_sym, out_offset);
+    }
+    if (e->kind == EX_VAR) {
+        *out_sym = e->u.var.name;
+        *out_offset = 0;
+        return 1;
+    }
+    if (e->kind == EX_ADDR) {
+        const Expr *sub = e->u.addr.operand;
+        while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
+        if (!sub) return 0;
+        if (sub->kind == EX_VAR) {
+            *out_sym = sub->u.var.name;
+            *out_offset = 0;
+            return 1;
+        }
+        if (sub->kind == EX_MEMBER) {
+            const char *sym = NULL;
+            int off = 0;
+            if (!eval_global_addr_offset(sub->u.member.obj, &sym, &off))
+                return 0;
+            Type m_target_ty = get_global_obj_struct_type(sub->u.member.obj);
+            if (m_target_ty.kind == TY_STRUCT && m_target_ty.tag) {
+                const StructDef *sd = struct_registry_find_c(g_ir_structs, m_target_ty.tag);
+                if (sd) {
+                    for (int i = 0; i < sd->num_members; i++) {
+                        if (strcmp(sd->members[i].name, sub->u.member.name) == 0) {
+                            off += sd->members[i].offset;
+                            *out_sym = sym;
+                            *out_offset = off;
+                            return 1;
+                        }
+                    }
+                }
+            }
+            *out_sym = sym;
+            *out_offset = off;
+            return 1;
+        }
+        if (sub->kind == EX_DEREF) {
+            return eval_global_addr_offset(sub->u.deref.operand, out_sym, out_offset);
+        }
+        if (sub->kind == EX_INDEX) {
+            const char *sym = NULL;
+            int off = 0;
+            if (!eval_global_addr_offset(sub->u.idx.array, &sym, &off))
+                return 0;
+            long long idx = 0;
+            if (!fold_const_int(sub->u.idx.index, &idx))
+                return 0;
+            int esz = get_global_elem_size(sub->u.idx.array);
+            *out_sym = sym;
+            *out_offset = off + (int)(idx * esz);
+            return 1;
+        }
+        return eval_global_addr_offset(sub, out_sym, out_offset);
+    }
+    if (e->kind == EX_BINOP) {
+        if (e->u.bin.op == BOP_ADD) {
+            const char *sym = NULL;
+            int off = 0;
+            long long delta = 0;
+            if (eval_global_addr_offset(e->u.bin.l, &sym, &off) && fold_const_int(e->u.bin.r, &delta)) {
+                int esz = get_global_elem_size(e->u.bin.l);
+                *out_sym = sym;
+                *out_offset = off + (int)(delta * esz);
+                return 1;
+            }
+            if (eval_global_addr_offset(e->u.bin.r, &sym, &off) && fold_const_int(e->u.bin.l, &delta)) {
+                int esz = get_global_elem_size(e->u.bin.r);
+                *out_sym = sym;
+                *out_offset = off + (int)(delta * esz);
+                return 1;
+            }
+        } else if (e->u.bin.op == BOP_SUB) {
+            const char *sym = NULL;
+            int off = 0;
+            long long delta = 0;
+            if (eval_global_addr_offset(e->u.bin.l, &sym, &off) && fold_const_int(e->u.bin.r, &delta)) {
+                int esz = get_global_elem_size(e->u.bin.l);
+                *out_sym = sym;
+                *out_offset = off - (int)(delta * esz);
+                return 1;
+            }
+        }
+    }
+    if (e->kind == EX_MEMBER) {
+        const char *sym = NULL;
+        int off = 0;
+        if (eval_global_addr_offset(e->u.member.obj, &sym, &off)) {
+            Type m_target_ty = get_global_obj_struct_type(e->u.member.obj);
+            if (m_target_ty.kind == TY_STRUCT && m_target_ty.tag) {
+                const StructDef *sd = struct_registry_find_c(g_ir_structs, m_target_ty.tag);
+                if (sd) {
+                    for (int i = 0; i < sd->num_members; i++) {
+                        if (strcmp(sd->members[i].name, e->u.member.name) == 0) {
+                            off += sd->members[i].offset;
+                            *out_sym = sym;
+                            *out_offset = off;
+                            return 1;
+                        }
+                    }
+                }
+            }
+            *out_sym = sym;
+            *out_offset = off;
+            return 1;
+        }
+    }
+    if (e->kind == EX_DEREF) {
+        return eval_global_addr_offset(e->u.deref.operand, out_sym, out_offset);
+    }
+    return 0;
+}
+
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g) {
+    if (e->kind == EX_VAR && strcmp(e->u.var.name, "NULL") == 0) {
+        memset(bytes, 0, sz);
+        return;
+    }
     if (ty->kind == TY_STRUCT && ty->tag && strncmp(ty->tag, "__complex_", 10) == 0) {
         long double cr = 0.0, ci = 0.0;
         if (fold_const_complex(e, &cr, &ci)) {
@@ -3262,7 +3462,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         if (!init) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         memcpy(init, e->u.str.bytes, nbytes);
         queue_rodata(name, init, nbytes, loc);
-        add_global_fixup(g, (int)(bytes - g->init_bytes), name);
+        add_global_fixup(g, (int)(bytes - g->init_bytes), name, 0);
         memset(bytes, 0, sz);  /* patched by the linker */
         return;
     }
@@ -3284,13 +3484,8 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         const IRGlobal *src = find_packed_global(ir, e->u.var.name);
         if (src) {
             if (ty->kind == TY_PTR && g) {
-                /* Pointer slot: patch in the target's address at link time. */
-                if (sz < g->size) {
-                    /* Target global is larger than the pointer slot — it MUST
-                     * be an address (array/struct decay), not a value copy. */
-                }
                 int off = (int)(bytes - g->init_bytes);
-                add_global_fixup(g, off, src->name);
+                add_global_fixup(g, off, src->name, 0);
                 memset(bytes, 0, sz);  /* patched by linker */
                 return;
             }
@@ -3299,11 +3494,11 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             return;
         }
     }
-    /* `T *p = &g` — link-time address of a file-scope object. */
-    if (e->kind == EX_ADDR && e->u.addr.operand
-        && e->u.addr.operand->kind == EX_VAR && ty->kind == TY_PTR && g) {
-        add_global_fixup(g, (int)(bytes - g->init_bytes),
-                         e->u.addr.operand->u.var.name);
+    /* Address of a global object (with optional member/array offset/arithmetic). */
+    const char *addr_sym = NULL;
+    int addr_offset = 0;
+    if (ty->kind == TY_PTR && g && eval_global_addr_offset(e, &addr_sym, &addr_offset)) {
+        add_global_fixup(g, (int)(bytes - g->init_bytes), addr_sym, addr_offset);
         memset(bytes, 0, sz);
         return;
     }
