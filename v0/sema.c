@@ -2079,8 +2079,44 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         Stmt *s = &tu->globals.data[i];
         if (s->kind != ST_DECL) continue;
         if (symtable_has_since(&globals, s->u.decl.name, 0)) {
-            die_at(s->loc.file, s->loc.line, s->loc.col,
-                   "redefinition of global '%s'", s->u.decl.name);
+            Stmt *prev = ((void*)0);
+            for (size_t k = 0; k < i; k++) {
+                if (tu->globals.data[k].kind == ST_DECL &&
+                    runtime.strcmp(tu->globals.data[k].u.decl.name, s->u.decl.name) == 0) {
+                    prev = &tu->globals.data[k];
+                    break;
+                }
+            }
+            if (prev) {
+                if (prev->u.decl.init && s->u.decl.init) {
+                    die_at(s->loc.file, s->loc.line, s->loc.col,
+                           "redefinition of global '%s'", s->u.decl.name);
+                }
+                if (!prev->u.decl.init && s->u.decl.init) {
+                    prev->u.decl.init = s->u.decl.init;
+                    prev->u.decl.type = s->u.decl.type;
+                    if (s->u.decl.storage_class != 2)
+                        prev->u.decl.storage_class = s->u.decl.storage_class;
+                    symtable_push(&globals, prev->u.decl.name, prev->u.decl.type, prev->loc);
+                    if (prev->u.decl.type.kind == TY_ARRAY && prev->u.decl.type.length == 0
+                        && prev->u.decl.init && prev->u.decl.init->kind == EX_STR
+                        && prev->u.decl.type.elem_type
+                        && prev->u.decl.type.elem_type->width == 1) {
+                        prev->u.decl.type.length = prev->u.decl.init->u.str.len + 1;
+                    }
+                    if (prev->u.decl.init && prev->u.decl.init->kind == EX_INIT_LIST)
+                        normalize_init_list(&prev->u.decl.type, prev->u.decl.init, prev->loc);
+                    if (prev->u.decl.init->kind == EX_INIT_LIST)
+                        check_init_list_shape(prev->u.decl.type, prev->u.decl.init, prev->loc);
+                    if (!is_const_init(prev->u.decl.init, &globals))
+                        die_at(prev->loc.file, prev->loc.line, prev->loc.col,
+                               "global '%s' initializer must be a compile-time constant",
+                               prev->u.decl.name);
+                }
+                s->kind = ST_EXPR;
+                s->u.expr = ((void*)0);
+                continue;
+            }
         }
         if (ftab_find(&ft, s->u.decl.name)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
