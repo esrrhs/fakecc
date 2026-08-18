@@ -808,7 +808,10 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
         if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_CONST) { *is_const = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_VOLATILE) { *is_volatile = 1; advance(p); }
-        else if (peek(p)->kind == TK_KW_RESTRICT) { *is_restrict = 1; advance(p); }
+        else if (peek(p)->kind == TK_KW_RESTRICT) {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
+        }
         else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
         else if (is_complex && peek(p)->kind == TK_KW_COMPLEX) { *is_complex = 1; advance(p); }
         else break;
@@ -1064,7 +1067,10 @@ static Type parse_specifiers(Parser *p) {
         TokenKind k = peek(p)->kind;
         if (k == TK_KW_CONST) { is_const = 1; advance(p); }
         else if (k == TK_KW_VOLATILE) { is_volatile = 1; advance(p); }
-        else if (k == TK_KW_RESTRICT) { is_restrict = 1; advance(p); }
+        else if (k == TK_KW_RESTRICT) {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
+        }
         else if (k == TK_KW_INLINE) { advance(p); }
         else if (k == TK_KW_COMPLEX) { is_complex = 1; advance(p); }
         else if (k == TK_KW_SIGNED) { is_signed = 1; has_type = 1; advance(p); }
