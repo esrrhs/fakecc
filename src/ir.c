@@ -1378,8 +1378,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * Sema has already decayed array operands to pointer types on both
          * l and r; check the l/r Expr's type to know. */
         Type lt = e->u.bin.l->type, rt = e->u.bin.r->type;
-        int l_is_ptr = (lt.kind == TY_PTR);
-        int r_is_ptr = (rt.kind == TY_PTR);
+        int l_is_ptr = (lt.kind == TY_PTR || lt.kind == TY_ARRAY);
+        int r_is_ptr = (rt.kind == TY_PTR || rt.kind == TY_ARRAY);
         BinOp bop = e->u.bin.op;
         if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
@@ -1447,7 +1447,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue rv = lower_expr(fn, st, e->u.bin.r);
             if (bop == BOP_SUB && l_is_ptr && r_is_ptr) {
                 /* ptrdiff: (p - q) / sizeof(*p). */
-                int esize = type_size(*lt.pointee);
+                int esize = (lt.kind == TY_ARRAY && lt.elem_type) ? type_size(*lt.elem_type)
+                          : (lt.kind == TY_PTR && lt.pointee) ? type_size(*lt.pointee) : 1;
+                if (esize <= 0) esize = 1;
                 IRValue diff = emit_bin_w(fn, IR_SUB, lv, rv, 8, 0, e->loc);
                 IRValue esv = new_value(fn);
                 emit_inst_w(fn, IR_CONST, esv, -1, -1, esize, 8, 0, e->loc);
@@ -1457,7 +1459,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue pv = l_is_ptr ? lv : rv;
             IRValue iv = l_is_ptr ? rv : lv;
             Type pty = l_is_ptr ? lt : rt;
-            int esize = type_size(*pty.pointee);
+            int esize = (pty.kind == TY_ARRAY && pty.elem_type) ? type_size(*pty.elem_type)
+                      : (pty.kind == TY_PTR && pty.pointee) ? type_size(*pty.pointee) : 1;
+            if (esize <= 0) esize = 1;
             int iw = get_value_width(fn, iv), iu = get_value_is_unsigned(fn, iv);
             IRValue iv8 = coerce(fn, iv, iw, iu, 8, 0, e->loc);
             IRValue esv = new_value(fn);

@@ -413,12 +413,9 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         /* Array-to-pointer decay for operands (except & / sizeof handled elsewhere). */
         if (lt.kind == TY_ARRAY) {
             Type d = type_decay(lt); type_free(&lt); lt = d;
-            /* Also update the child's e->type to reflect decay so IR-gen sees it. */
-            set_type(e->u.bin.l, type_clone(lt));
         }
         if (rt.kind == TY_ARRAY) {
             Type d = type_decay(rt); type_free(&rt); rt = d;
-            set_type(e->u.bin.r, type_clone(rt));
         }
         BinOp op = e->u.bin.op;
         Type res;
@@ -497,7 +494,6 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type ot = check_expr(e->u.un.operand, st, ft);
         if (ot.kind == TY_ARRAY) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
-            set_type(e->u.un.operand, type_clone(ot));
         }
         /* Bitwise NOT requires an integer operand (or complex for conjugate ~x);
          * +/- on pointer is handled in BOP. Here -, +, ~ require scalar integer; reject pointer. */
@@ -984,7 +980,6 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type ot = check_expr(e->u.deref.operand, st, ft);
         if (ot.kind == TY_ARRAY) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
-            set_type(e->u.deref.operand, type_clone(ot));
         }
         if (ot.kind != TY_PTR) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -1119,11 +1114,9 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         /* Array-to-pointer decay for string literals (now typed as char[N]). */
         if (tt.kind == TY_ARRAY) {
             Type d = type_decay(tt); type_free(&tt); tt = d;
-            set_type(e->u.tern.then, type_clone(tt));
         }
         if (et.kind == TY_ARRAY) {
             Type d = type_decay(et); type_free(&et); et = d;
-            set_type(e->u.tern.else_, type_clone(et));
         }
         int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
                                && e->u.tern.then->kind == EX_INT_LIT
