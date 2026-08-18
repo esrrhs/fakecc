@@ -689,7 +689,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     }
     advance(p);
 }
-static int skip_attribute(Parser *p) {
+static int parse_attribute(Parser *p, int *align, int *packed) {
     if (peek(p)->kind != TK_IDENT) return 0;
     if (runtime.strcmp(peek(p)->text, "__attribute__") != 0
         && runtime.strcmp(peek(p)->text, "__attribute") != 0)
@@ -702,12 +702,57 @@ static int skip_attribute(Parser *p) {
     }
     advance(p);
     int depth = 2;
+    while (depth > 1 && peek(p)->kind != TK_EOF) {
+        if (peek(p)->kind == TK_IDENT) {
+            const char *name = peek(p)->text;
+            if (runtime.strcmp(name, "aligned") == 0 || runtime.strcmp(name, "__aligned__") == 0) {
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    Expr *e = parse_ternary(p);
+                    long long val = 0;
+                    if (fold_const_int(e, &val)) {
+                        if (align && val > *align) *align = (int)val;
+                    }
+                    expr_free(e);
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                } else {
+                    if (align && 16 > *align) *align = 16;
+                }
+                continue;
+            } else if (runtime.strcmp(name, "packed") == 0 || runtime.strcmp(name, "__packed__") == 0) {
+                if (packed) *packed = 1;
+                advance(p);
+                continue;
+            }
+        }
+        if (peek(p)->kind == TK_LPAREN) depth++;
+        else if (peek(p)->kind == TK_RPAREN) {
+            depth--;
+            if (depth == 1) {
+                advance(p);
+                if (peek(p)->kind == TK_RPAREN) {
+                    advance(p);
+                    depth--;
+                }
+                break;
+            }
+        }
+        advance(p);
+    }
     while (depth > 0 && peek(p)->kind != TK_EOF) {
         if (peek(p)->kind == TK_LPAREN) depth++;
         else if (peek(p)->kind == TK_RPAREN) depth--;
         advance(p);
     }
     return 1;
+}
+static int skip_attribute(Parser *p) {
+    return parse_attribute(p, ((void*)0), ((void*)0));
 }
 static int tu_has_import(const TranslationUnit *tu, const char *name) {
     for (size_t i = 0; i < tu->imports.len; i++)
@@ -1171,6 +1216,10 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         type_free(&base);
     }
     expect_kind(p, TK_RBRACE, "'}'");
+    int align = 0, packed = 0;
+    while (parse_attribute(p, &align, &packed)) {}
+    if (align > sd->align) sd->align = align;
+    if (packed) sd->align = 1;
     struct_def_finish(sd);
     sd = struct_registry_find(&p->tu->structs, tag);
     if (sd) struct_def_fixup_self_types(sd);

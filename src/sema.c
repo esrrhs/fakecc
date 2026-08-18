@@ -614,7 +614,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type ret = type_default_int();
             if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0)
                 ret = type_make_void();
-            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0)
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0)
                 ret = type_make_ptr(type_make_void());
             else if (strcmp(bname, "__builtin_strlen") == 0)
                 ret = type_make_int(8, 1);
@@ -1584,20 +1584,24 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "non-void function must return a value");
         } else {
-            if (g_sema_ret_type.kind == TY_VOID)
-                die_at(s->loc.file, s->loc.line, s->loc.col,
-                       "void function cannot return a value");
             discard = check_expr(s->u.value, st, ft);
-            if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
-                discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
-                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
-                set_type(c, type_clone(g_sema_ret_type));
-                s->u.value = c;
-            } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
-                       (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
-                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
-                set_type(c, type_clone(g_sema_ret_type));
-                s->u.value = c;
+            if (g_sema_ret_type.kind == TY_VOID) {
+                if (discard.kind != TY_VOID) {
+                    die_at(s->loc.file, s->loc.line, s->loc.col,
+                           "void function cannot return a value");
+                }
+            } else {
+                if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
+                    discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
+                    Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                    set_type(c, type_clone(g_sema_ret_type));
+                    s->u.value = c;
+                } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
+                           (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
+                    Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                    set_type(c, type_clone(g_sema_ret_type));
+                    s->u.value = c;
+                }
             }
             type_free(&discard);
         }

@@ -91,6 +91,7 @@ enum IROpcode {
     IR_LADDR,
     IR_JMP_PTR,
     IR_FRAME_ADDR,
+    IR_RETURN_ADDR,
     IR_DYN_ALLOCA,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
