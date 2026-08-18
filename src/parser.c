@@ -428,7 +428,6 @@ static Type parse_specifiers(Parser *p) {
             parse_enum_body(p, ed);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_default_int();
-            t.tag = xstrdup(tag);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
@@ -445,7 +444,6 @@ static Type parse_specifiers(Parser *p) {
         }
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_default_int();
-        t.tag = xstrdup(tag->text);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
@@ -1344,8 +1342,6 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
     if (!a || !b) return 0;
     if (a->kind != b->kind) return 0;
     if (a->kind == TY_INT) {
-        if (a->tag && b->tag && strcmp(a->tag, b->tag) != 0) return 0;
-        if ((a->tag && !b->tag) || (!a->tag && b->tag)) return 0;
         return (a->width == b->width && a->is_unsigned == b->is_unsigned);
     }
     if (a->kind == TY_FLOAT) {
@@ -2595,11 +2591,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
             }
             /* Normalize array parameters (`int a[]`, `int a[N]`) to pointers,
              * matching standard C parameter adjustment. */
-            if (pty.kind == TY_ARRAY) {
-                Type elem = *pty.elem_type;
+            if (pty.kind == TY_ARRAY && pty.elem_type) {
+                Type ptr = type_make_ptr(*pty.elem_type);
                 type_free(&pty);
-                pty = type_make_ptr(elem);
-                type_free(&elem);
+                pty = ptr;
             }
             param_array_push(&fn.params, pname, pty, peek(p)->loc);
             free(pname);

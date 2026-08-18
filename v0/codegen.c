@@ -242,6 +242,8 @@ enum IROpcode {
     IR_FADDR,
     IR_LADDR,
     IR_JMP_PTR,
+    IR_FRAME_ADDR,
+    IR_DYN_ALLOCA,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -324,6 +326,7 @@ struct IRFunction {
     int ret_is_bool;
     int is_variadic;
     int is_static;
+    int has_dyn_alloca;
     IRValue sret_value;
     IRDebugVar *dbg_vars;
     size_t num_dbg_vars;
@@ -337,6 +340,7 @@ struct IRFunctionArray {
 struct GlobalFixup {
     int offset;
     char *sym;
+    int addend;
 };typedef struct GlobalFixup GlobalFixup;
 struct IRGlobal {
     char *name;
@@ -2062,8 +2066,23 @@ static DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
     default: return DBG_TY_INT;
     }
 }
-static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3]) {
-    emit_add_rsp_imm32(b, stack_size);
+static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int has_dyn_alloca) {
+    if (has_dyn_alloca) {
+        int cs_count = (cs_used[0]?1:0) + (cs_used[1]?1:0) + (cs_used[2]?1:0);
+        int cs_bytes = cs_count * 8;
+        if (cs_bytes > 0) {
+            emit_byte(b, 0x48);
+            emit_byte(b, 0x8D);
+            emit_byte(b, 0x65);
+            emit_byte(b, (uint8_t)(-cs_bytes));
+        } else {
+            emit_byte(b, 0x48);
+            emit_byte(b, 0x89);
+            emit_byte(b, 0xEC);
+        }
+    } else {
+        emit_add_rsp_imm32(b, stack_size);
+    }
     if (cs_used[2]) emit_pop_r(b, REG_R13);
     if (cs_used[1]) emit_pop_r(b, REG_R12);
     if (cs_used[0]) emit_pop_r(b, REG_RBX);
@@ -2124,7 +2143,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (tsym < 0)
                 tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
             emit_module_add_data_reloc(out, global_off[gi] + g->fixups[fi].offset,
-                                       10, tsym, 0);
+                                       10, tsym, g->fixups[fi].addend);
         }
     }
     runtime.free(global_off);
@@ -2647,6 +2666,32 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 emit_byte(&out->text, 0xE3);
                 break;
             }
+            case IR_FRAME_ADDR: {
+                int target = dr >= 0 ? dr : REG_RAX;
+                emit_mov_rr(&out->text, target, REG_RBP);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+            case IR_DYN_ALLOCA: {
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_byte(&out->text, 0x48);
+                emit_byte(&out->text, 0x83);
+                emit_byte(&out->text, 0xC0);
+                emit_byte(&out->text, 0x0F);
+                emit_byte(&out->text, 0x48);
+                emit_byte(&out->text, 0x83);
+                emit_byte(&out->text, 0xE0);
+                emit_byte(&out->text, 0xF0);
+                emit_byte(&out->text, 0x48);
+                emit_byte(&out->text, 0x29);
+                emit_byte(&out->text, 0xC4);
+                int target = dr >= 0 ? dr : REG_RAX;
+                emit_mov_rr(&out->text, target, REG_RSP);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
             case IR_FADDR: {
                 int target = dr >= 0 ? dr : REG_RAX;
                 size_t patch = emit_lea_rip(&out->text, target);
@@ -3069,7 +3114,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     else
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 }
-                emit_epilogue(&out->text, stack_size, cs_used);
+                emit_epilogue(&out->text, stack_size, cs_used, fn->has_dyn_alloca);
                 break;
             }
             case IR_FADD:
@@ -3388,7 +3433,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 needs_ret = 1;
         }
         if (needs_ret)
-            emit_epilogue(&out->text, stack_size, cs_used);
+            emit_epilogue(&out->text, stack_size, cs_used, fn->has_dyn_alloca);
         if (want_debug && dbg_func_idx >= 0) {
             size_t fn_end_pc = out->text.len;
             emit_module_dbg_func_end(out, dbg_func_idx, fn_end_pc,

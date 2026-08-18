@@ -242,6 +242,8 @@ enum IROpcode {
     IR_FADDR,
     IR_LADDR,
     IR_JMP_PTR,
+    IR_FRAME_ADDR,
+    IR_DYN_ALLOCA,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -324,6 +326,7 @@ struct IRFunction {
     int ret_is_bool;
     int is_variadic;
     int is_static;
+    int has_dyn_alloca;
     IRValue sret_value;
     IRDebugVar *dbg_vars;
     size_t num_dbg_vars;
@@ -337,6 +340,7 @@ struct IRFunctionArray {
 struct GlobalFixup {
     int offset;
     char *sym;
+    int addend;
 };typedef struct GlobalFixup GlobalFixup;
 struct IRGlobal {
     char *name;

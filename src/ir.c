@@ -3659,6 +3659,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         if (fd->is_extern) continue;
 
         IRFunction irfn;
+        memset(&irfn, 0, sizeof(irfn));
         irfn.name = xstrdup(fd->name);
         irfn.loc = fd->loc;
         irfn.insts.data = NULL;

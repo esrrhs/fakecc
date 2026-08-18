@@ -242,10 +242,14 @@ static TokenKind keyword_kind(const char *s, size_t len) {
     case 11:
         if (runtime.memcmp(s, "__alignof__", 11) == 0) return TK_KW_ALIGNOF;
         if (runtime.memcmp(s, "__complex__", 11) == 0) return TK_KW_COMPLEX;
+        if (runtime.memcmp(s, "__extension", 11) == 0) return TK_KW_INLINE;
         break;
     case 12:
         if (runtime.memcmp(s, "__volatile__", 12) == 0) return TK_KW_VOLATILE;
         if (runtime.memcmp(s, "__restrict__", 12) == 0) return TK_KW_RESTRICT;
+        break;
+    case 13:
+        if (runtime.memcmp(s, "__extension__", 13) == 0) return TK_KW_INLINE;
         break;
     default:
         break;
