@@ -1222,6 +1222,64 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
     int dst = inst->dst;
     int is_float = inst->is_float;
 
+    /* INTEGER-class aggregate: copy `imm` bytes from the GP save area (or
+     * overflow) into the caller-provided slot in call_args[1], then return
+     * that pointer. */
+    if (!is_float && inst->imm > 0 && inst->call_nargs >= 2
+        && inst->call_args[1] >= 0) {
+        int nbytes = (int)inst->imm;
+        int n8 = (nbytes + 7) / 8;
+        if (n8 < 1) n8 = 1;
+        int destv = inst->call_args[1];
+        ensure_reg(b, destv, REG_RSI, ra);
+        int ov_step = (nbytes + 7) & ~7;
+        if (ov_step < 8) ov_step = 8;
+
+        if (!inst->force_stack && n8 <= 2) {
+            emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
+            emit_cmp_imm32(b, REG_RCX, 48 - 8 * (n8 - 1));
+            size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow */
+            emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF);
+            emit_add_rr(b, REG_R11, REG_RCX); /* r11 = save + gp_offset */
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            }
+            emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
+            emit_add_imm32(b, REG_RCX, 8 * n8);
+            emit_store_base_off32(b, ap_reg, REG_RCX, VA_GP_OFF);
+            size_t jmp_end = emit_jmp_rel32(b);
+            size_t ov_off = b->len;
+            patch_rel32(b, jae_ov, ov_off);
+            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            }
+            emit_add_imm32(b, REG_R11, ov_step);
+            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            patch_rel32(b, jmp_end, b->len);
+        } else {
+            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            }
+            emit_add_imm32(b, REG_R11, ov_step);
+            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+        }
+        if (dst >= 0) {
+            if (ra && dst < ra->num_values && ra->reg[dst] >= 0
+                && ra->reg[dst] < 16) {
+                int dr = ra->reg[dst];
+                if (dr != REG_RSI) emit_mov_rr(b, dr, REG_RSI);
+            } else {
+                spill_if_needed(b, dst, REG_RSI, ra);
+            }
+        }
+        return;
+    }
+
     if (!is_float) {
         /* ---------------- GP class ---------------- */
         emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF); /* ecx = gp_offset */
@@ -2544,6 +2602,95 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                     } else {
                         spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    }
+                    break;
+                }
+                /* GCC integer bit builtins: keep the full name so codegen
+                 * can emit lzcnt/tzcnt/popcnt/bswap instead of a libc call. */
+                if (inst->call_name && strncmp(inst->call_name, "__builtin_", 10) == 0
+                    && (strstr(inst->call_name, "clz") || strstr(inst->call_name, "ctz")
+                        || strstr(inst->call_name, "ffs") || strstr(inst->call_name, "popcount")
+                        || strstr(inst->call_name, "parity") || strstr(inst->call_name, "clrsb")
+                        || strstr(inst->call_name, "bswap"))) {
+                    const char *bn = inst->call_name;
+                    int w64 = 1;
+                    if (strstr(bn, "bswap16")) w64 = 0;
+                    else if (strstr(bn, "bswap32")) w64 = 0;
+                    else if (strstr(bn, "bswap64")) w64 = 1;
+                    else {
+                        size_t L = strlen(bn);
+                        if (!(L >= 2 && bn[L-2] == 'l' && bn[L-1] == 'l')
+                            && !(L >= 1 && bn[L-1] == 'l'))
+                            w64 = 0; /* 32-bit int variants */
+                    }
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    if (!w64 && !strstr(bn, "bswap16")) {
+                        /* 32-bit operand: zero-extend so high bits cannot affect lzcnt/tzcnt. */
+                        emit_rex_wrb(&out->text, 0, REG_RCX, REG_RCX);
+                        emit_byte(&out->text, 0x89);
+                        emit_modrm(&out->text, 3, REG_RCX & 7, REG_RCX & 7);
+                    }
+                    if (strstr(bn, "bswap")) {
+                        if (strstr(bn, "16")) {
+                            emit_mov_rr(&out->text, REG_RAX, REG_RCX);
+                            emit_and_imm32(&out->text, REG_RAX, 0xFFFF);
+                            /* rorw $8, %ax */
+                            emit_byte(&out->text, 0x66);
+                            emit_byte(&out->text, 0xC1);
+                            emit_modrm(&out->text, 3, 1, REG_RAX);
+                            emit_byte(&out->text, 8);
+                        } else {
+                            emit_mov_rr(&out->text, REG_RAX, REG_RCX);
+                            if (w64) emit_rex_wrb(&out->text, 1, 0, REG_RAX);
+                            emit_byte(&out->text, 0x0F);
+                            emit_byte(&out->text, (uint8_t)(0xC8 + (REG_RAX & 7)));
+                        }
+                    } else if (strstr(bn, "clrsb")) {
+                        emit_mov_rr(&out->text, REG_R11, REG_RCX);
+                        emit_mov_imm(&out->text, REG_RCX, w64 ? 63 : 31);
+                        emit_mov_rr(&out->text, REG_RAX, REG_R11);
+                        emit_rex_wrb(&out->text, w64, 0, REG_RAX);
+                        emit_byte(&out->text, 0xD3);
+                        emit_modrm(&out->text, 3, 7, REG_RAX & 7);
+                        emit_bitxor_rr(&out->text, REG_RAX, REG_R11);
+                        emit_byte(&out->text, 0xF3);
+                        emit_rex_wrb(&out->text, w64, REG_RAX, REG_RAX);
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xBD);
+                        emit_modrm(&out->text, 3, REG_RAX & 7, REG_RAX & 7);
+                        emit_add_imm32(&out->text, REG_RAX, -1);
+                    } else if (strstr(bn, "ffs")) {
+                        emit_xor_rr(&out->text, REG_RAX);
+                        emit_byte(&out->text, 0xF3);
+                        emit_rex_wrb(&out->text, w64, REG_RDX, REG_RCX);
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xBC);
+                        emit_modrm(&out->text, 3, REG_RDX & 7, REG_RCX & 7);
+                        emit_add_imm32(&out->text, REG_RDX, 1);
+                        emit_test_rr(&out->text, REG_RCX);
+                        emit_rex_wrb(&out->text, 1, REG_RAX, REG_RDX);
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0x45); /* cmovnz rax, rdx */
+                        emit_modrm(&out->text, 3, REG_RAX & 7, REG_RDX & 7);
+                    } else {
+                        uint8_t opc = 0xBD; /* lzcnt */
+                        if (strstr(bn, "ctz")) opc = 0xBC;
+                        else if (strstr(bn, "popcount") || strstr(bn, "parity")) opc = 0xB8;
+                        emit_byte(&out->text, 0xF3);
+                        emit_rex_wrb(&out->text, w64, REG_RAX, REG_RCX);
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, opc);
+                        emit_modrm(&out->text, 3, REG_RAX & 7, REG_RCX & 7);
+                        if (strstr(bn, "parity"))
+                            emit_and_imm32(&out->text, REG_RAX, 1);
+                    }
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX)
+                                emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
                     }
                     break;
                 }

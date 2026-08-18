@@ -12,6 +12,39 @@ void abort(void) {
     __syscall(231, 127);
 }
 
+int abs(int x) { return x < 0 ? -x : x; }
+long labs(long x) { return x < 0 ? -x : x; }
+long long llabs(long long x) { return x < 0 ? -x : x; }
+
+double fabs(double x) { return x < 0.0 ? -x : x; }
+float fabsf(float x) { return x < 0.0f ? -x : x; }
+
+double floor(double x) {
+    if (x >= 0.0) return (double)(long long)x;
+    long long i = (long long)x;
+    if ((double)i == x) return (double)i;
+    return (double)(i - 1);
+}
+float floorf(float x) { return (float)floor((double)x); }
+
+double ceil(double x) {
+    double f = floor(x);
+    if (f == x) return f;
+    return f + 1.0;
+}
+
+double sqrt(double x) {
+    if (x <= 0.0) return 0.0;
+    double g = x;
+    int n = 0;
+    while (n < 40) {
+        g = 0.5 * (g + x / g);
+        n = n + 1;
+    }
+    return g;
+}
+
+
 /* Shared body of the strto* family: parses [ws][sign][base prefix][digits] and
  * returns the magnitude, with the sign reported through *neg.  Wraparound on
  * overflow rather than clamping to LONG_MAX/ULLONG_MAX. */
@@ -97,6 +130,13 @@ static long double pow10_exact(int k) {
  *
  * Only integer-valued literals appear below, which parse exactly under both
  * this implementation and the host's, keeping the bootstrap a fixed point. */
+static int hex_char_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 static long double strtofp_body(const char *s, char **end) {
     const char *start = s;
     while (isspace((unsigned char)*s)) s = s + 1;
@@ -105,6 +145,75 @@ static long double strtofp_body(const char *s, char **end) {
     else if (*s == '-') {
         neg = 1;
         s = s + 1;
+    }
+
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s = s + 2;
+        long double mant = 0.0L;
+        int any = 0;
+        int shift_bits = 0;
+        for (;;) {
+            int v = hex_char_val(*s);
+            if (v < 0) break;
+            any = 1;
+            mant = mant * 16.0L + (long double)v;
+            s = s + 1;
+        }
+        if (*s == '.') {
+            s = s + 1;
+            for (;;) {
+                int v = hex_char_val(*s);
+                if (v < 0) break;
+                any = 1;
+                mant = mant * 16.0L + (long double)v;
+                shift_bits = shift_bits - 4;
+                s = s + 1;
+            }
+        }
+        if (!any) {
+            if (end) *end = (char *)start;
+            return 0.0L;
+        }
+        int bin_exp = 0;
+        if (*s == 'p' || *s == 'P') {
+            const char *ppos = s;
+            s = s + 1;
+            int pneg = 0;
+            if (*s == '+') s = s + 1;
+            else if (*s == '-') {
+                pneg = 1;
+                s = s + 1;
+            }
+            if (isdigit((unsigned char)*s)) {
+                while (isdigit((unsigned char)*s)) {
+                    if (bin_exp < 100000) bin_exp = bin_exp * 10 + (*s - '0');
+                    s = s + 1;
+                }
+                if (pneg) bin_exp = -bin_exp;
+            } else {
+                s = ppos;
+            }
+        }
+        if (end) *end = (char *)s;
+        int total_exp = bin_exp + shift_bits;
+        while (total_exp >= 32) {
+            mant = mant * 4294967296.0L;
+            total_exp = total_exp - 32;
+        }
+        while (total_exp > 0) {
+            mant = mant * 2.0L;
+            total_exp = total_exp - 1;
+        }
+        while (total_exp <= -32) {
+            mant = mant / 4294967296.0L;
+            total_exp = total_exp + 32;
+        }
+        while (total_exp < 0) {
+            mant = mant / 2.0L;
+            total_exp = total_exp + 1;
+        }
+        if (neg) mant = -mant;
+        return mant;
     }
 
     long double mant = 0.0L;

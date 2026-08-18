@@ -345,12 +345,14 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int enum_id;
+    int bitfield_width;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -362,13 +364,15 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -648,6 +652,7 @@ struct FunctionDecl {
     StmtArray body;
     SourceLoc loc;
     int is_variadic;
+    int is_unprototyped;
     int is_extern;
     int is_static;
 };typedef struct FunctionDecl FunctionDecl;
@@ -701,6 +706,10 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
 void struct_def_fixup_self_types(StructDef *sd);
+const StructMember *struct_lookup_member(const StructRegistry *reg,
+                                         const StructDef *sd,
+                                         const char *name,
+                                         int *offset_out);
 struct FunctionArray {
     FunctionDecl *data;
     size_t len;
@@ -1043,6 +1052,11 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
     }
     return 0;
 }
+static int64_t bitfield_mask64(int bit_width) {
+    if (bit_width <= 0) return 0;
+    if (bit_width >= 64) return -1;
+    return (1LL << bit_width) - 1;
+}
 static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
                            int *unit_width) {
     if (e->kind != EX_MEMBER) return 0;
@@ -1051,18 +1065,14 @@ static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
     if (!tag) return 0;
     const StructDef *sd = struct_registry_find_c(g_ir_structs, tag);
     if (!sd) return 0;
-    for (int i = 0; i < sd->num_members; i++) {
-        if (runtime.strcmp(sd->members[i].name, e->u.member.name) == 0) {
-            if (sd->members[i].bit_width > 0) {
-                *bit_width = sd->members[i].bit_width;
-                *bit_offset = sd->members[i].bit_offset;
-                *unit_width = type_size(sd->members[i].type);
-                return 1;
-            }
-            return 0;
-        }
-    }
-    return 0;
+    int off = 0;
+    const StructMember *m = struct_lookup_member(g_ir_structs, sd,
+                                                 e->u.member.name, &off);
+    if (!m || m->bit_width <= 0) return 0;
+    *bit_width = m->bit_width;
+    *bit_offset = m->bit_offset;
+    *unit_width = type_size(m->type);
+    return 1;
 }
 static int member_field_is_array(const Expr *e) {
     if (e->kind != EX_MEMBER) return 0;
@@ -1071,11 +1081,9 @@ static int member_field_is_array(const Expr *e) {
     if (!tag) return 0;
     const StructDef *sd = struct_registry_find_c(g_ir_structs, tag);
     if (!sd) return 0;
-    for (int i = 0; i < sd->num_members; i++) {
-        if (runtime.strcmp(sd->members[i].name, e->u.member.name) == 0)
-            return sd->members[i].type.kind == TY_ARRAY;
-    }
-    return 0;
+    const StructMember *m = struct_lookup_member(g_ir_structs, sd,
+                                                 e->u.member.name, ((void*)0));
+    return m && m->type.kind == TY_ARRAY;
 }
 static int stmt_has_computed_goto(const Stmt *s) {
     if (!s) return 0;
@@ -1258,23 +1266,41 @@ static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
     for (int i = 0; i < n; i++) {
         int off = i * 8;
         int remain = size - off;
+        if (remain > 8) remain = 8;
         if (remain <= 0) remain = 1;
-        int w = remain >= 8 ? 8 : remain >= 4 ? 4 : remain >= 2 ? 2 : 1;
-        IRValue a = emit_add_const(fn, addr, off, loc);
-        IRValue v = new_value(fn);
+        int remain_n = remain;
+        int off_b = 0;
+        IRValue v = -1;
         int is_sse = (cls[i] == SYSV_CLS_SSE);
-        emit_inst_w(fn, IR_LOAD_PTR, v, a, -1, 0, w, 1, loc);
-        if (is_sse) set_value_float(fn, v, 1);
-        if (w < 8 && !is_sse) {
-            IRValue wide = new_value(fn);
-            emit_inst_w(fn, IR_ZEXT, wide, v, -1, w, 8, 1, loc);
-            v = wide;
-        } else if (w < 8 && is_sse) {
-            set_value_type(fn, v, w, 0);
+        while (remain_n > 0) {
+            int chunk = remain_n >= 8 ? 8 : remain_n >= 4 ? 4 : remain_n >= 2 ? 2 : 1;
+            IRValue a = emit_add_const(fn, addr, off + off_b, loc);
+            IRValue piece = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, piece, a, -1, 0, chunk, 1, loc);
+            if (!is_sse && chunk < 8) {
+                IRValue wide = new_value(fn);
+                emit_inst_w(fn, IR_ZEXT, wide, piece, -1, chunk, 8, 1, loc);
+                piece = wide;
+            }
+            if (off_b > 0 && !is_sse) {
+                IRValue sh = new_value(fn);
+                emit_inst_w(fn, IR_CONST, sh, -1, -1, (long long)off_b * 8, 8, 1, loc);
+                IRValue shifted = new_value(fn);
+                emit_inst_w(fn, IR_SHL, shifted, piece, sh, 0, 8, 1, loc);
+                IRValue merged = new_value(fn);
+                emit_inst_w(fn, IR_BOR, merged, v, shifted, 0, 8, 1, loc);
+                v = merged;
+            } else {
+                v = piece;
+            }
+            off_b += chunk;
+            remain_n -= chunk;
+        }
+        if (is_sse) {
+            set_value_type(fn, v, remain <= 4 ? 4 : 8, 0);
             set_value_float(fn, v, 1);
         } else {
-            set_value_type(fn, v, is_sse ? (w <= 4 ? 4 : 8) : 8, is_sse ? 0 : 1);
-            if (is_sse) set_value_float(fn, v, 1);
+            set_value_type(fn, v, 8, 1);
         }
         out[i] = v;
     }
@@ -1287,22 +1313,36 @@ static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
         int off = i * 8;
         int remain = size - off;
         if (remain <= 0) break;
-        int w = remain >= 8 ? 8 : remain >= 4 ? 4 : remain >= 2 ? 2 : 1;
-        IRValue a = emit_add_const(fn, addr, off, loc);
-        IRValue v = vals[i];
-        int vw = get_value_width(fn, v);
-        if (vw != w && !get_value_is_float(fn, v)) {
-            if (vw > w) {
-                IRValue t = new_value(fn);
-                emit_inst_w(fn, IR_TRUNC, t, v, -1, vw, w, 1, loc);
-                v = t;
-            } else {
-                IRValue t = new_value(fn);
-                emit_inst_w(fn, IR_ZEXT, t, v, -1, vw, w, 1, loc);
-                v = t;
+        int remain_n = remain;
+        int off_b = 0;
+        IRValue srcv = vals[i];
+        while (remain_n > 0) {
+            int w = remain_n >= 8 ? 8 : remain_n >= 4 ? 4 : remain_n >= 2 ? 2 : 1;
+            IRValue a = emit_add_const(fn, addr, off + off_b, loc);
+            IRValue v = srcv;
+            if (off_b > 0 && !get_value_is_float(fn, srcv)) {
+                IRValue sh = new_value(fn);
+                emit_inst_w(fn, IR_CONST, sh, -1, -1, (long long)off_b * 8, 8, 1, loc);
+                IRValue shifted = new_value(fn);
+                emit_inst_w(fn, IR_SHR, shifted, srcv, sh, 0, 8, 1, loc);
+                v = shifted;
             }
+            int vw = get_value_width(fn, v);
+            if (vw != w && !get_value_is_float(fn, v)) {
+                if (vw > w) {
+                    IRValue t = new_value(fn);
+                    emit_inst_w(fn, IR_TRUNC, t, v, -1, vw, w, 1, loc);
+                    v = t;
+                } else {
+                    IRValue t = new_value(fn);
+                    emit_inst_w(fn, IR_ZEXT, t, v, -1, vw, w, 1, loc);
+                    v = t;
+                }
+            }
+            emit_inst_w(fn, IR_STORE_PTR, -1, a, v, 0, w, 1, loc);
+            off_b += w;
+            remain_n -= w;
         }
-        emit_inst_w(fn, IR_STORE_PTR, -1, a, v, 0, w, 1, loc);
     }
 }
 static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc) {
@@ -1554,9 +1594,8 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
         const StructDef *sd = struct_registry_find_c(g_ir_structs,
                                                      e->u.member.obj->type.tag);
         int off = 0;
-        for (int i = 0; i < sd->num_members; i++)
-            if (runtime.strcmp(sd->members[i].name, e->u.member.name) == 0)
-                { off = sd->members[i].offset; break; }
+        if (sd)
+            struct_lookup_member(g_ir_structs, sd, e->u.member.name, &off);
         IRValue off_v = new_value(fn);
         emit_inst_w(fn, IR_CONST, off_v, -1, -1, off, 8, 1, e->loc);
         return emit_bin_w(fn, IR_ADD, base, off_v, 8, 1, e->loc);
@@ -1981,6 +2020,13 @@ IRValue pr;
         if (res_float) set_value_float(fn, result, 1);
         if (is_cmp) {
             set_value_type(fn, result, rw_res, ru_res);
+        } else if (e->type.bitfield_width > 0 && e->type.bitfield_width < op_w * 8) {
+            int64_t msk = bitfield_mask64(e->type.bitfield_width);
+            IRValue mv = new_value(fn);
+            emit_inst_w(fn, IR_CONST, mv, -1, -1, msk, op_w, 1, e->loc);
+            IRValue masked = new_value(fn);
+            emit_inst_w(fn, IR_BAND, masked, result, mv, 0, op_w, op_u, e->loc);
+            result = masked;
         }
         return result;
     }
@@ -2030,7 +2076,8 @@ IRValue pr;
                     if (runtime.strcmp(g_ir_tu->functions.data[i].name, e->u.var.name) == 0) {
                         IRValue v = new_value(fn);
                         emit_inst_w(fn, IR_FADDR, v, -1, -1, 0, 8, 1, e->loc);
-                        fn->insts.data[fn->insts.len - 1].call_name = xstrdup(e->u.var.name);
+                        fn->insts.data[fn->insts.len - 1].call_name =
+                            xstrdup(e->u.var.name);
                         return v;
                     }
                 }
@@ -2046,9 +2093,8 @@ IRValue pr;
             if (entry->ty.kind == TY_FLOAT) set_value_float(fn, v, 1);
             return v;
         }
-        if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT) {
+        if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT)
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
-        }
         if (entry->pinned) {
             IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
             IRValue v = new_value(fn);
@@ -2139,7 +2185,7 @@ IRValue pr;
                 int uw = unit_width ? unit_width : 4;
                 IRValue unit = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
-                int mask = (1 << bit_width) - 1;
+                int64_t mask = bitfield_mask64(bit_width);
                 IRValue m = new_value(fn);
                 emit_inst_w(fn, IR_CONST, m, -1, -1, mask, uw, 1, e->loc);
                 IRValue so = new_value(fn);
@@ -2219,6 +2265,25 @@ IRValue pr;
                 inst.call_args[0] = ap;
                 inst.call_args[1] = last;
                 if (runtime.strcmp(cname, "va_arg") == 0) {
+                    if (e->va_arg_type.kind == TY_STRUCT) {
+                        int sz = type_size(e->va_arg_type);
+                        if (sz <= 0) sz = 8;
+                        SysVRegClass cls[2];
+                        int nreg = sysv_classify_agg(e->va_arg_type, cls);
+                        IRValue slot = emit_alloca(fn, sz < 8 ? 8 : sz, 8, 1, e->loc);
+                        IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                        inst.dst = new_value(fn);
+                        inst.width = 8;
+                        inst.is_unsigned = 1;
+                        inst.is_float = 0;
+                        inst.imm = sz;
+                        inst.force_stack = (nreg == 0);
+                        inst.call_nargs = 2;
+                        inst.call_args[1] = addr;
+                        ir_inst_array_push(&fn->insts, inst);
+                        set_value_type(fn, inst.dst, 8, 1);
+                        return inst.dst;
+                    }
                     inst.dst = new_value(fn);
                     inst.width = e->va_arg_type.width ? e->va_arg_type.width : 4;
                     inst.is_unsigned = e->va_arg_type.is_unsigned;
@@ -2339,7 +2404,12 @@ IRValue pr;
             } else if (runtime.strcmp(cname, "__builtin_ctzll") == 0) {
                 inst.call_name = xstrdup(cname);
             } else if (runtime.strncmp(cname, "__builtin_", 10) == 0) {
-                if (runtime.strcmp(cname, "__builtin_abort") == 0) inst.call_name = xstrdup("abort");
+                if (runtime.strstr(cname, "__builtin_clz") || runtime.strstr(cname, "__builtin_ctz")
+                    || runtime.strstr(cname, "__builtin_ffs") || runtime.strstr(cname, "__builtin_popcount")
+                    || runtime.strstr(cname, "__builtin_parity") || runtime.strstr(cname, "__builtin_clrsb")
+                    || runtime.strstr(cname, "__builtin_bswap"))
+                    inst.call_name = xstrdup(cname);
+                else if (runtime.strcmp(cname, "__builtin_abort") == 0) inst.call_name = xstrdup("abort");
                 else if (runtime.strcmp(cname, "__builtin_exit") == 0) inst.call_name = xstrdup("exit");
                 else if (runtime.strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("abort");
                 else if (runtime.strcmp(cname, "__builtin_memset") == 0) inst.call_name = xstrdup("memset");
@@ -2436,7 +2506,8 @@ IRValue pr;
         if (op->kind == EX_DEREF) {
             return lower_expr(fn, st, op->u.deref.operand);
         }
-        if (op->kind == EX_INDEX || op->kind == EX_MEMBER) {
+        if (op->kind == EX_INDEX || op->kind == EX_MEMBER
+            || op->kind == EX_COMPOUND_LITERAL) {
             return lower_lvalue_addr(fn, st, op);
         }
         return -1;
@@ -2503,7 +2574,7 @@ IRValue pr;
                     v = down;
                     u = 0;
                 } else {
-                    int mask = (1 << bit_width) - 1;
+                    int64_t mask = bitfield_mask64(bit_width);
                     IRValue m = new_value(fn);
                     emit_inst_w(fn, IR_CONST, m, -1, -1, mask, w, 1, e->loc);
                     IRValue masked = new_value(fn);
@@ -2670,7 +2741,7 @@ IRValue vi;
         if (lv->kind == EX_MEMBER
             && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit)) {
             int uw = bf_unit ? bf_unit : 4;
-            int mask = (1 << bf_width) - 1;
+            int64_t mask = bitfield_mask64(bf_width);
             IRValue unit = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
             IRValue old_bf;
@@ -2744,6 +2815,11 @@ IRValue vi;
         int is_float = (lv->type.kind == TY_FLOAT);
         int lw = is_ptr ? 8 : (lv->type.width ? lv->type.width : 4);
         int lu = is_ptr ? 1 : lv->type.is_unsigned;
+        int arith_w = lw, arith_u = lu;
+        if (!is_ptr && !is_float && lw < 4) {
+            arith_w = 4;
+            arith_u = 0;
+        }
         IROpcode ir_op;
         if (is_float) {
             switch (op) {
@@ -2761,13 +2837,86 @@ IRValue vi;
                 IRValue old = new_value(fn);
                 emit_inst_w(fn, IR_LOAD, old, entry->slot, -1, 0, lw, lu, e->loc);
                 IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
-                IRValue scaled = scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc);
-                IRValue neu = emit_bin_w(fn, ir_op, old, scaled, lw, lu, e->loc);
-                emit_inst_w(fn, IR_STORE, -1, entry->slot, neu, 0, lw, lu, e->loc);
-                return neu;
+                IRValue scaled = is_ptr
+                    ? scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc)
+                    : coerce(fn, rhs, get_value_width(fn, rhs),
+                             get_value_is_unsigned(fn, rhs), arith_w, arith_u, e->loc);
+                IRValue old_p = (arith_w == lw && arith_u == lu)
+                    ? old : coerce(fn, old, lw, lu, arith_w, arith_u, e->loc);
+                IRValue neu = emit_bin_w(fn, ir_op, old_p, scaled, arith_w, arith_u, e->loc);
+                IRValue back = (arith_w == lw && arith_u == lu)
+                    ? neu : coerce(fn, neu, arith_w, arith_u, lw, lu, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, entry->slot, back, 0, lw, lu, e->loc);
+                return back;
             }
         }
         IRValue addr = lower_lvalue_addr(fn, st, lv);
+        int bf_width = 0, bf_offset = 0, bf_unit = 0;
+        if (!is_float && !is_ptr && lv->kind == EX_MEMBER
+            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit)) {
+            int uw = bf_unit ? bf_unit : 4;
+            int64_t mask = bitfield_mask64(bf_width);
+            IRValue unit = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
+            IRValue extracted;
+            if (bf_offset > 0) {
+                IRValue sh = new_value(fn);
+                emit_inst_w(fn, IR_CONST, sh, -1, -1, bf_offset, 8, 1, e->loc);
+                extracted = new_value(fn);
+                emit_inst_w(fn, IR_SHR, extracted, unit, sh, 0, uw, 1, e->loc);
+            } else {
+                extracted = unit;
+            }
+            IRValue old_val;
+            if (!lv->type.is_unsigned && !lv->type.is_bool && bf_width < uw * 8) {
+                int shift = uw * 8 - bf_width;
+                IRValue s = new_value(fn);
+                emit_inst_w(fn, IR_CONST, s, -1, -1, shift, 8, 1, e->loc);
+                IRValue up = new_value(fn);
+                emit_inst_w(fn, IR_SHL, up, extracted, s, 0, uw, 0, e->loc);
+                old_val = new_value(fn);
+                emit_inst_w(fn, IR_SHR, old_val, up, s, 0, uw, 0, e->loc);
+            } else {
+                IRValue m_mask = new_value(fn);
+                emit_inst_w(fn, IR_CONST, m_mask, -1, -1, mask, uw, 1, e->loc);
+                old_val = new_value(fn);
+                emit_inst_w(fn, IR_BAND, old_val, extracted, m_mask, 0, uw, 1, e->loc);
+            }
+            int cw = (uw > 4) ? uw : 4;
+            int cu = (lv->type.is_unsigned && bf_width >= 32) ? 1 : 0;
+            if (uw > 4) cu = lv->type.is_unsigned;
+            IRValue old_p = coerce(fn, old_val, uw,
+                                   (!lv->type.is_unsigned && !lv->type.is_bool) ? 0 : 1,
+                                   cw, cu, e->loc);
+            IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
+            int rw = get_value_width(fn, rhs), ru = get_value_is_unsigned(fn, rhs);
+            IRValue rhs_p = coerce(fn, rhs, rw, ru, cw, cu, e->loc);
+            IRValue neu = emit_bin_w(fn, ir_op, old_p, rhs_p, cw, cu, e->loc);
+            IRValue neu_u = coerce(fn, neu, cw, cu, uw, 1, e->loc);
+            IRValue m_mask2 = new_value(fn);
+            emit_inst_w(fn, IR_CONST, m_mask2, -1, -1, mask, uw, 1, e->loc);
+            IRValue new_masked = new_value(fn);
+            emit_inst_w(fn, IR_BAND, new_masked, neu_u, m_mask2, 0, uw, 1, e->loc);
+            IRValue shifted_new;
+            if (bf_offset > 0) {
+                IRValue sh2 = new_value(fn);
+                emit_inst_w(fn, IR_CONST, sh2, -1, -1, bf_offset, 8, 1, e->loc);
+                shifted_new = new_value(fn);
+                emit_inst_w(fn, IR_SHL, shifted_new, new_masked, sh2, 0, uw, 1, e->loc);
+            } else {
+                shifted_new = new_masked;
+            }
+            IRValue clr = new_value(fn);
+            emit_inst_w(fn, IR_CONST, clr, -1, -1, ~(mask << bf_offset), uw, 1, e->loc);
+            IRValue unit_cleared = new_value(fn);
+            emit_inst_w(fn, IR_BAND, unit_cleared, unit, clr, 0, uw, 1, e->loc);
+            IRValue unit_new = new_value(fn);
+            emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_new, 0, uw, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, unit_new, 0, uw, 1, e->loc);
+            return coerce(fn, new_masked, uw, 1,
+                          lv->type.width ? lv->type.width : 4,
+                          lv->type.is_unsigned, e->loc);
+        }
         IRValue old = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
         if (is_float) set_value_float(fn, old, 1);
@@ -2778,13 +2927,24 @@ IRValue vi;
             scaled = (get_value_is_float(fn, rhs) && rw == lw)
                      ? rhs
                      : convert_numeric(fn, rhs, rw, lw, 0, 1, e->loc);
-        } else {
+        } else if (is_ptr) {
             scaled = scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc);
+        } else {
+            scaled = coerce(fn, rhs, get_value_width(fn, rhs),
+                            get_value_is_unsigned(fn, rhs), arith_w, arith_u, e->loc);
         }
-        IRValue neu = emit_bin_w(fn, ir_op, old, scaled, lw, lu, e->loc);
+        IRValue old_p = old;
+        if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
+            old_p = coerce(fn, old, lw, lu, arith_w, arith_u, e->loc);
+        IRValue neu = emit_bin_w(fn, ir_op, old_p, scaled,
+                                 is_float ? lw : arith_w,
+                                 is_float ? lu : arith_u, e->loc);
         if (is_float) set_value_float(fn, neu, 1);
-        emit_inst_w(fn, IR_STORE_PTR, -1, addr, neu, 0, lw, lu, e->loc);
-        return neu;
+        IRValue back = neu;
+        if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
+            back = coerce(fn, neu, arith_w, arith_u, lw, lu, e->loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, addr, back, 0, lw, lu, e->loc);
+        return back;
     }
     case EX_COMMA: {
         lower_expr(fn, st, e->u.comma.lhs);
@@ -2965,7 +3125,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 : (dty.kind == TY_PTR ? 8
                    : (dty.kind == TY_STRUCT ? 8 : dty.width));
         int du = dty.is_unsigned;
-        if (s->u.decl.storage_class == 2) {
+        if (dty.kind == TY_FUNC || s->u.decl.storage_class == 2) {
             if (dty.kind != TY_FUNC)
                 irsymtable_push_global(st, s->u.decl.name, dty);
             break;
@@ -3207,11 +3367,9 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_BLOCK: {
-        size_t mark = st->len;
         for (size_t i = 0; i < s->u.block.len; i++) {
             lower_stmt(fn, st, &s->u.block.data[i], cur_fd);
         }
-        st->len = mark;
         break;
     }
     case ST_GOTO: {
@@ -3348,6 +3506,18 @@ static int fold_const_float(const Expr *e, long double *out) {
         *out = (long double)e->u.int_val;
         return 1;
     }
+    if (e->kind == EX_BINOP) {
+        long double l = 0, r = 0;
+        if (!fold_const_float(e->u.bin.l, &l) || !fold_const_float(e->u.bin.r, &r))
+            return 0;
+        switch (e->u.bin.op) {
+        case BOP_ADD: *out = l + r; return 1;
+        case BOP_SUB: *out = l - r; return 1;
+        case BOP_MUL: *out = l * r; return 1;
+        case BOP_DIV: if (r == 0) return 0; *out = l / r; return 1;
+        default: return 0;
+        }
+    }
     long long iv;
     if (fold_const_int(e, &iv)) {
         *out = (long double)iv;
@@ -3477,13 +3647,12 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             if (m_target_ty.kind == TY_STRUCT && m_target_ty.tag) {
                 const StructDef *sd = struct_registry_find_c(g_ir_structs, m_target_ty.tag);
                 if (sd) {
-                    for (int i = 0; i < sd->num_members; i++) {
-                        if (runtime.strcmp(sd->members[i].name, sub->u.member.name) == 0) {
-                            off += sd->members[i].offset;
-                            *out_sym = sym;
-                            *out_offset = off;
-                            return 1;
-                        }
+                    int moff = 0;
+                    if (struct_lookup_member(g_ir_structs, sd, sub->u.member.name, &moff)) {
+                        off += moff;
+                        *out_sym = sym;
+                        *out_offset = off;
+                        return 1;
                     }
                 }
             }
@@ -3546,13 +3715,12 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             if (m_target_ty.kind == TY_STRUCT && m_target_ty.tag) {
                 const StructDef *sd = struct_registry_find_c(g_ir_structs, m_target_ty.tag);
                 if (sd) {
-                    for (int i = 0; i < sd->num_members; i++) {
-                        if (runtime.strcmp(sd->members[i].name, e->u.member.name) == 0) {
-                            off += sd->members[i].offset;
-                            *out_sym = sym;
-                            *out_offset = off;
-                            return 1;
-                        }
+                    int moff = 0;
+                    if (struct_lookup_member(g_ir_structs, sd, e->u.member.name, &moff)) {
+                        off += moff;
+                        *out_sym = sym;
+                        *out_offset = off;
+                        return 1;
                     }
                 }
             }
@@ -3748,7 +3916,7 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
                 if (sm->bit_width > 0) {
                     int uw = type_size(sm->type);
-                    int mask = (1 << sm->bit_width) - 1;
+                    int64_t mask = bitfield_mask64(sm->bit_width);
                     IRValue rv = lower_expr(fn, st, e->u.init_list.elements[i]);
                     int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
                     IRValue m_mask = new_value(fn);

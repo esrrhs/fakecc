@@ -180,6 +180,18 @@ int fileno(FILE *f) {
     return f->fd;
 }
 
+char *tmpnam(char *s) {
+    static char buf[64];
+    char *d = s ? s : buf;
+    strcpy(d, "/tmp/fccXXXXXX");
+    return d;
+}
+
+int remove(const char *path) {
+    return (int)__syscall(87, (long)path);
+}
+
+
 void perror(const char *s) {
     stdio_init();
     if (s && s[0]) {

@@ -164,12 +164,14 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int enum_id;
+    int bitfield_width;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -181,13 +183,15 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -467,6 +471,7 @@ struct FunctionDecl {
     StmtArray body;
     SourceLoc loc;
     int is_variadic;
+    int is_unprototyped;
     int is_extern;
     int is_static;
 };typedef struct FunctionDecl FunctionDecl;
@@ -520,6 +525,10 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
 void struct_def_fixup_self_types(StructDef *sd);
+const StructMember *struct_lookup_member(const StructRegistry *reg,
+                                         const StructDef *sd,
+                                         const char *name,
+                                         int *offset_out);
 struct FunctionArray {
     FunctionDecl *data;
     size_t len;
@@ -680,6 +689,7 @@ Type type_make_ptr(Type pointee) {
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0;
     t.pointee = runtime.malloc(sizeof(Type));
     if (!t.pointee) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     *t.pointee = type_clone(pointee);
@@ -698,6 +708,31 @@ static void type_fixup_struct_width(Type *t, const char *tag, int final_width) {
             type_fixup_struct_width(&t->func_params[i], tag, final_width);
     }
 }
+const StructMember *struct_lookup_member(const StructRegistry *reg,
+                                         const StructDef *sd,
+                                         const char *name,
+                                         int *offset_out) {
+    if (!sd || !name) return ((void*)0);
+    for (int i = 0; i < sd->num_members; i++) {
+        const StructMember *m = &sd->members[i];
+        if (m->name && m->name[0] && runtime.strcmp(m->name, name) == 0) {
+            if (offset_out) *offset_out = m->offset;
+            return m;
+        }
+        if ((!m->name || !m->name[0]) && m->type.kind == TY_STRUCT
+            && m->type.tag && reg) {
+            const StructDef *nested = struct_registry_find_c(reg, m->type.tag);
+            int inner = 0;
+            const StructMember *found =
+                struct_lookup_member(reg, nested, name, &inner);
+            if (found) {
+                if (offset_out) *offset_out = m->offset + inner;
+                return found;
+            }
+        }
+    }
+    return ((void*)0);
+}
 void struct_def_fixup_self_types(StructDef *sd) {
     if (!sd || !sd->tag) return;
     for (int i = 0; i < sd->num_members; i++) {
@@ -711,6 +746,7 @@ Type type_make_array(Type elem, int length) {
     t.is_bool = 0; t.length = length;
     t.pointee = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0;
     t.elem_type = runtime.malloc(sizeof(Type));
     if (!t.elem_type) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     *t.elem_type = type_clone(elem);
@@ -721,12 +757,14 @@ Type type_make_struct(const char *tag, int size) {
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0;
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0;
     t.tag = xstrdup(tag);
     return t;
 }
 Type type_make_func(Type ret, Type * *params, int nparams) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0); t.enum_id = 0;
+    t.bitfield_width = 0;
     t.func_ret = runtime.malloc(sizeof(Type));
     if (!t.func_ret) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     *t.func_ret = type_clone(ret);
@@ -1536,6 +1574,20 @@ void tu_init(TranslationUnit *tu) {
     struct_def_finish(va);
     Type va_type = type_make_struct("__va_list_tag", va->size);
     typedef_registry_add(&tu->typedefs, "va_list", va_type);
+    typedef_registry_add(&tu->typedefs, "__builtin_va_list", type_clone(va_type));
+    typedef_registry_add(&tu->typedefs, "__INT8_TYPE__", type_make_int(1, 0));
+    typedef_registry_add(&tu->typedefs, "__UINT8_TYPE__", type_make_int(1, 1));
+    typedef_registry_add(&tu->typedefs, "__INT16_TYPE__", type_make_int(2, 0));
+    typedef_registry_add(&tu->typedefs, "__UINT16_TYPE__", type_make_int(2, 1));
+    typedef_registry_add(&tu->typedefs, "__INT32_TYPE__", type_make_int(4, 0));
+    typedef_registry_add(&tu->typedefs, "__UINT32_TYPE__", type_make_int(4, 1));
+    typedef_registry_add(&tu->typedefs, "__INT64_TYPE__", type_make_int(8, 0));
+    typedef_registry_add(&tu->typedefs, "__UINT64_TYPE__", type_make_int(8, 1));
+    typedef_registry_add(&tu->typedefs, "__INTMAX_TYPE__", type_make_int(8, 0));
+    typedef_registry_add(&tu->typedefs, "__UINTMAX_TYPE__", type_make_int(8, 1));
+    typedef_registry_add(&tu->typedefs, "__SIZE_TYPE__", type_make_int(8, 1));
+    typedef_registry_add(&tu->typedefs, "__PTRDIFF_TYPE__", type_make_int(8, 0));
+    typedef_registry_add(&tu->typedefs, "__WCHAR_TYPE__", type_make_int(4, 0));
 }
 void tu_free(TranslationUnit *tu) {
     runtime.free(tu->package.name);

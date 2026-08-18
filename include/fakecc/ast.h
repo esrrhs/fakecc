@@ -35,13 +35,15 @@ struct Type {
     Type *func_params; /* TY_FUNC only: malloc'd array of param types (nparams long) */
     int   func_nparams;/* TY_FUNC only */
     int   enum_id;     /* TY_INT only: non-zero unique ID for enum types */
+    int   bitfield_width; /* 0 = not a bit-field; else width in bits (promotions) */
 };
 
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -53,13 +55,15 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0; return t;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
+    t.bitfield_width = 0; return t;
 }
 
 /* Deep-clone a Type (recursing into pointee/elem_type). */
@@ -327,6 +331,7 @@ typedef struct {
     StmtArray body;
     SourceLoc loc;
     int    is_variadic; /* 1 = ends with `...` (variadic function) */
+    int    is_unprototyped; /* 1 = K&R `foo()` empty identifier list */
     int    is_extern;   /* 1 = declaration only (`extern int f();`), no body */
     int    is_static;   /* 1 = `static` function — LOCAL linkage */
 } FunctionDecl;
@@ -409,6 +414,12 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
 void struct_def_fixup_self_types(StructDef *sd);
+/* Find a member by name, walking C11 anonymous struct/union members.
+ * On success, *offset_out (if non-NULL) is the byte offset from `sd`'s start. */
+const StructMember *struct_lookup_member(const StructRegistry *reg,
+                                         const StructDef *sd,
+                                         const char *name,
+                                         int *offset_out);
 
 typedef struct {
     FunctionDecl *data;
