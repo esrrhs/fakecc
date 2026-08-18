@@ -20,6 +20,12 @@ int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 const TranslationUnit *g_ir_tu = NULL;       /* set by ir_generate */
 static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
+
+static int align_up(int x, int align) {
+    if (align <= 0) return x;
+    return (x + align - 1) & ~(align - 1);
+}
+
 static const FunctionDecl *g_ir_cur_fd = NULL; /* set by ir_generate */
 
 /* Forward declarations for LabelMap and g_ir_label_map used by lower_expr
@@ -3585,10 +3591,19 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
             if (!sd) die_at(loc.file, loc.line, loc.col,
                             "unknown struct 'struct %s'", ty->tag);
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < n && i < sd->num_members; i++) {
+                int msz = type_size(sd->members[i].type);
+                if (msz == 0 && sd->members[i].type.kind == TY_ARRAY && sd->members[i].type.elem_type) {
+                    const Expr *el = e->u.init_list.elements[i];
+                    if (el->kind == EX_STR)
+                        msz = el->u.str.len + 1;
+                    else if (el->kind == EX_INIT_LIST)
+                        msz = el->u.init_list.num_elements * type_size(*sd->members[i].type.elem_type);
+                }
                 pack_init(ir, &sd->members[i].type, e->u.init_list.elements[i],
                           bytes + sd->members[i].offset,
-                          type_size(sd->members[i].type), ctx, loc, g);
+                          msz, ctx, loc, g);
+            }
             break;
         }
         default:
@@ -3655,13 +3670,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     }
     if (e->kind == EX_STR && ty->kind == TY_ARRAY && ty->elem_type
         && ty->elem_type->width == 1) {
-        /* char[] = "..." — copy bytes (excluding the lexer's implicit NUL,
-         * which we re-add) and NUL-terminate. */
+        /* char[] = "..." — copy bytes (up to sz); NUL-terminate only if room. */
         if (sz > 0) {
             int n = e->u.str.len;
-            if (n > sz - 1) n = sz - 1;
+            if (n > sz) n = sz;
             if (n > 0) memcpy(bytes, e->u.str.bytes, n);
-            bytes[n > 0 ? n : 0] = '\0';
+            if (n < sz) bytes[n] = '\0';
         }
         return;
     }
@@ -3826,6 +3840,28 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         /* extern → declaration only: skip emission entirely. */
         if (s->u.decl.storage_class == 2) continue;
         int sz = type_size(s->u.decl.type);
+        if (s->u.decl.init && s->u.decl.type.kind == TY_STRUCT && s->u.decl.init->kind == EX_INIT_LIST && s->u.decl.type.tag) {
+            const StructDef *sd = struct_registry_find_c(g_ir_structs, s->u.decl.type.tag);
+            if (sd) {
+                int max_end = sz;
+                for (int mi = 0; mi < s->u.decl.init->u.init_list.num_elements && mi < sd->num_members; mi++) {
+                    int end = sd->members[mi].offset;
+                    const Type *mt = &sd->members[mi].type;
+                    int msz = type_size(*mt);
+                    const Expr *el = s->u.decl.init->u.init_list.elements[mi];
+                    if (msz == 0 && mt->kind == TY_ARRAY && mt->elem_type) {
+                        if (el->kind == EX_STR)
+                            msz = el->u.str.len + 1;
+                        else if (el->kind == EX_INIT_LIST)
+                            msz = el->u.init_list.num_elements * type_size(*mt->elem_type);
+                    }
+                    end += msz;
+                    if (end > max_end) max_end = end;
+                }
+                if (sd->align > 0) max_end = align_up(max_end, sd->align);
+                sz = max_end;
+            }
+        }
         if (sz <= 0) sz = 8;
         char *bytes = calloc(sz, 1);
         if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
