@@ -53,6 +53,7 @@ static FunctionDecl parse_function_decl(Parser *p);
 static void parse_stmt_list(Parser *p, StmtArray *out);
 static Stmt parse_stmt(Parser *p);
 static Expr *parse_expr(Parser *p);
+static Expr *parse_ternary(Parser *p);
 static Type parse_type_abstract(Parser *p);
 
 /* Skip a GCC-style `__attribute__((...))` annotation if present at the current
@@ -665,25 +666,23 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
         int has_value = 0, value = 0;
         if (peek(p)->kind == TK_ASSIGN) {
             advance(p);
-            int sign = 1;
-            /* Leading unary +/- on the value: `enum { A = -1 };`. */
-            if (peek(p)->kind == TK_MINUS) { sign = -1; advance(p); }
-            else if (peek(p)->kind == TK_PLUS) { advance(p); }
-            const Token *v = peek(p);
-            if (v->kind == TK_INT_LITERAL) {
-                has_value = 1; value = sign * int_literal_value(v->text); advance(p);
-            } else if (v->kind == TK_IDENT) {
+            Expr *e = parse_ternary(p);
+            long long val = 0;
+            if (fold_const_int(e, &val)) {
+                has_value = 1; value = (int)val;
+            } else if (e->kind == EX_VAR) {
                 const EnumConstant *ec =
-                    enum_registry_find_constant(&p->tu->enums, v->text);
+                    enum_registry_find_constant(&p->tu->enums, e->u.var.name);
                 if (!ec) {
-                    die_at(v->loc.file, v->loc.line, v->loc.col,
-                           "enum value '%s' is not a constant", v->text);
+                    die_at(cn->loc.file, cn->loc.line, cn->loc.col,
+                           "enum value '%s' is not a constant", e->u.var.name);
                 }
-                has_value = 1; value = ec->value; advance(p);
+                has_value = 1; value = ec->value;
             } else {
-                die_at(v->loc.file, v->loc.line, v->loc.col,
+                die_at(cn->loc.file, cn->loc.line, cn->loc.col,
                        "expected integer value for enum constant '%s'", cn->text);
             }
+            expr_free(e);
         }
         enum_def_push_constant(ed, cn->text, has_value, value, cn->loc);
         if (peek(p)->kind == TK_COMMA) advance(p);

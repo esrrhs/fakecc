@@ -3470,10 +3470,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         && ty->elem_type->width == 1) {
         /* char[] = "..." — copy bytes (excluding the lexer's implicit NUL,
          * which we re-add) and NUL-terminate. */
-        int n = e->u.str.len;
-        if (n > sz - 1) n = sz - 1;
-        memcpy(bytes, e->u.str.bytes, n);
-        bytes[n] = '\0';
+        if (sz > 0) {
+            int n = e->u.str.len;
+            if (n > sz - 1) n = sz - 1;
+            if (n > 0) memcpy(bytes, e->u.str.bytes, n);
+            bytes[n > 0 ? n : 0] = '\0';
+        }
         return;
     }
     /* Reference to a previously-defined const global: `.regs = ALLOCATABLE_REGS`.

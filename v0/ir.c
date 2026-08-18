@@ -3689,10 +3689,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     }
     if (e->kind == EX_STR && ty->kind == TY_ARRAY && ty->elem_type
         && ty->elem_type->width == 1) {
-        int n = e->u.str.len;
-        if (n > sz - 1) n = sz - 1;
-        runtime.memcpy(bytes, e->u.str.bytes, n);
-        bytes[n] = '\0';
+        if (sz > 0) {
+            int n = e->u.str.len;
+            if (n > sz - 1) n = sz - 1;
+            if (n > 0) runtime.memcpy(bytes, e->u.str.bytes, n);
+            bytes[n > 0 ? n : 0] = '\0';
+        }
         return;
     }
     if (e->kind == EX_VAR && ir) {
