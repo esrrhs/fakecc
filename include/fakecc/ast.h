@@ -34,13 +34,14 @@ struct Type {
     Type *func_ret;    /* TY_FUNC only: malloc'd return type */
     Type *func_params; /* TY_FUNC only: malloc'd array of param types (nparams long) */
     int   func_nparams;/* TY_FUNC only */
+    int   enum_id;     /* TY_INT only: non-zero unique ID for enum types */
 };
 
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -52,13 +53,13 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; return t;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0; return t;
 }
 
 /* Deep-clone a Type (recursing into pointee/elem_type). */

@@ -128,7 +128,7 @@ Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
     t.pointee = malloc(sizeof(Type));
     if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.pointee = type_clone(pointee);
@@ -165,7 +165,7 @@ Type type_make_array(Type elem, int length) {
     t.is_const = elem.is_const; t.is_volatile = elem.is_volatile; t.is_restrict = elem.is_restrict;
     t.is_bool = 0; t.length = length;
     t.pointee = NULL; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.elem_type = type_clone(elem);
@@ -176,14 +176,14 @@ Type type_make_struct(const char *tag, int size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
     t.tag = xstrdup(tag);
     return t;
 }
 
 Type type_make_func(Type ret, Type * const *params, int nparams) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL; t.enum_id = 0;
     t.func_ret = malloc(sizeof(Type));
     if (!t.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.func_ret = type_clone(ret);

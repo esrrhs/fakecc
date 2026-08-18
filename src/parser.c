@@ -428,6 +428,7 @@ static Type parse_specifiers(Parser *p) {
             parse_enum_body(p, ed);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_default_int();
+            t.enum_id = (int)(ed - p->tu->enums.data + 1);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
@@ -442,8 +443,10 @@ static Type parse_specifiers(Parser *p) {
             EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, peek(p)->loc);
             parse_enum_body(p, ed);
         }
+        EnumDef *ed = enum_registry_find(&p->tu->enums, tag->text);
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_default_int();
+        if (ed) t.enum_id = (int)(ed - p->tu->enums.data + 1);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
@@ -1342,6 +1345,7 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
     if (!a || !b) return 0;
     if (a->kind != b->kind) return 0;
     if (a->kind == TY_INT) {
+        if (a->enum_id != 0 && b->enum_id != 0 && a->enum_id != b->enum_id) return 0;
         return (a->width == b->width && a->is_unsigned == b->is_unsigned);
     }
     if (a->kind == TY_FLOAT) {

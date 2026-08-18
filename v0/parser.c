@@ -163,12 +163,13 @@ struct Type {
     Type *func_ret;
     Type *func_params;
     int func_nparams;
+    int enum_id;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -180,13 +181,13 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -981,6 +982,7 @@ static Type parse_specifiers(Parser *p) {
             parse_enum_body(p, ed);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_default_int();
+            t.enum_id = (int)(ed - p->tu->enums.data + 1);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
@@ -995,8 +997,10 @@ static Type parse_specifiers(Parser *p) {
             EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, peek(p)->loc);
             parse_enum_body(p, ed);
         }
+        EnumDef *ed = enum_registry_find(&p->tu->enums, tag->text);
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_default_int();
+        if (ed) t.enum_id = (int)(ed - p->tu->enums.data + 1);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
@@ -1706,6 +1710,7 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
     if (!a || !b) return 0;
     if (a->kind != b->kind) return 0;
     if (a->kind == TY_INT) {
+        if (a->enum_id != 0 && b->enum_id != 0 && a->enum_id != b->enum_id) return 0;
         return (a->width == b->width && a->is_unsigned == b->is_unsigned);
     }
     if (a->kind == TY_FLOAT) {
