@@ -66,6 +66,8 @@ typedef enum {
     IR_FADDR,       /* dst = &function; function name in call_name.  Result is 8-byte ptr. */
     IR_LADDR,       /* dst = &label; imm = label_id.  Result is 8-byte ptr. */
     IR_JMP_PTR,     /* jmp *a — indirect jump to pointer value in a */
+    IR_FRAME_ADDR,  /* dst = %rbp — frame pointer */
+    IR_DYN_ALLOCA,  /* dst = alloca(a) — dynamic stack allocation of size a */
     /* Debug-only marker (emitted by mem2reg under -g): from here on, source
      * variable `imm` (index into fn->dbg_vars) lives in SSA value `a`.
      *
@@ -211,6 +213,7 @@ typedef struct {
      * emits a register-save area and the va_* builtins read/write it. */
     int   is_variadic;
     int   is_static;  /* 1 = `static` function — LOCAL linkage */
+    int   has_dyn_alloca; /* 1 = function uses dynamic alloca / VLA */
     /* Slice 13: SSA value of the hidden sret pointer param (param index 0)
      * when ret_is_struct && ret_reg_n == 0.  The return statement copies
      * struct bytes into *sret_value and returns the pointer in RAX. */
@@ -236,6 +239,7 @@ typedef struct {
 typedef struct {
     int   offset;       /* byte offset within the global's init_bytes */
     char *sym;          /* xstrdup'd target symbol name */
+    int   addend;       /* addend for relocation (e.g. &g + addend) */
 } GlobalFixup;
 
 /* Module-level global variable.  Codegen places these in the .data section

@@ -90,6 +90,8 @@ enum IROpcode {
     IR_FADDR,
     IR_LADDR,
     IR_JMP_PTR,
+    IR_FRAME_ADDR,
+    IR_DYN_ALLOCA,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -172,6 +174,7 @@ struct IRFunction {
     int ret_is_bool;
     int is_variadic;
     int is_static;
+    int has_dyn_alloca;
     IRValue sret_value;
     IRDebugVar *dbg_vars;
     size_t num_dbg_vars;
@@ -185,6 +188,7 @@ struct IRFunctionArray {
 struct GlobalFixup {
     int offset;
     char *sym;
+    int addend;
 };typedef struct GlobalFixup GlobalFixup;
 struct IRGlobal {
     char *name;
@@ -340,12 +344,13 @@ struct Type {
     Type *func_ret;
     Type *func_params;
     int func_nparams;
+    int enum_id;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -357,13 +362,13 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -852,7 +857,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->cap_fixups = 0;
     return g;
 }
-static void add_global_fixup(IRGlobal *g, int offset, const char *sym) {
+static void add_global_fixup(IRGlobal *g, int offset, const char *sym, int addend) {
     if (g->num_fixups >= g->cap_fixups) {
         size_t nc = g->cap_fixups ? g->cap_fixups * 2 : 4;
         g->fixups = runtime.realloc(g->fixups, nc * sizeof(GlobalFixup));
@@ -861,6 +866,7 @@ static void add_global_fixup(IRGlobal *g, int offset, const char *sym) {
     }
     g->fixups[g->num_fixups].offset = offset;
     g->fixups[g->num_fixups].sym = xstrdup(sym);
+    g->fixups[g->num_fixups].addend = addend;
     g->num_fixups++;
 }
 static void ir_inst_array_push(IRInstArray *a, IRInst inst) {
@@ -1468,17 +1474,20 @@ static IRValue convert_numeric(IRFunction *fn, IRValue v,
     if (src_float && to_float) {
         op = (dst_w > src_w) ? IR_FPEXT : IR_FPTRUNC;
         emit_inst_f(fn, op, res, v, -1, dst_w, loc);
+        set_value_type(fn, res, dst_w, 0);
         return res;
     }
     if (src_float && !to_float) {
         op = IR_FPTOSI;
         emit_inst_w(fn, op, res, v, -1, src_w, dst_w, dst_u, loc);
+        set_value_type(fn, res, dst_w, dst_u);
         set_value_float(fn, res, 0);
         return res;
     }
     op = IR_SITOFP;
     emit_inst_w(fn, op, res, v, -1, src_w, dst_w, get_value_is_unsigned(fn, v),
                 loc);
+    set_value_type(fn, res, dst_w, 0);
     set_value_float(fn, res, 1);
     return res;
 }
@@ -1558,6 +1567,158 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     }
     return -1;
 }
+static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
+static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
+                                  Type lt, Type rt, BinOp bop) {
+    int lt_is_cplx = (lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0);
+    int rt_is_cplx = (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0);
+    int l_elem_sz = lt_is_cplx ? type_size(lt) / 2 : (lt.kind == TY_PTR ? 8 : (lt.width ? lt.width : 4));
+    int r_elem_sz = rt_is_cplx ? type_size(rt) / 2 : (rt.kind == TY_PTR ? 8 : (rt.width ? rt.width : 4));
+    int l_is_float = lt_is_cplx ? ((runtime.strstr(lt.tag, "float") || runtime.strstr(lt.tag, "double") || runtime.strstr(lt.tag, "ldouble")) ? 1 : 0) : (lt.kind == TY_FLOAT);
+    int r_is_float = rt_is_cplx ? ((runtime.strstr(rt.tag, "float") || runtime.strstr(rt.tag, "double") || runtime.strstr(rt.tag, "ldouble")) ? 1 : 0) : (rt.kind == TY_FLOAT);
+    int is_float = (l_is_float || r_is_float);
+    int elem_sz = l_elem_sz > r_elem_sz ? l_elem_sz : r_elem_sz;
+    if (is_float && elem_sz < 4) elem_sz = 4;
+    int l_is_unsigned = lt_is_cplx ? (runtime.strstr(lt.tag, "unsigned") != ((void*)0)) : lt.is_unsigned;
+    int r_is_unsigned = rt_is_cplx ? (runtime.strstr(rt.tag, "unsigned") != ((void*)0)) : rt.is_unsigned;
+    IRValue lv_addr = -1, rv_addr = -1;
+IRValue l_real;
+IRValue l_imag;
+IRValue r_real;
+IRValue r_imag;
+    if (lt_is_cplx) {
+        lv_addr = lower_expr(fn, st, e->u.bin.l);
+        l_real = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, l_real, lv_addr, -1, 0, l_elem_sz, l_is_unsigned, e->loc);
+        if (l_is_float) set_value_float(fn, l_real, 1);
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, l_elem_sz, 8, 1, e->loc);
+        IRValue iaddr = emit_bin_w(fn, IR_ADD, lv_addr, off, 8, 1, e->loc);
+        l_imag = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, l_imag, iaddr, -1, 0, l_elem_sz, l_is_unsigned, e->loc);
+        if (l_is_float) set_value_float(fn, l_imag, 1);
+    } else {
+        l_real = lower_expr(fn, st, e->u.bin.l);
+        if (l_is_float) {
+            l_imag = emit_float_const(fn, l_elem_sz, 0, e->loc);
+        } else {
+            l_imag = new_value(fn);
+            emit_inst_w(fn, IR_CONST, l_imag, -1, -1, 0, l_elem_sz, l_is_unsigned, e->loc);
+        }
+    }
+    if (l_is_float != is_float || l_elem_sz != elem_sz) {
+        if (l_is_float && !is_float) {
+            l_real = convert_numeric(fn, l_real, l_elem_sz, elem_sz, 0, 0, e->loc);
+            l_imag = convert_numeric(fn, l_imag, l_elem_sz, elem_sz, 0, 0, e->loc);
+        } else if (!l_is_float && is_float) {
+            l_real = convert_numeric(fn, l_real, l_elem_sz, elem_sz, 0, 1, e->loc);
+            l_imag = convert_numeric(fn, l_imag, l_elem_sz, elem_sz, 0, 1, e->loc);
+        } else if (is_float) {
+            l_real = convert_numeric(fn, l_real, l_elem_sz, elem_sz, 0, 1, e->loc);
+            l_imag = convert_numeric(fn, l_imag, l_elem_sz, elem_sz, 0, 1, e->loc);
+        } else {
+            l_real = coerce(fn, l_real, l_elem_sz, l_is_unsigned, elem_sz, l_is_unsigned, e->loc);
+            l_imag = coerce(fn, l_imag, l_elem_sz, l_is_unsigned, elem_sz, l_is_unsigned, e->loc);
+        }
+    }
+    if (rt_is_cplx) {
+        rv_addr = lower_expr(fn, st, e->u.bin.r);
+        r_real = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, r_real, rv_addr, -1, 0, r_elem_sz, r_is_unsigned, e->loc);
+        if (r_is_float) set_value_float(fn, r_real, 1);
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, r_elem_sz, 8, 1, e->loc);
+        IRValue iaddr = emit_bin_w(fn, IR_ADD, rv_addr, off, 8, 1, e->loc);
+        r_imag = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, r_imag, iaddr, -1, 0, r_elem_sz, r_is_unsigned, e->loc);
+        if (r_is_float) set_value_float(fn, r_imag, 1);
+    } else {
+        r_real = lower_expr(fn, st, e->u.bin.r);
+        if (r_is_float) {
+            r_imag = emit_float_const(fn, r_elem_sz, 0, e->loc);
+        } else {
+            r_imag = new_value(fn);
+            emit_inst_w(fn, IR_CONST, r_imag, -1, -1, 0, r_elem_sz, r_is_unsigned, e->loc);
+        }
+    }
+    if (r_is_float != is_float || r_elem_sz != elem_sz) {
+        if (r_is_float && !is_float) {
+            r_real = convert_numeric(fn, r_real, r_elem_sz, elem_sz, 0, 0, e->loc);
+            r_imag = convert_numeric(fn, r_imag, r_elem_sz, elem_sz, 0, 0, e->loc);
+        } else if (!r_is_float && is_float) {
+            r_real = convert_numeric(fn, r_real, r_elem_sz, elem_sz, 0, 1, e->loc);
+            r_imag = convert_numeric(fn, r_imag, r_elem_sz, elem_sz, 0, 1, e->loc);
+        } else if (is_float) {
+            r_real = convert_numeric(fn, r_real, r_elem_sz, elem_sz, 0, 1, e->loc);
+            r_imag = convert_numeric(fn, r_imag, r_elem_sz, elem_sz, 0, 1, e->loc);
+        } else {
+            r_real = coerce(fn, r_real, r_elem_sz, r_is_unsigned, elem_sz, r_is_unsigned, e->loc);
+            r_imag = coerce(fn, r_imag, r_elem_sz, r_is_unsigned, elem_sz, r_is_unsigned, e->loc);
+        }
+    }
+    if (bop == BOP_EQ || bop == BOP_NE) {
+        if (is_float) {
+            int cmp_sub = (bop == BOP_EQ) ? 4 : 5;
+            IRValue cmp_r = emit_bin_w(fn, IR_FCMP, l_real, r_real, elem_sz, cmp_sub, e->loc);
+            IRValue cmp_i = emit_bin_w(fn, IR_FCMP, l_imag, r_imag, elem_sz, cmp_sub, e->loc);
+            if (bop == BOP_EQ) return emit_bin_w(fn, IR_BAND, cmp_r, cmp_i, 4, 0, e->loc);
+            else return emit_bin_w(fn, IR_BOR, cmp_r, cmp_i, 4, 0, e->loc);
+        } else {
+            IROpcode cmp_op = (bop == BOP_EQ ? IR_EQ : IR_NE);
+            IRValue cmp_r = emit_bin_w(fn, cmp_op, l_real, r_real, elem_sz, 1, e->loc);
+            IRValue cmp_i = emit_bin_w(fn, cmp_op, l_imag, r_imag, elem_sz, 1, e->loc);
+            if (bop == BOP_EQ) return emit_bin_w(fn, IR_BAND, cmp_r, cmp_i, 4, 0, e->loc);
+            else return emit_bin_w(fn, IR_BOR, cmp_r, cmp_i, 4, 0, e->loc);
+        }
+    }
+IRValue out_r;
+IRValue out_i;
+    IROpcode add_op = is_float ? IR_FADD : IR_ADD;
+    IROpcode sub_op = is_float ? IR_FSUB : IR_SUB;
+    IROpcode mul_op = is_float ? IR_FMUL : IR_MUL;
+    IROpcode div_op = is_float ? IR_FDIV : IR_DIV;
+    if (bop == BOP_ADD) {
+        out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
+        out_i = emit_bin_w(fn, add_op, l_imag, r_imag, elem_sz, 1, e->loc);
+    } else if (bop == BOP_SUB) {
+        out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
+        out_i = emit_bin_w(fn, sub_op, l_imag, r_imag, elem_sz, 1, e->loc);
+    } else if (bop == BOP_MUL) {
+        IRValue r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
+        IRValue r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        out_r = emit_bin_w(fn, sub_op, r1, r2, elem_sz, 1, e->loc);
+        IRValue i1 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
+        IRValue i2 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
+        out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
+    } else if (bop == BOP_DIV) {
+        IRValue d1 = emit_bin_w(fn, mul_op, r_real, r_real, elem_sz, 1, e->loc);
+        IRValue d2 = emit_bin_w(fn, mul_op, r_imag, r_imag, elem_sz, 1, e->loc);
+        IRValue denom = emit_bin_w(fn, add_op, d1, d2, elem_sz, 1, e->loc);
+        IRValue n_r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
+        IRValue n_r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        IRValue num_r = emit_bin_w(fn, add_op, n_r1, n_r2, elem_sz, 1, e->loc);
+        out_r = emit_bin_w(fn, div_op, num_r, denom, elem_sz, 1, e->loc);
+        IRValue n_i1 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
+        IRValue n_i2 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
+        IRValue num_i = emit_bin_w(fn, sub_op, n_i1, n_i2, elem_sz, 1, e->loc);
+        out_i = emit_bin_w(fn, div_op, num_i, denom, elem_sz, 1, e->loc);
+    } else {
+        out_r = l_real; out_i = l_imag;
+    }
+    if (is_float) {
+        set_value_float(fn, out_r, 1);
+        set_value_float(fn, out_i, 1);
+    }
+    int total_sz = elem_sz * 2;
+    IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    emit_inst_w(fn, IR_STORE_PTR, -1, addr, out_r, 0, elem_sz, 1, e->loc);
+    IRValue off = new_value(fn);
+    emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+    IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+    emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, out_i, 0, elem_sz, 1, e->loc);
+    return addr;
+}
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     switch (e->kind) {
     case EX_INT_LIT: {
@@ -1617,6 +1778,39 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return cmp;
         }
         case UOP_BITNOT: {
+            if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
+                runtime.strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
+                Type cty = e->u.un.operand->type;
+                int total_sz = type_size(cty);
+                int elem_sz = total_sz / 2;
+                int is_float = (runtime.strstr(cty.tag, "float") != ((void*)0) || runtime.strstr(cty.tag, "double") != ((void*)0) || runtime.strstr(cty.tag, "ldouble") != ((void*)0));
+                int is_unsigned = (runtime.strstr(cty.tag, "unsigned") != ((void*)0));
+                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
+                IRValue vr = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vr, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vr, 1);
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                IRValue iaddr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
+                IRValue vi = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vi, 1);
+                IRValue neg_vi;
+                if (is_float) {
+                    int64_t negzero = (elem_sz == 4) ? (int64_t)0x80000000 : (int64_t)0x8000000000000000LL;
+                    IRValue zero = emit_float_const(fn, elem_sz, negzero, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_FSUB, zero, vi, elem_sz, 0, e->loc);
+                    set_value_float(fn, neg_vi, 1);
+                } else {
+                    neg_vi = emit_bin_w(fn, IR_NEG, vi, -1, elem_sz, 0, e->loc);
+                }
+                IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, vr, 0, elem_sz, 1, e->loc);
+                IRValue out_iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, out_iaddr, neg_vi, 0, elem_sz, 1, e->loc);
+                return addr;
+            }
             IRValue x = lower_expr(fn, st, e->u.un.operand);
             int sw = get_value_width(fn, x);
             int su = get_value_is_unsigned(fn, x);
@@ -1634,6 +1828,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int l_is_ptr = (lt.kind == TY_PTR);
         int r_is_ptr = (rt.kind == TY_PTR);
         BinOp bop = e->u.bin.op;
+        if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) ||
+            (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) {
+            return lower_complex_binop(fn, st, e, lt, rt, bop);
+        }
         if (bop == BOP_AND || bop == BOP_OR) {
             IRValue slot = new_value(fn);
             emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, 4, 0, e->loc);
@@ -1814,6 +2012,11 @@ IRValue pr;
         return result;
     }
     case EX_VAR: {
+        if (runtime.strcmp(e->u.var.name, "NULL") == 0) {
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 8, 1, e->loc);
+            return v;
+        }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
             if (e->u.var.pkg) {
@@ -1893,8 +2096,23 @@ IRValue pr;
             } else {
                 return coerced;
             }
+            if (runtime.strncmp(lv->type.tag, "__complex_", 10) == 0 &&
+                (e->u.assign.rvalue->type.kind != TY_STRUCT ||
+                 !e->u.assign.rvalue->type.tag ||
+                 runtime.strcmp(lv->type.tag, e->u.assign.rvalue->type.tag) != 0)) {
+                Expr fake_cast;
+                runtime.memset(&fake_cast, 0, sizeof(fake_cast));
+                fake_cast.kind = EX_CAST;
+                fake_cast.type = lv->type;
+                fake_cast.loc = e->loc;
+                fake_cast.u.cast.target = lv->type;
+                fake_cast.u.cast.operand = e->u.assign.rvalue;
+                IRValue cplx_rv = lower_expr(fn, st, &fake_cast);
+                emit_struct_copy(fn, dst, cplx_rv, type_size(lv->type), e->loc);
+                return dst;
+            }
             emit_struct_copy(fn, dst, rv, type_size(lv->type), e->loc);
-            return coerced;
+            return dst;
         }
         if (lv->kind == EX_VAR) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
@@ -1947,6 +2165,40 @@ IRValue pr;
         return coerced;
     }
     case EX_CALL: {
+        if (e->u.call.callee->kind == EX_VAR &&
+            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
+            Expr fake_un;
+            runtime.memset(&fake_un, 0, sizeof(fake_un));
+            fake_un.kind = EX_UNARY;
+            fake_un.type = e->type;
+            fake_un.loc = e->loc;
+            fake_un.u.un.op = UOP_BITNOT;
+            fake_un.u.un.operand = e->u.call.args.data[0];
+            return lower_expr(fn, st, &fake_un);
+        }
+        if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_prefetch") == 0) {
+            for (size_t i = 0; i < e->u.call.args.len; i++)
+                lower_expr(fn, st, e->u.call.args.data[i]);
+            return -1;
+        }
+        if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_frame_address") == 0) {
+            if (e->u.call.args.len > 0) lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_FRAME_ADDR, v, -1, -1, 0, 8, 1, e->loc);
+            set_value_type(fn, v, 8, 1);
+            return v;
+        }
+        if (e->u.call.callee->kind == EX_VAR && (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_alloca") == 0 ||
+                                                runtime.strcmp(e->u.call.callee->u.var.name, "alloca") == 0)) {
+            IRValue sz = lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_DYN_ALLOCA, v, sz, -1, 0, 8, 1, e->loc);
+            set_value_type(fn, v, 8, 1);
+            fn->has_dyn_alloca = 1;
+            return v;
+        }
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
             if (runtime.strcmp(cname, "va_start") == 0 || runtime.strcmp(cname, "va_end") == 0
@@ -2266,6 +2518,93 @@ IRValue pr;
         return v;
     }
     case EX_CAST: {
+        if (e->type.kind == TY_STRUCT && e->type.tag && runtime.strncmp(e->type.tag, "__complex_", 10) == 0) {
+            Type cty = e->type;
+            int total_sz = type_size(cty);
+            int elem_sz = total_sz / 2;
+            int is_float = (runtime.strstr(cty.tag, "float") != ((void*)0) || runtime.strstr(cty.tag, "double") != ((void*)0) || runtime.strstr(cty.tag, "ldouble") != ((void*)0));
+            int is_unsigned = (runtime.strstr(cty.tag, "unsigned") != ((void*)0));
+IRValue vr;
+IRValue vi;
+            if (e->u.cast.operand->type.kind == TY_STRUCT && e->u.cast.operand->type.tag &&
+                runtime.strncmp(e->u.cast.operand->type.tag, "__complex_", 10) == 0) {
+                IRValue src_addr = lower_expr(fn, st, e->u.cast.operand);
+                int src_elem_sz = type_size(e->u.cast.operand->type) / 2;
+                int src_is_float = (runtime.strstr(e->u.cast.operand->type.tag, "float") || runtime.strstr(e->u.cast.operand->type.tag, "double") || runtime.strstr(e->u.cast.operand->type.tag, "ldouble")) ? 1 : 0;
+                int src_is_unsigned = (runtime.strstr(e->u.cast.operand->type.tag, "unsigned") != ((void*)0));
+                vr = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vr, src_addr, -1, 0, src_elem_sz, src_is_unsigned, e->loc);
+                if (src_is_float) set_value_float(fn, vr, 1);
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, src_elem_sz, 8, 1, e->loc);
+                IRValue iaddr = emit_bin_w(fn, IR_ADD, src_addr, off, 8, 1, e->loc);
+                vi = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, src_elem_sz, src_is_unsigned, e->loc);
+                if (src_is_float) set_value_float(fn, vi, 1);
+                if (src_is_float != is_float) {
+                    if (src_is_float) {
+                        vr = convert_numeric(fn, vr, src_elem_sz, elem_sz, is_unsigned, 0, e->loc);
+                        vi = convert_numeric(fn, vi, src_elem_sz, elem_sz, is_unsigned, 0, e->loc);
+                    } else {
+                        vr = convert_numeric(fn, vr, src_elem_sz, elem_sz, 0, 1, e->loc);
+                        vi = convert_numeric(fn, vi, src_elem_sz, elem_sz, 0, 1, e->loc);
+                    }
+                } else if (is_float) {
+                    if (src_elem_sz != elem_sz) {
+                        vr = convert_numeric(fn, vr, src_elem_sz, elem_sz, 0, 1, e->loc);
+                        vi = convert_numeric(fn, vi, src_elem_sz, elem_sz, 0, 1, e->loc);
+                    }
+                } else {
+                    if (src_elem_sz != elem_sz) {
+                        vr = coerce(fn, vr, src_elem_sz, src_is_unsigned, elem_sz, is_unsigned, e->loc);
+                        vi = coerce(fn, vi, src_elem_sz, src_is_unsigned, elem_sz, is_unsigned, e->loc);
+                    }
+                }
+            } else {
+                vr = lower_expr(fn, st, e->u.cast.operand);
+                if (is_float) {
+                    if (!get_value_is_float(fn, vr) || get_value_width(fn, vr) != elem_sz)
+                        vr = convert_numeric(fn, vr, get_value_width(fn, vr), elem_sz, 0, 1, e->loc);
+                    vi = emit_float_const(fn, elem_sz, 0, e->loc);
+                } else {
+                    if (get_value_is_float(fn, vr)) {
+                        vr = convert_numeric(fn, vr, get_value_width(fn, vr), elem_sz, is_unsigned, 0, e->loc);
+                    } else if (get_value_width(fn, vr) != elem_sz) {
+                        vr = coerce(fn, vr, get_value_width(fn, vr), get_value_is_unsigned(fn, vr), elem_sz, is_unsigned, e->loc);
+                    }
+                    vi = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, vi, -1, -1, 0, elem_sz, is_unsigned, e->loc);
+                }
+            }
+            IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, vr, 0, elem_sz, is_unsigned, e->loc);
+            IRValue off = new_value(fn);
+            emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+            IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, vi, 0, elem_sz, is_unsigned, e->loc);
+            return addr;
+        }
+        if (e->u.cast.operand->type.kind == TY_STRUCT && e->u.cast.operand->type.tag &&
+            runtime.strncmp(e->u.cast.operand->type.tag, "__complex_", 10) == 0 &&
+            (e->type.kind == TY_INT || e->type.kind == TY_FLOAT || e->type.is_bool)) {
+            IRValue src_addr = lower_expr(fn, st, e->u.cast.operand);
+            int src_elem_sz = type_size(e->u.cast.operand->type) / 2;
+            int src_is_float = (runtime.strstr(e->u.cast.operand->type.tag, "float") || runtime.strstr(e->u.cast.operand->type.tag, "double") || runtime.strstr(e->u.cast.operand->type.tag, "ldouble")) ? 1 : 0;
+            IRValue vr = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, vr, src_addr, -1, 0, src_elem_sz, 1, e->loc);
+            if (src_is_float) set_value_float(fn, vr, 1);
+            int vw = get_value_width(fn, vr), vu = get_value_is_unsigned(fn, vr), vf = get_value_is_float(fn, vr);
+            int dw = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+            int du = e->type.is_unsigned, df = (e->type.kind == TY_FLOAT);
+            if (e->type.is_bool) {
+                IRValue n = bool_normalize(fn, vr, vw, vu, vf, e->loc);
+                return coerce(fn, n, 4, 0, dw, du, e->loc);
+            }
+            if (vf != df) return convert_numeric(fn, vr, vw, dw, du, df, e->loc);
+            if (df) return (vw == dw) ? vr : convert_numeric(fn, vr, vw, dw, du, 1, e->loc);
+            return coerce(fn, vr, vw, vu, dw, du, e->loc);
+        }
         IRValue x = lower_expr(fn, st, e->u.cast.operand);
         int sw = get_value_width(fn, x), su = get_value_is_unsigned(fn, x);
         int sf = get_value_is_float(fn, x);
@@ -2387,6 +2726,20 @@ IRValue pr;
     case EX_COMPOUND_ASSIGN: {
         Expr *lv = e->u.comp.lvalue;
         BinOp op = e->u.comp.op;
+        if (lv->type.kind == TY_STRUCT && lv->type.tag && runtime.strncmp(lv->type.tag, "__complex_", 10) == 0) {
+            IRValue addr = lower_lvalue_addr(fn, st, lv);
+            Expr fake_bin;
+            runtime.memset(&fake_bin, 0, sizeof(fake_bin));
+            fake_bin.kind = EX_BINOP;
+            fake_bin.type = lv->type;
+            fake_bin.loc = e->loc;
+            fake_bin.u.bin.op = op;
+            fake_bin.u.bin.l = lv;
+            fake_bin.u.bin.r = e->u.comp.rvalue;
+            IRValue res_addr = lower_complex_binop(fn, st, &fake_bin, lv->type, e->u.comp.rvalue->type, op);
+            emit_struct_copy(fn, addr, res_addr, type_size(lv->type), e->loc);
+            return addr;
+        }
         int is_ptr = (lv->type.kind == TY_PTR);
         int is_float = (lv->type.kind == TY_FLOAT);
         int lw = is_ptr ? 8 : (lv->type.width ? lv->type.width : 4);
@@ -2515,6 +2868,37 @@ static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
                      SourceLoc loc) {
     emit_inst(fn, IR_CBR, -1, cond, f_label, t_label, loc);
 }
+static IRValue lower_condition(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    if (e->type.kind == TY_STRUCT && e->type.tag && runtime.strncmp(e->type.tag, "__complex_", 10) == 0) {
+        Type cty = e->type;
+        int elem_sz = type_size(cty) / 2;
+        int is_float = (runtime.strstr(cty.tag, "float") || runtime.strstr(cty.tag, "double") || runtime.strstr(cty.tag, "ldouble")) ? 1 : 0;
+        IRValue addr = lower_expr(fn, st, e);
+        IRValue vr = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, vr, addr, -1, 0, elem_sz, 1, e->loc);
+        if (is_float) set_value_float(fn, vr, 1);
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+        IRValue vi = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, 1, e->loc);
+        if (is_float) set_value_float(fn, vi, 1);
+IRValue cmp_r;
+IRValue cmp_i;
+        if (is_float) {
+            IRValue zero = emit_float_const(fn, elem_sz, 0, e->loc);
+            cmp_r = emit_bin_w(fn, IR_FCMP, vr, zero, elem_sz, 5 , e->loc);
+            cmp_i = emit_bin_w(fn, IR_FCMP, vi, zero, elem_sz, 5 , e->loc);
+        } else {
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, elem_sz, 1, e->loc);
+            cmp_r = emit_bin_w(fn, IR_NE, vr, zero, elem_sz, 1, e->loc);
+            cmp_i = emit_bin_w(fn, IR_NE, vi, zero, elem_sz, 1, e->loc);
+        }
+        return emit_bin_w(fn, IR_BOR, cmp_r, cmp_i, 4, 0, e->loc);
+    }
+    return lower_expr(fn, st, e);
+}
 static void labelmap_init(LabelMap *lm) {
     lm->names = ((void*)0); lm->ids = ((void*)0); lm->len = 0; lm->cap = 0;
 }
@@ -2639,13 +3023,28 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                         emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
                     }
                 }
-            } else {
-                IRValue rv = lower_expr(fn, st, s->u.decl.init);
-                if (dty.kind == TY_STRUCT) {
-                    IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
-                    emit_struct_copy(fn, addr, rv, type_size(dty), s->loc);
+            } else if (dty.kind == TY_STRUCT) {
+                IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
+                if (dty.tag && runtime.strncmp(dty.tag, "__complex_", 10) == 0 &&
+                    (s->u.decl.init->type.kind != TY_STRUCT ||
+                     !s->u.decl.init->type.tag ||
+                     runtime.strcmp(dty.tag, s->u.decl.init->type.tag) != 0)) {
+                    Expr fake_cast;
+                    runtime.memset(&fake_cast, 0, sizeof(fake_cast));
+                    fake_cast.kind = EX_CAST;
+                    fake_cast.type = dty;
+                    fake_cast.loc = s->loc;
+                    fake_cast.u.cast.target = dty;
+                    fake_cast.u.cast.operand = s->u.decl.init;
+                    IRValue cplx_rv = lower_expr(fn, st, &fake_cast);
+                    emit_struct_copy(fn, addr, cplx_rv, type_size(dty), s->loc);
                     break;
                 }
+                IRValue rv = lower_expr(fn, st, s->u.decl.init);
+                emit_struct_copy(fn, addr, rv, type_size(dty), s->loc);
+                break;
+            } else {
+                IRValue rv = lower_expr(fn, st, s->u.decl.init);
                 int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
                 int rf = get_value_is_float(fn, rv);
                 int df = (dty.kind == TY_FLOAT);
@@ -2715,7 +3114,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_IF: {
-        IRValue cond = lower_expr(fn, st, s->u.if_s.cond);
+        IRValue cond = lower_condition(fn, st, s->u.if_s.cond);
         int L_then = new_label(fn);
         int L_end = new_label(fn);
         int L_else = s->u.if_s.else_s ? new_label(fn) : L_end;
@@ -2736,7 +3135,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         int L_exit = new_label(fn);
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_head, s->loc);
-        IRValue cond = lower_expr(fn, st, s->u.while_s.cond);
+        IRValue cond = lower_condition(fn, st, s->u.while_s.cond);
         emit_cbr(fn, cond, L_body, L_exit, s->loc);
         emit_label(fn, L_body, s->loc);
         push_loop(L_head, L_exit);
@@ -2757,7 +3156,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         pop_loop();
         emit_br(fn, L_cond, s->loc);
         emit_label(fn, L_cond, s->loc);
-        IRValue cond = lower_expr(fn, st, s->u.do_s.cond);
+        IRValue cond = lower_condition(fn, st, s->u.do_s.cond);
         emit_cbr(fn, cond, L_body, L_exit, s->loc);
         emit_label(fn, L_exit, s->loc);
         break;
@@ -2766,9 +3165,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         size_t mark = st->len;
         if (s->u.for_s.init) {
             if (s->u.for_s.init->kind == ST_BLOCK) {
-                StmtArray *blk = &s->u.for_s.init->u.block;
-                for (size_t i = 0; i < blk->len; i++)
-                    lower_stmt(fn, st, &blk->data[i], cur_fd);
+                for (size_t i = 0; i < s->u.for_s.init->u.block.len; i++)
+                    lower_stmt(fn, st, &s->u.for_s.init->u.block.data[i], cur_fd);
             } else {
                 lower_stmt(fn, st, s->u.for_s.init, cur_fd);
             }
@@ -2780,7 +3178,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_head, s->loc);
         if (s->u.for_s.cond) {
-            IRValue cond = lower_expr(fn, st, s->u.for_s.cond);
+            IRValue cond = lower_condition(fn, st, s->u.for_s.cond);
             emit_cbr(fn, cond, L_body, L_exit, s->loc);
         } else {
             emit_br(fn, L_body, s->loc);
@@ -2957,9 +3355,264 @@ static int fold_const_float(const Expr *e, long double *out) {
     }
     return 0;
 }
+static int fold_const_complex(const Expr *e, long double *r_out, long double *i_out) {
+    if (!e) return 0;
+    if (e->kind == EX_FLOAT_LIT) {
+        *r_out = runtime.strtold(e->u.float_text, ((void*)0));
+        *i_out = 0.0;
+        return 1;
+    }
+    if (e->kind == EX_INT_LIT) {
+        *r_out = (long double)e->u.int_val;
+        *i_out = 0.0;
+        return 1;
+    }
+    if (e->kind == EX_COMPOUND_LITERAL && e->u.compound.init && e->u.compound.init->kind == EX_INIT_LIST) {
+        int n = e->u.compound.init->u.init_list.num_elements;
+        long double r = 0.0, i = 0.0, dummy = 0.0;
+        if (n >= 1) fold_const_complex(e->u.compound.init->u.init_list.elements[0], &r, &dummy);
+        if (n >= 2) fold_const_complex(e->u.compound.init->u.init_list.elements[1], &i, &dummy);
+        *r_out = r;
+        *i_out = i;
+        return 1;
+    }
+    if (e->kind == EX_UNARY) {
+        long double r = 0.0, i = 0.0;
+        if (!fold_const_complex(e->u.un.operand, &r, &i)) return 0;
+        if (e->u.un.op == UOP_NEG) { *r_out = -r; *i_out = -i; return 1; }
+        if (e->u.un.op == UOP_POS) { *r_out = r; *i_out = i; return 1; }
+        if (e->u.un.op == UOP_BITNOT) { *r_out = r; *i_out = -i; return 1; }
+    }
+    if (e->kind == EX_BINOP) {
+        long double lr = 0.0, li = 0.0, rr = 0.0, ri = 0.0;
+        if (!fold_const_complex(e->u.bin.l, &lr, &li)) return 0;
+        if (!fold_const_complex(e->u.bin.r, &rr, &ri)) return 0;
+        if (e->u.bin.op == BOP_ADD) { *r_out = lr + rr; *i_out = li + ri; return 1; }
+        if (e->u.bin.op == BOP_SUB) { *r_out = lr - rr; *i_out = li - ri; return 1; }
+        if (e->u.bin.op == BOP_MUL) { *r_out = lr * rr - li * ri; *i_out = lr * ri + li * rr; return 1; }
+        if (e->u.bin.op == BOP_DIV) {
+            long double denom = rr * rr + ri * ri;
+            if (denom == 0.0) return 0;
+            *r_out = (lr * rr + li * ri) / denom;
+            *i_out = (li * rr - lr * ri) / denom;
+            return 1;
+        }
+    }
+    return 0;
+}
+static int get_global_elem_size(const Expr *e) {
+    if (!e) return 1;
+    if (e->type.kind == TY_PTR && e->type.pointee)
+        return type_size(*e->type.pointee);
+    if (e->type.kind == TY_ARRAY && e->type.elem_type)
+        return type_size(*e->type.elem_type);
+    if (e->kind == EX_VAR && g_ir_tu) {
+        for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+            if (g_ir_tu->globals.data[i].kind == ST_DECL &&
+                runtime.strcmp(g_ir_tu->globals.data[i].u.decl.name, e->u.var.name) == 0) {
+                Type gt = g_ir_tu->globals.data[i].u.decl.type;
+                if (gt.kind == TY_ARRAY && gt.elem_type)
+                    return type_size(*gt.elem_type);
+                if (gt.kind == TY_PTR && gt.pointee)
+                    return type_size(*gt.pointee);
+            }
+        }
+    }
+    if (e->kind == EX_BINOP) {
+        return get_global_elem_size(e->u.bin.l);
+    }
+    if (e->kind == EX_CAST) {
+        return get_global_elem_size(e->u.cast.operand);
+    }
+    return 1;
+}
+static Type get_global_obj_struct_type(const Expr *e) {
+    Type t = e->type;
+    if (t.kind == TY_VOID && e->kind == EX_DEREF) {
+        return get_global_obj_struct_type(e->u.deref.operand);
+    }
+    if (t.kind == TY_VOID && e->kind == EX_VAR && g_ir_tu) {
+        for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+            if (g_ir_tu->globals.data[i].kind == ST_DECL &&
+                runtime.strcmp(g_ir_tu->globals.data[i].u.decl.name, e->u.var.name) == 0) {
+                t = g_ir_tu->globals.data[i].u.decl.type;
+                break;
+            }
+        }
+    }
+    if (t.kind == TY_VOID && e->kind == EX_BINOP) {
+        return get_global_obj_struct_type(e->u.bin.l);
+    }
+    if (t.kind == TY_PTR && t.pointee)
+        t = *t.pointee;
+    else if (t.kind == TY_ARRAY && t.elem_type)
+        t = *t.elem_type;
+    return t;
+}
+static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out_offset) {
+    if (!e) return 0;
+    if (e->kind == EX_CAST) {
+        return eval_global_addr_offset(e->u.cast.operand, out_sym, out_offset);
+    }
+    if (e->kind == EX_VAR) {
+        *out_sym = e->u.var.name;
+        *out_offset = 0;
+        return 1;
+    }
+    if (e->kind == EX_ADDR) {
+        const Expr *sub = e->u.addr.operand;
+        while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
+        if (!sub) return 0;
+        if (sub->kind == EX_VAR) {
+            *out_sym = sub->u.var.name;
+            *out_offset = 0;
+            return 1;
+        }
+        if (sub->kind == EX_MEMBER) {
+            const char *sym = ((void*)0);
+            int off = 0;
+            if (!eval_global_addr_offset(sub->u.member.obj, &sym, &off))
+                return 0;
+            Type m_target_ty = get_global_obj_struct_type(sub->u.member.obj);
+            if (m_target_ty.kind == TY_STRUCT && m_target_ty.tag) {
+                const StructDef *sd = struct_registry_find_c(g_ir_structs, m_target_ty.tag);
+                if (sd) {
+                    for (int i = 0; i < sd->num_members; i++) {
+                        if (runtime.strcmp(sd->members[i].name, sub->u.member.name) == 0) {
+                            off += sd->members[i].offset;
+                            *out_sym = sym;
+                            *out_offset = off;
+                            return 1;
+                        }
+                    }
+                }
+            }
+            *out_sym = sym;
+            *out_offset = off;
+            return 1;
+        }
+        if (sub->kind == EX_DEREF) {
+            return eval_global_addr_offset(sub->u.deref.operand, out_sym, out_offset);
+        }
+        if (sub->kind == EX_INDEX) {
+            const char *sym = ((void*)0);
+            int off = 0;
+            if (!eval_global_addr_offset(sub->u.idx.array, &sym, &off))
+                return 0;
+            long long idx = 0;
+            if (!fold_const_int(sub->u.idx.index, &idx))
+                return 0;
+            int esz = get_global_elem_size(sub->u.idx.array);
+            *out_sym = sym;
+            *out_offset = off + (int)(idx * esz);
+            return 1;
+        }
+        return eval_global_addr_offset(sub, out_sym, out_offset);
+    }
+    if (e->kind == EX_BINOP) {
+        if (e->u.bin.op == BOP_ADD) {
+            const char *sym = ((void*)0);
+            int off = 0;
+            long long delta = 0;
+            if (eval_global_addr_offset(e->u.bin.l, &sym, &off) && fold_const_int(e->u.bin.r, &delta)) {
+                int esz = get_global_elem_size(e->u.bin.l);
+                *out_sym = sym;
+                *out_offset = off + (int)(delta * esz);
+                return 1;
+            }
+            if (eval_global_addr_offset(e->u.bin.r, &sym, &off) && fold_const_int(e->u.bin.l, &delta)) {
+                int esz = get_global_elem_size(e->u.bin.r);
+                *out_sym = sym;
+                *out_offset = off + (int)(delta * esz);
+                return 1;
+            }
+        } else if (e->u.bin.op == BOP_SUB) {
+            const char *sym = ((void*)0);
+            int off = 0;
+            long long delta = 0;
+            if (eval_global_addr_offset(e->u.bin.l, &sym, &off) && fold_const_int(e->u.bin.r, &delta)) {
+                int esz = get_global_elem_size(e->u.bin.l);
+                *out_sym = sym;
+                *out_offset = off - (int)(delta * esz);
+                return 1;
+            }
+        }
+    }
+    if (e->kind == EX_MEMBER) {
+        const char *sym = ((void*)0);
+        int off = 0;
+        if (eval_global_addr_offset(e->u.member.obj, &sym, &off)) {
+            Type m_target_ty = get_global_obj_struct_type(e->u.member.obj);
+            if (m_target_ty.kind == TY_STRUCT && m_target_ty.tag) {
+                const StructDef *sd = struct_registry_find_c(g_ir_structs, m_target_ty.tag);
+                if (sd) {
+                    for (int i = 0; i < sd->num_members; i++) {
+                        if (runtime.strcmp(sd->members[i].name, e->u.member.name) == 0) {
+                            off += sd->members[i].offset;
+                            *out_sym = sym;
+                            *out_offset = off;
+                            return 1;
+                        }
+                    }
+                }
+            }
+            *out_sym = sym;
+            *out_offset = off;
+            return 1;
+        }
+    }
+    if (e->kind == EX_DEREF) {
+        return eval_global_addr_offset(e->u.deref.operand, out_sym, out_offset);
+    }
+    return 0;
+}
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g) {
+    if (e->kind == EX_VAR && runtime.strcmp(e->u.var.name, "NULL") == 0) {
+        runtime.memset(bytes, 0, sz);
+        return;
+    }
+    if (ty->kind == TY_STRUCT && ty->tag && runtime.strncmp(ty->tag, "__complex_", 10) == 0) {
+        long double cr = 0.0, ci = 0.0;
+        if (fold_const_complex(e, &cr, &ci)) {
+            int esz = sz / 2;
+            int is_float = (runtime.strstr(ty->tag, "float") || runtime.strstr(ty->tag, "double") || runtime.strstr(ty->tag, "ldouble")) ? 1 : 0;
+            if (is_float) {
+                if (esz == 16) {
+                    runtime.memcpy(bytes, &cr, 10);
+                    runtime.memcpy(bytes + esz, &ci, 10);
+                } else if (esz == 4) {
+                    float fr = (float)cr, fi = (float)ci;
+                    runtime.memcpy(bytes, &fr, 4);
+                    runtime.memcpy(bytes + esz, &fi, 4);
+                } else {
+                    double dr = (double)cr, di = (double)ci;
+                    runtime.memcpy(bytes, &dr, 8);
+                    runtime.memcpy(bytes + esz, &di, 8);
+                }
+            } else {
+                if (esz == 1) {
+                    char c_r = (char)cr, c_i = (char)ci;
+                    runtime.memcpy(bytes, &c_r, 1);
+                    runtime.memcpy(bytes + esz, &c_i, 1);
+                } else if (esz == 2) {
+                    short s_r = (short)cr, s_i = (short)ci;
+                    runtime.memcpy(bytes, &s_r, 2);
+                    runtime.memcpy(bytes + esz, &s_i, 2);
+                } else if (esz == 4) {
+                    int i_r = (int)cr, i_i = (int)ci;
+                    runtime.memcpy(bytes, &i_r, 4);
+                    runtime.memcpy(bytes + esz, &i_i, 4);
+                } else {
+                    int64_t l_r = (int64_t)cr, l_i = (int64_t)ci;
+                    runtime.memcpy(bytes, &l_r, 8);
+                    runtime.memcpy(bytes + esz, &l_i, 8);
+                }
+            }
+            return;
+        }
+    }
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
         switch (ty->kind) {
@@ -2984,6 +3637,10 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             pack_init(ir, ty, e->u.init_list.elements[0], bytes, sz, ctx, loc, g);
             break;
         }
+        return;
+    }
+    if (e->kind == EX_COMPOUND_LITERAL) {
+        pack_init(ir, ty, e->u.compound.init, bytes, sz, ctx, loc, g);
         return;
     }
     if (e->kind == EX_CAST) {
@@ -3026,7 +3683,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         if (!init) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         runtime.memcpy(init, e->u.str.bytes, nbytes);
         queue_rodata(name, init, nbytes, loc);
-        add_global_fixup(g, (int)(bytes - g->init_bytes), name);
+        add_global_fixup(g, (int)(bytes - g->init_bytes), name, 0);
         runtime.memset(bytes, 0, sz);
         return;
     }
@@ -3042,10 +3699,8 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         const IRGlobal *src = find_packed_global(ir, e->u.var.name);
         if (src) {
             if (ty->kind == TY_PTR && g) {
-                if (sz < g->size) {
-                }
                 int off = (int)(bytes - g->init_bytes);
-                add_global_fixup(g, off, src->name);
+                add_global_fixup(g, off, src->name, 0);
                 runtime.memset(bytes, 0, sz);
                 return;
             }
@@ -3054,10 +3709,10 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             return;
         }
     }
-    if (e->kind == EX_ADDR && e->u.addr.operand
-        && e->u.addr.operand->kind == EX_VAR && ty->kind == TY_PTR && g) {
-        add_global_fixup(g, (int)(bytes - g->init_bytes),
-                         e->u.addr.operand->u.var.name);
+    const char *addr_sym = ((void*)0);
+    int addr_offset = 0;
+    if (ty->kind == TY_PTR && g && eval_global_addr_offset(e, &addr_sym, &addr_offset)) {
+        add_global_fixup(g, (int)(bytes - g->init_bytes), addr_sym, addr_offset);
         runtime.memset(bytes, 0, sz);
         return;
     }
@@ -3182,6 +3837,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         const FunctionDecl *fd = &tu->functions.data[i];
         if (fd->is_extern) continue;
         IRFunction irfn;
+        runtime.memset(&irfn, 0, sizeof(irfn));
         irfn.name = xstrdup(fd->name);
         irfn.loc = fd->loc;
         irfn.insts.data = ((void*)0);

@@ -113,23 +113,23 @@ static int __fakecc_ffsll(unsigned long long x) {
 typedef unsigned long size_t;
 typedef long ptrdiff_t;
 typedef int wchar_t;
-typedef signed char int8_t;
-typedef unsigned char uint8_t;
-typedef short int16_t;
-typedef unsigned short uint16_t;
-typedef int int32_t;
-typedef unsigned int uint32_t;
-typedef long long int64_t;
-typedef unsigned long long uint64_t;
-typedef long intptr_t;
-typedef unsigned long uintptr_t;
-typedef long intmax_t;
-typedef unsigned long uintmax_t;
-void f883b (int8_t * result,
-    int16_t *  arg1,
-    uint32_t *  arg2,
-    uint64_t *  arg3,
-    uint8_t *  arg4)
+typedef signed char my_int8_t;
+typedef unsigned char my_uint8_t;
+typedef short my_int16_t;
+typedef unsigned short my_uint16_t;
+typedef int my_int32_t;
+typedef unsigned int my_uint32_t;
+typedef long long my_int64_t;
+typedef unsigned long long my_uint64_t;
+typedef long my_intptr_t;
+typedef unsigned long my_uintptr_t;
+typedef long my_intmax_t;
+typedef unsigned long my_uintmax_t;
+void f883b (my_int8_t * result,
+    my_int16_t *  arg1,
+    my_uint32_t *  arg2,
+    my_uint64_t *  arg3,
+    my_uint8_t *  arg4)
 {
     int idx;
     for (idx=0;idx<96;idx += 1) {
@@ -139,11 +139,11 @@ void f883b (int8_t * result,
           >> (arg2[idx] & 31)) ^ 1) - -32)>>7) | -5) & arg3[idx]);
     }
 }
-int8_t result[96];
-int16_t arg1[96];
-uint32_t arg2[96];
-uint64_t arg3[96];
-uint8_t arg4[96];
+my_int8_t result[96];
+my_int16_t arg1[96];
+my_uint32_t arg2[96];
+my_uint64_t arg3[96];
+my_uint8_t arg4[96];
 int main(void)
 {
   int i;

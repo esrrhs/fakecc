@@ -113,42 +113,42 @@ static int __fakecc_ffsll(unsigned long long x) {
 typedef unsigned long size_t;
 typedef long ptrdiff_t;
 typedef int wchar_t;
-typedef signed char int8_t;
-typedef unsigned char uint8_t;
-typedef short int16_t;
-typedef unsigned short uint16_t;
-typedef int int32_t;
-typedef unsigned int uint32_t;
-typedef long long int64_t;
-typedef unsigned long long uint64_t;
-typedef long intptr_t;
-typedef unsigned long uintptr_t;
-typedef long intmax_t;
-typedef unsigned long uintmax_t;
-int32_t a[6];
-int64_t b;
-int32_t *c;
-int32_t **d = &c;
-int64_t *e = &b;
-int32_t **const *f = &d;
-int32_t **const **g = &f;
-int32_t *h();
-static int16_t j();
-static uint32_t k(int8_t, const int32_t *, int64_t);
-static uint32_t l() {
-  int32_t *m = &a[3];
-  int32_t n = 0;
-  int8_t o = 0;
-  int32_t *p[] = {&n, &n, &n, &n};
-  uint32_t q[6][1][2] = {};
+typedef signed char my_int8_t;
+typedef unsigned char my_uint8_t;
+typedef short my_int16_t;
+typedef unsigned short my_uint16_t;
+typedef int my_int32_t;
+typedef unsigned int my_uint32_t;
+typedef long long my_int64_t;
+typedef unsigned long long my_uint64_t;
+typedef long my_intptr_t;
+typedef unsigned long my_uintptr_t;
+typedef long my_intmax_t;
+typedef unsigned long my_uintmax_t;
+my_int32_t a[6];
+my_int64_t b;
+my_int32_t *c;
+my_int32_t **d = &c;
+my_int64_t *e = &b;
+my_int32_t **const *f = &d;
+my_int32_t **const **g = &f;
+my_int32_t *h();
+static my_int16_t j();
+static my_uint32_t k(my_int8_t, const my_int32_t *, my_int64_t);
+static my_uint32_t l() {
+  my_int32_t *m = &a[3];
+  my_int32_t n = 0;
+  my_int8_t o = 0;
+  my_int32_t *p[] = {&n, &n, &n, &n};
+  my_uint32_t q[6][1][2] = {};
   for (o = 0; o <= 1; o = 6)
     if (h(j(k(3, 0, q[2][0][0]), &n), n) == p[3])
       *m = *e;
   return 0;
 }
-int32_t * h(int uint32_t, int int32_t) { return ***g; }
-int16_t j(int uint32_t, int32_t *r) { **f = r; return 0;}
-uint32_t k(int int8_t, const int32_t *, int int64_t) { *e = 3; return 0;}
+my_int32_t * h(int arg1, int arg2) { return ***g; }
+my_int16_t j(int arg1, my_int32_t *r) { **f = r; return 0;}
+my_uint32_t k(my_int8_t arg1, const my_int32_t *arg2, my_int64_t arg3) { *e = 3; return 0;}
 int main() {
   int i = 0;
   l();

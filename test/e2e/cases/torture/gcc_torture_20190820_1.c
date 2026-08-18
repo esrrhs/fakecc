@@ -122,7 +122,7 @@ typedef __u64 u64;
 typedef _Bool bool;
 typedef s32 int32_t;
 typedef u32 uint32_t;
-typedef u64 uint64_t;
+typedef u64 my_uint64_t;
 char hex_asc_upper[16];
 u16 decpair[100];
 static  void put_dec_full4 (char *buf, unsigned r)
@@ -135,7 +135,7 @@ static  void put_dec_full4 (char *buf, unsigned r)
 }
 static  unsigned put_dec_helper4 (char *buf, unsigned x)
 {
-  uint32_t q = (x * (uint64_t)0x346DC5D7) >> 43;
+  uint32_t q = (x * (my_uint64_t)0x346DC5D7) >> 43;
   put_dec_full4(buf, x - q * 10000);
   return q;
 }

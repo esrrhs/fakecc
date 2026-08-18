@@ -4,7 +4,7 @@
 // exactly like an ordinary definition.  Returns 0 on success or a failing
 // sentinel.
 package main;
-inline int square(int n) {
+static inline int square(int n) {
     return n * n;
 }
 int main() {

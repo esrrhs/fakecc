@@ -111,7 +111,7 @@ static int __fakecc_ffsll(unsigned long long x) {
 
 
 typedef long unsigned int size_t;
-extern int memcmp (const char *, const char *, size_t);
+extern int memcmp (const void *, const void *, size_t);
 extern void abort ();
 void foo(char *x)
 {

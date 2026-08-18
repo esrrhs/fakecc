@@ -52,6 +52,8 @@ static Type parse_declarator(Parser *p, Type base, char **name_out);
 static FunctionDecl parse_function_decl(Parser *p);
 static void parse_stmt_list(Parser *p, StmtArray *out);
 static Stmt parse_stmt(Parser *p);
+static Expr *parse_expr(Parser *p);
+static Type parse_type_abstract(Parser *p);
 
 /* Skip a GCC-style `__attribute__((...))` annotation if present at the current
  * position.  Tokenizes as IDENT `__attribute__`, then `(`, then a balanced
@@ -161,6 +163,8 @@ static int is_type_start(const Parser *p, size_t pos) {
         return 1;
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
+        if (strcmp(text, "typeof") == 0 || strcmp(text, "__typeof__") == 0 || strcmp(text, "__typeof") == 0)
+            return 1;
         if (typedef_registry_find(&p->tu->typedefs, text))
             return 1;
         /* pkg.Type — IDENT '.' IDENT where IDENT is an imported package. */
@@ -220,7 +224,10 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
         if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_CONST) { *is_const = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_VOLATILE) { *is_volatile = 1; advance(p); }
-        else if (peek(p)->kind == TK_KW_RESTRICT) { *is_restrict = 1; advance(p); }
+        else if (peek(p)->kind == TK_KW_RESTRICT) {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
+        }
         else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
         else if (is_complex && peek(p)->kind == TK_KW_COMPLEX) { *is_complex = 1; advance(p); }
         else break;
@@ -233,6 +240,43 @@ static Type parse_specifiers(Parser *p) {
      * completeness).  All three may appear in any order (C permits mixing). */
     int is_const = 0, is_volatile = 0, is_restrict = 0, is_complex = 0;
     parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+
+    /* typeof / __typeof__ / __typeof */
+    if (peek(p)->kind == TK_IDENT && (strcmp(peek(p)->text, "typeof") == 0 ||
+                                      strcmp(peek(p)->text, "__typeof__") == 0 ||
+                                      strcmp(peek(p)->text, "__typeof") == 0)) {
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        Type t;
+        if (is_type_start(p, p->pos)) {
+            t = parse_type_abstract(p);
+        } else {
+            const Token *tok = peek(p);
+            Type found = type_default_int();
+            if (tok->kind == TK_IDENT) {
+                const EnumConstant *ec = enum_registry_find_constant(&p->tu->enums, tok->text);
+                if (ec) {
+                    found = type_default_int();
+                } else {
+                    for (size_t g = 0; g < p->tu->globals.len; g++) {
+                        if (p->tu->globals.data[g].kind == ST_DECL &&
+                            strcmp(p->tu->globals.data[g].u.decl.name, tok->text) == 0) {
+                            found = type_clone(p->tu->globals.data[g].u.decl.type);
+                            break;
+                        }
+                    }
+                }
+            }
+            Expr *e = parse_expr(p);
+            expr_free(e);
+            t = found;
+        }
+        expect_kind(p, TK_RPAREN, "')'");
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+        if (is_complex) t = get_or_create_complex_type(p, t);
+        return t;
+    }
 
     /* void — only meaningful as a return type or as void* (pointer to void).
      * A lone `void` variable is rejected later in sema. */
@@ -387,6 +431,7 @@ static Type parse_specifiers(Parser *p) {
             parse_enum_body(p, ed);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
             Type t = type_default_int();
+            t.enum_id = (int)(ed - p->tu->enums.data + 1);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
             return t;
@@ -401,8 +446,10 @@ static Type parse_specifiers(Parser *p) {
             EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, peek(p)->loc);
             parse_enum_body(p, ed);
         }
+        EnumDef *ed = enum_registry_find(&p->tu->enums, tag->text);
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_default_int();
+        if (ed) t.enum_id = (int)(ed - p->tu->enums.data + 1);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         if (is_complex) t = get_or_create_complex_type(p, t);
         return t;
@@ -478,7 +525,10 @@ static Type parse_specifiers(Parser *p) {
         TokenKind k = peek(p)->kind;
         if (k == TK_KW_CONST) { is_const = 1; advance(p); }
         else if (k == TK_KW_VOLATILE) { is_volatile = 1; advance(p); }
-        else if (k == TK_KW_RESTRICT) { is_restrict = 1; advance(p); }
+        else if (k == TK_KW_RESTRICT) {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
+        }
         else if (k == TK_KW_INLINE) { advance(p); }
         else if (k == TK_KW_COMPLEX) { is_complex = 1; advance(p); }
         else if (k == TK_KW_SIGNED) { is_signed = 1; has_type = 1; advance(p); }
@@ -670,6 +720,7 @@ static ParamArray parse_param_list(Parser *p) {
     }
     if (peek(p)->kind != TK_RPAREN) {
         for (;;) {
+            while (skip_attribute(p)) {}
             if (!is_type_start(p, p->pos)) {
                 const Token *t = peek(p);
                 die_at(t->loc.file, t->loc.line, t->loc.col,
@@ -677,6 +728,7 @@ static ParamArray parse_param_list(Parser *p) {
             }
             char *pname_in = NULL;
             Type pty = parse_type(p, &pname_in);
+            while (skip_attribute(p)) {}
             const Token *pname = peek(p);
             if (!pname_in) {
                 /* Unnamed parameter — the declarator produced no name
@@ -685,6 +737,7 @@ static ParamArray parse_param_list(Parser *p) {
             }
             param_array_push(&params, pname_in, pty, pname->loc);
             free(pname_in);
+            while (skip_attribute(p)) {}
             if (peek(p)->kind == TK_COMMA) {
                 advance(p);
                 /* Variadic tail of a function type. The variadic-ness of a
@@ -743,10 +796,24 @@ static int parse_array_size(Parser *p) {
 static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
                                 int *out_array_len, int *out_has_array) {
     int ptrs = 0;
-    while (peek(p)->kind == TK_STAR) { advance(p); ptrs++; }
+    while (skip_attribute(p)) {}
+    while (peek(p)->kind == TK_STAR) {
+        advance(p);
+        ptrs++;
+        while (peek(p)->kind == TK_KW_CONST ||
+               peek(p)->kind == TK_KW_VOLATILE ||
+               peek(p)->kind == TK_KW_RESTRICT ||
+               skip_attribute(p)) {
+            if (peek(p)->kind == TK_KW_CONST ||
+                peek(p)->kind == TK_KW_VOLATILE ||
+                peek(p)->kind == TK_KW_RESTRICT) advance(p);
+        }
+    }
+    while (skip_attribute(p)) {}
     if (peek(p)->kind == TK_IDENT) {
         *name_out = xstrdup(peek(p)->text);
         advance(p);
+        while (skip_attribute(p)) {}
     } else {
         *name_out = NULL;  /* abstract declarator */
     }
@@ -757,6 +824,7 @@ static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
         array_len = parse_array_size(p);
         expect_kind(p, TK_RBRACKET, "']'");
         has_array = 1;
+        while (skip_attribute(p)) {}
     }
     *out_ptrs = ptrs;
     *out_array_len = array_len;
@@ -783,28 +851,34 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
      * (`* const`, `*volatile`, `* const restrict`, ...).  Record the qualifier
      * set per pointer level so `Type * const *p` parses as pointer-to-(const-pointer).
      * The leftmost `*` is the innermost pointer (applied first). */
+    while (skip_attribute(p)) {}
     enum { MAX_PTRS = 8 };
     int ptr_const[MAX_PTRS], ptr_volatile[MAX_PTRS], ptr_restrict[MAX_PTRS];
     int ptrs = 0;
-    while (peek(p)->kind == TK_STAR) {
+    for (;;) {
+        while (skip_attribute(p)) {}
+        if (peek(p)->kind != TK_STAR) break;
         advance(p);
         int c = 0, v = 0, r = 0;
         while (peek(p)->kind == TK_KW_CONST
                || peek(p)->kind == TK_KW_VOLATILE
-               || peek(p)->kind == TK_KW_RESTRICT) {
-            if (peek(p)->kind == TK_KW_CONST) c = 1;
-            else if (peek(p)->kind == TK_KW_VOLATILE) v = 1;
-            else r = 1;
-            advance(p);
+               || peek(p)->kind == TK_KW_RESTRICT
+               || skip_attribute(p)) {
+            if (peek(p)->kind == TK_KW_CONST) { c = 1; advance(p); }
+            else if (peek(p)->kind == TK_KW_VOLATILE) { v = 1; advance(p); }
+            else if (peek(p)->kind == TK_KW_RESTRICT) { r = 1; advance(p); }
         }
         if (ptrs >= MAX_PTRS) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                      peek(p)->loc.col, "too many pointer levels");
         ptr_const[ptrs] = c; ptr_volatile[ptrs] = v; ptr_restrict[ptrs] = r;
         ptrs++;
     }
+    while (skip_attribute(p)) {}
 
     Type t;
-    if (peek(p)->kind == TK_LPAREN) {
+    if (peek(p)->kind == TK_LPAREN && (p->pos + 1 < p->tokens->len &&
+        (p->tokens->data[p->pos + 1].kind == TK_STAR ||
+         (p->tokens->data[p->pos + 1].kind == TK_IDENT && strcmp(p->tokens->data[p->pos + 1].text, "__attribute__") == 0)))) {
         /* Grouping: '(' group_content ')'.  The group content's modifiers
          * (prefix `*`, array `[N]`) wrap the group's core type. */
         advance(p);  /* '(' */
@@ -814,6 +888,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                             &inner_has_array);
         *name_out = inner_name;
         expect_kind(p, TK_RPAREN, "')'");
+        while (skip_attribute(p)) {}
         /* Parse the postfix that follows the group (array/function). */
         t = base;
         /* Collect array dims and optional function suffix.  Arrays wrap
@@ -848,6 +923,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
     } else if (peek(p)->kind == TK_IDENT) {
         *name_out = xstrdup(peek(p)->text);
         advance(p);
+        while (skip_attribute(p)) {}
         t = base;
         /* Apply prefix pointers FIRST (they wrap the base type, innermost).
          * `int *rows[2]` → ptr(int) then array(2, ptr(int)).  Applying them
@@ -905,11 +981,11 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             type_free(&t);
             t = wrapped;
         }
+        for (int i = 0; i < ptrs; i++)
+            t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
+        ptrs = 0;
     }
-
-    /* Apply prefix pointers (they wrap the whole thing), innermost first. */
-    for (int i = 0; i < ptrs; i++)
-        t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
+    while (skip_attribute(p)) {}
     return t;
 }
 
@@ -921,14 +997,9 @@ static Type parse_type(Parser *p, char **name_out) {
     return parse_declarator(p, base, name_out);
 }
 
-/* Parse an abstract type (no name): specifiers + trailing `*` chain.  Used
- * for function return types, casts, and sizeof where the declarator must NOT
- * consume an identifier (the name belongs to the function/var, not the type).
- * This mirrors the old `parse_type` — it parses the specifiers and any `*`
- * pointers glued to them, but stops before an identifier.  (Full declarators
- * with grouping/array/function suffixes for return types — e.g. a function
- * returning a function pointer — are beyond this slice.) */
-static Type parse_type_abstract(Parser *p) {
+static Type parse_type_name(Parser *p);
+
+static Type parse_return_type(Parser *p) {
     Type base = parse_specifiers(p);
     Type t = base;
     while (peek(p)->kind == TK_STAR) {
@@ -946,6 +1017,10 @@ static Type parse_type_abstract(Parser *p) {
         t = w;
     }
     return t;
+}
+
+static Type parse_type_abstract(Parser *p) {
+    return parse_type_name(p);
 }
 
 /* Parse a type-name (specifiers + abstract declarator): the type in a
@@ -1272,6 +1347,36 @@ static Expr *parse_mul(Parser *p) {
     return lhs;
 }
 
+static int types_compatible_unqual(const Type *a, const Type *b) {
+    if (!a || !b) return 0;
+    if (a->kind != b->kind) return 0;
+    if (a->kind == TY_INT) {
+        if (a->enum_id != 0 && b->enum_id != 0 && a->enum_id != b->enum_id) return 0;
+        return (a->width == b->width && a->is_unsigned == b->is_unsigned);
+    }
+    if (a->kind == TY_FLOAT) {
+        return (a->width == b->width);
+    }
+    if (a->kind == TY_PTR) {
+        if (!a->pointee || !b->pointee) return 0;
+        if (a->pointee->is_const != b->pointee->is_const ||
+            a->pointee->is_volatile != b->pointee->is_volatile) return 0;
+        return types_compatible_unqual(a->pointee, b->pointee);
+    }
+    if (a->kind == TY_ARRAY) {
+        if (a->length != b->length && a->length != 0 && b->length != 0) return 0;
+        if (!a->elem_type || !b->elem_type) return 0;
+        if (a->elem_type->is_const != b->elem_type->is_const ||
+            a->elem_type->is_volatile != b->elem_type->is_volatile) return 0;
+        return types_compatible_unqual(a->elem_type, b->elem_type);
+    }
+    if (a->kind == TY_STRUCT) {
+        if (a->tag && b->tag) return strcmp(a->tag, b->tag) == 0;
+        return 1;
+    }
+    return 1;
+}
+
 /* unary-expr = ("+"|"-"|"&"|"*"|"~") unary-expr | sizeof unary-or-type | primary { postfix } */
 static Expr *parse_unary(Parser *p) {
     TokenKind k = peek(p)->kind;
@@ -1358,6 +1463,30 @@ static Expr *parse_unary(Parser *p) {
         Expr *e = expr_new_alignof_type(t, loc);
         type_free(&t);
         return e;
+    }
+    if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_types_compatible_p") == 0) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        Type t1 = parse_type_abstract(p);
+        expect_kind(p, TK_COMMA, "','");
+        Type t2 = parse_type_abstract(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        int compat = types_compatible_unqual(&t1, &t2);
+        type_free(&t1);
+        type_free(&t2);
+        return expr_new_int(compat ? 1 : 0, loc);
+    }
+    if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_constant_p") == 0) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        Expr *arg = parse_expr(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        long long v;
+        int is_const = fold_const_int(arg, &v) || (arg->kind == EX_STR) || (arg->kind == EX_FLOAT_LIT);
+        expr_free(arg);
+        return expr_new_int(is_const ? 1 : 0, loc);
     }
     return parse_primary(p);
 }
@@ -2429,7 +2558,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
         else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
         else break;
     }
-    Type ret_ty = parse_type_abstract(p);
+    Type ret_ty = parse_return_type(p);
     for (;;) { if (!skip_attribute(p)) break; }
 
     const Token *name = peek(p);
@@ -2472,11 +2601,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
             }
             /* Normalize array parameters (`int a[]`, `int a[N]`) to pointers,
              * matching standard C parameter adjustment. */
-            if (pty.kind == TY_ARRAY) {
-                Type elem = *pty.elem_type;
+            if (pty.kind == TY_ARRAY && pty.elem_type) {
+                Type ptr = type_make_ptr(*pty.elem_type);
                 type_free(&pty);
-                pty = type_make_ptr(elem);
-                type_free(&elem);
+                pty = ptr;
             }
             param_array_push(&fn.params, pname, pty, peek(p)->loc);
             free(pname);

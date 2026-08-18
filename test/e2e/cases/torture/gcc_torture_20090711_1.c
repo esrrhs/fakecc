@@ -111,14 +111,14 @@ static int __fakecc_ffsll(unsigned long long x) {
 
 
 extern void abort (void);
-long long  div (long long val)
+long long my_div (long long val)
 {
   return val / 32768;
 }
 int main(void)
 {
   long long d1 = -990000000;
-  long long d2 = div(d1);
+  long long d2 = my_div(d1);
   if (d2 != -30212)
     abort ();
   return 0;

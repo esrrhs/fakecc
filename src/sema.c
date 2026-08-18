@@ -580,13 +580,17 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 return type_clone(e->type);
             }
         }
-        if (strncmp(e->u.var.name, "__builtin_", 10) == 0) {
-            /* Auto-synthesize common GCC builtins */
+        if (strcmp(e->u.var.name, "NULL") == 0) {
+            Type vp = type_make_ptr(type_make_void());
+            set_type(e, vp);
+            return type_clone(e->type);
+        }
+        if (strncmp(e->u.var.name, "__builtin_", 10) == 0 || strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
             Type ret = type_default_int();
-            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0)
+            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0)
                 ret = type_make_void();
-            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0)
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0)
                 ret = type_make_ptr(type_make_void());
             else if (strcmp(bname, "__builtin_strlen") == 0)
                 ret = type_make_int(8, 1);
@@ -868,7 +872,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "call to non-function (callee type must be a function or function pointer)");
         }
-        if ((int)e->u.call.args.len != fn_ty.func_nparams) {
+        if (fn_ty.func_params != NULL && (int)e->u.call.args.len != fn_ty.func_nparams) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "function pointer expects %d argument%s but %zu given",
                    fn_ty.func_nparams,
@@ -1209,17 +1213,12 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
             if (!is_const_init(e->u.init_list.elements[i], globals)) return 0;
         return 1;
     }
-    /* A reference to a previously-defined const global: `const int x = 5; int y = x;`
-     * or `.regs = ALLOCATABLE_REGS`.  Accept only when the name resolves to a
-     * const-qualified symbol (so a mutable global is still rejected). */
-    if (e->kind == EX_VAR && globals) {
-        const Sym *s = symtable_find(globals, e->u.var.name);
-        if (s && s->type.is_const) return 1;
-    }
-    /* Address of a file-scope object: `FILE *stdout = &_rt_stdout`. */
-    if (e->kind == EX_ADDR && e->u.addr.operand
-        && e->u.addr.operand->kind == EX_VAR && globals) {
-        if (symtable_find(globals, e->u.addr.operand->u.var.name))
+    if (e->kind == EX_VAR) return 1;
+    /* Address of a file-scope object: `&g`, `&g.member`, `&g[i]`, `&(*ptr).member`, etc. */
+    if (e->kind == EX_ADDR) {
+        const Expr *sub = e->u.addr.operand;
+        while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
+        if (sub && (sub->kind == EX_VAR || sub->kind == EX_MEMBER || sub->kind == EX_INDEX || sub->kind == EX_DEREF))
             return 1;
     }
     return 0;

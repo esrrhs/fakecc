@@ -163,12 +163,13 @@ struct Type {
     Type *func_ret;
     Type *func_params;
     int func_nparams;
+    int enum_id;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -180,13 +181,13 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -907,10 +908,16 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
     const Type *at = &arg->type;
     int at_arith = (at->kind == TY_INT || at->kind == TY_FLOAT);
     int pt_arith = (ptype->kind == TY_INT || ptype->kind == TY_FLOAT);
-    if (!at_arith || !pt_arith) return;
-    if (at->kind == ptype->kind && at->width == ptype->width
-        && at->is_unsigned == ptype->is_unsigned)
+    int at_cplx = (at->kind == TY_STRUCT && at->tag && runtime.strncmp(at->tag, "__complex_", 10) == 0);
+    int pt_cplx = (ptype->kind == TY_STRUCT && ptype->tag && runtime.strncmp(ptype->tag, "__complex_", 10) == 0);
+    if ((!at_arith && !at_cplx) || (!pt_arith && !pt_cplx)) return;
+    if (at_cplx && pt_cplx) {
+        if (at->tag && ptype->tag && runtime.strcmp(at->tag, ptype->tag) == 0)
+            return;
+    } else if (at->kind == ptype->kind && at->width == ptype->width
+        && at->is_unsigned == ptype->is_unsigned && at_cplx == pt_cplx) {
         return;
+    }
     Type target = type_clone(*ptype);
     Expr *cast = expr_new_cast(target, arg, arg->loc);
     set_type(cast, target);
@@ -1010,6 +1017,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
             set_type(e->u.un.operand, type_clone(ot));
         }
+        if (e->u.un.op == UOP_BITNOT && ot.kind == TY_STRUCT && ot.tag && runtime.strncmp(ot.tag, "__complex_", 10) == 0) {
+            set_type(e, ot);
+            return type_clone(e->type);
+        }
         if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT)
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "bitwise NOT requires an integer operand");
@@ -1103,12 +1114,17 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 return type_clone(e->type);
             }
         }
-        if (runtime.strncmp(e->u.var.name, "__builtin_", 10) == 0) {
+        if (runtime.strcmp(e->u.var.name, "NULL") == 0) {
+            Type vp = type_make_ptr(type_make_void());
+            set_type(e, vp);
+            return type_clone(e->type);
+        }
+        if (runtime.strncmp(e->u.var.name, "__builtin_", 10) == 0 || runtime.strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
             Type ret = type_default_int();
-            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0)
+            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0 || runtime.strcmp(bname, "__builtin_prefetch") == 0)
                 ret = type_make_void();
-            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0)
+            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0 || runtime.strcmp(bname, "alloca") == 0 || runtime.strcmp(bname, "__builtin_frame_address") == 0)
                 ret = type_make_ptr(type_make_void());
             else if (runtime.strcmp(bname, "__builtin_strlen") == 0)
                 ret = type_make_int(8, 1);
@@ -1159,7 +1175,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                    e->u.assign.lvalue->loc.col,
                    "assignment of read-only variable");
         Type rt = check_expr(e->u.assign.rvalue, st, ft);
-        (void)rt;
+        coerce_arg_to_param(&e->u.assign.rvalue, &lt);
         type_free(&rt);
         set_type(e, lt);
         return type_clone(e->type);
@@ -1179,13 +1195,14 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         BinOp op = e->u.comp.op;
         int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
                            || op == BOP_DIV);
+        int is_complex = (lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0);
         if (op == BOP_ADD || op == BOP_SUB) {
             if (lt.kind == TY_PTR && rt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
         }
-        if (lt.kind != TY_PTR
+        if (lt.kind != TY_PTR && !is_complex
             && !(arith_float && (lt.kind == TY_FLOAT || rt.kind == TY_FLOAT))) {
             if (lt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
@@ -1215,6 +1232,18 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 type_free(&at);
             }
             set_type(e, type_make_int(8, 0));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "conjugate builtin takes exactly 1 argument");
+            }
+            Type at = check_expr(e->u.call.args.data[0], st, ft);
+            set_type(e, at);
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
@@ -1348,7 +1377,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "call to non-function (callee type must be a function or function pointer)");
         }
-        if ((int)e->u.call.args.len != fn_ty.func_nparams) {
+        if (fn_ty.func_params != ((void*)0) && (int)e->u.call.args.len != fn_ty.func_nparams) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "function pointer expects %d argument%s but %zu given",
                    fn_ty.func_nparams,
@@ -1619,6 +1648,10 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     if (e->kind == EX_FLOAT_LIT) return 1;
     if (e->kind == EX_STR) return 1;
     if (e->kind == EX_LABEL_ADDR) return 1;
+    if (e->kind == EX_COMPOUND_LITERAL)
+        return is_const_init(e->u.compound.init, globals);
+    if (e->kind == EX_BINOP)
+        return is_const_init(e->u.bin.l, globals) && is_const_init(e->u.bin.r, globals);
     if (e->kind == EX_CAST)
         return is_const_init(e->u.cast.operand, globals);
     if (e->kind == EX_UNARY
@@ -1632,13 +1665,11 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
             if (!is_const_init(e->u.init_list.elements[i], globals)) return 0;
         return 1;
     }
-    if (e->kind == EX_VAR && globals) {
-        const Sym *s = symtable_find(globals, e->u.var.name);
-        if (s && s->type.is_const) return 1;
-    }
-    if (e->kind == EX_ADDR && e->u.addr.operand
-        && e->u.addr.operand->kind == EX_VAR && globals) {
-        if (symtable_find(globals, e->u.addr.operand->u.var.name))
+    if (e->kind == EX_VAR) return 1;
+    if (e->kind == EX_ADDR) {
+        const Expr *sub = e->u.addr.operand;
+        while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
+        if (sub && (sub->kind == EX_VAR || sub->kind == EX_MEMBER || sub->kind == EX_INDEX || sub->kind == EX_DEREF))
             return 1;
     }
     return 0;
@@ -1661,7 +1692,7 @@ static int init_elem_may_be_aggregate(const Expr *e) {
     switch (e->kind) {
     case EX_VAR: case EX_CALL: case EX_MEMBER: case EX_INDEX: case EX_DEREF:
     case EX_COMPOUND_LITERAL: case EX_ASSIGN: case EX_TERNARY: case EX_COMMA:
-    case EX_CAST:
+    case EX_CAST: case EX_BINOP:
         return 1;
     default:
         return 0;
@@ -1889,7 +1920,19 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             if (g_sema_ret_type.kind == TY_VOID)
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "void function cannot return a value");
-            discard = check_expr(s->u.value, st, ft); type_free(&discard);
+            discard = check_expr(s->u.value, st, ft);
+            if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
+                discard.kind == TY_STRUCT && discard.tag && runtime.strncmp(discard.tag, "__complex_", 10) == 0) {
+                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                set_type(c, type_clone(g_sema_ret_type));
+                s->u.value = c;
+            } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && runtime.strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
+                       (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
+                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                set_type(c, type_clone(g_sema_ret_type));
+                s->u.value = c;
+            }
+            type_free(&discard);
         }
         *has_return = 1;
         break;
