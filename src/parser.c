@@ -2575,21 +2575,141 @@ static Stmt parse_stmt(Parser *p) {
                                               strcmp(peek(p)->text, "__inline__") == 0))) {
             advance(p);
         }
-        if (peek(p)->kind == TK_LPAREN) {
-            advance(p);
-            int depth = 1;
-            while (depth > 0 && peek(p)->kind != TK_EOF) {
-                if (peek(p)->kind == TK_LPAREN) depth++;
-                else if (peek(p)->kind == TK_RPAREN) depth--;
-                advance(p);
-            }
-        }
-        if (peek(p)->kind == TK_SEMICOLON) advance(p);
         Stmt s;
         memset(&s, 0, sizeof(s));
         s.kind = ST_BLOCK;
         s.loc = loc;
         stmt_array_init(&s.u.block);
+        if (peek(p)->kind == TK_LPAREN) {
+            advance(p);
+            /* Parse asm template string(s) */
+            int is_empty_template = 1;
+            while (peek(p)->kind == TK_STRING_LITERAL) {
+                const char *src = peek(p)->text;
+                size_t slen = strlen(src);
+                if (slen >= 1 && src[0] == '"') { src++; slen--; }
+                if (slen >= 1 && src[slen-1] == '"') slen--;
+                for (size_t i = 0; i < slen; i++) {
+                    if (!isspace((unsigned char)src[i])) { is_empty_template = 0; break; }
+                }
+                advance(p);
+            }
+            Expr *outputs[16];
+            char *out_constr[16];
+            int num_outputs = 0;
+            Expr *inputs[16];
+            char *in_constr[16];
+            int num_inputs = 0;
+            memset(outputs, 0, sizeof(outputs));
+            memset(out_constr, 0, sizeof(out_constr));
+            memset(inputs, 0, sizeof(inputs));
+            memset(in_constr, 0, sizeof(in_constr));
+            if (peek(p)->kind == TK_COLON) {
+                advance(p); /* consume ':' */
+                /* Outputs */
+                while (peek(p)->kind != TK_COLON && peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) {
+                    char *c_str = NULL;
+                    if (peek(p)->kind == TK_STRING_LITERAL) {
+                        const char *src = peek(p)->text;
+                        size_t slen = strlen(src);
+                        if (slen >= 1 && src[0] == '"') { src++; slen--; }
+                        if (slen >= 1 && src[slen-1] == '"') slen--;
+                        c_str = malloc(slen + 1);
+                        memcpy(c_str, src, slen);
+                        c_str[slen] = '\0';
+                        advance(p);
+                    }
+                    if (peek(p)->kind == TK_LPAREN) {
+                        advance(p);
+                        Expr *e = parse_expr(p);
+                        expect_kind(p, TK_RPAREN, "')'");
+                        if (num_outputs < 16) {
+                            out_constr[num_outputs] = c_str;
+                            outputs[num_outputs++] = e;
+                        } else {
+                            expr_free(e);
+                            free(c_str);
+                        }
+                    }
+                    if (peek(p)->kind == TK_COMMA) advance(p);
+                    else break;
+                }
+                if (peek(p)->kind == TK_COLON) {
+                    advance(p); /* consume ':' */
+                    /* Inputs */
+                    while (peek(p)->kind != TK_COLON && peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) {
+                        char *c_str = NULL;
+                        if (peek(p)->kind == TK_STRING_LITERAL) {
+                            const char *src = peek(p)->text;
+                            size_t slen = strlen(src);
+                            if (slen >= 1 && src[0] == '"') { src++; slen--; }
+                            if (slen >= 1 && src[slen-1] == '"') slen--;
+                            c_str = malloc(slen + 1);
+                            memcpy(c_str, src, slen);
+                            c_str[slen] = '\0';
+                            advance(p);
+                        }
+                        if (peek(p)->kind == TK_LPAREN) {
+                            advance(p);
+                            Expr *e = parse_expr(p);
+                            expect_kind(p, TK_RPAREN, "')'");
+                            if (num_inputs < 16) {
+                                in_constr[num_inputs] = c_str;
+                                inputs[num_inputs++] = e;
+                            } else {
+                                expr_free(e);
+                                free(c_str);
+                            }
+                        }
+                        if (peek(p)->kind == TK_COMMA) advance(p);
+                        else break;
+                    }
+                }
+            }
+            /* Skip remaining clobbers / labels until matching RPAREN */
+            int depth = 1;
+            while (depth > 0 && peek(p)->kind != TK_EOF) {
+                if (peek(p)->kind == TK_LPAREN) depth++;
+                else if (peek(p)->kind == TK_RPAREN) {
+                    depth--;
+                    if (depth == 0) { advance(p); break; }
+                }
+                advance(p);
+            }
+            if (is_empty_template) {
+                for (int oi = 0; oi < num_outputs; oi++) {
+                    int match_idx = -1;
+                    char match_char = (char)('0' + oi);
+                    for (int ii = 0; ii < num_inputs; ii++) {
+                        if (in_constr[ii] && strchr(in_constr[ii], match_char)) {
+                            match_idx = ii;
+                            break;
+                        }
+                    }
+                    if (match_idx < 0 && oi < num_inputs) match_idx = oi;
+                    if (match_idx >= 0 && outputs[oi] && inputs[match_idx]) {
+                        Expr *assign = expr_new_assign(outputs[oi], inputs[match_idx], loc);
+                        outputs[oi] = NULL;
+                        inputs[match_idx] = NULL;
+                        Stmt es;
+                        memset(&es, 0, sizeof(es));
+                        es.kind = ST_EXPR;
+                        es.loc = loc;
+                        es.u.expr = assign;
+                        stmt_array_push(&s.u.block, es);
+                    }
+                }
+            }
+            for (int oi = 0; oi < num_outputs; oi++) {
+                if (outputs[oi]) expr_free(outputs[oi]);
+                free(out_constr[oi]);
+            }
+            for (int ii = 0; ii < num_inputs; ii++) {
+                if (inputs[ii]) expr_free(inputs[ii]);
+                free(in_constr[ii]);
+            }
+        }
+        if (peek(p)->kind == TK_SEMICOLON) advance(p);
         return s;
     }
     /* expr-stmt */

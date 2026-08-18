@@ -2259,6 +2259,42 @@ IRValue pr;
             fn->has_dyn_alloca = 1;
             return v;
         }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (runtime.strcmp(e->u.call.callee->u.var.name, "abs") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "labs") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "llabs") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_abs") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_labs") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_llabs") == 0) &&
+            e->u.call.args.len > 0) {
+            const char *bname = e->u.call.callee->u.var.name;
+            int bw = (runtime.strstr(bname, "llabs") || runtime.strstr(bname, "labs")) ? 8 : 4;
+            IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
+            arg = coerce(fn, arg, get_value_width(fn, arg), get_value_is_unsigned(fn, arg), bw, 0, e->loc);
+            IRValue slot = new_value(fn);
+            emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, bw, 0, e->loc);
+            int L_neg = new_label(fn);
+            int L_pos = new_label(fn);
+            int L_done = new_label(fn);
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, bw, 0, e->loc);
+            IRValue cond = new_value(fn);
+            emit_inst_w(fn, IR_LT, cond, arg, zero, 0, bw, 0, e->loc);
+            emit_cbr(fn, cond, L_neg, L_pos, e->loc);
+            emit_label(fn, L_neg, e->loc);
+            IRValue neg = new_value(fn);
+            emit_inst_w(fn, IR_NEG, neg, arg, -1, 0, bw, 0, e->loc);
+            emit_inst_w(fn, IR_STORE, -1, slot, neg, 0, bw, 0, e->loc);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_pos, e->loc);
+            emit_inst_w(fn, IR_STORE, -1, slot, arg, 0, bw, 0, e->loc);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_done, e->loc);
+            IRValue result = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, bw, 0, e->loc);
+            set_value_type(fn, result, bw, 0);
+            return result;
+        }
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
             if (runtime.strcmp(cname, "va_start") == 0 || runtime.strcmp(cname, "va_end") == 0
