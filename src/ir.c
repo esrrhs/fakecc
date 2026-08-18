@@ -2126,7 +2126,20 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 v = shifted;
             }
             if (bit_width < w * 8) {
-                if (!e->type.is_unsigned && !e->type.is_bool) {
+                int is_signed_bf = (!e->type.is_unsigned && !e->type.is_bool);
+                if (e->type.enum_id > 0) {
+                    is_signed_bf = 0;
+                    if (g_ir_tu && (size_t)(e->type.enum_id - 1) < g_ir_tu->enums.len) {
+                        const EnumDef *ed = &g_ir_tu->enums.data[e->type.enum_id - 1];
+                        for (int k = 0; k < ed->num_constants; k++) {
+                            if (ed->constants[k].value < 0) {
+                                is_signed_bf = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (is_signed_bf) {
                     /* A signed bitfield holds a two's-complement value in
                      * bit_width bits: shift it up to the unit's sign bit and
                      * back down arithmetically.  Masking alone would read
@@ -2150,12 +2163,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     IRValue masked = new_value(fn);
                     emit_inst_w(fn, IR_BAND, masked, v, m, 0, w, 1, e->loc);
                     v = masked;
+                    u = 1;
                 }
             }
-            /* Result is a small unsigned int; coerce to the member's declared
-             * width (semantically int/bool). */
+            /* Result is a small int; coerce to the member's declared width. */
             return coerce(fn, v, w, u, e->type.width ? e->type.width : 4,
-                         e->type.is_unsigned, e->loc);
+                          u, e->loc);
         }
         if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
@@ -2916,7 +2929,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     case ST_RETURN: {
         if (fn->ret_width == 0 && !fn->ret_is_float) {
-            /* void function: bare `return;` — no value. */
+            /* void function: bare `return;` or `return void_expr;` */
+            if (s->u.value) lower_expr(fn, st, s->u.value);
             emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
         } else if (fn->ret_is_struct) {
             IRValue v = lower_expr(fn, st, s->u.value);

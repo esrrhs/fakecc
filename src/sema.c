@@ -1584,20 +1584,24 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "non-void function must return a value");
         } else {
-            if (g_sema_ret_type.kind == TY_VOID)
-                die_at(s->loc.file, s->loc.line, s->loc.col,
-                       "void function cannot return a value");
             discard = check_expr(s->u.value, st, ft);
-            if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
-                discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
-                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
-                set_type(c, type_clone(g_sema_ret_type));
-                s->u.value = c;
-            } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
-                       (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
-                Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
-                set_type(c, type_clone(g_sema_ret_type));
-                s->u.value = c;
+            if (g_sema_ret_type.kind == TY_VOID) {
+                if (discard.kind != TY_VOID) {
+                    die_at(s->loc.file, s->loc.line, s->loc.col,
+                           "void function cannot return a value");
+                }
+            } else {
+                if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
+                    discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
+                    Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                    set_type(c, type_clone(g_sema_ret_type));
+                    s->u.value = c;
+                } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
+                           (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
+                    Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                    set_type(c, type_clone(g_sema_ret_type));
+                    s->u.value = c;
+                }
             }
             type_free(&discard);
         }
