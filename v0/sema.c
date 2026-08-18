@@ -1796,7 +1796,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
         if (!sd)
             die_at(loc.file, loc.line, loc.col,
                    "unknown struct 'struct %s'", target->tag);
-        N = sd->num_members;
+        N = sd->is_union ? 1 : sd->num_members;
         break;
     default: N = 1; break;
     }
@@ -1832,6 +1832,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
     for (int i = 0; i < n; i++) {
         Expr *elem = list->u.init_list.elements[i];
         int pos;
+        int member_idx = 0;
         if (list->u.init_list.desig_kind[i] == 0) {
             pos = list->u.init_list.desig_index[i];
         } else if (list->u.init_list.desig_kind[i] == 1) {
@@ -1839,15 +1840,18 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             pos = -1;
             for (int j = 0; j < sd->num_members; j++)
                 if (runtime.strcmp(sd->members[j].name, name) == 0) { pos = j; break; }
+            member_idx = pos;
+            if (sd && sd->is_union) pos = 0;
         } else {
             pos = cursor;
+            member_idx = (sd && sd->is_union) ? 0 : pos;
         }
         if (pos < 0 || pos >= N)
             die_at(loc.file, loc.line, loc.col,
                    "too many initializers: %d value(s) for %d slot(s)", n, N);
         Type *slot_type = ((void*)0);
         if (target->kind == TY_ARRAY) slot_type = target->elem_type;
-        else if (target->kind == TY_STRUCT) slot_type = &sd->members[pos].type;
+        else if (target->kind == TY_STRUCT) slot_type = &sd->members[member_idx].type;
         if (slot_type && elem->kind != EX_INIT_LIST
             && (slot_type->kind == TY_ARRAY || slot_type->kind == TY_STRUCT)
             && !init_elem_may_be_aggregate(elem)
@@ -1867,7 +1871,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             if (target->kind == TY_ARRAY)
                 normalize_init_list(target->elem_type, elem, elem->loc);
             else
-                normalize_init_list(&sd->members[pos].type, elem, elem->loc);
+                normalize_init_list(&sd->members[member_idx].type, elem, elem->loc);
         }
         expr_free(out[pos]);
         out[pos] = elem;

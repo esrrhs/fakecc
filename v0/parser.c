@@ -2287,6 +2287,50 @@ int is_unsigned;
            "expected expression but got '%s'", t->text);
     return ((void*)0);
 }
+static Expr *parse_designator_chain(Parser *p, SourceLoc loc) {
+    int kind = -1, idx = -1;
+    char *member = ((void*)0);
+    int chained = 0;
+    if (peek(p)->kind == TK_DOT) {
+        advance(p);
+        const Token *fn = peek(p);
+        if (fn->kind != TK_IDENT)
+            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                   "expected field name after '.' but got '%s'", fn->text);
+        advance(p);
+        member = xstrdup(fn->text);
+        kind = 1;
+        if (peek(p)->kind == TK_DOT || peek(p)->kind == TK_LBRACKET) chained = 1;
+        else expect_kind(p, TK_ASSIGN, "'='");
+    } else if (peek(p)->kind == TK_LBRACKET) {
+        advance(p);
+        const Token *ix = peek(p);
+        if (ix->kind != TK_INT_LITERAL)
+            die_at(ix->loc.file, ix->loc.line, ix->loc.col,
+                   "expected integer constant in designator but got '%s'", ix->text);
+        idx = int_literal_value(ix->text);
+        advance(p);
+        expect_kind(p, TK_RBRACKET, "']'");
+        kind = 0;
+        if (peek(p)->kind == TK_DOT || peek(p)->kind == TK_LBRACKET) chained = 1;
+        else expect_kind(p, TK_ASSIGN, "'='");
+    }
+    Expr *val = ((void*)0);
+    if (chained) {
+        val = parse_designator_chain(p, loc);
+    } else if (peek(p)->kind == TK_LBRACE) {
+        val = parse_init_list(p);
+    } else {
+        val = parse_assign(p);
+    }
+    Expr **elems = runtime.malloc(sizeof(Expr *));
+    elems[0] = val;
+    Expr *list = expr_new_init_list(elems, 1, loc);
+    list->u.init_list.desig_kind[0] = kind;
+    list->u.init_list.desig_index[0] = idx;
+    list->u.init_list.desig_member[0] = member;
+    return list;
+}
 static Expr *parse_init_list(Parser *p) {
     SourceLoc loc = peek(p)->loc;
     expect_kind(p, TK_LBRACE, "'{'");
@@ -2301,6 +2345,7 @@ static Expr *parse_init_list(Parser *p) {
         }
         int kind = -1, idx = -1;
         char *member = ((void*)0);
+        int has_chained = 0;
         if (peek(p)->kind == TK_DOT) {
             advance(p);
             const Token *fn = peek(p);
@@ -2309,8 +2354,12 @@ static Expr *parse_init_list(Parser *p) {
                        "expected field name after '.' but got '%s'", fn->text);
             advance(p);
             member = xstrdup(fn->text);
-            expect_kind(p, TK_ASSIGN, "'='");
             kind = 1;
+            if (peek(p)->kind == TK_DOT || peek(p)->kind == TK_LBRACKET) {
+                has_chained = 1;
+            } else {
+                expect_kind(p, TK_ASSIGN, "'='");
+            }
         } else if (peek(p)->kind == TK_LBRACKET) {
             advance(p);
             const Token *ix = peek(p);
@@ -2321,8 +2370,12 @@ static Expr *parse_init_list(Parser *p) {
             idx = int_literal_value(ix->text);
             advance(p);
             expect_kind(p, TK_RBRACKET, "']'");
-            expect_kind(p, TK_ASSIGN, "'='");
             kind = 0;
+            if (peek(p)->kind == TK_DOT || peek(p)->kind == TK_LBRACKET) {
+                has_chained = 1;
+            } else {
+                expect_kind(p, TK_ASSIGN, "'='");
+            }
         } else if (peek(p)->kind == TK_IDENT
                    && p->pos + 1 < p->tokens->len
                    && p->tokens->data[p->pos + 1].kind == TK_COLON) {
@@ -2332,7 +2385,9 @@ static Expr *parse_init_list(Parser *p) {
             kind = 1;
         }
         Expr *elem;
-        if (peek(p)->kind == TK_LBRACE) {
+        if (has_chained) {
+            elem = parse_designator_chain(p, loc);
+        } else if (peek(p)->kind == TK_LBRACE) {
             elem = parse_init_list(p);
         } else {
             elem = parse_assign(p);

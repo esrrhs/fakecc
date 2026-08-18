@@ -1487,6 +1487,53 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                        const FunctionDecl *cur_fd);
+static const StructMember *ir_find_struct_member(const StructDef *sd, const char *name) {
+    if (!sd || !name) return ((void*)0);
+    for (int i = 0; i < sd->num_members; i++) {
+        if (sd->members[i].name && runtime.strcmp(sd->members[i].name, name) == 0)
+            return &sd->members[i];
+    }
+    return ((void*)0);
+}
+static void emit_zero_bytes(IRFunction *fn, IRValue base, int total, SourceLoc loc) {
+    int off = 0;
+    while (off + 8 <= total) {
+        IRValue poff = new_value(fn);
+        emit_inst_w(fn, IR_CONST, poff, -1, -1, off, 8, 1, loc);
+        IRValue p = emit_bin_w(fn, IR_ADD, base, poff, 8, 1, loc);
+        IRValue z = new_value(fn);
+        emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 8, 1, loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, p, z, 0, 8, 1, loc);
+        off += 8;
+    }
+    if (off + 4 <= total) {
+        IRValue poff = new_value(fn);
+        emit_inst_w(fn, IR_CONST, poff, -1, -1, off, 8, 1, loc);
+        IRValue p = emit_bin_w(fn, IR_ADD, base, poff, 8, 1, loc);
+        IRValue z = new_value(fn);
+        emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 4, 1, loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, p, z, 0, 4, 1, loc);
+        off += 4;
+    }
+    if (off + 2 <= total) {
+        IRValue poff = new_value(fn);
+        emit_inst_w(fn, IR_CONST, poff, -1, -1, off, 8, 1, loc);
+        IRValue p = emit_bin_w(fn, IR_ADD, base, poff, 8, 1, loc);
+        IRValue z = new_value(fn);
+        emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 2, 1, loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, p, z, 0, 2, 1, loc);
+        off += 2;
+    }
+    if (off < total) {
+        IRValue poff = new_value(fn);
+        emit_inst_w(fn, IR_CONST, poff, -1, -1, off, 8, 1, loc);
+        IRValue p = emit_bin_w(fn, IR_ADD, base, poff, 8, 1, loc);
+        IRValue z = new_value(fn);
+        emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 1, 1, loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, p, z, 0, 1, 1, loc);
+        off += 1;
+    }
+}
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g);
@@ -3061,6 +3108,7 @@ IRValue vi;
         if (total <= 0) total = 8;
         IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
         IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        emit_zero_bytes(fn, addr, total, e->loc);
         lower_init_list(fn, st, addr, &target, e->u.compound.init, e->loc);
         if (target.kind == TY_ARRAY || target.kind == TY_STRUCT)
             return addr;
@@ -3257,6 +3305,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             if (s->u.decl.init->kind == EX_INIT_LIST) {
                 if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT) {
                     IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
+                    int total = type_size(dty);
+                    if (total > 0) emit_zero_bytes(fn, addr, total, s->loc);
                     lower_init_list(fn, st, addr, &dty, s->u.decl.init, s->loc);
                 } else {
                     IRValue rv = lower_expr(fn, st,
@@ -3874,26 +3924,45 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         switch (ty->kind) {
         case TY_ARRAY: {
             int esz = type_size(*ty->elem_type);
-            for (int i = 0; i < n; i++)
+            int cur_idx = 0;
+            for (int i = 0; i < n; i++) {
+                int elem_idx = cur_idx++;
+                if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                    elem_idx = e->u.init_list.desig_index[i];
+                    cur_idx = elem_idx + 1;
+                }
                 pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
-                          bytes + i * esz, esz, ctx, loc, g);
+                          bytes + elem_idx * esz, esz, ctx, loc, g);
+            }
             break;
         }
         case TY_STRUCT: {
             const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
             if (!sd) die_at(loc.file, loc.line, loc.col,
                             "unknown struct 'struct %s'", ty->tag);
-            for (int i = 0; i < n && i < sd->num_members; i++) {
-                int msz = type_size(sd->members[i].type);
-                if (msz == 0 && sd->members[i].type.kind == TY_ARRAY && sd->members[i].type.elem_type) {
+            int cur_idx = 0;
+            for (int i = 0; i < n; i++) {
+                const StructMember *sm = ((void*)0);
+                if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 1
+                    && e->u.init_list.desig_member[i]) {
+                    sm = ir_find_struct_member(sd, e->u.init_list.desig_member[i]);
+                } else if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                    int dix = e->u.init_list.desig_index[i];
+                    if (dix >= 0 && dix < sd->num_members) sm = &sd->members[dix];
+                } else {
+                    if (cur_idx < sd->num_members) sm = &sd->members[cur_idx++];
+                }
+                if (!sm) continue;
+                int msz = type_size(sm->type);
+                if (msz == 0 && sm->type.kind == TY_ARRAY && sm->type.elem_type) {
                     const Expr *el = e->u.init_list.elements[i];
                     if (el->kind == EX_STR)
                         msz = el->u.str.len + 1;
                     else if (el->kind == EX_INIT_LIST)
-                        msz = el->u.init_list.num_elements * type_size(*sd->members[i].type.elem_type);
+                        msz = el->u.init_list.num_elements * type_size(*sm->type.elem_type);
                 }
-                pack_init(ir, &sd->members[i].type, e->u.init_list.elements[i],
-                          bytes + sd->members[i].offset,
+                pack_init(ir, &sm->type, e->u.init_list.elements[i],
+                          bytes + sm->offset,
                           msz, ctx, loc, g);
             }
             break;
@@ -3993,9 +4062,15 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         switch (ty->kind) {
         case TY_ARRAY: {
             int esz = type_size(*ty->elem_type);
+            int cur_idx = 0;
             for (int i = 0; i < n; i++) {
+                int elem_idx = cur_idx++;
+                if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                    elem_idx = e->u.init_list.desig_index[i];
+                    cur_idx = elem_idx + 1;
+                }
                 IRValue off = new_value(fn);
-                emit_inst_w(fn, IR_CONST, off, -1, -1, i * esz, 8, 1, loc);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_idx * esz, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
                 lower_init_list(fn, st, ptr, ty->elem_type,
                                 e->u.init_list.elements[i], loc);
@@ -4006,8 +4081,19 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
             const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
             if (!sd) die_at(loc.file, loc.line, loc.col,
                             "unknown struct 'struct %s'", ty->tag);
+            int cur_idx = 0;
             for (int i = 0; i < n; i++) {
-                const StructMember *sm = &sd->members[i];
+                const StructMember *sm = ((void*)0);
+                if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 1
+                    && e->u.init_list.desig_member[i]) {
+                    sm = ir_find_struct_member(sd, e->u.init_list.desig_member[i]);
+                } else if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                    int dix = e->u.init_list.desig_index[i];
+                    if (dix >= 0 && dix < sd->num_members) sm = &sd->members[dix];
+                } else {
+                    if (cur_idx < sd->num_members) sm = &sd->members[cur_idx++];
+                }
+                if (!sm) continue;
                 IRValue off = new_value(fn);
                 emit_inst_w(fn, IR_CONST, off, -1, -1, sm->offset, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
