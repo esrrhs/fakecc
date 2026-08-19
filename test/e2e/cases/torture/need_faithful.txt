@@ -5,7 +5,6 @@
 # fails, fix the compiler. Nested-function tests live in UNSUPPORTED.txt.
 
 20031003-1.c
-20040629-1.c
 20040705-1.c
 20040705-2.c
 20040709-3.c
