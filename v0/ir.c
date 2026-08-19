@@ -2005,7 +2005,10 @@ int op_u;
             int aw = lf ? lw : (lw < 4 ? 4 : lw), au = lf ? 0 : (lw < 4 ? 0 : lu);
             int bw = rf ? rw : (rw < 4 ? 4 : rw), bu = rf ? 0 : (rw < 4 ? 0 : ru);
             if (lf || rf) {
-                op_w = aw > bw ? aw : bw; op_u = 0;
+                if (lf && rf) op_w = lw > rw ? lw : rw;
+                else if (lf) op_w = lw;
+                else op_w = rw;
+                op_u = 0;
             } else if (aw == bw && au == bu) { op_w = aw; op_u = au; }
             else if (au == bu) { op_w = aw > bw ? aw : bw; op_u = au; }
             else {
@@ -2456,6 +2459,8 @@ IRValue pr;
                         inst.is_float = 0;
                         inst.imm = sz;
                         inst.force_stack = (nreg == 0);
+                        inst.float_imm = (nreg > 0 && cls[0] == SYSV_CLS_SSE ? 1 : 0) |
+                                         (nreg > 1 && cls[1] == SYSV_CLS_SSE ? 2 : 0);
                         inst.call_nargs = 2;
                         inst.call_args[1] = addr;
                         ir_inst_array_push(&fn->insts, inst);

@@ -1265,22 +1265,39 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
         int ov_step = (nbytes + 7) & ~7;
         if (ov_step < 8) ov_step = 8;
 
+        int num_gp = 0, num_fp = 0;
+        for (int i = 0; i < n8; i++) {
+            if ((inst->float_imm >> i) & 1) num_fp++;
+            else num_gp++;
+        }
+
         if (!inst->force_stack && n8 <= 2) {
-            emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
-            emit_cmp_imm32(b, REG_RCX, 48 - 8 * (n8 - 1));
-            size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow */
-            emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF);
-            emit_add_rr(b, REG_R11, REG_RCX); /* r11 = save + gp_offset */
-            for (int i = 0; i < n8; i++) {
-                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
-                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            size_t jae_gp = 0, jae_fp = 0;
+            if (num_gp > 0) {
+                emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
+                emit_cmp_imm32(b, REG_RCX, 48 - 8 * num_gp);
+                jae_gp = emit_jcc_rel32(b, 0x87); /* JA overflow */
             }
-            emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
-            emit_add_imm32(b, REG_RCX, 8 * n8);
-            emit_store_base_off32(b, ap_reg, REG_RCX, VA_GP_OFF);
+            if (num_fp > 0) {
+                emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF);
+                emit_cmp_imm32(b, REG_RCX, 176 - 16 * num_fp);
+                jae_fp = emit_jcc_rel32(b, 0x87); /* JA overflow */
+            }
+            for (int i = 0; i < n8; i++) {
+                int is_sse = (inst->float_imm >> i) & 1;
+                int off_field = is_sse ? VA_FP_OFF : VA_GP_OFF;
+                emit_load_base_off32(b, REG_RCX, ap_reg, off_field);
+                emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF);
+                emit_add_rr(b, REG_R11, REG_RCX);
+                emit_load_base_off(b, REG_RDX, REG_R11, 0);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+                emit_add_imm32(b, REG_RCX, is_sse ? 16 : 8);
+                emit_store_base_off32(b, ap_reg, REG_RCX, off_field);
+            }
             size_t jmp_end = emit_jmp_rel32(b);
             size_t ov_off = b->len;
-            patch_rel32(b, jae_ov, ov_off);
+            if (num_gp > 0) patch_rel32(b, jae_gp, ov_off);
+            if (num_fp > 0) patch_rel32(b, jae_fp, ov_off);
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
@@ -2199,10 +2216,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                     dr >= 0 ? dr : REG_RAX, ra);
                 } else {
                     mask_to_width(&out->text, REG_RDX, inst->width, inst->is_unsigned);
-                    if (dr >= 0)
+                    if (dr >= 0 && dr != REG_RDX)
                         emit_mov_rr(&out->text, dr, REG_RDX);
                     spill_if_needed(&out->text, inst->dst,
-                                    dr >= 0 ? dr : REG_RAX, ra);
+                                    dr >= 0 ? dr : REG_RDX, ra);
                 }
                 break;
             }
