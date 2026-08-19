@@ -1022,11 +1022,20 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "call to non-function (callee type must be a function or function pointer)");
         }
-        if (fn_ty.func_params != NULL && (int)e->u.call.args.len != fn_ty.func_nparams) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "function pointer expects %d argument%s but %zu given",
-                   fn_ty.func_nparams,
-                   fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
+        if (fn_ty.func_params != NULL) {
+            if (fn_ty.func_is_variadic) {
+                if ((int)e->u.call.args.len < fn_ty.func_nparams) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "function pointer expects at least %d argument%s but %zu given",
+                           fn_ty.func_nparams,
+                           fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
+                }
+            } else if ((int)e->u.call.args.len != fn_ty.func_nparams) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "function pointer expects %d argument%s but %zu given",
+                       fn_ty.func_nparams,
+                       fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
+            }
         }
         for (size_t i = 0; i < e->u.call.args.len; i++) {
             Type at = check_expr(e->u.call.args.data[i], st, ft);

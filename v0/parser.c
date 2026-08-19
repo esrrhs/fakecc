@@ -164,6 +164,7 @@ struct Type {
     Type *func_ret;
     Type *func_params;
     int func_nparams;
+    int func_is_variadic;
     int enum_id;
     int bitfield_width;
 };
@@ -171,7 +172,7 @@ static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
 static inline Type type_make_bool(void) {
@@ -184,14 +185,14 @@ static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
 Type type_clone(Type t);
@@ -208,6 +209,7 @@ Type type_make_array(Type elem, int length);
 Type type_make_vla(Type elem, struct Expr *dim);
 Type type_make_struct(const char *tag, int size);
 Type type_make_func(Type ret, Type * *params, int nparams);
+Type type_make_func_var(Type ret, Type * *params, int nparams, int is_variadic);
 Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
@@ -1276,7 +1278,7 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
     }
     expect_kind(p, TK_RBRACE, "'}'");
 }
-static Type make_func_type(Type ret, ParamArray *params) {
+static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
     Type **ptys = ((void*)0);
     if (params->len > 0) {
         ptys = runtime.malloc(params->len * sizeof(Type *));
@@ -1284,12 +1286,13 @@ static Type make_func_type(Type ret, ParamArray *params) {
         for (size_t i = 0; i < params->len; i++)
             ptys[i] = &params->data[i].type;
     }
-    Type t = type_make_func(ret, ptys, (int)params->len);
+    Type t = type_make_func_var(ret, ptys, (int)params->len, is_variadic);
     runtime.free(ptys);
     param_array_free(params);
     return t;
 }
-static ParamArray parse_param_list(Parser *p) {
+static ParamArray parse_param_list(Parser *p, int *is_variadic) {
+    if (is_variadic) *is_variadic = 0;
     ParamArray params;
     param_array_init(&params);
     if (peek(p)->kind == TK_KW_VOID
@@ -1319,6 +1322,8 @@ static ParamArray parse_param_list(Parser *p) {
                 advance(p);
                 if (peek(p)->kind == TK_ELLIPSIS) {
                     advance(p);
+                    if (is_variadic) *is_variadic = 1;
+                    break;
                 }
                 continue;
             }
@@ -1463,9 +1468,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                ParamArray params = parse_param_list(p);
+                int is_var = 0;
+                ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params);
+                t = make_func_type(base, &params, is_var);
                 break;
             }
         }
@@ -1508,9 +1514,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                ParamArray params = parse_param_list(p);
+                int is_var = 0;
+                ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params);
+                t = make_func_type(base, &params, is_var);
                 break;
             }
         }
@@ -1540,9 +1547,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                ParamArray params = parse_param_list(p);
+                int is_var = 0;
+                ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params);
+                t = make_func_type(base, &params, is_var);
                 break;
             }
         }

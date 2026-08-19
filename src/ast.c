@@ -56,6 +56,7 @@ Type type_clone(Type t) {
     } else {
         r.func_params = NULL;
     }
+    r.func_is_variadic = t.func_is_variadic;
     return r;
 }
 
@@ -133,7 +134,7 @@ Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
     t.bitfield_width = 0;
     t.pointee = malloc(sizeof(Type));
     if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
@@ -197,7 +198,7 @@ Type type_make_array(Type elem, int length) {
     t.is_const = elem.is_const; t.is_volatile = elem.is_volatile; t.is_restrict = elem.is_restrict;
     t.is_bool = 0; t.length = length; t.vla_dim = NULL;
     t.pointee = NULL; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
     t.bitfield_width = 0;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
@@ -215,16 +216,17 @@ Type type_make_struct(const char *tag, int size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
     t.bitfield_width = 0;
     t.tag = xstrdup(tag);
     return t;
 }
 
-Type type_make_func(Type ret, Type * const *params, int nparams) {
+Type type_make_func_var(Type ret, Type * const *params, int nparams, int is_variadic) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL; t.enum_id = 0;
     t.bitfield_width = 0;
+    t.func_is_variadic = is_variadic;
     t.func_ret = malloc(sizeof(Type));
     if (!t.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.func_ret = type_clone(ret);
@@ -238,6 +240,10 @@ Type type_make_func(Type ret, Type * const *params, int nparams) {
         t.func_params = NULL;
     }
     return t;
+}
+
+Type type_make_func(Type ret, Type * const *params, int nparams) {
+    return type_make_func_var(ret, params, nparams, 0);
 }
 
 static int types_equal(Type a, Type b);  /* forward */

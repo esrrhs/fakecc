@@ -764,9 +764,9 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
     expect_kind(p, TK_RBRACE, "'}'");
 }
 
-static Type make_func_type(Type ret, ParamArray *params) {
+static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
     /* Build a shallow array of pointers into the ParamArray's owned types.
-     * type_make_func deep-clones them, so the originals stay owned by the
+     * type_make_func_var deep-clones them, so the originals stay owned by the
      * ParamArray and are freed by param_array_free below. */
     Type **ptys = NULL;
     if (params->len > 0) {
@@ -775,7 +775,7 @@ static Type make_func_type(Type ret, ParamArray *params) {
         for (size_t i = 0; i < params->len; i++)
             ptys[i] = &params->data[i].type;
     }
-    Type t = type_make_func(ret, ptys, (int)params->len);
+    Type t = type_make_func_var(ret, ptys, (int)params->len, is_variadic);
     free(ptys);
     param_array_free(params);
     return t;
@@ -783,7 +783,8 @@ static Type make_func_type(Type ret, ParamArray *params) {
 
 /* Parse a parameter list: (void) means empty, else type declarator pairs.
  * Returns the collected params.  Tolerates a trailing comma. */
-static ParamArray parse_param_list(Parser *p) {
+static ParamArray parse_param_list(Parser *p, int *is_variadic) {
+    if (is_variadic) *is_variadic = 0;
     ParamArray params;
     param_array_init(&params);
     if (peek(p)->kind == TK_KW_VOID
@@ -813,11 +814,11 @@ static ParamArray parse_param_list(Parser *p) {
             while (skip_attribute(p)) {}
             if (peek(p)->kind == TK_COMMA) {
                 advance(p);
-                /* Variadic tail of a function type. The variadic-ness of a
-                 * type is deferred (indirect variadic calls are out of scope);
-                 * here we just consume the `...` so the syntax parses. */
+                /* Variadic tail of a function type. */
                 if (peek(p)->kind == TK_ELLIPSIS) {
                     advance(p);
+                    if (is_variadic) *is_variadic = 1;
+                    break;
                 }
                 continue;
             }
@@ -996,9 +997,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                ParamArray params = parse_param_list(p);
+                int is_var = 0;
+                ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params);
+                t = make_func_type(base, &params, is_var);
                 /* A function result cannot be further arrayed in valid C. */
                 break;
             }
@@ -1049,9 +1051,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                ParamArray params = parse_param_list(p);
+                int is_var = 0;
+                ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params);
+                t = make_func_type(base, &params, is_var);
                 break;
             }
         }
@@ -1082,9 +1085,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                ParamArray params = parse_param_list(p);
+                int is_var = 0;
+                ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params);
+                t = make_func_type(base, &params, is_var);
                 break;
             }
         }
