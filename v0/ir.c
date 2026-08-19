@@ -688,6 +688,7 @@ struct StructMember {
 struct StructDef {
     char *tag;
     int is_union;
+    int is_big_endian;
     StructMember *members;
     int num_members;
     int cap_members;
@@ -711,6 +712,7 @@ StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
+void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
@@ -807,6 +809,8 @@ static void push_loop(int cont, int brk) {
     g_loop_depth++;
 }
 static void pop_loop(void) { g_loop_depth--; }
+static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
+                        int64_t imm, int width, int is_unsigned, SourceLoc loc);
 void ir_module_init(IRModule *m) {
     m->functions.data = ((void*)0);
     m->functions.len = 0;
@@ -1067,8 +1071,52 @@ static int64_t bitfield_mask64(int bit_width) {
     if (bit_width >= 64) return -1;
     return (1LL << bit_width) - 1;
 }
+static IRValue emit_bswap_val(IRFunction *fn, IRValue v, int uw, SourceLoc loc) {
+    if (uw <= 1) return v;
+    if (uw == 2) {
+        IRValue s8 = new_value(fn);
+        emit_inst_w(fn, IR_CONST, s8, -1, -1, 8, 8, 1, loc);
+        IRValue hi = new_value(fn);
+        emit_inst_w(fn, IR_SHR, hi, v, s8, 0, 2, 1, loc);
+        IRValue lo = new_value(fn);
+        emit_inst_w(fn, IR_SHL, lo, v, s8, 0, 2, 1, loc);
+        IRValue res = new_value(fn);
+        emit_inst_w(fn, IR_BOR, res, hi, lo, 0, 2, 1, loc);
+        return res;
+    }
+    if (uw == 4) {
+        IRValue s24 = new_value(fn);
+        emit_inst_w(fn, IR_CONST, s24, -1, -1, 24, 8, 1, loc);
+        IRValue s8 = new_value(fn);
+        emit_inst_w(fn, IR_CONST, s8, -1, -1, 8, 8, 1, loc);
+        IRValue m_mid = new_value(fn);
+        emit_inst_w(fn, IR_CONST, m_mid, -1, -1, 0x00ff0000ULL, 4, 1, loc);
+        IRValue m_lo = new_value(fn);
+        emit_inst_w(fn, IR_CONST, m_lo, -1, -1, 0x0000ff00ULL, 4, 1, loc);
+        IRValue b0 = new_value(fn);
+        emit_inst_w(fn, IR_SHR, b0, v, s24, 0, 4, 1, loc);
+        IRValue b3 = new_value(fn);
+        emit_inst_w(fn, IR_SHL, b3, v, s24, 0, 4, 1, loc);
+        IRValue v_shr8 = new_value(fn);
+        emit_inst_w(fn, IR_SHR, v_shr8, v, s8, 0, 4, 1, loc);
+        IRValue b1 = new_value(fn);
+        emit_inst_w(fn, IR_BAND, b1, v_shr8, m_lo, 0, 4, 1, loc);
+        IRValue v_shl8 = new_value(fn);
+        emit_inst_w(fn, IR_SHL, v_shl8, v, s8, 0, 4, 1, loc);
+        IRValue b2 = new_value(fn);
+        emit_inst_w(fn, IR_BAND, b2, v_shl8, m_mid, 0, 4, 1, loc);
+        IRValue or1 = new_value(fn);
+        emit_inst_w(fn, IR_BOR, or1, b0, b3, 0, 4, 1, loc);
+        IRValue or2 = new_value(fn);
+        emit_inst_w(fn, IR_BOR, or2, or1, b1, 0, 4, 1, loc);
+        IRValue res = new_value(fn);
+        emit_inst_w(fn, IR_BOR, res, or2, b2, 0, 4, 1, loc);
+        return res;
+    }
+    return v;
+}
 static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
-                           int *unit_width) {
+                           int *unit_width, int *is_be) {
     if (e->kind != EX_MEMBER) return 0;
     if (e->u.member.obj->type.kind != TY_STRUCT) return 0;
     const char *tag = e->u.member.obj->type.tag;
@@ -1082,6 +1130,7 @@ static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
     *bit_width = m->bit_width;
     *bit_offset = m->bit_offset;
     *unit_width = type_size(m->type);
+    if (is_be) *is_be = sd->is_big_endian;
     return 1;
 }
 static int member_field_is_array(const Expr *e) {
@@ -2279,12 +2328,13 @@ IRValue pr;
             return coerced;
         } else if (lv->kind == EX_INDEX || lv->kind == EX_MEMBER) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
-            int bit_width = 0, bit_offset = 0, unit_width = 0;
+            int bit_width = 0, bit_offset = 0, unit_width = 0, is_be = 0;
             if (lv->kind == EX_MEMBER
-                && member_bitfield(lv, &bit_width, &bit_offset, &unit_width)) {
+                && member_bitfield(lv, &bit_width, &bit_offset, &unit_width, &is_be)) {
                 int uw = unit_width ? unit_width : 4;
                 IRValue unit = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
+                if (is_be) unit = emit_bswap_val(fn, unit, uw, e->loc);
                 int64_t mask = bitfield_mask64(bit_width);
                 IRValue m = new_value(fn);
                 emit_inst_w(fn, IR_CONST, m, -1, -1, mask, uw, 1, e->loc);
@@ -2302,7 +2352,9 @@ IRValue pr;
                 emit_inst_w(fn, IR_SHL, vs, vm, so, 0, uw, 1, e->loc);
                 IRValue merged = new_value(fn);
                 emit_inst_w(fn, IR_BOR, merged, cleared, vs, 0, uw, 1, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, merged, 0, uw, 1, e->loc);
+                IRValue to_store = merged;
+                if (is_be) to_store = emit_bswap_val(fn, merged, uw, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, to_store, 0, uw, 1, e->loc);
                 if (!e->type.is_unsigned && bit_width < uw * 8) {
                     int shift = uw * 8 - bit_width;
                     IRValue s_val = new_value(fn);
@@ -2763,13 +2815,16 @@ IRValue pr;
         if (e->type.kind == TY_STRUCT) return addr;
         if (e->type.kind == TY_ARRAY) return addr;
         if (e->type.kind == TY_PTR && member_field_is_array(e)) return addr;
-        int bit_width = 0, bit_offset = 0, unit_width = 0;
-        int is_bf = member_bitfield(e, &bit_width, &bit_offset, &unit_width);
+        int bit_width = 0, bit_offset = 0, unit_width = 0, is_be = 0;
+        int is_bf = member_bitfield(e, &bit_width, &bit_offset, &unit_width, &is_be);
         int w = is_bf ? (unit_width ? unit_width : 4)
                       : (e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4));
         int u = is_bf ? 1 : e->type.is_unsigned;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        if (is_bf && is_be) {
+            v = emit_bswap_val(fn, v, w, e->loc);
+        }
         if (is_bf) {
             if (bit_offset > 0) {
                 IRValue s = new_value(fn);
@@ -2967,13 +3022,14 @@ IRValue vi;
             }
         }
         IRValue addr = lower_lvalue_addr(fn, st, lv);
-        int bf_width = 0, bf_offset = 0, bf_unit = 0;
+        int bf_width = 0, bf_offset = 0, bf_unit = 0, is_be = 0;
         if (lv->kind == EX_MEMBER
-            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit)) {
+            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be)) {
             int uw = bf_unit ? bf_unit : 4;
             int64_t mask = bitfield_mask64(bf_width);
             IRValue unit = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
+            if (is_be) unit = emit_bswap_val(fn, unit, uw, e->loc);
             IRValue old_bf;
             if (bf_offset > 0) {
                 IRValue sh = new_value(fn);
@@ -3009,7 +3065,9 @@ IRValue vi;
             emit_inst_w(fn, IR_BAND, unit_cleared, unit, clr, 0, uw, 1, e->loc);
             IRValue unit_new = new_value(fn);
             emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_new, 0, uw, 1, e->loc);
-            emit_inst_w(fn, IR_STORE_PTR, -1, addr, unit_new, 0, uw, 1, e->loc);
+            IRValue to_store = unit_new;
+            if (is_be) to_store = emit_bswap_val(fn, unit_new, uw, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, to_store, 0, uw, 1, e->loc);
             IRValue ret_bf = is_prefix ? new_masked : old_val;
             return coerce(fn, ret_bf, uw, 1,
                           lv->type.width ? lv->type.width : 4,
@@ -3081,13 +3139,14 @@ IRValue vi;
             }
         }
         IRValue addr = lower_lvalue_addr(fn, st, lv);
-        int bf_width = 0, bf_offset = 0, bf_unit = 0;
+        int bf_width = 0, bf_offset = 0, bf_unit = 0, is_be = 0;
         if (!is_float && !is_ptr && lv->kind == EX_MEMBER
-            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit)) {
+            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be)) {
             int uw = bf_unit ? bf_unit : 4;
             int64_t mask = bitfield_mask64(bf_width);
             IRValue unit = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
+            if (is_be) unit = emit_bswap_val(fn, unit, uw, e->loc);
             IRValue extracted;
             if (bf_offset > 0) {
                 IRValue sh = new_value(fn);
@@ -3142,7 +3201,9 @@ IRValue vi;
             emit_inst_w(fn, IR_BAND, unit_cleared, unit, clr, 0, uw, 1, e->loc);
             IRValue unit_new = new_value(fn);
             emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_new, 0, uw, 1, e->loc);
-            emit_inst_w(fn, IR_STORE_PTR, -1, addr, unit_new, 0, uw, 1, e->loc);
+            IRValue to_store = unit_new;
+            if (is_be) to_store = emit_bswap_val(fn, unit_new, uw, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, to_store, 0, uw, 1, e->loc);
             return coerce(fn, new_masked, uw, 1,
                           lv->type.width ? lv->type.width : 4,
                           lv->type.is_unsigned, e->loc);
@@ -4175,11 +4236,25 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                     if (uw < 1) uw = 1;
                     uint64_t mask = bitfield_mask64(sm->bit_width);
                     uint64_t val_masked = ((uint64_t)fv) & mask;
-                    uint64_t unit = 0;
-                    runtime.memcpy(&unit, bytes + sm->offset, uw);
-                    unit &= ~(mask << sm->bit_offset);
-                    unit |= (val_masked << sm->bit_offset);
-                    runtime.memcpy(bytes + sm->offset, &unit, uw);
+                    const StructDef *sd = (ty->kind == TY_STRUCT && ty->tag && g_ir_structs) ?
+                        struct_registry_find_c(g_ir_structs, ty->tag) : ((void*)0);
+                    if (sd && sd->is_big_endian) {
+                        uint64_t unit = 0;
+                        for (int b = 0; b < uw; b++) {
+                            unit = (unit << 8) | (uint8_t)bytes[sm->offset + b];
+                        }
+                        unit &= ~(mask << sm->bit_offset);
+                        unit |= (val_masked << sm->bit_offset);
+                        for (int b = 0; b < uw; b++) {
+                            bytes[sm->offset + b] = (unit >> ((uw - 1 - b) * 8)) & 0xff;
+                        }
+                    } else {
+                        uint64_t unit = 0;
+                        runtime.memcpy(&unit, bytes + sm->offset, uw);
+                        unit &= ~(mask << sm->bit_offset);
+                        unit |= (val_masked << sm->bit_offset);
+                        runtime.memcpy(bytes + sm->offset, &unit, uw);
+                    }
                 } else {
                     int msz = type_size(sm->type);
                     if (msz == 0 && sm->type.kind == TY_ARRAY && sm->type.elem_type) {
@@ -4347,6 +4422,9 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                     }
                     IRValue unit_old = new_value(fn);
                     emit_inst_w(fn, IR_LOAD_PTR, unit_old, ptr, -1, 0, uw, 1, loc);
+                    if (sd->is_big_endian) {
+                        unit_old = emit_bswap_val(fn, unit_old, uw, loc);
+                    }
                     IRValue clr_mask = new_value(fn);
                     emit_inst_w(fn, IR_CONST, clr_mask, -1, -1,
                                 ~(mask << sm->bit_offset), uw, 1, loc);
@@ -4354,7 +4432,11 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                     emit_inst_w(fn, IR_BAND, unit_cleared, unit_old, clr_mask, 0, uw, 1, loc);
                     IRValue unit_new = new_value(fn);
                     emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_val, 0, uw, 1, loc);
-                    emit_inst_w(fn, IR_STORE_PTR, -1, ptr, unit_new, 0, uw, 1, loc);
+                    IRValue to_store = unit_new;
+                    if (sd->is_big_endian) {
+                        to_store = emit_bswap_val(fn, unit_new, uw, loc);
+                    }
+                    emit_inst_w(fn, IR_STORE_PTR, -1, ptr, to_store, 0, uw, 1, loc);
                 } else {
                     lower_init_list(fn, st, ptr, &sm->type,
                                     e->u.init_list.elements[i], loc);

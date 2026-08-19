@@ -72,7 +72,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     advance(p);
 }
 
-static int parse_attribute(Parser *p, int *align, int *packed) {
+static int parse_attribute(Parser *p, int *align, int *packed, int *sso) {
     if (peek(p)->kind != TK_IDENT) return 0;
     if (strcmp(peek(p)->text, "__attribute__") != 0
         && strcmp(peek(p)->text, "__attribute") != 0)
@@ -111,6 +111,25 @@ static int parse_attribute(Parser *p, int *align, int *packed) {
                 if (packed) *packed = 1;
                 advance(p);
                 continue;
+            } else if (strcmp(name, "scalar_storage_order") == 0 || strcmp(name, "__scalar_storage_order__") == 0) {
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    if (peek(p)->kind == TK_STRING_LITERAL) {
+                        const char *s = peek(p)->text;
+                        if (sso) {
+                            if (strstr(s, "big-endian")) *sso = 1;
+                            else if (strstr(s, "little-endian")) *sso = 2;
+                        }
+                        advance(p);
+                    }
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                }
+                continue;
             }
         }
         if (peek(p)->kind == TK_LPAREN) depth++;
@@ -136,7 +155,7 @@ static int parse_attribute(Parser *p, int *align, int *packed) {
 }
 
 static int skip_attribute(Parser *p) {
-    return parse_attribute(p, NULL, NULL);
+    return parse_attribute(p, NULL, NULL, NULL);
 }
 
 /* True if `name` appears in this TU's import list. */
@@ -342,8 +361,8 @@ static Type parse_specifiers(Parser *p) {
      * generate a unique tag, parse the body, and register it. */
     if (peek(p)->kind == TK_KW_STRUCT) {
         advance(p);
-        int attr_align = 0, attr_packed = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed)) {}
+        int attr_align = 0, attr_packed = 0, attr_sso = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
         if (peek(p)->kind == TK_LBRACE) {
             /* Anonymous struct definition. */
             char tag[64];
@@ -351,6 +370,8 @@ static Type parse_specifiers(Parser *p) {
             StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
             if (attr_align > sd->align) sd->align = attr_align;
             if (attr_packed) sd->align = 1;
+            if (attr_sso == 1) struct_def_apply_sso(sd, 1);
+            else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
             /* parse_struct_body may realloc the registry (nested anonymous
              * structs/unions), invalidating sd — re-fetch before reading size. */
@@ -367,7 +388,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected struct tag but got '%s'", tag->text);
         }
         advance(p);
-        while (parse_attribute(p, &attr_align, &attr_packed)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
         /* If '{' follows, this is a struct definition at use site
          * (`struct Tag { ... }`), not just a forward reference. */
         if (peek(p)->kind == TK_LBRACE) {
@@ -378,6 +399,8 @@ static Type parse_specifiers(Parser *p) {
             StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
             if (attr_align > sd->align) sd->align = attr_align;
             if (attr_packed) sd->align = 1;
+            if (attr_sso == 1) struct_def_apply_sso(sd, 1);
+            else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
@@ -398,8 +421,8 @@ static Type parse_specifiers(Parser *p) {
      * union definition. */
     if (peek(p)->kind == TK_KW_UNION) {
         advance(p);
-        int attr_align = 0, attr_packed = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed)) {}
+        int attr_align = 0, attr_packed = 0, attr_sso = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
             snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
@@ -407,6 +430,8 @@ static Type parse_specifiers(Parser *p) {
             sd->is_union = 1;
             if (attr_align > sd->align) sd->align = attr_align;
             if (attr_packed) sd->align = 1;
+            if (attr_sso == 1) struct_def_apply_sso(sd, 1);
+            else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
@@ -421,7 +446,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected union tag but got '%s'", tag->text);
         }
         advance(p);
-        while (parse_attribute(p, &attr_align, &attr_packed)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
         /* If '{' follows, this is a union definition at use site
          * (`union Tag { ... }`), not just a forward reference. */
         if (peek(p)->kind == TK_LBRACE) {
@@ -433,6 +458,8 @@ static Type parse_specifiers(Parser *p) {
             sd->is_union = 1;
             if (attr_align > sd->align) sd->align = attr_align;
             if (attr_packed) sd->align = 1;
+            if (attr_sso == 1) struct_def_apply_sso(sd, 1);
+            else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
             parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
@@ -712,10 +739,12 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         type_free(&base);
     }
     expect_kind(p, TK_RBRACE, "'}'");
-    int align = 0, packed = 0;
-    while (parse_attribute(p, &align, &packed)) {}
+    int align = 0, packed = 0, sso = 0;
+    while (parse_attribute(p, &align, &packed, &sso)) {}
     if (align > sd->align) sd->align = align;
     if (packed) sd->align = 1;
+    if (sso == 1) struct_def_apply_sso(sd, 1);
+    else if (sso == 2) struct_def_apply_sso(sd, 0);
     /* Finalize the struct's total size (round up to natural alignment) now
      * that all members are known.  This must run before fixup so that
      * self-referential pointer members see the final aligned size. */

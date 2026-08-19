@@ -45,6 +45,3 @@ nestfunc-7.c
 20050604-1.c
 20050607-1.c
 
-# GCC scalar_storage_order (reverse endianness struct layouts).
-20230630-2.c
-20230630-4.c

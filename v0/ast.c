@@ -506,6 +506,7 @@ struct StructMember {
 struct StructDef {
     char *tag;
     int is_union;
+    int is_big_endian;
     StructMember *members;
     int num_members;
     int cap_members;
@@ -529,6 +530,7 @@ StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
+void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
@@ -867,6 +869,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
     StructDef *sd = &r->data[r->len++];
     sd->tag = xstrdup(tag);
     sd->is_union = 0;
+    sd->is_big_endian = 0;
     sd->members = ((void*)0); sd->num_members = 0; sd->cap_members = 0;
     sd->size = 0; sd->align = 1; sd->loc = loc;
     sd->bf_unit_type = 0; sd->bf_unit_used = 0; sd->bf_unit_offset = 0;
@@ -1034,6 +1037,23 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
 }
 void struct_def_finish(StructDef *sd) {
     sd->size = align_up(sd->size, sd->align);
+}
+void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
+    if (!sd) return;
+    if (sd->is_big_endian == is_big_endian) return;
+    sd->is_big_endian = is_big_endian;
+    if (is_big_endian) {
+        for (int i = 0; i < sd->num_members; i++) {
+            StructMember *m = &sd->members[i];
+            if (m->bit_width > 0) {
+                int uw = type_size(m->type);
+                if (uw > 8) uw = 8;
+                if (uw < 1) uw = 1;
+                int unit_bits = uw * 8;
+                m->bit_offset = unit_bits - m->bit_offset - m->bit_width;
+            }
+        }
+    }
 }
 void switch_push_case(Stmt *s, int is_default, int value) {
     if (s->u.switch_s.num_cases >= s->u.switch_s.cap_cases) {

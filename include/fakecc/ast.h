@@ -381,6 +381,7 @@ typedef struct {
 typedef struct {
     char *tag;            /* xstrdup'd */
     int   is_union;       /* 1 = union (members overlap at offset 0) */
+    int   is_big_endian;  /* 1 = scalar_storage_order("big-endian") */
     StructMember *members;
     int num_members;
     int cap_members;
@@ -419,6 +420,7 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
  * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield `x : N;`. */
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
+void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
 /* Find a member by name, walking C11 anonymous struct/union members.
  * On success, *offset_out (if non-NULL) is the byte offset from `sd`'s start. */
