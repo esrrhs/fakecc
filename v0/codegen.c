@@ -214,6 +214,13 @@ enum IROpcode {
     IR_FMUL,
     IR_FDIV,
     IR_FCMP,
+    IR_VADD,
+    IR_VSUB,
+    IR_VMUL,
+    IR_VDIV,
+    IR_VBAND,
+    IR_VBOR,
+    IR_VBXOR,
     IR_SITOFP,
     IR_FPTOSI,
     IR_FPEXT,
@@ -2849,6 +2856,130 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 } else {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, inst->width);
+                }
+                break;
+            }
+            case IR_VADD:
+            case IR_VSUB:
+            case IR_VMUL:
+            case IR_VDIV:
+            case IR_VBAND:
+            case IR_VBOR:
+            case IR_VBXOR: {
+                int vec_sz = inst->width;
+                int elem_sz = (int)inst->imm;
+                int is_float = inst->is_float;
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                if (vec_sz >= 16) {
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x10);
+                    emit_modrm(&out->text, 0, 0, REG_RAX);
+                } else if (vec_sz >= 8) {
+                    emit_byte(&out->text, 0xF3);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x7E);
+                    emit_modrm(&out->text, 0, 0, REG_RAX);
+                } else {
+                    emit_byte(&out->text, 0x66);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x6E);
+                    emit_modrm(&out->text, 0, 0, REG_RAX);
+                }
+                if (vec_sz >= 16) {
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x10);
+                    emit_modrm(&out->text, 0, 1, REG_RCX);
+                } else if (vec_sz >= 8) {
+                    emit_byte(&out->text, 0xF3);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x7E);
+                    emit_modrm(&out->text, 0, 1, REG_RCX);
+                } else {
+                    emit_byte(&out->text, 0x66);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x6E);
+                    emit_modrm(&out->text, 0, 1, REG_RCX);
+                }
+                if (is_float) {
+                    if (elem_sz >= 8) {
+                        emit_byte(&out->text, 0x66);
+                        emit_byte(&out->text, 0x0F);
+                        if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
+                        else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
+                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
+                        else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
+                        else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
+                        else if (inst->op == IR_VBOR) emit_byte(&out->text, 0x56);
+                        else if (inst->op == IR_VBXOR) emit_byte(&out->text, 0x57);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else {
+                        emit_byte(&out->text, 0x0F);
+                        if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
+                        else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
+                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
+                        else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
+                        else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
+                        else if (inst->op == IR_VBOR) emit_byte(&out->text, 0x56);
+                        else if (inst->op == IR_VBXOR) emit_byte(&out->text, 0x57);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    }
+                } else {
+                    emit_byte(&out->text, 0x66);
+                    if (inst->op == IR_VBAND) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xDB);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (inst->op == IR_VBOR) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xEB);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (inst->op == IR_VBXOR) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xEF);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (elem_sz == 1) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, (inst->op == IR_VADD) ? 0xFC : 0xF8);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (elem_sz == 2) {
+                        emit_byte(&out->text, 0x0F);
+                        if (inst->op == IR_VADD) emit_byte(&out->text, 0xFD);
+                        else if (inst->op == IR_VSUB) emit_byte(&out->text, 0xF9);
+                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0xD5);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (elem_sz == 4) {
+                        if (inst->op == IR_VMUL) {
+                            emit_byte(&out->text, 0x0F);
+                            emit_byte(&out->text, 0x38);
+                            emit_byte(&out->text, 0x40);
+                            emit_modrm(&out->text, 3, 0, 1);
+                        } else {
+                            emit_byte(&out->text, 0x0F);
+                            emit_byte(&out->text, (inst->op == IR_VADD) ? 0xFE : 0xFA);
+                            emit_modrm(&out->text, 3, 0, 1);
+                        }
+                    } else if (elem_sz >= 8) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, (inst->op == IR_VADD) ? 0xD4 : 0xFB);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    }
+                }
+                ensure_reg(&out->text, inst->dst, REG_RDI, ra);
+                if (vec_sz >= 16) {
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x11);
+                    emit_modrm(&out->text, 0, 0, REG_RDI);
+                } else if (vec_sz >= 8) {
+                    emit_byte(&out->text, 0x66);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0xD6);
+                    emit_modrm(&out->text, 0, 0, REG_RDI);
+                } else {
+                    emit_byte(&out->text, 0x66);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x7E);
+                    emit_modrm(&out->text, 0, 0, REG_RDI);
                 }
                 break;
             }

@@ -62,6 +62,13 @@ enum IROpcode {
     IR_FMUL,
     IR_FDIV,
     IR_FCMP,
+    IR_VADD,
+    IR_VSUB,
+    IR_VMUL,
+    IR_VDIV,
+    IR_VBAND,
+    IR_VBOR,
+    IR_VBXOR,
     IR_SITOFP,
     IR_FPTOSI,
     IR_FPEXT,
@@ -1850,81 +1857,87 @@ IRValue out_i;
 static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
                                   Type lt, Type rt, BinOp bop) {
     Type vt = lt.is_vector ? lt : rt;
-    int esz = type_size(*vt.elem_type);
+    int total_sz = type_size(vt);
+    int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
     if (esz <= 0) esz = 4;
-    int count = vt.length;
-    if (count <= 0) count = vt.width / esz;
-    int is_float = (vt.elem_type->kind == TY_FLOAT);
-    int is_unsigned = vt.elem_type->is_unsigned;
-    IROpcode ir_op = bop_to_ir(bop);
-    IRValue l_val = lower_expr(fn, st, e->u.bin.l);
-    IRValue r_val = lower_expr(fn, st, e->u.bin.r);
-    IRValue slot = emit_alloca(fn, vt.width, 16, 1, e->loc);
-    IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-    for (int i = 0; i < count; i++) {
-        IRValue off = new_value(fn);
-        emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)i * esz, 8, 1, e->loc);
-        IRValue l_elem;
-        if (lt.is_vector) {
-            IRValue l_ptr = emit_bin_w(fn, IR_ADD, l_val, off, 8, 1, e->loc);
-            l_elem = new_value(fn);
-            emit_inst_w(fn, IR_LOAD_PTR, l_elem, l_ptr, -1, 0, esz, is_unsigned, e->loc);
-            if (is_float) set_value_float(fn, l_elem, 1);
-        } else {
-            l_elem = l_val;
-        }
-        IRValue r_elem;
-        if (rt.is_vector) {
-            IRValue r_ptr = emit_bin_w(fn, IR_ADD, r_val, off, 8, 1, e->loc);
-            r_elem = new_value(fn);
-            emit_inst_w(fn, IR_LOAD_PTR, r_elem, r_ptr, -1, 0, esz, is_unsigned, e->loc);
-            if (is_float) set_value_float(fn, r_elem, 1);
-        } else {
-            r_elem = r_val;
-        }
-        IRValue res_elem = emit_bin_w(fn, ir_op, l_elem, r_elem, esz, is_unsigned, e->loc);
-        if (is_float) set_value_float(fn, res_elem, 1);
-        IRValue dst_ptr = emit_bin_w(fn, IR_ADD, dst_addr, off, 8, 1, e->loc);
-        emit_inst_w(fn, IR_STORE_PTR, -1, dst_ptr, res_elem, 0, esz, is_unsigned, e->loc);
-        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+    int count = vt.length > 0 ? vt.length : (total_sz / esz);
+    int is_float = (vt.elem_type && vt.elem_type->kind == TY_FLOAT);
+    int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
+    IROpcode vop = IR_VADD;
+    switch (bop) {
+    case BOP_ADD: vop = IR_VADD; break;
+    case BOP_SUB: vop = IR_VSUB; break;
+    case BOP_MUL: vop = IR_VMUL; break;
+    case BOP_DIV: vop = IR_VDIV; break;
+    case BOP_BITAND: case BOP_AND: vop = IR_VBAND; break;
+    case BOP_BITOR: case BOP_OR: vop = IR_VBOR; break;
+    case BOP_BITXOR: vop = IR_VBXOR; break;
+    default: vop = IR_VADD; break;
     }
+    IRValue l_addr = lower_expr(fn, st, e->u.bin.l);
+    if (!lt.is_vector) {
+        IRValue l_slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+        IRValue l_buf = emit_bin_w(fn, IR_ADDR, l_slot, -1, 8, 1, e->loc);
+        for (int i = 0; i < count; i++) {
+            IRValue off = emit_add_const(fn, l_buf, i * esz, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, off, l_addr, 0, esz, is_unsigned, e->loc);
+            if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+        }
+        l_addr = l_buf;
+    }
+    IRValue r_addr = lower_expr(fn, st, e->u.bin.r);
+    if (!rt.is_vector) {
+        IRValue r_slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+        IRValue r_buf = emit_bin_w(fn, IR_ADDR, r_slot, -1, 8, 1, e->loc);
+        for (int i = 0; i < count; i++) {
+            IRValue off = emit_add_const(fn, r_buf, i * esz, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, off, r_addr, 0, esz, is_unsigned, e->loc);
+            if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+        }
+        r_addr = r_buf;
+    }
+    IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+    IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    emit_inst_w(fn, vop, dst_addr, l_addr, r_addr, esz, total_sz, is_unsigned, e->loc);
+    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
     return dst_addr;
 }
-static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st, const Expr *e) {
+static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
+                                            const Expr *e) {
     Expr *lv = e->u.comp.lvalue;
     Type vt = lv->type;
-    int esz = type_size(*vt.elem_type);
+    int total_sz = type_size(vt);
+    int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
     if (esz <= 0) esz = 4;
-    int count = vt.length;
-    if (count <= 0) count = vt.width / esz;
-    int is_float = (vt.elem_type->kind == TY_FLOAT);
-    int is_unsigned = vt.elem_type->is_unsigned;
+    int count = vt.length > 0 ? vt.length : (total_sz / esz);
+    int is_float = (vt.elem_type && vt.elem_type->kind == TY_FLOAT);
+    int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
     BinOp op = e->u.comp.op;
-    IROpcode ir_op = is_float ? (op == BOP_SUB ? IR_FSUB : op == BOP_MUL ? IR_FMUL : op == BOP_DIV ? IR_FDIV : IR_FADD)
-                              : bop_to_ir(op);
-    IRValue addr = lower_lvalue_addr(fn, st, lv);
-    IRValue rhs_val = lower_expr(fn, st, e->u.comp.rvalue);
-    for (int i = 0; i < count; i++) {
-        IRValue off = new_value(fn);
-        emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)i * esz, 8, 1, e->loc);
-        IRValue elem_addr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
-        IRValue old_elem = new_value(fn);
-        emit_inst_w(fn, IR_LOAD_PTR, old_elem, elem_addr, -1, 0, esz, is_unsigned, e->loc);
-        if (is_float) set_value_float(fn, old_elem, 1);
-        IRValue rhs_elem;
-        if (e->u.comp.rvalue->type.is_vector) {
-            IRValue r_ptr = emit_bin_w(fn, IR_ADD, rhs_val, off, 8, 1, e->loc);
-            rhs_elem = new_value(fn);
-            emit_inst_w(fn, IR_LOAD_PTR, rhs_elem, r_ptr, -1, 0, esz, is_unsigned, e->loc);
-            if (is_float) set_value_float(fn, rhs_elem, 1);
-        } else {
-            rhs_elem = rhs_val;
-        }
-        IRValue neu_elem = emit_bin_w(fn, ir_op, old_elem, rhs_elem, esz, is_unsigned, e->loc);
-        if (is_float) set_value_float(fn, neu_elem, 1);
-        emit_inst_w(fn, IR_STORE_PTR, -1, elem_addr, neu_elem, 0, esz, is_unsigned, e->loc);
-        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+    IROpcode vop = IR_VADD;
+    switch (op) {
+    case BOP_ADD: vop = IR_VADD; break;
+    case BOP_SUB: vop = IR_VSUB; break;
+    case BOP_MUL: vop = IR_VMUL; break;
+    case BOP_DIV: vop = IR_VDIV; break;
+    case BOP_BITAND: case BOP_AND: vop = IR_VBAND; break;
+    case BOP_BITOR: case BOP_OR: vop = IR_VBOR; break;
+    case BOP_BITXOR: vop = IR_VBXOR; break;
+    default: vop = IR_VADD; break;
     }
+    IRValue addr = lower_lvalue_addr(fn, st, lv);
+    IRValue rhs_addr = lower_expr(fn, st, e->u.comp.rvalue);
+    if (!e->u.comp.rvalue->type.is_vector) {
+        IRValue r_slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+        IRValue r_buf = emit_bin_w(fn, IR_ADDR, r_slot, -1, 8, 1, e->loc);
+        for (int i = 0; i < count; i++) {
+            IRValue off = emit_add_const(fn, r_buf, i * esz, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, off, rhs_addr, 0, esz, is_unsigned, e->loc);
+            if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+        }
+        rhs_addr = r_buf;
+    }
+    emit_inst_w(fn, vop, addr, addr, rhs_addr, esz, total_sz, is_unsigned, e->loc);
+    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
     return addr;
 }
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {

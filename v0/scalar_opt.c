@@ -62,6 +62,13 @@ enum IROpcode {
     IR_FMUL,
     IR_FDIV,
     IR_FCMP,
+    IR_VADD,
+    IR_VSUB,
+    IR_VMUL,
+    IR_VDIV,
+    IR_VBAND,
+    IR_VBOR,
+    IR_VBXOR,
     IR_SITOFP,
     IR_FPTOSI,
     IR_FPEXT,
@@ -774,7 +781,9 @@ static int64_t trunc_to_width(int64_t v, int width, int is_unsigned) {
 static int has_side_effect(IROpcode op) {
     return op == IR_RETURN || op == IR_STORE || op == IR_STORE_PTR ||
            op == IR_BR || op == IR_CBR || op == IR_LABEL ||
-           op == IR_ALLOCA || op == IR_CALL || op == IR_PARAM;
+           op == IR_ALLOCA || op == IR_CALL || op == IR_PARAM ||
+           op == IR_VADD || op == IR_VSUB || op == IR_VMUL || op == IR_VDIV ||
+           op == IR_VBAND || op == IR_VBOR || op == IR_VBXOR;
 }
 int scalar_constfold(IRFunction *fn) {
     int changed = 0;
