@@ -873,48 +873,6 @@ static int parse_array_size_ext(Parser *p, Expr **dim_expr) {
     return 1;
 }
 
-static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
-                                int *out_array_len, int *out_has_array,
-                                Expr **out_vla_dim) {
-    int ptrs = 0;
-    while (skip_attribute(p)) {}
-    while (peek(p)->kind == TK_STAR) {
-        advance(p);
-        ptrs++;
-        while (peek(p)->kind == TK_KW_CONST ||
-               peek(p)->kind == TK_KW_VOLATILE ||
-               peek(p)->kind == TK_KW_RESTRICT ||
-               skip_attribute(p)) {
-            if (peek(p)->kind == TK_KW_CONST ||
-                peek(p)->kind == TK_KW_VOLATILE ||
-                peek(p)->kind == TK_KW_RESTRICT) advance(p);
-        }
-    }
-    while (skip_attribute(p)) {}
-    if (peek(p)->kind == TK_IDENT) {
-        *name_out = xstrdup(peek(p)->text);
-        advance(p);
-        while (skip_attribute(p)) {}
-    } else {
-        *name_out = NULL;  /* abstract declarator */
-    }
-    int array_len = 0;
-    int has_array = 0;
-    Expr *vla_dim = NULL;
-    if (peek(p)->kind == TK_LBRACKET) {
-        advance(p);
-        array_len = parse_array_size_ext(p, &vla_dim);
-        expect_kind(p, TK_RBRACKET, "']'");
-        has_array = 1;
-        while (skip_attribute(p)) {}
-    }
-    *out_ptrs = ptrs;
-    *out_array_len = array_len;
-    *out_has_array = has_array;
-    if (out_vla_dim) *out_vla_dim = vla_dim;
-    else if (vla_dim) expr_free(vla_dim);
-}
-
 /* Parse a C declarator given the base (specifier) type.  Implements the
  * right-left rule: prefix `*` wraps the result, grouping parens change
  * precedence, postfix `[N]` (array) and `(params)` (function) bind tightest.
@@ -966,21 +924,26 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
          p->tokens->data[p->pos + 1].kind == TK_LBRACKET ||
          (p->tokens->data[p->pos + 1].kind == TK_IDENT
           && !is_type_start(p, p->pos + 1))))) {
-        /* Grouping: '(' group_content ')'.  The group content's modifiers
-         * (prefix `*`, array `[N]`) wrap the group's core type. */
+        /* Grouping: '(' declarator ')' */
         advance(p);  /* '(' */
-        char *inner_name = NULL;
-        int inner_ptrs = 0, inner_array_len = 0, inner_has_array = 0;
-        Expr *inner_vla_dim = NULL;
-        parse_group_content(p, &inner_name, &inner_ptrs, &inner_array_len,
-                            &inner_has_array, &inner_vla_dim);
-        *name_out = inner_name;
-        expect_kind(p, TK_RPAREN, "')'");
+        size_t group_start = p->pos;
+        int paren_depth = 1;
+        while (p->pos < p->tokens->len && paren_depth > 0) {
+            if (p->tokens->data[p->pos].kind == TK_LPAREN) paren_depth++;
+            else if (p->tokens->data[p->pos].kind == TK_RPAREN) {
+                paren_depth--;
+                if (paren_depth == 0) break;
+            }
+            p->pos++;
+        }
+        if (paren_depth != 0) {
+            die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col, "unmatched '('");
+        }
+        advance(p);  /* consume ')' */
         while (skip_attribute(p)) {}
-        /* Parse the postfix that follows the group (array/function). */
-        t = base;
-        /* Collect array dims and optional function suffix.  Arrays wrap
-         * right-to-left (so `int a[3][2]` → array(3, array(2, int))). */
+
+        /* Parse postfixes that follow the group ')' using `base` */
+        Type outer_t = base;
         int dims[8], ndims = 0;
         Expr *vla_dims[8];
         memset(vla_dims, 0, sizeof(vla_dims));
@@ -1000,28 +963,24 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 int is_var = 0;
                 ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params, is_var);
-                /* A function result cannot be further arrayed in valid C. */
+                outer_t = make_func_type(base, &params, is_var);
                 break;
             }
         }
-        /* Wrap arrays right-to-left around the core type. */
         for (int i = ndims - 1; i >= 0; i--) {
             Type wrapped = (dims[i] == -1 && vla_dims[i]) ?
-                           type_make_vla(t, vla_dims[i]) :
-                           type_make_array(t, dims[i]);
-            type_free(&t);
-            t = wrapped;
+                           type_make_vla(outer_t, vla_dims[i]) :
+                           type_make_array(outer_t, dims[i]);
+            type_free(&outer_t);
+            outer_t = wrapped;
         }
-        /* Apply the group content's modifiers (they wrap the core type). */
-        for (int i = 0; i < inner_ptrs; i++) t = type_make_ptr(t);
-        if (inner_has_array) {
-            Type wrapped = (inner_array_len == -1 && inner_vla_dim) ?
-                           type_make_vla(t, inner_vla_dim) :
-                           type_make_array(t, inner_array_len);
-            type_free(&t);
-            t = wrapped;
-        }
+        for (int i = 0; i < ptrs; i++)
+            outer_t = ptr_wrap(outer_t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
+
+        size_t saved_pos = p->pos;
+        p->pos = group_start;
+        t = parse_declarator(p, outer_t, name_out);
+        p->pos = saved_pos;
     } else if (peek(p)->kind == TK_IDENT) {
         *name_out = xstrdup(peek(p)->text);
         advance(p);
@@ -1054,7 +1013,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 int is_var = 0;
                 ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params, is_var);
+                t = make_func_type(t, &params, is_var);
                 break;
             }
         }
@@ -1088,7 +1047,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 int is_var = 0;
                 ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(base, &params, is_var);
+                t = make_func_type(t, &params, is_var);
                 break;
             }
         }
