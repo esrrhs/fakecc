@@ -809,6 +809,78 @@ static int labelset_has(const LabelSet *ls, const char *name) {
         if (runtime.strcmp(ls->names[i], name) == 0) return 1;
     return 0;
 }
+static void collect_labels(LabelSet *ls, const Stmt *s);
+static void collect_labels_expr(LabelSet *ls, const Expr *e) {
+    if (!e) return;
+    switch (e->kind) {
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                collect_labels(ls, &e->u.stmt_expr.stmts->data[i]);
+        }
+        break;
+    case EX_UNARY:
+        collect_labels_expr(ls, e->u.un.operand);
+        break;
+    case EX_INC_DEC:
+        collect_labels_expr(ls, e->u.incdec.operand);
+        break;
+    case EX_BINOP:
+        collect_labels_expr(ls, e->u.bin.l);
+        collect_labels_expr(ls, e->u.bin.r);
+        break;
+    case EX_TERNARY:
+        collect_labels_expr(ls, e->u.tern.cond);
+        collect_labels_expr(ls, e->u.tern.then);
+        collect_labels_expr(ls, e->u.tern.else_);
+        break;
+    case EX_ASSIGN:
+        collect_labels_expr(ls, e->u.assign.lvalue);
+        collect_labels_expr(ls, e->u.assign.rvalue);
+        break;
+    case EX_COMPOUND_ASSIGN:
+        collect_labels_expr(ls, e->u.comp.lvalue);
+        collect_labels_expr(ls, e->u.comp.rvalue);
+        break;
+    case EX_COMMA:
+        collect_labels_expr(ls, e->u.comma.lhs);
+        collect_labels_expr(ls, e->u.comma.rhs);
+        break;
+    case EX_CAST:
+        collect_labels_expr(ls, e->u.cast.operand);
+        break;
+    case EX_CALL:
+        collect_labels_expr(ls, e->u.call.callee);
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            collect_labels_expr(ls, e->u.call.args.data[i]);
+        break;
+    case EX_MEMBER:
+        collect_labels_expr(ls, e->u.member.obj);
+        break;
+    case EX_INDEX:
+        collect_labels_expr(ls, e->u.idx.array);
+        collect_labels_expr(ls, e->u.idx.index);
+        break;
+    case EX_DEREF:
+        collect_labels_expr(ls, e->u.deref.operand);
+        break;
+    case EX_ADDR:
+        collect_labels_expr(ls, e->u.addr.operand);
+        break;
+    case EX_SIZEOF_EXPR:
+        collect_labels_expr(ls, e->u.sizeof_e.operand);
+        break;
+    case EX_COMPOUND_LITERAL:
+        collect_labels_expr(ls, e->u.compound.init);
+        break;
+    case EX_INIT_LIST:
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            collect_labels_expr(ls, e->u.init_list.elements[i]);
+        break;
+    default:
+        break;
+    }
+}
 static void collect_labels(LabelSet *ls, const Stmt *s) {
     if (!s) return;
     switch (s->kind) {
@@ -816,21 +888,39 @@ static void collect_labels(LabelSet *ls, const Stmt *s) {
         labelset_add(ls, s->u.label_s.name);
         collect_labels(ls, s->u.label_s.stmt);
         break;
+    case ST_EXPR:
+        collect_labels_expr(ls, s->u.expr);
+        break;
+    case ST_DECL:
+        if (s->u.decl.init) collect_labels_expr(ls, s->u.decl.init);
+        break;
+    case ST_RETURN:
+        if (s->u.value) collect_labels_expr(ls, s->u.value);
+        break;
+    case ST_GOTO:
+        if (s->u.goto_s.target_expr) collect_labels_expr(ls, s->u.goto_s.target_expr);
+        break;
     case ST_IF:
+        collect_labels_expr(ls, s->u.if_s.cond);
         collect_labels(ls, s->u.if_s.then_s);
         if (s->u.if_s.else_s) collect_labels(ls, s->u.if_s.else_s);
         break;
     case ST_WHILE:
+        collect_labels_expr(ls, s->u.while_s.cond);
         collect_labels(ls, s->u.while_s.body);
         break;
     case ST_DO_WHILE:
         collect_labels(ls, s->u.do_s.body);
+        collect_labels_expr(ls, s->u.do_s.cond);
         break;
     case ST_FOR:
         if (s->u.for_s.init) collect_labels(ls, s->u.for_s.init);
+        if (s->u.for_s.cond) collect_labels_expr(ls, s->u.for_s.cond);
+        if (s->u.for_s.step) collect_labels_expr(ls, s->u.for_s.step);
         collect_labels(ls, s->u.for_s.body);
         break;
     case ST_SWITCH:
+        collect_labels_expr(ls, s->u.switch_s.cond);
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             const SwitchCase *arm = &s->u.switch_s.cases[i];
             for (size_t j = 0; j < arm->stmts.len; j++)
@@ -2262,23 +2352,6 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         symtable_free(&st);
         g_sema_labels = ((void*)0);
         labelset_free(&ls);
-        if (!has_return && fn->ret_type.kind != TY_VOID) {
-            if (fn->name && runtime.strcmp(fn->name, "main") == 0) {
-                if (fn->body.len > 0) {
-                    const Stmt *last = &fn->body.data[fn->body.len - 1];
-                    if (last->kind == ST_EXPR && last->u.expr && last->u.expr->kind == EX_CALL) {
-                    } else {
-                        die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                               "function '%s' must have a return statement",
-                               fn->name ? fn->name : "(nullptr)");
-                    }
-                } else {
-                    die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                           "function '%s' must have a return statement",
-                           fn->name ? fn->name : "(nullptr)");
-                }
-            }
-        }
     }
     ftab_free(&ft);
     symtable_free(&globals);

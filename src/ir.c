@@ -1794,7 +1794,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue merged = new_value(fn);
                 emit_inst_w(fn, IR_BOR, merged, cleared, vs, 0, uw, 1, e->loc);
                 emit_inst_w(fn, IR_STORE_PTR, -1, addr, merged, 0, uw, 1, e->loc);
-                return coerced;
+                if (!e->type.is_unsigned && bit_width < uw * 8) {
+                    int shift = uw * 8 - bit_width;
+                    IRValue s_val = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, s_val, -1, -1, shift, 8, 1, e->loc);
+                    IRValue shl = new_value(fn);
+                    emit_inst_w(fn, IR_SHL, shl, vm, s_val, 0, uw, 0, e->loc);
+                    IRValue ashr = new_value(fn);
+                    emit_inst_w(fn, IR_SHR, ashr, shl, s_val, 0, uw, 0, e->loc);
+                    return ashr;
+                }
+                return vm;
             }
             emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
             return coerced;
@@ -2928,6 +2938,80 @@ static void labelmap_add(LabelMap *lm, const char *name, int id) {
     lm->len++;
 }
 
+static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s);
+
+static void assign_label_ids_expr(IRFunction *fn, LabelMap *lm, const Expr *e) {
+    if (!e) return;
+    switch (e->kind) {
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                assign_label_ids(fn, lm, &e->u.stmt_expr.stmts->data[i]);
+        }
+        break;
+    case EX_UNARY:
+        assign_label_ids_expr(fn, lm, e->u.un.operand);
+        break;
+    case EX_INC_DEC:
+        assign_label_ids_expr(fn, lm, e->u.incdec.operand);
+        break;
+    case EX_BINOP:
+        assign_label_ids_expr(fn, lm, e->u.bin.l);
+        assign_label_ids_expr(fn, lm, e->u.bin.r);
+        break;
+    case EX_TERNARY:
+        assign_label_ids_expr(fn, lm, e->u.tern.cond);
+        assign_label_ids_expr(fn, lm, e->u.tern.then);
+        assign_label_ids_expr(fn, lm, e->u.tern.else_);
+        break;
+    case EX_ASSIGN:
+        assign_label_ids_expr(fn, lm, e->u.assign.lvalue);
+        assign_label_ids_expr(fn, lm, e->u.assign.rvalue);
+        break;
+    case EX_COMPOUND_ASSIGN:
+        assign_label_ids_expr(fn, lm, e->u.comp.lvalue);
+        assign_label_ids_expr(fn, lm, e->u.comp.rvalue);
+        break;
+    case EX_COMMA:
+        assign_label_ids_expr(fn, lm, e->u.comma.lhs);
+        assign_label_ids_expr(fn, lm, e->u.comma.rhs);
+        break;
+    case EX_CAST:
+        assign_label_ids_expr(fn, lm, e->u.cast.operand);
+        break;
+    case EX_CALL:
+        assign_label_ids_expr(fn, lm, e->u.call.callee);
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            assign_label_ids_expr(fn, lm, e->u.call.args.data[i]);
+        break;
+    case EX_MEMBER:
+        assign_label_ids_expr(fn, lm, e->u.member.obj);
+        break;
+    case EX_INDEX:
+        assign_label_ids_expr(fn, lm, e->u.idx.array);
+        assign_label_ids_expr(fn, lm, e->u.idx.index);
+        break;
+    case EX_DEREF:
+        assign_label_ids_expr(fn, lm, e->u.deref.operand);
+        break;
+    case EX_ADDR:
+        assign_label_ids_expr(fn, lm, e->u.addr.operand);
+        break;
+    case EX_SIZEOF_EXPR:
+        assign_label_ids_expr(fn, lm, e->u.sizeof_e.operand);
+        break;
+    case EX_COMPOUND_LITERAL:
+        assign_label_ids_expr(fn, lm, e->u.compound.init);
+        break;
+    case EX_INIT_LIST:
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            assign_label_ids_expr(fn, lm, e->u.init_list.elements[i]);
+        break;
+    default:
+        break;
+    }
+}
+
 /* Recursively assign a label id to every ST_LABEL in a statement. */
 static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s) {
     if (!s) return;
@@ -2938,21 +3022,39 @@ static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s) {
         assign_label_ids(fn, lm, s->u.label_s.stmt);
         break;
     }
+    case ST_EXPR:
+        assign_label_ids_expr(fn, lm, s->u.expr);
+        break;
+    case ST_DECL:
+        if (s->u.decl.init) assign_label_ids_expr(fn, lm, s->u.decl.init);
+        break;
+    case ST_RETURN:
+        if (s->u.value) assign_label_ids_expr(fn, lm, s->u.value);
+        break;
+    case ST_GOTO:
+        if (s->u.goto_s.target_expr) assign_label_ids_expr(fn, lm, s->u.goto_s.target_expr);
+        break;
     case ST_IF:
+        assign_label_ids_expr(fn, lm, s->u.if_s.cond);
         assign_label_ids(fn, lm, s->u.if_s.then_s);
         if (s->u.if_s.else_s) assign_label_ids(fn, lm, s->u.if_s.else_s);
         break;
     case ST_WHILE:
+        assign_label_ids_expr(fn, lm, s->u.while_s.cond);
         assign_label_ids(fn, lm, s->u.while_s.body);
         break;
     case ST_DO_WHILE:
         assign_label_ids(fn, lm, s->u.do_s.body);
+        assign_label_ids_expr(fn, lm, s->u.do_s.cond);
         break;
     case ST_FOR:
         if (s->u.for_s.init) assign_label_ids(fn, lm, s->u.for_s.init);
+        if (s->u.for_s.cond) assign_label_ids_expr(fn, lm, s->u.for_s.cond);
+        if (s->u.for_s.step) assign_label_ids_expr(fn, lm, s->u.for_s.step);
         assign_label_ids(fn, lm, s->u.for_s.body);
         break;
     case ST_SWITCH:
+        assign_label_ids_expr(fn, lm, s->u.switch_s.cond);
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             const SwitchCase *arm = &s->u.switch_s.cases[i];
             for (size_t j = 0; j < arm->stmts.len; j++)
