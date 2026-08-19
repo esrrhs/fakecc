@@ -5,9 +5,6 @@
 # fails, fix the compiler. Nested-function tests live in UNSUPPORTED.txt.
 
 20031003-1.c
-20040705-1.c
-20040705-2.c
-20040709-3.c
 20040811-1.c
 930614-1.c
 960117-1.c
@@ -27,10 +24,6 @@ arith-rand.c
 arith-rand-ll.c
 bf64-1.c
 bf-sign-2.c
-bitfld-4.c
-bitfld-5.c
-bitfld-6.c
-bitfld-7.c
 bswap-2.c
 built-in-setjmp.c
 comp-goto-1.c

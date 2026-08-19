@@ -983,7 +983,7 @@ static Type usual_arith_conv(Type a, Type b) {
     a = integer_promote(a);
     b = integer_promote(b);
     int bfw = 0;
-    if (a.bitfield_width > 0 && b.bitfield_width > 0)
+    if (a.bitfield_width > 0 || b.bitfield_width > 0)
         bfw = a.bitfield_width > b.bitfield_width ? a.bitfield_width : b.bitfield_width;
     Type res;
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
