@@ -1718,12 +1718,21 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         set_type(e, type_clone(e->u.cast.target));
         return type_clone(e->type);
     }
-    case EX_SIZEOF_TYPE:
-    case EX_SIZEOF_EXPR: {
-        if (e->kind == EX_SIZEOF_EXPR) {
-            Type ot = check_expr(e->u.sizeof_e.operand, st, ft);
-            type_free(&ot);
+    case EX_SIZEOF_TYPE: {
+        Type *t = &e->u.sizeof_t.target;
+        while (t && t->kind == TY_ARRAY) {
+            if (t->vla_dim) {
+                Type dt = check_expr(t->vla_dim, st, ft);
+                type_free(&dt);
+            }
+            t = t->elem_type;
         }
+        set_type(e, type_make_int(8, 1));
+        return type_clone(e->type);
+    }
+    case EX_SIZEOF_EXPR: {
+        Type ot = check_expr(e->u.sizeof_e.operand, st, ft);
+        type_free(&ot);
         set_type(e, type_make_int(8, 1));
         return type_clone(e->type);
     }

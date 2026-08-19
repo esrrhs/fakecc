@@ -1414,6 +1414,27 @@ static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
     return addr;
 }
 
+static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceLoc loc) {
+    if (t.kind == TY_ARRAY && t.vla_dim) {
+        IRValue dim_val = lower_expr(fn, st, t.vla_dim);
+        if (t.elem_type && t.elem_type->kind == TY_ARRAY && t.elem_type->vla_dim) {
+            IRValue elem_sz_val = lower_sizeof_type(fn, st, *t.elem_type, loc);
+            return emit_bin_w(fn, IR_MUL, dim_val, elem_sz_val, 8, 1, loc);
+        } else {
+            int elem_sz = t.elem_type ? type_size(*t.elem_type) : 4;
+            if (elem_sz <= 0) elem_sz = 1;
+            IRValue elem_c = new_value(fn);
+            emit_inst_w(fn, IR_CONST, elem_c, -1, -1, elem_sz, 8, 1, loc);
+            return emit_bin_w(fn, IR_MUL, dim_val, elem_c, 8, 1, loc);
+        }
+    }
+    int sz = type_size(t);
+    if (sz < 0) sz = 0;
+    IRValue v = new_value(fn);
+    emit_inst_w(fn, IR_CONST, v, -1, -1, sz, 8, 1, loc);
+    return v;
+}
+
 /* Lower an expression to a value id, emitting instructions as needed.
  * Sema has annotated e->type; we lower operands and coerce them per UAC. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
@@ -2984,18 +3005,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         lower_expr(fn, st, e->u.comma.lhs);
         return lower_expr(fn, st, e->u.comma.rhs);
     }
-    case EX_SIZEOF_TYPE: {
-        IRValue v = new_value(fn);
-        emit_inst_w(fn, IR_CONST, v, -1, -1, type_size(e->u.sizeof_t.target),
-                    8, 1, e->loc);
-        return v;
-    }
-    case EX_SIZEOF_EXPR: {
-        IRValue v = new_value(fn);
-        emit_inst_w(fn, IR_CONST, v, -1, -1, type_size(e->u.sizeof_e.operand->type),
-                    8, 1, e->loc);
-        return v;
-    }
+    case EX_SIZEOF_TYPE:
+        return lower_sizeof_type(fn, st, e->u.sizeof_t.target, e->loc);
+    case EX_SIZEOF_EXPR:
+        return lower_sizeof_type(fn, st, e->u.sizeof_e.operand->type, e->loc);
     case EX_ALIGNOF_TYPE: {
         /* _Alignof(T) — compile-time alignment, lowered like sizeof but using
          * type_align() instead of type_size(). */
