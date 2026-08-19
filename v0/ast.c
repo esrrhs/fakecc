@@ -159,6 +159,7 @@ struct Type {
     Type *pointee;
     Type *elem_type;
     int length;
+    struct Expr *vla_dim;
     char *tag;
     Type *func_ret;
     Type *func_params;
@@ -169,7 +170,7 @@ struct Type {
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
@@ -182,14 +183,14 @@ static inline Type type_default_int(void) { return type_make_int(4, 0); }
 static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
@@ -204,12 +205,14 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
+Type type_make_vla(Type elem, struct Expr *dim);
 Type type_make_struct(const char *tag, int size);
 Type type_make_func(Type ret, Type * *params, int nparams);
 Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
     EX_BINOP,
@@ -608,6 +611,7 @@ Type type_clone(Type t) {
     } else {
         r.elem_type = ((void*)0);
     }
+    r.vla_dim = t.vla_dim ? expr_clone(t.vla_dim) : ((void*)0);
     r.tag = t.tag ? xstrdup(t.tag) : ((void*)0);
     if (t.kind == TY_FUNC && t.func_ret) {
         if (t.func_ret->kind == TY_STRUCT) {
@@ -643,6 +647,10 @@ void type_free(Type *t) {
             type_free(t->elem_type); runtime.free(t->elem_type);
         }
         t->elem_type = ((void*)0);
+    }
+    if (t->vla_dim) {
+        expr_free(t->vla_dim);
+        t->vla_dim = ((void*)0);
     }
     if (t->tag) { runtime.free(t->tag); t->tag = ((void*)0); }
     if (t->func_ret) {
@@ -687,7 +695,7 @@ int type_size(Type t) {
 Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0;
     t.pointee = runtime.malloc(sizeof(Type));
@@ -743,7 +751,7 @@ Type type_make_array(Type elem, int length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
     t.is_unsigned = elem.is_unsigned;
     t.is_const = elem.is_const; t.is_volatile = elem.is_volatile; t.is_restrict = elem.is_restrict;
-    t.is_bool = 0; t.length = length;
+    t.is_bool = 0; t.length = length; t.vla_dim = ((void*)0);
     t.pointee = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0;
@@ -752,10 +760,15 @@ Type type_make_array(Type elem, int length) {
     *t.elem_type = type_clone(elem);
     return t;
 }
+Type type_make_vla(Type elem, Expr *dim) {
+    Type t = type_make_array(elem, -1);
+    t.vla_dim = dim;
+    return t;
+}
 Type type_make_struct(const char *tag, int size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0;
     t.tag = xstrdup(tag);
@@ -763,7 +776,7 @@ Type type_make_struct(const char *tag, int size) {
 }
 Type type_make_func(Type ret, Type * *params, int nparams) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0); t.enum_id = 0;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0); t.enum_id = 0;
     t.bitfield_width = 0;
     t.func_ret = runtime.malloc(sizeof(Type));
     if (!t.func_ret) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
@@ -1680,4 +1693,100 @@ long long r;
         return 1;
     }
     return 0;
+}
+Expr *expr_clone(const Expr *e) {
+    if (!e) return ((void*)0);
+    Expr *r = runtime.malloc(sizeof(Expr));
+    if (!r) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    *r = *e;
+    r->type = type_clone(e->type);
+    r->va_arg_type = type_clone(e->va_arg_type);
+    switch (e->kind) {
+    case EX_BINOP:
+        r->u.bin.l = expr_clone(e->u.bin.l);
+        r->u.bin.r = expr_clone(e->u.bin.r);
+        break;
+    case EX_UNARY:
+        r->u.un.operand = expr_clone(e->u.un.operand);
+        break;
+    case EX_VAR:
+        r->u.var.name = e->u.var.name ? xstrdup(e->u.var.name) : ((void*)0);
+        r->u.var.pkg = e->u.var.pkg ? xstrdup(e->u.var.pkg) : ((void*)0);
+        break;
+    case EX_ASSIGN:
+        r->u.assign.lvalue = expr_clone(e->u.assign.lvalue);
+        r->u.assign.rvalue = expr_clone(e->u.assign.rvalue);
+        break;
+    case EX_CALL:
+        r->u.call.callee = expr_clone(e->u.call.callee);
+        r->u.call.args.len = e->u.call.args.len;
+        r->u.call.args.cap = e->u.call.args.len;
+        if (e->u.call.args.len > 0) {
+            r->u.call.args.data = runtime.malloc(e->u.call.args.len * sizeof(Expr*));
+            for (size_t i = 0; i < e->u.call.args.len; i++)
+                r->u.call.args.data[i] = expr_clone(e->u.call.args.data[i]);
+        } else {
+            r->u.call.args.data = ((void*)0);
+        }
+        break;
+    case EX_STR:
+        r->u.str.bytes = e->u.str.bytes ? runtime.malloc(e->u.str.len + 1) : ((void*)0);
+        if (r->u.str.bytes) {
+            runtime.memcpy(r->u.str.bytes, e->u.str.bytes, e->u.str.len);
+            r->u.str.bytes[e->u.str.len] = '\0';
+        }
+        break;
+    case EX_ADDR:
+        r->u.addr.operand = expr_clone(e->u.addr.operand);
+        break;
+    case EX_DEREF:
+        r->u.deref.operand = expr_clone(e->u.deref.operand);
+        break;
+    case EX_INDEX:
+        r->u.idx.array = expr_clone(e->u.idx.array);
+        r->u.idx.index = expr_clone(e->u.idx.index);
+        break;
+    case EX_MEMBER:
+        r->u.member.obj = expr_clone(e->u.member.obj);
+        r->u.member.name = e->u.member.name ? xstrdup(e->u.member.name) : ((void*)0);
+        break;
+    case EX_CAST:
+        r->u.cast.target = type_clone(e->u.cast.target);
+        r->u.cast.operand = expr_clone(e->u.cast.operand);
+        break;
+    case EX_SIZEOF_TYPE:
+        r->u.sizeof_t.target = type_clone(e->u.sizeof_t.target);
+        break;
+    case EX_SIZEOF_EXPR:
+        r->u.sizeof_e.operand = expr_clone(e->u.sizeof_e.operand);
+        break;
+    case EX_ALIGNOF_TYPE:
+        r->u.alignof_t.target = type_clone(e->u.alignof_t.target);
+        break;
+    case EX_TERNARY:
+        r->u.tern.cond = expr_clone(e->u.tern.cond);
+        r->u.tern.then = expr_clone(e->u.tern.then);
+        r->u.tern.else_ = expr_clone(e->u.tern.else_);
+        break;
+    case EX_INC_DEC:
+        r->u.incdec.operand = expr_clone(e->u.incdec.operand);
+        break;
+    case EX_COMPOUND_ASSIGN:
+        r->u.comp.lvalue = expr_clone(e->u.comp.lvalue);
+        r->u.comp.rvalue = expr_clone(e->u.comp.rvalue);
+        break;
+    case EX_COMMA:
+        r->u.comma.lhs = expr_clone(e->u.comma.lhs);
+        r->u.comma.rhs = expr_clone(e->u.comma.rhs);
+        break;
+    case EX_FLOAT_LIT:
+        r->u.float_text = e->u.float_text ? xstrdup(e->u.float_text) : ((void*)0);
+        break;
+    case EX_LABEL_ADDR:
+        r->u.label_addr.label = e->u.label_addr.label ? xstrdup(e->u.label_addr.label) : ((void*)0);
+        break;
+    default:
+        break;
+    }
+    return r;
 }

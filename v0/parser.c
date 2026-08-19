@@ -159,6 +159,7 @@ struct Type {
     Type *pointee;
     Type *elem_type;
     int length;
+    struct Expr *vla_dim;
     char *tag;
     Type *func_ret;
     Type *func_params;
@@ -169,7 +170,7 @@ struct Type {
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
@@ -182,14 +183,14 @@ static inline Type type_default_int(void) { return type_make_int(4, 0); }
 static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
@@ -204,12 +205,14 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
+Type type_make_vla(Type elem, struct Expr *dim);
 Type type_make_struct(const char *tag, int size);
 Type type_make_func(Type ret, Type * *params, int nparams);
 Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
     EX_BINOP,
@@ -1329,7 +1332,8 @@ static ParamArray parse_param_list(Parser *p) {
     return params;
 }
 static Expr *parse_expr(Parser *p);
-static int parse_array_size(Parser *p) {
+static int parse_array_size_ext(Parser *p, Expr **dim_expr) {
+    if (dim_expr) *dim_expr = ((void*)0);
     if (peek(p)->kind == TK_RBRACKET) {
         return 0;
     }
@@ -1347,11 +1351,16 @@ static int parse_array_size(Parser *p) {
             return ec->value > 0 ? ec->value : 1;
         }
     }
+    if (dim_expr) {
+        *dim_expr = e;
+        return -1;
+    }
     expr_free(e);
     return 1;
 }
 static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
-                                int *out_array_len, int *out_has_array) {
+                                int *out_array_len, int *out_has_array,
+                                Expr **out_vla_dim) {
     int ptrs = 0;
     while (skip_attribute(p)) {}
     while (peek(p)->kind == TK_STAR) {
@@ -1376,9 +1385,10 @@ static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
     }
     int array_len = 0;
     int has_array = 0;
+    Expr *vla_dim = ((void*)0);
     if (peek(p)->kind == TK_LBRACKET) {
         advance(p);
-        array_len = parse_array_size(p);
+        array_len = parse_array_size_ext(p, &vla_dim);
         expect_kind(p, TK_RBRACKET, "']'");
         has_array = 1;
         while (skip_attribute(p)) {}
@@ -1386,6 +1396,8 @@ static void parse_group_content(Parser *p, char **name_out, int *out_ptrs,
     *out_ptrs = ptrs;
     *out_array_len = array_len;
     *out_has_array = has_array;
+    if (out_vla_dim) *out_vla_dim = vla_dim;
+    else if (vla_dim) expr_free(vla_dim);
 }
 static Type ptr_wrap(Type t, int is_const, int is_volatile, int is_restrict) {
     Type w = type_make_ptr(t);
@@ -1428,21 +1440,27 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         advance(p);
         char *inner_name = ((void*)0);
         int inner_ptrs = 0, inner_array_len = 0, inner_has_array = 0;
+        Expr *inner_vla_dim = ((void*)0);
         parse_group_content(p, &inner_name, &inner_ptrs, &inner_array_len,
-                            &inner_has_array);
+                            &inner_has_array, &inner_vla_dim);
         *name_out = inner_name;
         expect_kind(p, TK_RPAREN, "')'");
         while (skip_attribute(p)) {}
         t = base;
         int dims[8], ndims = 0;
+        Expr *vla_dims[8];
+        runtime.memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
-                int len = parse_array_size(p);
+                Expr *vla_e = ((void*)0);
+                int len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
-                dims[ndims++] = len;
+                dims[ndims] = len;
+                vla_dims[ndims] = vla_e;
+                ndims++;
             } else {
                 advance(p);
                 ParamArray params = parse_param_list(p);
@@ -1452,12 +1470,20 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             }
         }
         for (int i = ndims - 1; i >= 0; i--) {
-            Type wrapped = type_make_array(t, dims[i]);
+            Type wrapped = (dims[i] == -1 && vla_dims[i]) ?
+                           type_make_vla(t, vla_dims[i]) :
+                           type_make_array(t, dims[i]);
             type_free(&t);
             t = wrapped;
         }
         for (int i = 0; i < inner_ptrs; i++) t = type_make_ptr(t);
-        if (inner_has_array) t = type_make_array(t, inner_array_len);
+        if (inner_has_array) {
+            Type wrapped = (inner_array_len == -1 && inner_vla_dim) ?
+                           type_make_vla(t, inner_vla_dim) :
+                           type_make_array(t, inner_array_len);
+            type_free(&t);
+            t = wrapped;
+        }
     } else if (peek(p)->kind == TK_IDENT) {
         *name_out = xstrdup(peek(p)->text);
         advance(p);
@@ -1467,14 +1493,19 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
         ptrs = 0;
         int dims[8], ndims = 0;
+        Expr *vla_dims[8];
+        runtime.memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
-                int len = parse_array_size(p);
+                Expr *vla_e = ((void*)0);
+                int len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
-                dims[ndims++] = len;
+                dims[ndims] = len;
+                vla_dims[ndims] = vla_e;
+                ndims++;
             } else {
                 advance(p);
                 ParamArray params = parse_param_list(p);
@@ -1484,7 +1515,9 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             }
         }
         for (int i = ndims - 1; i >= 0; i--) {
-            Type wrapped = type_make_array(t, dims[i]);
+            Type wrapped = (dims[i] == -1 && vla_dims[i]) ?
+                           type_make_vla(t, vla_dims[i]) :
+                           type_make_array(t, dims[i]);
             type_free(&t);
             t = wrapped;
         }
@@ -1492,14 +1525,19 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         *name_out = ((void*)0);
         t = base;
         int dims[8], ndims = 0;
+        Expr *vla_dims[8];
+        runtime.memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
-                int len = parse_array_size(p);
+                Expr *vla_e = ((void*)0);
+                int len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
-                dims[ndims++] = len;
+                dims[ndims] = len;
+                vla_dims[ndims] = vla_e;
+                ndims++;
             } else {
                 advance(p);
                 ParamArray params = parse_param_list(p);
@@ -1509,7 +1547,9 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             }
         }
         for (int i = ndims - 1; i >= 0; i--) {
-            Type wrapped = type_make_array(t, dims[i]);
+            Type wrapped = (dims[i] == -1 && vla_dims[i]) ?
+                           type_make_vla(t, vla_dims[i]) :
+                           type_make_array(t, dims[i]);
             type_free(&t);
             t = wrapped;
         }

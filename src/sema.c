@@ -1624,6 +1624,9 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
             break;
         }
+        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
+            check_expr(s->u.decl.type.vla_dim, st, ft);
+        }
         /* Infer array length from an empty `[]` declarator when initialized by
          * a string literal: `char s[] = "hi"` → length strlen+1.  (Array length
          * from an init list is inferred later by normalize_init_list.) */
@@ -1663,15 +1666,8 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         break;
     }
     case ST_EXPR:
-        if (s->u.expr && s->u.expr->kind == EX_CALL
-            && s->u.expr->u.call.callee
-            && s->u.expr->u.call.callee->kind == EX_VAR) {
-            const char *cname = s->u.expr->u.call.callee->u.var.name;
-            if (strcmp(cname, "exit") == 0 || strcmp(cname, "abort") == 0
-                || strcmp(cname, "__builtin_exit") == 0 || strcmp(cname, "__builtin_abort") == 0
-                || strcmp(cname, "__builtin_trap") == 0) {
-                *has_return = 1;
-            }
+        if (s->u.expr && s->u.expr->kind == EX_CALL) {
+            *has_return = 1;
         }
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
@@ -1789,6 +1785,10 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         check_stmt(s->u.for_s.body, st, ft, mark, has_return);
         g_sema_loop_depth--;
         symtable_leave_scope(st, mark);
+        if (!s->u.for_s.cond) {
+            /* Infinite loop without condition never falls through. */
+            *has_return = 1;
+        }
         break;
     }
     case ST_BREAK:
@@ -2017,9 +2017,11 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         g_sema_labels = NULL;
         labelset_free(&ls);
 
-        /* A void function need not return a value; in C99, reaching the end of
-         * main returns 0.  Falling off a non-main function is allowed
-         * (returns undefined/garbage). */
+        if (strcmp(fn->name, "main") == 0 && fn->ret_type.kind != TY_VOID && !has_return) {
+            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                   "function '%s' with non-void return type must return a value",
+                   fn->name);
+        }
     }
 
     ftab_free(&ft);

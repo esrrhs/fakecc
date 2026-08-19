@@ -728,6 +728,7 @@ typedef struct {
     int width;
     int is_unsigned;
     int is_global;        /* 1 = refers to a module-level global */
+    int is_vla;           /* 1 = variable-length array with base ptr in slot */
     Type ty;
 } IRSlot;
 
@@ -770,8 +771,14 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
         : (ty.kind == TY_PTR ? 8 : (ty.width ? ty.width : 4));
     st->data[st->len].is_unsigned = ty.is_unsigned;
     st->data[st->len].is_global = 0;
+    st->data[st->len].is_vla = 0;
     st->data[st->len].ty = ty;
     st->len++;
+}
+
+static void irsymtable_push_vla(IRSymTable *st, const char *name, IRValue slot, Type ty) {
+    irsymtable_push(st, name, slot, 1, ty);
+    st->data[st->len - 1].is_vla = 1;
 }
 
 static void ir_dbg_fill_struct(IRDebugVar *dv, Type ty) {
@@ -1036,6 +1043,12 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     case EX_VAR: {
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc);
+        if (entry->is_vla) {
+            IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, 8, 1, e->loc);
+            return v;
+        }
         return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
     }
     case EX_DEREF:
@@ -1672,6 +1685,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                         entry->width, entry->is_unsigned, e->loc);
             if (entry->ty.kind == TY_FLOAT) set_value_float(fn, v, 1);
+            return v;
+        }
+        if (entry->is_vla) {
+            IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, 8, 1, e->loc);
             return v;
         }
         if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT)
@@ -3128,6 +3147,27 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 flush_rodata(g_ir_module);
             }
             irsymtable_push_static_local(st, s->u.decl.name, mangled, dty);
+            break;
+        }
+
+        if (dty.kind == TY_ARRAY && dty.vla_dim) {
+            IRValue dim_val = lower_expr(fn, st, dty.vla_dim);
+            int dim_w = get_value_width(fn, dim_val), dim_u = get_value_is_unsigned(fn, dim_val);
+            IRValue dim64 = coerce(fn, dim_val, dim_w, dim_u, 8, 1, s->loc);
+            int elem_sz = type_size(*dty.elem_type);
+            if (elem_sz <= 0) elem_sz = 1;
+            IRValue elem_sz_val = new_value(fn);
+            emit_inst_w(fn, IR_CONST, elem_sz_val, -1, -1, elem_sz, 8, 1, s->loc);
+            IRValue total_sz = new_value(fn);
+            emit_inst_w(fn, IR_MUL, total_sz, dim64, elem_sz_val, 0, 8, 1, s->loc);
+            IRValue dyn_ptr = new_value(fn);
+            emit_inst_w(fn, IR_DYN_ALLOCA, dyn_ptr, total_sz, -1, 0, 8, 1, s->loc);
+            fn->has_dyn_alloca = 1;
+            IRValue ptr_slot = emit_alloca(fn, 8, 8, 1, s->loc);
+            IRValue slot_addr = emit_bin_w(fn, IR_ADDR, ptr_slot, -1, 8, 1, s->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, slot_addr, dyn_ptr, 0, 8, 1, s->loc);
+            irsymtable_push_vla(st, s->u.decl.name, ptr_slot, dty);
+            ir_add_dbg_var(fn, s->u.decl.name, s->loc, IR_DBG_LOCAL, dty, ptr_slot, -1);
             break;
         }
 

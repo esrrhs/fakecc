@@ -30,6 +30,7 @@ struct Type {
     Type *pointee;     /* TY_PTR only: malloc'd */
     Type *elem_type;   /* TY_ARRAY only: malloc'd */
     int length;        /* TY_ARRAY only */
+    struct Expr *vla_dim; /* TY_ARRAY only: dynamic dimension expr if length == -1 */
     char *tag;         /* TY_STRUCT only: xstrdup'd tag name */
     Type *func_ret;    /* TY_FUNC only: malloc'd return type */
     Type *func_params; /* TY_FUNC only: malloc'd array of param types (nparams long) */
@@ -41,7 +42,7 @@ struct Type {
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
@@ -54,14 +55,14 @@ static inline Type type_default_int(void) { return type_make_int(4, 0); }
 static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
@@ -88,12 +89,15 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
+Type type_make_vla(Type elem, struct Expr *dim);
 Type type_make_struct(const char *tag, int size);
 Type type_make_func(Type ret, Type * const *params, int nparams);
 Type type_decay(Type t);
 int  type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int  type_funcs_equal(Type a, Type b);  /* true if ret + all params match */
+
+struct Expr *expr_clone(const struct Expr *e);
 
 /* ------------------------------------------------------------------ */
 /* Expression — Slice 2 introduces arithmetic expressions              */

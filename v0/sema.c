@@ -159,6 +159,7 @@ struct Type {
     Type *pointee;
     Type *elem_type;
     int length;
+    struct Expr *vla_dim;
     char *tag;
     Type *func_ret;
     Type *func_params;
@@ -169,7 +170,7 @@ struct Type {
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
@@ -182,14 +183,14 @@ static inline Type type_default_int(void) { return type_make_int(4, 0); }
 static inline Type type_make_float(int width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
     t.bitfield_width = 0; return t;
 }
@@ -204,12 +205,14 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
+Type type_make_vla(Type elem, struct Expr *dim);
 Type type_make_struct(const char *tag, int size);
 Type type_make_func(Type ret, Type * *params, int nparams);
 Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
     EX_BINOP,
@@ -2029,6 +2032,9 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
             break;
         }
+        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
+            check_expr(s->u.decl.type.vla_dim, st, ft);
+        }
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
             && s->u.decl.init && s->u.decl.init->kind == EX_STR
             && s->u.decl.type.elem_type
@@ -2060,15 +2066,8 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         break;
     }
     case ST_EXPR:
-        if (s->u.expr && s->u.expr->kind == EX_CALL
-            && s->u.expr->u.call.callee
-            && s->u.expr->u.call.callee->kind == EX_VAR) {
-            const char *cname = s->u.expr->u.call.callee->u.var.name;
-            if (runtime.strcmp(cname, "exit") == 0 || runtime.strcmp(cname, "abort") == 0
-                || runtime.strcmp(cname, "__builtin_exit") == 0 || runtime.strcmp(cname, "__builtin_abort") == 0
-                || runtime.strcmp(cname, "__builtin_trap") == 0) {
-                *has_return = 1;
-            }
+        if (s->u.expr && s->u.expr->kind == EX_CALL) {
+            *has_return = 1;
         }
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
@@ -2172,6 +2171,9 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         check_stmt(s->u.for_s.body, st, ft, mark, has_return);
         g_sema_loop_depth--;
         symtable_leave_scope(st, mark);
+        if (!s->u.for_s.cond) {
+            *has_return = 1;
+        }
         break;
     }
     case ST_BREAK:
@@ -2352,6 +2354,11 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         symtable_free(&st);
         g_sema_labels = ((void*)0);
         labelset_free(&ls);
+        if (runtime.strcmp(fn->name, "main") == 0 && fn->ret_type.kind != TY_VOID && !has_return) {
+            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                   "function '%s' with non-void return type must return a value",
+                   fn->name);
+        }
     }
     ftab_free(&ft);
     symtable_free(&globals);
