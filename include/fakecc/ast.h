@@ -38,6 +38,7 @@ struct Type {
     int   func_is_variadic; /* TY_FUNC only: non-zero if variadic */
     int   enum_id;     /* TY_INT only: non-zero unique ID for enum types */
     int   bitfield_width; /* 0 = not a bit-field; else width in bits (promotions) */
+    int   is_vector;   /* 1 = GCC vector extension (__attribute__((vector_size(N)))) */
 };
 
 static inline Type type_make_int(int width, int is_unsigned) {
@@ -45,7 +46,7 @@ static inline Type type_make_int(int width, int is_unsigned) {
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -58,14 +59,14 @@ static inline Type type_make_float(int width) {
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 
 /* Deep-clone a Type (recursing into pointee/elem_type). */
@@ -90,6 +91,7 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
+Type type_make_vector(Type elem, int vec_size);
 Type type_make_vla(Type elem, struct Expr *dim);
 Type type_make_struct(const char *tag, int size);
 Type type_make_func(Type ret, Type * const *params, int nparams);

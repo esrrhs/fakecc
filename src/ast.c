@@ -24,7 +24,7 @@ Type type_clone(Type t) {
     } else {
         r.pointee = NULL;
     }
-    if (t.kind == TY_ARRAY && t.elem_type) {
+    if ((t.kind == TY_ARRAY || t.is_vector) && t.elem_type) {
         if (t.elem_type->kind == TY_STRUCT) {
             r.elem_type = t.elem_type;
         } else {
@@ -97,6 +97,7 @@ extern const StructRegistry *get_ir_structs(void);
 extern const StructRegistry *get_parser_structs(void);
 
 int type_size(Type t) {
+    if (t.is_vector) return t.width;
     /* Walk array nesting through a pointer instead of recursing on the
      * by-value parameter.  Self-recursion here is rewritten by clang into a
      * loop that overwrites its own argument slot; because that slot is not
@@ -108,6 +109,7 @@ int type_size(Type t) {
         count *= p->length;
         p = p->elem_type;
     }
+    if (p->is_vector) return count * p->width;
     switch (p->kind) {
     case TY_VOID:   return 0;
     case TY_INT:    return count * p->width;
@@ -130,12 +132,24 @@ int type_size(Type t) {
     return 0;
 }
 
+Type type_make_vector(Type elem, int vec_size) {
+    Type t = elem;
+    t.is_vector = 1;
+    t.width = vec_size;
+    t.elem_type = malloc(sizeof(Type));
+    if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    *t.elem_type = type_clone(elem);
+    int esz = type_size(elem);
+    t.length = esz > 0 ? vec_size / esz : 1;
+    return t;
+}
+
 Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0;
+    t.bitfield_width = 0; t.is_vector = 0;
     t.pointee = malloc(sizeof(Type));
     if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.pointee = type_clone(pointee);
@@ -199,7 +213,7 @@ Type type_make_array(Type elem, int length) {
     t.is_bool = 0; t.length = length; t.vla_dim = NULL;
     t.pointee = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0;
+    t.bitfield_width = 0; t.is_vector = 0;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.elem_type = type_clone(elem);
@@ -217,7 +231,7 @@ Type type_make_struct(const char *tag, int size) {
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0;
+    t.bitfield_width = 0; t.is_vector = 0;
     t.tag = xstrdup(tag);
     return t;
 }
@@ -225,7 +239,7 @@ Type type_make_struct(const char *tag, int size) {
 Type type_make_func_var(Type ret, Type * const *params, int nparams, int is_variadic) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL; t.enum_id = 0;
-    t.bitfield_width = 0;
+    t.bitfield_width = 0; t.is_vector = 0;
     t.func_is_variadic = is_variadic;
     t.func_ret = malloc(sizeof(Type));
     if (!t.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
@@ -354,9 +368,11 @@ static int align_up(int x, int align) {
 /* Natural alignment of a type: 1/2/4/8 for scalars, elem's alignment for
  * arrays, max member alignment for structs. */
 int type_align(Type t) {
+    if (t.is_vector) return t.width > 16 ? 16 : (t.width > 0 ? t.width : 1);
     /* Pointer walk rather than self-recursion — see type_size(). */
     const Type *p = &t;
     while (p->kind == TY_ARRAY && p->elem_type) p = p->elem_type;
+    if (p->is_vector) return p->width > 16 ? 16 : (p->width > 0 ? p->width : 1);
     switch (p->kind) {
     case TY_VOID:  return 1;    /* void has no size; alignment is a no-op */
     case TY_INT:   return p->width;
@@ -410,6 +426,22 @@ static int sysv_field_class(Type t) {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     cls[0] = SYSV_CLS_INTEGER;
     cls[1] = SYSV_CLS_INTEGER;
+    if (t.is_vector) {
+        if (t.width == 16) {
+            cls[0] = SYSV_CLS_SSE;
+            cls[1] = SYSV_CLS_SSE;
+            return 2;
+        }
+        if (t.width == 8) {
+            cls[0] = SYSV_CLS_INTEGER;
+            return 1;
+        }
+        if (t.width <= 4) {
+            cls[0] = SYSV_CLS_INTEGER;
+            return 1;
+        }
+        return 0;
+    }
     if (t.kind != TY_STRUCT || !t.tag) return 0;
     int sz = type_size(t);
     if (sz <= 0 || sz > 16) return 0;

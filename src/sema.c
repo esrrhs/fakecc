@@ -511,7 +511,9 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         }
         BinOp op = e->u.bin.op;
         Type res;
-        if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
+        if (lt.is_vector || rt.is_vector) {
+            res = type_clone(lt.is_vector ? lt : rt);
+        } else if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
             if (op == BOP_EQ || op == BOP_NE) {
                 res = type_make_int(4, 0);
@@ -791,6 +793,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
                            || op == BOP_DIV);
         int is_complex = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
+        int is_vector = (lt.is_vector || rt.is_vector);
         if (op == BOP_ADD || op == BOP_SUB) {
             /* Pointer arithmetic: p += n, p -= n (n must be int). */
             if (lt.kind == TY_PTR && rt.kind != TY_INT)
@@ -798,7 +801,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
         }
-        if (lt.kind != TY_PTR && !is_complex
+        if (lt.kind != TY_PTR && !is_complex && !is_vector
             && !(arith_float && (lt.kind == TY_FLOAT || rt.kind == TY_FLOAT))) {
             if (lt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
@@ -1448,7 +1451,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
                 len = list->u.init_list.desig_index[i] + 1;
         target->length = len;
     }
-    /* Determine the output slot count N. */
+    /* Determine the output slot count */
     int N;
     const StructDef *sd = NULL;
     switch (target->kind) {
@@ -1460,13 +1463,16 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
                    "unknown struct 'struct %s'", target->tag);
         N = sd->is_union ? 1 : sd->num_members;
         break;
-    default: N = 1; break;  /* scalar: `int x = {5}` */
+    default:
+        if (target->is_vector) N = target->length;
+        else N = 1;
+        break;  /* scalar: `int x = {5}` */
     }
     /* 2. Validate designators. */
     for (int i = 0; i < n; i++) {
         int kind = list->u.init_list.desig_kind[i];
         if (kind == 0) {  /* [index] */
-            if (target->kind != TY_ARRAY)
+            if (target->kind != TY_ARRAY && !target->is_vector)
                 die_at(loc.file, loc.line, loc.col,
                        "array index designator used on a non-array type");
             int idx = list->u.init_list.desig_index[i];
@@ -1478,49 +1484,56 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             if (target->kind != TY_STRUCT)
                 die_at(loc.file, loc.line, loc.col,
                        "member designator used on a non-struct type");
-            const char *name = list->u.init_list.desig_member[i];
-            int found = 0;
-            for (int j = 0; j < sd->num_members; j++)
-                if (strcmp(sd->members[j].name, name) == 0) { found = 1; break; }
-            if (!found)
-                die_at(loc.file, loc.line, loc.col,
-                       "struct '%s' has no member named '%s'",
-                       target->tag, name);
+            if (sd->is_union) {
+                /* Union: only one member may be initialized. */
+                if (list->u.init_list.desig_member[i] == NULL)
+                    die_at(loc.file, loc.line, loc.col,
+                           "invalid member designator in union initializer");
+            }
         }
     }
-    /* 3. Build a positional output of N slots, gap-filled with 0. */
+    /* 3. Build the dense array of N initialized elements. */
     Expr **out = malloc(N * sizeof(Expr *));
+    if (!out) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     for (int i = 0; i < N; i++)
         out[i] = expr_new_int(0, loc);
+
     int cursor = 0;
     for (int i = 0; i < n; i++) {
-        Expr *elem = list->u.init_list.elements[i];
         int pos;
         int member_idx = 0;
         if (list->u.init_list.desig_kind[i] == 0) {
             pos = list->u.init_list.desig_index[i];
+            member_idx = pos;
+            if (sd && sd->is_union) pos = 0;
         } else if (list->u.init_list.desig_kind[i] == 1) {
             const char *name = list->u.init_list.desig_member[i];
             pos = -1;
-            for (int j = 0; j < sd->num_members; j++)
+            for (int j = 0; j < (sd ? sd->num_members : 0); j++)
                 if (strcmp(sd->members[j].name, name) == 0) { pos = j; break; }
+            if (pos < 0)
+                die_at(loc.file, loc.line, loc.col,
+                       "struct '%s' has no member named '%s'",
+                       target->tag, name);
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
         } else {
             pos = cursor;
             member_idx = (sd && sd->is_union) ? 0 : pos;
         }
-        if (pos < 0 || pos >= N)
-            die_at(loc.file, loc.line, loc.col,
-                   "too many initializers: %d value(s) for %d slot(s)", n, N);
-
-        /* Brace elision (C99 6.7.8p17): a sub-aggregate may be written without
-         * its own braces, as in `int m[2][3] = {1, 2, 3, 4}`.  Collect the
-         * elements that belong to this slot into a synthesized sub-list so the
+        if (pos < 0 || pos >= N) {
+            continue;
+        }
+        Expr *elem = list->u.init_list.elements[i];
+        /* Bracket elision: if this slot expects an aggregate (array or struct)
+         * and the source element is a scalar (not an EX_INIT_LIST), collect as
+         * many flat elements as that aggregate has leaf scalars and wrap them
+         * in a synthetic EX_INIT_LIST.  Done before recursion so that the
          * rest of the pipeline only ever sees fully braced initializers. */
         Type *slot_type = NULL;
-        if (target->kind == TY_ARRAY) slot_type = target->elem_type;
-        else if (target->kind == TY_STRUCT) slot_type = &sd->members[member_idx].type;
+        if (target->kind == TY_ARRAY || target->is_vector) slot_type = target->elem_type;
+        else if (target->kind == TY_STRUCT && sd && member_idx < sd->num_members)
+            slot_type = &sd->members[member_idx].type;
         if (slot_type && elem->kind != EX_INIT_LIST
             && (slot_type->kind == TY_ARRAY || slot_type->kind == TY_STRUCT)
             && !init_elem_may_be_aggregate(elem)
@@ -1542,9 +1555,9 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
          * inferred inner length propagates to the parent type); struct member
          * types carry explicit lengths and need no propagation. */
         if (elem->kind == EX_INIT_LIST) {
-            if (target->kind == TY_ARRAY)
+            if (target->kind == TY_ARRAY || target->is_vector)
                 normalize_init_list(target->elem_type, elem, elem->loc);
-            else
+            else if (sd && member_idx < sd->num_members)
                 normalize_init_list(&sd->members[member_idx].type, elem, elem->loc);
         }
         expr_free(out[pos]); /* drop the gap-fill zero (or previous element) */
@@ -1574,6 +1587,18 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
  * `int x = {5}`).  Dies on mismatch. */
 static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) {
     int n = list->u.init_list.num_elements;
+    if (target.is_vector) {
+        if (target.length > 0 && n > target.length)
+            die_at(loc.file, loc.line, loc.col,
+                   "too many initializers for vector (expected %d, got %d)",
+                   target.length, n);
+        for (int i = 0; i < n; i++) {
+            const Expr *elem = list->u.init_list.elements[i];
+            if (elem->kind == EX_INIT_LIST && target.elem_type)
+                check_init_list_shape(*target.elem_type, elem, elem->loc);
+        }
+        return;
+    }
     switch (target.kind) {
     case TY_ARRAY:
         if (target.length > 0 && n > target.length)

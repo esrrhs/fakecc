@@ -167,13 +167,14 @@ struct Type {
     int func_is_variadic;
     int enum_id;
     int bitfield_width;
+    int is_vector;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -186,14 +187,14 @@ static inline Type type_make_float(int width) {
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -206,6 +207,7 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
+Type type_make_vector(Type elem, int vec_size);
 Type type_make_vla(Type elem, struct Expr *dim);
 Type type_make_struct(const char *tag, int size);
 Type type_make_func(Type ret, Type * *params, int nparams);
@@ -300,60 +302,37 @@ union __anon_u_1 {
         struct { Type target_type; Expr *init; } compound;
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
-    };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
-struct __anon_un_5 { UnaryOp op; Expr *operand; };
-struct __anon_var_6 { char *name; char *pkg; };
-struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
-struct __anon_call_8 { Expr *callee; ExprArray args; };
-struct __anon_str_9 { char *bytes; int len; };
-struct __anon_addr_10 { Expr *operand; };
-struct __anon_deref_11 { Expr *operand; };
-struct __anon_idx_12 { Expr *array; Expr *index; };
-struct __anon_member_13 { Expr *obj; char *name; };
-struct __anon_cast_14 { Type target; Expr *operand; };
-struct __anon_sizeof_t_15 { Type target; };
-struct __anon_sizeof_e_16 { Expr *operand; };
-struct __anon_alignof_t_17 { Type target; };
-struct __anon_tern_18 { Expr *cond; Expr *then; Expr *else_; };
-struct __anon_incdec_19 { Expr *operand; int is_inc; int is_prefix; };
-struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
-struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
-struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
-struct __anon_compound_23 { Type target_type; Expr *init; };
-struct __anon_stmt_expr_24 { StmtArray *stmts; };
-struct __anon_label_addr_25 { char *label; };
-
-        long long int_val;
-        struct __anon_bin_4 bin;
-        struct __anon_un_5 un;
-        struct __anon_var_6 var;
-        struct __anon_assign_7 assign;
-        struct __anon_call_8 call;
-        struct __anon_str_9 str;
-        struct __anon_addr_10 addr;
-        struct __anon_deref_11 deref;
-        struct __anon_idx_12 idx;
-        struct __anon_member_13 member;
-        struct __anon_cast_14 cast;
-        struct __anon_sizeof_t_15 sizeof_t;
-        struct __anon_sizeof_e_16 sizeof_e;
-        struct __anon_alignof_t_17 alignof_t;
-        struct __anon_tern_18 tern;
-        struct __anon_incdec_19 incdec;
-        struct __anon_comp_20 comp;
-        struct __anon_comma_21 comma;
-        struct __anon_init_list_22 init_list;
-        char *float_text;
-        struct __anon_compound_23 compound;
-        struct __anon_stmt_expr_24 stmt_expr;
-        struct __anon_label_addr_25 label_addr;
-    };
-
+    };struct Expr {
     ExprKind kind;
     SourceLoc loc;
     Type type;
     Type va_arg_type;
-    union __anon_u_3 u;
+    union {
+        long long int_val;
+        struct { BinOp op; Expr *l, *r; } bin;
+        struct { UnaryOp op; Expr *operand; } un;
+        struct { char *name; char *pkg; } var;
+        struct { Expr *lvalue; Expr *rvalue; } assign;
+        struct { Expr *callee; ExprArray args; } call;
+        struct { char *bytes; int len; } str;
+        struct { Expr *operand; } addr;
+        struct { Expr *operand; } deref;
+        struct { Expr *array; Expr *index; } idx;
+        struct { Expr *obj; char *name; } member;
+        struct { Type target; Expr *operand; } cast;
+        struct { Type target; } sizeof_t;
+        struct { Expr *operand; } sizeof_e;
+        struct { Type target; } alignof_t;
+        struct { Expr *cond; Expr *then; Expr *else_; } tern;
+        struct { Expr *operand; int is_inc; int is_prefix; } incdec;
+        struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
+        struct { Expr *lhs; Expr *rhs; } comma;
+        struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
+        char *float_text;
+        struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
+    } u;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
@@ -423,31 +402,22 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    };struct Stmt {union __anon_u_26 {struct __anon_decl_27 { char *name; Type type; Expr *init; int storage_class; };
-struct __anon_if_s_28 { Expr *cond; Stmt *then_s; Stmt *else_s; };
-struct __anon_while_s_29 { Expr *cond; Stmt *body; };
-struct __anon_do_s_30 { Expr *cond; Stmt *body; };
-struct __anon_for_s_31 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
-struct __anon_goto_s_32 { char *target; Expr *target_expr; };
-struct __anon_label_s_33 { char *name; Stmt *stmt; };
-struct __anon_switch_s_34 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
-
-        struct __anon_decl_27 decl;
-        Expr *expr;
-        Expr *value;
-        struct __anon_if_s_28 if_s;
-        struct __anon_while_s_29 while_s;
-        struct __anon_do_s_30 do_s;
-        struct __anon_for_s_31 for_s;
-        StmtArray block;
-        struct __anon_goto_s_32 goto_s;
-        struct __anon_label_s_33 label_s;
-        struct __anon_switch_s_34 switch_s;
-    };
-
+    };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
-    union __anon_u_26 u;
+    union {
+        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        Expr *expr;
+        Expr *value;
+        struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
+        struct { Expr *cond; Stmt *body; } while_s;
+        struct { Expr *cond; Stmt *body; } do_s;
+        struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
+        StmtArray block;
+        struct { char *target; Expr *target_expr; } goto_s;
+        struct { char *name; Stmt *stmt; } label_s;
+        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+    } u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
@@ -696,7 +666,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     }
     advance(p);
 }
-static int parse_attribute(Parser *p, int *align, int *packed, int *sso) {
+static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size) {
     if (peek(p)->kind != TK_IDENT) return 0;
     if (runtime.strcmp(peek(p)->text, "__attribute__") != 0
         && runtime.strcmp(peek(p)->text, "__attribute") != 0)
@@ -734,6 +704,23 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso) {
             } else if (runtime.strcmp(name, "packed") == 0 || runtime.strcmp(name, "__packed__") == 0) {
                 if (packed) *packed = 1;
                 advance(p);
+                continue;
+            } else if (runtime.strcmp(name, "vector_size") == 0 || runtime.strcmp(name, "__vector_size__") == 0) {
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    Expr *e = parse_ternary(p);
+                    long long val = 0;
+                    if (fold_const_int(e, &val)) {
+                        if (vec_size) *vec_size = (int)val;
+                    }
+                    expr_free(e);
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                }
                 continue;
             } else if (runtime.strcmp(name, "scalar_storage_order") == 0 || runtime.strcmp(name, "__scalar_storage_order__") == 0) {
                 advance(p);
@@ -778,7 +765,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso) {
     return 1;
 }
 static int skip_attribute(Parser *p) {
-    return parse_attribute(p, ((void*)0), ((void*)0), ((void*)0));
+    return parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0));
 }
 static int tu_has_import(const TranslationUnit *tu, const char *name) {
     for (size_t i = 0; i < tu->imports.len; i++)
@@ -950,8 +937,8 @@ static Type parse_specifiers(Parser *p) {
     }
     if (peek(p)->kind == TK_KW_STRUCT) {
         advance(p);
-        int attr_align = 0, attr_packed = 0, attr_sso = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
             runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
@@ -966,6 +953,7 @@ static Type parse_specifiers(Parser *p) {
             Type t = type_make_struct(tag, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
+            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
             return t;
         }
         const Token *tag = peek(p);
@@ -974,7 +962,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected struct tag but got '%s'", tag->text);
         }
         advance(p);
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         if (peek(p)->kind == TK_LBRACE) {
             if (struct_registry_find(&p->tu->structs, tag->text)) {
                 die_at(tag->loc.file, tag->loc.line, tag->loc.col,
@@ -991,6 +979,7 @@ static Type parse_specifiers(Parser *p) {
             Type t = type_make_struct(tag->text, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
+            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
@@ -999,12 +988,13 @@ static Type parse_specifiers(Parser *p) {
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         if (is_complex) t = get_or_create_complex_type(p, t);
+        if (attr_vec > 0) t = type_make_vector(t, attr_vec);
         return t;
     }
     if (peek(p)->kind == TK_KW_UNION) {
         advance(p);
-        int attr_align = 0, attr_packed = 0, attr_sso = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
             runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
@@ -1020,6 +1010,7 @@ static Type parse_specifiers(Parser *p) {
             Type t = type_make_struct(tag, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
+            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
             return t;
         }
         const Token *tag = peek(p);
@@ -1028,7 +1019,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected union tag but got '%s'", tag->text);
         }
         advance(p);
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         if (peek(p)->kind == TK_LBRACE) {
             if (struct_registry_find(&p->tu->structs, tag->text)) {
                 die_at(tag->loc.file, tag->loc.line, tag->loc.col,
@@ -1264,8 +1255,8 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         type_free(&base);
     }
     expect_kind(p, TK_RBRACE, "'}'");
-    int align = 0, packed = 0, sso = 0;
-    while (parse_attribute(p, &align, &packed, &sso)) {}
+    int align = 0, packed = 0, sso = 0, vec = 0;
+    while (parse_attribute(p, &align, &packed, &sso, &vec)) {}
     if (align > sd->align) sd->align = align;
     if (packed) sd->align = 1;
     if (sso == 1) struct_def_apply_sso(sd, 1);
@@ -1490,8 +1481,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
     } else if (peek(p)->kind == TK_IDENT) {
         *name_out = xstrdup(peek(p)->text);
         advance(p);
-        while (skip_attribute(p)) {}
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         t = base;
+        if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
         for (int i = 0; i < ptrs; i++)
             t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
         ptrs = 0;
@@ -1562,7 +1555,9 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
         ptrs = 0;
     }
-    while (skip_attribute(p)) {}
+    int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+    while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+    if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
     return t;
 }
 static Type parse_type(Parser *p, char **name_out) {
@@ -1812,6 +1807,10 @@ static Expr *parse_mul(Parser *p) {
 }
 static int types_compatible_unqual(const Type *a, const Type *b) {
     if (!a || !b) return 0;
+    if (a->is_vector != b->is_vector) return 0;
+    if (a->is_vector) {
+        return a->width == b->width && types_compatible_unqual(a->elem_type, b->elem_type);
+    }
     if (a->kind != b->kind) return 0;
     if (a->kind == TY_INT) {
         if (a->enum_id != 0 && b->enum_id != 0 && a->enum_id != b->enum_id) return 0;
@@ -3095,6 +3094,13 @@ static Stmt parse_typedef_stmt(Parser *p) {
             decl_name = xstrdup(name->text);
             advance(p);
         }
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        if (attr_vec > 0 && !ty.is_vector) {
+            Type vt = type_make_vector(ty, attr_vec);
+            type_free(&ty);
+            ty = vt;
+        }
         if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
             runtime.free(decl_name);
             type_free(&ty);
@@ -3102,7 +3108,7 @@ static Stmt parse_typedef_stmt(Parser *p) {
             typedef_registry_add(&p->tu->typedefs, decl_name, ty);
             runtime.free(decl_name);
         }
-        for (;;) { if (!skip_attribute(p)) break; }
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         if (peek(p)->kind == TK_COMMA) {
             advance(p);
             continue;

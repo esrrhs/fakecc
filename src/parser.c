@@ -72,7 +72,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     advance(p);
 }
 
-static int parse_attribute(Parser *p, int *align, int *packed, int *sso) {
+static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size) {
     if (peek(p)->kind != TK_IDENT) return 0;
     if (strcmp(peek(p)->text, "__attribute__") != 0
         && strcmp(peek(p)->text, "__attribute") != 0)
@@ -110,6 +110,23 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso) {
             } else if (strcmp(name, "packed") == 0 || strcmp(name, "__packed__") == 0) {
                 if (packed) *packed = 1;
                 advance(p);
+                continue;
+            } else if (strcmp(name, "vector_size") == 0 || strcmp(name, "__vector_size__") == 0) {
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    Expr *e = parse_ternary(p);
+                    long long val = 0;
+                    if (fold_const_int(e, &val)) {
+                        if (vec_size) *vec_size = (int)val;
+                    }
+                    expr_free(e);
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                }
                 continue;
             } else if (strcmp(name, "scalar_storage_order") == 0 || strcmp(name, "__scalar_storage_order__") == 0) {
                 advance(p);
@@ -155,7 +172,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso) {
 }
 
 static int skip_attribute(Parser *p) {
-    return parse_attribute(p, NULL, NULL, NULL);
+    return parse_attribute(p, NULL, NULL, NULL, NULL);
 }
 
 /* True if `name` appears in this TU's import list. */
@@ -361,8 +378,8 @@ static Type parse_specifiers(Parser *p) {
      * generate a unique tag, parse the body, and register it. */
     if (peek(p)->kind == TK_KW_STRUCT) {
         advance(p);
-        int attr_align = 0, attr_packed = 0, attr_sso = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         if (peek(p)->kind == TK_LBRACE) {
             /* Anonymous struct definition. */
             char tag[64];
@@ -380,6 +397,7 @@ static Type parse_specifiers(Parser *p) {
             Type t = type_make_struct(tag, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
+            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
             return t;
         }
         const Token *tag = peek(p);
@@ -388,7 +406,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected struct tag but got '%s'", tag->text);
         }
         advance(p);
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         /* If '{' follows, this is a struct definition at use site
          * (`struct Tag { ... }`), not just a forward reference. */
         if (peek(p)->kind == TK_LBRACE) {
@@ -407,6 +425,7 @@ static Type parse_specifiers(Parser *p) {
             Type t = type_make_struct(tag->text, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
+            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
@@ -415,14 +434,15 @@ static Type parse_specifiers(Parser *p) {
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
         if (is_complex) t = get_or_create_complex_type(p, t);
+        if (attr_vec > 0) t = type_make_vector(t, attr_vec);
         return t;
     }
     /* union [Tag] — same as struct: a Tag is a use, `{` begins an anonymous
      * union definition. */
     if (peek(p)->kind == TK_KW_UNION) {
         advance(p);
-        int attr_align = 0, attr_packed = 0, attr_sso = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
             snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
@@ -438,6 +458,7 @@ static Type parse_specifiers(Parser *p) {
             Type t = type_make_struct(tag, sd ? sd->size : 0);
             t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
             if (is_complex) t = get_or_create_complex_type(p, t);
+            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
             return t;
         }
         const Token *tag = peek(p);
@@ -446,7 +467,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected union tag but got '%s'", tag->text);
         }
         advance(p);
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         /* If '{' follows, this is a union definition at use site
          * (`union Tag { ... }`), not just a forward reference. */
         if (peek(p)->kind == TK_LBRACE) {
@@ -739,8 +760,8 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         type_free(&base);
     }
     expect_kind(p, TK_RBRACE, "'}'");
-    int align = 0, packed = 0, sso = 0;
-    while (parse_attribute(p, &align, &packed, &sso)) {}
+    int align = 0, packed = 0, sso = 0, vec = 0;
+    while (parse_attribute(p, &align, &packed, &sso, &vec)) {}
     if (align > sd->align) sd->align = align;
     if (packed) sd->align = 1;
     if (sso == 1) struct_def_apply_sso(sd, 1);
@@ -1016,8 +1037,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
     } else if (peek(p)->kind == TK_IDENT) {
         *name_out = xstrdup(peek(p)->text);
         advance(p);
-        while (skip_attribute(p)) {}
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         t = base;
+        if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
         /* Apply prefix pointers FIRST (they wrap the base type, innermost).
          * `int *rows[2]` → ptr(int) then array(2, ptr(int)).  Applying them
          * after the array (at function scope) would wrongly yield
@@ -1094,7 +1117,9 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
         ptrs = 0;
     }
-    while (skip_attribute(p)) {}
+    int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+    while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+    if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
     return t;
 }
 
@@ -1424,6 +1449,10 @@ static Expr *parse_mul(Parser *p) {
 
 static int types_compatible_unqual(const Type *a, const Type *b) {
     if (!a || !b) return 0;
+    if (a->is_vector != b->is_vector) return 0;
+    if (a->is_vector) {
+        return a->width == b->width && types_compatible_unqual(a->elem_type, b->elem_type);
+    }
     if (a->kind != b->kind) return 0;
     if (a->kind == TY_INT) {
         if (a->enum_id != 0 && b->enum_id != 0 && a->enum_id != b->enum_id) return 0;
@@ -2846,6 +2875,13 @@ static Stmt parse_typedef_stmt(Parser *p) {
             decl_name = xstrdup(name->text);
             advance(p);
         }
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        if (attr_vec > 0 && !ty.is_vector) {
+            Type vt = type_make_vector(ty, attr_vec);
+            type_free(&ty);
+            ty = vt;
+        }
         if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
             /* C11 / GCC: a typedef that restates the same name is accepted
              * here so c-torture files that re-include a typedef parse. */
@@ -2855,7 +2891,7 @@ static Stmt parse_typedef_stmt(Parser *p) {
             typedef_registry_add(&p->tu->typedefs, decl_name, ty);
             free(decl_name);
         }
-        for (;;) { if (!skip_attribute(p)) break; }
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
         if (peek(p)->kind == TK_COMMA) {
             advance(p);
             continue;

@@ -349,13 +349,14 @@ struct Type {
     int func_is_variadic;
     int enum_id;
     int bitfield_width;
+    int is_vector;
 };
 static inline Type type_make_int(int width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -368,14 +369,14 @@ static inline Type type_make_float(int width) {
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -388,6 +389,7 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, int length);
+Type type_make_vector(Type elem, int vec_size);
 Type type_make_vla(Type elem, struct Expr *dim);
 Type type_make_struct(const char *tag, int size);
 Type type_make_func(Type ret, Type * *params, int nparams);
@@ -482,60 +484,37 @@ union __anon_u_1 {
         struct { Type target_type; Expr *init; } compound;
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
-    };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
-struct __anon_un_5 { UnaryOp op; Expr *operand; };
-struct __anon_var_6 { char *name; char *pkg; };
-struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
-struct __anon_call_8 { Expr *callee; ExprArray args; };
-struct __anon_str_9 { char *bytes; int len; };
-struct __anon_addr_10 { Expr *operand; };
-struct __anon_deref_11 { Expr *operand; };
-struct __anon_idx_12 { Expr *array; Expr *index; };
-struct __anon_member_13 { Expr *obj; char *name; };
-struct __anon_cast_14 { Type target; Expr *operand; };
-struct __anon_sizeof_t_15 { Type target; };
-struct __anon_sizeof_e_16 { Expr *operand; };
-struct __anon_alignof_t_17 { Type target; };
-struct __anon_tern_18 { Expr *cond; Expr *then; Expr *else_; };
-struct __anon_incdec_19 { Expr *operand; int is_inc; int is_prefix; };
-struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
-struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
-struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
-struct __anon_compound_23 { Type target_type; Expr *init; };
-struct __anon_stmt_expr_24 { StmtArray *stmts; };
-struct __anon_label_addr_25 { char *label; };
-
-        long long int_val;
-        struct __anon_bin_4 bin;
-        struct __anon_un_5 un;
-        struct __anon_var_6 var;
-        struct __anon_assign_7 assign;
-        struct __anon_call_8 call;
-        struct __anon_str_9 str;
-        struct __anon_addr_10 addr;
-        struct __anon_deref_11 deref;
-        struct __anon_idx_12 idx;
-        struct __anon_member_13 member;
-        struct __anon_cast_14 cast;
-        struct __anon_sizeof_t_15 sizeof_t;
-        struct __anon_sizeof_e_16 sizeof_e;
-        struct __anon_alignof_t_17 alignof_t;
-        struct __anon_tern_18 tern;
-        struct __anon_incdec_19 incdec;
-        struct __anon_comp_20 comp;
-        struct __anon_comma_21 comma;
-        struct __anon_init_list_22 init_list;
-        char *float_text;
-        struct __anon_compound_23 compound;
-        struct __anon_stmt_expr_24 stmt_expr;
-        struct __anon_label_addr_25 label_addr;
-    };
-
+    };struct Expr {
     ExprKind kind;
     SourceLoc loc;
     Type type;
     Type va_arg_type;
-    union __anon_u_3 u;
+    union {
+        long long int_val;
+        struct { BinOp op; Expr *l, *r; } bin;
+        struct { UnaryOp op; Expr *operand; } un;
+        struct { char *name; char *pkg; } var;
+        struct { Expr *lvalue; Expr *rvalue; } assign;
+        struct { Expr *callee; ExprArray args; } call;
+        struct { char *bytes; int len; } str;
+        struct { Expr *operand; } addr;
+        struct { Expr *operand; } deref;
+        struct { Expr *array; Expr *index; } idx;
+        struct { Expr *obj; char *name; } member;
+        struct { Type target; Expr *operand; } cast;
+        struct { Type target; } sizeof_t;
+        struct { Expr *operand; } sizeof_e;
+        struct { Type target; } alignof_t;
+        struct { Expr *cond; Expr *then; Expr *else_; } tern;
+        struct { Expr *operand; int is_inc; int is_prefix; } incdec;
+        struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
+        struct { Expr *lhs; Expr *rhs; } comma;
+        struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
+        char *float_text;
+        struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
+    } u;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
@@ -605,31 +584,22 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    };struct Stmt {union __anon_u_26 {struct __anon_decl_27 { char *name; Type type; Expr *init; int storage_class; };
-struct __anon_if_s_28 { Expr *cond; Stmt *then_s; Stmt *else_s; };
-struct __anon_while_s_29 { Expr *cond; Stmt *body; };
-struct __anon_do_s_30 { Expr *cond; Stmt *body; };
-struct __anon_for_s_31 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
-struct __anon_goto_s_32 { char *target; Expr *target_expr; };
-struct __anon_label_s_33 { char *name; Stmt *stmt; };
-struct __anon_switch_s_34 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
-
-        struct __anon_decl_27 decl;
-        Expr *expr;
-        Expr *value;
-        struct __anon_if_s_28 if_s;
-        struct __anon_while_s_29 while_s;
-        struct __anon_do_s_30 do_s;
-        struct __anon_for_s_31 for_s;
-        StmtArray block;
-        struct __anon_goto_s_32 goto_s;
-        struct __anon_label_s_33 label_s;
-        struct __anon_switch_s_34 switch_s;
-    };
-
+    };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
-    union __anon_u_26 u;
+    union {
+        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        Expr *expr;
+        Expr *value;
+        struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
+        struct { Expr *cond; Stmt *body; } while_s;
+        struct { Expr *cond; Stmt *body; } do_s;
+        struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
+        StmtArray block;
+        struct { char *target; Expr *target_expr; } goto_s;
+        struct { char *name; Stmt *stmt; } label_s;
+        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+    } u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
@@ -1188,6 +1158,7 @@ static int fd_has_computed_goto(const FunctionDecl *fd) {
 static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) {
     if (ty.kind == TY_ARRAY) return 1;
     if (ty.kind == TY_STRUCT) return 1;
+    if (ty.is_vector) return 1;
     if (fd_has_computed_goto(fd)) return 1;
     for (size_t i = 0; i < fd->body.len; i++)
         if (stmt_takes_addr_of(&fd->body.data[i], name)) return 1;
@@ -1876,6 +1847,86 @@ IRValue out_i;
     emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, out_i, 0, elem_sz, 1, e->loc);
     return addr;
 }
+static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
+                                  Type lt, Type rt, BinOp bop) {
+    Type vt = lt.is_vector ? lt : rt;
+    int esz = type_size(*vt.elem_type);
+    if (esz <= 0) esz = 4;
+    int count = vt.length;
+    if (count <= 0) count = vt.width / esz;
+    int is_float = (vt.elem_type->kind == TY_FLOAT);
+    int is_unsigned = vt.elem_type->is_unsigned;
+    IROpcode ir_op = bop_to_ir(bop);
+    IRValue l_val = lower_expr(fn, st, e->u.bin.l);
+    IRValue r_val = lower_expr(fn, st, e->u.bin.r);
+    IRValue slot = emit_alloca(fn, vt.width, 16, 1, e->loc);
+    IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    for (int i = 0; i < count; i++) {
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)i * esz, 8, 1, e->loc);
+        IRValue l_elem;
+        if (lt.is_vector) {
+            IRValue l_ptr = emit_bin_w(fn, IR_ADD, l_val, off, 8, 1, e->loc);
+            l_elem = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, l_elem, l_ptr, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, l_elem, 1);
+        } else {
+            l_elem = l_val;
+        }
+        IRValue r_elem;
+        if (rt.is_vector) {
+            IRValue r_ptr = emit_bin_w(fn, IR_ADD, r_val, off, 8, 1, e->loc);
+            r_elem = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, r_elem, r_ptr, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, r_elem, 1);
+        } else {
+            r_elem = r_val;
+        }
+        IRValue res_elem = emit_bin_w(fn, ir_op, l_elem, r_elem, esz, is_unsigned, e->loc);
+        if (is_float) set_value_float(fn, res_elem, 1);
+        IRValue dst_ptr = emit_bin_w(fn, IR_ADD, dst_addr, off, 8, 1, e->loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, dst_ptr, res_elem, 0, esz, is_unsigned, e->loc);
+        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+    }
+    return dst_addr;
+}
+static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    Expr *lv = e->u.comp.lvalue;
+    Type vt = lv->type;
+    int esz = type_size(*vt.elem_type);
+    if (esz <= 0) esz = 4;
+    int count = vt.length;
+    if (count <= 0) count = vt.width / esz;
+    int is_float = (vt.elem_type->kind == TY_FLOAT);
+    int is_unsigned = vt.elem_type->is_unsigned;
+    BinOp op = e->u.comp.op;
+    IROpcode ir_op = is_float ? (op == BOP_SUB ? IR_FSUB : op == BOP_MUL ? IR_FMUL : op == BOP_DIV ? IR_FDIV : IR_FADD)
+                              : bop_to_ir(op);
+    IRValue addr = lower_lvalue_addr(fn, st, lv);
+    IRValue rhs_val = lower_expr(fn, st, e->u.comp.rvalue);
+    for (int i = 0; i < count; i++) {
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)i * esz, 8, 1, e->loc);
+        IRValue elem_addr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+        IRValue old_elem = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, old_elem, elem_addr, -1, 0, esz, is_unsigned, e->loc);
+        if (is_float) set_value_float(fn, old_elem, 1);
+        IRValue rhs_elem;
+        if (e->u.comp.rvalue->type.is_vector) {
+            IRValue r_ptr = emit_bin_w(fn, IR_ADD, rhs_val, off, 8, 1, e->loc);
+            rhs_elem = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, rhs_elem, r_ptr, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, rhs_elem, 1);
+        } else {
+            rhs_elem = rhs_val;
+        }
+        IRValue neu_elem = emit_bin_w(fn, ir_op, old_elem, rhs_elem, esz, is_unsigned, e->loc);
+        if (is_float) set_value_float(fn, neu_elem, 1);
+        emit_inst_w(fn, IR_STORE_PTR, -1, elem_addr, neu_elem, 0, esz, is_unsigned, e->loc);
+        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+    }
+    return addr;
+}
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     switch (e->kind) {
     case EX_INT_LIT: {
@@ -1985,6 +2036,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int l_is_ptr = (lt.kind == TY_PTR || lt.kind == TY_ARRAY);
         int r_is_ptr = (rt.kind == TY_PTR || rt.kind == TY_ARRAY);
         BinOp bop = e->u.bin.op;
+        if (lt.is_vector || rt.is_vector) {
+            return lower_vector_binop(fn, st, e, lt, rt, bop);
+        }
         if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) {
             return lower_complex_binop(fn, st, e, lt, rt, bop);
@@ -2229,7 +2283,7 @@ IRValue pr;
         }
         if (entry->is_global) {
             IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
-            if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT) return addr;
+            if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT || entry->ty.is_vector) return addr;
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                         entry->width, entry->is_unsigned, e->loc);
@@ -2242,7 +2296,7 @@ IRValue pr;
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, 8, 1, e->loc);
             return v;
         }
-        if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT)
+        if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT || entry->ty.is_vector)
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         if (entry->pinned) {
             IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
@@ -2275,7 +2329,7 @@ IRValue pr;
             coerced = (rw == lw) ? rv : convert_numeric(fn, rv, rw, lw, lu, 1, e->loc);
         else
             coerced = coerce(fn, rv, rw, ru, lw, lu, e->loc);
-        if (lv->type.kind == TY_STRUCT) {
+        if (lv->type.kind == TY_STRUCT || lv->type.is_vector) {
             IRValue dst;
             if (lv->kind == EX_VAR) {
                 const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
@@ -2291,7 +2345,7 @@ IRValue pr;
             } else {
                 return coerced;
             }
-            if (runtime.strncmp(lv->type.tag, "__complex_", 10) == 0 &&
+            if (lv->type.tag && runtime.strncmp(lv->type.tag, "__complex_", 10) == 0 &&
                 (e->u.assign.rvalue->type.kind != TY_STRUCT ||
                  !e->u.assign.rvalue->type.tag ||
                  runtime.strcmp(lv->type.tag, e->u.assign.rvalue->type.tag) != 0)) {
@@ -2573,8 +2627,8 @@ IRValue pr;
         unsigned char arg_on_stack[32];
         int nargs = 0;
         runtime.memset(arg_on_stack, 0, sizeof(arg_on_stack));
-        int is_void_pre = (e->type.width == 0);
-        int is_ret_struct_pre = (!is_void_pre && e->type.kind == TY_STRUCT);
+        int is_void_pre = (e->type.kind == TY_VOID);
+        int is_ret_struct_pre = (!is_void_pre && (e->type.kind == TY_STRUCT || e->type.is_vector));
         SysVRegClass ret_cls_pre[2];
         int ret_nreg_pre = is_ret_struct_pre
                            ? sysv_classify_agg(e->type, ret_cls_pre) : 0;
@@ -2583,7 +2637,7 @@ IRValue pr;
         for (int i = 0; i < (int)e->u.call.args.len; i++) {
             Expr *arg = e->u.call.args.data[i];
             IRValue av = lower_expr(fn, st, arg);
-            if (arg->type.kind == TY_STRUCT) {
+            if (arg->type.kind == TY_STRUCT || arg->type.is_vector) {
                 SysVRegClass cls[2];
                 int nreg = sysv_classify_agg(arg->type, cls);
                 int asz = type_size(arg->type);
@@ -2961,6 +3015,29 @@ IRValue vi;
             if (df) return (vw == dw) ? vr : convert_numeric(fn, vr, vw, dw, du, 1, e->loc);
             return coerce(fn, vr, vw, vu, dw, du, e->loc);
         }
+        if (e->type.is_vector) {
+            IRValue x = lower_expr(fn, st, e->u.cast.operand);
+            if (e->u.cast.operand->type.is_vector) return x;
+            int sw = get_value_width(fn, x);
+            int sf = get_value_is_float(fn, x);
+            IRValue slot = emit_alloca(fn, e->type.width, 16, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            emit_zero_bytes(fn, addr, e->type.width, e->loc);
+            int store_w = (sw > e->type.width) ? e->type.width : (sw > 0 ? sw : e->type.width);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, x, 0, store_w, 1, e->loc);
+            if (sf) fn->insts.data[fn->insts.len - 1].is_float = 1;
+            return addr;
+        }
+        if (e->u.cast.operand->type.is_vector) {
+            IRValue src_addr = lower_expr(fn, st, e->u.cast.operand);
+            int dw = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+            int du = e->type.is_unsigned;
+            int df = (e->type.kind == TY_FLOAT);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, v, src_addr, -1, 0, dw, du, e->loc);
+            if (df) set_value_float(fn, v, 1);
+            return v;
+        }
         IRValue x = lower_expr(fn, st, e->u.cast.operand);
         int sw = get_value_width(fn, x), su = get_value_is_unsigned(fn, x);
         int sf = get_value_is_float(fn, x);
@@ -3085,6 +3162,9 @@ IRValue vi;
     case EX_COMPOUND_ASSIGN: {
         Expr *lv = e->u.comp.lvalue;
         BinOp op = e->u.comp.op;
+        if (lv->type.is_vector) {
+            return lower_vector_compound_assign(fn, st, e);
+        }
         if (lv->type.kind == TY_STRUCT && lv->type.tag && runtime.strncmp(lv->type.tag, "__complex_", 10) == 0) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
             Expr fake_bin;
@@ -3267,7 +3347,7 @@ IRValue vi;
         IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         emit_zero_bytes(fn, addr, total, e->loc);
         lower_init_list(fn, st, addr, &target, e->u.compound.init, e->loc);
-        if (target.kind == TY_ARRAY || target.kind == TY_STRUCT)
+        if (target.kind == TY_ARRAY || target.kind == TY_STRUCT || target.is_vector)
             return addr;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
@@ -3563,7 +3643,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             pinned = 1;
         if (dty.kind == TY_PTR && dty.pointee && dty.pointee->kind == TY_FUNC)
             pinned = 1;
-        if (dty.kind == TY_FLOAT)
+        if (dty.kind == TY_FLOAT || dty.is_vector)
             pinned = 1;
         IRValue v;
         if (pinned) {
@@ -3577,7 +3657,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         ir_add_dbg_var(fn, s->u.decl.name, s->loc, IR_DBG_LOCAL, dty, v, -1);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST) {
-                if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT) {
+                if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT || dty.is_vector) {
                     IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
                     int total = type_size(dty);
                     if (total > 0) emit_zero_bytes(fn, addr, total, s->loc);
@@ -3594,7 +3674,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                         emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
                     }
                 }
-            } else if (dty.kind == TY_STRUCT) {
+            } else if (dty.kind == TY_STRUCT || dty.is_vector) {
                 IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
                 if (dty.tag && runtime.strncmp(dty.tag, "__complex_", 10) == 0 &&
                     (s->u.decl.init->type.kind != TY_STRUCT ||
@@ -4195,6 +4275,22 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     }
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
+        if (ty->is_vector && ty->elem_type) {
+            int esz = type_size(*ty->elem_type);
+            int cur_idx = 0;
+            for (int i = 0; i < n; i++) {
+                int elem_idx = cur_idx++;
+                if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                    elem_idx = e->u.init_list.desig_index[i];
+                    cur_idx = elem_idx + 1;
+                }
+                if (elem_idx * esz < sz) {
+                    pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
+                              bytes + elem_idx * esz, esz, ctx, loc, g);
+                }
+            }
+            return;
+        }
         switch (ty->kind) {
         case TY_ARRAY: {
             int esz = type_size(*ty->elem_type);
@@ -4363,6 +4459,23 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                             const Type *ty, const Expr *e, SourceLoc loc) {
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
+        if (ty->is_vector && ty->elem_type) {
+            int esz = type_size(*ty->elem_type);
+            int cur_idx = 0;
+            for (int i = 0; i < n; i++) {
+                int elem_idx = cur_idx++;
+                if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                    elem_idx = e->u.init_list.desig_index[i];
+                    cur_idx = elem_idx + 1;
+                }
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)elem_idx * esz, 8, 1, loc);
+                IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
+                lower_init_list(fn, st, ptr, ty->elem_type,
+                                e->u.init_list.elements[i], loc);
+            }
+            return;
+        }
         switch (ty->kind) {
         case TY_ARRAY: {
             int esz = type_size(*ty->elem_type);
@@ -4374,7 +4487,7 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                     cur_idx = elem_idx + 1;
                 }
                 IRValue off = new_value(fn);
-                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_idx * esz, 8, 1, loc);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)elem_idx * esz, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
                 lower_init_list(fn, st, ptr, ty->elem_type,
                                 e->u.init_list.elements[i], loc);
@@ -4469,10 +4582,19 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
     }
     IRValue rv = lower_expr(fn, st, e);
     int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+    int rf = get_value_is_float(fn, rv);
+    int df = (ty->kind == TY_FLOAT);
     int sw = ty->kind == TY_PTR ? 8 : (ty->width ? ty->width : 4);
     int su = ty->is_unsigned;
-    IRValue coerced = coerce(fn, rv, rw, ru, sw, su, loc);
+    IRValue coerced;
+    if (rf != df)
+        coerced = convert_numeric(fn, rv, rw, sw, su, df, loc);
+    else if (df)
+        coerced = (rw == sw) ? rv : convert_numeric(fn, rv, rw, sw, su, 1, loc);
+    else
+        coerced = coerce(fn, rv, rw, ru, sw, su, loc);
     emit_inst_w(fn, IR_STORE_PTR, -1, base, coerced, 0, sw, su, loc);
+    if (df) fn->insts.data[fn->insts.len - 1].is_float = 1;
 }
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     g_ir_module = ir;
@@ -4540,7 +4662,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.ret_width = fd->ret_type.width;
         irfn.ret_is_unsigned = fd->ret_type.is_unsigned;
         irfn.ret_is_float = (fd->ret_type.kind == TY_FLOAT);
-        irfn.ret_is_struct = (fd->ret_type.kind == TY_STRUCT);
+        irfn.ret_is_struct = (fd->ret_type.kind == TY_STRUCT || fd->ret_type.is_vector);
         irfn.ret_is_bool = fd->ret_type.is_bool;
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
@@ -4582,7 +4704,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             SourceLoc ploc = fd->params.data[p].loc;
             param_mem_base[p] = 0;
             param_mem_n[p] = 0;
-            if (pty.kind == TY_STRUCT) {
+            if (pty.kind == TY_STRUCT || pty.is_vector) {
                 SysVRegClass cls[2];
                 int nreg = sysv_classify_agg(pty, cls);
                 if (nreg > 0) {
@@ -4633,10 +4755,10 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 pinned = 1;
             if (pty.kind == TY_FLOAT)
                 pinned = 1;
-            if (pty.kind == TY_STRUCT)
+            if (pty.kind == TY_STRUCT || pty.is_vector)
                 pinned = 1;
             IRValue slot;
-            if (pty.kind == TY_STRUCT) {
+            if (pty.kind == TY_STRUCT || pty.is_vector) {
                 int total = type_size(pty);
                 slot = emit_alloca(&irfn, total, 8, 1, ploc);
                 IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1, ploc);

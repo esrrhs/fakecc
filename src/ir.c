@@ -501,6 +501,7 @@ static int fd_has_computed_goto(const FunctionDecl *fd) {
 static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) {
     if (ty.kind == TY_ARRAY) return 1;
     if (ty.kind == TY_STRUCT) return 1;
+    if (ty.is_vector) return 1;
     if (fd_has_computed_goto(fd)) return 1;
     for (size_t i = 0; i < fd->body.len; i++)
         if (stmt_takes_addr_of(&fd->body.data[i], name)) return 1;
@@ -1318,6 +1319,101 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
     return addr;
 }
 
+static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
+                                  Type lt, Type rt, BinOp bop) {
+    Type vt = lt.is_vector ? lt : rt;
+    int esz = type_size(*vt.elem_type);
+    if (esz <= 0) esz = 4;
+    int count = vt.length;
+    if (count <= 0) count = vt.width / esz;
+    int is_float = (vt.elem_type->kind == TY_FLOAT);
+    int is_unsigned = vt.elem_type->is_unsigned;
+    IROpcode ir_op = bop_to_ir(bop);
+
+    IRValue l_val = lower_expr(fn, st, e->u.bin.l);
+    IRValue r_val = lower_expr(fn, st, e->u.bin.r);
+
+    IRValue slot = emit_alloca(fn, vt.width, 16, 1, e->loc);
+    IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+
+    for (int i = 0; i < count; i++) {
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)i * esz, 8, 1, e->loc);
+
+        IRValue l_elem;
+        if (lt.is_vector) {
+            IRValue l_ptr = emit_bin_w(fn, IR_ADD, l_val, off, 8, 1, e->loc);
+            l_elem = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, l_elem, l_ptr, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, l_elem, 1);
+        } else {
+            l_elem = l_val;
+        }
+
+        IRValue r_elem;
+        if (rt.is_vector) {
+            IRValue r_ptr = emit_bin_w(fn, IR_ADD, r_val, off, 8, 1, e->loc);
+            r_elem = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, r_elem, r_ptr, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, r_elem, 1);
+        } else {
+            r_elem = r_val;
+        }
+
+        IRValue res_elem = emit_bin_w(fn, ir_op, l_elem, r_elem, esz, is_unsigned, e->loc);
+        if (is_float) set_value_float(fn, res_elem, 1);
+
+        IRValue dst_ptr = emit_bin_w(fn, IR_ADD, dst_addr, off, 8, 1, e->loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, dst_ptr, res_elem, 0, esz, is_unsigned, e->loc);
+        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+    }
+    return dst_addr;
+}
+
+static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    Expr *lv = e->u.comp.lvalue;
+    Type vt = lv->type;
+    int esz = type_size(*vt.elem_type);
+    if (esz <= 0) esz = 4;
+    int count = vt.length;
+    if (count <= 0) count = vt.width / esz;
+    int is_float = (vt.elem_type->kind == TY_FLOAT);
+    int is_unsigned = vt.elem_type->is_unsigned;
+    BinOp op = e->u.comp.op;
+    IROpcode ir_op = is_float ? (op == BOP_SUB ? IR_FSUB : op == BOP_MUL ? IR_FMUL : op == BOP_DIV ? IR_FDIV : IR_FADD)
+                              : bop_to_ir(op);
+
+    IRValue addr = lower_lvalue_addr(fn, st, lv);
+    IRValue rhs_val = lower_expr(fn, st, e->u.comp.rvalue);
+
+    for (int i = 0; i < count; i++) {
+        IRValue off = new_value(fn);
+        emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)i * esz, 8, 1, e->loc);
+        IRValue elem_addr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+
+        IRValue old_elem = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, old_elem, elem_addr, -1, 0, esz, is_unsigned, e->loc);
+        if (is_float) set_value_float(fn, old_elem, 1);
+
+        IRValue rhs_elem;
+        if (e->u.comp.rvalue->type.is_vector) {
+            IRValue r_ptr = emit_bin_w(fn, IR_ADD, rhs_val, off, 8, 1, e->loc);
+            rhs_elem = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, rhs_elem, r_ptr, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, rhs_elem, 1);
+        } else {
+            rhs_elem = rhs_val;
+        }
+
+        IRValue neu_elem = emit_bin_w(fn, ir_op, old_elem, rhs_elem, esz, is_unsigned, e->loc);
+        if (is_float) set_value_float(fn, neu_elem, 1);
+
+        emit_inst_w(fn, IR_STORE_PTR, -1, elem_addr, neu_elem, 0, esz, is_unsigned, e->loc);
+        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+    }
+    return addr;
+}
+
 /* Lower an expression to a value id, emitting instructions as needed.
  * Sema has annotated e->type; we lower operands and coerce them per UAC. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
@@ -1447,6 +1543,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int l_is_ptr = (lt.kind == TY_PTR || lt.kind == TY_ARRAY);
         int r_is_ptr = (rt.kind == TY_PTR || rt.kind == TY_ARRAY);
         BinOp bop = e->u.bin.op;
+        if (lt.is_vector || rt.is_vector) {
+            return lower_vector_binop(fn, st, e, lt, rt, bop);
+        }
         if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
             return lower_complex_binop(fn, st, e, lt, rt, bop);
@@ -1733,7 +1832,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (entry->is_global) {
             IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
-            if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT) return addr;
+            if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT || entry->ty.is_vector) return addr;
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                         entry->width, entry->is_unsigned, e->loc);
@@ -1746,7 +1845,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, 8, 1, e->loc);
             return v;
         }
-        if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT)
+        if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT || entry->ty.is_vector)
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         if (entry->pinned) {
             IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
@@ -1781,7 +1880,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             coerced = coerce(fn, rv, rw, ru, lw, lu, e->loc);
         /* Slice 13 — struct lvalue: both sides are pointers (a struct value is
          * its byte address), so copy the bytes instead of storing the pointer. */
-        if (lv->type.kind == TY_STRUCT) {
+        if (lv->type.kind == TY_STRUCT || lv->type.is_vector) {
             IRValue dst;
             if (lv->kind == EX_VAR) {
                 const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
@@ -1797,7 +1896,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             } else {
                 return coerced;
             }
-            if (strncmp(lv->type.tag, "__complex_", 10) == 0 &&
+            if (lv->type.tag && strncmp(lv->type.tag, "__complex_", 10) == 0 &&
                 (e->u.assign.rvalue->type.kind != TY_STRUCT ||
                  !e->u.assign.rvalue->type.tag ||
                  strcmp(lv->type.tag, e->u.assign.rvalue->type.tag) != 0)) {
@@ -2096,8 +2195,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int nargs = 0;
         memset(arg_on_stack, 0, sizeof(arg_on_stack));
         /* Reserve a slot if the return needs a hidden sret pointer. */
-        int is_void_pre = (e->type.width == 0);
-        int is_ret_struct_pre = (!is_void_pre && e->type.kind == TY_STRUCT);
+        int is_void_pre = (e->type.kind == TY_VOID);
+        int is_ret_struct_pre = (!is_void_pre && (e->type.kind == TY_STRUCT || e->type.is_vector));
         SysVRegClass ret_cls_pre[2];
         int ret_nreg_pre = is_ret_struct_pre
                            ? sysv_classify_agg(e->type, ret_cls_pre) : 0;
@@ -2109,7 +2208,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         for (int i = 0; i < (int)e->u.call.args.len; i++) {
             Expr *arg = e->u.call.args.data[i];
             IRValue av = lower_expr(fn, st, arg);
-            if (arg->type.kind == TY_STRUCT) {
+            if (arg->type.kind == TY_STRUCT || arg->type.is_vector) {
                 SysVRegClass cls[2];
                 int nreg = sysv_classify_agg(arg->type, cls);
                 int asz = type_size(arg->type);
@@ -2538,6 +2637,29 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (df) return (vw == dw) ? vr : convert_numeric(fn, vr, vw, dw, du, 1, e->loc);
             return coerce(fn, vr, vw, vu, dw, du, e->loc);
         }
+        if (e->type.is_vector) {
+            IRValue x = lower_expr(fn, st, e->u.cast.operand);
+            if (e->u.cast.operand->type.is_vector) return x;
+            int sw = get_value_width(fn, x);
+            int sf = get_value_is_float(fn, x);
+            IRValue slot = emit_alloca(fn, e->type.width, 16, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            emit_zero_bytes(fn, addr, e->type.width, e->loc);
+            int store_w = (sw > e->type.width) ? e->type.width : (sw > 0 ? sw : e->type.width);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, x, 0, store_w, 1, e->loc);
+            if (sf) fn->insts.data[fn->insts.len - 1].is_float = 1;
+            return addr;
+        }
+        if (e->u.cast.operand->type.is_vector) {
+            IRValue src_addr = lower_expr(fn, st, e->u.cast.operand);
+            int dw = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+            int du = e->type.is_unsigned;
+            int df = (e->type.kind == TY_FLOAT);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, v, src_addr, -1, 0, dw, du, e->loc);
+            if (df) set_value_float(fn, v, 1);
+            return v;
+        }
         IRValue x = lower_expr(fn, st, e->u.cast.operand);
         int sw = get_value_width(fn, x), su = get_value_is_unsigned(fn, x);
         int sf = get_value_is_float(fn, x);
@@ -2688,6 +2810,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * scale the rvalue by sizeof(pointee). */
         Expr *lv = e->u.comp.lvalue;
         BinOp op = e->u.comp.op;
+        if (lv->type.is_vector) {
+            return lower_vector_compound_assign(fn, st, e);
+        }
         if (lv->type.kind == TY_STRUCT && lv->type.tag && strncmp(lv->type.tag, "__complex_", 10) == 0) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
             Expr fake_bin;
@@ -2891,7 +3016,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         emit_zero_bytes(fn, addr, total, e->loc);
         lower_init_list(fn, st, addr, &target, e->u.compound.init, e->loc);
-        if (target.kind == TY_ARRAY || target.kind == TY_STRUCT)
+        if (target.kind == TY_ARRAY || target.kind == TY_STRUCT || target.is_vector)
             return addr;    /* aggregate value is its byte address, like struct/array vars */
         /* Scalar: load the value back so the literal behaves as an rvalue. */
         IRValue v = new_value(fn);
@@ -3248,7 +3373,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
          * XMM register file (separate from the GP file the scalar regalloc
          * targets), so mem2reg must not promote them.  Codegen loads/stores
          * through the pinned slot on every use. */
-        if (dty.kind == TY_FLOAT)
+        if (dty.kind == TY_FLOAT || dty.is_vector)
             pinned = 1;
         IRValue v;
         if (pinned) {
@@ -3262,7 +3387,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         ir_add_dbg_var(fn, s->u.decl.name, s->loc, IR_DBG_LOCAL, dty, v, -1);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST) {
-                if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT) {
+                if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT || dty.is_vector) {
                     IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
                     int total = type_size(dty);
                     if (total > 0) emit_zero_bytes(fn, addr, total, s->loc);
@@ -3281,7 +3406,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                         emit_inst_w(fn, IR_STORE, -1, v, coerced, 0, dw, du, s->loc);
                     }
                 }
-            } else if (dty.kind == TY_STRUCT) {
+            } else if (dty.kind == TY_STRUCT || dty.is_vector) {
                 IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
                 if (dty.tag && strncmp(dty.tag, "__complex_", 10) == 0 &&
                     (s->u.decl.init->type.kind != TY_STRUCT ||
@@ -3967,6 +4092,22 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     }
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
+        if (ty->is_vector && ty->elem_type) {
+            int esz = type_size(*ty->elem_type);
+            int cur_idx = 0;
+            for (int i = 0; i < n; i++) {
+                int elem_idx = cur_idx++;
+                if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                    elem_idx = e->u.init_list.desig_index[i];
+                    cur_idx = elem_idx + 1;
+                }
+                if (elem_idx * esz < sz) {
+                    pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
+                              bytes + elem_idx * esz, esz, ctx, loc, g);
+                }
+            }
+            return;
+        }
         switch (ty->kind) {
         case TY_ARRAY: {
             int esz = type_size(*ty->elem_type);
@@ -4154,6 +4295,23 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                             const Type *ty, const Expr *e, SourceLoc loc) {
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
+        if (ty->is_vector && ty->elem_type) {
+            int esz = type_size(*ty->elem_type);
+            int cur_idx = 0;
+            for (int i = 0; i < n; i++) {
+                int elem_idx = cur_idx++;
+                if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                    elem_idx = e->u.init_list.desig_index[i];
+                    cur_idx = elem_idx + 1;
+                }
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)elem_idx * esz, 8, 1, loc);
+                IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
+                lower_init_list(fn, st, ptr, ty->elem_type,
+                                e->u.init_list.elements[i], loc);
+            }
+            return;
+        }
         switch (ty->kind) {
         case TY_ARRAY: {
             int esz = type_size(*ty->elem_type);
@@ -4165,7 +4323,7 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                     cur_idx = elem_idx + 1;
                 }
                 IRValue off = new_value(fn);
-                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_idx * esz, 8, 1, loc);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)elem_idx * esz, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
                 lower_init_list(fn, st, ptr, ty->elem_type,
                                 e->u.init_list.elements[i], loc);
@@ -4276,10 +4434,19 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
     /* Scalar element: lower, coerce to the target width, store via pointer. */
     IRValue rv = lower_expr(fn, st, e);
     int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
+    int rf = get_value_is_float(fn, rv);
+    int df = (ty->kind == TY_FLOAT);
     int sw = ty->kind == TY_PTR ? 8 : (ty->width ? ty->width : 4);
     int su = ty->is_unsigned;
-    IRValue coerced = coerce(fn, rv, rw, ru, sw, su, loc);
+    IRValue coerced;
+    if (rf != df)
+        coerced = convert_numeric(fn, rv, rw, sw, su, df, loc);
+    else if (df)
+        coerced = (rw == sw) ? rv : convert_numeric(fn, rv, rw, sw, su, 1, loc);
+    else
+        coerced = coerce(fn, rv, rw, ru, sw, su, loc);
     emit_inst_w(fn, IR_STORE_PTR, -1, base, coerced, 0, sw, su, loc);
+    if (df) fn->insts.data[fn->insts.len - 1].is_float = 1;
 }
 
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
@@ -4362,7 +4529,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.ret_width = fd->ret_type.width;
         irfn.ret_is_unsigned = fd->ret_type.is_unsigned;
         irfn.ret_is_float = (fd->ret_type.kind == TY_FLOAT);
-        irfn.ret_is_struct = (fd->ret_type.kind == TY_STRUCT);
+        irfn.ret_is_struct = (fd->ret_type.kind == TY_STRUCT || fd->ret_type.is_vector);
         irfn.ret_is_bool = fd->ret_type.is_bool;
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
@@ -4417,7 +4584,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             SourceLoc ploc = fd->params.data[p].loc;
             param_mem_base[p] = 0;
             param_mem_n[p] = 0;
-            if (pty.kind == TY_STRUCT) {
+            if (pty.kind == TY_STRUCT || pty.is_vector) {
                 SysVRegClass cls[2];
                 int nreg = sysv_classify_agg(pty, cls);
                 if (nreg > 0) {
@@ -4476,11 +4643,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             if (pty.kind == TY_FLOAT)
                 pinned = 1;
             /* Struct formals are always pinned (live in a stack slot). */
-            if (pty.kind == TY_STRUCT)
+            if (pty.kind == TY_STRUCT || pty.is_vector)
                 pinned = 1;
 
             IRValue slot;
-            if (pty.kind == TY_STRUCT) {
+            if (pty.kind == TY_STRUCT || pty.is_vector) {
                 int total = type_size(pty);
                 slot = emit_alloca(&irfn, total, 8, 1, ploc);
                 IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1, ploc);
