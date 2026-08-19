@@ -942,8 +942,13 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         advance(p);  /* consume ')' */
         while (skip_attribute(p)) {}
 
-        /* Parse postfixes that follow the group ')' using `base` */
-        Type outer_t = base;
+        /* Parse postfixes that follow the group ')' */
+        Type ret = base;
+        for (int i = 0; i < ptrs; i++)
+            ret = ptr_wrap(ret, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
+        ptrs = 0;
+
+        Type outer_t = ret;
         int dims[8], ndims = 0;
         Expr *vla_dims[8];
         memset(vla_dims, 0, sizeof(vla_dims));
@@ -963,7 +968,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 int is_var = 0;
                 ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
-                outer_t = make_func_type(base, &params, is_var);
+                outer_t = make_func_type(ret, &params, is_var);
                 break;
             }
         }
@@ -974,8 +979,6 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             type_free(&outer_t);
             outer_t = wrapped;
         }
-        for (int i = 0; i < ptrs; i++)
-            outer_t = ptr_wrap(outer_t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
 
         size_t saved_pos = p->pos;
         p->pos = group_start;
