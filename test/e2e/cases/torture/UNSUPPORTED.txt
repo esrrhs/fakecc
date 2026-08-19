@@ -45,12 +45,6 @@ nestfunc-7.c
 20050604-1.c
 20050607-1.c
 
-# POSIX signal handlers and non-call exceptions (signal(SIGFPE) requires -lc).
-20101011-1.c
-
-# POSIX setjmp / longjmp and indirect jumps (setjmp/longjmp requires -lc).
-20210505-1.c
-
 # GCC scalar_storage_order (reverse endianness struct layouts).
 20230630-2.c
 20230630-4.c
