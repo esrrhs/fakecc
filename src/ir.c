@@ -2132,6 +2132,53 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
         }
         if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_add_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_sadd_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_saddl_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_saddll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_uadd_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_uaddl_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_uaddll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_sub_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ssub_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ssubl_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ssubll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_usub_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_usubl_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_usubll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_mul_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_smul_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_smull_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_smulll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umul_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umull_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umulll_overflow") == 0) &&
+            e->u.call.args.len == 3) {
+            const char *cname = e->u.call.callee->u.var.name;
+            int is_add = strstr(cname, "add") != NULL;
+            int is_sub = strstr(cname, "sub") != NULL;
+            Expr *arg0 = e->u.call.args.data[0];
+            Expr *arg1 = e->u.call.args.data[1];
+            Expr *arg2 = e->u.call.args.data[2];
+            Type res_ty = (arg2->type.kind == TY_PTR && arg2->type.pointee) ? *arg2->type.pointee : type_default_int();
+            int tw = res_ty.width ? res_ty.width : 4;
+            int tu = res_ty.is_unsigned;
+            IRValue a = lower_expr(fn, st, arg0);
+            IRValue b = lower_expr(fn, st, arg1);
+            IRValue rptr = lower_expr(fn, st, arg2);
+            int aw = get_value_width(fn, a), au = get_value_is_unsigned(fn, a);
+            int bw = get_value_width(fn, b), bu = get_value_is_unsigned(fn, b);
+            IRValue a64 = coerce(fn, a, aw, au, 8, au, e->loc);
+            IRValue b64 = coerce(fn, b, bw, bu, 8, bu, e->loc);
+            IROpcode op = is_add ? IR_ADD : is_sub ? IR_SUB : IR_MUL;
+            IRValue full_res = emit_bin_w(fn, op, a64, b64, 8, tu, e->loc);
+            IRValue narrow_res = coerce(fn, full_res, 8, tu, tw, tu, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, rptr, narrow_res, 0, tw, tu, e->loc);
+            IRValue ext_res = coerce(fn, narrow_res, tw, tu, 8, tu, e->loc);
+            IRValue is_ov = emit_bin_w(fn, IR_NE, full_res, ext_res, 8, 1, e->loc);
+            return coerce(fn, is_ov, 8, 1, 4, 0, e->loc);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
             (strcmp(e->u.call.callee->u.var.name, "abs") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "labs") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "llabs") == 0 ||
