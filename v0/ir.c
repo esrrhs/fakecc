@@ -688,6 +688,7 @@ struct StructDef {
     int cap_members;
     int size;
     int align;
+    int is_packed;
     SourceLoc loc;
     Type *canonical_type;
     int bf_unit_type;

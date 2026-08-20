@@ -392,6 +392,7 @@ typedef struct {
     int cap_members;
     int size;             /* total size in bytes (already aligned) */
     int align;            /* max member alignment seen so far */
+    int is_packed;        /* 1 if __attribute__((packed)) */
     SourceLoc loc;
     /* Canonical TY_STRUCT Type for this struct's tag, if one has been created
      * via type_make_struct().  struct_def_finish() updates its width so that

@@ -483,7 +483,7 @@ static Type parse_specifiers(Parser *p) {
             snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
             StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
             if (attr_align > sd->align) sd->align = attr_align;
-            if (attr_packed) sd->align = 1;
+            if (attr_packed) { sd->align = 1; sd->is_packed = 1; }
             if (attr_sso == 1) struct_def_apply_sso(sd, 1);
             else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
@@ -513,7 +513,7 @@ static Type parse_specifiers(Parser *p) {
             }
             StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
             if (attr_align > sd->align) sd->align = attr_align;
-            if (attr_packed) sd->align = 1;
+            if (attr_packed) { sd->align = 1; sd->is_packed = 1; }
             if (attr_sso == 1) struct_def_apply_sso(sd, 1);
             else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
@@ -546,7 +546,7 @@ static Type parse_specifiers(Parser *p) {
             StructDef *sd = struct_registry_add(&p->tu->structs, tag, peek(p)->loc);
             sd->is_union = 1;
             if (attr_align > sd->align) sd->align = attr_align;
-            if (attr_packed) sd->align = 1;
+            if (attr_packed) { sd->align = 1; sd->is_packed = 1; }
             if (attr_sso == 1) struct_def_apply_sso(sd, 1);
             else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
@@ -575,7 +575,7 @@ static Type parse_specifiers(Parser *p) {
             StructDef *sd = struct_registry_add(&p->tu->structs, tag->text, peek(p)->loc);
             sd->is_union = 1;
             if (attr_align > sd->align) sd->align = attr_align;
-            if (attr_packed) sd->align = 1;
+            if (attr_packed) { sd->align = 1; sd->is_packed = 1; }
             if (attr_sso == 1) struct_def_apply_sso(sd, 1);
             else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
@@ -864,7 +864,18 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     int align = 0, packed = 0, sso = 0, vec = 0;
     while (parse_attribute(p, &align, &packed, &sso, &vec, NULL)) {}
     if (align > sd->align) sd->align = align;
-    if (packed) sd->align = 1;
+    if (packed) {
+        sd->is_packed = 1;
+        sd->align = 1;
+        int cur_off = 0;
+        for (int i = 0; i < sd->num_members; i++) {
+            if (!sd->is_union) {
+                sd->members[i].offset = cur_off;
+                cur_off += type_size(sd->members[i].type);
+            }
+        }
+        if (!sd->is_union) sd->size = cur_off;
+    }
     if (sso == 1) struct_def_apply_sso(sd, 1);
     else if (sso == 2) struct_def_apply_sso(sd, 0);
     /* Finalize the struct's total size (round up to natural alignment) now

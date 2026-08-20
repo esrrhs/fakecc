@@ -485,6 +485,7 @@ struct StructDef {
     int cap_members;
     int size;
     int align;
+    int is_packed;
     SourceLoc loc;
     Type *canonical_type;
     int bf_unit_type;
@@ -853,13 +854,10 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
         r->cap = nc;
     }
     StructDef *sd = &r->data[r->len++];
+    runtime.memset(sd, 0, sizeof(StructDef));
     sd->tag = xstrdup(tag);
-    sd->is_union = 0;
-    sd->is_big_endian = 0;
-    sd->members = ((void*)0); sd->num_members = 0; sd->cap_members = 0;
-    sd->size = 0; sd->align = 1; sd->loc = loc;
-    sd->bf_unit_type = 0; sd->bf_unit_used = 0; sd->bf_unit_offset = 0;
-    sd->canonical_type = ((void*)0);
+    sd->align = 1;
+    sd->loc = loc;
     return sd;
 }
 StructDef *struct_registry_find(StructRegistry *r, const char *tag) {
@@ -992,9 +990,9 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         if (!sd->members) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         sd->cap_members = nc;
     }
-    int a = type_align(ty);
+    int a = sd->is_packed ? 1 : type_align(ty);
     int sz = type_size(ty);
-    if (a > sd->align) sd->align = a;
+    if (!sd->is_packed && a > sd->align) sd->align = a;
     int off;
     if (sd->is_union) {
         off = 0;
@@ -1040,6 +1038,7 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
     }
 }
 void struct_def_finish(StructDef *sd) {
+    if (sd->is_packed) sd->align = 1;
     sd->size = align_up(sd->size, sd->align);
 }
 void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
