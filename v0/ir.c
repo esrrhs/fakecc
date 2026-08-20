@@ -3021,6 +3021,67 @@ IRValue pr;
                 emit_inst_w(fn, IR_STORE_PTR, -1, rptr, narrow_res, 0, tw, tu, e->loc);
             }
             IRValue ext_res = coerce(fn, narrow_res, tw, tu, 8, tu, e->loc);
+            if (tw == 8) {
+                if (is_add) {
+                    if (!tu) {
+                        IRValue x1 = emit_bin_w(fn, IR_BXOR, a64, full_res, 8, 1, e->loc);
+                        IRValue x2 = emit_bin_w(fn, IR_BXOR, b64, full_res, 8, 1, e->loc);
+                        IRValue both = emit_bin_w(fn, IR_BAND, x1, x2, 8, 1, e->loc);
+                        IRValue zero = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 8, 0, e->loc);
+                        IRValue is_ov = emit_bin_w(fn, IR_LT, both, zero, 8, 0, e->loc);
+                        return coerce(fn, is_ov, 8, 1, 4, 0, e->loc);
+                    } else {
+                        IRValue is_ov = emit_bin_w(fn, IR_LT, full_res, a64, 8, 1, e->loc);
+                        return coerce(fn, is_ov, 8, 1, 4, 0, e->loc);
+                    }
+                } else if (is_sub) {
+                    if (!tu) {
+                        IRValue x1 = emit_bin_w(fn, IR_BXOR, a64, b64, 8, 1, e->loc);
+                        IRValue x2 = emit_bin_w(fn, IR_BXOR, a64, full_res, 8, 1, e->loc);
+                        IRValue both = emit_bin_w(fn, IR_BAND, x1, x2, 8, 1, e->loc);
+                        IRValue zero = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 8, 0, e->loc);
+                        IRValue is_ov = emit_bin_w(fn, IR_LT, both, zero, 8, 0, e->loc);
+                        return coerce(fn, is_ov, 8, 1, 4, 0, e->loc);
+                    } else {
+                        IRValue is_ov = emit_bin_w(fn, IR_LT, a64, b64, 8, 1, e->loc);
+                        return coerce(fn, is_ov, 8, 1, 4, 0, e->loc);
+                    }
+                } else {
+                    IRValue zero = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 8, tu, e->loc);
+                    IRValue b_ne_zero = emit_bin_w(fn, IR_NE, b64, zero, 8, tu, e->loc);
+                    int L_check = new_label(fn);
+                    int L_done = new_label(fn);
+                    IRValue ov_slot = emit_alloca(fn, 4, 4, 0, e->loc);
+                    IRValue ov_addr = emit_bin_w(fn, IR_ADDR, ov_slot, -1, 8, 1, e->loc);
+                    IRValue c0 = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, c0, -1, -1, 0, 4, 0, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, ov_addr, c0, 0, 4, 0, e->loc);
+                    emit_cbr(fn, b_ne_zero, L_check, L_done, e->loc);
+                    emit_label(fn, L_check, e->loc);
+                    IRValue div_res = emit_bin_w(fn, IR_DIV, full_res, b64, 8, tu, e->loc);
+                    IRValue cur_ov = emit_bin_w(fn, IR_NE, div_res, a64, 8, tu, e->loc);
+                    if (!tu) {
+                        IRValue minus1 = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, minus1, -1, -1, -1, 8, 0, e->loc);
+                        IRValue min_int = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, min_int, -1, -1, (int64_t)0x8000000000000000ULL, 8, 0, e->loc);
+                        IRValue a_eq_m1 = emit_bin_w(fn, IR_EQ, a64, minus1, 8, 0, e->loc);
+                        IRValue b_eq_min = emit_bin_w(fn, IR_EQ, b64, min_int, 8, 0, e->loc);
+                        IRValue special = emit_bin_w(fn, IR_BAND, a_eq_m1, b_eq_min, 8, 0, e->loc);
+                        cur_ov = emit_bin_w(fn, IR_BOR, cur_ov, special, 8, 0, e->loc);
+                    }
+                    IRValue cur_ov_4 = coerce(fn, cur_ov, 8, 0, 4, 0, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, ov_addr, cur_ov_4, 0, 4, 0, e->loc);
+                    emit_br(fn, L_done, e->loc);
+                    emit_label(fn, L_done, e->loc);
+                    IRValue final_ov = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, final_ov, ov_addr, -1, 0, 4, 0, e->loc);
+                    return final_ov;
+                }
+            }
             IRValue is_ov = emit_bin_w(fn, IR_NE, full_res, ext_res, 8, 1, e->loc);
             return coerce(fn, is_ov, 8, 1, 4, 0, e->loc);
         }
