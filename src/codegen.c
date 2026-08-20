@@ -3541,10 +3541,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8D);
                     emit_modrm(&out->text, 0, REG_RCX & 7, 4);
                     emit_byte(&out->text, 0x24);
-                    /* fisttp m32int (DB /1) vs m64int (DD /1): the store must
-                     * match the target width, since the value is read back as
-                     * a full 64-bit word below. */
-                    emit_byte(&out->text, inst->width == 8 ? 0xDD : 0xDB);
+                    /* fisttp m64int (DD /1): always store full 64-bit integer
+                     * into the 8-byte stack scratch, and narrow via mask_to_width below. */
+                    emit_byte(&out->text, 0xDD);
                     emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp [rsp] */
                     int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                                 ? ra->reg[inst->dst] : -1;

@@ -756,13 +756,17 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
             Type mty = parse_declarator(p, type_clone(base), &mname);
             sd = struct_registry_find(&p->tu->structs, tag);
             if (!mname) {
-                const Token *mn = peek(p);
-                if (!is_name_token(mn->kind)) {
-                    die_at(mn->loc.file, mn->loc.line, mn->loc.col,
-                           "expected member name but got '%s'", mn->text);
+                if (peek(p)->kind == TK_COLON) {
+                    mname = xstrdup("");
+                } else {
+                    const Token *mn = peek(p);
+                    if (!is_name_token(mn->kind)) {
+                        die_at(mn->loc.file, mn->loc.line, mn->loc.col,
+                               "expected member name but got '%s'", mn->text);
+                    }
+                    mname = xstrdup(mn->text);
+                    advance(p);
                 }
-                mname = xstrdup(mn->text);
-                advance(p);
             }
             int bit_width = 0;
             if (peek(p)->kind == TK_COLON) {

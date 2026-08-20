@@ -3651,7 +3651,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8D);
                     emit_modrm(&out->text, 0, REG_RCX & 7, 4);
                     emit_byte(&out->text, 0x24);
-                    emit_byte(&out->text, inst->width == 8 ? 0xDD : 0xDB);
+                    emit_byte(&out->text, 0xDD);
                     emit_modrm(&out->text, 0, 1, REG_RCX & 7);
                     int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                                 ? ra->reg[inst->dst] : -1;

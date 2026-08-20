@@ -9,11 +9,9 @@
 991014-1.c
 align-3.c
 align-nest.c
-bswap-2.c
 built-in-setjmp.c
 comp-goto-1.c
 complex-4.c
-conversion.c
 eeprof-1.c
 ffs-1.c
 ffs-2.c
