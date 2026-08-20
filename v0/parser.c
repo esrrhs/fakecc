@@ -391,7 +391,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -406,7 +406,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -450,6 +450,7 @@ struct FunctionDecl {
     int is_extern;
     int is_static;
     char *alias_target;
+    int align;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -668,6 +669,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     advance(p);
 }
 static char *g_parsed_alias = ((void*)0);
+static int g_parsed_mode_size = 0;
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind != TK_IDENT) return 0;
     if (runtime.strcmp(peek(p)->text, "__asm__") == 0 || runtime.strcmp(peek(p)->text, "asm") == 0 || runtime.strcmp(peek(p)->text, "__asm") == 0) {
@@ -800,6 +802,35 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                             if (*alias_out) runtime.free(*alias_out);
                             *alias_out = xstrdup(g_parsed_alias);
                         }
+                        advance(p);
+                    }
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                }
+                continue;
+            } else if (runtime.strcmp(name, "mode") == 0 || runtime.strcmp(name, "__mode__") == 0) {
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    if (peek(p)->kind == TK_IDENT) {
+                        const char *mname = peek(p)->text;
+                        int msize = 0;
+                        if (runtime.strcmp(mname, "QI") == 0 || runtime.strcmp(mname, "__QI__") == 0 ||
+                            runtime.strcmp(mname, "byte") == 0 || runtime.strcmp(mname, "__byte__") == 0)
+                            msize = 1;
+                        else if (runtime.strcmp(mname, "HI") == 0 || runtime.strcmp(mname, "__HI__") == 0)
+                            msize = 2;
+                        else if (runtime.strcmp(mname, "SI") == 0 || runtime.strcmp(mname, "__SI__") == 0 ||
+                                 runtime.strcmp(mname, "word") == 0 || runtime.strcmp(mname, "__word__") == 0)
+                            msize = 4;
+                        else if (runtime.strcmp(mname, "DI") == 0 || runtime.strcmp(mname, "__DI__") == 0)
+                            msize = 8;
+                        else if (runtime.strcmp(mname, "TI") == 0 || runtime.strcmp(mname, "__TI__") == 0)
+                            msize = 16;
+                        if (msize > 0) g_parsed_mode_size = msize;
                         advance(p);
                     }
                     if (peek(p)->kind == TK_RPAREN) {
@@ -1472,12 +1503,20 @@ static Type ptr_wrap(Type t, int is_const, int is_volatile, int is_restrict) {
 static Type parse_declarator(Parser *p, Type base, char **name_out) {
     int pre_align = 0, pre_packed = 0, pre_sso = 0, pre_vec = 0;
     while (parse_attribute(p, &pre_align, &pre_packed, &pre_sso, &pre_vec, ((void*)0))) {}
+    if (g_parsed_mode_size > 0) {
+        if (base.kind == TY_INT || base.kind == TY_FLOAT) base.width = g_parsed_mode_size;
+        g_parsed_mode_size = 0;
+    }
     if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
     enum { MAX_PTRS = 8 };
     int ptr_const[MAX_PTRS], ptr_volatile[MAX_PTRS], ptr_restrict[MAX_PTRS];
     int ptrs = 0;
     for (;;) {
         while (parse_attribute(p, &pre_align, &pre_packed, &pre_sso, &pre_vec, ((void*)0))) {}
+        if (g_parsed_mode_size > 0) {
+            if (base.kind == TY_INT || base.kind == TY_FLOAT) base.width = g_parsed_mode_size;
+            g_parsed_mode_size = 0;
+        }
         if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
         if (peek(p)->kind != TK_STAR) break;
         advance(p);
@@ -1496,6 +1535,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         ptrs++;
     }
     while (parse_attribute(p, &pre_align, &pre_packed, &pre_sso, &pre_vec, ((void*)0))) {}
+    if (g_parsed_mode_size > 0) {
+        if (base.kind == TY_INT || base.kind == TY_FLOAT) base.width = g_parsed_mode_size;
+        g_parsed_mode_size = 0;
+    }
     if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
     Type t;
     if (peek(p)->kind == TK_LPAREN && (p->pos + 1 < p->tokens->len &&
@@ -1564,6 +1607,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         advance(p);
         int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
         while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
+        if (g_parsed_mode_size > 0) {
+            if (base.kind == TY_INT || base.kind == TY_FLOAT) base.width = g_parsed_mode_size;
+            g_parsed_mode_size = 0;
+        }
         t = base;
         if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
         for (int i = 0; i < ptrs; i++)
@@ -1638,6 +1685,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
     }
     int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
     while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
+    if (g_parsed_mode_size > 0) {
+        if (t.kind == TY_INT || t.kind == TY_FLOAT) t.width = g_parsed_mode_size;
+        g_parsed_mode_size = 0;
+    }
     if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
     return t;
 }
@@ -1997,11 +2048,41 @@ static Expr *parse_unary(Parser *p) {
             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                    "expected '(' after '_Alignof'");
         advance(p);
-        Type t = parse_type_abstract(p);
+        if (is_type_start(p, p->pos)) {
+            Type t = parse_type_abstract(p);
+            expect_kind(p, TK_RPAREN, "')'");
+            Expr *e = expr_new_alignof_type(t, loc);
+            type_free(&t);
+            return e;
+        }
+        Expr *sub = parse_expr(p);
         expect_kind(p, TK_RPAREN, "')'");
-        Expr *e = expr_new_alignof_type(t, loc);
-        type_free(&t);
-        return e;
+        int align_val = 0;
+        if (sub->kind == EX_VAR && p->tu) {
+            for (size_t i = 0; i < p->tu->functions.len; i++) {
+                if (runtime.strcmp(p->tu->functions.data[i].name, sub->u.var.name) == 0 &&
+                    p->tu->functions.data[i].align > 0) {
+                    align_val = p->tu->functions.data[i].align;
+                    break;
+                }
+            }
+            if (align_val == 0) {
+                for (size_t i = 0; i < p->tu->globals.len; i++) {
+                    if (p->tu->globals.data[i].kind == ST_DECL &&
+                        p->tu->globals.data[i].u.decl.name &&
+                        runtime.strcmp(p->tu->globals.data[i].u.decl.name, sub->u.var.name) == 0 &&
+                        p->tu->globals.data[i].u.decl.align > 0) {
+                        align_val = p->tu->globals.data[i].u.decl.align;
+                        break;
+                    }
+                }
+            }
+        }
+        expr_free(sub);
+        if (align_val > 0) {
+            return expr_new_int(align_val, loc);
+        }
+        return expr_new_int(1, loc);
     }
     if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_types_compatible_p") == 0) {
         SourceLoc loc = peek(p)->loc;
@@ -2523,7 +2604,7 @@ static Expr *parse_init_list(Parser *p) {
             die_at(loc.file, loc.line, loc.col,
                    "unterminated initializer list");
         }
-        int kind = -1, idx = -1;
+        int kind = -1, idx = -1, end_idx = -1;
         char *member = ((void*)0);
         int has_chained = 0;
         if (peek(p)->kind == TK_DOT) {
@@ -2549,6 +2630,15 @@ static Expr *parse_init_list(Parser *p) {
                        ix->text);
             idx = int_literal_value(ix->text);
             advance(p);
+            if (peek(p)->kind == TK_ELLIPSIS) {
+                advance(p);
+                const Token *eix = peek(p);
+                if (eix->kind != TK_INT_LITERAL)
+                    die_at(eix->loc.file, eix->loc.line, eix->loc.col,
+                           "expected integer constant after '...' in designator");
+                end_idx = int_literal_value(eix->text);
+                advance(p);
+            }
             expect_kind(p, TK_RBRACKET, "']'");
             kind = 0;
             if (peek(p)->kind == TK_DOT || peek(p)->kind == TK_LBRACKET) {
@@ -2572,18 +2662,36 @@ static Expr *parse_init_list(Parser *p) {
         } else {
             elem = parse_assign(p);
         }
-        if (num >= cap) {
-            cap = cap ? cap * 2 : 8;
-            elements = runtime.realloc(elements, cap * sizeof(Expr *));
-            dkind = runtime.realloc(dkind, cap * sizeof(int));
-            dindex = runtime.realloc(dindex, cap * sizeof(int));
-            dmember = runtime.realloc(dmember, cap * sizeof(char *));
+        if (end_idx >= idx) {
+            for (int r = idx; r <= end_idx; r++) {
+                if (num >= cap) {
+                    cap = cap ? cap * 2 : 8;
+                    elements = runtime.realloc(elements, cap * sizeof(Expr *));
+                    dkind = runtime.realloc(dkind, cap * sizeof(int));
+                    dindex = runtime.realloc(dindex, cap * sizeof(int));
+                    dmember = runtime.realloc(dmember, cap * sizeof(char *));
+                }
+                elements[num] = (r == end_idx) ? elem : expr_clone(elem);
+                dkind[num] = kind;
+                dindex[num] = r;
+                dmember[num] = member ? xstrdup(member) : ((void*)0);
+                num++;
+            }
+            runtime.free(member);
+        } else {
+            if (num >= cap) {
+                cap = cap ? cap * 2 : 8;
+                elements = runtime.realloc(elements, cap * sizeof(Expr *));
+                dkind = runtime.realloc(dkind, cap * sizeof(int));
+                dindex = runtime.realloc(dindex, cap * sizeof(int));
+                dmember = runtime.realloc(dmember, cap * sizeof(char *));
+            }
+            elements[num] = elem;
+            dkind[num] = kind;
+            dindex[num] = idx;
+            dmember[num] = member;
+            num++;
         }
-        elements[num] = elem;
-        dkind[num] = kind;
-        dindex[num] = idx;
-        dmember[num] = member;
-        num++;
         if (peek(p)->kind == TK_COMMA) {
             advance(p);
             if (peek(p)->kind == TK_RBRACE) break;
@@ -3412,6 +3520,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.is_extern = is_extern;
     fn.is_static = is_static;
     fn.alias_target = ((void*)0);
+    fn.align = 0;
     char *kr_names[16];
     int nkr = 0;
     if (peek(p)->kind == TK_KW_VOID
@@ -3536,7 +3645,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
             runtime.free(kr_names[i]);
         }
     }
-    while (parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), &fn.alias_target)) {}
+    while (parse_attribute(p, &fn.align, ((void*)0), ((void*)0), ((void*)0), &fn.alias_target)) {}
     if (!fn.alias_target && g_parsed_alias) {
         fn.alias_target = g_parsed_alias;
         g_parsed_alias = ((void*)0);

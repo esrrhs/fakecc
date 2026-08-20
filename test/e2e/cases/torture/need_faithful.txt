@@ -7,13 +7,10 @@
 20031003-1.c
 20040811-1.c
 991014-1.c
-align-3.c
-align-nest.c
 built-in-setjmp.c
 comp-goto-1.c
 eeprof-1.c
 medce-1.c
-memclr.c
 misalign.c
 pr103405.c
 pr105613.c

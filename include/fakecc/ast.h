@@ -285,7 +285,7 @@ struct Stmt {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;   /* ST_DECL: init may be NULL; storage_class: 0=default, 1=static, 2=extern */
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;   /* ST_DECL: init may be NULL; storage_class: 0=default, 1=static, 2=extern */
         Expr *expr;                                 /* ST_EXPR */
         Expr *value;                                /* ST_RETURN */
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */
@@ -343,6 +343,7 @@ typedef struct {
     int    is_extern;   /* 1 = declaration only (`extern int f();`), no body */
     int    is_static;   /* 1 = `static` function — LOCAL linkage */
     char  *alias_target; /* __attribute__((alias("..."))) or NULL */
+    int    align;       /* alignment attribute */
 } FunctionDecl;
 
 typedef struct {
