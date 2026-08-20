@@ -670,6 +670,44 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 static char *g_parsed_alias = ((void*)0);
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind != TK_IDENT) return 0;
+    if (runtime.strcmp(peek(p)->text, "__asm__") == 0 || runtime.strcmp(peek(p)->text, "asm") == 0 || runtime.strcmp(peek(p)->text, "__asm") == 0) {
+        if (p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LPAREN) {
+            size_t k = p->pos + 2;
+            int has_str = 0;
+            while (k < p->tokens->len && p->tokens->data[k].kind == TK_STRING_LITERAL) {
+                has_str = 1;
+                k++;
+            }
+            if (has_str && k < p->tokens->len && p->tokens->data[k].kind == TK_RPAREN) {
+                advance(p);
+                advance(p);
+                char buf[512] = {0};
+                int blen = 0;
+                while (peek(p)->kind == TK_STRING_LITERAL) {
+                    const char *s = peek(p)->text;
+                    size_t slen = runtime.strlen(s);
+                    size_t start = (slen >= 2 && s[0] == '"') ? 1 : 0;
+                    size_t end = (slen >= 2 && s[slen-1] == '"') ? slen - 1 : slen;
+                    for (size_t i = start; i < end && blen < 510; i++) {
+                        buf[blen++] = s[i];
+                    }
+                    buf[blen] = '\0';
+                    advance(p);
+                }
+                if (peek(p)->kind == TK_RPAREN) advance(p);
+                if (buf[0]) {
+                    if (alias_out) {
+                        runtime.free(*alias_out);
+                        *alias_out = xstrdup(buf);
+                    }
+                    runtime.free(g_parsed_alias);
+                    g_parsed_alias = xstrdup(buf);
+                }
+                return 1;
+            }
+        }
+        return 0;
+    }
     if (runtime.strcmp(peek(p)->text, "__attribute__") != 0
         && runtime.strcmp(peek(p)->text, "__attribute") != 0)
         return 0;
