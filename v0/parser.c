@@ -1985,6 +1985,61 @@ static Expr *parse_unary(Parser *p) {
         expr_free(arg);
         return expr_new_int(is_const ? 1 : 0, loc);
     }
+    if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_offsetof") == 0) {
+        SourceLoc loc = peek(p)->loc;
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        Type t = parse_type_abstract(p);
+        expect_kind(p, TK_COMMA, "','");
+        int offset = 0;
+        Type cur_type = type_clone(t);
+        for (;;) {
+            if (peek(p)->kind == TK_IDENT) {
+                const char *mname = peek(p)->text;
+                advance(p);
+                if (cur_type.kind == TY_STRUCT && cur_type.tag) {
+                    const StructDef *sd = struct_registry_find(&p->tu->structs, cur_type.tag);
+                    if (sd) {
+                        int moff = 0;
+                        const StructMember *sm = struct_lookup_member(&p->tu->structs, sd, mname, &moff);
+                        if (sm) {
+                            offset += moff;
+                            Type next = type_clone(sm->type);
+                            type_free(&cur_type);
+                            cur_type = next;
+                        }
+                    }
+                }
+            } else if (peek(p)->kind == TK_LBRACKET) {
+                advance(p);
+                Expr *idx_expr = parse_expr(p);
+                long long idx = 0;
+                fold_const_int(idx_expr, &idx);
+                expr_free(idx_expr);
+                expect_kind(p, TK_RBRACKET, "']'");
+                if (cur_type.kind == TY_ARRAY && cur_type.elem_type) {
+                    offset += (int)(idx * type_size(*cur_type.elem_type));
+                    Type next = type_clone(*cur_type.elem_type);
+                    type_free(&cur_type);
+                    cur_type = next;
+                }
+            } else if (peek(p)->kind == TK_DOT) {
+                advance(p);
+                continue;
+            } else {
+                break;
+            }
+            if (peek(p)->kind == TK_DOT) {
+                advance(p);
+            } else if (peek(p)->kind != TK_LBRACKET) {
+                break;
+            }
+        }
+        expect_kind(p, TK_RPAREN, "')'");
+        type_free(&cur_type);
+        type_free(&t);
+        return expr_new_int(offset, loc);
+    }
     return parse_primary(p);
 }
 static Expr *parse_postfix(Parser *p, Expr *lhs) {
