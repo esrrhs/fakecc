@@ -12,7 +12,6 @@ align-nest.c
 built-in-setjmp.c
 comp-goto-1.c
 eeprof-1.c
-fprintf-2.c
 medce-1.c
 memclr.c
 misalign.c

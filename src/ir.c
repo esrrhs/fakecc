@@ -2025,10 +2025,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (g_ir_tu) {
                 for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
                     if (strcmp(g_ir_tu->functions.data[i].name, e->u.var.name) == 0) {
+                        const char *target_name = g_ir_tu->functions.data[i].alias_target
+                                                ? g_ir_tu->functions.data[i].alias_target
+                                                : e->u.var.name;
                         IRValue v = new_value(fn);
                         emit_inst_w(fn, IR_FADDR, v, -1, -1, 0, 8, 1, e->loc);
                         fn->insts.data[fn->insts.len - 1].call_name =
-                            xstrdup(e->u.var.name);
+                            xstrdup(target_name);
                         return v;
                     }
                 }
@@ -2634,7 +2637,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     }
                 }
                 if (is_direct) {
-                    inst.call_name = xstrdup(cname);
+                    const char *target_name = cname;
+                    if (g_ir_tu) {
+                        for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
+                            if (strcmp(g_ir_tu->functions.data[i].name, cname) == 0 &&
+                                g_ir_tu->functions.data[i].alias_target) {
+                                target_name = g_ir_tu->functions.data[i].alias_target;
+                            }
+                        }
+                    }
+                    inst.call_name = xstrdup(target_name);
                 } else {
                     /* Function-pointer variable: the callee is loaded from a slot.
                      * lower_expr returns the loaded SSA value. */
