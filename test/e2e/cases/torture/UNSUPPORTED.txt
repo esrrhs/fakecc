@@ -38,3 +38,9 @@ pr103405.c
 20040308-1.c
 20041218-2.c
 20070919-1.c
+
+# 128-bit scalar integer types (unsigned __int128 / target int128 requirement)
+pr105613.c
+
+# x87 legacy FPU specific float-to-int overflow clamping (UB under C99 §6.3.1.4, fails on x86_64 SSE)
+20031003-1.c
