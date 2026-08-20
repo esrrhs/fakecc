@@ -391,7 +391,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -406,7 +406,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -449,6 +449,7 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    char *alias_target;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -1483,6 +1484,7 @@ void stmt_free(Stmt *s) {
         runtime.free(s->u.decl.name);
         type_free(&s->u.decl.type);
         expr_free(s->u.decl.init);
+        runtime.free(s->u.decl.alias_target);
         break;
     case ST_EXPR:
         expr_free(s->u.expr);
@@ -1639,6 +1641,7 @@ void tu_free(TranslationUnit *tu) {
         type_free(&tu->functions.data[i].ret_type);
         param_array_free(&tu->functions.data[i].params);
         stmt_array_free(&tu->functions.data[i].body);
+        runtime.free(tu->functions.data[i].alias_target);
     }
     runtime.free(tu->functions.data);
     struct_registry_free(&tu->structs);

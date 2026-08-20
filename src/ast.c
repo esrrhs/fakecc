@@ -1075,6 +1075,7 @@ void stmt_free(Stmt *s) {
         free(s->u.decl.name);
         type_free(&s->u.decl.type);
         expr_free(s->u.decl.init);
+        free(s->u.decl.alias_target);
         break;
     case ST_EXPR:
         expr_free(s->u.expr);
@@ -1249,6 +1250,7 @@ void tu_free(TranslationUnit *tu) {
         type_free(&tu->functions.data[i].ret_type);
         param_array_free(&tu->functions.data[i].params);
         stmt_array_free(&tu->functions.data[i].body);
+        free(tu->functions.data[i].alias_target);
     }
     free(tu->functions.data);
     struct_registry_free(&tu->structs);

@@ -366,12 +366,26 @@ struct IRGlobalArray {
     size_t len;
     size_t cap;
 };typedef struct IRGlobalArray IRGlobalArray;
+struct IRAlias {
+    char *name;
+    char *target;
+    int is_static;
+    SourceLoc loc;
+};typedef struct IRAlias IRAlias;
+struct IRAliasArray {
+    IRAlias *data;
+    size_t len;
+    size_t cap;
+};typedef struct IRAliasArray IRAliasArray;
 struct IRModule {
     IRFunctionArray functions;
     IRGlobalArray globals;
+    IRAliasArray aliases;
 };typedef struct IRModule IRModule;
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
+void ir_module_push_alias(IRModule *m, const char *name, const char *target,
+                          int is_static, SourceLoc loc);
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -732,7 +746,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -747,7 +761,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -790,6 +804,7 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    char *alias_target;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -3934,4 +3949,23 @@ int dreg;
         runtime.free(fp->fn_name);
     }
     runtime.free(fnaddr_patches);
+    for (size_t ai = 0; ai < ir->aliases.len; ai++) {
+        const IRAlias *al = &ir->aliases.data[ai];
+        int tsym = emit_module_find_symbol(out, al->target);
+        if (tsym >= 0) {
+            EmitSymbol target_sym = out->syms[tsym];
+            int existing = emit_module_find_symbol(out, al->name);
+            if (existing >= 0 && out->syms[existing].shndx == 0) {
+                out->syms[existing].binding = al->is_static ? 0 : 1;
+                out->syms[existing].type = target_sym.type;
+                out->syms[existing].shndx = target_sym.shndx;
+                out->syms[existing].value = target_sym.value;
+                out->syms[existing].size = target_sym.size;
+            } else {
+                emit_module_add_symbol(out, al->name, al->is_static ? 0 : 1,
+                                       target_sym.type, target_sym.shndx,
+                                       target_sym.value, target_sym.size);
+            }
+        }
+    }
 }

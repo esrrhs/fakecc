@@ -270,12 +270,28 @@ typedef struct {
 } IRGlobalArray;
 
 typedef struct {
+    char *name;         /* xstrdup'd */
+    char *target;       /* xstrdup'd */
+    int   is_static;
+    SourceLoc loc;
+} IRAlias;
+
+typedef struct {
+    IRAlias *data;
+    size_t len;
+    size_t cap;
+} IRAliasArray;
+
+typedef struct {
     IRFunctionArray functions;
     IRGlobalArray   globals;
+    IRAliasArray    aliases;
 } IRModule;
 
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
+void ir_module_push_alias(IRModule *m, const char *name, const char *target,
+                          int is_static, SourceLoc loc);
 
 #include "fakecc/ast.h"
 /* Lower AST to IR.  When `pin_locals` is set (-O0), scalar locals and params

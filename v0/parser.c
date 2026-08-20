@@ -391,7 +391,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -406,7 +406,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -449,6 +449,7 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    char *alias_target;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -666,7 +667,8 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
     }
     advance(p);
 }
-static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size) {
+static char *g_parsed_alias = ((void*)0);
+static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind != TK_IDENT) return 0;
     if (runtime.strcmp(peek(p)->text, "__attribute__") != 0
         && runtime.strcmp(peek(p)->text, "__attribute") != 0)
@@ -741,6 +743,33 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                     }
                 }
                 continue;
+            } else if (runtime.strcmp(name, "alias") == 0 || runtime.strcmp(name, "__alias__") == 0) {
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    if (peek(p)->kind == TK_STRING_LITERAL) {
+                        const char *src = peek(p)->text;
+                        size_t slen = runtime.strlen(src);
+                        if (slen >= 1 && src[0] == '"') { src++; slen--; }
+                        if (slen >= 1 && src[slen-1] == '"') slen--;
+                        if (g_parsed_alias) runtime.free(g_parsed_alias);
+                        g_parsed_alias = runtime.malloc(slen + 1);
+                        if (!g_parsed_alias) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                        runtime.memcpy(g_parsed_alias, src, slen);
+                        g_parsed_alias[slen] = '\0';
+                        if (alias_out) {
+                            if (*alias_out) runtime.free(*alias_out);
+                            *alias_out = xstrdup(g_parsed_alias);
+                        }
+                        advance(p);
+                    }
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                }
+                continue;
             }
         }
         if (peek(p)->kind == TK_LPAREN) depth++;
@@ -765,7 +794,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
     return 1;
 }
 static int skip_attribute(Parser *p) {
-    return parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0));
+    return parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), ((void*)0));
 }
 static int tu_has_import(const TranslationUnit *tu, const char *name) {
     for (size_t i = 0; i < tu->imports.len; i++)
@@ -938,7 +967,7 @@ static Type parse_specifiers(Parser *p) {
     if (peek(p)->kind == TK_KW_STRUCT) {
         advance(p);
         int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
             runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
@@ -962,7 +991,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected struct tag but got '%s'", tag->text);
         }
         advance(p);
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         if (peek(p)->kind == TK_LBRACE) {
             if (struct_registry_find(&p->tu->structs, tag->text)) {
                 die_at(tag->loc.file, tag->loc.line, tag->loc.col,
@@ -994,7 +1023,7 @@ static Type parse_specifiers(Parser *p) {
     if (peek(p)->kind == TK_KW_UNION) {
         advance(p);
         int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
             runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
@@ -1019,7 +1048,7 @@ static Type parse_specifiers(Parser *p) {
                    "expected union tag but got '%s'", tag->text);
         }
         advance(p);
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         if (peek(p)->kind == TK_LBRACE) {
             if (struct_registry_find(&p->tu->structs, tag->text)) {
                 die_at(tag->loc.file, tag->loc.line, tag->loc.col,
@@ -1256,7 +1285,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     }
     expect_kind(p, TK_RBRACE, "'}'");
     int align = 0, packed = 0, sso = 0, vec = 0;
-    while (parse_attribute(p, &align, &packed, &sso, &vec)) {}
+    while (parse_attribute(p, &align, &packed, &sso, &vec, ((void*)0))) {}
     if (align > sd->align) sd->align = align;
     if (packed) sd->align = 1;
     if (sso == 1) struct_def_apply_sso(sd, 1);
@@ -1488,7 +1517,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         *name_out = xstrdup(peek(p)->text);
         advance(p);
         int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         t = base;
         if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
         for (int i = 0; i < ptrs; i++)
@@ -1562,7 +1591,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         ptrs = 0;
     }
     int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
-    while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+    while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
     if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
     return t;
 }
@@ -2539,12 +2568,14 @@ static int is_function_declaration_lookahead(Parser *p) {
         saw_name = 1;
     }
     for (;;) { if (!skip_attribute(p)) break; }
+    int has_bracket = 0;
     while (peek(p)->kind == TK_LBRACKET) {
+        has_bracket = 1;
         advance(p);
         while (peek(p)->kind != TK_RBRACKET && peek(p)->kind != TK_EOF) advance(p);
         if (peek(p)->kind == TK_RBRACKET) advance(p);
     }
-    int is_func = (saw_name && peek(p)->kind == TK_LPAREN);
+    int is_func = (!has_bracket && saw_name && peek(p)->kind == TK_LPAREN);
     p->pos = save;
     return is_func;
 }
@@ -2710,6 +2741,8 @@ static Stmt parse_stmt(Parser *p) {
             s.u.decl.type = ty;
             s.u.decl.storage_class = storage_class;
             s.u.decl.init = ((void*)0);
+            s.u.decl.alias_target = ((void*)0);
+            while (parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {
                 advance(p);
                 if (storage_class == 2) {
@@ -2721,6 +2754,11 @@ static Stmt parse_stmt(Parser *p) {
                 } else {
                     s.u.decl.init = parse_assign(p);
                 }
+            }
+            while (parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), &s.u.decl.alias_target)) {}
+            if (!s.u.decl.alias_target && g_parsed_alias) {
+                s.u.decl.alias_target = g_parsed_alias;
+                g_parsed_alias = ((void*)0);
             }
             stmt_array_push(&decls, s);
             if (peek(p)->kind == TK_COMMA) {
@@ -3117,7 +3155,7 @@ static Stmt parse_typedef_stmt(Parser *p) {
             advance(p);
         }
         int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         if (attr_vec > 0 && !ty.is_vector) {
             Type vt = type_make_vector(ty, attr_vec);
             type_free(&ty);
@@ -3130,7 +3168,7 @@ static Stmt parse_typedef_stmt(Parser *p) {
             typedef_registry_add(&p->tu->typedefs, decl_name, ty);
             runtime.free(decl_name);
         }
-        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec)) {}
+        while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         if (peek(p)->kind == TK_COMMA) {
             advance(p);
             continue;
@@ -3272,6 +3310,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.is_unprototyped = 0;
     fn.is_extern = is_extern;
     fn.is_static = is_static;
+    fn.alias_target = ((void*)0);
     char *kr_names[16];
     int nkr = 0;
     if (peek(p)->kind == TK_KW_VOID
@@ -3396,8 +3435,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
             runtime.free(kr_names[i]);
         }
     }
-    for (;;) {
-        if (!skip_attribute(p)) break;
+    while (parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), &fn.alias_target)) {}
+    if (!fn.alias_target && g_parsed_alias) {
+        fn.alias_target = g_parsed_alias;
+        g_parsed_alias = ((void*)0);
     }
     if (fn.is_extern || peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
         fn.is_extern = 1;

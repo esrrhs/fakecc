@@ -7,9 +7,6 @@
 20031003-1.c
 20040811-1.c
 991014-1.c
-alias-2.c
-alias-3.c
-alias-4.c
 align-1.c
 align-3.c
 align-nest.c

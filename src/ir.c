@@ -75,6 +75,9 @@ void ir_module_init(IRModule *m) {
     m->globals.data = NULL;
     m->globals.len = 0;
     m->globals.cap = 0;
+    m->aliases.data = NULL;
+    m->aliases.len = 0;
+    m->aliases.cap = 0;
 }
 
 void ir_module_free(IRModule *m) {
@@ -111,12 +114,35 @@ void ir_module_free(IRModule *m) {
         free(m->globals.data[i].fixups);
     }
     free(m->globals.data);
+    for (size_t i = 0; i < m->aliases.len; i++) {
+        free(m->aliases.data[i].name);
+        free(m->aliases.data[i].target);
+    }
+    free(m->aliases.data);
     m->functions.data = NULL;
     m->functions.len = 0;
     m->functions.cap = 0;
     m->globals.data = NULL;
     m->globals.len = 0;
     m->globals.cap = 0;
+    m->aliases.data = NULL;
+    m->aliases.len = 0;
+    m->aliases.cap = 0;
+}
+
+void ir_module_push_alias(IRModule *m, const char *name, const char *target,
+                          int is_static, SourceLoc loc) {
+    if (m->aliases.len >= m->aliases.cap) {
+        size_t nc = m->aliases.cap ? m->aliases.cap * 2 : 4;
+        m->aliases.data = realloc(m->aliases.data, nc * sizeof(IRAlias));
+        if (!m->aliases.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->aliases.cap = nc;
+    }
+    IRAlias *al = &m->aliases.data[m->aliases.len++];
+    al->name = xstrdup(name);
+    al->target = xstrdup(target);
+    al->is_static = is_static;
+    al->loc = loc;
 }
 
 static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
@@ -4478,6 +4504,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     for (size_t i = 0; i < tu->globals.len; i++) {
         const Stmt *s = &tu->globals.data[i];
         if (s->kind != ST_DECL) continue;
+        if (s->u.decl.alias_target) {
+            ir_module_push_alias(ir, s->u.decl.name, s->u.decl.alias_target,
+                                 s->u.decl.storage_class == 1, s->loc);
+            continue;
+        }
         /* extern → declaration only: skip emission entirely. */
         if (s->u.decl.storage_class == 2) continue;
         int sz = type_size(s->u.decl.type);
@@ -4520,6 +4551,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
 
     for (size_t i = 0; i < tu->functions.len; i++) {
         const FunctionDecl *fd = &tu->functions.data[i];
+        if (fd->alias_target) {
+            ir_module_push_alias(ir, fd->name, fd->alias_target,
+                                 fd->is_static, fd->loc);
+            continue;
+        }
 
         /* `extern` declarations have no body — no IR is generated for them. */
         if (fd->is_extern) continue;

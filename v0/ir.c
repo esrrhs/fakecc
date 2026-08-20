@@ -214,12 +214,26 @@ struct IRGlobalArray {
     size_t len;
     size_t cap;
 };typedef struct IRGlobalArray IRGlobalArray;
+struct IRAlias {
+    char *name;
+    char *target;
+    int is_static;
+    SourceLoc loc;
+};typedef struct IRAlias IRAlias;
+struct IRAliasArray {
+    IRAlias *data;
+    size_t len;
+    size_t cap;
+};typedef struct IRAliasArray IRAliasArray;
 struct IRModule {
     IRFunctionArray functions;
     IRGlobalArray globals;
+    IRAliasArray aliases;
 };typedef struct IRModule IRModule;
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
+void ir_module_push_alias(IRModule *m, const char *name, const char *target,
+                          int is_static, SourceLoc loc);
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -580,7 +594,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -595,7 +609,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -638,6 +652,7 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    char *alias_target;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -795,6 +810,9 @@ void ir_module_init(IRModule *m) {
     m->globals.data = ((void*)0);
     m->globals.len = 0;
     m->globals.cap = 0;
+    m->aliases.data = ((void*)0);
+    m->aliases.len = 0;
+    m->aliases.cap = 0;
 }
 void ir_module_free(IRModule *m) {
     for (size_t i = 0; i < m->functions.len; i++) {
@@ -828,12 +846,34 @@ void ir_module_free(IRModule *m) {
         runtime.free(m->globals.data[i].fixups);
     }
     runtime.free(m->globals.data);
+    for (size_t i = 0; i < m->aliases.len; i++) {
+        runtime.free(m->aliases.data[i].name);
+        runtime.free(m->aliases.data[i].target);
+    }
+    runtime.free(m->aliases.data);
     m->functions.data = ((void*)0);
     m->functions.len = 0;
     m->functions.cap = 0;
     m->globals.data = ((void*)0);
     m->globals.len = 0;
     m->globals.cap = 0;
+    m->aliases.data = ((void*)0);
+    m->aliases.len = 0;
+    m->aliases.cap = 0;
+}
+void ir_module_push_alias(IRModule *m, const char *name, const char *target,
+                          int is_static, SourceLoc loc) {
+    if (m->aliases.len >= m->aliases.cap) {
+        size_t nc = m->aliases.cap ? m->aliases.cap * 2 : 4;
+        m->aliases.data = runtime.realloc(m->aliases.data, nc * sizeof(IRAlias));
+        if (!m->aliases.data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        m->aliases.cap = nc;
+    }
+    IRAlias *al = &m->aliases.data[m->aliases.len++];
+    al->name = xstrdup(name);
+    al->target = xstrdup(target);
+    al->is_static = is_static;
+    al->loc = loc;
 }
 static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
                                        int size, char *init_bytes,
@@ -4630,6 +4670,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     for (size_t i = 0; i < tu->globals.len; i++) {
         const Stmt *s = &tu->globals.data[i];
         if (s->kind != ST_DECL) continue;
+        if (s->u.decl.alias_target) {
+            ir_module_push_alias(ir, s->u.decl.name, s->u.decl.alias_target,
+                                 s->u.decl.storage_class == 1, s->loc);
+            continue;
+        }
         if (s->u.decl.storage_class == 2) continue;
         int sz = type_size(s->u.decl.type);
         if (s->u.decl.init && s->u.decl.type.kind == TY_STRUCT && s->u.decl.init->kind == EX_INIT_LIST && s->u.decl.type.tag) {
@@ -4668,6 +4713,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     }
     for (size_t i = 0; i < tu->functions.len; i++) {
         const FunctionDecl *fd = &tu->functions.data[i];
+        if (fd->alias_target) {
+            ir_module_push_alias(ir, fd->name, fd->alias_target,
+                                 fd->is_static, fd->loc);
+            continue;
+        }
         if (fd->is_extern) continue;
         IRFunction irfn;
         runtime.memset(&irfn, 0, sizeof(irfn));

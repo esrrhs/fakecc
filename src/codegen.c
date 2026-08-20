@@ -3917,4 +3917,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(fp->fn_name);
     }
     free(fnaddr_patches);
+
+    /* ---- Resolve module aliases (variables and functions) ---- */
+    for (size_t ai = 0; ai < ir->aliases.len; ai++) {
+        const IRAlias *al = &ir->aliases.data[ai];
+        int tsym = emit_module_find_symbol(out, al->target);
+        if (tsym >= 0) {
+            EmitSymbol target_sym = out->syms[tsym];
+            int existing = emit_module_find_symbol(out, al->name);
+            if (existing >= 0 && out->syms[existing].shndx == SECT_UNDEF) {
+                out->syms[existing].binding = al->is_static ? 0 : 1;
+                out->syms[existing].type = target_sym.type;
+                out->syms[existing].shndx = target_sym.shndx;
+                out->syms[existing].value = target_sym.value;
+                out->syms[existing].size = target_sym.size;
+            } else {
+                emit_module_add_symbol(out, al->name, al->is_static ? 0 : 1,
+                                       target_sym.type, target_sym.shndx,
+                                       target_sym.value, target_sym.size);
+            }
+        }
+    }
 }

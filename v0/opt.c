@@ -214,12 +214,26 @@ struct IRGlobalArray {
     size_t len;
     size_t cap;
 };typedef struct IRGlobalArray IRGlobalArray;
+struct IRAlias {
+    char *name;
+    char *target;
+    int is_static;
+    SourceLoc loc;
+};typedef struct IRAlias IRAlias;
+struct IRAliasArray {
+    IRAlias *data;
+    size_t len;
+    size_t cap;
+};typedef struct IRAliasArray IRAliasArray;
 struct IRModule {
     IRFunctionArray functions;
     IRGlobalArray globals;
+    IRAliasArray aliases;
 };typedef struct IRModule IRModule;
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
+void ir_module_push_alias(IRModule *m, const char *name, const char *target,
+                          int is_static, SourceLoc loc);
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -580,7 +594,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -595,7 +609,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -638,6 +652,7 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    char *alias_target;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
