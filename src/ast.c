@@ -96,7 +96,7 @@ void type_free(Type *t) {
 extern const StructRegistry *get_ir_structs(void);
 extern const StructRegistry *get_parser_structs(void);
 
-int type_size(Type t) {
+long long type_size(Type t) {
     if (t.is_vector) return t.width;
     /* Walk array nesting through a pointer instead of recursing on the
      * by-value parameter.  Self-recursion here is rewritten by clang into a
@@ -104,7 +104,7 @@ int type_size(Type t) {
      * given a private copy, both this function and its caller then read a
      * mutated Type.  Never writing to `t` keeps the parameter intact. */
     const Type *p = &t;
-    int count = 1;
+    long long count = 1;
     while (p->kind == TY_ARRAY && p->elem_type) {
         count *= p->length;
         p = p->elem_type;
@@ -132,14 +132,14 @@ int type_size(Type t) {
     return 0;
 }
 
-Type type_make_vector(Type elem, int vec_size) {
+Type type_make_vector(Type elem, long long vec_size) {
     Type t = elem;
     t.is_vector = 1;
     t.width = vec_size;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.elem_type = type_clone(elem);
-    int esz = type_size(elem);
+    long long esz = type_size(elem);
     t.length = esz > 0 ? vec_size / esz : 1;
     return t;
 }
@@ -159,7 +159,7 @@ Type type_make_ptr(Type pointee) {
 /* fixup all TY_STRUCT widths in a type tree that match the given tag.
  * this is called after a struct definition is complete so that self-referential
  * pointer members use the final struct size instead of a stale snapshot. */
-static void type_fixup_struct_width(Type *t, const char *tag, int final_width) {
+static void type_fixup_struct_width(Type *t, const char *tag, long long final_width) {
     if (!t || !tag) return;
     if (t->kind == TY_STRUCT && t->tag && strcmp(t->tag, tag) == 0) {
         t->width = final_width;
@@ -176,7 +176,7 @@ static void type_fixup_struct_width(Type *t, const char *tag, int final_width) {
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
                                          const char *name,
-                                         int *offset_out) {
+                                         long long *offset_out) {
     if (!sd || !name) return NULL;
     for (int i = 0; i < sd->num_members; i++) {
         const StructMember *m = &sd->members[i];
@@ -187,7 +187,7 @@ const StructMember *struct_lookup_member(const StructRegistry *reg,
         if ((!m->name || !m->name[0]) && m->type.kind == TY_STRUCT
             && m->type.tag && reg) {
             const StructDef *nested = struct_registry_find_c(reg, m->type.tag);
-            int inner = 0;
+            long long inner = 0;
             const StructMember *found =
                 struct_lookup_member(reg, nested, name, &inner);
             if (found) {
@@ -206,7 +206,7 @@ void struct_def_fixup_self_types(StructDef *sd) {
     }
 }
 
-Type type_make_array(Type elem, int length) {
+Type type_make_array(Type elem, long long length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
     t.is_unsigned = elem.is_unsigned;
     t.is_const = elem.is_const; t.is_volatile = elem.is_volatile; t.is_restrict = elem.is_restrict;
@@ -226,7 +226,7 @@ Type type_make_vla(Type elem, Expr *dim) {
     return t;
 }
 
-Type type_make_struct(const char *tag, int size) {
+Type type_make_struct(const char *tag, long long size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL;
@@ -357,14 +357,14 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 }
 
 /* Round up x to a multiple of align. */
-static int align_up(int x, int align) {
+static long long align_up(long long x, long long align) {
     if (align <= 1) return x;
     return (x + align - 1) & ~(align - 1);
 }
 
 /* Natural alignment of a type: 1/2/4/8 for scalars, elem's alignment for
  * arrays, max member alignment for structs. */
-int type_align(Type t) {
+long long type_align(Type t) {
     if (t.is_vector) return t.width > 16 ? 16 : (t.width > 0 ? t.width : 1);
     /* Pointer walk rather than self-recursion — see type_size(). */
     const Type *p = &t;
@@ -497,11 +497,11 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         if (!sd->members) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         sd->cap_members = nc;
     }
-    int a = sd->is_packed ? 1 : type_align(ty);
-    int sz = type_size(ty);
+    long long a = sd->is_packed ? 1 : type_align(ty);
+    long long sz = type_size(ty);
     /* Track the max member alignment for final struct alignment. */
     if (!sd->is_packed && a > sd->align) sd->align = a;
-    int off;
+    long long off;
     if (sd->is_union) {
         /* Union members all start at offset 0; total size is the max. */
         off = 0;
@@ -510,15 +510,15 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
          * the same byte-width unit packs into one storage unit.  The unit
          * size is the smallest of {1,2,4,8} bytes that holds all its bits
          * (we use the declared type width, e.g. unsigned → 4 bytes). */
-        int unit_bits = sz * 8;
+        long long unit_bits = sz * 8;
         if (sd->bf_unit_type == sz && sd->bf_unit_used + bit_width <= unit_bits) {
             /* Fits in the current open unit. */
             off = sd->bf_unit_offset;
         } else {
             /* Close any open unit and start a new one.  Track the raw byte
-             * end of the closed unit; defer alignment padding to
-             * struct_def_finish() so a following member can still pack into
-             * any trailing gap. */
+              * end of the closed unit; defer alignment padding to
+              * struct_def_finish() so a following member can still pack into
+              * any trailing gap. */
             if (sd->bf_unit_used > 0)
                 sd->size = sd->bf_unit_offset + sd->bf_unit_type;
             sd->bf_unit_type = sz;
@@ -531,7 +531,7 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         sd->members[sd->num_members].offset = off;
         sd->members[sd->num_members].bit_width = bit_width;
         /* Advance logical struct size to cover this unit if it extends past. */
-        int unit_end = sd->bf_unit_offset + sz;
+        long long unit_end = sd->bf_unit_offset + sz;
         if (unit_end > sd->size) sd->size = unit_end;
         sd->members[sd->num_members].name = xstrdup(name);
         sd->members[sd->num_members].type = type_clone(ty);

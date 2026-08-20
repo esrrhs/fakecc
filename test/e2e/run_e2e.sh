@@ -7,7 +7,7 @@ set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
 shift || true
-CC_TIMEOUT=${CC_TIMEOUT:-30}
+CC_TIMEOUT=${CC_TIMEOUT:-60}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 

@@ -150,7 +150,7 @@ enum TypeKind {
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int width;
+    long long width;
     int is_unsigned;
     unsigned is_const : 1;
     unsigned is_volatile : 1;
@@ -158,7 +158,7 @@ struct Type {
     unsigned is_bool : 1;
     Type *pointee;
     Type *elem_type;
-    int length;
+    long long length;
     struct Expr *vla_dim;
     char *tag;
     Type *func_ret;
@@ -169,7 +169,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
 };
-static inline Type type_make_int(int width, int is_unsigned) {
+static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
@@ -182,7 +182,7 @@ static inline Type type_make_bool(void) {
     return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
-static inline Type type_make_float(int width) {
+static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
@@ -198,18 +198,18 @@ static inline Type type_make_void(void) {
 }
 Type type_clone(Type t);
 void type_free(Type *t);
-int type_size(Type t);
-int type_align(Type t);
+long long type_size(Type t);
+long long type_align(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
-Type type_make_array(Type elem, int length);
-Type type_make_vector(Type elem, int vec_size);
+Type type_make_array(Type elem, long long length);
+Type type_make_vector(Type elem, long long vec_size);
 Type type_make_vla(Type elem, struct Expr *dim);
-Type type_make_struct(const char *tag, int size);
+Type type_make_struct(const char *tag, long long size);
 Type type_make_func(Type ret, Type * *params, int nparams);
 Type type_make_func_var(Type ret, Type * *params, int nparams, int is_variadic);
 Type type_decay(Type t);
@@ -472,7 +472,7 @@ void import_array_free(ImportArray *a);
 struct StructMember {
     char *name;
     Type type;
-    int offset;
+    long long offset;
     int bit_width;
     int bit_offset;
 };typedef struct StructMember StructMember;
@@ -483,14 +483,14 @@ struct StructDef {
     StructMember *members;
     int num_members;
     int cap_members;
-    int size;
-    int align;
+    long long size;
+    long long align;
     int is_packed;
     SourceLoc loc;
     Type *canonical_type;
-    int bf_unit_type;
+    long long bf_unit_type;
     int bf_unit_used;
-    int bf_unit_offset;
+    long long bf_unit_offset;
 };typedef struct StructDef StructDef;
 struct StructRegistry {
     StructDef *data;
@@ -509,7 +509,7 @@ void struct_def_fixup_self_types(StructDef *sd);
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
                                          const char *name,
-                                         int *offset_out);
+                                         long long *offset_out);
 struct FunctionArray {
     FunctionDecl *data;
     size_t len;
@@ -643,10 +643,10 @@ void type_free(Type *t) {
         runtime.free(t->func_params); t->func_params = ((void*)0);
     }
 }
-int type_size(Type t) {
+long long type_size(Type t) {
     if (t.is_vector) return t.width;
     const Type *p = &t;
-    int count = 1;
+    long long count = 1;
     while (p->kind == TY_ARRAY && p->elem_type) {
         count *= p->length;
         p = p->elem_type;
@@ -673,14 +673,14 @@ int type_size(Type t) {
     }
     return 0;
 }
-Type type_make_vector(Type elem, int vec_size) {
+Type type_make_vector(Type elem, long long vec_size) {
     Type t = elem;
     t.is_vector = 1;
     t.width = vec_size;
     t.elem_type = runtime.malloc(sizeof(Type));
     if (!t.elem_type) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     *t.elem_type = type_clone(elem);
-    int esz = type_size(elem);
+    long long esz = type_size(elem);
     t.length = esz > 0 ? vec_size / esz : 1;
     return t;
 }
@@ -695,7 +695,7 @@ Type type_make_ptr(Type pointee) {
     *t.pointee = type_clone(pointee);
     return t;
 }
-static void type_fixup_struct_width(Type *t, const char *tag, int final_width) {
+static void type_fixup_struct_width(Type *t, const char *tag, long long final_width) {
     if (!t || !tag) return;
     if (t->kind == TY_STRUCT && t->tag && runtime.strcmp(t->tag, tag) == 0) {
         t->width = final_width;
@@ -711,7 +711,7 @@ static void type_fixup_struct_width(Type *t, const char *tag, int final_width) {
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
                                          const char *name,
-                                         int *offset_out) {
+                                         long long *offset_out) {
     if (!sd || !name) return ((void*)0);
     for (int i = 0; i < sd->num_members; i++) {
         const StructMember *m = &sd->members[i];
@@ -722,7 +722,7 @@ const StructMember *struct_lookup_member(const StructRegistry *reg,
         if ((!m->name || !m->name[0]) && m->type.kind == TY_STRUCT
             && m->type.tag && reg) {
             const StructDef *nested = struct_registry_find_c(reg, m->type.tag);
-            int inner = 0;
+            long long inner = 0;
             const StructMember *found =
                 struct_lookup_member(reg, nested, name, &inner);
             if (found) {
@@ -739,7 +739,7 @@ void struct_def_fixup_self_types(StructDef *sd) {
         type_fixup_struct_width(&sd->members[i].type, sd->tag, sd->size);
     }
 }
-Type type_make_array(Type elem, int length) {
+Type type_make_array(Type elem, long long length) {
     Type t; t.kind = TY_ARRAY; t.width = elem.width;
     t.is_unsigned = elem.is_unsigned;
     t.is_const = elem.is_const; t.is_volatile = elem.is_volatile; t.is_restrict = elem.is_restrict;
@@ -757,7 +757,7 @@ Type type_make_vla(Type elem, Expr *dim) {
     t.vla_dim = dim;
     return t;
 }
-Type type_make_struct(const char *tag, int size) {
+Type type_make_struct(const char *tag, long long size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0);
@@ -868,11 +868,11 @@ StructDef *struct_registry_find(StructRegistry *r, const char *tag) {
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag) {
     return struct_registry_find((StructRegistry *)r, tag);
 }
-static int align_up(int x, int align) {
+static long long align_up(long long x, long long align) {
     if (align <= 1) return x;
     return (x + align - 1) & ~(align - 1);
 }
-int type_align(Type t) {
+long long type_align(Type t) {
     if (t.is_vector) return t.width > 16 ? 16 : (t.width > 0 ? t.width : 1);
     const Type *p = &t;
     while (p->kind == TY_ARRAY && p->elem_type) p = p->elem_type;
@@ -990,14 +990,14 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         if (!sd->members) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         sd->cap_members = nc;
     }
-    int a = sd->is_packed ? 1 : type_align(ty);
-    int sz = type_size(ty);
+    long long a = sd->is_packed ? 1 : type_align(ty);
+    long long sz = type_size(ty);
     if (!sd->is_packed && a > sd->align) sd->align = a;
-    int off;
+    long long off;
     if (sd->is_union) {
         off = 0;
     } else if (bit_width > 0 && ty.kind == TY_INT) {
-        int unit_bits = sz * 8;
+        long long unit_bits = sz * 8;
         if (sd->bf_unit_type == sz && sd->bf_unit_used + bit_width <= unit_bits) {
             off = sd->bf_unit_offset;
         } else {
@@ -1012,7 +1012,7 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         sd->bf_unit_used += bit_width;
         sd->members[sd->num_members].offset = off;
         sd->members[sd->num_members].bit_width = bit_width;
-        int unit_end = sd->bf_unit_offset + sz;
+        long long unit_end = sd->bf_unit_offset + sz;
         if (unit_end > sd->size) sd->size = unit_end;
         sd->members[sd->num_members].name = xstrdup(name);
         sd->members[sd->num_members].type = type_clone(ty);

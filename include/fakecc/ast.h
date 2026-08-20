@@ -21,7 +21,7 @@ typedef enum {
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. TY_FUNC: 0. */
+    long long width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. TY_FUNC: 0. */
     int is_unsigned;   /* TY_INT only */
     unsigned is_const : 1; /* const-qualified (assignment forbidden) */
     unsigned is_volatile : 1; /* volatile-qualified (no-op without an optimizer) */
@@ -29,7 +29,7 @@ struct Type {
     unsigned is_bool : 1;  /* _Bool (width-1 unsigned that normalizes to 0/1) */
     Type *pointee;     /* TY_PTR only: malloc'd */
     Type *elem_type;   /* TY_ARRAY only: malloc'd */
-    int length;        /* TY_ARRAY only */
+    long long length;  /* TY_ARRAY only */
     struct Expr *vla_dim; /* TY_ARRAY only: dynamic dimension expr if length == -1 */
     char *tag;         /* TY_STRUCT only: xstrdup'd tag name */
     Type *func_ret;    /* TY_FUNC only: malloc'd return type */
@@ -41,7 +41,7 @@ struct Type {
     int   is_vector;   /* 1 = GCC vector extension (__attribute__((vector_size(N)))) */
 };
 
-static inline Type type_make_int(int width, int is_unsigned) {
+static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
@@ -54,7 +54,7 @@ static inline Type type_make_bool(void) {
     return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
-static inline Type type_make_float(int width) {
+static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
@@ -75,8 +75,8 @@ Type type_clone(Type t);
 void type_free(Type *t);
 /* Total byte size of a Type: sizeof for scalars, N*elem for arrays,
  * width for structs (which is stashed at parse-time via layout). */
-int  type_size(Type t);
-int  type_align(Type t); /* natural alignment of a type */
+long long  type_size(Type t);
+long long  type_align(Type t); /* natural alignment of a type */
 
 /* SysV AMD64 aggregate classification for ≤16-byte structs/unions.
  * Returns the number of eightbytes passed/returned in registers (1 or 2),
@@ -90,10 +90,10 @@ typedef enum {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 
 Type type_make_ptr(Type pointee);
-Type type_make_array(Type elem, int length);
-Type type_make_vector(Type elem, int vec_size);
+Type type_make_array(Type elem, long long length);
+Type type_make_vector(Type elem, long long vec_size);
 Type type_make_vla(Type elem, struct Expr *dim);
-Type type_make_struct(const char *tag, int size);
+Type type_make_struct(const char *tag, long long size);
 Type type_make_func(Type ret, Type * const *params, int nparams);
 Type type_make_func_var(Type ret, Type * const *params, int nparams, int is_variadic);
 Type type_decay(Type t);
@@ -376,7 +376,7 @@ void import_array_free(ImportArray *a);
 typedef struct {
     char *name;
     Type type;
-    int  offset;
+    long long offset;
     int  bit_width;     /* 0 = normal member, else bitfield width in bits */
     int  bit_offset;    /* bit position within the unit (0 = LSB); valid when
                          * bit_width > 0.  Codegen loads the unit, shifts right
@@ -390,8 +390,8 @@ typedef struct {
     StructMember *members;
     int num_members;
     int cap_members;
-    int size;             /* total size in bytes (already aligned) */
-    int align;            /* max member alignment seen so far */
+    long long size;       /* total size in bytes (already aligned) */
+    long long align;      /* max member alignment seen so far */
     int is_packed;        /* 1 if __attribute__((packed)) */
     SourceLoc loc;
     /* Canonical TY_STRUCT Type for this struct's tag, if one has been created
@@ -402,9 +402,9 @@ typedef struct {
      * adjacent bitfields of the same `type` packs into one "unit"; the unit
      * size is the smallest of {1,2,4,8} bytes holding all its bits.  A
      * non-bitfield member (or a type/width change) closes the current unit. */
-    int   bf_unit_type;   /* width (bytes) of the current open bitfield unit */
+    long long bf_unit_type;   /* width (bytes) of the current open bitfield unit */
     int   bf_unit_used;   /* bits used in the current open unit */
-    int   bf_unit_offset; /* byte offset of the current open unit */
+    long long bf_unit_offset; /* byte offset of the current open unit */
 } StructDef;
 
 typedef struct {
@@ -433,7 +433,7 @@ void struct_def_fixup_self_types(StructDef *sd);
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
                                          const char *name,
-                                         int *offset_out);
+                                         long long *offset_out);
 
 typedef struct {
     FunctionDecl *data;

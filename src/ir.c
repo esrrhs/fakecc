@@ -451,7 +451,7 @@ static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
     if (!tag) return 0;
     const StructDef *sd = struct_registry_find_c(g_ir_structs, tag);
     if (!sd) return 0;
-    int off = 0;
+    long long off = 0;
     const StructMember *m = struct_lookup_member(g_ir_structs, sd,
                                                  e->u.member.name, &off);
     if (!m || m->bit_width <= 0) return 0;
@@ -947,9 +947,15 @@ static const char *slot_global_name(const IRSlot *entry) {
     return entry->global_name ? entry->global_name : entry->name;
 }
 
+static IRSymTable g_ir_globals_st;
+
 static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
-    for (size_t i = st->len; i > 0; i--)
-        if (strcmp(st->data[i-1].name, name) == 0) return &st->data[i-1];
+    if (st) {
+        for (size_t i = st->len; i > 0; i--)
+            if (strcmp(st->data[i-1].name, name) == 0) return &st->data[i-1];
+    }
+    for (size_t i = g_ir_globals_st.len; i > 0; i--)
+        if (strcmp(g_ir_globals_st.data[i-1].name, name) == 0) return &g_ir_globals_st.data[i-1];
     return NULL;
 }
 
@@ -1157,7 +1163,7 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
         IRValue base = lower_lvalue_addr(fn, st, e->u.member.obj);
         const StructDef *sd = struct_registry_find_c(g_ir_structs,
                                                      e->u.member.obj->type.tag);
-        int off = 0;
+        long long off = 0;
         if (sd)
             struct_lookup_member(g_ir_structs, sd, e->u.member.name, &off);
         IRValue off_v = new_value(fn);
@@ -1567,14 +1573,14 @@ static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceL
             IRValue elem_sz_val = lower_sizeof_type(fn, st, *t.elem_type, loc);
             return emit_bin_w(fn, IR_MUL, dim_val, elem_sz_val, 8, 1, loc);
         } else {
-            int elem_sz = t.elem_type ? type_size(*t.elem_type) : 4;
+            long long elem_sz = t.elem_type ? type_size(*t.elem_type) : 4;
             if (elem_sz <= 0) elem_sz = 1;
             IRValue elem_c = new_value(fn);
             emit_inst_w(fn, IR_CONST, elem_c, -1, -1, elem_sz, 8, 1, loc);
             return emit_bin_w(fn, IR_MUL, dim_val, elem_c, 8, 1, loc);
         }
     }
-    int sz = type_size(t);
+    long long sz = type_size(t);
     if (sz < 0) sz = 0;
     IRValue v = new_value(fn);
     emit_inst_w(fn, IR_CONST, v, -1, -1, sz, 8, 1, loc);
@@ -4275,9 +4281,9 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             if (m_target_ty.kind == TY_STRUCT && m_target_ty.tag) {
                 const StructDef *sd = struct_registry_find_c(g_ir_structs, m_target_ty.tag);
                 if (sd) {
-                    int moff = 0;
+                    long long moff = 0;
                     if (struct_lookup_member(g_ir_structs, sd, sub->u.member.name, &moff)) {
-                        off += moff;
+                        off += (int)moff;
                         *out_sym = sym;
                         *out_offset = off;
                         return 1;
@@ -4343,9 +4349,9 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             if (m_target_ty.kind == TY_STRUCT && m_target_ty.tag) {
                 const StructDef *sd = struct_registry_find_c(g_ir_structs, m_target_ty.tag);
                 if (sd) {
-                    int moff = 0;
+                    long long moff = 0;
                     if (struct_lookup_member(g_ir_structs, sd, e->u.member.name, &moff)) {
-                        off += moff;
+                        off += (int)moff;
                         *out_sym = sym;
                         *out_offset = off;
                         return 1;
@@ -4777,6 +4783,13 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     g_ir_tu = tu;
     g_ir_pin_locals = pin_locals;
 
+    irsymtable_init(&g_ir_globals_st);
+    for (size_t g = 0; g < tu->globals.len; g++) {
+        const Stmt *gs = &tu->globals.data[g];
+        if (gs->kind == ST_DECL)
+            irsymtable_push_global(&g_ir_globals_st, gs->u.decl.name, gs->u.decl.type);
+    }
+
     /* Register named globals from tu->globals.  `extern` globals are
      * declarations only — no storage, no emission (single-TU model: they can
      * never be defined, so any use is an unresolved symbol).  `static` globals
@@ -4881,13 +4894,6 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
 
         IRSymTable st;
         irsymtable_init(&st);
-
-        /* Bind globals so function-body EX_VAR lookups find them. */
-        for (size_t g = 0; g < tu->globals.len; g++) {
-            const Stmt *gs = &tu->globals.data[g];
-            if (gs->kind == ST_DECL)
-                irsymtable_push_global(&st, gs->u.decl.name, gs->u.decl.type);
-        }
 
         /* Emit all PARAM instructions up front so they stay contiguous at
          * function start (codegen's prologue relies on this layout).  The
@@ -5081,4 +5087,5 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irsymtable_free(&st);
         ir_func_array_push(&ir->functions, irfn);
     }
+    irsymtable_free(&g_ir_globals_st);
 }

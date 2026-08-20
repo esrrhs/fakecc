@@ -150,7 +150,7 @@ enum TypeKind {
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int width;
+    long long width;
     int is_unsigned;
     unsigned is_const : 1;
     unsigned is_volatile : 1;
@@ -158,7 +158,7 @@ struct Type {
     unsigned is_bool : 1;
     Type *pointee;
     Type *elem_type;
-    int length;
+    long long length;
     struct Expr *vla_dim;
     char *tag;
     Type *func_ret;
@@ -169,7 +169,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
 };
-static inline Type type_make_int(int width, int is_unsigned) {
+static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
@@ -182,7 +182,7 @@ static inline Type type_make_bool(void) {
     return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
-static inline Type type_make_float(int width) {
+static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
@@ -198,18 +198,18 @@ static inline Type type_make_void(void) {
 }
 Type type_clone(Type t);
 void type_free(Type *t);
-int type_size(Type t);
-int type_align(Type t);
+long long type_size(Type t);
+long long type_align(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
-Type type_make_array(Type elem, int length);
-Type type_make_vector(Type elem, int vec_size);
+Type type_make_array(Type elem, long long length);
+Type type_make_vector(Type elem, long long vec_size);
 Type type_make_vla(Type elem, struct Expr *dim);
-Type type_make_struct(const char *tag, int size);
+Type type_make_struct(const char *tag, long long size);
 Type type_make_func(Type ret, Type * *params, int nparams);
 Type type_make_func_var(Type ret, Type * *params, int nparams, int is_variadic);
 Type type_decay(Type t);
@@ -472,7 +472,7 @@ void import_array_free(ImportArray *a);
 struct StructMember {
     char *name;
     Type type;
-    int offset;
+    long long offset;
     int bit_width;
     int bit_offset;
 };typedef struct StructMember StructMember;
@@ -483,14 +483,14 @@ struct StructDef {
     StructMember *members;
     int num_members;
     int cap_members;
-    int size;
-    int align;
+    long long size;
+    long long align;
     int is_packed;
     SourceLoc loc;
     Type *canonical_type;
-    int bf_unit_type;
+    long long bf_unit_type;
     int bf_unit_used;
-    int bf_unit_offset;
+    long long bf_unit_offset;
 };typedef struct StructDef StructDef;
 struct StructRegistry {
     StructDef *data;
@@ -509,7 +509,7 @@ void struct_def_fixup_self_types(StructDef *sd);
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
                                          const char *name,
-                                         int *offset_out);
+                                         long long *offset_out);
 struct FunctionArray {
     FunctionDecl *data;
     size_t len;
@@ -1083,7 +1083,7 @@ static Type parse_specifiers(Parser *p) {
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
-        int size = sd ? sd->size : 0;
+        long long size = sd ? sd->size : 0;
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
@@ -1140,7 +1140,7 @@ static Type parse_specifiers(Parser *p) {
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
-        int size = sd ? sd->size : 0;
+        long long size = sd ? sd->size : 0;
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
@@ -1365,7 +1365,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     if (packed) {
         sd->is_packed = 1;
         sd->align = 1;
-        int cur_off = 0;
+        long long cur_off = 0;
         for (int i = 0; i < sd->num_members; i++) {
             if (!sd->is_union) {
                 sd->members[i].offset = cur_off;
@@ -1480,7 +1480,7 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
     return params;
 }
 static Expr *parse_expr(Parser *p);
-static int parse_array_size_ext(Parser *p, Expr **dim_expr) {
+static long long parse_array_size_ext(Parser *p, Expr **dim_expr) {
     if (dim_expr) *dim_expr = ((void*)0);
     if (peek(p)->kind == TK_RBRACKET) {
         return 0;
@@ -1489,7 +1489,7 @@ static int parse_array_size_ext(Parser *p, Expr **dim_expr) {
     long long val = 0;
     if (fold_const_int(e, &val)) {
         expr_free(e);
-        return val > 0 ? (int)val : 1;
+        return val > 0 ? val : 1;
     }
     if (e->kind == EX_VAR) {
         const EnumConstant *ec =
@@ -1581,14 +1581,15 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             ret = ptr_wrap(ret, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
         ptrs = 0;
         Type outer_t = ret;
-        int dims[8], ndims = 0;
+        long long dims[8];
+        int ndims = 0;
         Expr *vla_dims[8];
         runtime.memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
                 Expr *vla_e = ((void*)0);
-                int len = parse_array_size_ext(p, &vla_e);
+                long long len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -1629,14 +1630,15 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         for (int i = 0; i < ptrs; i++)
             t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
         ptrs = 0;
-        int dims[8], ndims = 0;
+        long long dims[8];
+        int ndims = 0;
         Expr *vla_dims[8];
         runtime.memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
                 Expr *vla_e = ((void*)0);
-                int len = parse_array_size_ext(p, &vla_e);
+                long long len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -1662,14 +1664,15 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
     } else {
         *name_out = ((void*)0);
         t = base;
-        int dims[8], ndims = 0;
+        long long dims[8];
+        int ndims = 0;
         Expr *vla_dims[8];
         runtime.memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
                 Expr *vla_e = ((void*)0);
-                int len = parse_array_size_ext(p, &vla_e);
+                long long len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -2127,7 +2130,7 @@ static Expr *parse_unary(Parser *p) {
         expect_kind(p, TK_LPAREN, "'('");
         Type t = parse_type_abstract(p);
         expect_kind(p, TK_COMMA, "','");
-        int offset = 0;
+        long long offset = 0;
         Type cur_type = type_clone(t);
         for (;;) {
             if (peek(p)->kind == TK_IDENT) {
@@ -2136,7 +2139,7 @@ static Expr *parse_unary(Parser *p) {
                 if (cur_type.kind == TY_STRUCT && cur_type.tag) {
                     const StructDef *sd = struct_registry_find(&p->tu->structs, cur_type.tag);
                     if (sd) {
-                        int moff = 0;
+                        long long moff = 0;
                         const StructMember *sm = struct_lookup_member(&p->tu->structs, sd, mname, &moff);
                         if (sm) {
                             offset += moff;

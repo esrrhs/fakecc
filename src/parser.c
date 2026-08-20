@@ -526,7 +526,7 @@ static Type parse_specifiers(Parser *p) {
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
-        int size = sd ? sd->size : 0;
+        long long size = sd ? sd->size : 0;
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
@@ -587,7 +587,7 @@ static Type parse_specifiers(Parser *p) {
             return t;
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
-        int size = sd ? sd->size : 0;
+        long long size = sd ? sd->size : 0;
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
         Type t = type_make_struct(tag->text, size);
         t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
@@ -867,7 +867,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     if (packed) {
         sd->is_packed = 1;
         sd->align = 1;
-        int cur_off = 0;
+        long long cur_off = 0;
         for (int i = 0; i < sd->num_members; i++) {
             if (!sd->is_union) {
                 sd->members[i].offset = cur_off;
@@ -1012,7 +1012,7 @@ static Expr *parse_expr(Parser *p); /* forward declaration */
 /* Parse an array dimension size: an int literal, enum constant,
  * full constant expression, or dynamic expression for VLA.
  * Returns the constant value (0 if absent, -1 if VLA with *dim_expr set). */
-static int parse_array_size_ext(Parser *p, Expr **dim_expr) {
+static long long parse_array_size_ext(Parser *p, Expr **dim_expr) {
     if (dim_expr) *dim_expr = NULL;
     if (peek(p)->kind == TK_RBRACKET) {
         return 0;
@@ -1021,7 +1021,7 @@ static int parse_array_size_ext(Parser *p, Expr **dim_expr) {
     long long val = 0;
     if (fold_const_int(e, &val)) {
         expr_free(e);
-        return val > 0 ? (int)val : 1;
+        return val > 0 ? val : 1;
     }
     if (e->kind == EX_VAR) {
         const EnumConstant *ec =
@@ -1131,14 +1131,15 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         ptrs = 0;
 
         Type outer_t = ret;
-        int dims[8], ndims = 0;
+        long long dims[8];
+        int ndims = 0;
         Expr *vla_dims[8];
         memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
                 Expr *vla_e = NULL;
-                int len = parse_array_size_ext(p, &vla_e);
+                long long len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -1185,14 +1186,15 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             t = ptr_wrap(t, ptr_const[i], ptr_volatile[i], ptr_restrict[i]);
         ptrs = 0; /* applied here — prevent double-apply at function scope */
         /* Postfix: array [] or function ().  Collect dims, wrap right-to-left. */
-        int dims[8], ndims = 0;
+        long long dims[8];
+        int ndims = 0;
         Expr *vla_dims[8];
         memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
                 Expr *vla_e = NULL;
-                int len = parse_array_size_ext(p, &vla_e);
+                long long len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -1219,14 +1221,15 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         /* Abstract declarator (no name) — for casts/sizeof. */
         *name_out = NULL;
         t = base;
-        int dims[8], ndims = 0;
+        long long dims[8];
+        int ndims = 0;
         Expr *vla_dims[8];
         memset(vla_dims, 0, sizeof(vla_dims));
         while (peek(p)->kind == TK_LBRACKET || peek(p)->kind == TK_LPAREN) {
             if (peek(p)->kind == TK_LBRACKET) {
                 advance(p);
                 Expr *vla_e = NULL;
-                int len = parse_array_size_ext(p, &vla_e);
+                long long len = parse_array_size_ext(p, &vla_e);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (ndims >= 8) die_at(peek(p)->loc.file, peek(p)->loc.line,
                                        peek(p)->loc.col, "too many array dimensions");
@@ -1769,7 +1772,7 @@ static Expr *parse_unary(Parser *p) {
         expect_kind(p, TK_LPAREN, "'('");
         Type t = parse_type_abstract(p);
         expect_kind(p, TK_COMMA, "','");
-        int offset = 0;
+        long long offset = 0;
         Type cur_type = type_clone(t);
         for (;;) {
             if (peek(p)->kind == TK_IDENT) {
@@ -1778,7 +1781,7 @@ static Expr *parse_unary(Parser *p) {
                 if (cur_type.kind == TY_STRUCT && cur_type.tag) {
                     const StructDef *sd = struct_registry_find(&p->tu->structs, cur_type.tag);
                     if (sd) {
-                        int moff = 0;
+                        long long moff = 0;
                         const StructMember *sm = struct_lookup_member(&p->tu->structs, sd, mname, &moff);
                         if (sm) {
                             offset += moff;

@@ -6,7 +6,6 @@
 
 20031003-1.c
 20040811-1.c
-991014-1.c
 built-in-setjmp.c
 comp-goto-1.c
 eeprof-1.c
