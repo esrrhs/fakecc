@@ -407,12 +407,23 @@ static int type_rank(Type t) {
  * Float types are NOT integer-promoted — they keep their type. */
 static Type integer_promote(Type t) {
     if (t.kind == TY_FLOAT) return t;
-    /* C §6.3.1.1: a bit-field of (unsigned) int rank promotes to int if
-     * every value of the field fits in int. */
-    if (t.bitfield_width > 0 && t.width <= 4) {
-        if (!t.is_unsigned || t.bitfield_width < 32)
-            return type_make_int(4, 0);
-        return type_make_int(4, 1);
+    /* C §6.3.1.1: a bit-field promotes to signed int if every value of the field fits in int. */
+    if (t.bitfield_width > 0) {
+        if (!t.is_unsigned) {
+            if (t.bitfield_width <= 32)
+                return type_make_int(4, 0);
+            Type res = type_make_int(8, 0);
+            res.bitfield_width = t.bitfield_width;
+            return res;
+        } else {
+            if (t.bitfield_width < 32)
+                return type_make_int(4, 0);
+            if (t.bitfield_width == 32)
+                return type_make_int(4, 1);
+            Type res = type_make_int(8, 1);
+            res.bitfield_width = t.bitfield_width;
+            return res;
+        }
     }
     if (t.width < 4) return type_make_int(4, 0);
     return t;
