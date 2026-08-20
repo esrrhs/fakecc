@@ -78,6 +78,7 @@ typedef enum {
     IR_DYN_ALLOCA,  /* dst = alloca(a) — dynamic stack allocation of size a */
     IR_STACK_SAVE,  /* dst = %rsp — save stack pointer */
     IR_STACK_RESTORE, /* %rsp = a — restore stack pointer */
+    IR_LONGJMP,     /* a = buf ptr — restore %rbp, %rsp and jump to buf[1] */
     /* Debug-only marker (emitted by mem2reg under -g): from here on, source
      * variable `imm` (index into fn->dbg_vars) lives in SSA value `a`.
      *

@@ -102,6 +102,7 @@ enum IROpcode {
     IR_DYN_ALLOCA,
     IR_STACK_SAVE,
     IR_STACK_RESTORE,
+    IR_LONGJMP,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {

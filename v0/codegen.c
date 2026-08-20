@@ -254,6 +254,7 @@ enum IROpcode {
     IR_DYN_ALLOCA,
     IR_STACK_SAVE,
     IR_STACK_RESTORE,
+    IR_LONGJMP,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -2832,6 +2833,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_STACK_RESTORE: {
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 emit_mov_rr(&out->text, REG_RSP, REG_RAX);
+                break;
+            }
+            case IR_LONGJMP: {
+                ensure_reg(&out->text, inst->a, REG_RDI, ra);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x6F); emit_byte(&out->text, 0x00);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x67); emit_byte(&out->text, 0x10);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x47); emit_byte(&out->text, 0x08);
+                emit_byte(&out->text, 0xFF); emit_byte(&out->text, 0xE0);
                 break;
             }
             case IR_FADDR: {

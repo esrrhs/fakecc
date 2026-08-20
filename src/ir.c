@@ -563,6 +563,69 @@ static int fd_has_vla(const FunctionDecl *fd) {
     return 0;
 }
 
+static int expr_has_setjmp(const Expr *e) {
+    if (!e) return 0;
+    if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR &&
+        strcmp(e->u.call.callee->u.var.name, "__builtin_setjmp") == 0) return 1;
+    switch (e->kind) {
+    case EX_BINOP: return expr_has_setjmp(e->u.bin.l) || expr_has_setjmp(e->u.bin.r);
+    case EX_UNARY: return expr_has_setjmp(e->u.un.operand);
+    case EX_ASSIGN: return expr_has_setjmp(e->u.assign.lvalue) || expr_has_setjmp(e->u.assign.rvalue);
+    case EX_CAST: return expr_has_setjmp(e->u.cast.operand);
+    case EX_COMMA: return expr_has_setjmp(e->u.comma.lhs) || expr_has_setjmp(e->u.comma.rhs);
+    case EX_TERNARY:
+        return expr_has_setjmp(e->u.tern.cond) || expr_has_setjmp(e->u.tern.then) || expr_has_setjmp(e->u.tern.else_);
+    case EX_CALL:
+        if (expr_has_setjmp(e->u.call.callee)) return 1;
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            if (expr_has_setjmp(e->u.call.args.data[i])) return 1;
+        return 0;
+    default: return 0;
+    }
+}
+
+static int stmt_has_setjmp(const Stmt *s) {
+    if (!s) return 0;
+    switch (s->kind) {
+    case ST_DECL: return s->u.decl.init && expr_has_setjmp(s->u.decl.init);
+    case ST_EXPR: return expr_has_setjmp(s->u.expr);
+    case ST_RETURN: return expr_has_setjmp(s->u.value);
+    case ST_IF:
+        return expr_has_setjmp(s->u.if_s.cond)
+            || stmt_has_setjmp(s->u.if_s.then_s)
+            || (s->u.if_s.else_s && stmt_has_setjmp(s->u.if_s.else_s));
+    case ST_WHILE:
+        return expr_has_setjmp(s->u.while_s.cond) || stmt_has_setjmp(s->u.while_s.body);
+    case ST_DO_WHILE:
+        return expr_has_setjmp(s->u.do_s.cond) || stmt_has_setjmp(s->u.do_s.body);
+    case ST_FOR:
+        return (s->u.for_s.init && stmt_has_setjmp(s->u.for_s.init))
+            || expr_has_setjmp(s->u.for_s.cond)
+            || expr_has_setjmp(s->u.for_s.step)
+            || stmt_has_setjmp(s->u.for_s.body);
+    case ST_LABEL: return stmt_has_setjmp(s->u.label_s.stmt);
+    case ST_SWITCH:
+        if (expr_has_setjmp(s->u.switch_s.cond)) return 1;
+        if (s->u.switch_s.body && stmt_has_setjmp(s->u.switch_s.body)) return 1;
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                if (stmt_has_setjmp(&s->u.switch_s.cases[i].stmts.data[j])) return 1;
+        return 0;
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            if (stmt_has_setjmp(&s->u.block.data[i])) return 1;
+        return 0;
+    default: return 0;
+    }
+}
+
+static int fd_has_setjmp(const FunctionDecl *fd) {
+    if (!fd) return 0;
+    for (size_t i = 0; i < fd->body.len; i++)
+        if (stmt_has_setjmp(&fd->body.data[i])) return 1;
+    return 0;
+}
+
 /* Is `name` pinned in the given function body? True iff array-typed
  * (its decl is TY_ARRAY, or param would be TY_PTR — the latter is fine) or
  * `&name` appears anywhere in the function, or the function uses computed gotos. */
@@ -571,6 +634,7 @@ static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) 
     if (ty.kind == TY_STRUCT) return 1;
     if (ty.is_vector) return 1;
     if (fd_has_computed_goto(fd)) return 1;
+    if (fd_has_setjmp(fd)) return 1;
     for (size_t i = 0; i < fd->body.len; i++)
         if (stmt_takes_addr_of(&fd->body.data[i], name)) return 1;
     return 0;
@@ -2295,6 +2359,55 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_stack_restore") == 0) {
             IRValue ptr = lower_expr(fn, st, e->u.call.args.data[0]);
             emit_inst_w(fn, IR_STACK_RESTORE, -1, ptr, -1, 0, 8, 1, e->loc);
+            fn->has_dyn_alloca = 1;
+            return -1;
+        }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_setjmp") == 0) {
+            IRValue buf_ptr = lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue ret_slot = emit_alloca(fn, 4, 4, 0, e->loc);
+            IRValue addr_ret = emit_bin_w(fn, IR_ADDR, ret_slot, -1, 8, 1, e->loc);
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr_ret, zero, 0, 4, 0, e->loc);
+
+            IRValue frame_val = new_value(fn);
+            emit_inst_w(fn, IR_FRAME_ADDR, frame_val, -1, -1, 0, 8, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, buf_ptr, frame_val, 0, 8, 1, e->loc);
+
+            int L_resume = new_label(fn);
+            int L_cont = new_label(fn);
+            IRValue laddr = new_value(fn);
+            emit_inst_w(fn, IR_LADDR, laddr, -1, -1, L_resume, 8, 1, e->loc);
+            IRValue c8 = new_value(fn);
+            emit_inst_w(fn, IR_CONST, c8, -1, -1, 8, 8, 1, e->loc);
+            IRValue buf_off8 = emit_bin_w(fn, IR_ADD, buf_ptr, c8, 8, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, buf_off8, laddr, 0, 8, 1, e->loc);
+
+            IRValue sp_val = new_value(fn);
+            emit_inst_w(fn, IR_STACK_SAVE, sp_val, -1, -1, 0, 8, 1, e->loc);
+            IRValue c16 = new_value(fn);
+            emit_inst_w(fn, IR_CONST, c16, -1, -1, 16, 8, 1, e->loc);
+            IRValue buf_off16 = emit_bin_w(fn, IR_ADD, buf_ptr, c16, 8, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, buf_off16, sp_val, 0, 8, 1, e->loc);
+
+            emit_br(fn, L_cont, e->loc);
+            emit_label(fn, L_resume, e->loc);
+            IRValue addr_ret2 = emit_bin_w(fn, IR_ADDR, ret_slot, -1, 8, 1, e->loc);
+            IRValue one = new_value(fn);
+            emit_inst_w(fn, IR_CONST, one, -1, -1, 1, 4, 0, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr_ret2, one, 0, 4, 0, e->loc);
+            emit_label(fn, L_cont, e->loc);
+
+            IRValue addr_ret3 = emit_bin_w(fn, IR_ADDR, ret_slot, -1, 8, 1, e->loc);
+            IRValue res = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, res, addr_ret3, -1, 0, 4, 0, e->loc);
+            set_value_type(fn, res, 4, 0);
+            fn->has_dyn_alloca = 1;
+            return res;
+        }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_longjmp") == 0) {
+            IRValue buf_ptr = lower_expr(fn, st, e->u.call.args.data[0]);
+            emit_inst_w(fn, IR_LONGJMP, -1, buf_ptr, -1, 0, 8, 1, e->loc);
             fn->has_dyn_alloca = 1;
             return -1;
         }

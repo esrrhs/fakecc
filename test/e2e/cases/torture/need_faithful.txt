@@ -5,8 +5,6 @@
 # fails, fix the compiler. Nested-function tests live in UNSUPPORTED.txt.
 
 20031003-1.c
-built-in-setjmp.c
-comp-goto-1.c
 eeprof-1.c
 pr103405.c
 pr105613.c

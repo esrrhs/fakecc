@@ -2546,6 +2546,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
 
+            case IR_LONGJMP: {
+                ensure_reg(&out->text, inst->a, REG_RDI, ra);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x6F); emit_byte(&out->text, 0x00);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x67); emit_byte(&out->text, 0x10);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x47); emit_byte(&out->text, 0x08);
+                emit_byte(&out->text, 0xFF); emit_byte(&out->text, 0xE0);
+                break;
+            }
+
             case IR_FADDR: {
                 /* dst = &function; function name in inst->call_name.  Emit
                  * `lea r, [rip+0]` and record an FnAddrPatch resolved against
