@@ -31,6 +31,7 @@ nestfunc-3.c
 nestfunc-5.c
 nestfunc-6.c
 nestfunc-7.c
+pr103405.c
 
 # GNU variable-length structures (VLAs inside struct definitions) and C99 runtime VLAs.
 20020412-1.c
