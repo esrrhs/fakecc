@@ -1602,6 +1602,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type swap = at; at = it; it = swap;
         }
         type_free(&it);
+        if (at.is_vector && at.elem_type) {
+            Type res = type_clone(*at.elem_type);
+            type_free(&at);
+            set_type(e, res);
+            return type_clone(e->type);
+        }
         Type base = at;
         if (base.kind == TY_ARRAY) {
             Type d = type_decay(base); type_free(&base); base = d;
