@@ -4718,6 +4718,14 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             }
         }
 
+        /* C99 §6.7.5.3p21: evaluate parameter VLA dimensions on function entry. */
+        for (size_t p = 0; p < fd->params.len; p++) {
+            Type pty = fd->params.data[p].type;
+            if (pty.vla_dim) {
+                lower_expr(&irfn, &st, pty.vla_dim);
+            }
+        }
+
         /* Pre-pass: assign label ids to every label in this function so
          * forward gotos resolve. */
         LabelMap lm;

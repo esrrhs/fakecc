@@ -2031,6 +2031,10 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
              * fn->params.data[j].type (e.g. a function-pointer parameter,
              * whose pointee is freed later by param_array_free in tu_free). */
             Type pty = fn->params.data[j].type;
+            if (pty.vla_dim) {
+                Type dt = check_expr(pty.vla_dim, &st, &ft);
+                type_free(&dt);
+            }
             int own_ptr = 0;
             if (pty.kind == TY_ARRAY && pty.length == 0) {
                 pty = type_make_ptr(*pty.elem_type);

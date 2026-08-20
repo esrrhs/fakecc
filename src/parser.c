@@ -853,13 +853,17 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
             char *pname_in = NULL;
             Type pty = parse_type(p, &pname_in);
             while (skip_attribute(p)) {}
-            const Token *pname = peek(p);
+            if (pty.kind == TY_ARRAY && pty.elem_type) {
+                Type ptr = type_make_ptr(*pty.elem_type);
+                ptr.vla_dim = pty.vla_dim;
+                pty.vla_dim = NULL;
+                type_free(&pty);
+                pty = ptr;
+            }
             if (!pname_in) {
-                /* Unnamed parameter — the declarator produced no name
-                 * (e.g. `int`, `int*`).  Synthesize a name. */
                 pname_in = xstrdup("");
             }
-            param_array_push(&params, pname_in, pty, pname->loc);
+            param_array_push(&params, pname_in, pty, peek(p)->loc);
             free(pname_in);
             while (skip_attribute(p)) {}
             if (peek(p)->kind == TK_COMMA) {
@@ -3082,6 +3086,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
             }
             if (pty.kind == TY_ARRAY && pty.elem_type) {
                 Type ptr = type_make_ptr(*pty.elem_type);
+                ptr.vla_dim = pty.vla_dim;
+                pty.vla_dim = NULL;
                 type_free(&pty);
                 pty = ptr;
             }

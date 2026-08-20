@@ -4837,6 +4837,12 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 ir_add_dbg_var(&irfn, pname, ploc, IR_DBG_PARAM, pty, slot, pidx);
             }
         }
+        for (size_t p = 0; p < fd->params.len; p++) {
+            Type pty = fd->params.data[p].type;
+            if (pty.vla_dim) {
+                lower_expr(&irfn, &st, pty.vla_dim);
+            }
+        }
         LabelMap lm;
         labelmap_init(&lm);
         g_ir_label_map = &lm;
