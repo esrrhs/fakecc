@@ -2532,6 +2532,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
 
+            case IR_STACK_SAVE: {
+                int target = dr >= 0 ? dr : REG_RAX;
+                emit_mov_rr(&out->text, target, REG_RSP);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+
+            case IR_STACK_RESTORE: {
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_mov_rr(&out->text, REG_RSP, REG_RAX);
+                break;
+            }
+
             case IR_FADDR: {
                 /* dst = &function; function name in inst->call_name.  Emit
                  * `lea r, [rip+0]` and record an FnAddrPatch resolved against

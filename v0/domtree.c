@@ -100,6 +100,8 @@ enum IROpcode {
     IR_FRAME_ADDR,
     IR_RETURN_ADDR,
     IR_DYN_ALLOCA,
+    IR_STACK_SAVE,
+    IR_STACK_RESTORE,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {

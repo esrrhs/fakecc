@@ -252,6 +252,8 @@ enum IROpcode {
     IR_FRAME_ADDR,
     IR_RETURN_ADDR,
     IR_DYN_ALLOCA,
+    IR_STACK_SAVE,
+    IR_STACK_RESTORE,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -2818,6 +2820,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 emit_mov_rr(&out->text, target, REG_RSP);
                 if (dr < 0)
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+            case IR_STACK_SAVE: {
+                int target = dr >= 0 ? dr : REG_RAX;
+                emit_mov_rr(&out->text, target, REG_RSP);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+            case IR_STACK_RESTORE: {
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_mov_rr(&out->text, REG_RSP, REG_RAX);
                 break;
             }
             case IR_FADDR: {

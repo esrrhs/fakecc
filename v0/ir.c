@@ -100,6 +100,8 @@ enum IROpcode {
     IR_FRAME_ADDR,
     IR_RETURN_ADDR,
     IR_DYN_ALLOCA,
+    IR_STACK_SAVE,
+    IR_STACK_RESTORE,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -789,6 +791,8 @@ struct LabelMap {
 };typedef struct LabelMap LabelMap;
 static int labelmap_find(const LabelMap *lm, const char *name);
 static LabelMap *g_ir_label_map = ((void*)0);
+static int *g_ir_label_sp_slots = ((void*)0);
+static int g_ir_label_sp_count = 0;
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : ((void*)0);
 }
@@ -1205,6 +1209,42 @@ static int fd_has_computed_goto(const FunctionDecl *fd) {
     if (!fd) return 0;
     for (size_t i = 0; i < fd->body.len; i++)
         if (stmt_has_computed_goto(&fd->body.data[i])) return 1;
+    return 0;
+}
+static int stmt_has_vla(const Stmt *s) {
+    if (!s) return 0;
+    switch (s->kind) {
+    case ST_DECL:
+        return (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim != ((void*)0));
+    case ST_IF:
+        return stmt_has_vla(s->u.if_s.then_s)
+            || (s->u.if_s.else_s && stmt_has_vla(s->u.if_s.else_s));
+    case ST_WHILE:
+        return stmt_has_vla(s->u.while_s.body);
+    case ST_DO_WHILE:
+        return stmt_has_vla(s->u.do_s.body);
+    case ST_FOR:
+        return (s->u.for_s.init && stmt_has_vla(s->u.for_s.init))
+            || stmt_has_vla(s->u.for_s.body);
+    case ST_LABEL:
+        return stmt_has_vla(s->u.label_s.stmt);
+    case ST_SWITCH:
+        if (s->u.switch_s.body && stmt_has_vla(s->u.switch_s.body)) return 1;
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                if (stmt_has_vla(&s->u.switch_s.cases[i].stmts.data[j])) return 1;
+        return 0;
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            if (stmt_has_vla(&s->u.block.data[i])) return 1;
+        return 0;
+    default: return 0;
+    }
+}
+static int fd_has_vla(const FunctionDecl *fd) {
+    if (!fd) return 0;
+    for (size_t i = 0; i < fd->body.len; i++)
+        if (stmt_has_vla(&fd->body.data[i])) return 1;
     return 0;
 }
 static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) {
@@ -2711,6 +2751,19 @@ IRValue pr;
             fn->has_dyn_alloca = 1;
             return v;
         }
+        if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_stack_save") == 0) {
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_STACK_SAVE, v, -1, -1, 0, 8, 1, e->loc);
+            set_value_type(fn, v, 8, 1);
+            fn->has_dyn_alloca = 1;
+            return v;
+        }
+        if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_stack_restore") == 0) {
+            IRValue ptr = lower_expr(fn, st, e->u.call.args.data[0]);
+            emit_inst_w(fn, IR_STACK_RESTORE, -1, ptr, -1, 0, 8, 1, e->loc);
+            fn->has_dyn_alloca = 1;
+            return -1;
+        }
         if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_classify_type") == 0) {
             int tc = -1;
             if (e->u.call.args.len > 0) {
@@ -4179,8 +4232,30 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_BLOCK: {
+        int vla_saved_slot = -1;
+        int has_block_vla = 0;
+        for (size_t i = 0; i < s->u.block.len; i++) {
+            if (stmt_has_vla(&s->u.block.data[i])) {
+                has_block_vla = 1;
+                break;
+            }
+        }
+        if (has_block_vla) {
+            vla_saved_slot = emit_alloca(fn, 8, 8, 1, s->loc);
+            IRValue cur_sp = new_value(fn);
+            emit_inst_w(fn, IR_STACK_SAVE, cur_sp, -1, -1, 0, 8, 1, s->loc);
+            IRValue slot_addr = emit_bin_w(fn, IR_ADDR, vla_saved_slot, -1, 8, 1, s->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, slot_addr, cur_sp, 0, 8, 1, s->loc);
+            fn->has_dyn_alloca = 1;
+        }
         for (size_t i = 0; i < s->u.block.len; i++) {
             lower_stmt(fn, st, &s->u.block.data[i], cur_fd);
+        }
+        if (vla_saved_slot >= 0) {
+            IRValue slot_addr = emit_bin_w(fn, IR_ADDR, vla_saved_slot, -1, 8, 1, s->loc);
+            IRValue saved_sp = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, saved_sp, slot_addr, -1, 0, 8, 1, s->loc);
+            emit_inst_w(fn, IR_STACK_RESTORE, -1, saved_sp, -1, 0, 8, 1, s->loc);
         }
         break;
     }
@@ -4195,6 +4270,12 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                         s->u.goto_s.target);
                 runtime.exit(1);
             }
+            if (g_ir_label_sp_slots && id >= 0 && id < g_ir_label_sp_count && g_ir_label_sp_slots[id] >= 0) {
+                IRValue slot_addr = emit_bin_w(fn, IR_ADDR, g_ir_label_sp_slots[id], -1, 8, 1, s->loc);
+                IRValue saved_sp = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, saved_sp, slot_addr, -1, 0, 8, 1, s->loc);
+                emit_inst_w(fn, IR_STACK_RESTORE, -1, saved_sp, -1, 0, 8, 1, s->loc);
+            }
             emit_br(fn, id, s->loc);
         }
         break;
@@ -4205,6 +4286,12 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             runtime.fprintf(runtime.stderr, "fakecc: label '%s' has no assigned id\n",
                     s->u.label_s.name);
             runtime.exit(1);
+        }
+        if (g_ir_label_sp_slots && id >= 0 && id < g_ir_label_sp_count && g_ir_label_sp_slots[id] >= 0) {
+            IRValue cur_sp = new_value(fn);
+            emit_inst_w(fn, IR_STACK_SAVE, cur_sp, -1, -1, 0, 8, 1, s->loc);
+            IRValue slot_addr = emit_bin_w(fn, IR_ADDR, g_ir_label_sp_slots[id], -1, 8, 1, s->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, slot_addr, cur_sp, 0, 8, 1, s->loc);
         }
         emit_label(fn, id, s->loc);
         lower_stmt(fn, st, s->u.label_s.stmt, cur_fd);
@@ -5181,8 +5268,31 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         g_ir_cur_fd = fd;
         for (size_t j = 0; j < fd->body.len; j++)
             assign_label_ids(&irfn, &lm, &fd->body.data[j]);
+        int has_vla = fd_has_vla(fd);
+        int *label_sp_slots = ((void*)0);
+        if (has_vla && lm.len > 0) {
+            label_sp_slots = xmalloc(lm.len * sizeof(int));
+            for (size_t i = 0; i < lm.len; i++) {
+                label_sp_slots[i] = emit_alloca(&irfn, 8, 8, 1, fd->loc);
+            }
+            IRValue init_sp = new_value(&irfn);
+            emit_inst_w(&irfn, IR_STACK_SAVE, init_sp, -1, -1, 0, 8, 1, fd->loc);
+            for (size_t i = 0; i < lm.len; i++) {
+                IRValue slot_addr = emit_bin_w(&irfn, IR_ADDR, label_sp_slots[i], -1, 8, 1, fd->loc);
+                emit_inst_w(&irfn, IR_STORE_PTR, -1, slot_addr, init_sp, 0, 8, 1, fd->loc);
+            }
+            irfn.has_dyn_alloca = 1;
+        }
+        g_ir_label_sp_slots = label_sp_slots;
+        g_ir_label_sp_count = (int)lm.len;
         for (size_t j = 0; j < fd->body.len; j++) {
             lower_stmt(&irfn, &st, &fd->body.data[j], fd);
+        }
+        if (label_sp_slots) {
+            runtime.free(label_sp_slots);
+            label_sp_slots = ((void*)0);
+            g_ir_label_sp_slots = ((void*)0);
+            g_ir_label_sp_count = 0;
         }
         int needs_ret = 1;
         if (irfn.insts.len > 0) {
