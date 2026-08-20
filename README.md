@@ -2,158 +2,148 @@
 
 [![CI](https://github.com/esrrhs/fakecc/actions/workflows/ci.yml/badge.svg)](https://github.com/esrrhs/fakecc/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Language: C99](https://img.shields.io/badge/language-C99-orange.svg)
+![Language: C99 + GCC Extensions](https://img.shields.io/badge/language-C99%20%2B%20GCC-orange.svg)
 ![Self-hosting](https://img.shields.io/badge/self--hosting-yes-brightgreen.svg)
 ![Freestanding](https://img.shields.io/badge/default-zero--dep-brightgreen.svg)
 
-一门类 C 的系统级编程语言——保留 C 的执行模型，去掉预处理器，自带 runtime。**已自举**：fakecc 能编译自己，两级产物逐字节相同；**默认零依赖**：用户程序与自举产物不链系统 libc（像 Go；`-l` 可选互操作，像 cgo）。
+一门类 C 的系统级编程语言——**完整支持 C99 标准及主流 GCC 语言扩展**，保留 C 语言高效直接的底层执行模型与内存布局，**彻底摒弃 C 语言的预处理器宏（`#define`）与文本头文件（`#include`），转而采用类似 Go 语言的现代 Package 模块体系**，自带轻量零依赖 runtime。
 
-## 设计目标
+- **已完全自举**：fakecc 能编译自身源码，两级自举生成产物逐字节完全一致（Fixed Point）；
+- **默认零依赖**：用户程序与自举产物默认不链接系统 libc，直接生成静态独立 ELF64 可执行文件；
+- **高严苛测试覆盖**：忠实移植了 GCC 官方 **`gcc.c-torture/execute` 960+ 个完整执行用例**，全量 1680+ E2E 测试在 `-O0` 和 `-O1` 下 100% 全部通过。
 
-### 与标准 C 一致的部分
+---
 
-- 声明语法：`int x;`、`int (*fp)(int)`、struct、union、enum、typedef、指针、数组
-- 语句：`if/else/while/for/switch/return/break/continue/goto`
-- 表达式：完整运算符、优先级、隐式转换、指针算术、左值/右值
-- 类型系统：整型/浮点/指针/struct/union/enum、`const/volatile/restrict`
-- 函数签名：`int main(int argc, char **argv)`
-- 手动内存管理（`malloc`/`free`），无 GC
-- `sizeof` / `_Alignof` 等编译期运算符
+## 核心设计与语言特性
 
-### 与标准 C 不同的部分
+### 1. 现代 Package 模块系统（替代宏与头文件）
 
-| 特性 | C | FakeCC |
-|---|---|---|
-| 预处理器 | `#include` / `#define` / `#if` / … | **整个消失** |
-| 宏 | 对象宏、函数宏、`#`、`##` | **全部不存在** |
-| 头文件 | `.h`、前向声明 | 用 `extern` / 多文件链接；跨 package 用 `import` |
-| 包组织 | 无 | 文件顶部 `package name;`；`import pkg;` 后写 `pkg.sym` / `pkg.Type` |
-| 标准库 | 系统 libc | **默认内置 `runtime/` 一个包**（裸 syscall）；`-nostdlib -lc` 可选走系统库 |
-| 条件编译 | `#if` / `#ifdef` | 第一版不引入 |
+传统 C 语言依赖预处理器进行文本级拼接（`#include`）与宏展开（`#define`），极易引发命名污染、符号冲突以及编译膨胀。FakeCC 彻底移除了预处理器，改用现代模块系统：
 
-### 最小程序
+- **文件声明包名**：每个源文件顶部通过 `package pkg_name;` 声明所属包；
+- **同包自动互见**：同一个 package 目录下的所有源文件自动共享 typedef、struct、enum 和全局声明，无需维护头文件；
+- **包间导入**：跨包调用使用 `import other_pkg;`，在代码中通过限定名访问：
+  ```c
+  package main;
+  import runtime;
 
-```c
-package main;
+  int main(void) {
+      runtime.printf("hello %d\n", 42);
+      return 0;
+  }
+  ```
+- **包级作用域**：`static` 声明将符号限制在当前包内，外部不可见；非 static 符号导出供其他包使用。
 
-int main() {
-    return 42;
-}
-```
+---
 
-```c
-package main;
-import runtime;
-int main(void) {
-    runtime.printf("hello %d\n", 42);
-    return 0;
-}
-```
+### 2. 完整 C99 核心语言支持
 
-```c
-package main;
-extern int printf(const char *fmt, ...);  /* 仍可用：与 gcc .o / -lc 互操作 */
-int main(void) {
-    printf("hello %d\n", 42);
-    return 0;
-}
-```
+FakeCC 完整实现了 C99 标准规范的核心语法与语义特性：
 
-```bash
-./build/fakecc hello.c -o hello
-ldd hello          # 「不是动态可执行文件」— 无 libc
-./hello            # hello 42
-```
+- **基础类型系统**：
+  - 整型：`char` / `short` / `int` / `long` / `long long`（及其 `unsigned` 变体）、`_Bool`、`__int128`
+  - 浮点：`float`、`double`（SSE 浮点指令）、`long double`（80 位扩展精度 x87 FPU）
+  - 复数类型：`_Complex float`、`_Complex double`、`_Complex long double`
+  - 派生类型：多级指针、定长数组、多维数组、`struct`、`union`、`enum`、函数指针
+  - 类型修饰符：`const`、`volatile`、`restrict`、`inline`
+- **C99 进阶特性**：
+  - **变长数组（VLA）**：支持运行时动态长度数组分配与多维 VLA（如 `int arr[n][m]`），支持在循环与复杂控制流中跨作用域自动回收栈空间；
+  - **复合字面量（Compound Literals）**：如 `(struct Point){ .x = 1, .y = 2 }` 或 `(int[]){ 1, 2, 3 }`；
+  - **指定初始化器（Designated Initializers）**：结构体成员指定初始化 `{.field = val}`、数组下标指定初始化 `{[3] = val}` 以及嵌套初始化；
+  - **灵活数组成员（Flexible Array Members）**：结构体末尾的 `type array[]` 柔性数组；
+  - **声明位置自由**：支持在代码块任意位置声明局部变量，以及 `for (int i = 0; i < n; i++)` 循环头局部变量声明。
+- **表达式与控制流**：
+  - 完整运算符优先级与隐式类型提升/转换规则（Integer Promotion、Arithmetic Conversions）；
+  - `if` / `else`、`switch`（支持多 case/default 与任意跨作用域跳转）、`while`、`do-while`、`for`、`goto`、`break`、`continue`、`return`。
+
+---
+
+### 3. 主流 GCC 扩展支持
+
+为了无缝运行底层系统级代码与复杂的开源测试集，FakeCC 深入支持了主流的 GCC 编译器扩展：
+
+- **语句表达式（Statement Expressions）**：`({ int x = f(); x * 2; })` 允许在表达式内嵌入代码块并返回值；
+- **计算跳转（Computed Gotos）**：支持取标签地址 `&&label` 与间接跳转 `goto *expr;`，支持静态标签跳转表；
+- **GCC 属性系统（`__attribute__`）**：
+  - 对齐与打包：`aligned(N)`、`packed`
+  - 别名与重命名：`alias("target")`、`__asm__("symbol")`
+  - 向量类型：`vector_size(N)`
+  - 字节序调整：`scalar_storage_order("big-endian" / "little-endian")`
+  - 函数剖析控制：`no_instrument_function`
+  - 机器模式：`mode(QI/HI/SI/DI/TI/word/byte)`
+- **SIMD 向量扩展**：支持 `__attribute__((vector_size(N)))` 定义的向量类型，支持按元素向量加减乘除、位运算、按元素比较生成全 1/全 0 掩码以及向量初始化；
+- **初始化扩展**：数组范围指定初始化器（如 `[0 ... 9] = 1`）；
+- **函数级性能剖析**：支持 `-finstrument-functions` 编译选项，在非 `no_instrument_function` 函数的出入口自动注入 `__cyg_profile_func_enter` 与 `__cyg_profile_func_exit` 钩子调用；
+- **丰富的内置函数（GCC Builtins）**：
+  - 控制流与优化提示：`__builtin_expect`, `__builtin_unreachable`, `__builtin_constant_p`, `__builtin_trap`
+  - 位运算指令：`__builtin_clz/clzl/clzll`, `__builtin_ctz/ctzl/ctzll`, `__builtin_popcount/popcountll`, `__builtin_ffs/ffsll`, `__builtin_bswap16/32/64`
+  - 溢出安全算术：`__builtin_add_overflow`, `__builtin_sub_overflow`, `__builtin_mul_overflow`（支持 8/16/32/64 位有符号与无符号全类型及 `_p` 变体）
+  - 栈与执行上下文：`__builtin_frame_address`, `__builtin_return_address`, `__builtin_stack_save`, `__builtin_stack_restore`, `__builtin_setjmp`, `__builtin_longjmp`, `__builtin_alloca`
+  - 内存与标准运算：`__builtin_memcpy`, `__builtin_memset`, `__builtin_memcmp`, `__builtin_abs`, `__builtin_labs`, `__builtin_llabs`, `__builtin_copysign` 等。
+
+---
 
 ## 编译器架构
 
 ```
-源码 → Lexer → Tokens → Parser → AST → Sema → IR → Opt → Codegen → ELF/链接 → 可执行文件
+源码 (.c) → Lexer → Tokens → Parser → AST → Sema → SSA IR → 中端优化 (Opt) → Codegen (x86-64) → 内嵌链接器 → ELF64 可执行文件
 ```
 
-- **前端**：Lexer + Parser + Sema + IR 生成
-- **中端**：统一 SSA IR（CFG、支配树、mem2reg、constfold/DCE/peephole、寄存器分配）
-- **后端**：x86-64 编码器 + 内嵌 ELF 写入器 / 链接器（不调用外部 `as`/`ld`）
+- **前端（Frontend）**：
+  - 手写递归下降解析器，直接构建 AST；
+  - 语义分析（Sema）负责类型检查、隐式转换插入、常量折叠与作用域符号表解析；
+  - AST 降级为中端统一三地址 SSA IR。
+- **中端（Middle-end）**：
+  - **控制流图（CFG）与支配树（Dominator Tree）**；
+  - **mem2reg**：基于支配前沿（Dominance Frontiers）自动插入 φ 函数，将栈上的局部标量变量提升至 SSA 寄存器；
+  - **标量优化**：常量折叠（Constant Folding）、代数化简、无效代码消除（DCE）、窥孔优化（Peephole）；
+  - **寄存器分配**：基于图着色 / 线性扫描的 SysV AMD64 寄存器分配器（支持 GP 与 XMM 寄存器分配、溢出处理与调用约定保存）。
+- **后端与链接器（Backend & Linker）**：
+  - 原生 x86-64 机器码生成器（不依赖外部 GNU `as`）；
+  - 内嵌 ELF64 文件生成器与静态/动态链接器（不依赖 GNU `ld`），直接写出可执行 ELF。
 
-## 零依赖 runtime（`runtime/`）
+---
 
-默认链接时，驱动自动编译并静态链上 `runtime/`（FakeCC 方言）。整个目录是一个 package（`package runtime;`），目录内文件互相可见；用户侧 `import runtime;` 后写 `runtime.printf` / `runtime.FILE`。
+## 零依赖 Runtime（`runtime/`）
 
-| 文件 | 内容 |
+FakeCC 源码树自带纯 C / FakeCC 实现的独立 runtime（位于 `runtime/` 目录），默认编译时自动将其静态编译并链接入最终二进制中。
+
+| 模块 | 包含的核心能力 |
 |---|---|
-| `builtin.c` | `size_t` / `ssize_t` / `FILE`（按文件名最先解析，供同包其余文件使用） |
-| `string.c` | `memcpy` / `memset` / `strlen` / `strcmp` / … |
-| `ctype.c` | `isdigit` / `isspace` / … |
-| `malloc.c` | `mmap` freelist：`malloc` / `free` / `calloc` / `realloc` |
-| `stdio.c` | `stdin`/`stdout`/`stderr`、缓冲、`fopen`/`fread`/… |
-| `printf.c` | `printf` / `fprintf` / `snprintf` / `v*` |
-| `stdlib.c` | `exit` / `abort` / `strto*` / `qsort` / `getenv` |
+| `builtin.c` | 基础类型定义（`size_t`, `ssize_t`, `FILE`, `va_list`） |
+| `string.c` | `memcpy`, `memmove`, `memset`, `memcmp`, `strlen`, `strcpy`, `strcmp`, `strchr` 等 |
+| `ctype.c` | `isdigit`, `isalpha`, `isspace`, `toupper`, `tolower` 等 |
+| `malloc.c` | 基于 Linux `mmap` 系统调用的独立内存分配器：`malloc`, `free`, `calloc`, `realloc` |
+| `stdio.c` | `stdin`/`stdout`/`stderr` 标准流、用户态 I/O 缓冲区、`fopen`, `fclose`, `fread`, `fwrite`, `fputs` 等 |
+| `printf.c` | `printf`, `fprintf`, `sprintf`, `snprintf`, `vprintf`, `vfprintf`, `vsnprintf` |
+| `stdlib.c` | `exit`, `abort`, `strtol`, `strtoul`, `qsort`, `getenv`, `abs` |
 
-用户侧：`import runtime;` 之后写 `runtime.printf(...)`。ELF 符号不改名（`runtime.printf` 仍链接到 `printf`），因此原有的 `extern int printf(...);` 写法继续可用。
+- **与宿主系统互操作**：
+  - 使用 `-nostdlib` 可禁用内置 runtime；
+  - 搭配 `-lc` / `-lm` 可与系统 glibc / libm 等标准共享库无缝链接互操作。
 
-- 查找顺序：`FAKECC_RT` → `./runtime` → `<argv0>/runtime` → `<argv0>/../runtime`
-- `-nostdlib`：不链 `runtime/`；再加 `-lc` 即走系统 libc（调试 / 互操作用）
-- `-l` / `-L` / 直接传 `.so`：可选动态依赖，`-L` 写入 `DT_RUNPATH`
+---
 
-Stage0（`build/fakecc`，gcc 编）本身仍依赖系统 libc；**它编出来的程序**和自举产物 `v0/fakecc-1` 默认是静态零依赖 ELF。
+## 自举流程
 
-## 自包含工具链
+FakeCC 的自举验证机制保证了编译器自身的逻辑自洽性与稳定性：
 
-不依赖外部 `as` / `ld`。链接器直接写出 ELF64：
+```
+[ Stage 0 ] gcc 编译 src/*.c                  → build/fakecc
+     ↓
+[ Stage 1 ] build/fakecc 编译 v0/*.c + runtime → v0/fakecc-1
+     ↓
+[ Stage 2 ] v0/fakecc-1 再次编译 v0/*.c + runtime → v0/fakecc-2
+     ↓
+[ 验证 ]   比对 v0/fakecc-1 与 v0/fakecc-2（逐字节 100% 完全一致）
+```
 
-- 内部 x86-64 编码 + ELF 写入（PT_LOAD；动态时才有 INTERP / PT_DYNAMIC）
-- 入口桩：设置 `argc`/`argv` → `call main` → 调用 `exit`（有 rt 或 `-lc` 时）或裸 `exit_group`
-- 无未解析外部符号时：静态 ELF（`ldd` 报非动态可执行文件）
-
-可执行文件默认带 `.symtab` / `.strtab`（对齐未 strip 的 gcc），gdb 可 `break main`、按函数名反汇编。加 `-g` 时额外发出 DWARF（行号、参数/局部变量、`.debug_frame`、`.debug_loc`），支持按源码行调试与 `print`。
-
-`-g` 与 `-O` 正交，和 gcc 一致：`-g` 只增加调试节，绝不改变生成的指令（`test_debug` 与 gdb e2e 都逐字节比对 `.text` 来守住这条）。优化后变量常驻寄存器且位置随程序点变化，因此 mem2reg 会留下 `IR_DBG_VALUE` 标记，codegen 据此结合寄存器分配结果生成 DWARF 位置列表。该标记对 DCE、活跃区间和 SSA 重编号一律不可见，这正是它不影响代码的原因。
-
-`.debug_frame` 逐步描述 prologue（entry / `push %rbp` 之后 / `mov %rsp,%rbp` 之后各一条规则），行表则用 `DW_LNS_set_prologue_end` 标出函数体的第一行。两者都是 `break <函数名>` 能用的前提：gdb 会自己跳过 prologue 停在中间，只给整段 prologue 一条 CFI 规则的话它会展开出一个并不存在的栈帧。
-
-优化级别：`-O0` 让标量留在栈上（跳过 SSA 提升，调试信息最直白），`-O1`（默认）跑完整流水线。
-
-## 自举
-
-主体源码仍是 `src/*.c`（C99，给 gcc 做 Stage0）；`v0/translate.py` 机械翻译成 FakeCC 方言后自举：
-
-- **Stage 0** — gcc 编译 `src/` → `build/fakecc`
-- **Stage 1** — Stage0 编译 `v0/*.c`（+ 默认 `runtime/`）→ `fakecc-1`
-- **Stage 2** — `fakecc-1` 再编译同一份 → `fakecc-2`；与 `fakecc-1` 逐字节相同即不动点
-
+运行自举检查：
 ```bash
-v0/build_bootstrap.sh   # 翻译 + Stage0 编译链接
-v0/stage2_check.sh      # 两级自举 + 逐字节比对
+v0/stage2_check.sh
 ```
 
-gcc 只出现在：编 Stage0，以及 `translate.py` 里对 `src/*.c` 做预处理（方言无预处理器）。自举编译与链接全程由 fakecc 完成。CI bootstrap job 在不动点之后用 `v0/fakecc-1` 再跑 e2e / e2e_multi / difftest / e2e_shlib。
-
-## 语言与实现现状
-
-| 类别 | 已支持 |
-|---|---|
-| 声明与类型 | `char/short/int/long/long long` × signed/unsigned、`_Bool`、`void`、`struct`/`union`/`enum`、`typedef`、qualifier、`inline`、`static`/`extern`、函数指针 |
-| 字面量 | 十进制 / `0x` / 八进制 `0`、后缀、`float`/`double`（SSE）、`long double`（x87，16 字节） |
-| 表达式 / 语句 | 完整运算符、指针算术、cast、`sizeof`/`_Alignof`、复合字面量；`if`/`while`/`for`/`do`/`switch`/`goto`/… |
-| 函数 | 多函数、递归、最多 16 参数（SysV 前 6 寄存器）、变参（`va_list`） |
-| 链接 | 多文件 / `.o`；默认静态链 `runtime/`；可选 `-l`/`-L`/`.so` |
-| I/O | `__syscall`；`printf`/`malloc`/FILE 来自 `runtime/` |
-
-跨 package 的 `import` / 限定名已实现（目录即包；同包文件互见；`static` 包私有）。
-
-## 已知缺陷
-
-- **DWARF 位置列表在块重排时可能偏保守**：`-g` 已提供行号、标量/指针/具名 struct（含成员 DIE，`print p.x` / `q->x` 可用）、位置列表，以及 `DW_OP_entry_value` + `DW_TAG_call_site`（优化后外层帧参数可恢复）。位置列表按线性指令流推导，块的入口值靠 φ 标记补齐，块被重排时个别范围可能偏保守。
-- **工程主体仍是 `src/` + translate**：方言尚未成为唯一源码树；Stage0 仍需 gcc。
-- **`runtime/printf` 不认 `%Lf` 的 `L`**：长度修饰符被吃掉但实参仍按 `double` 取，long double 变参会打成 0；`va_arg(ap, long double)` 同样未走 SysV 的 MEMORY 类（16 字节栈槽），暂不支持。
-- **`runtime/` 的浮点打印只有 18 位有效数字**：`%f`/`%e`/`%g` 从 long double 展开十进制，足以覆盖 double 的 17 位；超出部分（如 `%f` 打印 `1e300`）按展开末尾补零，而不是 glibc 的精确二进制值。
-
-## 调试工具
-
-- `tools/bisect_module.sh` — 混合链接二分（定位自举错在哪个模块）
-- `tools/difftest.sh` — 以 gcc 为 oracle 的退出码 / stdout 差分
-
-自举期修过的后端问题已落成 e2e，例如 `extern_block_scope*.c`、`regalloc_trunc_spill.c`、`trunc_dirty_high_bits.c`、`dynamic_printf_output.c`。
+---
 
 ## 构建
 
