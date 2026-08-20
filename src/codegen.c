@@ -3630,6 +3630,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_sse_cvtss2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
                     else
                         emit_sse_cvtsd2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
+                    if (inst->width == 4 && !inst->is_unsigned) {
+                        /* Clamp positive overflow (e.g. 2147483648.0f) to INT_MAX */
+                        emit_mov_imm64(&out->text, REG_RCX, (int64_t)0x7fffffffLL);
+                        emit_cmp_rr(&out->text, REG_RCX, REG_RAX);
+                        size_t j_le = emit_jcc_rel32(&out->text, 0x8D); /* jge */
+                        emit_mov_rr(&out->text, REG_RAX, REG_RCX);
+                        patch_rel32(&out->text, j_le, out->text.len);
+                    }
                     mask_to_width(&out->text, REG_RAX, inst->width,
                                   inst->is_unsigned);
                 }
