@@ -2591,6 +2591,82 @@ static int is_function_definition_lookahead(Parser *p) {
     return is_def;
 }
 
+static Stmt parse_stmt(Parser *p);
+
+/* Evaluate a constant in a case label — may be an integer literal or an enum
+ * constant defined in this file, a sibling file, or an imported package.
+ * `name` is the case label name for error messages. */
+static int case_constant_value(Parser *p, const char *text) {
+    if (text[0] >= '0' && text[0] <= '9') {
+        return int_literal_value(text);
+    }
+    const EnumConstant *ec =
+        enum_registry_find_constant(&p->tu->enums, text);
+    if (ec) return ec->value;
+    /* Check same-package sibling files and the package export table. */
+    if (p->pkg_ctx && p->tu->package.name) {
+        Package *cur = pkg_find(p->pkg_ctx, p->tu->package.name);
+        if (cur) {
+            ec = enum_registry_find_constant(&cur->enums, text);
+            if (ec) return ec->value;
+            for (size_t f = 0; f < cur->nfiles; f++) {
+                if (&cur->files[f] == p->tu) continue;
+                ec = enum_registry_find_constant(&cur->files[f].enums, text);
+                if (ec) return ec->value;
+            }
+        }
+    }
+    {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "case label '%s' is not a constant", text);
+    }
+    return 0; /* unreachable */
+}
+
+typedef struct SwitchContext {
+    Stmt *switch_stmt;
+    int switch_id;
+    int case_count;
+    struct SwitchContext *parent;
+} SwitchContext;
+
+static SwitchContext *g_cur_switch = NULL;
+
+/* Parse a switch statement:
+ *   switch (expr) stmt
+ * Supports Duff's device and arbitrary nesting of case/default labels. */
+static Stmt parse_switch(Parser *p) {
+    const Token *kw = peek(p);
+    advance(p);  /* consume "switch" */
+    expect_kind(p, TK_LPAREN, "'('");
+    Expr *cond = parse_expr(p);
+    expect_kind(p, TK_RPAREN, "')'");
+
+    Stmt s;
+    s.kind = ST_SWITCH;
+    s.loc = kw->loc;
+    s.u.switch_s.cond = cond;
+    s.u.switch_s.body = NULL;
+    s.u.switch_s.cases = NULL;
+    s.u.switch_s.num_cases = 0;
+    s.u.switch_s.cap_cases = 0;
+
+    SwitchContext ctx;
+    ctx.switch_stmt = &s;
+    ctx.switch_id = p->anon_counter++;
+    ctx.case_count = 0;
+    ctx.parent = g_cur_switch;
+    g_cur_switch = &ctx;
+
+    Stmt body = parse_stmt(p);
+    s.u.switch_s.body = stmt_alloc();
+    *s.u.switch_s.body = body;
+
+    g_cur_switch = ctx.parent;
+    return s;
+}
+
 static Stmt parse_stmt(Parser *p) {
     for (;;) { if (!skip_attribute(p)) break; }
     TokenKind k = peek(p)->kind;
@@ -2931,6 +3007,74 @@ static Stmt parse_stmt(Parser *p) {
         *s.u.label_s.stmt = inner;
         return s;
     }
+    if (k == TK_KW_CASE) {
+        const Token *kw = peek(p);
+        advance(p);  /* consume "case" */
+        const Token *cv = peek(p);
+        int value;
+        if (cv->kind == TK_IDENT) {
+            value = case_constant_value(p, cv->text);
+            advance(p);
+        } else {
+            Expr *ce = parse_ternary(p);
+            long long folded;
+            if (!fold_const_int(ce, &folded))
+                die_at(cv->loc.file, cv->loc.line, cv->loc.col,
+                       "case label must be an integer constant expression");
+            expr_free(ce);
+            value = (int)folded;
+        }
+        expect_kind(p, TK_COLON, "':'");
+        char lbl[64];
+        if (g_cur_switch) {
+            snprintf(lbl, sizeof(lbl), "__sw_%d_case_%d", g_cur_switch->switch_id, g_cur_switch->case_count++);
+            switch_push_case(g_cur_switch->switch_stmt, 0, value, lbl);
+        } else {
+            snprintf(lbl, sizeof(lbl), "__case_%d", p->anon_counter++);
+        }
+        Stmt inner;
+        if (peek(p)->kind == TK_RBRACE) {
+            inner.kind = ST_EXPR;
+            inner.loc = kw->loc;
+            inner.u.expr = NULL;
+        } else {
+            inner = parse_stmt(p);
+        }
+        Stmt s;
+        s.kind = ST_LABEL;
+        s.loc = kw->loc;
+        s.u.label_s.name = xstrdup(lbl);
+        s.u.label_s.stmt = stmt_alloc();
+        *s.u.label_s.stmt = inner;
+        return s;
+    }
+    if (k == TK_KW_DEFAULT) {
+        const Token *kw = peek(p);
+        advance(p);
+        expect_kind(p, TK_COLON, "':'");
+        char lbl[64];
+        if (g_cur_switch) {
+            snprintf(lbl, sizeof(lbl), "__sw_%d_default", g_cur_switch->switch_id);
+            switch_push_case(g_cur_switch->switch_stmt, 1, 0, lbl);
+        } else {
+            snprintf(lbl, sizeof(lbl), "__default_%d", p->anon_counter++);
+        }
+        Stmt inner;
+        if (peek(p)->kind == TK_RBRACE) {
+            inner.kind = ST_EXPR;
+            inner.loc = kw->loc;
+            inner.u.expr = NULL;
+        } else {
+            inner = parse_stmt(p);
+        }
+        Stmt s;
+        s.kind = ST_LABEL;
+        s.loc = kw->loc;
+        s.u.label_s.name = xstrdup(lbl);
+        s.u.label_s.stmt = stmt_alloc();
+        *s.u.label_s.stmt = inner;
+        return s;
+    }
     if (k == TK_KW_SWITCH) {
         return parse_switch(p);
     }
@@ -3172,99 +3316,6 @@ static Stmt parse_typedef_stmt(Parser *p) {
     s.kind = ST_BLOCK;
     s.loc = kw->loc;
     stmt_array_init(&s.u.block);
-    return s;
-}
-
-/* Evaluate a compile-time integer constant for a case label: an int literal
- * or a previously defined enum constant.  Returns the value; dies on error.
- * `name` is the case label name for error messages. */
-static int case_constant_value(Parser *p, const char *text) {
-    if (text[0] >= '0' && text[0] <= '9') {
-        return int_literal_value(text);
-    }
-    const EnumConstant *ec =
-        enum_registry_find_constant(&p->tu->enums, text);
-    if (ec) return ec->value;
-    /* Check same-package sibling files and the package export table. */
-    if (p->pkg_ctx && p->tu->package.name) {
-        Package *cur = pkg_find(p->pkg_ctx, p->tu->package.name);
-        if (cur) {
-            ec = enum_registry_find_constant(&cur->enums, text);
-            if (ec) return ec->value;
-            for (size_t f = 0; f < cur->nfiles; f++) {
-                if (&cur->files[f] == p->tu) continue;
-                ec = enum_registry_find_constant(&cur->files[f].enums, text);
-                if (ec) return ec->value;
-            }
-        }
-    }
-    {
-        const Token *t = peek(p);
-        die_at(t->loc.file, t->loc.line, t->loc.col,
-               "case label '%s' is not a constant", text);
-    }
-    return 0; /* unreachable */
-}
-
-/* Parse a switch statement:
- *   switch (expr) { case CONST: stmts ... default: stmts }
- * Statements belong to the most recent case/default label (fall-through). */
-static Stmt parse_switch(Parser *p) {
-    const Token *kw = peek(p);
-    advance(p);  /* consume "switch" */
-    expect_kind(p, TK_LPAREN, "'('");
-    Expr *cond = parse_expr(p);
-    expect_kind(p, TK_RPAREN, "')'");
-    expect_kind(p, TK_LBRACE, "'{'");
-
-    Stmt s;
-    s.kind = ST_SWITCH;
-    s.loc = kw->loc;
-    s.u.switch_s.cond = cond;
-    s.u.switch_s.cases = NULL;
-    s.u.switch_s.num_cases = 0;
-    s.u.switch_s.cap_cases = 0;
-
-    while (peek(p)->kind != TK_RBRACE) {
-        TokenKind k = peek(p)->kind;
-        if (k == TK_KW_CASE) {
-            advance(p);  /* consume "case" */
-            const Token *cv = peek(p);
-            int value;
-            if (cv->kind == TK_IDENT) {
-                /* A bare name may be an enum constant the expression parser
-                 * cannot fold on its own. */
-                value = case_constant_value(p, cv->text);
-                advance(p);
-            } else {
-                /* Any integer constant expression: `case -3:`, `case 'a':`,
-                 * `case 1 << 4:`, `case MAX - 1:`. */
-                Expr *ce = parse_ternary(p);
-                long long folded;
-                if (!fold_const_int(ce, &folded))
-                    die_at(cv->loc.file, cv->loc.line, cv->loc.col,
-                           "case label must be an integer constant expression");
-                expr_free(ce);
-                value = (int)folded;
-            }
-            expect_kind(p, TK_COLON, "':'");
-            switch_push_case(&s, 0, value);
-        } else if (k == TK_KW_DEFAULT) {
-            advance(p);  /* consume "default" */
-            expect_kind(p, TK_COLON, "':'");
-            switch_push_case(&s, 1, 0);
-        } else {
-            /* A statement — attach to the most recent case arm. */
-            if (s.u.switch_s.num_cases == 0) {
-                die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
-                       "statement before any case label in switch");
-            }
-            Stmt stmt = parse_stmt(p);
-            SwitchCase *arm = &s.u.switch_s.cases[s.u.switch_s.num_cases - 1];
-            stmt_array_push(&arm->stmts, stmt);
-        }
-    }
-    expect_kind(p, TK_RBRACE, "'}'");
     return s;
 }
 

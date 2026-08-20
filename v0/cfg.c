@@ -591,6 +591,7 @@ struct StmtArray {
 struct SwitchCase {
     int is_default;
     int value;
+    char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
@@ -604,7 +605,7 @@ union __anon_u_2 {
         StmtArray block;
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -619,7 +620,7 @@ union __anon_u_2 {
         StmtArray block;
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -628,7 +629,7 @@ void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value);
+void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
 struct Param {
     char *name;
     Type type;

@@ -388,6 +388,7 @@ struct StmtArray {
 struct SwitchCase {
     int is_default;
     int value;
+    char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
@@ -401,7 +402,7 @@ union __anon_u_2 {
         StmtArray block;
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -416,7 +417,7 @@ union __anon_u_2 {
         StmtArray block;
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -425,7 +426,7 @@ void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value);
+void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
 struct Param {
     char *name;
     Type type;
@@ -1058,7 +1059,7 @@ void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
         }
     }
 }
-void switch_push_case(Stmt *s, int is_default, int value) {
+void switch_push_case(Stmt *s, int is_default, int value, const char *label_name) {
     if (s->u.switch_s.num_cases >= s->u.switch_s.cap_cases) {
         int nc = s->u.switch_s.cap_cases ? s->u.switch_s.cap_cases * 2 : 4;
         s->u.switch_s.cases = runtime.realloc(s->u.switch_s.cases,
@@ -1069,6 +1070,7 @@ void switch_push_case(Stmt *s, int is_default, int value) {
     SwitchCase *c = &s->u.switch_s.cases[s->u.switch_s.num_cases++];
     c->is_default = is_default;
     c->value = value;
+    c->label_name = label_name ? xstrdup(label_name) : ((void*)0);
     stmt_array_init(&c->stmts);
 }
 void enum_registry_init(EnumRegistry *r) {
@@ -1516,8 +1518,11 @@ void stmt_free(Stmt *s) {
         break;
     case ST_SWITCH:
         expr_free(s->u.switch_s.cond);
-        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+        stmt_free_ptr(s->u.switch_s.body);
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            runtime.free(s->u.switch_s.cases[i].label_name);
             stmt_array_free(&s->u.switch_s.cases[i].stmts);
+        }
         runtime.free(s->u.switch_s.cases);
         break;
     case ST_FOR:

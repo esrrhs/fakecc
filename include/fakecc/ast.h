@@ -278,6 +278,7 @@ struct StmtArray {
 typedef struct {
     int is_default;
     int value;          /* case value (valid when !is_default) */
+    char *label_name;   /* synthetic label name */
     StmtArray stmts;    /* statements in this arm */
 } SwitchCase;
 
@@ -296,7 +297,7 @@ struct Stmt {
         StmtArray block;                             /* ST_BLOCK — owns its statements */
         struct { char *target; Expr *target_expr; } goto_s; /* ST_GOTO — target_expr != NULL for indirect goto *expr */
         struct { char *name; Stmt *stmt; } label_s;   /* ST_LABEL — owns stmt */
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s; /* ST_SWITCH */
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s; /* ST_SWITCH */
     } u;
 };
 
@@ -310,7 +311,7 @@ Stmt *stmt_alloc(void);
 void  stmt_free_ptr(Stmt *s);
 
 /* Switch helper: append a case arm (default if is_default) to a ST_SWITCH. */
-void switch_push_case(Stmt *s, int is_default, int value);
+void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
 
 /* ------------------------------------------------------------------ */
 /* Function & package declarations                                     */

@@ -318,6 +318,7 @@ static void collect_labels(LabelSet *ls, const Stmt *s) {
         break;
     case ST_SWITCH:
         collect_labels_expr(ls, s->u.switch_s.cond);
+        if (s->u.switch_s.body) collect_labels(ls, s->u.switch_s.body);
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             const SwitchCase *arm = &s->u.switch_s.cases[i];
             for (size_t j = 0; j < arm->stmts.len; j++)
@@ -1823,6 +1824,8 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         type_free(&ct);
         /* Switch introduces a breakable scope. */
         g_sema_loop_depth++;
+        if (s->u.switch_s.body)
+            check_stmt(s->u.switch_s.body, st, ft, scope_mark, has_return);
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             SwitchCase *arm = &s->u.switch_s.cases[i];
             for (size_t j = 0; j < arm->stmts.len; j++)

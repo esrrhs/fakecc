@@ -591,6 +591,7 @@ struct StmtArray {
 struct SwitchCase {
     int is_default;
     int value;
+    char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
@@ -604,7 +605,7 @@ union __anon_u_2 {
         StmtArray block;
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -619,7 +620,7 @@ union __anon_u_2 {
         StmtArray block;
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -628,7 +629,7 @@ void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value);
+void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
 struct Param {
     char *name;
     Type type;
@@ -1064,6 +1065,7 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
         return stmt_takes_addr_of(s->u.label_s.stmt, name);
     case ST_SWITCH:
         if (expr_takes_addr_of(s->u.switch_s.cond, name)) return 1;
+        if (s->u.switch_s.body && stmt_takes_addr_of(s->u.switch_s.body, name)) return 1;
         for (int i = 0; i < s->u.switch_s.num_cases; i++)
             for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
                 if (stmt_takes_addr_of(&s->u.switch_s.cases[i].stmts.data[j], name))
@@ -1186,6 +1188,7 @@ static int stmt_has_computed_goto(const Stmt *s) {
             || stmt_has_computed_goto(s->u.for_s.body);
     case ST_LABEL: return stmt_has_computed_goto(s->u.label_s.stmt);
     case ST_SWITCH:
+        if (s->u.switch_s.body && stmt_has_computed_goto(s->u.switch_s.body)) return 1;
         for (int i = 0; i < s->u.switch_s.num_cases; i++)
             for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
                 if (stmt_has_computed_goto(&s->u.switch_s.cases[i].stmts.data[j])) return 1;
@@ -3879,6 +3882,7 @@ static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s) {
         break;
     case ST_SWITCH:
         assign_label_ids_expr(fn, lm, s->u.switch_s.cond);
+        if (s->u.switch_s.body) assign_label_ids(fn, lm, s->u.switch_s.body);
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             const SwitchCase *arm = &s->u.switch_s.cases[i];
             for (size_t j = 0; j < arm->stmts.len; j++)
@@ -4207,9 +4211,35 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         int has_default = 0;
         for (int i = 0; i < n; i++)
             if (s->u.switch_s.cases[i].is_default) { has_default = 1; break; }
+        int exit_label = new_label(fn);
+        if (s->u.switch_s.body) {
+            int fallthrough_label = exit_label;
+            for (int i = 0; i < n; i++) {
+                if (s->u.switch_s.cases[i].is_default && s->u.switch_s.cases[i].label_name) {
+                    fallthrough_label = labelmap_find(g_ir_label_map, s->u.switch_s.cases[i].label_name);
+                    break;
+                }
+            }
+            for (int i = 0; i < n; i++) {
+                SwitchCase *arm = &s->u.switch_s.cases[i];
+                if (arm->is_default) continue;
+                IRValue cmp_val = new_value(fn);
+                emit_inst_w(fn, IR_CONST, cmp_val, -1, -1, arm->value, vw, vu, s->loc);
+                IRValue eq = emit_bin_w(fn, IR_EQ, v, cmp_val, vw, vu, s->loc);
+                int target_lbl = arm->label_name ? labelmap_find(g_ir_label_map, arm->label_name) : exit_label;
+                int next_check = new_label(fn);
+                emit_cbr(fn, eq, target_lbl, next_check, s->loc);
+                emit_label(fn, next_check, s->loc);
+            }
+            emit_br(fn, fallthrough_label, s->loc);
+            push_loop( exit_label, exit_label);
+            lower_stmt(fn, st, s->u.switch_s.body, cur_fd);
+            pop_loop();
+            emit_label(fn, exit_label, s->loc);
+            break;
+        }
         int *body_label = xmalloc(n * sizeof(int));
         for (int i = 0; i < n; i++) body_label[i] = new_label(fn);
-        int exit_label = new_label(fn);
         int ndispatch = 0;
         for (int i = 0; i < n; i++)
             if (!s->u.switch_s.cases[i].is_default) ndispatch++;
