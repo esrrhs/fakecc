@@ -1299,6 +1299,10 @@ int fold_const_int(const Expr *e, long long *out) {
         *out = e->u.int_val;
         return 1;
     }
+    if (e->kind == EX_VAR && strcmp(e->u.var.name, "__CHAR_BIT__") == 0) {
+        *out = 8;
+        return 1;
+    }
     if (e->kind == EX_CAST) {
         /* Fold through integer casts (e.g. `(int)`); pointer casts are not
          * integer constants, so require the operand to fold to an int. */

@@ -1128,6 +1128,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         if (ot.kind == TY_ARRAY) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
         }
+        if (ot.is_vector) {
+            set_type(e, ot);
+            return type_clone(e->type);
+        }
         if (e->u.un.op == UOP_BITNOT && ot.kind == TY_STRUCT && ot.tag && runtime.strncmp(ot.tag, "__complex_", 10) == 0) {
             set_type(e, ot);
             return type_clone(e->type);
@@ -1228,6 +1232,11 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         if (runtime.strcmp(e->u.var.name, "NULL") == 0) {
             Type vp = type_make_ptr(type_make_void());
             set_type(e, vp);
+            return type_clone(e->type);
+        }
+        if (runtime.strcmp(e->u.var.name, "__CHAR_BIT__") == 0) {
+            Type it = type_make_int(4, 0);
+            set_type(e, it);
             return type_clone(e->type);
         }
         if (runtime.strncmp(e->u.var.name, "__builtin_", 10) == 0 || runtime.strcmp(e->u.var.name, "alloca") == 0) {

@@ -1470,12 +1470,15 @@ static Type ptr_wrap(Type t, int is_const, int is_volatile, int is_restrict) {
     return w;
 }
 static Type parse_declarator(Parser *p, Type base, char **name_out) {
-    while (skip_attribute(p)) {}
+    int pre_align = 0, pre_packed = 0, pre_sso = 0, pre_vec = 0;
+    while (parse_attribute(p, &pre_align, &pre_packed, &pre_sso, &pre_vec, ((void*)0))) {}
+    if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
     enum { MAX_PTRS = 8 };
     int ptr_const[MAX_PTRS], ptr_volatile[MAX_PTRS], ptr_restrict[MAX_PTRS];
     int ptrs = 0;
     for (;;) {
-        while (skip_attribute(p)) {}
+        while (parse_attribute(p, &pre_align, &pre_packed, &pre_sso, &pre_vec, ((void*)0))) {}
+        if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
         if (peek(p)->kind != TK_STAR) break;
         advance(p);
         int c = 0, v = 0, r = 0;
@@ -1492,7 +1495,8 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         ptr_const[ptrs] = c; ptr_volatile[ptrs] = v; ptr_restrict[ptrs] = r;
         ptrs++;
     }
-    while (skip_attribute(p)) {}
+    while (parse_attribute(p, &pre_align, &pre_packed, &pre_sso, &pre_vec, ((void*)0))) {}
+    if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
     Type t;
     if (peek(p)->kind == TK_LPAREN && (p->pos + 1 < p->tokens->len &&
         (p->tokens->data[p->pos + 1].kind == TK_STAR ||

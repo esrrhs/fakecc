@@ -1355,18 +1355,6 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
     int is_float = (vt.elem_type && vt.elem_type->kind == TY_FLOAT);
     int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
 
-    IROpcode vop = IR_VADD;
-    switch (bop) {
-    case BOP_ADD: vop = IR_VADD; break;
-    case BOP_SUB: vop = IR_VSUB; break;
-    case BOP_MUL: vop = IR_VMUL; break;
-    case BOP_DIV: vop = IR_VDIV; break;
-    case BOP_BITAND: case BOP_AND: vop = IR_VBAND; break;
-    case BOP_BITOR:  case BOP_OR:  vop = IR_VBOR; break;
-    case BOP_BITXOR: vop = IR_VBXOR; break;
-    default: vop = IR_VADD; break;
-    }
-
     IRValue l_addr = lower_expr(fn, st, e->u.bin.l);
     if (!lt.is_vector) {
         IRValue l_slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
@@ -1391,6 +1379,90 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
         r_addr = r_buf;
     }
 
+    int is_cmp = (bop == BOP_EQ || bop == BOP_NE || bop == BOP_LT || bop == BOP_GT || bop == BOP_LE || bop == BOP_GE);
+    int is_shift = (bop == BOP_SHL || bop == BOP_SHR);
+
+    if (is_cmp || is_shift || total_sz > 16) {
+        IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+        IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        for (int i = 0; i < count; i++) {
+            IRValue l_off = emit_add_const(fn, l_addr, i * esz, e->loc);
+            IRValue r_off = emit_add_const(fn, r_addr, i * esz, e->loc);
+            IRValue dst_off = emit_add_const(fn, dst_addr, i * esz, e->loc);
+            IRValue lv = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, lv, l_off, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, lv, 1);
+            IRValue rv = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, rv, r_off, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, rv, 1);
+            IRValue res;
+            if (is_cmp) {
+                if (is_float) {
+                    IRValue cval = new_value(fn);
+                    emit_inst_w(fn, IR_FCMP, cval, lv, rv, bop, esz, 0, e->loc);
+                    IRValue neg_cval = emit_bin_w(fn, IR_NEG, cval, -1, 4, 0, e->loc);
+                    res = coerce(fn, neg_cval, 4, 0, esz, is_unsigned, e->loc);
+                } else {
+                    IROpcode cop;
+                    switch (bop) {
+                    case BOP_EQ: cop = IR_EQ; break;
+                    case BOP_NE: cop = IR_NE; break;
+                    case BOP_LT: cop = IR_LT; break;
+                    case BOP_LE: cop = IR_LE; break;
+                    case BOP_GT: cop = IR_GT; break;
+                    case BOP_GE: cop = IR_GE; break;
+                    default: cop = IR_EQ; break;
+                    }
+                    IRValue cval = emit_bin_w(fn, cop, lv, rv, esz, is_unsigned, e->loc);
+                    IRValue neg_cval = emit_bin_w(fn, IR_NEG, cval, -1, 4, 0, e->loc);
+                    res = coerce(fn, neg_cval, 4, 0, esz, is_unsigned, e->loc);
+                }
+            } else if (is_shift) {
+                IROpcode sop = (bop == BOP_SHL) ? IR_SHL : IR_SHR;
+                res = emit_bin_w(fn, sop, lv, rv, esz, is_unsigned, e->loc);
+            } else {
+                IROpcode aop;
+                if (is_float) {
+                    switch (bop) {
+                    case BOP_ADD: aop = IR_FADD; break;
+                    case BOP_SUB: aop = IR_FSUB; break;
+                    case BOP_MUL: aop = IR_FMUL; break;
+                    case BOP_DIV: aop = IR_FDIV; break;
+                    default: aop = IR_FADD; break;
+                    }
+                } else {
+                    switch (bop) {
+                    case BOP_ADD: aop = IR_ADD; break;
+                    case BOP_SUB: aop = IR_SUB; break;
+                    case BOP_MUL: aop = IR_MUL; break;
+                    case BOP_DIV: aop = IR_DIV; break;
+                    case BOP_BITAND: case BOP_AND: aop = IR_BAND; break;
+                    case BOP_BITOR:  case BOP_OR:  aop = IR_BOR; break;
+                    case BOP_BITXOR: aop = IR_BXOR; break;
+                    default: aop = IR_ADD; break;
+                    }
+                }
+                res = emit_bin_w(fn, aop, lv, rv, esz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, res, 1);
+            }
+            emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, res, 0, esz, is_unsigned, e->loc);
+            if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+        }
+        return dst_addr;
+    }
+
+    IROpcode vop = IR_VADD;
+    switch (bop) {
+    case BOP_ADD: vop = IR_VADD; break;
+    case BOP_SUB: vop = IR_VSUB; break;
+    case BOP_MUL: vop = IR_VMUL; break;
+    case BOP_DIV: vop = IR_VDIV; break;
+    case BOP_BITAND: case BOP_AND: vop = IR_VBAND; break;
+    case BOP_BITOR:  case BOP_OR:  vop = IR_VBOR; break;
+    case BOP_BITXOR: vop = IR_VBXOR; break;
+    default: vop = IR_VADD; break;
+    }
+
     IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
     IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
     emit_inst_w(fn, vop, dst_addr, l_addr, r_addr, esz, total_sz, is_unsigned, e->loc);
@@ -1410,18 +1482,6 @@ static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
     int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
     BinOp op = e->u.comp.op;
 
-    IROpcode vop = IR_VADD;
-    switch (op) {
-    case BOP_ADD: vop = IR_VADD; break;
-    case BOP_SUB: vop = IR_VSUB; break;
-    case BOP_MUL: vop = IR_VMUL; break;
-    case BOP_DIV: vop = IR_VDIV; break;
-    case BOP_BITAND: case BOP_AND: vop = IR_VBAND; break;
-    case BOP_BITOR:  case BOP_OR:  vop = IR_VBOR; break;
-    case BOP_BITXOR: vop = IR_VBXOR; break;
-    default: vop = IR_VADD; break;
-    }
-
     IRValue addr = lower_lvalue_addr(fn, st, lv);
     IRValue rhs_addr = lower_expr(fn, st, e->u.comp.rvalue);
     if (!e->u.comp.rvalue->type.is_vector) {
@@ -1433,6 +1493,64 @@ static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
             if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
         }
         rhs_addr = r_buf;
+    }
+
+    int is_shift = (op == BOP_SHL || op == BOP_SHR);
+    if (is_shift || total_sz > 16) {
+        for (int i = 0; i < count; i++) {
+            IRValue l_off = emit_add_const(fn, addr, i * esz, e->loc);
+            IRValue r_off = emit_add_const(fn, rhs_addr, i * esz, e->loc);
+            IRValue lval = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, lval, l_off, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, lval, 1);
+            IRValue rval = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, rval, r_off, -1, 0, esz, is_unsigned, e->loc);
+            if (is_float) set_value_float(fn, rval, 1);
+            IRValue res;
+            if (is_shift) {
+                IROpcode sop = (op == BOP_SHL) ? IR_SHL : IR_SHR;
+                res = emit_bin_w(fn, sop, lval, rval, esz, is_unsigned, e->loc);
+            } else {
+                IROpcode aop;
+                if (is_float) {
+                    switch (op) {
+                    case BOP_ADD: aop = IR_FADD; break;
+                    case BOP_SUB: aop = IR_FSUB; break;
+                    case BOP_MUL: aop = IR_FMUL; break;
+                    case BOP_DIV: aop = IR_FDIV; break;
+                    default: aop = IR_FADD; break;
+                    }
+                } else {
+                    switch (op) {
+                    case BOP_ADD: aop = IR_ADD; break;
+                    case BOP_SUB: aop = IR_SUB; break;
+                    case BOP_MUL: aop = IR_MUL; break;
+                    case BOP_DIV: aop = IR_DIV; break;
+                    case BOP_BITAND: case BOP_AND: aop = IR_BAND; break;
+                    case BOP_BITOR:  case BOP_OR:  aop = IR_BOR; break;
+                    case BOP_BITXOR: aop = IR_BXOR; break;
+                    default: aop = IR_ADD; break;
+                    }
+                }
+                res = emit_bin_w(fn, aop, lval, rval, esz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, res, 1);
+            }
+            emit_inst_w(fn, IR_STORE_PTR, -1, l_off, res, 0, esz, is_unsigned, e->loc);
+            if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+        }
+        return addr;
+    }
+
+    IROpcode vop = IR_VADD;
+    switch (op) {
+    case BOP_ADD: vop = IR_VADD; break;
+    case BOP_SUB: vop = IR_VSUB; break;
+    case BOP_MUL: vop = IR_VMUL; break;
+    case BOP_DIV: vop = IR_VDIV; break;
+    case BOP_BITAND: case BOP_AND: vop = IR_VBAND; break;
+    case BOP_BITOR:  case BOP_OR:  vop = IR_VBOR; break;
+    case BOP_BITXOR: vop = IR_VBXOR; break;
+    default: vop = IR_VADD; break;
     }
 
     emit_inst_w(fn, vop, addr, addr, rhs_addr, esz, total_sz, is_unsigned, e->loc);
@@ -1534,6 +1652,26 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return cmp;
         }
         case UOP_BITNOT: {
+            if (e->u.un.operand->type.is_vector) {
+                Type vt = e->u.un.operand->type;
+                int total_sz = type_size(vt);
+                int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
+                if (esz <= 0) esz = 4;
+                int count = vt.length > 0 ? vt.length : (total_sz / esz);
+                int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
+                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
+                IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+                IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                for (int i = 0; i < count; i++) {
+                    IRValue src_off = emit_add_const(fn, op_addr, i * esz, e->loc);
+                    IRValue dst_off = emit_add_const(fn, dst_addr, i * esz, e->loc);
+                    IRValue val = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, val, src_off, -1, 0, esz, is_unsigned, e->loc);
+                    IRValue not_val = emit_bin_w(fn, IR_BNOT, val, -1, esz, is_unsigned, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, not_val, 0, esz, is_unsigned, e->loc);
+                }
+                return dst_addr;
+            }
             if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
                 strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
                 Type cty = e->u.un.operand->type;
@@ -1866,6 +2004,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 8, 1, e->loc);
             return v;
         }
+        if (strcmp(e->u.var.name, "__CHAR_BIT__") == 0) {
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 8, 4, 0, e->loc);
+            return v;
+        }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
             /* Not a variable — is it a function name?  A function lvalue
@@ -2148,39 +2291,65 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (e->u.call.callee->kind == EX_VAR &&
             (strcmp(e->u.call.callee->u.var.name, "__builtin_add_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_add_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_sadd_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_sadd_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_saddl_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_saddl_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_saddll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_saddll_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_uadd_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_uadd_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_uaddl_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_uaddl_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_uaddll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_uaddll_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_sub_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_sub_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_ssub_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ssub_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_ssubl_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ssubl_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_ssubll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ssubll_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_usub_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_usub_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_usubl_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_usubl_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_usubll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_usubll_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_mul_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_mul_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_smul_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_smul_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_smull_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_smull_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_smulll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_smulll_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_umul_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umul_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_umull_overflow") == 0 ||
-             strcmp(e->u.call.callee->u.var.name, "__builtin_umulll_overflow") == 0) &&
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umull_overflow_p") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umulll_overflow") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umulll_overflow_p") == 0) &&
             e->u.call.args.len == 3) {
             const char *cname = e->u.call.callee->u.var.name;
             int is_add = strstr(cname, "add") != NULL;
             int is_sub = strstr(cname, "sub") != NULL;
+            int is_p = strstr(cname, "_p") != NULL;
             Expr *arg0 = e->u.call.args.data[0];
             Expr *arg1 = e->u.call.args.data[1];
             Expr *arg2 = e->u.call.args.data[2];
-            Type res_ty = (arg2->type.kind == TY_PTR && arg2->type.pointee) ? *arg2->type.pointee : type_default_int();
+            Type res_ty;
+            if (is_p) {
+                res_ty = arg2->type;
+            } else {
+                res_ty = (arg2->type.kind == TY_PTR && arg2->type.pointee) ? *arg2->type.pointee : type_default_int();
+            }
             int tw = res_ty.width ? res_ty.width : 4;
             int tu = res_ty.is_unsigned;
             IRValue a = lower_expr(fn, st, arg0);
             IRValue b = lower_expr(fn, st, arg1);
-            IRValue rptr = lower_expr(fn, st, arg2);
             int aw = get_value_width(fn, a), au = get_value_is_unsigned(fn, a);
             int bw = get_value_width(fn, b), bu = get_value_is_unsigned(fn, b);
             IRValue a64 = coerce(fn, a, aw, au, 8, au, e->loc);
@@ -2188,7 +2357,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IROpcode op = is_add ? IR_ADD : is_sub ? IR_SUB : IR_MUL;
             IRValue full_res = emit_bin_w(fn, op, a64, b64, 8, tu, e->loc);
             IRValue narrow_res = coerce(fn, full_res, 8, tu, tw, tu, e->loc);
-            emit_inst_w(fn, IR_STORE_PTR, -1, rptr, narrow_res, 0, tw, tu, e->loc);
+            if (!is_p) {
+                IRValue rptr = lower_expr(fn, st, arg2);
+                emit_inst_w(fn, IR_STORE_PTR, -1, rptr, narrow_res, 0, tw, tu, e->loc);
+            }
             IRValue ext_res = coerce(fn, narrow_res, tw, tu, 8, tu, e->loc);
             IRValue is_ov = emit_bin_w(fn, IR_NE, full_res, ext_res, 8, 1, e->loc);
             return coerce(fn, is_ov, 8, 1, 4, 0, e->loc);

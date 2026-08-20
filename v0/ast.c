@@ -1676,6 +1676,10 @@ int fold_const_int(const Expr *e, long long *out) {
         *out = e->u.int_val;
         return 1;
     }
+    if (e->kind == EX_VAR && runtime.strcmp(e->u.var.name, "__CHAR_BIT__") == 0) {
+        *out = 8;
+        return 1;
+    }
     if (e->kind == EX_CAST) {
         return fold_const_int(e->u.cast.operand, out);
     }
