@@ -14,8 +14,6 @@ comp-goto-1.c
 eeprof-1.c
 fprintf-2.c
 fprintf-chk-1.c
-loop-2f.c
-loop-2g.c
 medce-1.c
 memchr-1.c
 memclr.c
