@@ -349,6 +349,8 @@ static int is_type_start(const Parser *p, size_t pos) {
         const char *text = p->tokens->data[pos].text;
         if (strcmp(text, "register") == 0 || strcmp(text, "auto") == 0)
             return is_type_start(p, pos + 1);
+        if (strcmp(text, "__int128") == 0 || strcmp(text, "__int128_t") == 0 || strcmp(text, "__uint128_t") == 0)
+            return 1;
         if (strcmp(text, "typeof") == 0 || strcmp(text, "__typeof__") == 0 || strcmp(text, "__typeof") == 0)
             return 1;
         if (typedef_registry_find(&p->tu->typedefs, text))
@@ -729,6 +731,7 @@ static Type parse_specifiers(Parser *p) {
     int is_long = 0;
     int is_short = 0;
     int is_int = 0;
+    int is_int128 = 0;
     int is_char = 0;
     int is_unsigned = 0;
     int is_signed = 0;
@@ -749,6 +752,10 @@ static Type parse_specifiers(Parser *p) {
         else if (k == TK_KW_SHORT) { is_short = 1; has_type = 1; advance(p); }
         else if (k == TK_KW_INT) { is_int = 1; has_type = 1; advance(p); }
         else if (k == TK_KW_LONG) { is_long++; has_type = 1; advance(p); }
+        else if (k == TK_IDENT && (strcmp(peek(p)->text, "__int128") == 0 || strcmp(peek(p)->text, "__int128_t") == 0 || strcmp(peek(p)->text, "__uint128_t") == 0)) {
+            if (strcmp(peek(p)->text, "__uint128_t") == 0) is_unsigned = 1;
+            is_int128 = 1; has_type = 1; advance(p);
+        }
         else break;
     }
 
@@ -765,7 +772,8 @@ static Type parse_specifiers(Parser *p) {
     }
 
     int width = 4;
-    if (is_char) width = 1;
+    if (is_int128) width = 16;
+    else if (is_char) width = 1;
     else if (is_short) width = 2;
     else if (is_long >= 1) width = 8;
     else width = 4;
