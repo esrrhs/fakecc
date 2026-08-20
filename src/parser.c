@@ -2838,11 +2838,27 @@ static Stmt parse_stmt(Parser *p) {
                 }
             }
             for (int oi = 0; oi < num_outputs; oi++) {
-                if (outputs[oi]) expr_free(outputs[oi]);
+                if (outputs[oi]) {
+                    Stmt es;
+                    memset(&es, 0, sizeof(es));
+                    es.kind = ST_EXPR;
+                    es.loc = loc;
+                    es.u.expr = outputs[oi];
+                    outputs[oi] = NULL;
+                    stmt_array_push(&s.u.block, es);
+                }
                 free(out_constr[oi]);
             }
             for (int ii = 0; ii < num_inputs; ii++) {
-                if (inputs[ii]) expr_free(inputs[ii]);
+                if (inputs[ii]) {
+                    Stmt es;
+                    memset(&es, 0, sizeof(es));
+                    es.kind = ST_EXPR;
+                    es.loc = loc;
+                    es.u.expr = inputs[ii];
+                    inputs[ii] = NULL;
+                    stmt_array_push(&s.u.block, es);
+                }
                 free(in_constr[ii]);
             }
         }
