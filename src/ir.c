@@ -1794,6 +1794,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return result;
     }
     case EX_TERNARY: {
+        if (e->type.kind == TY_VOID) {
+            int L_then = new_label(fn);
+            int L_else = new_label(fn);
+            int L_done = new_label(fn);
+            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
+            emit_cbr(fn, cond, L_then, L_else, e->loc);
+            emit_label(fn, L_then, e->loc);
+            lower_expr(fn, st, e->u.tern.then);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_else, e->loc);
+            lower_expr(fn, st, e->u.tern.else_);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_done, e->loc);
+            return -1;
+        }
         /* Lower cond ? then : else to control flow writing a temporary
          * alloca, then let mem2reg promote it into a φ-merged SSA value
          * (no IR_PHI opcode needed).

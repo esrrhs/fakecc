@@ -14,7 +14,6 @@ comp-goto-1.c
 eeprof-1.c
 fprintf-2.c
 medce-1.c
-memchr-1.c
 memclr.c
 misalign.c
 pr103405.c

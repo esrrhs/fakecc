@@ -2283,6 +2283,21 @@ IRValue pr;
         return result;
     }
     case EX_TERNARY: {
+        if (e->type.kind == TY_VOID) {
+            int L_then = new_label(fn);
+            int L_else = new_label(fn);
+            int L_done = new_label(fn);
+            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
+            emit_cbr(fn, cond, L_then, L_else, e->loc);
+            emit_label(fn, L_then, e->loc);
+            lower_expr(fn, st, e->u.tern.then);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_else, e->loc);
+            lower_expr(fn, st, e->u.tern.else_);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_done, e->loc);
+            return -1;
+        }
         int rw = e->type.width ? e->type.width : 4;
         int ru = e->type.is_unsigned;
         int rf = (e->type.kind == TY_FLOAT);
