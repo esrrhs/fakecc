@@ -658,6 +658,7 @@ struct FunctionDecl {
     int is_static;
     char *alias_target;
     int align;
+    int no_instrument;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -794,6 +795,7 @@ static int labelmap_find(const LabelMap *lm, const char *name);
 static LabelMap *g_ir_label_map = ((void*)0);
 static int *g_ir_label_sp_slots = ((void*)0);
 static int g_ir_label_sp_count = 0;
+int g_instrument_functions = 0;
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : ((void*)0);
 }
@@ -1350,6 +1352,27 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     runtime.memset(inst.call_arg_on_stack, 0, sizeof(inst.call_arg_on_stack));
     ir_inst_array_push(&fn->insts, inst);
     if (dst >= 0) set_value_type(fn, dst, width ? width : 4, is_unsigned);
+}
+static void emit_profile_call(IRFunction *fn, const char *hook_name, const FunctionDecl *fd, SourceLoc loc) {
+    IRValue fn_addr = new_value(fn);
+    emit_inst_w(fn, IR_FADDR, fn_addr, -1, -1, 0, 8, 1, loc);
+    fn->insts.data[fn->insts.len - 1].call_name = xstrdup(fd->name);
+    IRValue ret_addr = new_value(fn);
+    emit_inst_w(fn, IR_RETURN_ADDR, ret_addr, -1, -1, 0, 8, 1, loc);
+    IRInst inst;
+    runtime.memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = -1;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = 0;
+    inst.loc = loc;
+    inst.call_name = xstrdup(hook_name);
+    inst.call_callee = -1;
+    inst.call_args[0] = fn_addr;
+    inst.call_args[1] = ret_addr;
+    inst.call_nargs = 2;
+    ir_inst_array_push(&fn->insts, inst);
 }
 static void emit_inst_f(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
                         int width, SourceLoc loc) {
@@ -4202,6 +4225,9 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         lower_expr(fn, st, s->u.expr);
         break;
     case ST_RETURN: {
+        if (g_instrument_functions && cur_fd && !cur_fd->no_instrument) {
+            emit_profile_call(fn, "__cyg_profile_func_exit", cur_fd, s->loc);
+        }
         if (fn->ret_width == 0 && !fn->ret_is_float) {
             if (s->u.value) lower_expr(fn, st, s->u.value);
             emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
@@ -5391,6 +5417,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         }
         g_ir_label_sp_slots = label_sp_slots;
         g_ir_label_sp_count = (int)lm.len;
+        if (g_instrument_functions && !fd->no_instrument) {
+            emit_profile_call(&irfn, "__cyg_profile_func_enter", fd, fd->loc);
+        }
         for (size_t j = 0; j < fd->body.len; j++) {
             lower_stmt(&irfn, &st, &fd->body.data[j], fd);
         }
@@ -5407,6 +5436,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 needs_ret = 0;
         }
         if (needs_ret) {
+            if (g_instrument_functions && !fd->no_instrument) {
+                emit_profile_call(&irfn, "__cyg_profile_func_exit", fd, fd->loc);
+            }
             if (fd->ret_type.kind == TY_VOID) {
                 emit_inst_w(&irfn, IR_RETURN, -1, -1, -1, 0, 0, 0, fd->loc);
             } else {

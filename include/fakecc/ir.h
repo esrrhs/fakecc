@@ -301,6 +301,8 @@ void ir_module_push_alias(IRModule *m, const char *name, const char *target,
  * keep a real stack slot instead of relying on mem2reg promotion. */
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 
+extern int g_instrument_functions;
+
 /* Return the live struct registry during lowering (NULL outside it).
  * type_size() uses this to refresh stale cached struct widths. */
 const StructRegistry *get_ir_structs(void);

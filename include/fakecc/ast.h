@@ -345,6 +345,7 @@ typedef struct {
     int    is_static;   /* 1 = `static` function — LOCAL linkage */
     char  *alias_target; /* __attribute__((alias("..."))) or NULL */
     int    align;       /* alignment attribute */
+    int    no_instrument; /* 1 = __attribute__((no_instrument_function)) */
 } FunctionDecl;
 
 typedef struct {

@@ -74,6 +74,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 
 static char *g_parsed_alias = NULL;
 static int g_parsed_mode_size = 0;
+static int g_parsed_no_instrument = 0;
 
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind != TK_IDENT) return 0;
@@ -243,6 +244,10 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                         depth--;
                     }
                 }
+                continue;
+            } else if (strcmp(name, "no_instrument_function") == 0 || strcmp(name, "__no_instrument_function__") == 0) {
+                g_parsed_no_instrument = 1;
+                advance(p);
                 continue;
             }
         }
@@ -3391,6 +3396,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.is_static = is_static;
     fn.alias_target = NULL;
     fn.align = 0;
+    fn.no_instrument = g_parsed_no_instrument;
+    g_parsed_no_instrument = 0;
 
     /* Parameter list.  Three forms:
      *   (void)              — prototyped, no parameters
@@ -3535,6 +3542,18 @@ static FunctionDecl parse_function_decl(Parser *p) {
         fn.alias_target = g_parsed_alias;
         g_parsed_alias = NULL;
     }
+    if (g_parsed_no_instrument) {
+        fn.no_instrument = 1;
+        g_parsed_no_instrument = 0;
+    }
+    if (p->tu) {
+        for (size_t i = 0; i < p->tu->functions.len; i++) {
+            if (strcmp(p->tu->functions.data[i].name, fn.name) == 0 && p->tu->functions.data[i].no_instrument) {
+                fn.no_instrument = 1;
+                break;
+            }
+        }
+    }
 
     if (fn.is_extern || peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
         /* Declaration only / forward declaration — no body. */
@@ -3554,6 +3573,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
             extra_fn.loc = next_name->loc;
             extra_fn.is_extern = 1;
             extra_fn.is_static = is_static;
+            extra_fn.no_instrument = fn.no_instrument;
             if (peek(p)->kind == TK_LPAREN) {
                 advance(p);
                 while (peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) advance(p);

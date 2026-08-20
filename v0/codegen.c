@@ -810,6 +810,7 @@ struct FunctionDecl {
     int is_static;
     char *alias_target;
     int align;
+    int no_instrument;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;

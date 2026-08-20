@@ -810,6 +810,7 @@ struct FunctionDecl {
     int is_static;
     char *alias_target;
     int align;
+    int no_instrument;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -1231,6 +1232,8 @@ int main(int argc, char **argv) {
             compile_only = 1;
         } else if (runtime.strcmp(argv[i], "-nodefaultlibs") == 0) {
             nodefaultlibs = 1;
+        } else if (runtime.strcmp(argv[i], "-finstrument-functions") == 0) {
+            g_instrument_functions = 1;
         } else if (runtime.strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
         } else if (runtime.strcmp(argv[i], "-O0") == 0) {
