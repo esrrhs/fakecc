@@ -38,6 +38,13 @@ typedef enum {
     IR_FCMP,        /* dst = (a op b) ? 1 : 0 (float comparison; signedness
                        encodes the ordered comparison: 0 = LT,1=LE,2=GT,3=GE,
                        4 = EQ, 5 = NE).  Result width 4 (int). */
+    IR_VADD,        /* dst = a + b (vector SIMD; width=vec_sz, imm=elem_sz, is_float) */
+    IR_VSUB,        /* dst = a - b (vector SIMD) */
+    IR_VMUL,        /* dst = a * b (vector SIMD) */
+    IR_VDIV,        /* dst = a / b (vector SIMD) */
+    IR_VBAND,       /* dst = a & b (vector SIMD) */
+    IR_VBOR,        /* dst = a | b (vector SIMD) */
+    IR_VBXOR,       /* dst = a ^ b (vector SIMD) */
     IR_SITOFP,      /* dst = (float)a — signed int → float; width = target */
     IR_FPTOSI,      /* dst = (int)a — float → signed int; width = target */
     IR_FPEXT,       /* dst = (double)(float)a — float → double */
@@ -69,6 +76,9 @@ typedef enum {
     IR_FRAME_ADDR,  /* dst = %rbp — frame pointer (at level imm) */
     IR_RETURN_ADDR, /* dst = return address (at level imm) */
     IR_DYN_ALLOCA,  /* dst = alloca(a) — dynamic stack allocation of size a */
+    IR_STACK_SAVE,  /* dst = %rsp — save stack pointer */
+    IR_STACK_RESTORE, /* %rsp = a — restore stack pointer */
+    IR_LONGJMP,     /* a = buf ptr — restore %rbp, %rsp and jump to buf[1] */
     /* Debug-only marker (emitted by mem2reg under -g): from here on, source
      * variable `imm` (index into fn->dbg_vars) lives in SSA value `a`.
      *
@@ -83,7 +93,7 @@ typedef enum {
 /* Maximum arguments to IR_CALL.  SysV packs small aggregates into 1–2
  * register args and MEMORY-class aggregates into one stack eightbyte per
  * 8 bytes of payload, so a single large struct can consume many slots. */
-#define IR_CALL_MAX_ARGS 32
+#define IR_CALL_MAX_ARGS 64
 
 typedef struct {
     IROpcode op;
@@ -263,17 +273,35 @@ typedef struct {
 } IRGlobalArray;
 
 typedef struct {
+    char *name;         /* xstrdup'd */
+    char *target;       /* xstrdup'd */
+    int   is_static;
+    SourceLoc loc;
+} IRAlias;
+
+typedef struct {
+    IRAlias *data;
+    size_t len;
+    size_t cap;
+} IRAliasArray;
+
+typedef struct {
     IRFunctionArray functions;
     IRGlobalArray   globals;
+    IRAliasArray    aliases;
 } IRModule;
 
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
+void ir_module_push_alias(IRModule *m, const char *name, const char *target,
+                          int is_static, SourceLoc loc);
 
 #include "fakecc/ast.h"
 /* Lower AST to IR.  When `pin_locals` is set (-O0), scalar locals and params
  * keep a real stack slot instead of relying on mem2reg promotion. */
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
+
+extern int g_instrument_functions;
 
 /* Return the live struct registry during lowering (NULL outside it).
  * type_size() uses this to refresh stale cached struct widths. */

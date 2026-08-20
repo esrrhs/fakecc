@@ -150,7 +150,7 @@ enum TypeKind {
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int width;
+    long long width;
     int is_unsigned;
     unsigned is_const : 1;
     unsigned is_volatile : 1;
@@ -158,20 +158,23 @@ struct Type {
     unsigned is_bool : 1;
     Type *pointee;
     Type *elem_type;
-    int length;
+    long long length;
+    struct Expr *vla_dim;
     char *tag;
     Type *func_ret;
     Type *func_params;
     int func_nparams;
+    int func_is_variadic;
     int enum_id;
     int bitfield_width;
+    int is_vector;
 };
-static inline Type type_make_int(int width, int is_unsigned) {
+static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -179,37 +182,41 @@ static inline Type type_make_bool(void) {
     return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
-static inline Type type_make_float(int width) {
+static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
-int type_size(Type t);
-int type_align(Type t);
+long long type_size(Type t);
+long long type_align(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
-Type type_make_array(Type elem, int length);
-Type type_make_struct(const char *tag, int size);
+Type type_make_array(Type elem, long long length);
+Type type_make_vector(Type elem, long long vec_size);
+Type type_make_vla(Type elem, struct Expr *dim);
+Type type_make_struct(const char *tag, long long size);
 Type type_make_func(Type ret, Type * *params, int nparams);
+Type type_make_func_var(Type ret, Type * *params, int nparams, int is_variadic);
 Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
     EX_BINOP,
@@ -295,60 +302,37 @@ union __anon_u_1 {
         struct { Type target_type; Expr *init; } compound;
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
-    };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
-struct __anon_un_5 { UnaryOp op; Expr *operand; };
-struct __anon_var_6 { char *name; char *pkg; };
-struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
-struct __anon_call_8 { Expr *callee; ExprArray args; };
-struct __anon_str_9 { char *bytes; int len; };
-struct __anon_addr_10 { Expr *operand; };
-struct __anon_deref_11 { Expr *operand; };
-struct __anon_idx_12 { Expr *array; Expr *index; };
-struct __anon_member_13 { Expr *obj; char *name; };
-struct __anon_cast_14 { Type target; Expr *operand; };
-struct __anon_sizeof_t_15 { Type target; };
-struct __anon_sizeof_e_16 { Expr *operand; };
-struct __anon_alignof_t_17 { Type target; };
-struct __anon_tern_18 { Expr *cond; Expr *then; Expr *else_; };
-struct __anon_incdec_19 { Expr *operand; int is_inc; int is_prefix; };
-struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
-struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
-struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
-struct __anon_compound_23 { Type target_type; Expr *init; };
-struct __anon_stmt_expr_24 { StmtArray *stmts; };
-struct __anon_label_addr_25 { char *label; };
-
-        long long int_val;
-        struct __anon_bin_4 bin;
-        struct __anon_un_5 un;
-        struct __anon_var_6 var;
-        struct __anon_assign_7 assign;
-        struct __anon_call_8 call;
-        struct __anon_str_9 str;
-        struct __anon_addr_10 addr;
-        struct __anon_deref_11 deref;
-        struct __anon_idx_12 idx;
-        struct __anon_member_13 member;
-        struct __anon_cast_14 cast;
-        struct __anon_sizeof_t_15 sizeof_t;
-        struct __anon_sizeof_e_16 sizeof_e;
-        struct __anon_alignof_t_17 alignof_t;
-        struct __anon_tern_18 tern;
-        struct __anon_incdec_19 incdec;
-        struct __anon_comp_20 comp;
-        struct __anon_comma_21 comma;
-        struct __anon_init_list_22 init_list;
-        char *float_text;
-        struct __anon_compound_23 compound;
-        struct __anon_stmt_expr_24 stmt_expr;
-        struct __anon_label_addr_25 label_addr;
-    };
-
+    };struct Expr {
     ExprKind kind;
     SourceLoc loc;
     Type type;
     Type va_arg_type;
-    union __anon_u_3 u;
+    union {
+        long long int_val;
+        struct { BinOp op; Expr *l, *r; } bin;
+        struct { UnaryOp op; Expr *operand; } un;
+        struct { char *name; char *pkg; } var;
+        struct { Expr *lvalue; Expr *rvalue; } assign;
+        struct { Expr *callee; ExprArray args; } call;
+        struct { char *bytes; int len; } str;
+        struct { Expr *operand; } addr;
+        struct { Expr *operand; } deref;
+        struct { Expr *array; Expr *index; } idx;
+        struct { Expr *obj; char *name; } member;
+        struct { Type target; Expr *operand; } cast;
+        struct { Type target; } sizeof_t;
+        struct { Expr *operand; } sizeof_e;
+        struct { Type target; } alignof_t;
+        struct { Expr *cond; Expr *then; Expr *else_; } tern;
+        struct { Expr *operand; int is_inc; int is_prefix; } incdec;
+        struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
+        struct { Expr *lhs; Expr *rhs; } comma;
+        struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
+        char *float_text;
+        struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
+    } u;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
@@ -404,10 +388,11 @@ struct StmtArray {
 struct SwitchCase {
     int is_default;
     int value;
+    char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -417,32 +402,23 @@ union __anon_u_2 {
         StmtArray block;
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    };struct Stmt {union __anon_u_26 {struct __anon_decl_27 { char *name; Type type; Expr *init; int storage_class; };
-struct __anon_if_s_28 { Expr *cond; Stmt *then_s; Stmt *else_s; };
-struct __anon_while_s_29 { Expr *cond; Stmt *body; };
-struct __anon_do_s_30 { Expr *cond; Stmt *body; };
-struct __anon_for_s_31 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
-struct __anon_goto_s_32 { char *target; Expr *target_expr; };
-struct __anon_label_s_33 { char *name; Stmt *stmt; };
-struct __anon_switch_s_34 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
-
-        struct __anon_decl_27 decl;
-        Expr *expr;
-        Expr *value;
-        struct __anon_if_s_28 if_s;
-        struct __anon_while_s_29 while_s;
-        struct __anon_do_s_30 do_s;
-        struct __anon_for_s_31 for_s;
-        StmtArray block;
-        struct __anon_goto_s_32 goto_s;
-        struct __anon_label_s_33 label_s;
-        struct __anon_switch_s_34 switch_s;
-    };
-
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+    };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
-    union __anon_u_26 u;
+    union {
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        Expr *expr;
+        Expr *value;
+        struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
+        struct { Expr *cond; Stmt *body; } while_s;
+        struct { Expr *cond; Stmt *body; } do_s;
+        struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
+        StmtArray block;
+        struct { char *target; Expr *target_expr; } goto_s;
+        struct { char *name; Stmt *stmt; } label_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+    } u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
@@ -450,7 +426,7 @@ void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value);
+void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
 struct Param {
     char *name;
     Type type;
@@ -474,6 +450,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    char *alias_target;
+    int align;
+    int no_instrument;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -494,23 +473,25 @@ void import_array_free(ImportArray *a);
 struct StructMember {
     char *name;
     Type type;
-    int offset;
+    long long offset;
     int bit_width;
     int bit_offset;
 };typedef struct StructMember StructMember;
 struct StructDef {
     char *tag;
     int is_union;
+    int is_big_endian;
     StructMember *members;
     int num_members;
     int cap_members;
-    int size;
-    int align;
+    long long size;
+    long long align;
+    int is_packed;
     SourceLoc loc;
     Type *canonical_type;
-    int bf_unit_type;
+    long long bf_unit_type;
     int bf_unit_used;
-    int bf_unit_offset;
+    long long bf_unit_offset;
 };typedef struct StructDef StructDef;
 struct StructRegistry {
     StructDef *data;
@@ -524,11 +505,12 @@ StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
+void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
                                          const char *name,
-                                         int *offset_out);
+                                         long long *offset_out);
 struct FunctionArray {
     FunctionDecl *data;
     size_t len;
@@ -809,6 +791,78 @@ static int labelset_has(const LabelSet *ls, const char *name) {
         if (runtime.strcmp(ls->names[i], name) == 0) return 1;
     return 0;
 }
+static void collect_labels(LabelSet *ls, const Stmt *s);
+static void collect_labels_expr(LabelSet *ls, const Expr *e) {
+    if (!e) return;
+    switch (e->kind) {
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                collect_labels(ls, &e->u.stmt_expr.stmts->data[i]);
+        }
+        break;
+    case EX_UNARY:
+        collect_labels_expr(ls, e->u.un.operand);
+        break;
+    case EX_INC_DEC:
+        collect_labels_expr(ls, e->u.incdec.operand);
+        break;
+    case EX_BINOP:
+        collect_labels_expr(ls, e->u.bin.l);
+        collect_labels_expr(ls, e->u.bin.r);
+        break;
+    case EX_TERNARY:
+        collect_labels_expr(ls, e->u.tern.cond);
+        collect_labels_expr(ls, e->u.tern.then);
+        collect_labels_expr(ls, e->u.tern.else_);
+        break;
+    case EX_ASSIGN:
+        collect_labels_expr(ls, e->u.assign.lvalue);
+        collect_labels_expr(ls, e->u.assign.rvalue);
+        break;
+    case EX_COMPOUND_ASSIGN:
+        collect_labels_expr(ls, e->u.comp.lvalue);
+        collect_labels_expr(ls, e->u.comp.rvalue);
+        break;
+    case EX_COMMA:
+        collect_labels_expr(ls, e->u.comma.lhs);
+        collect_labels_expr(ls, e->u.comma.rhs);
+        break;
+    case EX_CAST:
+        collect_labels_expr(ls, e->u.cast.operand);
+        break;
+    case EX_CALL:
+        collect_labels_expr(ls, e->u.call.callee);
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            collect_labels_expr(ls, e->u.call.args.data[i]);
+        break;
+    case EX_MEMBER:
+        collect_labels_expr(ls, e->u.member.obj);
+        break;
+    case EX_INDEX:
+        collect_labels_expr(ls, e->u.idx.array);
+        collect_labels_expr(ls, e->u.idx.index);
+        break;
+    case EX_DEREF:
+        collect_labels_expr(ls, e->u.deref.operand);
+        break;
+    case EX_ADDR:
+        collect_labels_expr(ls, e->u.addr.operand);
+        break;
+    case EX_SIZEOF_EXPR:
+        collect_labels_expr(ls, e->u.sizeof_e.operand);
+        break;
+    case EX_COMPOUND_LITERAL:
+        collect_labels_expr(ls, e->u.compound.init);
+        break;
+    case EX_INIT_LIST:
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            collect_labels_expr(ls, e->u.init_list.elements[i]);
+        break;
+    default:
+        break;
+    }
+}
 static void collect_labels(LabelSet *ls, const Stmt *s) {
     if (!s) return;
     switch (s->kind) {
@@ -816,21 +870,40 @@ static void collect_labels(LabelSet *ls, const Stmt *s) {
         labelset_add(ls, s->u.label_s.name);
         collect_labels(ls, s->u.label_s.stmt);
         break;
+    case ST_EXPR:
+        collect_labels_expr(ls, s->u.expr);
+        break;
+    case ST_DECL:
+        if (s->u.decl.init) collect_labels_expr(ls, s->u.decl.init);
+        break;
+    case ST_RETURN:
+        if (s->u.value) collect_labels_expr(ls, s->u.value);
+        break;
+    case ST_GOTO:
+        if (s->u.goto_s.target_expr) collect_labels_expr(ls, s->u.goto_s.target_expr);
+        break;
     case ST_IF:
+        collect_labels_expr(ls, s->u.if_s.cond);
         collect_labels(ls, s->u.if_s.then_s);
         if (s->u.if_s.else_s) collect_labels(ls, s->u.if_s.else_s);
         break;
     case ST_WHILE:
+        collect_labels_expr(ls, s->u.while_s.cond);
         collect_labels(ls, s->u.while_s.body);
         break;
     case ST_DO_WHILE:
         collect_labels(ls, s->u.do_s.body);
+        collect_labels_expr(ls, s->u.do_s.cond);
         break;
     case ST_FOR:
         if (s->u.for_s.init) collect_labels(ls, s->u.for_s.init);
+        if (s->u.for_s.cond) collect_labels_expr(ls, s->u.for_s.cond);
+        if (s->u.for_s.step) collect_labels_expr(ls, s->u.for_s.step);
         collect_labels(ls, s->u.for_s.body);
         break;
     case ST_SWITCH:
+        collect_labels_expr(ls, s->u.switch_s.cond);
+        if (s->u.switch_s.body) collect_labels(ls, s->u.switch_s.body);
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             const SwitchCase *arm = &s->u.switch_s.cases[i];
             for (size_t j = 0; j < arm->stmts.len; j++)
@@ -904,10 +977,22 @@ static int type_rank(Type t) {
 }
 static Type integer_promote(Type t) {
     if (t.kind == TY_FLOAT) return t;
-    if (t.bitfield_width > 0 && t.width <= 4) {
-        if (!t.is_unsigned || t.bitfield_width < 32)
-            return type_make_int(4, 0);
-        return type_make_int(4, 1);
+    if (t.bitfield_width > 0) {
+        if (!t.is_unsigned) {
+            if (t.bitfield_width <= 32)
+                return type_make_int(4, 0);
+            Type res = type_make_int(8, 0);
+            res.bitfield_width = t.bitfield_width;
+            return res;
+        } else {
+            if (t.bitfield_width < 32)
+                return type_make_int(4, 0);
+            if (t.bitfield_width == 32)
+                return type_make_int(4, 1);
+            Type res = type_make_int(8, 1);
+            res.bitfield_width = t.bitfield_width;
+            return res;
+        }
     }
     if (t.width < 4) return type_make_int(4, 0);
     return t;
@@ -916,7 +1001,7 @@ static Type usual_arith_conv(Type a, Type b) {
     a = integer_promote(a);
     b = integer_promote(b);
     int bfw = 0;
-    if (a.bitfield_width > 0 && b.bitfield_width > 0)
+    if (a.bitfield_width > 0 || b.bitfield_width > 0)
         bfw = a.bitfield_width > b.bitfield_width ? a.bitfield_width : b.bitfield_width;
     Type res;
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
@@ -971,15 +1056,15 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type rt = check_expr(e->u.bin.r, st, ft);
         if (lt.kind == TY_ARRAY) {
             Type d = type_decay(lt); type_free(&lt); lt = d;
-            set_type(e->u.bin.l, type_clone(lt));
         }
         if (rt.kind == TY_ARRAY) {
             Type d = type_decay(rt); type_free(&rt); rt = d;
-            set_type(e->u.bin.r, type_clone(rt));
         }
         BinOp op = e->u.bin.op;
         Type res;
-        if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) ||
+        if (lt.is_vector || rt.is_vector) {
+            res = type_clone(lt.is_vector ? lt : rt);
+        } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) {
             if (op == BOP_EQ || op == BOP_NE) {
                 res = type_make_int(4, 0);
@@ -1047,7 +1132,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type ot = check_expr(e->u.un.operand, st, ft);
         if (ot.kind == TY_ARRAY) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
-            set_type(e->u.un.operand, type_clone(ot));
+        }
+        if (ot.is_vector) {
+            set_type(e, ot);
+            return type_clone(e->type);
         }
         if (e->u.un.op == UOP_BITNOT && ot.kind == TY_STRUCT && ot.tag && runtime.strncmp(ot.tag, "__complex_", 10) == 0) {
             set_type(e, ot);
@@ -1151,12 +1239,17 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             set_type(e, vp);
             return type_clone(e->type);
         }
+        if (runtime.strcmp(e->u.var.name, "__CHAR_BIT__") == 0) {
+            Type it = type_make_int(4, 0);
+            set_type(e, it);
+            return type_clone(e->type);
+        }
         if (runtime.strncmp(e->u.var.name, "__builtin_", 10) == 0 || runtime.strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
             Type ret = type_default_int();
-            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0 || runtime.strcmp(bname, "__builtin_prefetch") == 0)
+            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0 || runtime.strcmp(bname, "__builtin_prefetch") == 0 || runtime.strcmp(bname, "__builtin_stack_restore") == 0 || runtime.strcmp(bname, "__builtin_longjmp") == 0)
                 ret = type_make_void();
-            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0 || runtime.strcmp(bname, "alloca") == 0 || runtime.strcmp(bname, "__builtin_frame_address") == 0 || runtime.strcmp(bname, "__builtin_return_address") == 0)
+            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0 || runtime.strcmp(bname, "alloca") == 0 || runtime.strcmp(bname, "__builtin_frame_address") == 0 || runtime.strcmp(bname, "__builtin_return_address") == 0 || runtime.strcmp(bname, "__builtin_stack_save") == 0)
                 ret = type_make_ptr(type_make_void());
             else if (runtime.strcmp(bname, "__builtin_strlen") == 0)
                 ret = type_make_int(8, 1);
@@ -1172,6 +1265,14 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 1);
             else if (runtime.strcmp(bname, "__builtin_bswap16") == 0)
                 ret = type_make_int(2, 1);
+            else if (runtime.strcmp(bname, "__builtin_classify_type") == 0)
+                ret = type_make_int(4, 0);
+            else if (runtime.strcmp(bname, "__builtin_signbit") == 0 || runtime.strcmp(bname, "__builtin_signbitf") == 0 || runtime.strcmp(bname, "__builtin_signbitl") == 0 || runtime.strcmp(bname, "signbit") == 0)
+                ret = type_make_int(4, 0);
+            else if (runtime.strcmp(bname, "__builtin_abs") == 0 || runtime.strcmp(bname, "abs") == 0)
+                ret = type_make_int(4, 0);
+            else if (runtime.strcmp(bname, "__builtin_labs") == 0 || runtime.strcmp(bname, "__builtin_llabs") == 0 || runtime.strcmp(bname, "labs") == 0 || runtime.strcmp(bname, "llabs") == 0)
+                ret = type_make_int(8, 0);
             Type fn = type_make_func(ret, ((void*)0), 0);
             Type fp = type_make_ptr(fn);
             type_free(&fn);
@@ -1234,13 +1335,14 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
                            || op == BOP_DIV);
         int is_complex = (lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0);
+        int is_vector = (lt.is_vector || rt.is_vector);
         if (op == BOP_ADD || op == BOP_SUB) {
             if (lt.kind == TY_PTR && rt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
         }
-        if (lt.kind != TY_PTR && !is_complex
+        if (lt.kind != TY_PTR && !is_complex && !is_vector
             && !(arith_float && (lt.kind == TY_FLOAT || rt.kind == TY_FLOAT))) {
             if (lt.kind != TY_INT)
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
@@ -1296,10 +1398,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
-            && runtime.strcmp(e->u.call.callee->u.var.name, "va_start") == 0) {
-            if (e->u.call.args.len != 2) {
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "va_start") == 0 ||
+                runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_start") == 0 ||
+                runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_c23_va_start") == 0)) {
+            if (e->u.call.args.len < 1 || e->u.call.args.len > 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "va_start takes exactly 2 arguments (va_list, last_param)");
+                       "va_start takes 1 or 2 arguments");
             }
             Type list_ty = check_expr(e->u.call.args.data[0], st, ft);
             if (!is_va_list_type(&list_ty)) {
@@ -1308,13 +1412,16 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "va_start first argument must be a va_list");
             }
             type_free(&list_ty);
-            Type at = check_expr(e->u.call.args.data[1], st, ft);
-            type_free(&at);
+            if (e->u.call.args.len == 2) {
+                Type at = check_expr(e->u.call.args.data[1], st, ft);
+                type_free(&at);
+            }
             set_type(e, type_make_void());
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
-            && runtime.strcmp(e->u.call.callee->u.var.name, "va_arg") == 0) {
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "va_arg") == 0 ||
+                runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_arg") == 0)) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_arg takes exactly 2 arguments (va_list, type)");
@@ -1335,7 +1442,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
-            && runtime.strcmp(e->u.call.callee->u.var.name, "va_end") == 0) {
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "va_end") == 0 ||
+                runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_end") == 0)) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_end takes exactly 1 argument (va_list)");
@@ -1435,11 +1543,20 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "call to non-function (callee type must be a function or function pointer)");
         }
-        if (fn_ty.func_params != ((void*)0) && (int)e->u.call.args.len != fn_ty.func_nparams) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "function pointer expects %d argument%s but %zu given",
-                   fn_ty.func_nparams,
-                   fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
+        if (fn_ty.func_params != ((void*)0)) {
+            if (fn_ty.func_is_variadic) {
+                if ((int)e->u.call.args.len < fn_ty.func_nparams) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "function pointer expects at least %d argument%s but %zu given",
+                           fn_ty.func_nparams,
+                           fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
+                }
+            } else if ((int)e->u.call.args.len != fn_ty.func_nparams) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "function pointer expects %d argument%s but %zu given",
+                       fn_ty.func_nparams,
+                       fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
+            }
         }
         for (size_t i = 0; i < e->u.call.args.len; i++) {
             Type at = check_expr(e->u.call.args.data[i], st, ft);
@@ -1479,7 +1596,6 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type ot = check_expr(e->u.deref.operand, st, ft);
         if (ot.kind == TY_ARRAY) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
-            set_type(e->u.deref.operand, type_clone(ot));
         }
         if (ot.kind != TY_PTR) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -1500,6 +1616,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type swap = at; at = it; it = swap;
         }
         type_free(&it);
+        if (at.is_vector && at.elem_type) {
+            Type res = type_clone(*at.elem_type);
+            type_free(&at);
+            set_type(e, res);
+            return type_clone(e->type);
+        }
         Type base = at;
         if (base.kind == TY_ARRAY) {
             Type d = type_decay(base); type_free(&base); base = d;
@@ -1593,11 +1715,9 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type et = check_expr(e->u.tern.else_, st, ft);
         if (tt.kind == TY_ARRAY) {
             Type d = type_decay(tt); type_free(&tt); tt = d;
-            set_type(e->u.tern.then, type_clone(tt));
         }
         if (et.kind == TY_ARRAY) {
             Type d = type_decay(et); type_free(&et); et = d;
-            set_type(e->u.tern.else_, type_clone(et));
         }
         int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
                                && e->u.tern.then->kind == EX_INT_LIT
@@ -1608,7 +1728,9 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT);
         int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT);
         Type res;
-        if (tt_arith && et_arith) {
+        if (tt.kind == TY_VOID && et.kind == TY_VOID) {
+            res = type_make_void();
+        } else if (tt_arith && et_arith) {
             res = usual_arith_conv(tt, et);
         } else if (tt.kind == TY_PTR && et.kind == TY_PTR) {
             res = type_clone(tt);
@@ -1634,12 +1756,21 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         set_type(e, type_clone(e->u.cast.target));
         return type_clone(e->type);
     }
-    case EX_SIZEOF_TYPE:
-    case EX_SIZEOF_EXPR: {
-        if (e->kind == EX_SIZEOF_EXPR) {
-            Type ot = check_expr(e->u.sizeof_e.operand, st, ft);
-            type_free(&ot);
+    case EX_SIZEOF_TYPE: {
+        Type *t = &e->u.sizeof_t.target;
+        while (t && t->kind == TY_ARRAY) {
+            if (t->vla_dim) {
+                Type dt = check_expr(t->vla_dim, st, ft);
+                type_free(&dt);
+            }
+            t = t->elem_type;
         }
+        set_type(e, type_make_int(8, 1));
+        return type_clone(e->type);
+    }
+    case EX_SIZEOF_EXPR: {
+        Type ot = check_expr(e->u.sizeof_e.operand, st, ft);
+        type_free(&ot);
         set_type(e, type_make_int(8, 1));
         return type_clone(e->type);
     }
@@ -1787,14 +1918,17 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
         if (!sd)
             die_at(loc.file, loc.line, loc.col,
                    "unknown struct 'struct %s'", target->tag);
-        N = sd->num_members;
+        N = sd->is_union ? 1 : sd->num_members;
         break;
-    default: N = 1; break;
+    default:
+        if (target->is_vector) N = target->length;
+        else N = 1;
+        break;
     }
     for (int i = 0; i < n; i++) {
         int kind = list->u.init_list.desig_kind[i];
         if (kind == 0) {
-            if (target->kind != TY_ARRAY)
+            if (target->kind != TY_ARRAY && !target->is_vector)
                 die_at(loc.file, loc.line, loc.col,
                        "array index designator used on a non-array type");
             int idx = list->u.init_list.desig_index[i];
@@ -1806,39 +1940,48 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             if (target->kind != TY_STRUCT)
                 die_at(loc.file, loc.line, loc.col,
                        "member designator used on a non-struct type");
-            const char *name = list->u.init_list.desig_member[i];
-            int found = 0;
-            for (int j = 0; j < sd->num_members; j++)
-                if (runtime.strcmp(sd->members[j].name, name) == 0) { found = 1; break; }
-            if (!found)
-                die_at(loc.file, loc.line, loc.col,
-                       "struct '%s' has no member named '%s'",
-                       target->tag, name);
+            if (sd->is_union) {
+                if (list->u.init_list.desig_member[i] == ((void*)0))
+                    die_at(loc.file, loc.line, loc.col,
+                           "invalid member designator in union initializer");
+            }
         }
     }
     Expr **out = runtime.malloc(N * sizeof(Expr *));
+    if (!out) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     for (int i = 0; i < N; i++)
         out[i] = expr_new_int(0, loc);
     int cursor = 0;
     for (int i = 0; i < n; i++) {
-        Expr *elem = list->u.init_list.elements[i];
         int pos;
+        int member_idx = 0;
         if (list->u.init_list.desig_kind[i] == 0) {
             pos = list->u.init_list.desig_index[i];
+            member_idx = pos;
+            if (sd && sd->is_union) pos = 0;
         } else if (list->u.init_list.desig_kind[i] == 1) {
             const char *name = list->u.init_list.desig_member[i];
             pos = -1;
-            for (int j = 0; j < sd->num_members; j++)
+            for (int j = 0; j < (sd ? sd->num_members : 0); j++)
                 if (runtime.strcmp(sd->members[j].name, name) == 0) { pos = j; break; }
+            if (pos < 0)
+                die_at(loc.file, loc.line, loc.col,
+                       "struct '%s' has no member named '%s'",
+                       target->tag, name);
+            member_idx = pos;
+            if (sd && sd->is_union) pos = 0;
         } else {
             pos = cursor;
+            member_idx = (sd && sd->is_union) ? 0 : pos;
         }
-        if (pos < 0 || pos >= N)
-            die_at(loc.file, loc.line, loc.col,
-                   "too many initializers: %d value(s) for %d slot(s)", n, N);
+        if (pos < 0 || pos >= N) {
+            continue;
+        }
+        Expr *elem = list->u.init_list.elements[i];
         Type *slot_type = ((void*)0);
-        if (target->kind == TY_ARRAY) slot_type = target->elem_type;
-        else if (target->kind == TY_STRUCT) slot_type = &sd->members[pos].type;
+        if (target->kind == TY_ARRAY || target->is_vector) slot_type = target->elem_type;
+        else if (target->kind == TY_STRUCT && sd && member_idx < sd->num_members)
+            slot_type = &sd->members[member_idx].type;
         if (slot_type && elem->kind != EX_INIT_LIST
             && (slot_type->kind == TY_ARRAY || slot_type->kind == TY_STRUCT)
             && !init_elem_may_be_aggregate(elem)
@@ -1855,10 +1998,10 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             i += take - 1;
         }
         if (elem->kind == EX_INIT_LIST) {
-            if (target->kind == TY_ARRAY)
+            if (target->kind == TY_ARRAY || target->is_vector)
                 normalize_init_list(target->elem_type, elem, elem->loc);
-            else
-                normalize_init_list(&sd->members[pos].type, elem, elem->loc);
+            else if (sd && member_idx < sd->num_members)
+                normalize_init_list(&sd->members[member_idx].type, elem, elem->loc);
         }
         expr_free(out[pos]);
         out[pos] = elem;
@@ -1878,6 +2021,18 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
 }
 static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) {
     int n = list->u.init_list.num_elements;
+    if (target.is_vector) {
+        if (target.length > 0 && n > target.length)
+            die_at(loc.file, loc.line, loc.col,
+                   "too many initializers for vector (expected %d, got %d)",
+                   target.length, n);
+        for (int i = 0; i < n; i++) {
+            const Expr *elem = list->u.init_list.elements[i];
+            if (elem->kind == EX_INIT_LIST && target.elem_type)
+                check_init_list_shape(*target.elem_type, elem, elem->loc);
+        }
+        return;
+    }
     switch (target.kind) {
     case TY_ARRAY:
         if (target.length > 0 && n > target.length)
@@ -1930,6 +2085,9 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
             break;
         }
+        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
+            check_expr(s->u.decl.type.vla_dim, st, ft);
+        }
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
             && s->u.decl.init && s->u.decl.init->kind == EX_STR
             && s->u.decl.type.elem_type
@@ -1961,15 +2119,8 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         break;
     }
     case ST_EXPR:
-        if (s->u.expr && s->u.expr->kind == EX_CALL
-            && s->u.expr->u.call.callee
-            && s->u.expr->u.call.callee->kind == EX_VAR) {
-            const char *cname = s->u.expr->u.call.callee->u.var.name;
-            if (runtime.strcmp(cname, "exit") == 0 || runtime.strcmp(cname, "abort") == 0
-                || runtime.strcmp(cname, "__builtin_exit") == 0 || runtime.strcmp(cname, "__builtin_abort") == 0
-                || runtime.strcmp(cname, "__builtin_trap") == 0) {
-                *has_return = 1;
-            }
+        if (s->u.expr && s->u.expr->kind == EX_CALL) {
+            *has_return = 1;
         }
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
@@ -2044,6 +2195,8 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                    "switch condition must be integer");
         type_free(&ct);
         g_sema_loop_depth++;
+        if (s->u.switch_s.body)
+            check_stmt(s->u.switch_s.body, st, ft, scope_mark, has_return);
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             SwitchCase *arm = &s->u.switch_s.cases[i];
             for (size_t j = 0; j < arm->stmts.len; j++)
@@ -2073,6 +2226,9 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         check_stmt(s->u.for_s.body, st, ft, mark, has_return);
         g_sema_loop_depth--;
         symtable_leave_scope(st, mark);
+        if (!s->u.for_s.cond) {
+            *has_return = 1;
+        }
         break;
     }
     case ST_BREAK:
@@ -2230,6 +2386,10 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                 }
             }
             Type pty = fn->params.data[j].type;
+            if (pty.vla_dim) {
+                Type dt = check_expr(pty.vla_dim, &st, &ft);
+                type_free(&dt);
+            }
             int own_ptr = 0;
             if (pty.kind == TY_ARRAY && pty.length == 0) {
                 pty = type_make_ptr(*pty.elem_type);
@@ -2253,22 +2413,10 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         symtable_free(&st);
         g_sema_labels = ((void*)0);
         labelset_free(&ls);
-        if (!has_return && fn->ret_type.kind != TY_VOID) {
-            if (fn->name && runtime.strcmp(fn->name, "main") == 0) {
-                if (fn->body.len > 0) {
-                    const Stmt *last = &fn->body.data[fn->body.len - 1];
-                    if (last->kind == ST_EXPR && last->u.expr && last->u.expr->kind == EX_CALL) {
-                    } else {
-                        die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                               "function '%s' must have a return statement",
-                               fn->name ? fn->name : "(nullptr)");
-                    }
-                } else {
-                    die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                           "function '%s' must have a return statement",
-                           fn->name ? fn->name : "(nullptr)");
-                }
-            }
+        if (runtime.strcmp(fn->name, "main") == 0 && fn->ret_type.kind != TY_VOID && !has_return) {
+            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                   "function '%s' with non-void return type must return a value",
+                   fn->name);
         }
     }
     ftab_free(&ft);

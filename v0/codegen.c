@@ -214,6 +214,13 @@ enum IROpcode {
     IR_FMUL,
     IR_FDIV,
     IR_FCMP,
+    IR_VADD,
+    IR_VSUB,
+    IR_VMUL,
+    IR_VDIV,
+    IR_VBAND,
+    IR_VBOR,
+    IR_VBXOR,
     IR_SITOFP,
     IR_FPTOSI,
     IR_FPEXT,
@@ -245,6 +252,9 @@ enum IROpcode {
     IR_FRAME_ADDR,
     IR_RETURN_ADDR,
     IR_DYN_ALLOCA,
+    IR_STACK_SAVE,
+    IR_STACK_RESTORE,
+    IR_LONGJMP,
     IR_DBG_VALUE,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
@@ -255,7 +265,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[32];
+    IRValue call_args[64];
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -263,7 +273,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[32];
+    unsigned char call_arg_on_stack[64];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -359,12 +369,26 @@ struct IRGlobalArray {
     size_t len;
     size_t cap;
 };typedef struct IRGlobalArray IRGlobalArray;
+struct IRAlias {
+    char *name;
+    char *target;
+    int is_static;
+    SourceLoc loc;
+};typedef struct IRAlias IRAlias;
+struct IRAliasArray {
+    IRAlias *data;
+    size_t len;
+    size_t cap;
+};typedef struct IRAliasArray IRAliasArray;
 struct IRModule {
     IRFunctionArray functions;
     IRGlobalArray globals;
+    IRAliasArray aliases;
 };typedef struct IRModule IRModule;
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
+void ir_module_push_alias(IRModule *m, const char *name, const char *target,
+                          int is_static, SourceLoc loc);
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -484,7 +508,7 @@ enum TypeKind {
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int width;
+    long long width;
     int is_unsigned;
     unsigned is_const : 1;
     unsigned is_volatile : 1;
@@ -492,20 +516,23 @@ struct Type {
     unsigned is_bool : 1;
     Type *pointee;
     Type *elem_type;
-    int length;
+    long long length;
+    struct Expr *vla_dim;
     char *tag;
     Type *func_ret;
     Type *func_params;
     int func_nparams;
+    int func_is_variadic;
     int enum_id;
     int bitfield_width;
+    int is_vector;
 };
-static inline Type type_make_int(int width, int is_unsigned) {
+static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -513,37 +540,41 @@ static inline Type type_make_bool(void) {
     return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
-static inline Type type_make_float(int width) {
+static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
-int type_size(Type t);
-int type_align(Type t);
+long long type_size(Type t);
+long long type_align(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 Type type_make_ptr(Type pointee);
-Type type_make_array(Type elem, int length);
-Type type_make_struct(const char *tag, int size);
+Type type_make_array(Type elem, long long length);
+Type type_make_vector(Type elem, long long vec_size);
+Type type_make_vla(Type elem, struct Expr *dim);
+Type type_make_struct(const char *tag, long long size);
 Type type_make_func(Type ret, Type * *params, int nparams);
+Type type_make_func_var(Type ret, Type * *params, int nparams, int is_variadic);
 Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
     EX_BINOP,
@@ -629,60 +660,37 @@ union __anon_u_1 {
         struct { Type target_type; Expr *init; } compound;
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
-    };struct Expr {union __anon_u_3 {struct __anon_bin_4 { BinOp op; Expr *l, *r; };
-struct __anon_un_5 { UnaryOp op; Expr *operand; };
-struct __anon_var_6 { char *name; char *pkg; };
-struct __anon_assign_7 { Expr *lvalue; Expr *rvalue; };
-struct __anon_call_8 { Expr *callee; ExprArray args; };
-struct __anon_str_9 { char *bytes; int len; };
-struct __anon_addr_10 { Expr *operand; };
-struct __anon_deref_11 { Expr *operand; };
-struct __anon_idx_12 { Expr *array; Expr *index; };
-struct __anon_member_13 { Expr *obj; char *name; };
-struct __anon_cast_14 { Type target; Expr *operand; };
-struct __anon_sizeof_t_15 { Type target; };
-struct __anon_sizeof_e_16 { Expr *operand; };
-struct __anon_alignof_t_17 { Type target; };
-struct __anon_tern_18 { Expr *cond; Expr *then; Expr *else_; };
-struct __anon_incdec_19 { Expr *operand; int is_inc; int is_prefix; };
-struct __anon_comp_20 { Expr *lvalue; Expr *rvalue; BinOp op; };
-struct __anon_comma_21 { Expr *lhs; Expr *rhs; };
-struct __anon_init_list_22 { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; };
-struct __anon_compound_23 { Type target_type; Expr *init; };
-struct __anon_stmt_expr_24 { StmtArray *stmts; };
-struct __anon_label_addr_25 { char *label; };
-
-        long long int_val;
-        struct __anon_bin_4 bin;
-        struct __anon_un_5 un;
-        struct __anon_var_6 var;
-        struct __anon_assign_7 assign;
-        struct __anon_call_8 call;
-        struct __anon_str_9 str;
-        struct __anon_addr_10 addr;
-        struct __anon_deref_11 deref;
-        struct __anon_idx_12 idx;
-        struct __anon_member_13 member;
-        struct __anon_cast_14 cast;
-        struct __anon_sizeof_t_15 sizeof_t;
-        struct __anon_sizeof_e_16 sizeof_e;
-        struct __anon_alignof_t_17 alignof_t;
-        struct __anon_tern_18 tern;
-        struct __anon_incdec_19 incdec;
-        struct __anon_comp_20 comp;
-        struct __anon_comma_21 comma;
-        struct __anon_init_list_22 init_list;
-        char *float_text;
-        struct __anon_compound_23 compound;
-        struct __anon_stmt_expr_24 stmt_expr;
-        struct __anon_label_addr_25 label_addr;
-    };
-
+    };struct Expr {
     ExprKind kind;
     SourceLoc loc;
     Type type;
     Type va_arg_type;
-    union __anon_u_3 u;
+    union {
+        long long int_val;
+        struct { BinOp op; Expr *l, *r; } bin;
+        struct { UnaryOp op; Expr *operand; } un;
+        struct { char *name; char *pkg; } var;
+        struct { Expr *lvalue; Expr *rvalue; } assign;
+        struct { Expr *callee; ExprArray args; } call;
+        struct { char *bytes; int len; } str;
+        struct { Expr *operand; } addr;
+        struct { Expr *operand; } deref;
+        struct { Expr *array; Expr *index; } idx;
+        struct { Expr *obj; char *name; } member;
+        struct { Type target; Expr *operand; } cast;
+        struct { Type target; } sizeof_t;
+        struct { Expr *operand; } sizeof_e;
+        struct { Type target; } alignof_t;
+        struct { Expr *cond; Expr *then; Expr *else_; } tern;
+        struct { Expr *operand; int is_inc; int is_prefix; } incdec;
+        struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
+        struct { Expr *lhs; Expr *rhs; } comma;
+        struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
+        char *float_text;
+        struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
+    } u;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
@@ -738,10 +746,11 @@ struct StmtArray {
 struct SwitchCase {
     int is_default;
     int value;
+    char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -751,32 +760,23 @@ union __anon_u_2 {
         StmtArray block;
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
-    };struct Stmt {union __anon_u_26 {struct __anon_decl_27 { char *name; Type type; Expr *init; int storage_class; };
-struct __anon_if_s_28 { Expr *cond; Stmt *then_s; Stmt *else_s; };
-struct __anon_while_s_29 { Expr *cond; Stmt *body; };
-struct __anon_do_s_30 { Expr *cond; Stmt *body; };
-struct __anon_for_s_31 { Stmt *init; Expr *cond; Expr *step; Stmt *body; };
-struct __anon_goto_s_32 { char *target; Expr *target_expr; };
-struct __anon_label_s_33 { char *name; Stmt *stmt; };
-struct __anon_switch_s_34 { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; };
-
-        struct __anon_decl_27 decl;
-        Expr *expr;
-        Expr *value;
-        struct __anon_if_s_28 if_s;
-        struct __anon_while_s_29 while_s;
-        struct __anon_do_s_30 do_s;
-        struct __anon_for_s_31 for_s;
-        StmtArray block;
-        struct __anon_goto_s_32 goto_s;
-        struct __anon_label_s_33 label_s;
-        struct __anon_switch_s_34 switch_s;
-    };
-
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+    };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
-    union __anon_u_26 u;
+    union {
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        Expr *expr;
+        Expr *value;
+        struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
+        struct { Expr *cond; Stmt *body; } while_s;
+        struct { Expr *cond; Stmt *body; } do_s;
+        struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
+        StmtArray block;
+        struct { char *target; Expr *target_expr; } goto_s;
+        struct { char *name; Stmt *stmt; } label_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+    } u;
 };
 void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
@@ -784,7 +784,7 @@ void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value);
+void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
 struct Param {
     char *name;
     Type type;
@@ -808,6 +808,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    char *alias_target;
+    int align;
+    int no_instrument;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -828,23 +831,25 @@ void import_array_free(ImportArray *a);
 struct StructMember {
     char *name;
     Type type;
-    int offset;
+    long long offset;
     int bit_width;
     int bit_offset;
 };typedef struct StructMember StructMember;
 struct StructDef {
     char *tag;
     int is_union;
+    int is_big_endian;
     StructMember *members;
     int num_members;
     int cap_members;
-    int size;
-    int align;
+    long long size;
+    long long align;
+    int is_packed;
     SourceLoc loc;
     Type *canonical_type;
-    int bf_unit_type;
+    long long bf_unit_type;
     int bf_unit_used;
-    int bf_unit_offset;
+    long long bf_unit_offset;
 };typedef struct StructDef StructDef;
 struct StructRegistry {
     StructDef *data;
@@ -858,11 +863,12 @@ StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
+void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
                                          const char *name,
-                                         int *offset_out);
+                                         long long *offset_out);
 struct FunctionArray {
     FunctionDecl *data;
     size_t len;
@@ -1839,22 +1845,38 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
         ensure_reg(b, destv, REG_RSI, ra);
         int ov_step = (nbytes + 7) & ~7;
         if (ov_step < 8) ov_step = 8;
+        int num_gp = 0, num_fp = 0;
+        for (int i = 0; i < n8; i++) {
+            if ((inst->float_imm >> i) & 1) num_fp++;
+            else num_gp++;
+        }
         if (!inst->force_stack && n8 <= 2) {
-            emit_load_base_off32(b, REG_RCX, ap_reg, 0);
-            emit_cmp_imm32(b, REG_RCX, 48 - 8 * (n8 - 1));
-            size_t jae_ov = emit_jcc_rel32(b, 0x83);
-            emit_load_base_off(b, REG_R11, ap_reg, 16);
-            emit_add_rr(b, REG_R11, REG_RCX);
-            for (int i = 0; i < n8; i++) {
-                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
-                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            size_t jae_gp = 0, jae_fp = 0;
+            if (num_gp > 0) {
+                emit_load_base_off32(b, REG_RCX, ap_reg, 0);
+                emit_cmp_imm32(b, REG_RCX, 48 - 8 * num_gp);
+                jae_gp = emit_jcc_rel32(b, 0x87);
             }
-            emit_load_base_off32(b, REG_RCX, ap_reg, 0);
-            emit_add_imm32(b, REG_RCX, 8 * n8);
-            emit_store_base_off32(b, ap_reg, REG_RCX, 0);
+            if (num_fp > 0) {
+                emit_load_base_off32(b, REG_RCX, ap_reg, 4);
+                emit_cmp_imm32(b, REG_RCX, 176 - 16 * num_fp);
+                jae_fp = emit_jcc_rel32(b, 0x87);
+            }
+            for (int i = 0; i < n8; i++) {
+                int is_sse = (inst->float_imm >> i) & 1;
+                int off_field = is_sse ? 4 : 0;
+                emit_load_base_off32(b, REG_RCX, ap_reg, off_field);
+                emit_load_base_off(b, REG_R11, ap_reg, 16);
+                emit_add_rr(b, REG_R11, REG_RCX);
+                emit_load_base_off(b, REG_RDX, REG_R11, 0);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+                emit_add_imm32(b, REG_RCX, is_sse ? 16 : 8);
+                emit_store_base_off32(b, ap_reg, REG_RCX, off_field);
+            }
             size_t jmp_end = emit_jmp_rel32(b);
             size_t ov_off = b->len;
-            patch_rel32(b, jae_ov, ov_off);
+            if (num_gp > 0) patch_rel32(b, jae_gp, ov_off);
+            if (num_fp > 0) patch_rel32(b, jae_fp, ov_off);
             emit_load_base_off(b, REG_R11, ap_reg, 8);
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
@@ -2565,10 +2587,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                     dr >= 0 ? dr : REG_RAX, ra);
                 } else {
                     mask_to_width(&out->text, REG_RDX, inst->width, inst->is_unsigned);
-                    if (dr >= 0)
+                    if (dr >= 0 && dr != REG_RDX)
                         emit_mov_rr(&out->text, dr, REG_RDX);
                     spill_if_needed(&out->text, inst->dst,
-                                    dr >= 0 ? dr : REG_RAX, ra);
+                                    dr >= 0 ? dr : REG_RDX, ra);
                 }
                 break;
             }
@@ -2802,6 +2824,26 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
             }
+            case IR_STACK_SAVE: {
+                int target = dr >= 0 ? dr : REG_RAX;
+                emit_mov_rr(&out->text, target, REG_RSP);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+            case IR_STACK_RESTORE: {
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_mov_rr(&out->text, REG_RSP, REG_RAX);
+                break;
+            }
+            case IR_LONGJMP: {
+                ensure_reg(&out->text, inst->a, REG_RDI, ra);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x6F); emit_byte(&out->text, 0x00);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x67); emit_byte(&out->text, 0x10);
+                emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8B); emit_byte(&out->text, 0x47); emit_byte(&out->text, 0x08);
+                emit_byte(&out->text, 0xFF); emit_byte(&out->text, 0xE0);
+                break;
+            }
             case IR_FADDR: {
                 int target = dr >= 0 ? dr : REG_RAX;
                 size_t patch = emit_lea_rip(&out->text, target);
@@ -2856,6 +2898,130 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 } else {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, inst->width);
+                }
+                break;
+            }
+            case IR_VADD:
+            case IR_VSUB:
+            case IR_VMUL:
+            case IR_VDIV:
+            case IR_VBAND:
+            case IR_VBOR:
+            case IR_VBXOR: {
+                int vec_sz = inst->width;
+                int elem_sz = (int)inst->imm;
+                int is_float = inst->is_float;
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                if (vec_sz >= 16) {
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x10);
+                    emit_modrm(&out->text, 0, 0, REG_RAX);
+                } else if (vec_sz >= 8) {
+                    emit_byte(&out->text, 0xF3);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x7E);
+                    emit_modrm(&out->text, 0, 0, REG_RAX);
+                } else {
+                    emit_byte(&out->text, 0x66);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x6E);
+                    emit_modrm(&out->text, 0, 0, REG_RAX);
+                }
+                if (vec_sz >= 16) {
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x10);
+                    emit_modrm(&out->text, 0, 1, REG_RCX);
+                } else if (vec_sz >= 8) {
+                    emit_byte(&out->text, 0xF3);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x7E);
+                    emit_modrm(&out->text, 0, 1, REG_RCX);
+                } else {
+                    emit_byte(&out->text, 0x66);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x6E);
+                    emit_modrm(&out->text, 0, 1, REG_RCX);
+                }
+                if (is_float) {
+                    if (elem_sz >= 8) {
+                        emit_byte(&out->text, 0x66);
+                        emit_byte(&out->text, 0x0F);
+                        if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
+                        else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
+                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
+                        else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
+                        else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
+                        else if (inst->op == IR_VBOR) emit_byte(&out->text, 0x56);
+                        else if (inst->op == IR_VBXOR) emit_byte(&out->text, 0x57);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else {
+                        emit_byte(&out->text, 0x0F);
+                        if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
+                        else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
+                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
+                        else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
+                        else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
+                        else if (inst->op == IR_VBOR) emit_byte(&out->text, 0x56);
+                        else if (inst->op == IR_VBXOR) emit_byte(&out->text, 0x57);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    }
+                } else {
+                    emit_byte(&out->text, 0x66);
+                    if (inst->op == IR_VBAND) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xDB);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (inst->op == IR_VBOR) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xEB);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (inst->op == IR_VBXOR) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xEF);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (elem_sz == 1) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, (inst->op == IR_VADD) ? 0xFC : 0xF8);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (elem_sz == 2) {
+                        emit_byte(&out->text, 0x0F);
+                        if (inst->op == IR_VADD) emit_byte(&out->text, 0xFD);
+                        else if (inst->op == IR_VSUB) emit_byte(&out->text, 0xF9);
+                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0xD5);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    } else if (elem_sz == 4) {
+                        if (inst->op == IR_VMUL) {
+                            emit_byte(&out->text, 0x0F);
+                            emit_byte(&out->text, 0x38);
+                            emit_byte(&out->text, 0x40);
+                            emit_modrm(&out->text, 3, 0, 1);
+                        } else {
+                            emit_byte(&out->text, 0x0F);
+                            emit_byte(&out->text, (inst->op == IR_VADD) ? 0xFE : 0xFA);
+                            emit_modrm(&out->text, 3, 0, 1);
+                        }
+                    } else if (elem_sz >= 8) {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, (inst->op == IR_VADD) ? 0xD4 : 0xFB);
+                        emit_modrm(&out->text, 3, 0, 1);
+                    }
+                }
+                ensure_reg(&out->text, inst->dst, REG_RDI, ra);
+                if (vec_sz >= 16) {
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x11);
+                    emit_modrm(&out->text, 0, 0, REG_RDI);
+                } else if (vec_sz >= 8) {
+                    emit_byte(&out->text, 0x66);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0xD6);
+                    emit_modrm(&out->text, 0, 0, REG_RDI);
+                } else {
+                    emit_byte(&out->text, 0x66);
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x7E);
+                    emit_modrm(&out->text, 0, 0, REG_RDI);
                 }
                 break;
             }
@@ -3022,9 +3188,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 int nargs = inst->call_nargs;
-                if (nargs > 32) nargs = 32;
-                int target_reg[32];
-                int target_is_xmm[32];
+                if (nargs > 64) nargs = 64;
+                int target_reg[64];
+                int target_is_xmm[64];
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
@@ -3512,7 +3678,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8D);
                     emit_modrm(&out->text, 0, REG_RCX & 7, 4);
                     emit_byte(&out->text, 0x24);
-                    emit_byte(&out->text, inst->width == 8 ? 0xDD : 0xDB);
+                    emit_byte(&out->text, 0xDD);
                     emit_modrm(&out->text, 0, 1, REG_RCX & 7);
                     int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                                 ? ra->reg[inst->dst] : -1;
@@ -3560,6 +3726,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_sse_cvtss2si(&out->text, REG_RAX, 14, 1);
                     else
                         emit_sse_cvtsd2si(&out->text, REG_RAX, 14, 1);
+                    if (inst->width == 4 && !inst->is_unsigned) {
+                        emit_mov_imm64(&out->text, REG_RCX, (int64_t)0x7fffffffLL);
+                        emit_cmp_rr(&out->text, REG_RCX, REG_RAX);
+                        size_t j_le = emit_jcc_rel32(&out->text, 0x8D);
+                        emit_mov_rr(&out->text, REG_RAX, REG_RCX);
+                        patch_rel32(&out->text, j_le, out->text.len);
+                    }
                     mask_to_width(&out->text, REG_RAX, inst->width,
                                   inst->is_unsigned);
                 }
@@ -3810,4 +3983,23 @@ int dreg;
         runtime.free(fp->fn_name);
     }
     runtime.free(fnaddr_patches);
+    for (size_t ai = 0; ai < ir->aliases.len; ai++) {
+        const IRAlias *al = &ir->aliases.data[ai];
+        int tsym = emit_module_find_symbol(out, al->target);
+        if (tsym >= 0) {
+            EmitSymbol target_sym = out->syms[tsym];
+            int existing = emit_module_find_symbol(out, al->name);
+            if (existing >= 0 && out->syms[existing].shndx == 0) {
+                out->syms[existing].binding = al->is_static ? 0 : 1;
+                out->syms[existing].type = target_sym.type;
+                out->syms[existing].shndx = target_sym.shndx;
+                out->syms[existing].value = target_sym.value;
+                out->syms[existing].size = target_sym.size;
+            } else {
+                emit_module_add_symbol(out, al->name, al->is_static ? 0 : 1,
+                                       target_sym.type, target_sym.shndx,
+                                       target_sym.value, target_sym.size);
+            }
+        }
+    }
 }

@@ -61,14 +61,17 @@ difftest_one() {
             -e 's/\b(runtime|fmt|io|ctype)\.//g' \
             "$src"
     } > "$WORK/$name.gcc.c"
-    if ! gcc -std=gnu99 -D_GNU_SOURCE -w -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
+    local extra_flags
+    extra_flags=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
+
+    if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
         printf '%-28s SKIP (gcc rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.gcc.err")"
         return 0
     fi
     local gcc_rc=0
     timeout "$RUN_TIMEOUT" "$WORK/$name.gcc" >"$WORK/$name.gcc.out" 2>"$WORK/$name.gcc.stderr" || gcc_rc=$?
 
-    if ! "$FAKECC" $FCC_FLAGS "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
+    if ! "$FAKECC" $FCC_FLAGS $extra_flags "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
         local rc=$?
         if [ "$rc" -ge 128 ]; then
             printf '%-28s DIFF (fakecc killed by signal %s; gcc exits %s)\n' \

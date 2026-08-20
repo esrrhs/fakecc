@@ -201,3 +201,112 @@ void perror(const char *s) {
     fputs("error\n", stderr);
     fflush(stderr);
 }
+
+int fgetc(FILE *f) {
+    stdio_init();
+    unsigned char ch = 0;
+    long n = __syscall(0, (long)f->fd, (long)&ch, 1);
+    if (n <= 0) {
+        if (n == 0) f->eof = 1;
+        else f->err = 1;
+        return -1;
+    }
+    return (int)ch;
+}
+
+int getc(FILE *f) { return fgetc(f); }
+int getchar(void) { return fgetc(stdin); }
+
+static int is_space_ch(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+int vfscanf(FILE *f, const char *fmt, va_list ap) {
+    stdio_init();
+    int matched = 0;
+    int ch = fgetc(f);
+    while (*fmt && ch >= 0) {
+        if (is_space_ch((unsigned char)*fmt)) {
+            while (is_space_ch((unsigned char)*fmt)) fmt++;
+            while (ch >= 0 && is_space_ch(ch)) ch = fgetc(f);
+            continue;
+        }
+        if (*fmt == '%') {
+            fmt++;
+            if (*fmt == '%') {
+                if (ch != '%') break;
+                ch = fgetc(f);
+                fmt++;
+                continue;
+            }
+            if (*fmt == 's') {
+                while (ch >= 0 && is_space_ch(ch)) ch = fgetc(f);
+                if (ch < 0) break;
+                char *s = va_arg(ap, char *);
+                int len = 0;
+                while (ch >= 0 && !is_space_ch(ch)) {
+                    s[len++] = (char)ch;
+                    ch = fgetc(f);
+                }
+                s[len] = '\0';
+                matched++;
+                fmt++;
+                continue;
+            }
+            if (*fmt == 'd' || *fmt == 'i') {
+                while (ch >= 0 && is_space_ch(ch)) ch = fgetc(f);
+                if (ch < 0) break;
+                int sign = 1;
+                if (ch == '-') { sign = -1; ch = fgetc(f); }
+                else if (ch == '+') { ch = fgetc(f); }
+                int val = 0;
+                int read_digits = 0;
+                while (ch >= '0' && ch <= '9') {
+                    val = val * 10 + (ch - '0');
+                    read_digits = 1;
+                    ch = fgetc(f);
+                }
+                if (!read_digits) break;
+                int *p = va_arg(ap, int *);
+                *p = val * sign;
+                matched++;
+                fmt++;
+                continue;
+            }
+            if (*fmt == 'c') {
+                char *p = va_arg(ap, char *);
+                *p = (char)ch;
+                ch = fgetc(f);
+                matched++;
+                fmt++;
+                continue;
+            }
+            break;
+        } else {
+            if (ch != (unsigned char)*fmt) break;
+            ch = fgetc(f);
+            fmt++;
+        }
+    }
+    return matched;
+}
+
+int fscanf(FILE *f, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vfscanf(f, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+int __isoc99_fscanf(FILE *f, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vfscanf(f, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+int __isoc99_vfscanf(FILE *f, const char *fmt, va_list ap) {
+    return vfscanf(f, fmt, ap);
+}

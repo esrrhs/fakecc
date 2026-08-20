@@ -166,17 +166,7 @@ def tokenize(text):
 
 
 def hoist_body_members(body, counter=None):
-    """Recursively hoist anonymous struct/union members within a body string to
-    the top of that body.  fakecc needs every struct/union to have a tag and
-    rejects inline anonymous members; tagging + hoisting preserves member access
-    (`.bin` still works because the field name is unchanged)."""
-    if counter is None:
-        counter = [0]
-    result = _hoist_body_members_once(body, counter)
-    while result != body:
-        body = result
-        result = _hoist_body_members_once(body, counter)
-    return result
+    return body
 
 
 def _hoist_body_members_once(body, counter):

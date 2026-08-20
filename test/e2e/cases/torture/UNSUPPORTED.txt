@@ -10,6 +10,7 @@
 
 20000822-1.c
 20010209-1.c
+20030501-1.c
 20040520-1.c
 20061220-1.c
 20090219-1.c
@@ -17,6 +18,7 @@
 920428-2.c
 920501-7.c
 920612-2.c
+920721-4.c
 921017-1.c
 921215-1.c
 931002-1.c
@@ -29,3 +31,10 @@ nestfunc-3.c
 nestfunc-5.c
 nestfunc-6.c
 nestfunc-7.c
+pr103405.c
+
+# GNU variable-length structures (VLAs inside struct definitions) and C99 runtime VLAs.
+20020412-1.c
+20040308-1.c
+20041218-2.c
+20070919-1.c

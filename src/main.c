@@ -284,6 +284,8 @@ int main(int argc, char **argv) {
             compile_only = 1;
         } else if (strcmp(argv[i], "-nodefaultlibs") == 0) {
             nodefaultlibs = 1;
+        } else if (strcmp(argv[i], "-finstrument-functions") == 0) {
+            g_instrument_functions = 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
         } else if (strcmp(argv[i], "-O0") == 0) {

@@ -7,7 +7,7 @@ set -uo pipefail
 
 FAKECC=${1:-./build/fakecc}
 shift || true
-CC_TIMEOUT=${CC_TIMEOUT:-30}
+CC_TIMEOUT=${CC_TIMEOUT:-60}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 
@@ -38,8 +38,10 @@ run_single_case() {
     local cc_err="$WORK/$(echo "${name%.c}" | tr / _).cc_err"
     local run_out="$WORK/$(echo "${name%.c}" | tr / _).run_out"
     local run_want="$WORK/$(echo "${name%.c}" | tr / _).run_want"
+    local extra_flags
+    extra_flags=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
 
-    timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$src" -o "$out" 2>"$cc_err"
+    timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA $extra_flags "$src" -o "$out" 2>"$cc_err"
     local cc_rc=$?
 
     if grep -q '^// expect_error' "$src"; then

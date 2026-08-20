@@ -21,7 +21,7 @@ typedef enum {
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    int width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. TY_FUNC: 0. */
+    long long width;         /* TY_INT: 1/2/4/8. TY_PTR: always 8. TY_ARRAY: elem width. TY_STRUCT: total size. TY_FUNC: 0. */
     int is_unsigned;   /* TY_INT only */
     unsigned is_const : 1; /* const-qualified (assignment forbidden) */
     unsigned is_volatile : 1; /* volatile-qualified (no-op without an optimizer) */
@@ -29,21 +29,24 @@ struct Type {
     unsigned is_bool : 1;  /* _Bool (width-1 unsigned that normalizes to 0/1) */
     Type *pointee;     /* TY_PTR only: malloc'd */
     Type *elem_type;   /* TY_ARRAY only: malloc'd */
-    int length;        /* TY_ARRAY only */
+    long long length;  /* TY_ARRAY only */
+    struct Expr *vla_dim; /* TY_ARRAY only: dynamic dimension expr if length == -1 */
     char *tag;         /* TY_STRUCT only: xstrdup'd tag name */
     Type *func_ret;    /* TY_FUNC only: malloc'd return type */
     Type *func_params; /* TY_FUNC only: malloc'd array of param types (nparams long) */
     int   func_nparams;/* TY_FUNC only */
+    int   func_is_variadic; /* TY_FUNC only: non-zero if variadic */
     int   enum_id;     /* TY_INT only: non-zero unique ID for enum types */
     int   bitfield_width; /* 0 = not a bit-field; else width in bits (promotions) */
+    int   is_vector;   /* 1 = GCC vector extension (__attribute__((vector_size(N)))) */
 };
 
-static inline Type type_make_int(int width, int is_unsigned) {
+static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -51,19 +54,19 @@ static inline Type type_make_bool(void) {
     return t;
 }
 static inline Type type_default_int(void) { return type_make_int(4, 0); }
-static inline Type type_make_float(int width) {
+static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
-    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.enum_id = 0;
-    t.bitfield_width = 0; return t;
+    t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 
 /* Deep-clone a Type (recursing into pointee/elem_type). */
@@ -72,8 +75,8 @@ Type type_clone(Type t);
 void type_free(Type *t);
 /* Total byte size of a Type: sizeof for scalars, N*elem for arrays,
  * width for structs (which is stashed at parse-time via layout). */
-int  type_size(Type t);
-int  type_align(Type t); /* natural alignment of a type */
+long long  type_size(Type t);
+long long  type_align(Type t); /* natural alignment of a type */
 
 /* SysV AMD64 aggregate classification for ≤16-byte structs/unions.
  * Returns the number of eightbytes passed/returned in registers (1 or 2),
@@ -87,13 +90,18 @@ typedef enum {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 
 Type type_make_ptr(Type pointee);
-Type type_make_array(Type elem, int length);
-Type type_make_struct(const char *tag, int size);
+Type type_make_array(Type elem, long long length);
+Type type_make_vector(Type elem, long long vec_size);
+Type type_make_vla(Type elem, struct Expr *dim);
+Type type_make_struct(const char *tag, long long size);
 Type type_make_func(Type ret, Type * const *params, int nparams);
+Type type_make_func_var(Type ret, Type * const *params, int nparams, int is_variadic);
 Type type_decay(Type t);
 int  type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int  type_funcs_equal(Type a, Type b);  /* true if ret + all params match */
+
+struct Expr *expr_clone(const struct Expr *e);
 
 /* ------------------------------------------------------------------ */
 /* Expression — Slice 2 introduces arithmetic expressions              */
@@ -270,6 +278,7 @@ struct StmtArray {
 typedef struct {
     int is_default;
     int value;          /* case value (valid when !is_default) */
+    char *label_name;   /* synthetic label name */
     StmtArray stmts;    /* statements in this arm */
 } SwitchCase;
 
@@ -277,7 +286,7 @@ struct Stmt {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; } decl;   /* ST_DECL: init may be NULL; storage_class: 0=default, 1=static, 2=extern */
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;   /* ST_DECL: init may be NULL; storage_class: 0=default, 1=static, 2=extern */
         Expr *expr;                                 /* ST_EXPR */
         Expr *value;                                /* ST_RETURN */
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */
@@ -288,7 +297,7 @@ struct Stmt {
         StmtArray block;                             /* ST_BLOCK — owns its statements */
         struct { char *target; Expr *target_expr; } goto_s; /* ST_GOTO — target_expr != NULL for indirect goto *expr */
         struct { char *name; Stmt *stmt; } label_s;   /* ST_LABEL — owns stmt */
-        struct { Expr *cond; SwitchCase *cases; int num_cases; int cap_cases; } switch_s; /* ST_SWITCH */
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s; /* ST_SWITCH */
     } u;
 };
 
@@ -302,7 +311,7 @@ Stmt *stmt_alloc(void);
 void  stmt_free_ptr(Stmt *s);
 
 /* Switch helper: append a case arm (default if is_default) to a ST_SWITCH. */
-void switch_push_case(Stmt *s, int is_default, int value);
+void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
 
 /* ------------------------------------------------------------------ */
 /* Function & package declarations                                     */
@@ -334,6 +343,9 @@ typedef struct {
     int    is_unprototyped; /* 1 = K&R `foo()` empty identifier list */
     int    is_extern;   /* 1 = declaration only (`extern int f();`), no body */
     int    is_static;   /* 1 = `static` function — LOCAL linkage */
+    char  *alias_target; /* __attribute__((alias("..."))) or NULL */
+    int    align;       /* alignment attribute */
+    int    no_instrument; /* 1 = __attribute__((no_instrument_function)) */
 } FunctionDecl;
 
 typedef struct {
@@ -365,7 +377,7 @@ void import_array_free(ImportArray *a);
 typedef struct {
     char *name;
     Type type;
-    int  offset;
+    long long offset;
     int  bit_width;     /* 0 = normal member, else bitfield width in bits */
     int  bit_offset;    /* bit position within the unit (0 = LSB); valid when
                          * bit_width > 0.  Codegen loads the unit, shifts right
@@ -375,11 +387,13 @@ typedef struct {
 typedef struct {
     char *tag;            /* xstrdup'd */
     int   is_union;       /* 1 = union (members overlap at offset 0) */
+    int   is_big_endian;  /* 1 = scalar_storage_order("big-endian") */
     StructMember *members;
     int num_members;
     int cap_members;
-    int size;             /* total size in bytes (already aligned) */
-    int align;            /* max member alignment seen so far */
+    long long size;       /* total size in bytes (already aligned) */
+    long long align;      /* max member alignment seen so far */
+    int is_packed;        /* 1 if __attribute__((packed)) */
     SourceLoc loc;
     /* Canonical TY_STRUCT Type for this struct's tag, if one has been created
      * via type_make_struct().  struct_def_finish() updates its width so that
@@ -389,9 +403,9 @@ typedef struct {
      * adjacent bitfields of the same `type` packs into one "unit"; the unit
      * size is the smallest of {1,2,4,8} bytes holding all its bits.  A
      * non-bitfield member (or a type/width change) closes the current unit. */
-    int   bf_unit_type;   /* width (bytes) of the current open bitfield unit */
+    long long bf_unit_type;   /* width (bytes) of the current open bitfield unit */
     int   bf_unit_used;   /* bits used in the current open unit */
-    int   bf_unit_offset; /* byte offset of the current open unit */
+    long long bf_unit_offset; /* byte offset of the current open unit */
 } StructDef;
 
 typedef struct {
@@ -413,13 +427,14 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
  * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield `x : N;`. */
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
+void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
 /* Find a member by name, walking C11 anonymous struct/union members.
  * On success, *offset_out (if non-NULL) is the byte offset from `sd`'s start. */
 const StructMember *struct_lookup_member(const StructRegistry *reg,
                                          const StructDef *sd,
                                          const char *name,
-                                         int *offset_out);
+                                         long long *offset_out);
 
 typedef struct {
     FunctionDecl *data;
