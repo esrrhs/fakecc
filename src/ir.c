@@ -2177,13 +2177,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
                 || strcmp(cname, "va_arg") == 0
                 || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_va_end") == 0
-                || strcmp(cname, "__builtin_va_arg") == 0) {
+                || strcmp(cname, "__builtin_va_arg") == 0
+                || strcmp(cname, "__builtin_c23_va_start") == 0) {
                 IRValue ap = lower_expr(fn, st, e->u.call.args.data[0]);
                 /* va_start's second arg (last named param) must stay live so the
                  * optimizer doesn't eliminate the param as dead.  Lower it and
                  * keep it in call_args (codegen ignores it). */
                 IRValue last = -1;
-                int is_start = (strcmp(cname, "va_start") == 0 || strcmp(cname, "__builtin_va_start") == 0);
+                int is_start = (strcmp(cname, "va_start") == 0 || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_c23_va_start") == 0);
                 int is_end = (strcmp(cname, "va_end") == 0 || strcmp(cname, "__builtin_va_end") == 0);
                 int is_arg = (strcmp(cname, "va_arg") == 0 || strcmp(cname, "__builtin_va_arg") == 0);
                 if (is_start && e->u.call.args.len >= 2)

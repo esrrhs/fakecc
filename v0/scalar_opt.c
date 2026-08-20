@@ -110,7 +110,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[32];
+    IRValue call_args[64];
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -118,7 +118,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[32];
+    unsigned char call_arg_on_stack[64];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -985,7 +985,7 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->call_callee >= 0 && map[inst->call_callee] == -1)
                 map[inst->call_callee] = next++;
             for (int k = 0; k < inst->call_nargs; k++) {
-                if (k >= 32) break;
+                if (k >= 64) break;
                 int v = inst->call_args[k];
                 if (v >= 0 && v < fn->next_value_id && map[v] == -1)
                     map[v] = next++;

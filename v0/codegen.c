@@ -262,7 +262,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[32];
+    IRValue call_args[64];
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -270,7 +270,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[32];
+    unsigned char call_arg_on_stack[64];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -3161,9 +3161,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 int nargs = inst->call_nargs;
-                if (nargs > 32) nargs = 32;
-                int target_reg[32];
-                int target_is_xmm[32];
+                if (nargs > 64) nargs = 64;
+                int target_reg[64];
+                int target_is_xmm[64];
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);

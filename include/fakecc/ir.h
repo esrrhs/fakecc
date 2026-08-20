@@ -90,7 +90,7 @@ typedef enum {
 /* Maximum arguments to IR_CALL.  SysV packs small aggregates into 1–2
  * register args and MEMORY-class aggregates into one stack eightbyte per
  * 8 bytes of payload, so a single large struct can consume many slots. */
-#define IR_CALL_MAX_ARGS 32
+#define IR_CALL_MAX_ARGS 64
 
 typedef struct {
     IROpcode op;

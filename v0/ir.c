@@ -110,7 +110,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[32];
+    IRValue call_args[64];
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -118,7 +118,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[32];
+    unsigned char call_arg_on_stack[64];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -2639,10 +2639,11 @@ IRValue pr;
             if (runtime.strcmp(cname, "va_start") == 0 || runtime.strcmp(cname, "va_end") == 0
                 || runtime.strcmp(cname, "va_arg") == 0
                 || runtime.strcmp(cname, "__builtin_va_start") == 0 || runtime.strcmp(cname, "__builtin_va_end") == 0
-                || runtime.strcmp(cname, "__builtin_va_arg") == 0) {
+                || runtime.strcmp(cname, "__builtin_va_arg") == 0
+                || runtime.strcmp(cname, "__builtin_c23_va_start") == 0) {
                 IRValue ap = lower_expr(fn, st, e->u.call.args.data[0]);
                 IRValue last = -1;
-                int is_start = (runtime.strcmp(cname, "va_start") == 0 || runtime.strcmp(cname, "__builtin_va_start") == 0);
+                int is_start = (runtime.strcmp(cname, "va_start") == 0 || runtime.strcmp(cname, "__builtin_va_start") == 0 || runtime.strcmp(cname, "__builtin_c23_va_start") == 0);
                 int is_end = (runtime.strcmp(cname, "va_end") == 0 || runtime.strcmp(cname, "__builtin_va_end") == 0);
                 int is_arg = (runtime.strcmp(cname, "va_arg") == 0 || runtime.strcmp(cname, "__builtin_va_arg") == 0);
                 if (is_start && e->u.call.args.len >= 2)
@@ -2696,8 +2697,8 @@ IRValue pr;
                 return inst.dst;
             }
         }
-        IRValue arg_vals[32];
-        unsigned char arg_on_stack[32];
+        IRValue arg_vals[64];
+        unsigned char arg_on_stack[64];
         int nargs = 0;
         runtime.memset(arg_on_stack, 0, sizeof(arg_on_stack));
         int is_void_pre = (e->type.kind == TY_VOID);
@@ -2706,7 +2707,7 @@ IRValue pr;
         int ret_nreg_pre = is_ret_struct_pre
                            ? sysv_classify_agg(e->type, ret_cls_pre) : 0;
         int ret_in_mem_pre = is_ret_struct_pre && ret_nreg_pre == 0;
-        int arg_limit = 32 - (ret_in_mem_pre ? 1 : 0);
+        int arg_limit = 64 - (ret_in_mem_pre ? 1 : 0);
         for (int i = 0; i < (int)e->u.call.args.len; i++) {
             Expr *arg = e->u.call.args.data[i];
             IRValue av = lower_expr(fn, st, arg);

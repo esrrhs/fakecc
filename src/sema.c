@@ -881,10 +881,11 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
          * representation). */
         if (e->u.call.callee->kind == EX_VAR
             && (strcmp(e->u.call.callee->u.var.name, "va_start") == 0 ||
-                strcmp(e->u.call.callee->u.var.name, "__builtin_va_start") == 0)) {
-            if (e->u.call.args.len != 2) {
+                strcmp(e->u.call.callee->u.var.name, "__builtin_va_start") == 0 ||
+                strcmp(e->u.call.callee->u.var.name, "__builtin_c23_va_start") == 0)) {
+            if (e->u.call.args.len < 1 || e->u.call.args.len > 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "va_start takes exactly 2 arguments (va_list, last_param)");
+                       "va_start takes 1 or 2 arguments");
             }
             Type list_ty = check_expr(e->u.call.args.data[0], st, ft);
             if (!is_va_list_type(&list_ty)) {
@@ -893,8 +894,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "va_start first argument must be a va_list");
             }
             type_free(&list_ty);
-            Type at = check_expr(e->u.call.args.data[1], st, ft);
-            type_free(&at);
+            if (e->u.call.args.len == 2) {
+                Type at = check_expr(e->u.call.args.data[1], st, ft);
+                type_free(&at);
+            }
             set_type(e, type_make_void());
             return type_clone(e->type);
         }
