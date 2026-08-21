@@ -54,6 +54,7 @@ difftest_one() {
         echo '#include <stdint.h>'
         echo '#include <unistd.h>'
         echo '#include <sys/stat.h>'
+        echo '#include <errno.h>'
         echo '#define __syscall syscall'
         sed -E \
             -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
