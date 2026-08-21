@@ -13,6 +13,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__SANITIZE_ADDRESS__) || defined(__has_feature)
+const char *__asan_default_options(void) {
+    return "detect_leaks=0";
+}
+#endif
+
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -286,6 +292,11 @@ int main(int argc, char **argv) {
             nodefaultlibs = 1;
         } else if (strcmp(argv[i], "-finstrument-functions") == 0) {
             g_instrument_functions = 1;
+        } else if (strcmp(argv[i], "-fsanitize=address") == 0) {
+            g_sanitize_address = 1;
+        } else if (strncmp(argv[i], "-fsanitize=", 11) == 0) {
+            /* Accept standard sanitize flags */
+            if (strstr(argv[i], "address")) g_sanitize_address = 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
         } else if (strcmp(argv[i], "-O0") == 0) {

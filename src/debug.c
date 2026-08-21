@@ -351,7 +351,7 @@ static int deser_str(const unsigned char **p, const unsigned char *end, char **o
 }
 
 static uint32_t rd32(const unsigned char **p) {
-    uint32_t v = (uint32_t)((*p)[0] | ((*p)[1] << 8) | ((*p)[2] << 16) | ((*p)[3] << 24));
+    uint32_t v = (uint32_t)(*p)[0] | ((uint32_t)(*p)[1] << 8) | ((uint32_t)(*p)[2] << 16) | ((uint32_t)(*p)[3] << 24);
     *p += 4;
     return v;
 }

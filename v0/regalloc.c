@@ -1140,27 +1140,6 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             }
         }
     }
-    {
-        int changed = 1;
-        while (changed) {
-            changed = 0;
-            for (size_t bi = 0; bi < cfg->num; bi++) {
-                const CFGBlock *blk = &cfg->blocks[bi];
-                for (int _wi = 0; _wi < (&out_b[bi])->num_words; _wi++) for (uint64_t _w = (&out_b[bi])->w[_wi], v; _w && ((v = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
-                    for (size_t si = 0; si < blk->num_succs; si++) {
-                        int s = blk->succs[si];
-                        if (bs_test(&in_b[s], (int)v)) {
-                            int new_mask = forbid_mask[v] | forbid_mask[s];
-                            if (new_mask != forbid_mask[v]) {
-                                forbid_mask[v] = new_mask;
-                                changed = 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
     for (size_t bi = 0; bi < cfg->num; bi++) {
         const CFGBlock *blk = &cfg->blocks[bi];
         bs_copy(&live, &out_b[bi]);

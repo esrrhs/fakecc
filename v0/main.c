@@ -997,6 +997,9 @@ void sema_check_in_pkg(const TranslationUnit *tu, int require_main,
                        struct PkgContext *ctx);
 typedef struct FILE FILE;
 typedef long fpos_t;
+const char *__asan_default_options(void) {
+    return "detect_leaks=0";
+}
 static char *read_file(const char *path) {
     FILE *f = runtime.fopen(path, "rb");
     if (!f) {
@@ -1234,6 +1237,10 @@ int main(int argc, char **argv) {
             nodefaultlibs = 1;
         } else if (runtime.strcmp(argv[i], "-finstrument-functions") == 0) {
             g_instrument_functions = 1;
+        } else if (runtime.strcmp(argv[i], "-fsanitize=address") == 0) {
+            g_sanitize_address = 1;
+        } else if (runtime.strncmp(argv[i], "-fsanitize=", 11) == 0) {
+            if (runtime.strstr(argv[i], "address")) g_sanitize_address = 1;
         } else if (runtime.strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
         } else if (runtime.strcmp(argv[i], "-O0") == 0) {

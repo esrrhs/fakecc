@@ -7,6 +7,12 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 add_compile_options(-Wall -Wextra -Werror -Wno-unused-parameter)
 
+option(ENABLE_ASAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(ENABLE_ASAN)
+    add_compile_options(-fsanitize=address,undefined -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 add_library(fakecc_core
     src/common.c
     src/lexer.c

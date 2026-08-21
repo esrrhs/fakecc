@@ -457,35 +457,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         }
     }
 
-    /* Pass 2: Propagate forbid_mask backwards across CFG live ranges.
-     * If value `v` is live-in to block s and forbidden in block s (e.g. because
-     * it crosses a call in s or in a descendant of s), and `v` is live-out of
-     * block bi, its forbid_mask must propagate to bi.  This ensures that
-     * pre-loop definitions and loop-carried φ inputs receive the caller-saved
-     * restriction if `v` ever crosses a call inside the loop. */
-    {
-        int changed = 1;
-        while (changed) {
-            changed = 0;
-            for (size_t bi = 0; bi < cfg->num; bi++) {
-                const CFGBlock *blk = &cfg->blocks[bi];
-                BS_FOREACH(&out_b[bi], v) {
-                    for (size_t si = 0; si < blk->num_succs; si++) {
-                        int s = blk->succs[si];
-                        if (bs_test(&in_b[s], (int)v)) {
-                            int new_mask = forbid_mask[v] | forbid_mask[s];
-                            if (new_mask != forbid_mask[v]) {
-                                forbid_mask[v] = new_mask;
-                                changed = 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /* Pass 3: Build interference graph by walking instructions backwards. */
+    /* Pass 2: Build interference graph by walking instructions backwards. */
     for (size_t bi = 0; bi < cfg->num; bi++) {
         const CFGBlock *blk = &cfg->blocks[bi];
         bs_copy(&live, &out_b[bi]);
