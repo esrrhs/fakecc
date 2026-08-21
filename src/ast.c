@@ -1488,12 +1488,73 @@ void param_array_free(ParamArray *a) {
 /* Compile-time integer constant folding                               */
 /* ------------------------------------------------------------------ */
 
-/* Try to fold `e` to a single integer constant.  Returns 1 and writes the
- * value to *out if `e` is an integer literal, a cast of one, or a unary/
- * binary operation on constant integer operands (e.g. `(1u << 14) - 1u`).
- * Returns 0 otherwise (non-constant, non-integer, or涉及 pointer values).
+/* Fold e to a single integer constant.  Returns 1 and writes the value to
+ * *out if e is an integer literal, a cast of one, or a unary/binary
+ * operation on constant integer operands (e.g. (1u << 14) - 1u).  Returns 0
+ * otherwise (non-constant, non-integer, or involving pointer values).
  * Used by sema (global-init constness check) and ir (pack_init) so that
  * constant expressions are accepted and emitted exactly like literals. */
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi) {
+    if (!e) return 0;
+    if (e->kind == EX_INT_LIT) {
+        *lo = (unsigned long long)e->u.int_val;
+        *hi = (e->type.width == 16) ? e->int_hi : ((e->u.int_val < 0) ? ~0ULL : 0ULL);
+        return 1;
+    }
+    if (e->kind == EX_CAST) {
+        /* Fold through int casts; for int128→int128 casts just pass through. */
+        return fold_const_int128(e->u.cast.operand, lo, hi);
+    }
+    if (e->kind == EX_UNARY) {
+        unsigned long long vlo, vhi;
+        if (!fold_const_int128(e->u.un.operand, &vlo, &vhi)) return 0;
+        switch (e->u.un.op) {
+        case UOP_NEG: *lo = 0ULL - vlo; *hi = 0ULL - vhi - (vlo != 0ULL ? 1ULL : 0ULL); return 1;
+        case UOP_POS: *lo = vlo; *hi = vhi; return 1;
+        case UOP_BITNOT: *lo = ~vlo; *hi = ~vhi; return 1;
+        default: return 0;
+        }
+    }
+    if (e->kind == EX_BINOP) {
+        unsigned long long llo, lhi, rlo, rhi;
+        if (!fold_const_int128(e->u.bin.l, &llo, &lhi)) return 0;
+        if (!fold_const_int128(e->u.bin.r, &rlo, &rhi)) return 0;
+        switch (e->u.bin.op) {
+        case BOP_ADD: {
+            *lo = llo + rlo;
+            *hi = lhi + rhi + (*lo < llo ? 1ULL : 0ULL);
+            return 1;
+        }
+        case BOP_SUB: {
+            *lo = llo - rlo;
+            *hi = lhi - rhi - (llo < rlo ? 1ULL : 0ULL);
+            return 1;
+        }
+        case BOP_SHL: {
+            unsigned long long n = rlo;
+            if (n >= 128) { *lo = 0; *hi = 0; return 1; }
+            if (n >= 64) { *lo = 0; *hi = llo << (n - 64); return 1; }
+            *lo = llo << n;
+            *hi = (lhi << n) | (llo >> (64 - n));
+            return 1;
+        }
+        case BOP_SHR: {
+            unsigned long long n = rlo;
+            if (n >= 128) { *lo = 0; *hi = 0; return 1; }
+            if (n >= 64) { *lo = lhi >> (n - 64); *hi = 0; return 1; }
+            *hi = lhi >> n;
+            *lo = (llo >> n) | (lhi << (64 - n));
+            return 1;
+        }
+        case BOP_BITAND: *lo = llo & rlo; *hi = lhi & rhi; return 1;
+        case BOP_BITOR: *lo = llo | rlo; *hi = lhi | rhi; return 1;
+        case BOP_BITXOR: *lo = llo ^ rlo; *hi = lhi ^ rhi; return 1;
+        default: return 0;
+        }
+    }
+    return 0;
+}
+
 int fold_const_int(const Expr *e, long long *out) {
     if (!e) return 0;
     if (e->kind == EX_INT_LIT) {

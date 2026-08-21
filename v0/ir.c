@@ -481,6 +481,7 @@ enum UnaryOp {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 struct ExprArray {
     Expr **data;
     size_t len;
@@ -6034,6 +6035,28 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             } else {
                 double d = (double)fv;
                 runtime.memcpy(bytes, &d, sizeof d);
+            }
+            return;
+        }
+    }
+    /* For int128 targets, try fold_const_int128 first: it computes both
+     * halves correctly.  fold_const_int (below) would silently truncate
+     * to 64 bits, losing the high half of values like (1 << 64). */
+    if (ty->kind == TY_INT && ty->width == 16) {
+        unsigned long long vlo, vhi;
+        if (fold_const_int128(e, &vlo, &vhi)) {
+            if (ty->is_bool) { vlo = (vlo != 0 || vhi != 0) ? 1 : 0; vhi = 0; }
+            int n = sz < 8 ? sz : 8;
+            for (int b = 0; b < n; b++)
+                bytes[b] = (char)((vlo >> (8 * b)) & 0xff);
+            if (sz > 8) {
+                int n2 = sz - 8;
+                if (n2 > 8) n2 = 8;
+                for (int b = 0; b < n2; b++)
+                    bytes[8 + b] = (char)((vhi >> (8 * b)) & 0xff);
+                unsigned char fill = (!ty->is_unsigned && (vhi >> 63)) ? 0xff : 0;
+                for (int b = 8 + n2; b < sz; b++)
+                    bytes[b] = (char)fill;
             }
             return;
         }

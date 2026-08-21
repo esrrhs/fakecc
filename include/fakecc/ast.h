@@ -169,6 +169,7 @@ typedef enum {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out); /* compile-time int fold */
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 
 /* Argument-list holder used by EX_CALL — grows as arguments are parsed. */
 typedef struct {
