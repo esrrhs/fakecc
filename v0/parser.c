@@ -3654,6 +3654,11 @@ static Stmt parse_typedef_stmt(Parser *p) {
                 die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "redefinition of typedef '%s' with a different type",
                        decl_name);
+            } else if (ty.kind == TY_ARRAY && ty.length > 0
+                       && exist->type.kind == TY_ARRAY
+                       && exist->type.length == 0) {
+                type_free(&exist->type);
+                exist->type = ty;
             } else {
                 type_free(&ty);
             }

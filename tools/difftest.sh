@@ -64,8 +64,14 @@ difftest_one() {
     local extra_flags
     extra_flags=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
 
-    if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
+    if ! gcc -std=gnu99 -D_GNU_SOURCE $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
         printf '%-28s SKIP (gcc rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.gcc.err")"
+        return 0
+    fi
+    # gcc gnu99 truncates integer constants that do not fit in 64 bits; it is
+    # not an oracle for __int128 literals.  -w would hide the diagnostic.
+    if grep -qE 'too large for its type|so large that it is unsigned|整数常量值超出其类型' "$WORK/$name.gcc.err"; then
+        printf '%-28s SKIP (gcc cannot represent a >64-bit integer constant)\n' "$base"
         return 0
     fi
     local gcc_rc=0
