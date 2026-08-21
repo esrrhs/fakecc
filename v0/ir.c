@@ -796,6 +796,7 @@ static LabelMap *g_ir_label_map = ((void*)0);
 static int *g_ir_label_sp_slots = ((void*)0);
 static int g_ir_label_sp_count = 0;
 int g_instrument_functions = 0;
+int g_sanitize_address = 0;
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : ((void*)0);
 }
@@ -1332,8 +1333,66 @@ static int get_value_is_float(const IRFunction *fn, IRValue v) {
     if (v < 0 || v >= fn->value_meta_cap || !fn->value_is_float) return 0;
     return fn->value_is_float[v];
 }
+static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_write, SourceLoc loc) {
+    if (!g_sanitize_address || addr < 0) return;
+    if (g_ir_cur_fd && g_ir_cur_fd->name) {
+        const char *fn_name = g_ir_cur_fd->name;
+        if (runtime.strncmp(fn_name, "__asan_", 7) == 0 ||
+            runtime.strncmp(fn_name, "asan_", 5) == 0 ||
+            runtime.strcmp(fn_name, "malloc") == 0 ||
+            runtime.strcmp(fn_name, "free") == 0 ||
+            runtime.strcmp(fn_name, "realloc") == 0 ||
+            runtime.strcmp(fn_name, "calloc") == 0 ||
+            runtime.strcmp(fn_name, "heap_grow") == 0 ||
+            runtime.strcmp(fn_name, "map_anon") == 0) {
+            return;
+        }
+    }
+    char hook_name[32];
+    if (width == 1 || width == 2 || width == 4 || width == 8) {
+        runtime.snprintf(hook_name, sizeof(hook_name), "__asan_%s%d", is_write ? "store" : "load", width);
+        IRInst inst;
+        runtime.memset(&inst, 0, sizeof(inst));
+        inst.op = IR_CALL;
+        inst.dst = -1;
+        inst.a = -1;
+        inst.b = -1;
+        inst.imm = 0;
+        inst.loc = loc;
+        inst.call_name = xstrdup(hook_name);
+        inst.call_callee = -1;
+        inst.call_args[0] = addr;
+        inst.call_nargs = 1;
+        ir_inst_array_push(&fn->insts, inst);
+    } else if (width > 0) {
+        runtime.snprintf(hook_name, sizeof(hook_name), "__asan_%sN", is_write ? "store" : "load");
+        IRValue sz_val = new_value(fn);
+        emit_inst_w(fn, IR_CONST, sz_val, -1, -1, (int64_t)width, 8, 1, loc);
+        IRInst inst;
+        runtime.memset(&inst, 0, sizeof(inst));
+        inst.op = IR_CALL;
+        inst.dst = -1;
+        inst.a = -1;
+        inst.b = -1;
+        inst.imm = 0;
+        inst.loc = loc;
+        inst.call_name = xstrdup(hook_name);
+        inst.call_callee = -1;
+        inst.call_args[0] = addr;
+        inst.call_args[1] = sz_val;
+        inst.call_nargs = 2;
+        ir_inst_array_push(&fn->insts, inst);
+    }
+}
 static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
                         int64_t imm, int width, int is_unsigned, SourceLoc loc) {
+    if (g_sanitize_address) {
+        if (op == IR_LOAD_PTR && a >= 0) {
+            emit_asan_check(fn, a, width ? width : 4, 0, loc);
+        } else if (op == IR_STORE_PTR && a >= 0) {
+            emit_asan_check(fn, a, width ? width : 4, 1, loc);
+        }
+    }
     IRInst inst;
     inst.op = op;
     inst.dst = dst;
@@ -5322,6 +5381,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.dbg_vars = ((void*)0);
         irfn.num_dbg_vars = 0;
         irfn.cap_dbg_vars = 0;
+        g_ir_cur_fd = fd;
         IRSymTable st;
         irsymtable_init(&st);
         IRValue param_ebs[64][2];
@@ -5458,7 +5518,6 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         LabelMap lm;
         labelmap_init(&lm);
         g_ir_label_map = &lm;
-        g_ir_cur_fd = fd;
         for (size_t j = 0; j < fd->body.len; j++)
             assign_label_ids(&irfn, &lm, &fd->body.data[j]);
         int has_vla = fd_has_vla(fd);
@@ -5478,6 +5537,20 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         }
         g_ir_label_sp_slots = label_sp_slots;
         g_ir_label_sp_count = (int)lm.len;
+        if (g_sanitize_address && runtime.strcmp(fd->name, "main") == 0) {
+            IRInst init_inst;
+            runtime.memset(&init_inst, 0, sizeof(init_inst));
+            init_inst.op = IR_CALL;
+            init_inst.dst = -1;
+            init_inst.a = -1;
+            init_inst.b = -1;
+            init_inst.imm = 0;
+            init_inst.loc = fd->loc;
+            init_inst.call_name = xstrdup("__asan_init");
+            init_inst.call_callee = -1;
+            init_inst.call_nargs = 0;
+            ir_inst_array_push(&irfn.insts, init_inst);
+        }
         if (g_instrument_functions && !fd->no_instrument) {
             emit_profile_call(&irfn, "__cyg_profile_func_enter", fd, fd->loc);
         }
@@ -5512,6 +5585,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         }
         g_ir_label_map = ((void*)0);
         labelmap_free(&lm);
+        g_ir_cur_fd = ((void*)0);
         irsymtable_free(&st);
         ir_func_array_push(&ir->functions, irfn);
     }

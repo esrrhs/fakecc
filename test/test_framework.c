@@ -3,6 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#if defined(__SANITIZE_ADDRESS__) || defined(__has_feature)
+const char *__asan_default_options(void) {
+    return "detect_leaks=0";
+}
+#endif
+
 int t_total = 0;
 int t_failed = 0;
 

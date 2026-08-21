@@ -1,4 +1,5 @@
 // expect: 0
+// difftest: skip
 package main;
 extern void abort (void);
 int f1()

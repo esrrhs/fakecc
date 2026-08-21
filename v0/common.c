@@ -57,6 +57,7 @@ static void buffer_grow(Buffer *b, size_t need) {
     b->cap = new_cap;
 }
 void buffer_append(Buffer *b, const char *s, size_t n) {
+    if (n == 0) return;
     buffer_grow(b, n);
     runtime.memcpy(b->data + b->len, s, n);
     b->len += n;

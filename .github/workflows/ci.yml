@@ -29,6 +29,11 @@ jobs:
             cc: gcc
             cxx: g++
             cflags: "-O2"
+          - label: ubuntu-latest · gcc ASan
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+            cflags: "-fsanitize=address,undefined -g"
           - label: ubuntu-24.04 · clang
             os: ubuntu-24.04
             cc: clang

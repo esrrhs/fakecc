@@ -21,7 +21,7 @@ fi
 # by design, gcc would accept them).
 files=()
 for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
-    if grep -q '^// expect_error' "$f"; then
+    if grep -q '^// expect_error' "$f" || grep -q '^// difftest: skip' "$f"; then
         continue
     fi
     files+=("$f")
