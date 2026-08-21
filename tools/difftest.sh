@@ -44,30 +44,46 @@ difftest_one() {
     hash=$(printf '%s' "$src" | md5sum | cut -c1-8)
     local name="${base}_${hash}"
 
-    {
-        echo '#define _GNU_SOURCE 1'
-        echo '#include <stdio.h>'
-        echo '#include <stdlib.h>'
-        echo '#include <string.h>'
-        echo '#include <ctype.h>'
-        echo '#include <stdarg.h>'
-        echo '#include <stdint.h>'
-        echo '#include <unistd.h>'
-        echo '#include <sys/stat.h>'
-        echo '#include <errno.h>'
-        echo '#define __syscall syscall'
-        sed -E \
-            -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
-            -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
-            -e 's/\b(runtime|fmt|io|ctype)\.//g' \
-            "$src"
-    } > "$WORK/$name.gcc.c"
     local extra_flags
     extra_flags=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
 
+    sed -E \
+        -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
+        -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
+        -e 's/\b(runtime|fmt|io|ctype)\.//g' \
+        "$src" > "$WORK/$name.body.c"
+
+    # Prefer a header-free translation: torture ports ship their own libc
+    # prototypes (`fprintf(void*, ...)`, `isprint`) which clash with glibc
+    # headers and used to SKIP the whole case.  If the file uses va_list but
+    # does not typedef it (fakecc predeclares it), gcc still needs <stdarg.h>.
+    {
+        echo '#define _GNU_SOURCE 1'
+        if grep -qE '\bva_(list|start|arg|end|copy)\b' "$WORK/$name.body.c" \
+           && ! grep -qE 'typedef[[:space:]].*va_list' "$WORK/$name.body.c"; then
+            echo '#include <stdarg.h>'
+        fi
+        cat "$WORK/$name.body.c"
+    } > "$WORK/$name.gcc.c"
     if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
-        printf '%-28s SKIP (gcc rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.gcc.err")"
-        return 0
+        {
+            echo '#define _GNU_SOURCE 1'
+            echo '#include <stdio.h>'
+            echo '#include <stdlib.h>'
+            echo '#include <string.h>'
+            echo '#include <ctype.h>'
+            echo '#include <stdarg.h>'
+            echo '#include <stdint.h>'
+            echo '#include <unistd.h>'
+            echo '#include <sys/stat.h>'
+            echo '#include <errno.h>'
+            echo '#define __syscall syscall'
+            cat "$WORK/$name.body.c"
+        } > "$WORK/$name.gcc.c"
+        if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
+            printf '%-28s SKIP (gcc rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.gcc.err")"
+            return 0
+        fi
     fi
     local gcc_rc=0
     timeout "$RUN_TIMEOUT" "$WORK/$name.gcc" >"$WORK/$name.gcc.out" 2>"$WORK/$name.gcc.stderr" || gcc_rc=$?
