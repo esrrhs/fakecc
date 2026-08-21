@@ -2697,6 +2697,44 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         else if (inst->op == IR_VBXOR) emit_byte(&out->text, 0x57);
                         emit_modrm(&out->text, 3, 0, 1);
                     }
+                } else if (inst->op == IR_VDIV
+                           || (inst->op == IR_VMUL
+                               && (elem_sz == 1 || elem_sz >= 8))) {
+                    /* SSE has no packed integer div, no packed byte mul, and
+                     * no packed 64-bit mul of both lanes.  GCC scalarizes;
+                     * do the same instead of emitting a nearby add/sub. */
+                    int n = elem_sz > 0 ? vec_sz / elem_sz : 0;
+                    emit_mov_rr(&out->text, REG_R8, REG_RAX);
+                    emit_mov_rr(&out->text, REG_R9, REG_RCX);
+                    ensure_reg(&out->text, inst->dst, REG_RDI, ra);
+                    for (int ei = 0; ei < n; ei++) {
+                        int off = ei * elem_sz;
+                        emit_mov_rr(&out->text, REG_RAX, REG_R8);
+                        if (off) emit_add_imm32(&out->text, REG_RAX, off);
+                        emit_load_via_ptr(&out->text, REG_RAX, REG_RAX, elem_sz,
+                                          inst->is_unsigned);
+                        emit_mov_rr(&out->text, REG_RCX, REG_R9);
+                        if (off) emit_add_imm32(&out->text, REG_RCX, off);
+                        emit_load_via_ptr(&out->text, REG_RCX, REG_RCX, elem_sz,
+                                          inst->is_unsigned);
+                        if (inst->op == IR_VMUL) {
+                            emit_imul_rr(&out->text, REG_RAX, REG_RCX);
+                            mask_to_width(&out->text, REG_RAX, elem_sz,
+                                          inst->is_unsigned);
+                        } else if (inst->is_unsigned) {
+                            emit_xor_rr(&out->text, REG_RDX);
+                            emit_rex_w(&out->text);
+                            emit_byte(&out->text, 0xF7);
+                            emit_byte(&out->text, 0xF1);
+                        } else {
+                            emit_cqto(&out->text);
+                            emit_idiv_rcx(&out->text);
+                        }
+                        emit_mov_rr(&out->text, REG_RCX, REG_RDI);
+                        if (off) emit_add_imm32(&out->text, REG_RCX, off);
+                        emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, elem_sz);
+                    }
+                    break;
                 } else {
                     /* integer */
                     emit_byte(&out->text, 0x66);
@@ -2714,13 +2752,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_modrm(&out->text, 3, 0, 1);
                     } else if (elem_sz == 1) {
                         emit_byte(&out->text, 0x0F);
-                        emit_byte(&out->text, (inst->op == IR_VADD) ? 0xFC : 0xF8);
+                        emit_byte(&out->text,
+                                  inst->op == IR_VSUB ? 0xF8 : 0xFC);
                         emit_modrm(&out->text, 3, 0, 1);
                     } else if (elem_sz == 2) {
                         emit_byte(&out->text, 0x0F);
                         if (inst->op == IR_VADD) emit_byte(&out->text, 0xFD);
                         else if (inst->op == IR_VSUB) emit_byte(&out->text, 0xF9);
-                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0xD5);
+                        else emit_byte(&out->text, 0xD5); /* pmullw */
                         emit_modrm(&out->text, 3, 0, 1);
                     } else if (elem_sz == 4) {
                         if (inst->op == IR_VMUL) {
@@ -2730,12 +2769,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_modrm(&out->text, 3, 0, 1);
                         } else {
                             emit_byte(&out->text, 0x0F);
-                            emit_byte(&out->text, (inst->op == IR_VADD) ? 0xFE : 0xFA);
+                            emit_byte(&out->text, (inst->op == IR_VSUB) ? 0xFA : 0xFE);
                             emit_modrm(&out->text, 3, 0, 1);
                         }
                     } else if (elem_sz >= 8) {
                         emit_byte(&out->text, 0x0F);
-                        emit_byte(&out->text, (inst->op == IR_VADD) ? 0xD4 : 0xFB);
+                        emit_byte(&out->text, (inst->op == IR_VSUB) ? 0xFB : 0xD4);
                         emit_modrm(&out->text, 3, 0, 1);
                     }
                 }
@@ -3564,23 +3603,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8D);
                     emit_modrm(&out->text, 0, REG_RCX & 7, 4);
                     emit_byte(&out->text, 0x24);
-                    /* fisttp m64int (DD /1): always store full 64-bit integer
-                     * into the 8-byte stack scratch, and narrow via mask_to_width below. */
-                    emit_byte(&out->text, 0xDD);
-                    emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp [rsp] */
+                    /* GCC: signed/narrow uses fisttp m32 (indefinite 0x80000000
+                     * out of range); unsigned 32/64 uses m64 so 3e9L fits. */
+                    int use64 = inst->is_unsigned ? (inst->width >= 4)
+                                                  : (inst->width >= 8);
+                    if (use64) {
+                        emit_byte(&out->text, 0xDD);
+                        emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp m64 */
+                    } else {
+                        emit_byte(&out->text, 0xDB);
+                        emit_modrm(&out->text, 0, 1, REG_RCX & 7); /* fisttp m32 */
+                    }
                     int dr_gp = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                                 ? ra->reg[inst->dst] : -1;
                     int dst_reg = (dr_gp >= 0) ? dr_gp : REG_RAX;
-                    /* mov dst_reg, [rsp] — REX.R must come from the register,
-                     * otherwise r8-r15 encode as their low-3-bit twin (r8
-                     * would silently become rax). */
-                    emit_rex_wrb(&out->text, 1, dst_reg, REG_RSP);
+                    emit_rex_wrb(&out->text, use64 ? 1 : 0, dst_reg, REG_RSP);
                     emit_byte(&out->text, 0x8B);
                     emit_modrm(&out->text, 0, dst_reg & 7, 4);
                     emit_byte(&out->text, 0x24);
                     emit_add_rsp_imm32(&out->text, 8);
-                    /* A narrow fisttp only wrote the low bytes of the scratch,
-                     * and the read above took the whole word. */
                     if (inst->width < 8)
                         mask_to_width(&out->text, dst_reg, inst->width,
                                       inst->is_unsigned);
@@ -3622,22 +3663,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_bitxor_rr(&out->text, REG_RAX, REG_RCX);
                     patch_rel32(&out->text, j_done, out->text.len);
                 } else {
-                    /* Convert at 64 bits even for narrower targets: a 32-bit
-                     * cvtt* saturates a value like 3e9 that the target's
-                     * unsigned range holds fine, and leaves a negative result
-                     * zero-extended rather than sign-extended. */
+                    /* GCC x86: signed (and narrow unsigned) float→int uses
+                     * 32-bit cvtt*, which yields the integer indefinite
+                     * 0x80000000 for out-of-range values.  Unsigned 32-bit
+                     * uses a 64-bit convert so 3e9f survives. */
+                    int to64 = inst->is_unsigned ? (inst->width >= 4)
+                                                 : (inst->width >= 8);
                     if (src_float)
-                        emit_sse_cvtss2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
+                        emit_sse_cvtss2si(&out->text, REG_RAX, XMM_SCRATCH0, to64);
                     else
-                        emit_sse_cvtsd2si(&out->text, REG_RAX, XMM_SCRATCH0, 1);
-                    if (inst->width == 4 && !inst->is_unsigned) {
-                        /* Clamp positive overflow (e.g. 2147483648.0f) to INT_MAX */
-                        emit_mov_imm64(&out->text, REG_RCX, (int64_t)0x7fffffffLL);
-                        emit_cmp_rr(&out->text, REG_RCX, REG_RAX);
-                        size_t j_le = emit_jcc_rel32(&out->text, 0x8D); /* jge */
-                        emit_mov_rr(&out->text, REG_RAX, REG_RCX);
-                        patch_rel32(&out->text, j_le, out->text.len);
-                    }
+                        emit_sse_cvtsd2si(&out->text, REG_RAX, XMM_SCRATCH0, to64);
                     mask_to_width(&out->text, REG_RAX, inst->width,
                                   inst->is_unsigned);
                 }

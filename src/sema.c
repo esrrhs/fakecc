@@ -264,6 +264,9 @@ static void collect_labels_expr(LabelSet *ls, const Expr *e) {
     case EX_SIZEOF_EXPR:
         collect_labels_expr(ls, e->u.sizeof_e.operand);
         break;
+    case EX_ALIGNOF_EXPR:
+        collect_labels_expr(ls, e->u.alignof_e.operand);
+        break;
     case EX_COMPOUND_LITERAL:
         collect_labels_expr(ls, e->u.compound.init);
         break;
@@ -338,6 +341,7 @@ typedef struct {
     char *name;
     Type type;
     SourceLoc loc;
+    int align;
 } Sym;
 
 typedef struct {
@@ -360,7 +364,7 @@ static void symtable_free(SymTable *st) {
     st->data = NULL; st->len = 0; st->cap = 0;
 }
 
-static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc loc) {
+static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc loc, int align) {
     if (st->len >= st->cap) {
         st->cap = st->cap ? st->cap * 2 : 8;
         st->data = realloc(st->data, st->cap * sizeof(Sym));
@@ -369,6 +373,7 @@ static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc l
     st->data[st->len].name = name ? xstrdup(name) : NULL;
     st->data[st->len].type = type_clone(type);   /* own our copy */
     st->data[st->len].loc = loc;
+    st->data[st->len].align = align;
     st->len++;
 }
 
@@ -435,9 +440,15 @@ static Type integer_promote(Type t) {
 static Type usual_arith_conv(Type a, Type b) {
     a = integer_promote(a);
     b = integer_promote(b);
-    int bfw = 0;
-    if (a.bitfield_width > 0 || b.bitfield_width > 0)
-        bfw = a.bitfield_width > b.bitfield_width ? a.bitfield_width : b.bitfield_width;
+    /* GCC treats a bit-field that does not fit in int as a distinct integer
+     * type of that many bits (similar to C23 _BitInt(N)).  Usual arithmetic
+     * conversions then pick the wider precision: `u33 * u33` wraps at 33 bits,
+     * but `u33 * (unsigned long long)` is a full 64-bit multiply.  ISO C would
+     * promote the field to the declared type and never wrap early; we follow
+     * GCC because the c-torture suite (bitfld-3, bitfld-5) tests this. */
+    int prec_a = a.bitfield_width > 0 ? a.bitfield_width : a.width * 8;
+    int prec_b = b.bitfield_width > 0 ? b.bitfield_width : b.width * 8;
+    int prec = prec_a > prec_b ? prec_a : prec_b;
     Type res;
     /* Float dominates: if either operand is float, the result is float.
      * double wins over float (higher width). */
@@ -452,7 +463,12 @@ static Type usual_arith_conv(Type a, Type b) {
         Type s = a.is_unsigned ? b : a;
         res = (u.width >= s.width) ? u : s;
     }
-    res.bitfield_width = bfw;
+    if (res.kind == TY_INT) {
+        int type_bits = res.width * 8;
+        res.bitfield_width = (prec > 0 && prec < type_bits) ? prec : 0;
+    } else {
+        res.bitfield_width = 0;
+    }
     return res;
 }
 
@@ -1316,6 +1332,29 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         /* _Alignof(T) — compile-time alignment, same result type as sizeof. */
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
         return type_clone(e->type);
+    case EX_ALIGNOF_EXPR: {
+        Type ot = check_expr(e->u.alignof_e.operand, st, ft);
+        long long al = type_align(ot);
+        type_free(&ot);
+        if (e->u.alignof_e.operand->kind == EX_VAR) {
+            const char *nm = e->u.alignof_e.operand->u.var.name;
+            const Sym *sy = symtable_find(st, nm);
+            if (sy && sy->align > al) al = sy->align;
+            if (g_sema_tu) {
+                for (size_t i = 0; i < g_sema_tu->functions.len; i++) {
+                    if (strcmp(g_sema_tu->functions.data[i].name, nm) == 0
+                        && g_sema_tu->functions.data[i].align > al)
+                        al = g_sema_tu->functions.data[i].align;
+                }
+            }
+        }
+        expr_free(e->u.alignof_e.operand);
+        e->kind = EX_INT_LIT;
+        e->u.int_val = al;
+        e->int_hi = 0;
+        set_type(e, type_make_int(8, 1));
+        return type_clone(e->type);
+    }
     case EX_INIT_LIST: {
         /* An initializer list is valid only as a declarator initializer.  We
          * type-check every element; the count / layout validation against the
@@ -1433,8 +1472,10 @@ static int init_leaf_count(Type t) {
         if (!sd || sd->num_members == 0) return 1;
         if (sd->is_union) return init_leaf_count(sd->members[0].type);
         int total = 0;
-        for (int i = 0; i < sd->num_members; i++)
+        for (int i = 0; i < sd->num_members; i++) {
+            if (sd->members[i].bit_width == 0) continue;
             total += init_leaf_count(sd->members[i].type);
+        }
         return total;
     }
     return 1;
@@ -1694,7 +1735,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
          * declaration (e.g. `float fx();`) is a declaration referring to a file-scope
          * symbol. It carries no local storage, so register the name in scope and break. */
         if (s->u.decl.type.kind == TY_FUNC || s->u.decl.storage_class == 2) {
-            symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
+            symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
             break;
         }
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
@@ -1730,7 +1771,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
          * validate designators, expand to positional with zero-fill. */
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
             normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
-        symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
+        symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST)
                 check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
@@ -1978,7 +2019,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                     if (s->u.decl.storage_class != 2)
                         prev->u.decl.storage_class = s->u.decl.storage_class;
                     /* Update symbol table with completed type */
-                    symtable_push(&globals, prev->u.decl.name, prev->u.decl.type, prev->loc);
+                    symtable_push(&globals, prev->u.decl.name, prev->u.decl.type, prev->loc, prev->u.decl.align);
                     if (prev->u.decl.type.kind == TY_ARRAY && prev->u.decl.type.length == 0
                         && prev->u.decl.init && prev->u.decl.init->kind == EX_STR
                         && prev->u.decl.type.elem_type
@@ -2017,7 +2058,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
          * validate designators, expand to positional with zero-fill. */
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
             normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
-        symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc);
+        symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
             /* Validate the initializer list shape against the declared type. */
             if (s->u.decl.init->kind == EX_INIT_LIST)
@@ -2042,7 +2083,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         /* Import globals (as a fixed lower scope). */
         for (size_t g = 0; g < globals.len; g++) {
             symtable_push(&st, globals.data[g].name, globals.data[g].type,
-                          globals.data[g].loc);
+                          globals.data[g].loc, globals.data[g].align);
         }
 
         size_t mark = symtable_enter_scope(&st);
@@ -2074,7 +2115,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             }
             if (fn->params.data[j].name && fn->params.data[j].name[0] != '\0') {
                 symtable_push(&st, fn->params.data[j].name,
-                              pty, fn->params.data[j].loc);
+                              pty, fn->params.data[j].loc, 0);
             }
             if (own_ptr) type_free(&pty);
         }

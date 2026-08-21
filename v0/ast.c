@@ -216,6 +216,8 @@ Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+int type_is_vla(Type t);
+int type_same_typedef(Type a, Type b);
 struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
@@ -233,6 +235,7 @@ enum ExprKind {
     EX_SIZEOF_TYPE,
     EX_SIZEOF_EXPR,
     EX_ALIGNOF_TYPE,
+    EX_ALIGNOF_EXPR,
     EX_TERNARY,
     EX_INC_DEC,
     EX_COMPOUND_ASSIGN,
@@ -293,6 +296,7 @@ union __anon_u_1 {
         struct { Type target; } sizeof_t;
         struct { Expr *operand; } sizeof_e;
         struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
         struct { Expr *cond; Expr *then; Expr *else_; } tern;
         struct { Expr *operand; int is_inc; int is_prefix; } incdec;
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
@@ -307,6 +311,7 @@ union __anon_u_1 {
     SourceLoc loc;
     Type type;
     Type va_arg_type;
+    unsigned long long int_hi;
     union {
         long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
@@ -323,6 +328,7 @@ union __anon_u_1 {
         struct { Type target; } sizeof_t;
         struct { Expr *operand; } sizeof_e;
         struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
         struct { Expr *cond; Expr *then; Expr *else_; } tern;
         struct { Expr *operand; int is_inc; int is_prefix; } incdec;
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
@@ -336,6 +342,8 @@ union __anon_u_1 {
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
+Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
+                       int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -351,6 +359,7 @@ Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
 Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_alignof_type(Type t, SourceLoc loc);
+Expr *expr_new_alignof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
 Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
@@ -424,6 +433,7 @@ void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
 void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
+Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
 void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
@@ -553,6 +563,8 @@ void typedef_registry_init(TypedefRegistry *r);
 void typedef_registry_free(TypedefRegistry *r);
 TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type);
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
+TypedefEntry *typedef_registry_get(TypedefRegistry *r, const char *name);
+void typedef_registry_truncate(TypedefRegistry *r, size_t len);
 struct TranslationUnit {
     PackageDecl package;
     ImportArray imports;
@@ -649,6 +661,7 @@ long long type_size(Type t) {
     const Type *p = &t;
     long long count = 1;
     while (p->kind == TY_ARRAY && p->elem_type) {
+        if (p->vla_dim || p->length < 0) return -1;
         count *= p->length;
         p = p->elem_type;
     }
@@ -811,6 +824,54 @@ static int types_equal(Type a, Type b) {
     }
     return 0;
 }
+int type_same_typedef(Type a, Type b) {
+    if (a.is_const != b.is_const || a.is_volatile != b.is_volatile
+        || a.is_restrict != b.is_restrict)
+        return 0;
+    if (a.is_bool != b.is_bool) return 0;
+    if (a.is_vector != b.is_vector) return 0;
+    if (a.is_vector) {
+        if (a.width != b.width) return 0;
+        if (!a.elem_type || !b.elem_type) return a.elem_type == b.elem_type;
+        return type_same_typedef(*a.elem_type, *b.elem_type);
+    }
+    if (a.kind != b.kind) return 0;
+    switch (a.kind) {
+    case TY_VOID:
+        return 1;
+    case TY_INT:
+        if (a.enum_id != b.enum_id) return 0;
+        return a.width == b.width && a.is_unsigned == b.is_unsigned;
+    case TY_FLOAT:
+        return a.width == b.width;
+    case TY_PTR:
+        if (!a.pointee || !b.pointee) return a.pointee == b.pointee;
+        return type_same_typedef(*a.pointee, *b.pointee);
+    case TY_ARRAY:
+        if (a.length != b.length && a.length != 0 && b.length != 0
+            && a.length != -1 && b.length != -1)
+            return 0;
+        if (!a.elem_type || !b.elem_type) return a.elem_type == b.elem_type;
+        return type_same_typedef(*a.elem_type, *b.elem_type);
+    case TY_STRUCT:
+        if (!a.tag || !b.tag) return 0;
+        return runtime.strcmp(a.tag, b.tag) == 0;
+    case TY_FUNC:
+        if (a.func_is_variadic != b.func_is_variadic) return 0;
+        if (a.func_nparams != b.func_nparams) return 0;
+        if (a.func_ret && b.func_ret) {
+            if (!type_same_typedef(*a.func_ret, *b.func_ret)) return 0;
+        } else if (a.func_ret || b.func_ret) {
+            return 0;
+        }
+        for (int i = 0; i < a.func_nparams; i++) {
+            if (!type_same_typedef(a.func_params[i], b.func_params[i]))
+                return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
 Type type_decay(Type t) {
     if (t.kind == TY_ARRAY) {
         Type r = type_make_ptr(*t.elem_type);
@@ -898,6 +959,14 @@ long long type_align(Type t) {
     case TY_FUNC: return 1;
     }
     return 1;
+}
+int type_is_vla(Type t) {
+    const Type *p = &t;
+    while (p->kind == TY_ARRAY && p->elem_type) {
+        if (p->vla_dim) return 1;
+        p = p->elem_type;
+    }
+    return 0;
 }
 enum { SV_NO = 0, SV_INT = 1, SV_SSE = 2, SV_MEM = 3 };
 static int sysv_merge(int a, int b) {
@@ -997,7 +1066,21 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
     long long off;
     if (sd->is_union) {
         off = 0;
-    } else if (bit_width > 0 && ty.kind == TY_INT) {
+    } else if (bit_width >= 0 && ty.kind == TY_INT) {
+        if (bit_width == 0) {
+            if (sd->bf_unit_used > 0)
+                sd->size = sd->bf_unit_offset + sd->bf_unit_type;
+            sd->bf_unit_type = 0;
+            sd->bf_unit_used = 0;
+            sd->size = align_up(sd->size, a > 0 ? a : 1);
+            sd->members[sd->num_members].name = xstrdup(name ? name : "");
+            sd->members[sd->num_members].type = type_clone(ty);
+            sd->members[sd->num_members].offset = sd->size;
+            sd->members[sd->num_members].bit_width = 0;
+            sd->members[sd->num_members].bit_offset = 0;
+            sd->num_members++;
+            return;
+        }
         long long unit_bits = sz * 8;
         if (sd->bf_unit_type == sz && sd->bf_unit_used + bit_width <= unit_bits) {
             off = sd->bf_unit_offset;
@@ -1161,9 +1244,27 @@ TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type ty
     return e;
 }
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name) {
-    for (size_t i = 0; i < r->len; i++)
+    size_t i = r->len;
+    while (i > 0) {
+        i--;
         if (runtime.strcmp(r->data[i].name, name) == 0) return &r->data[i].type;
+    }
     return ((void*)0);
+}
+TypedefEntry *typedef_registry_get(TypedefRegistry *r, const char *name) {
+    size_t i = r->len;
+    while (i > 0) {
+        i--;
+        if (runtime.strcmp(r->data[i].name, name) == 0) return &r->data[i];
+    }
+    return ((void*)0);
+}
+void typedef_registry_truncate(TypedefRegistry *r, size_t len) {
+    while (r->len > len) {
+        r->len--;
+        runtime.free(r->data[r->len].name);
+        type_free(&r->data[r->len].type);
+    }
 }
 Expr *expr_new_int(long long v, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
@@ -1175,11 +1276,19 @@ Expr *expr_new_int(long long v, SourceLoc loc) {
     e->loc = loc;
     e->type = type_default_int();
     runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    e->int_hi = 0;
     e->u.int_val = v;
     return e;
 }
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc) {
     Expr *e = expr_new_int(v, loc);
+    e->type = type_make_int(width, is_unsigned);
+    return e;
+}
+Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
+                       int width, int is_unsigned, SourceLoc loc) {
+    Expr *e = expr_new_int((long long)lo, loc);
+    e->int_hi = hi;
     e->type = type_make_int(width, is_unsigned);
     return e;
 }
@@ -1334,6 +1443,10 @@ Expr *expr_new_alignof_type(Type t, SourceLoc loc) {
     Expr *e = expr_alloc(EX_ALIGNOF_TYPE, loc);
     e->u.alignof_t.target = type_clone(t); return e;
 }
+Expr *expr_new_alignof_expr(Expr *operand, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_ALIGNOF_EXPR, loc);
+    e->u.alignof_e.operand = operand; return e;
+}
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc) {
     Expr *e = expr_alloc(EX_TERNARY, loc);
     e->u.tern.cond = cond; e->u.tern.then = then; e->u.tern.else_ = else_; return e;
@@ -1467,6 +1580,9 @@ void expr_free(Expr *e) {
     case EX_ALIGNOF_TYPE:
         type_free(&e->u.alignof_t.target);
         break;
+    case EX_ALIGNOF_EXPR:
+        expr_free(e->u.alignof_e.operand);
+        break;
     case EX_STMT_EXPR:
         if (e->u.stmt_expr.stmts) {
             stmt_array_free(e->u.stmt_expr.stmts);
@@ -1538,6 +1654,92 @@ void stmt_free(Stmt *s) {
         stmt_array_free(&s->u.block);
         break;
     }
+}
+static Stmt *stmt_clone_ptr(const Stmt *s) {
+    if (!s) return ((void*)0);
+    Stmt *r = runtime.malloc(sizeof(Stmt));
+    if (!r) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    *r = stmt_clone(s);
+    return r;
+}
+Stmt stmt_clone(const Stmt *s) {
+    Stmt r;
+    runtime.memset(&r, 0, sizeof(r));
+    if (!s) return r;
+    r.kind = s->kind;
+    r.loc = s->loc;
+    switch (s->kind) {
+    case ST_DECL:
+        r.u.decl.name = s->u.decl.name ? xstrdup(s->u.decl.name) : ((void*)0);
+        r.u.decl.type = type_clone(s->u.decl.type);
+        r.u.decl.init = expr_clone(s->u.decl.init);
+        r.u.decl.storage_class = s->u.decl.storage_class;
+        r.u.decl.alias_target = s->u.decl.alias_target ? xstrdup(s->u.decl.alias_target) : ((void*)0);
+        r.u.decl.align = s->u.decl.align;
+        break;
+    case ST_EXPR:
+        r.u.expr = expr_clone(s->u.expr);
+        break;
+    case ST_RETURN:
+        r.u.value = expr_clone(s->u.value);
+        break;
+    case ST_IF:
+        r.u.if_s.cond = expr_clone(s->u.if_s.cond);
+        r.u.if_s.then_s = stmt_clone_ptr(s->u.if_s.then_s);
+        r.u.if_s.else_s = stmt_clone_ptr(s->u.if_s.else_s);
+        break;
+    case ST_WHILE:
+        r.u.while_s.cond = expr_clone(s->u.while_s.cond);
+        r.u.while_s.body = stmt_clone_ptr(s->u.while_s.body);
+        break;
+    case ST_DO_WHILE:
+        r.u.do_s.cond = expr_clone(s->u.do_s.cond);
+        r.u.do_s.body = stmt_clone_ptr(s->u.do_s.body);
+        break;
+    case ST_GOTO:
+        r.u.goto_s.target = s->u.goto_s.target ? xstrdup(s->u.goto_s.target) : ((void*)0);
+        r.u.goto_s.target_expr = expr_clone(s->u.goto_s.target_expr);
+        break;
+    case ST_LABEL:
+        r.u.label_s.name = s->u.label_s.name ? xstrdup(s->u.label_s.name) : ((void*)0);
+        r.u.label_s.stmt = stmt_clone_ptr(s->u.label_s.stmt);
+        break;
+    case ST_SWITCH:
+        r.u.switch_s.cond = expr_clone(s->u.switch_s.cond);
+        r.u.switch_s.body = stmt_clone_ptr(s->u.switch_s.body);
+        r.u.switch_s.num_cases = s->u.switch_s.num_cases;
+        r.u.switch_s.cap_cases = s->u.switch_s.num_cases;
+        r.u.switch_s.cases = ((void*)0);
+        if (s->u.switch_s.num_cases > 0) {
+            r.u.switch_s.cases = runtime.calloc((size_t)s->u.switch_s.num_cases, sizeof(SwitchCase));
+            for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+                r.u.switch_s.cases[i].is_default = s->u.switch_s.cases[i].is_default;
+                r.u.switch_s.cases[i].value = s->u.switch_s.cases[i].value;
+                r.u.switch_s.cases[i].label_name = s->u.switch_s.cases[i].label_name
+                    ? xstrdup(s->u.switch_s.cases[i].label_name) : ((void*)0);
+                stmt_array_init(&r.u.switch_s.cases[i].stmts);
+                for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                    stmt_array_push(&r.u.switch_s.cases[i].stmts,
+                                    stmt_clone(&s->u.switch_s.cases[i].stmts.data[j]));
+            }
+        }
+        break;
+    case ST_FOR:
+        r.u.for_s.init = stmt_clone_ptr(s->u.for_s.init);
+        r.u.for_s.cond = expr_clone(s->u.for_s.cond);
+        r.u.for_s.step = expr_clone(s->u.for_s.step);
+        r.u.for_s.body = stmt_clone_ptr(s->u.for_s.body);
+        break;
+    case ST_BREAK:
+    case ST_CONTINUE:
+        break;
+    case ST_BLOCK:
+        stmt_array_init(&r.u.block);
+        for (size_t i = 0; i < s->u.block.len; i++)
+            stmt_array_push(&r.u.block, stmt_clone(&s->u.block.data[i]));
+        break;
+    }
+    return r;
 }
 Stmt *stmt_alloc(void) {
     Stmt *s = runtime.malloc(sizeof(Stmt));
@@ -1616,10 +1818,10 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_init(&tu->typedefs);
     SourceLoc vloc = {0};
     StructDef *va = struct_registry_add(&tu->structs, "__va_list_tag", vloc);
-    struct_def_push_member(va, "gp_offset", type_make_int(4, 1), 0);
-    struct_def_push_member(va, "fp_offset", type_make_int(4, 1), 0);
-    struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()), 0);
-    struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()), 0);
+    struct_def_push_member(va, "gp_offset", type_make_int(4, 1), -1);
+    struct_def_push_member(va, "fp_offset", type_make_int(4, 1), -1);
+    struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()), -1);
+    struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()), -1);
     struct_def_finish(va);
     Type va_type = type_make_struct("__va_list_tag", va->size);
     typedef_registry_add(&tu->typedefs, "va_list", va_type);
@@ -1804,6 +2006,9 @@ Expr *expr_clone(const Expr *e) {
     case EX_ALIGNOF_TYPE:
         r->u.alignof_t.target = type_clone(e->u.alignof_t.target);
         break;
+    case EX_ALIGNOF_EXPR:
+        r->u.alignof_e.operand = expr_clone(e->u.alignof_e.operand);
+        break;
     case EX_TERNARY:
         r->u.tern.cond = expr_clone(e->u.tern.cond);
         r->u.tern.then = expr_clone(e->u.tern.then);
@@ -1825,6 +2030,48 @@ Expr *expr_clone(const Expr *e) {
         break;
     case EX_LABEL_ADDR:
         r->u.label_addr.label = e->u.label_addr.label ? xstrdup(e->u.label_addr.label) : ((void*)0);
+        break;
+    case EX_INIT_LIST: {
+        int n = e->u.init_list.num_elements;
+        r->u.init_list.num_elements = n;
+        r->u.init_list.elements = n ? runtime.malloc((size_t)n * sizeof(Expr *)) : ((void*)0);
+        r->u.init_list.desig_kind = ((void*)0);
+        r->u.init_list.desig_index = ((void*)0);
+        r->u.init_list.desig_member = ((void*)0);
+        for (int i = 0; i < n; i++)
+            r->u.init_list.elements[i] = expr_clone(e->u.init_list.elements[i]);
+        if (e->u.init_list.desig_kind) {
+            r->u.init_list.desig_kind = runtime.malloc((size_t)n * sizeof(int));
+            runtime.memcpy(r->u.init_list.desig_kind, e->u.init_list.desig_kind,
+                   (size_t)n * sizeof(int));
+        }
+        if (e->u.init_list.desig_index) {
+            r->u.init_list.desig_index = runtime.malloc((size_t)n * sizeof(int));
+            runtime.memcpy(r->u.init_list.desig_index, e->u.init_list.desig_index,
+                   (size_t)n * sizeof(int));
+        }
+        if (e->u.init_list.desig_member) {
+            r->u.init_list.desig_member = runtime.calloc((size_t)n, sizeof(char *));
+            for (int i = 0; i < n; i++)
+                r->u.init_list.desig_member[i] = e->u.init_list.desig_member[i]
+                    ? xstrdup(e->u.init_list.desig_member[i]) : ((void*)0);
+        }
+        break;
+    }
+    case EX_COMPOUND_LITERAL:
+        r->u.compound.target_type = type_clone(e->u.compound.target_type);
+        r->u.compound.init = expr_clone(e->u.compound.init);
+        break;
+    case EX_STMT_EXPR:
+        r->u.stmt_expr.stmts = ((void*)0);
+        if (e->u.stmt_expr.stmts) {
+            r->u.stmt_expr.stmts = runtime.malloc(sizeof(StmtArray));
+            if (!r->u.stmt_expr.stmts) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            stmt_array_init(r->u.stmt_expr.stmts);
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                stmt_array_push(r->u.stmt_expr.stmts,
+                                stmt_clone(&e->u.stmt_expr.stmts->data[i]));
+        }
         break;
     default:
         break;

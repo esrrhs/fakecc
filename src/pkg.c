@@ -161,6 +161,8 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src) {
     }
     StructDef *sd = struct_registry_add(dst, src->tag, src->loc);
     sd->is_union = src->is_union;
+    sd->is_packed = src->is_packed;
+    sd->is_big_endian = src->is_big_endian;
     for (int i = 0; i < src->num_members; i++) {
         struct_def_push_member(sd, src->members[i].name,
                                type_clone(src->members[i].type),
