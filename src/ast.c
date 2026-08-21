@@ -1497,6 +1497,11 @@ void param_array_free(ParamArray *a) {
 int fold_const_int(const Expr *e, long long *out) {
     if (!e) return 0;
     if (e->kind == EX_INT_LIT) {
+        /* int128 literals cannot be folded to a single long long: the high
+         * half would be lost.  Return 0 so the expression is evaluated at
+         * runtime (where i128_alloc/i128_store2 handle both halves). */
+        if (e->type.width == 16)
+            return 0;
         *out = e->u.int_val;
         return 1;
     }

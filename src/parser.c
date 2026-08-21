@@ -1962,14 +1962,68 @@ static int u128_fits(unsigned long long lo, unsigned long long hi,
     return lo <= max;
 }
 
-/* Decode an integer literal the way GCC gnu99 does on LP64.
+/* (hi:lo) * base + digit.  base is 8, 10, or 16.  Returns 1 on 128-bit
+ * overflow.  Schoolbook 64-bit multiply-split-into-32-bit halves. */
+static int u128_mul_add(unsigned long long *lo, unsigned long long *hi,
+                        unsigned base, unsigned digit) {
+    unsigned long long a = *lo >> 32, b = *lo & 0xffffffffULL;
+    unsigned long long pa = a * base, pb = b * base;
+    unsigned long long mid = (pb >> 32) + (pa & 0xffffffffULL);
+    unsigned long long new_lo = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
+    unsigned long long carry = (pa >> 32) + (mid >> 32);
+    a = *hi >> 32; b = *hi & 0xffffffffULL;
+    pa = a * base; pb = b * base;
+    mid = (pb >> 32) + (pa & 0xffffffffULL);
+    unsigned long long loh = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
+    unsigned long long hih = (pa >> 32) + (mid >> 32);
+    if (hih) return 1;
+    unsigned long long new_hi = loh + carry;
+    if (new_hi < loh) return 1;
+    unsigned long long t = new_lo + digit;
+    if (t < new_lo) {
+        new_hi++;
+        if (new_hi == 0) return 1;
+    }
+    *lo = t;
+    *hi = new_hi;
+    return 0;
+}
+
+/* Parse and validate the integer suffix.  Writes the body end (past the
+ * last suffix char) to *body_end, and reports whether `u` / `l` appear.
+ * Rejects malformed suffixes like `123LLL`, `123lul`, `123UU`.
+ * Accepts `U`, `L`, `LL`, `UL`, `LU`, `ULL`, `LLU`, and any case variant. */
+static int parse_int_suffix(const char *text, size_t n, size_t *body_end,
+                            int *suffix_u, int *suffix_l) {
+    size_t pos = n;
+    int u = 0, l = 0;
+    while (pos > 0) {
+        char c = text[pos - 1];
+        if (c == 'u' || c == 'U') {
+            if (u) return 0;            /* duplicate 'u' */
+            u = 1; pos--;
+        } else if (c == 'l' || c == 'L') {
+            if (l >= 2) return 0;       /* more than two 'l' */
+            l++; pos--;
+        } else break;
+    }
+    *body_end = pos;
+    *suffix_u = u;
+    *suffix_l = (l > 0) ? 1 : 0;
+    return 1;
+}
+
+/* Decode an integer literal the way GCC does on LP64 (gnu99).
  *
- * Magnitude is accumulated as unsigned 64-bit with wrap (a constant bigger
- * than `unsigned long long` keeps only the low 64 bits, then that wrapped
- * value is typed).  The type ladder is C §6.4.4.1, with GCC's extra rank:
- * an unsuffixed / `L` / `LL` *decimal* that does not fit in `long long` but
- * does fit in 64-bit unsigned is `__int128` (not `unsigned long long`).
- * Hex/octal never become `__int128`; they stop at unsigned 64-bit.
+ * Magnitude is accumulated as unsigned 128-bit (hi:lo).  The type ladder
+ * follows C §6.4.4.1 with GCC's extra ranks:
+ *
+ *   Decimal:  int → long → long long → __int128 → unsigned __int128.
+ *   Hex/octal:  int → unsigned int → long → unsigned long →
+ *               long long → unsigned long long.  (Never __int128.)
+ *
+ * A constant that does not fit the widest rank for its radix is truncated
+ * to low 64 bits (and a warning issued) — matching GCC's behaviour.
  *
  * Deriving the type here (rather than defaulting every literal to int) is what
  * makes `1UL << 63` and `0xFFu << 24 >> 24` come out right: the shift result
@@ -1978,15 +2032,17 @@ static int u128_fits(unsigned long long lo, unsigned long long hi,
 static void int_literal_typed(const char *text, SourceLoc loc,
                               unsigned long long *out_lo, unsigned long long *out_hi,
                               int *out_width, int *out_unsigned) {
-    int suffix_u = 0, suffix_l = 0;
     size_t n = strlen(text);
+    int suffix_u = 0, suffix_l = 0;
     size_t body = n;
-    while (body > 0) {
-        char c = text[body - 1];
-        if (c == 'u' || c == 'U') { suffix_u = 1; body--; }
-        else if (c == 'l' || c == 'L') { suffix_l = 1; body--; }
-        else break;
+
+    if (!parse_int_suffix(text, n, &body, &suffix_u, &suffix_l)) {
+        die_at(loc.file, loc.line, loc.col, "invalid suffix on integer constant");
+        /* Fall through with empty suffix so typing still completes. */
+        suffix_u = 0; suffix_l = 0;
+        body = n;
     }
+
     int base = 10;
     size_t i = 0;
     int decimal = 1;
@@ -1997,10 +2053,10 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         /* A leading 0 with no further digits is just `0`. */
         if (i >= body) { base = 10; i = 0; decimal = 1; }
     }
-    unsigned long long lo = 0;
     if (i >= body && base != 10) {
         die_at(loc.file, loc.line, loc.col, "integer literal has no digits");
     }
+    unsigned long long lo = 0, hi = 0;
     for (; i < body; i++) {
         unsigned char c = (unsigned char)text[i];
         unsigned d;
@@ -2018,29 +2074,61 @@ static void int_literal_typed(const char *text, SourceLoc loc,
                    "invalid digit in integer literal");
             return;
         }
-        lo = lo * (unsigned long long)base + (unsigned long long)d;
+        if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
+            /* 128-bit overflow: warn and truncate to low 64 bits (GCC-like). */
+            fprintf(stderr, "%s:%d:%d: warning: integer constant is too large "
+                    "for its type\n", loc.file, loc.line, loc.col);
+            lo = 0; hi = 0;
+            /* Re-accumulate low 64 bits only. */
+            {
+                unsigned long long tlo = 0;
+                for (size_t j = 0; j < body; j++) {
+                    unsigned char cc = (unsigned char)text[j];
+                    if (cc == '\'') continue;
+                    unsigned dd;
+                    if (cc >= '0' && cc <= '9') dd = (unsigned)(cc - '0');
+                    else if (cc >= 'a' && cc <= 'f') dd = (unsigned)(cc - 'a' + 10);
+                    else if (cc >= 'A' && cc <= 'F') dd = (unsigned)(cc - 'A' + 10);
+                    else continue;
+                    if (dd >= (unsigned)base) continue;
+                    tlo = tlo * (unsigned long long)base + (unsigned long long)dd;
+                }
+                lo = tlo;
+            }
+            break;
+        }
     }
-    unsigned long long hi = 0;
+    /* Hex / octal wider than 64 bits: wrap to low 64 bits (GCC behaviour). */
+    if (!decimal && hi != 0) {
+        fprintf(stderr, "%s:%d:%d: warning: integer constant is too large "
+                "for its type\n", loc.file, loc.line, loc.col);
+        hi = 0;
+    }
     int width, is_unsigned;
     if (suffix_u) {
+        /* Unsigned ladder: try 32/64/128-bit unsigned.  Hex/octal with U
+         * suffix never exceed 64 bits (they wrap), so 128 is only reachable
+         * for decimal literals like 340282366920938463463374607431768211455u. */
         is_unsigned = 1;
         if (u128_fits(lo, hi, 32, 1) && !suffix_l) width = 4;
         else if (u128_fits(lo, hi, 64, 1)) width = 8;
-        else width = 16;
+        else width = 16; /* unsigned __int128 */
     } else if (decimal) {
+        /* Decimal ladder (GCC extension): int → long → long long → __int128
+         * → unsigned __int128.  Values in [2^63, 2^127-1] become __int128;
+         * values in [2^127, 2^128-1] become unsigned __int128. */
         is_unsigned = 0;
         if (u128_fits(lo, hi, 32, 0) && !suffix_l) width = 4;
         else if (u128_fits(lo, hi, 64, 0)) width = 8;
-        else if (u128_fits(lo, hi, 128, 0)) width = 16;
-        else { width = 16; is_unsigned = 1; }
+        else if (u128_fits(lo, hi, 128, 0)) width = 16;            /* __int128 */
+        else if (u128_fits(lo, hi, 128, 1)) { width = 16; is_unsigned = 1; } /* unsigned __int128 */
+        else { width = 4; lo = 0; hi = 0; }  /* shouldn't reach (overflow handled above) */
     } else {
-        /* Hex / octal: signed then unsigned at each rank (GCC + C). */
+        /* Hex / octal: signed then unsigned at each rank; never __int128. */
         if (u128_fits(lo, hi, 32, 0) && !suffix_l) { width = 4; is_unsigned = 0; }
         else if (u128_fits(lo, hi, 32, 1) && !suffix_l) { width = 4; is_unsigned = 1; }
         else if (u128_fits(lo, hi, 64, 0)) { width = 8; is_unsigned = 0; }
-        else if (u128_fits(lo, hi, 64, 1)) { width = 8; is_unsigned = 1; }
-        else if (u128_fits(lo, hi, 128, 0)) { width = 16; is_unsigned = 0; }
-        else { width = 16; is_unsigned = 1; }
+        else { width = 8; is_unsigned = 1; }
     }
     *out_lo = lo;
     *out_hi = hi;

@@ -2301,18 +2301,70 @@ static int u128_fits(unsigned long long lo, unsigned long long hi,
         : ((1ULL << (bits - 1)) - 1ULL);
     return lo <= max;
 }
+/* (hi:lo) * base + digit.  base is 8, 10, or 16.  Returns 1 on 128-bit
+ * overflow.  Schoolbook 64-bit multiply-split-into-32-bit halves. */
+static int u128_mul_add(unsigned long long *lo, unsigned long long *hi,
+                        unsigned base, unsigned digit) {
+    unsigned long long a = *lo >> 32, b = *lo & 0xffffffffULL;
+    unsigned long long pa = a * base, pb = b * base;
+    unsigned long long mid = (pb >> 32) + (pa & 0xffffffffULL);
+    unsigned long long new_lo = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
+    unsigned long long carry = (pa >> 32) + (mid >> 32);
+    a = *hi >> 32; b = *hi & 0xffffffffULL;
+    pa = a * base; pb = b * base;
+    mid = (pb >> 32) + (pa & 0xffffffffULL);
+    unsigned long long loh = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
+    unsigned long long hih = (pa >> 32) + (mid >> 32);
+    if (hih) return 1;
+    unsigned long long new_hi = loh + carry;
+    if (new_hi < loh) return 1;
+    unsigned long long t = new_lo + digit;
+    if (t < new_lo) {
+        new_hi++;
+        if (new_hi == 0) return 1;
+    }
+    *lo = t;
+    *hi = new_hi;
+    return 0;
+}
+
+/* Parse and validate the integer suffix.  Writes the body end (past the
+ * last suffix char) to *body_end, and reports whether `u` / `l` appear.
+ * Rejects malformed suffixes like `123LLL`, `123lul`, `123UU`.
+ * Accepts `U`, `L`, `LL`, `UL`, `LU`, `ULL`, `LLU`, and any case variant. */
+static int parse_int_suffix(const char *text, size_t n, size_t *body_end,
+                            int *suffix_u, int *suffix_l) {
+    size_t pos = n;
+    int u = 0, l = 0;
+    while (pos > 0) {
+        char c = text[pos - 1];
+        if (c == 'u' || c == 'U') {
+            if (u) return 0;            /* duplicate 'u' */
+            u = 1; pos--;
+        } else if (c == 'l' || c == 'L') {
+            if (l >= 2) return 0;       /* more than two 'l' */
+            l++; pos--;
+        } else break;
+    }
+    *body_end = pos;
+    *suffix_u = u;
+    *suffix_l = (l > 0) ? 1 : 0;
+    return 1;
+}
+
 static void int_literal_typed(const char *text, SourceLoc loc,
                               unsigned long long *out_lo, unsigned long long *out_hi,
                               int *out_width, int *out_unsigned) {
-    int suffix_u = 0, suffix_l = 0;
     size_t n = runtime.strlen(text);
+    int suffix_u = 0, suffix_l = 0;
     size_t body = n;
-    while (body > 0) {
-        char c = text[body - 1];
-        if (c == 'u' || c == 'U') { suffix_u = 1; body--; }
-        else if (c == 'l' || c == 'L') { suffix_l = 1; body--; }
-        else break;
+
+    if (!parse_int_suffix(text, n, &body, &suffix_u, &suffix_l)) {
+        die_at(loc.file, loc.line, loc.col, "invalid suffix on integer constant");
+        suffix_u = 0; suffix_l = 0;
+        body = n;
     }
+
     int base = 10;
     size_t i = 0;
     int decimal = 1;
@@ -2322,10 +2374,10 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         base = 8; i = 1; decimal = 0;
         if (i >= body) { base = 10; i = 0; decimal = 1; }
     }
-    unsigned long long lo = 0;
     if (i >= body && base != 10) {
         die_at(loc.file, loc.line, loc.col, "integer literal has no digits");
     }
+    unsigned long long lo = 0, hi = 0;
     for (; i < body; i++) {
         unsigned char c = (unsigned char)text[i];
         unsigned d;
@@ -2343,11 +2395,35 @@ static void int_literal_typed(const char *text, SourceLoc loc,
                    "invalid digit in integer literal");
             return;
         }
-        lo = lo * (unsigned long long)base + (unsigned long long)d;
+        if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
+            runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant "
+                            "is too large for its type\n", loc.file, loc.line, loc.col);
+            lo = 0; hi = 0;
+            {
+                unsigned long long tlo = 0;
+                for (size_t j = 0; j < body; j++) {
+                    unsigned char cc = (unsigned char)text[j];
+                    if (cc == '\'') continue;
+                    unsigned dd;
+                    if (cc >= '0' && cc <= '9') dd = (unsigned)(cc - '0');
+                    else if (cc >= 'a' && cc <= 'f') dd = (unsigned)(cc - 'a' + 10);
+                    else if (cc >= 'A' && cc <= 'F') dd = (unsigned)(cc - 'A' + 10);
+                    else continue;
+                    if (dd >= (unsigned)base) continue;
+                    tlo = tlo * (unsigned long long)base + (unsigned long long)dd;
+                }
+                lo = tlo;
+            }
+            break;
+        }
     }
-    unsigned long long hi = 0;
-int width;
-int is_unsigned;
+    /* Hex / octal wider than 64 bits: wrap to low 64 bits (GCC behaviour). */
+    if (!decimal && hi != 0) {
+        runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant "
+                        "is too large for its type\n", loc.file, loc.line, loc.col);
+        hi = 0;
+    }
+    int width, is_unsigned;
     if (suffix_u) {
         is_unsigned = 1;
         if (u128_fits(lo, hi, 32, 1) && !suffix_l) width = 4;
@@ -2358,14 +2434,13 @@ int is_unsigned;
         if (u128_fits(lo, hi, 32, 0) && !suffix_l) width = 4;
         else if (u128_fits(lo, hi, 64, 0)) width = 8;
         else if (u128_fits(lo, hi, 128, 0)) width = 16;
-        else { width = 16; is_unsigned = 1; }
+        else if (u128_fits(lo, hi, 128, 1)) { width = 16; is_unsigned = 1; }
+        else { width = 4; lo = 0; hi = 0; }
     } else {
         if (u128_fits(lo, hi, 32, 0) && !suffix_l) { width = 4; is_unsigned = 0; }
         else if (u128_fits(lo, hi, 32, 1) && !suffix_l) { width = 4; is_unsigned = 1; }
         else if (u128_fits(lo, hi, 64, 0)) { width = 8; is_unsigned = 0; }
-        else if (u128_fits(lo, hi, 64, 1)) { width = 8; is_unsigned = 1; }
-        else if (u128_fits(lo, hi, 128, 0)) { width = 16; is_unsigned = 0; }
-        else { width = 16; is_unsigned = 1; }
+        else { width = 8; is_unsigned = 1; }
     }
     *out_lo = lo;
     *out_hi = hi;
