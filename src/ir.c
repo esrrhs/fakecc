@@ -3931,21 +3931,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 if (bits > 64) bits = 64;
                 long long imm;
                 if (du) {
-                    long double hi = (bits >= 64)
-                        ? 18446744073709551615.0L
-                        : (long double)((1ULL << bits) - 1ULL);
+                    unsigned long long maxu = (bits >= 64)
+                        ? ~0ULL
+                        : ((1ULL << bits) - 1ULL);
+                    long double hi = (long double)maxu;
                     unsigned long long uv;
-                    if (fv >= hi) uv = (bits >= 64) ? ~0ULL : ((1ULL << bits) - 1ULL);
+                    if (fv >= hi) uv = maxu;
                     else if (fv <= 0) uv = 0;
                     else uv = (unsigned long long)fv;
                     imm = (long long)uv;
                 } else {
-                    long double hi = (bits >= 64)
-                        ? 9223372036854775807.0L
-                        : (long double)((1LL << (bits - 1)) - 1);
-                    long double lo = (bits >= 64)
-                        ? -9223372036854775808.0L
-                        : -hi - 1.0L;
+                    unsigned long long mag = (bits >= 64)
+                        ? (1ULL << 63)
+                        : (1ULL << (bits - 1));
+                    long double hi = (long double)(mag - 1ULL);
+                    long double lo = -(long double)mag;
                     if (fv > hi) fv = hi;
                     if (fv < lo) fv = lo;
                     imm = (long long)fv;
@@ -5325,6 +5325,16 @@ static void flush_rodata(IRModule *m) {
 /* Evaluate a constant expression as a long double, so a float-typed global can
  * be packed in its own format.  Integer constants are accepted too: `double
  * d = 1;` must store 1.0, not the bit pattern of the integer 1. */
+static long double ld_two64(void) {
+    /* Build 2^64 in long double without a 80-bit source literal: glibc
+     * strtold and the freestanding runtime disagree on that constant, which
+     * breaks the bootstrap fixed point.  2^16 is exact in any format. */
+    long double t = 65536.0L;
+    t = t * t;
+    t = t * t;
+    return t;
+}
+
 static long double int_lit_to_ld(const Expr *e) {
     unsigned long long lo = (unsigned long long)e->u.int_val;
     unsigned long long hi = e->int_hi;
@@ -5334,12 +5344,13 @@ static long double int_lit_to_ld(const Expr *e) {
         return (long double)lo;
     }
     int neg = !e->type.is_unsigned && (hi >> 63);
+    long double scale = ld_two64();
     if (neg) {
         unsigned long long nlo = ~lo + 1ULL;
         unsigned long long nhi = ~hi + (nlo == 0);
-        return -((long double)nlo + (long double)nhi * 18446744073709551616.0L);
+        return -((long double)nlo + (long double)nhi * scale);
     }
-    return (long double)lo + (long double)hi * 18446744073709551616.0L;
+    return (long double)lo + (long double)hi * scale;
 }
 
 static int fold_const_float(const Expr *e, long double *out) {
@@ -5789,8 +5800,10 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         unsigned long long vlo, vhi = 0;
         if (e->kind == EX_INT_LIT) {
             vlo = (unsigned long long)e->u.int_val;
-            vhi = e->int_hi;
-            if (e->type.width < 16 && !e->type.is_unsigned && e->u.int_val < 0)
+            vhi = 0;
+            if (e->type.width == 16)
+                vhi = e->int_hi;
+            else if (!e->type.is_unsigned && e->u.int_val < 0)
                 vhi = ~0ULL;
         } else {
             vlo = (unsigned long long)_fold_v;

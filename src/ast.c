@@ -310,10 +310,9 @@ int type_same_typedef(Type a, Type b) {
         if (!a.pointee || !b.pointee) return a.pointee == b.pointee;
         return type_same_typedef(*a.pointee, *b.pointee);
     case TY_ARRAY:
-        /* Incomplete `T[]` is compatible with `T[N]` (C composite type). */
-        if (a.length != b.length && a.length != 0 && b.length != 0
-            && a.length != -1 && b.length != -1)
-            return 0;
+        /* GCC: a restated typedef must denote the same type, not merely a
+         * compatible one — `int[]` and `int[3]` are rejected. */
+        if (a.length != b.length) return 0;
         if (!a.elem_type || !b.elem_type) return a.elem_type == b.elem_type;
         return type_same_typedef(*a.elem_type, *b.elem_type);
     case TY_STRUCT:
@@ -829,11 +828,10 @@ Expr *expr_new_int(long long v, SourceLoc loc) {
         fprintf(stderr, "fakecc: out of memory\n");
         exit(1);
     }
+    memset(e, 0, sizeof(Expr));
     e->kind = EX_INT_LIT;
     e->loc = loc;
     e->type = type_default_int();
-    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
-    e->int_hi = 0;
     e->u.int_val = v;
     return e;
 }

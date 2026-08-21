@@ -669,7 +669,6 @@ union __anon_u_1 {
     SourceLoc loc;
     Type type;
     Type va_arg_type;
-    unsigned long long int_hi;
     union {
         long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
@@ -697,6 +696,7 @@ union __anon_u_1 {
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
     } u;
+    unsigned long long int_hi;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);

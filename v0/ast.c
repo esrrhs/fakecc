@@ -311,7 +311,6 @@ union __anon_u_1 {
     SourceLoc loc;
     Type type;
     Type va_arg_type;
-    unsigned long long int_hi;
     union {
         long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
@@ -339,6 +338,7 @@ union __anon_u_1 {
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
     } u;
+    unsigned long long int_hi;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
@@ -848,9 +848,7 @@ int type_same_typedef(Type a, Type b) {
         if (!a.pointee || !b.pointee) return a.pointee == b.pointee;
         return type_same_typedef(*a.pointee, *b.pointee);
     case TY_ARRAY:
-        if (a.length != b.length && a.length != 0 && b.length != 0
-            && a.length != -1 && b.length != -1)
-            return 0;
+        if (a.length != b.length) return 0;
         if (!a.elem_type || !b.elem_type) return a.elem_type == b.elem_type;
         return type_same_typedef(*a.elem_type, *b.elem_type);
     case TY_STRUCT:
@@ -1272,11 +1270,10 @@ Expr *expr_new_int(long long v, SourceLoc loc) {
         runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
+    runtime.memset(e, 0, sizeof(Expr));
     e->kind = EX_INT_LIT;
     e->loc = loc;
     e->type = type_default_int();
-    runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
-    e->int_hi = 0;
     e->u.int_val = v;
     return e;
 }

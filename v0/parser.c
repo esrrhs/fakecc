@@ -311,7 +311,6 @@ union __anon_u_1 {
     SourceLoc loc;
     Type type;
     Type va_arg_type;
-    unsigned long long int_hi;
     union {
         long long int_val;
         struct { BinOp op; Expr *l, *r; } bin;
@@ -339,6 +338,7 @@ union __anon_u_1 {
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
     } u;
+    unsigned long long int_hi;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
@@ -3654,11 +3654,6 @@ static Stmt parse_typedef_stmt(Parser *p) {
                 die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "redefinition of typedef '%s' with a different type",
                        decl_name);
-            } else if (ty.kind == TY_ARRAY && ty.length > 0
-                       && exist->type.kind == TY_ARRAY
-                       && exist->type.length == 0) {
-                type_free(&exist->type);
-                exist->type = ty;
             } else {
                 type_free(&ty);
             }

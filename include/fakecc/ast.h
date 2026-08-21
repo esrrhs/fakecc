@@ -186,9 +186,6 @@ struct Expr {
      * type T (va_arg's second argument is a type, not an expression).
      * Kept OUT of the union so it never aliases with EX_CALL::args/callee. */
     Type va_arg_type;
-    /* EX_INT_LIT only: high 64 bits of a width-16 (`__int128`) constant.
-     * Narrower literals leave this 0; the low 64 bits stay in u.int_val. */
-    unsigned long long int_hi;
     union {
         long long int_val;                             /* EX_INT_LIT — low 64 bits (or the whole value if width ≤ 8) */
         struct { BinOp op; Expr *l, *r; } bin;        /* EX_BINOP */
@@ -216,6 +213,9 @@ struct Expr {
         struct { StmtArray *stmts; } stmt_expr;            /* EX_STMT_EXPR — GNU statement expression ({ ... }) */
         struct { char *label; } label_addr;                /* EX_LABEL_ADDR — &&label address of label */
     } u;
+    /* EX_INT_LIT only: high 64 bits of a width-16 (`__int128`) constant.
+     * Kept after the union so existing Expr field offsets stay GCC-identical. */
+    unsigned long long int_hi;
 };
 
 /* Ownership: Expr uses malloc; tu_free recurses */
