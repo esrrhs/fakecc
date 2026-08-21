@@ -986,27 +986,41 @@ int rf;
     return changed;
 }
 void scalar_renumber(IRFunction *fn) {
-    if (fn->next_value_id <= 0) return;
-    int *map = xmalloc(fn->next_value_id * sizeof(int));
-    for (int i = 0; i < fn->next_value_id; i++) map[i] = -1;
+    int max_vid = fn->next_value_id;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *inst = &fn->insts.data[i];
+        if (inst->dst >= max_vid) max_vid = inst->dst + 1;
+        if (inst->a >= max_vid) max_vid = inst->a + 1;
+        if (inst->op != IR_CBR && inst->b >= max_vid) max_vid = inst->b + 1;
+        if (inst->op == IR_CALL) {
+            if (inst->call_callee >= max_vid) max_vid = inst->call_callee + 1;
+            for (int k = 0; k < inst->call_nargs; k++) {
+                if (k < 64 && inst->call_args[k] >= max_vid)
+                    max_vid = inst->call_args[k] + 1;
+            }
+        }
+    }
+    if (max_vid <= 0) return;
+    int *map = xmalloc((size_t)max_vid * sizeof(int));
+    for (int i = 0; i < max_vid; i++) map[i] = -1;
     int next = 0;
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
         if (inst->op == IR_DBG_VALUE) continue;
-        if (inst->dst >= 0 && map[inst->dst] == -1)
+        if (inst->dst >= 0 && inst->dst < max_vid && map[inst->dst] == -1)
             map[inst->dst] = next++;
-        if (inst->a >= 0 && map[inst->a] == -1)
+        if (inst->a >= 0 && inst->a < max_vid && map[inst->a] == -1)
             map[inst->a] = next++;
-        if (inst->op != IR_CBR && inst->b >= 0 && map[inst->b] == -1)
+        if (inst->op != IR_CBR && inst->b >= 0 && inst->b < max_vid && map[inst->b] == -1)
             map[inst->b] = next++;
         if (inst->op == IR_CALL) {
-            if (inst->call_callee >= 0 && map[inst->call_callee] == -1)
+            if (inst->call_callee >= 0 && inst->call_callee < max_vid && map[inst->call_callee] == -1)
                 map[inst->call_callee] = next++;
             for (int k = 0; k < inst->call_nargs; k++) {
                 if (k >= 64) break;
                 int v = inst->call_args[k];
-                if (v >= 0 && v < fn->next_value_id && map[v] == -1)
+                if (v >= 0 && v < max_vid && map[v] == -1)
                     map[v] = next++;
             }
         }
@@ -1015,25 +1029,26 @@ void scalar_renumber(IRFunction *fn) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_LABEL || inst->op == IR_BR) continue;
         if (inst->op == IR_DBG_VALUE) {
-            if (inst->a >= 0) inst->a = map[inst->a];
+            if (inst->a >= 0 && inst->a < max_vid) inst->a = map[inst->a];
             continue;
         }
-        if (inst->dst >= 0) inst->dst = map[inst->dst];
-        if (inst->a >= 0) inst->a = map[inst->a];
-        if (inst->op != IR_CBR && inst->b >= 0) inst->b = map[inst->b];
+        if (inst->dst >= 0 && inst->dst < max_vid) inst->dst = map[inst->dst];
+        if (inst->a >= 0 && inst->a < max_vid) inst->a = map[inst->a];
+        if (inst->op != IR_CBR && inst->b >= 0 && inst->b < max_vid) inst->b = map[inst->b];
         if (inst->op == IR_CALL) {
-            if (inst->call_callee >= 0)
+            if (inst->call_callee >= 0 && inst->call_callee < max_vid)
                 inst->call_callee = map[inst->call_callee];
             for (int k = 0; k < inst->call_nargs; k++) {
+                if (k >= 64) break;
                 int v = inst->call_args[k];
-                if (v >= 0) inst->call_args[k] = map[v];
+                if (v >= 0 && v < max_vid) inst->call_args[k] = map[v];
             }
         }
     }
     for (size_t i = 0; i < fn->num_dbg_vars; i++) {
         int slot = fn->dbg_vars[i].alloca_ssa;
         fn->dbg_vars[i].alloca_ssa =
-            (slot >= 0 && slot < fn->next_value_id) ? map[slot] : -1;
+            (slot >= 0 && slot < max_vid) ? map[slot] : -1;
     }
     if (fn->value_meta_cap > 0) {
         int *old_width = fn->value_width;

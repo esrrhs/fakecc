@@ -3,6 +3,7 @@ package runtime;
 
 struct chunk {
     size_t size;
+    size_t user_size;
     struct chunk *next_free;
 };
 
@@ -31,9 +32,10 @@ static void heap_grow(size_t need) {
     if (region < 1048576) region = 1048576;
     char *p = (char *)map_anon(region);
     if (p == 0) return;
+    __asan_unpoison_memory_region(p, region);
     struct chunk *c = (struct chunk *)p;
     c->size = region - sizeof(struct chunk);
-    c->next_free = 0;
+    c->user_size = 0;
     /* Insert by address so later frees can coalesce with this region. */
     struct chunk **prev = &freelist_head;
     struct chunk *n = freelist_head;
@@ -59,6 +61,7 @@ static int already_free(struct chunk *c) {
 }
 
 void *malloc(size_t n) {
+    size_t orig_n = n;
     if (n == 0) n = 1;
     n = align8(n);
     if (freelist_head == 0) heap_grow(n);
@@ -84,6 +87,7 @@ void *malloc(size_t n) {
         char *base = (char *)c;
         struct chunk *rest = (struct chunk *)(base + sizeof(struct chunk) + n);
         rest->size = c->size - n - sizeof(struct chunk);
+        rest->user_size = 0;
         rest->next_free = c->next_free;
         *prev = rest;
         c->size = n;
@@ -91,13 +95,17 @@ void *malloc(size_t n) {
         *prev = c->next_free;
     }
     c->next_free = 0;
-    return (char *)c + sizeof(struct chunk);
+    c->user_size = orig_n;
+    void *ret = (char *)c + sizeof(struct chunk);
+    __asan_unpoison_memory_region(ret, n);
+    return ret;
 }
 
 void free(void *p) {
     if (p == 0) return;
     struct chunk *c = (struct chunk *)((char *)p - sizeof(struct chunk));
     if (already_free(c)) return;
+    __asan_poison_memory_region(p, c->size);
     struct chunk *left = 0;
     struct chunk *n = freelist_head;
     while (n && n < c) {
@@ -133,10 +141,15 @@ void *realloc(void *p, size_t n) {
         return 0;
     }
     struct chunk *c = (struct chunk *)((char *)p - sizeof(struct chunk));
-    if (c->size >= n) return p;
+    if (c->size >= n) {
+        c->user_size = n;
+        __asan_unpoison_memory_region(p, n);
+        return p;
+    }
     void *q = malloc(n);
     if (q == 0) return 0;
-    size_t copy = c->size;
+    size_t copy = c->user_size;
+    if (copy == 0 || copy > c->size) copy = c->size;
     if (copy > n) copy = n;
     memcpy(q, p, copy);
     free(p);

@@ -15,6 +15,7 @@ static IRFunction *module_add_fn(IRModule *m, int next_value_id) {
         if (!m->functions.data) exit(1);
     }
     IRFunction *fn = &m->functions.data[m->functions.len++];
+    memset(fn, 0, sizeof(*fn));
     fn->name = NULL;
     fn->insts.data = NULL;
     fn->insts.len = 0;

@@ -302,6 +302,7 @@ void ir_module_push_alias(IRModule *m, const char *name, const char *target,
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 
 extern int g_instrument_functions;
+extern int g_sanitize_address;
 
 /* Return the live struct registry during lowering (NULL outside it).
  * type_size() uses this to refresh stale cached struct widths. */

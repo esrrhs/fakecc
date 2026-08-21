@@ -1246,6 +1246,10 @@ int main(int argc, char **argv) {
             nodefaultlibs = 1;
         } else if (runtime.strcmp(argv[i], "-finstrument-functions") == 0) {
             g_instrument_functions = 1;
+        } else if (runtime.strcmp(argv[i], "-fsanitize=address") == 0) {
+            g_sanitize_address = 1;
+        } else if (runtime.strncmp(argv[i], "-fsanitize=", 11) == 0) {
+            if (runtime.strstr(argv[i], "address")) g_sanitize_address = 1;
         } else if (runtime.strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
         } else if (runtime.strcmp(argv[i], "-O0") == 0) {
