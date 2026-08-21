@@ -101,8 +101,7 @@ int  type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int  type_funcs_equal(Type a, Type b);  /* true if ret + all params match */
 int  type_is_vla(Type t);               /* any dimension is a VLA */
-/* C11/GCC: a repeated typedef is valid only when the types are compatible
- * (qualifiers, signedness, tags, and completeness). */
+/* GCC: a repeated typedef is valid only when it denotes the same type. */
 int  type_same_typedef(Type a, Type b);
 
 struct Expr *expr_clone(const struct Expr *e);
@@ -224,8 +223,8 @@ Expr *expr_new_int(long long v, SourceLoc loc);
  * suffix and the value's magnitude: 0x8000000000000000 is unsigned long even
  * with no suffix.  Getting this wrong silently truncates wide constants. */
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
-/* Integer literal that may occupy a full 128 bits (GCC: a constant too large
- * for `unsigned long long` is typed `__int128` / `unsigned __int128`). */
+/* Integer literal, including GCC's `__int128` rank for decimal constants
+ * larger than `long long` but still within 64-bit unsigned magnitude. */
 Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
                        int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);

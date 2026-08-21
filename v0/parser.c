@@ -2284,30 +2284,6 @@ static void float_literal_width(const char *text, int *out_width) {
 static int int_literal_value(const char *text) {
     return (int)runtime.strtol(text, ((void*)0), 0);
 }
-static int u128_mul_add(unsigned long long *lo, unsigned long long *hi,
-                        unsigned base, unsigned digit) {
-    unsigned long long a = *lo >> 32, b = *lo & 0xffffffffULL;
-    unsigned long long pa = a * base, pb = b * base;
-    unsigned long long mid = (pb >> 32) + (pa & 0xffffffffULL);
-    unsigned long long new_lo = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
-    unsigned long long carry = (pa >> 32) + (mid >> 32);
-    a = *hi >> 32; b = *hi & 0xffffffffULL;
-    pa = a * base; pb = b * base;
-    mid = (pb >> 32) + (pa & 0xffffffffULL);
-    unsigned long long loh = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
-    unsigned long long hih = (pa >> 32) + (mid >> 32);
-    if (hih) return 1;
-    unsigned long long new_hi = loh + carry;
-    if (new_hi < loh) return 1;
-    unsigned long long t = new_lo + digit;
-    if (t < new_lo) {
-        new_hi++;
-        if (new_hi == 0) return 1;
-    }
-    *lo = t;
-    *hi = new_hi;
-    return 0;
-}
 static int u128_fits(unsigned long long lo, unsigned long long hi,
                     int bits, int is_unsigned) {
     if (bits >= 128) {
@@ -2346,7 +2322,7 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         base = 8; i = 1; decimal = 0;
         if (i >= body) { base = 10; i = 0; decimal = 1; }
     }
-    unsigned long long lo = 0, hi = 0;
+    unsigned long long lo = 0;
     if (i >= body && base != 10) {
         die_at(loc.file, loc.line, loc.col, "integer literal has no digits");
     }
@@ -2367,12 +2343,9 @@ static void int_literal_typed(const char *text, SourceLoc loc,
                    "invalid digit in integer literal");
             return;
         }
-        if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
-            die_at(loc.file, loc.line, loc.col,
-                   "integer constant is too large");
-            return;
-        }
+        lo = lo * (unsigned long long)base + (unsigned long long)d;
     }
+    unsigned long long hi = 0;
 int width;
 int is_unsigned;
     if (suffix_u) {
@@ -3654,11 +3627,6 @@ static Stmt parse_typedef_stmt(Parser *p) {
                 die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "redefinition of typedef '%s' with a different type",
                        decl_name);
-            } else if (ty.kind == TY_ARRAY && ty.length > 0
-                       && exist->type.kind == TY_ARRAY
-                       && exist->type.length == 0) {
-                type_free(&exist->type);
-                exist->type = ty;
             } else {
                 type_free(&ty);
             }

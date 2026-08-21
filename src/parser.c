@@ -1944,32 +1944,6 @@ static int int_literal_value(const char *text) {
     return (int)strtol(text, NULL, 0);
 }
 
-/* (hi:lo) * base + digit.  base is 8, 10, or 16.  Returns 1 on 128-bit overflow. */
-static int u128_mul_add(unsigned long long *lo, unsigned long long *hi,
-                        unsigned base, unsigned digit) {
-    unsigned long long a = *lo >> 32, b = *lo & 0xffffffffULL;
-    unsigned long long pa = a * base, pb = b * base;
-    unsigned long long mid = (pb >> 32) + (pa & 0xffffffffULL);
-    unsigned long long new_lo = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
-    unsigned long long carry = (pa >> 32) + (mid >> 32);
-    a = *hi >> 32; b = *hi & 0xffffffffULL;
-    pa = a * base; pb = b * base;
-    mid = (pb >> 32) + (pa & 0xffffffffULL);
-    unsigned long long loh = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
-    unsigned long long hih = (pa >> 32) + (mid >> 32);
-    if (hih) return 1;
-    unsigned long long new_hi = loh + carry;
-    if (new_hi < loh) return 1;
-    unsigned long long t = new_lo + digit;
-    if (t < new_lo) {
-        new_hi++;
-        if (new_hi == 0) return 1;
-    }
-    *lo = t;
-    *hi = new_hi;
-    return 0;
-}
-
 static int u128_fits(unsigned long long lo, unsigned long long hi,
                     int bits, int is_unsigned) {
     if (bits >= 128) {
@@ -1988,8 +1962,14 @@ static int u128_fits(unsigned long long lo, unsigned long long hi,
     return lo <= max;
 }
 
-/* Decode an integer literal to its 128-bit magnitude AND the type C/GCC gives
- * it (§6.4.4.1, plus GCC's `__int128` rank after `unsigned long long`).
+/* Decode an integer literal the way GCC gnu99 does on LP64.
+ *
+ * Magnitude is accumulated as unsigned 64-bit with wrap (a constant bigger
+ * than `unsigned long long` keeps only the low 64 bits, then that wrapped
+ * value is typed).  The type ladder is C §6.4.4.1, with GCC's extra rank:
+ * an unsuffixed / `L` / `LL` *decimal* that does not fit in `long long` but
+ * does fit in 64-bit unsigned is `__int128` (not `unsigned long long`).
+ * Hex/octal never become `__int128`; they stop at unsigned 64-bit.
  *
  * Deriving the type here (rather than defaulting every literal to int) is what
  * makes `1UL << 63` and `0xFFu << 24 >> 24` come out right: the shift result
@@ -2017,7 +1997,7 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         /* A leading 0 with no further digits is just `0`. */
         if (i >= body) { base = 10; i = 0; decimal = 1; }
     }
-    unsigned long long lo = 0, hi = 0;
+    unsigned long long lo = 0;
     if (i >= body && base != 10) {
         die_at(loc.file, loc.line, loc.col, "integer literal has no digits");
     }
@@ -2038,12 +2018,9 @@ static void int_literal_typed(const char *text, SourceLoc loc,
                    "invalid digit in integer literal");
             return;
         }
-        if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
-            die_at(loc.file, loc.line, loc.col,
-                   "integer constant is too large");
-            return;
-        }
+        lo = lo * (unsigned long long)base + (unsigned long long)d;
     }
+    unsigned long long hi = 0;
     int width, is_unsigned;
     if (suffix_u) {
         is_unsigned = 1;
@@ -3439,12 +3416,6 @@ static Stmt parse_typedef_stmt(Parser *p) {
                 die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "redefinition of typedef '%s' with a different type",
                        decl_name);
-            } else if (ty.kind == TY_ARRAY && ty.length > 0
-                       && exist->type.kind == TY_ARRAY
-                       && exist->type.length == 0) {
-                /* Incomplete `T[]` plus `T[N]` composes to `T[N]`. */
-                type_free(&exist->type);
-                exist->type = ty;
             } else {
                 type_free(&ty);
             }

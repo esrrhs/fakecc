@@ -310,9 +310,9 @@ int type_same_typedef(Type a, Type b) {
         if (!a.pointee || !b.pointee) return a.pointee == b.pointee;
         return type_same_typedef(*a.pointee, *b.pointee);
     case TY_ARRAY:
-        /* Incomplete `T[]` is compatible with `T[N]` (C composite type). */
-        if (a.length != b.length && a.length != 0 && b.length != 0
-            && a.length != -1 && b.length != -1)
+        /* GCC: restating a typedef requires the same type, not merely a
+         * compatible one, so `int[]` and `int[3]` do not match. */
+        if (a.length != b.length)
             return 0;
         if (!a.elem_type || !b.elem_type) return a.elem_type == b.elem_type;
         return type_same_typedef(*a.elem_type, *b.elem_type);
