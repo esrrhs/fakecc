@@ -59,17 +59,21 @@ difftest_one() {
     # headers and used to SKIP the whole case.  gcc still needs <stdarg.h>
     # for va_arg; drop fakecc's in-source SysV va_list typedef so gcc sees
     # its own va_list (otherwise the stdio.h fallback fights fprintf).
+    python3 "$TOOLS_DIR/gcc_stdarg_prep.py" < "$WORK/$name.body.c" > "$WORK/$name.prep.c"
     {
         echo '#define _GNU_SOURCE 1'
         if grep -qE '\b(va_(list|start|arg|end|copy)|__builtin_va_(list|start|arg|end|copy))\b' \
-               "$WORK/$name.body.c"; then
+               "$WORK/$name.prep.c"; then
             echo '#include <stdarg.h>'
-            python3 "$TOOLS_DIR/gcc_stdarg_prep.py" < "$WORK/$name.body.c"
-        else
-            cat "$WORK/$name.body.c"
         fi
+        cat "$WORK/$name.prep.c"
     } > "$WORK/$name.gcc.c"
-    if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
+    # Header-free gcc must not accept implicit libc decls (`int getenv()`).
+    # Do not pass -w: we need the diagnostic.  Fall back to glibc headers
+    # when gcc fails or only succeeded by assuming implicit functions.
+    if ! gcc -std=gnu99 -D_GNU_SOURCE \
+            $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err" \
+       || grep -qE 'implicit declaration|隐式声明' "$WORK/$name.gcc.err"; then
         {
             echo '#define _GNU_SOURCE 1'
             echo '#include <stdio.h>'
