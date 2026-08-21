@@ -33,8 +33,9 @@ shift $((OPTIND - 1))
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+TOOLS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-export FAKECC RUN_TIMEOUT FCC_FLAGS WORK
+export FAKECC RUN_TIMEOUT FCC_FLAGS WORK TOOLS_DIR
 
 difftest_one() {
     local src="$1"
@@ -55,15 +56,18 @@ difftest_one() {
 
     # Prefer a header-free translation: torture ports ship their own libc
     # prototypes (`fprintf(void*, ...)`, `isprint`) which clash with glibc
-    # headers and used to SKIP the whole case.  If the file uses va_list but
-    # does not typedef it (fakecc predeclares it), gcc still needs <stdarg.h>.
+    # headers and used to SKIP the whole case.  gcc still needs <stdarg.h>
+    # for va_arg; drop fakecc's in-source SysV va_list typedef so gcc sees
+    # its own va_list (otherwise the stdio.h fallback fights fprintf).
     {
         echo '#define _GNU_SOURCE 1'
-        if grep -qE '\bva_(list|start|arg|end|copy)\b' "$WORK/$name.body.c" \
-           && ! grep -qE 'typedef[[:space:]].*va_list' "$WORK/$name.body.c"; then
+        if grep -qE '\b(va_(list|start|arg|end|copy)|__builtin_va_(list|start|arg|end|copy))\b' \
+               "$WORK/$name.body.c"; then
             echo '#include <stdarg.h>'
+            python3 "$TOOLS_DIR/gcc_stdarg_prep.py" < "$WORK/$name.body.c"
+        else
+            cat "$WORK/$name.body.c"
         fi
-        cat "$WORK/$name.body.c"
     } > "$WORK/$name.gcc.c"
     if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
         {
