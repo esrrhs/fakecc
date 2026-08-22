@@ -1,9 +1,7 @@
 // runtime.strtoull: converts a string to an unsigned long long in a given
 // base, reporting where parsing stopped through an endptr.  Pin base-10,
-// endptr, explicit hex (uppercase — the lowercase-without-prefix path is a
-// known strtou_body bug), and the base==0 auto-detect path (hex via 0x,
-// octal via 0, else decimal).  Unlike runtime.strtol the result is unsigned,
-// so a leading '-' wraps via 0ULL - v rather than clamping.
+// endptr, explicit hex, the base==0 auto-detect path, and glibc saturation
+// to ULLONG_MAX on overflow.
 // expect: 0
 package main;
 import runtime;
@@ -17,7 +15,7 @@ int main() {
     if (v != 12ULL) return 2;
     if (end[0] != 'a') return 3;
 
-    /* explicit hex, uppercase (lowercase-without-prefix is a known bug) */
+    /* explicit hex, uppercase */
     if (runtime.strtoull("FF", 0, 16) != 255ULL) return 4;
 
     /* base == 0 auto-detect: 0x prefix -> hex */
@@ -32,6 +30,11 @@ int main() {
 
     /* a value that overflows 32-bit but fits 64-bit: 3000000000 */
     if (runtime.strtoull("3000000000", 0, 10) != 3000000000ULL) return 9;
+
+    runtime.errno = 0;
+    v = runtime.strtoull("18446744073709551616", 0, 10);
+    if (v != 18446744073709551615ULL) return 10;
+    if (runtime.errno != 34) return 11;
 
     return 0;
 }

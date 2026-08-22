@@ -216,6 +216,8 @@ Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+int type_is_vla(Type t);
+int type_same_typedef(Type a, Type b);
 struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
@@ -233,6 +235,7 @@ enum ExprKind {
     EX_SIZEOF_TYPE,
     EX_SIZEOF_EXPR,
     EX_ALIGNOF_TYPE,
+    EX_ALIGNOF_EXPR,
     EX_TERNARY,
     EX_INC_DEC,
     EX_COMPOUND_ASSIGN,
@@ -293,6 +296,7 @@ union __anon_u_1 {
         struct { Type target; } sizeof_t;
         struct { Expr *operand; } sizeof_e;
         struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
         struct { Expr *cond; Expr *then; Expr *else_; } tern;
         struct { Expr *operand; int is_inc; int is_prefix; } incdec;
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
@@ -323,6 +327,7 @@ union __anon_u_1 {
         struct { Type target; } sizeof_t;
         struct { Expr *operand; } sizeof_e;
         struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
         struct { Expr *cond; Expr *then; Expr *else_; } tern;
         struct { Expr *operand; int is_inc; int is_prefix; } incdec;
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
@@ -333,9 +338,12 @@ union __anon_u_1 {
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
     } u;
+    unsigned long long int_hi;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
+Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
+                       int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -351,6 +359,7 @@ Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
 Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_alignof_type(Type t, SourceLoc loc);
+Expr *expr_new_alignof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
 Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
@@ -424,6 +433,7 @@ void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
 void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
+Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
 void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
@@ -553,6 +563,8 @@ void typedef_registry_init(TypedefRegistry *r);
 void typedef_registry_free(TypedefRegistry *r);
 TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type);
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
+TypedefEntry *typedef_registry_get(TypedefRegistry *r, const char *name);
+void typedef_registry_truncate(TypedefRegistry *r, size_t len);
 struct TranslationUnit {
     PackageDecl package;
     ImportArray imports;
@@ -852,6 +864,9 @@ static void collect_labels_expr(LabelSet *ls, const Expr *e) {
     case EX_SIZEOF_EXPR:
         collect_labels_expr(ls, e->u.sizeof_e.operand);
         break;
+    case EX_ALIGNOF_EXPR:
+        collect_labels_expr(ls, e->u.alignof_e.operand);
+        break;
     case EX_COMPOUND_LITERAL:
         collect_labels_expr(ls, e->u.compound.init);
         break;
@@ -922,6 +937,7 @@ struct Sym {
     char *name;
     Type type;
     SourceLoc loc;
+    int align;
 };typedef struct Sym Sym;
 struct SymTable {
     Sym *data;
@@ -939,7 +955,7 @@ static void symtable_free(SymTable *st) {
     runtime.free(st->data);
     st->data = ((void*)0); st->len = 0; st->cap = 0;
 }
-static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc loc) {
+static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc loc, int align) {
     if (st->len >= st->cap) {
         st->cap = st->cap ? st->cap * 2 : 8;
         st->data = runtime.realloc(st->data, st->cap * sizeof(Sym));
@@ -948,6 +964,7 @@ static void symtable_push(SymTable *st, const char *name, Type type, SourceLoc l
     st->data[st->len].name = name ? xstrdup(name) : ((void*)0);
     st->data[st->len].type = type_clone(type);
     st->data[st->len].loc = loc;
+    st->data[st->len].align = align;
     st->len++;
 }
 static size_t symtable_enter_scope(SymTable *st) { return st->len; }
@@ -1000,9 +1017,9 @@ static Type integer_promote(Type t) {
 static Type usual_arith_conv(Type a, Type b) {
     a = integer_promote(a);
     b = integer_promote(b);
-    int bfw = 0;
-    if (a.bitfield_width > 0 || b.bitfield_width > 0)
-        bfw = a.bitfield_width > b.bitfield_width ? a.bitfield_width : b.bitfield_width;
+    int prec_a = a.bitfield_width > 0 ? a.bitfield_width : a.width * 8;
+    int prec_b = b.bitfield_width > 0 ? b.bitfield_width : b.width * 8;
+    int prec = prec_a > prec_b ? prec_a : prec_b;
     Type res;
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
         res = type_rank(a) >= type_rank(b) ? a : b;
@@ -1015,7 +1032,12 @@ static Type usual_arith_conv(Type a, Type b) {
         Type s = a.is_unsigned ? b : a;
         res = (u.width >= s.width) ? u : s;
     }
-    res.bitfield_width = bfw;
+    if (res.kind == TY_INT) {
+        int type_bits = res.width * 8;
+        res.bitfield_width = (prec > 0 && prec < type_bits) ? prec : 0;
+    } else {
+        res.bitfield_width = 0;
+    }
     return res;
 }
 static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
@@ -1777,6 +1799,29 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
     case EX_ALIGNOF_TYPE:
         set_type(e, type_make_int(8, 1));
         return type_clone(e->type);
+    case EX_ALIGNOF_EXPR: {
+        Type ot = check_expr(e->u.alignof_e.operand, st, ft);
+        long long al = type_align(ot);
+        type_free(&ot);
+        if (e->u.alignof_e.operand->kind == EX_VAR) {
+            const char *nm = e->u.alignof_e.operand->u.var.name;
+            const Sym *sy = symtable_find(st, nm);
+            if (sy && sy->align > al) al = sy->align;
+            if (g_sema_tu) {
+                for (size_t i = 0; i < g_sema_tu->functions.len; i++) {
+                    if (runtime.strcmp(g_sema_tu->functions.data[i].name, nm) == 0
+                        && g_sema_tu->functions.data[i].align > al)
+                        al = g_sema_tu->functions.data[i].align;
+                }
+            }
+        }
+        expr_free(e->u.alignof_e.operand);
+        e->kind = EX_INT_LIT;
+        e->u.int_val = al;
+        e->int_hi = 0;
+        set_type(e, type_make_int(8, 1));
+        return type_clone(e->type);
+    }
     case EX_INIT_LIST: {
         for (int i = 0; i < e->u.init_list.num_elements; i++) {
             Type et = check_expr(e->u.init_list.elements[i], st, ft);
@@ -1873,8 +1918,10 @@ static int init_leaf_count(Type t) {
         if (!sd || sd->num_members == 0) return 1;
         if (sd->is_union) return init_leaf_count(sd->members[0].type);
         int total = 0;
-        for (int i = 0; i < sd->num_members; i++)
+        for (int i = 0; i < sd->num_members; i++) {
+            if (sd->members[i].bit_width == 0) continue;
             total += init_leaf_count(sd->members[i].type);
+        }
         return total;
     }
     return 1;
@@ -2082,7 +2129,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                    "cannot declare variable '%s' of type void",
                    s->u.decl.name ? s->u.decl.name : "(null)");
         if (s->u.decl.type.kind == TY_FUNC || s->u.decl.storage_class == 2) {
-            symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
+            symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
             break;
         }
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
@@ -2110,7 +2157,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         }
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
             normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
-        symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc);
+        symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST)
                 check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
@@ -2320,7 +2367,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                     prev->u.decl.type = s->u.decl.type;
                     if (s->u.decl.storage_class != 2)
                         prev->u.decl.storage_class = s->u.decl.storage_class;
-                    symtable_push(&globals, prev->u.decl.name, prev->u.decl.type, prev->loc);
+                    symtable_push(&globals, prev->u.decl.name, prev->u.decl.type, prev->loc, prev->u.decl.align);
                     if (prev->u.decl.type.kind == TY_ARRAY && prev->u.decl.type.length == 0
                         && prev->u.decl.init && prev->u.decl.init->kind == EX_STR
                         && prev->u.decl.type.elem_type
@@ -2354,7 +2401,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         }
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
             normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
-        symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc);
+        symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST)
                 check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
@@ -2372,7 +2419,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         symtable_init(&st);
         for (size_t g = 0; g < globals.len; g++) {
             symtable_push(&st, globals.data[g].name, globals.data[g].type,
-                          globals.data[g].loc);
+                          globals.data[g].loc, globals.data[g].align);
         }
         size_t mark = symtable_enter_scope(&st);
         for (size_t j = 0; j < fn->params.len; j++) {
@@ -2397,7 +2444,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             }
             if (fn->params.data[j].name && fn->params.data[j].name[0] != '\0') {
                 symtable_push(&st, fn->params.data[j].name,
-                              pty, fn->params.data[j].loc);
+                              pty, fn->params.data[j].loc, 0);
             }
             if (own_ptr) type_free(&pty);
         }

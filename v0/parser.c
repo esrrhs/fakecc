@@ -216,6 +216,8 @@ Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+int type_is_vla(Type t);
+int type_same_typedef(Type a, Type b);
 struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
@@ -233,6 +235,7 @@ enum ExprKind {
     EX_SIZEOF_TYPE,
     EX_SIZEOF_EXPR,
     EX_ALIGNOF_TYPE,
+    EX_ALIGNOF_EXPR,
     EX_TERNARY,
     EX_INC_DEC,
     EX_COMPOUND_ASSIGN,
@@ -293,6 +296,7 @@ union __anon_u_1 {
         struct { Type target; } sizeof_t;
         struct { Expr *operand; } sizeof_e;
         struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
         struct { Expr *cond; Expr *then; Expr *else_; } tern;
         struct { Expr *operand; int is_inc; int is_prefix; } incdec;
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
@@ -323,6 +327,7 @@ union __anon_u_1 {
         struct { Type target; } sizeof_t;
         struct { Expr *operand; } sizeof_e;
         struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
         struct { Expr *cond; Expr *then; Expr *else_; } tern;
         struct { Expr *operand; int is_inc; int is_prefix; } incdec;
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
@@ -333,9 +338,12 @@ union __anon_u_1 {
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
     } u;
+    unsigned long long int_hi;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
+Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
+                       int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -351,6 +359,7 @@ Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
 Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_alignof_type(Type t, SourceLoc loc);
+Expr *expr_new_alignof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
 Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
@@ -424,6 +433,7 @@ void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
 void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
+Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
 void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
@@ -553,6 +563,8 @@ void typedef_registry_init(TypedefRegistry *r);
 void typedef_registry_free(TypedefRegistry *r);
 TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type);
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
+TypedefEntry *typedef_registry_get(TypedefRegistry *r, const char *name);
+void typedef_registry_truncate(TypedefRegistry *r, size_t len);
 struct TranslationUnit {
     PackageDecl package;
     ImportArray imports;
@@ -642,6 +654,7 @@ struct Parser {
     StmtArray prepend;
     int anon_counter;
     const char *cur_fn_name;
+    size_t typedef_mark;
 };typedef struct Parser Parser;
 static const Token *peek(const Parser *p) {
     return &p->tokens->data[p->pos];
@@ -977,8 +990,8 @@ static Type get_or_create_complex_type(Parser *p, Type base) {
     if (!sd) {
         SourceLoc loc; runtime.memset(&loc, 0, sizeof(loc));
         sd = struct_registry_add(&p->tu->structs, tag, loc);
-        struct_def_push_member(sd, "__real", type_clone(base), 0);
-        struct_def_push_member(sd, "__imag", type_clone(base), 0);
+        struct_def_push_member(sd, "__real", type_clone(base), -1);
+        struct_def_push_member(sd, "__imag", type_clone(base), -1);
         struct_def_finish(sd);
     }
     return type_make_struct(tag, sd->size);
@@ -1327,7 +1340,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                 && runtime.strncmp(base.tag, "__anon_", 7) == 0) {
                 sd = struct_registry_find(&p->tu->structs, tag);
                 if (sd)
-                    struct_def_push_member(sd, "", type_clone(base), 0);
+                    struct_def_push_member(sd, "", type_clone(base), -1);
             }
             advance(p);
             type_free(&base);
@@ -1350,7 +1363,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                     advance(p);
                 }
             }
-            int bit_width = 0;
+            int bit_width = -1;
             if (peek(p)->kind == TK_COLON) {
                 advance(p);
                 const Token *w = peek(p);
@@ -1379,14 +1392,24 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     if (packed) {
         sd->is_packed = 1;
         sd->align = 1;
-        long long cur_off = 0;
-        for (int i = 0; i < sd->num_members; i++) {
-            if (!sd->is_union) {
-                sd->members[i].offset = cur_off;
-                cur_off += type_size(sd->members[i].type);
-            }
+        int n = sd->num_members;
+        StructMember *old = runtime.malloc((size_t)n * sizeof(StructMember));
+        if (!old) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        runtime.memcpy(old, sd->members, (size_t)n * sizeof(StructMember));
+        runtime.free(sd->members);
+        sd->members = ((void*)0);
+        sd->num_members = 0;
+        sd->cap_members = 0;
+        sd->size = 0;
+        sd->bf_unit_type = 0;
+        sd->bf_unit_used = 0;
+        sd->bf_unit_offset = 0;
+        for (int i = 0; i < n; i++) {
+            struct_def_push_member(sd, old[i].name, old[i].type, old[i].bit_width);
+            runtime.free(old[i].name);
+            type_free(&old[i].type);
         }
-        if (!sd->is_union) sd->size = cur_off;
+        runtime.free(old);
     }
     if (sso == 1) struct_def_apply_sso(sd, 1);
     else if (sso == 2) struct_def_apply_sso(sd, 0);
@@ -2087,32 +2110,7 @@ static Expr *parse_unary(Parser *p) {
         }
         Expr *sub = parse_expr(p);
         expect_kind(p, TK_RPAREN, "')'");
-        int align_val = 0;
-        if (sub->kind == EX_VAR && p->tu) {
-            for (size_t i = 0; i < p->tu->functions.len; i++) {
-                if (runtime.strcmp(p->tu->functions.data[i].name, sub->u.var.name) == 0 &&
-                    p->tu->functions.data[i].align > 0) {
-                    align_val = p->tu->functions.data[i].align;
-                    break;
-                }
-            }
-            if (align_val == 0) {
-                for (size_t i = 0; i < p->tu->globals.len; i++) {
-                    if (p->tu->globals.data[i].kind == ST_DECL &&
-                        p->tu->globals.data[i].u.decl.name &&
-                        runtime.strcmp(p->tu->globals.data[i].u.decl.name, sub->u.var.name) == 0 &&
-                        p->tu->globals.data[i].u.decl.align > 0) {
-                        align_val = p->tu->globals.data[i].u.decl.align;
-                        break;
-                    }
-                }
-            }
-        }
-        expr_free(sub);
-        if (align_val > 0) {
-            return expr_new_int(align_val, loc);
-        }
-        return expr_new_int(1, loc);
+        return expr_new_alignof_expr(sub, loc);
     }
     if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_types_compatible_p") == 0) {
         SourceLoc loc = peek(p)->loc;
@@ -2160,6 +2158,9 @@ static Expr *parse_unary(Parser *p) {
                             Type next = type_clone(sm->type);
                             type_free(&cur_type);
                             cur_type = next;
+                        } else {
+                            die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
+                                   "no member named '%s'", mname);
                         }
                     }
                 }
@@ -2171,7 +2172,8 @@ static Expr *parse_unary(Parser *p) {
                 expr_free(idx_expr);
                 expect_kind(p, TK_RBRACKET, "']'");
                 if (cur_type.kind == TY_ARRAY && cur_type.elem_type) {
-                    offset += (int)(idx * type_size(*cur_type.elem_type));
+                    long long esz = type_size(*cur_type.elem_type);
+                    offset += idx * esz;
                     Type next = type_clone(*cur_type.elem_type);
                     type_free(&cur_type);
                     cur_type = next;
@@ -2282,30 +2284,186 @@ static void float_literal_width(const char *text, int *out_width) {
 static int int_literal_value(const char *text) {
     return (int)runtime.strtol(text, ((void*)0), 0);
 }
-static unsigned long long int_literal_typed(const char *text, int *out_width,
-                                            int *out_unsigned) {
-    unsigned long long v = runtime.strtoull(text, ((void*)0), 0);
+static int u128_fits(unsigned long long lo, unsigned long long hi,
+                    int bits, int is_unsigned) {
+    if (bits >= 128) {
+        if (is_unsigned) return 1;
+        return (hi & 0x8000000000000000ULL) == 0;
+    }
+    if (hi != 0) return 0;
+    if (bits >= 64) {
+        if (is_unsigned) return 1;
+        return (lo & 0x8000000000000000ULL) == 0;
+    }
+    if (bits <= 0) return lo == 0 && hi == 0;
+    unsigned long long max = is_unsigned
+        ? ((1ULL << bits) - 1ULL)
+        : ((1ULL << (bits - 1)) - 1ULL);
+    return lo <= max;
+}
+/* (hi:lo) * base + digit.  base is 8, 10, or 16.  Returns 1 on 128-bit
+ * overflow.  Schoolbook 64-bit multiply-split-into-32-bit halves. */
+static int u128_mul_add(unsigned long long *lo, unsigned long long *hi,
+                        unsigned base, unsigned digit) {
+    unsigned long long a = *lo >> 32, b = *lo & 0xffffffffULL;
+    unsigned long long pa = a * base, pb = b * base;
+    unsigned long long mid = (pb >> 32) + (pa & 0xffffffffULL);
+    unsigned long long new_lo = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
+    unsigned long long carry = (pa >> 32) + (mid >> 32);
+    a = *hi >> 32; b = *hi & 0xffffffffULL;
+    pa = a * base; pb = b * base;
+    mid = (pb >> 32) + (pa & 0xffffffffULL);
+    unsigned long long loh = (pb & 0xffffffffULL) | ((mid & 0xffffffffULL) << 32);
+    unsigned long long hih = (pa >> 32) + (mid >> 32);
+    if (hih) return 1;
+    unsigned long long new_hi = loh + carry;
+    if (new_hi < loh) return 1;
+    unsigned long long t = new_lo + digit;
+    if (t < new_lo) {
+        new_hi++;
+        if (new_hi == 0) return 1;
+    }
+    *lo = t;
+    *hi = new_hi;
+    return 0;
+}
+
+/* Parse and validate the integer suffix.  Writes the body end (past the
+ * last suffix char) to *body_end, and reports whether `u` / `l` appear.
+ * Rejects malformed suffixes like `123LLL`, `123lul`, `123UU`.
+ * Accepts `U`, `L`, `LL`, `UL`, `LU`, `ULL`, `LLU`, and any case variant. */
+static int parse_int_suffix(const char *text, size_t n, size_t *body_end,
+                            int *suffix_u, int *suffix_l) {
+    size_t pos = n;
+    int u = 0, l = 0;
+    while (pos > 0) {
+        char c = text[pos - 1];
+        if (c == 'u' || c == 'U') {
+            if (u) return 0;            /* duplicate 'u' */
+            u = 1; pos--;
+        } else if (c == 'l' || c == 'L') {
+            if (l >= 2) return 0;       /* more than two 'l' */
+            l++; pos--;
+        } else break;
+    }
+    *body_end = pos;
+    *suffix_u = u;
+    *suffix_l = (l > 0) ? 1 : 0;
+    return 1;
+}
+
+static void int_literal_typed(const char *text, SourceLoc loc,
+                              unsigned long long *out_lo, unsigned long long *out_hi,
+                              int *out_width, int *out_unsigned) {
+    size_t n = runtime.strlen(text);
     int suffix_u = 0, suffix_l = 0;
-    for (const char *s = text; *s; s++) {
-        if (*s == 'u' || *s == 'U') suffix_u = 1;
-        else if (*s == 'l' || *s == 'L') suffix_l = 1;
+    size_t body = n;
+
+    if (!parse_int_suffix(text, n, &body, &suffix_u, &suffix_l)) {
+        die_at(loc.file, loc.line, loc.col, "invalid suffix on integer constant");
+        suffix_u = 0; suffix_l = 0;
+        body = n;
     }
-    int decimal = !(text[0] == '0' && text[1] != '\0');
-    int width = suffix_l ? 8 : 4;
-    int is_unsigned = suffix_u;
-    if (is_unsigned) {
-        if (v > 0xFFFFFFFFULL) width = 8;
-    } else if (v > 0x7FFFFFFFFFFFFFFFULL) {
-        width = 8; is_unsigned = 1;
-    } else if (v > 0xFFFFFFFFULL) {
-        width = 8;
-    } else if (v > 0x7FFFFFFFULL) {
-        if (decimal) width = 8;
-        else if (width == 4) is_unsigned = 1;
+
+    int base = 10;
+    size_t i = 0;
+    int decimal = 1;
+    if (body >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        base = 16; i = 2; decimal = 0;
+    } else if (body >= 2 && text[0] == '0') {
+        base = 8; i = 1; decimal = 0;
+        if (i >= body) { base = 10; i = 0; decimal = 1; }
     }
+    if (i >= body && base != 10) {
+        die_at(loc.file, loc.line, loc.col, "integer literal has no digits");
+    }
+    unsigned long long lo = 0, hi = 0;
+    for (; i < body; i++) {
+        unsigned char c = (unsigned char)text[i];
+        unsigned d;
+        if (c == '\'') continue;
+        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+        else {
+            die_at(loc.file, loc.line, loc.col,
+                   "invalid digit in integer literal");
+            return;
+        }
+        if (d >= (unsigned)base) {
+            die_at(loc.file, loc.line, loc.col,
+                   "invalid digit in integer literal");
+            return;
+        }
+        if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
+            runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant "
+                            "is too large for its type\n", loc.file, loc.line, loc.col);
+            lo = 0; hi = 0;
+            {
+                unsigned long long tlo = 0;
+                for (size_t j = 0; j < body; j++) {
+                    unsigned char cc = (unsigned char)text[j];
+                    if (cc == '\'') continue;
+                    unsigned dd;
+                    if (cc >= '0' && cc <= '9') dd = (unsigned)(cc - '0');
+                    else if (cc >= 'a' && cc <= 'f') dd = (unsigned)(cc - 'a' + 10);
+                    else if (cc >= 'A' && cc <= 'F') dd = (unsigned)(cc - 'A' + 10);
+                    else continue;
+                    if (dd >= (unsigned)base) continue;
+                    tlo = tlo * (unsigned long long)base + (unsigned long long)dd;
+                }
+                lo = tlo;
+            }
+            break;
+        }
+    }
+    /* Hex / octal wider than 64 bits: wrap to low 64 bits (GCC behaviour). */
+    if (!decimal && hi != 0) {
+        runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant "
+                        "is too large for its type\n", loc.file, loc.line, loc.col);
+        hi = 0;
+    }
+    int width, is_unsigned;
+    if (suffix_u) {
+        is_unsigned = 1;
+        if (u128_fits(lo, hi, 32, 1) && !suffix_l) width = 4;
+        else if (u128_fits(lo, hi, 64, 1)) width = 8;
+        else width = 16;
+    } else if (decimal) {
+        is_unsigned = 0;
+        if (u128_fits(lo, hi, 32, 0) && !suffix_l) width = 4;
+        else if (u128_fits(lo, hi, 64, 0)) width = 8;
+        else if (u128_fits(lo, hi, 128, 0)) width = 16;
+        else if (u128_fits(lo, hi, 128, 1)) { width = 16; is_unsigned = 1; }
+        else { width = 4; lo = 0; hi = 0; }
+    } else {
+        if (u128_fits(lo, hi, 32, 0) && !suffix_l) { width = 4; is_unsigned = 0; }
+        else if (u128_fits(lo, hi, 32, 1) && !suffix_l) { width = 4; is_unsigned = 1; }
+        else if (u128_fits(lo, hi, 64, 0)) { width = 8; is_unsigned = 0; }
+        else { width = 8; is_unsigned = 1; }
+    }
+    *out_lo = lo;
+    *out_hi = hi;
     *out_width = width;
     *out_unsigned = is_unsigned;
-    return v;
+}
+static int simple_escape_value(int c) {
+    switch (c) {
+    case 'n': return '\n';
+    case 't': return '\t';
+    case 'r': return '\r';
+    case 'a': return '\a';
+    case 'b': return '\b';
+    case 'f': return '\f';
+    case 'v': return '\v';
+    case 'e': return 27;
+    case '\\': return '\\';
+    case '\'': return '\'';
+    case '"': return '"';
+    case '?': return '?';
+    case '0': return '\0';
+    default: return c;
+    }
 }
 static int char_literal_value(const char *text) {
     if (text[1] == '\\') {
@@ -2332,15 +2490,7 @@ static int char_literal_value(const char *text) {
             }
             return val & 0xff;
         }
-        switch (text[2]) {
-        case 'n': return '\n';
-        case 't': return '\t';
-        case 'r': return '\r';
-        case '\\': return '\\';
-        case '\'': return '\'';
-        case '0': return '\0';
-        default: return text[2];
-        }
+        return simple_escape_value((unsigned char)text[2]);
     }
     return (unsigned char)text[1];
 }
@@ -2388,8 +2538,9 @@ static Expr *parse_primary(Parser *p) {
         }
 int width;
 int is_unsigned;
-        unsigned long long v = int_literal_typed(t->text, &width, &is_unsigned);
-        Expr *e = expr_new_int_typed((long long)v, width, is_unsigned, t->loc);
+        unsigned long long lo = 0, hi = 0;
+        int_literal_typed(t->text, t->loc, &lo, &hi, &width, &is_unsigned);
+        Expr *e = expr_new_int_bits(lo, hi, width, is_unsigned, t->loc);
         advance(p);
         return parse_postfix(p, e);
     }
@@ -2428,13 +2579,7 @@ int is_unsigned;
                 int ch;
                 if (src[i] == '\\' && i + 1 < slen) {
                     i++;
-                    switch (src[i]) {
-                    case 'n': ch = '\n'; break;
-                    case 't': ch = '\t'; break;
-                    case 'r': ch = '\r'; break;
-                    case '0': ch = 0; break;
-                    default: ch = (unsigned char)src[i]; break;
-                    }
+                    ch = simple_escape_value((unsigned char)src[i]);
                 } else {
                     ch = (unsigned char)src[i];
                 }
@@ -2497,10 +2642,16 @@ int is_unsigned;
                     case 'n': seg[slen2++] = '\n'; break;
                     case 't': seg[slen2++] = '\t'; break;
                     case 'r': seg[slen2++] = '\r'; break;
+                    case 'a': seg[slen2++] = '\a'; break;
+                    case 'b': seg[slen2++] = '\b'; break;
+                    case 'f': seg[slen2++] = '\f'; break;
+                    case 'v': seg[slen2++] = '\v'; break;
+                    case 'e': seg[slen2++] = 27; break;
                     case '0': seg[slen2++] = '\0'; break;
                     case '\\': seg[slen2++] = '\\'; break;
                     case '"': seg[slen2++] = '"'; break;
                     case '\'': seg[slen2++] = '\''; break;
+                    case '?': seg[slen2++] = '?'; break;
                     default: seg[slen2++] = src[i]; break;
                     }
                 } else {
@@ -2794,6 +2945,11 @@ static int is_function_declaration_lookahead(Parser *p) {
         } else if (tk == TK_IDENT
                    && find_typedef_with_fallback(p, peek(p)->text)) {
             advance(p);
+        } else if (tk == TK_IDENT
+                   && (runtime.strcmp(peek(p)->text, "__int128") == 0
+                       || runtime.strcmp(peek(p)->text, "__int128_t") == 0
+                       || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
+            advance(p);
         } else {
             break;
         }
@@ -2847,6 +3003,11 @@ static int is_function_definition_lookahead(Parser *p) {
             advance(p);
         } else if (tk == TK_IDENT
                    && find_typedef_with_fallback(p, peek(p)->text)) {
+            advance(p);
+        } else if (tk == TK_IDENT
+                   && (runtime.strcmp(peek(p)->text, "__int128") == 0
+                       || runtime.strcmp(peek(p)->text, "__int128_t") == 0
+                       || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
             advance(p);
         } else {
             break;
@@ -3528,9 +3689,23 @@ static Stmt parse_typedef_stmt(Parser *p) {
             type_free(&ty);
             ty = vt;
         }
-        if (typedef_registry_find(&p->tu->typedefs, decl_name)) {
+        TypedefEntry *exist = typedef_registry_get(&p->tu->typedefs, decl_name);
+        if (exist) {
+            size_t exist_idx = (size_t)(exist - p->tu->typedefs.data);
+            int builtin_va = (runtime.strcmp(decl_name, "va_list") == 0
+                              || runtime.strcmp(decl_name, "__builtin_va_list") == 0);
+            if (p->cur_fn_name && exist_idx < p->typedef_mark) {
+                typedef_registry_add(&p->tu->typedefs, decl_name, ty);
+            } else if (builtin_va) {
+                type_free(&ty);
+            } else if (!type_same_typedef(exist->type, ty)) {
+                die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                       "redefinition of typedef '%s' with a different type",
+                       decl_name);
+            } else {
+                type_free(&ty);
+            }
             runtime.free(decl_name);
-            type_free(&ty);
         } else {
             typedef_registry_add(&p->tu->typedefs, decl_name, ty);
             runtime.free(decl_name);
@@ -3781,9 +3956,13 @@ static FunctionDecl parse_function_decl(Parser *p) {
     }
     expect_kind(p, TK_LBRACE, "'{'");
     const char *saved_fn = p->cur_fn_name;
+    size_t saved_td = p->typedef_mark;
     p->cur_fn_name = fn.name;
+    p->typedef_mark = p->tu->typedefs.len;
     parse_stmt_list(p, &fn.body);
+    typedef_registry_truncate(&p->tu->typedefs, p->typedef_mark);
     p->cur_fn_name = saved_fn;
+    p->typedef_mark = saved_td;
     expect_kind(p, TK_RBRACE, "'}'");
     return fn;
 }
@@ -3822,6 +4001,7 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
     stmt_array_init(&p.prepend);
     p.anon_counter = 0;
     p.cur_fn_name = ((void*)0);
+    p.typedef_mark = 0;
     g_parser_tu = tu;
     if (peek(&p)->kind != TK_KW_PACKAGE) {
         const Token *t = peek(&p);

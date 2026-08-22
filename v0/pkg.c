@@ -216,6 +216,8 @@ Type type_decay(Type t);
 int type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int type_funcs_equal(Type a, Type b);
+int type_is_vla(Type t);
+int type_same_typedef(Type a, Type b);
 struct Expr *expr_clone(const struct Expr *e);
 enum ExprKind {
     EX_INT_LIT,
@@ -233,6 +235,7 @@ enum ExprKind {
     EX_SIZEOF_TYPE,
     EX_SIZEOF_EXPR,
     EX_ALIGNOF_TYPE,
+    EX_ALIGNOF_EXPR,
     EX_TERNARY,
     EX_INC_DEC,
     EX_COMPOUND_ASSIGN,
@@ -293,6 +296,7 @@ union __anon_u_1 {
         struct { Type target; } sizeof_t;
         struct { Expr *operand; } sizeof_e;
         struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
         struct { Expr *cond; Expr *then; Expr *else_; } tern;
         struct { Expr *operand; int is_inc; int is_prefix; } incdec;
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
@@ -323,6 +327,7 @@ union __anon_u_1 {
         struct { Type target; } sizeof_t;
         struct { Expr *operand; } sizeof_e;
         struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
         struct { Expr *cond; Expr *then; Expr *else_; } tern;
         struct { Expr *operand; int is_inc; int is_prefix; } incdec;
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
@@ -333,9 +338,12 @@ union __anon_u_1 {
         struct { StmtArray *stmts; } stmt_expr;
         struct { char *label; } label_addr;
     } u;
+    unsigned long long int_hi;
 };
 Expr *expr_new_int(long long v, SourceLoc loc);
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
+Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
+                       int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -351,6 +359,7 @@ Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
 Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_alignof_type(Type t, SourceLoc loc);
+Expr *expr_new_alignof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
 Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
@@ -424,6 +433,7 @@ void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
 void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
+Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
 void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
@@ -553,6 +563,8 @@ void typedef_registry_init(TypedefRegistry *r);
 void typedef_registry_free(TypedefRegistry *r);
 TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type);
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
+TypedefEntry *typedef_registry_get(TypedefRegistry *r, const char *name);
+void typedef_registry_truncate(TypedefRegistry *r, size_t len);
 struct TranslationUnit {
     PackageDecl package;
     ImportArray imports;
@@ -739,6 +751,8 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src) {
     }
     StructDef *sd = struct_registry_add(dst, src->tag, src->loc);
     sd->is_union = src->is_union;
+    sd->is_packed = src->is_packed;
+    sd->is_big_endian = src->is_big_endian;
     for (int i = 0; i < src->num_members; i++) {
         struct_def_push_member(sd, src->members[i].name,
                                type_clone(src->members[i].type),

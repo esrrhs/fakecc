@@ -20,6 +20,8 @@ double fabs(double x) { return x < 0.0 ? -x : x; }
 float fabsf(float x) { return x < 0.0f ? -x : x; }
 
 double floor(double x) {
+    if (x != x) return x;
+    if (x >= 9223372036854775807.0 || x <= -9223372036854775807.0) return x;
     if (x >= 0.0) return (double)(long long)x;
     long long i = (long long)x;
     if ((double)i == x) return (double)i;
@@ -46,16 +48,22 @@ double sqrt(double x) {
 
 
 /* Shared body of the strto* family: parses [ws][sign][base prefix][digits] and
- * returns the magnitude, with the sign reported through *neg.  Wraparound on
- * overflow rather than clamping to LONG_MAX/ULLONG_MAX. */
+ * returns the magnitude, with the sign reported through *neg.  On overflow
+ * *ovf is set and the returned magnitude is ULLONG_MAX (glibc saturates). */
 static unsigned long long strtou_body(const char *s, char **end, int base,
-                                      int *neg) {
+                                      int *neg, int *ovf) {
+    const char *nptr = s;
+    *ovf = 0;
     while (isspace((unsigned char)*s)) s = s + 1;
     *neg = 0;
     if (*s == '+') s = s + 1;
     else if (*s == '-') {
         *neg = 1;
         s = s + 1;
+    }
+    if (base != 0 && (base < 2 || base > 36)) {
+        if (end) *end = (char *)nptr;
+        return 0;
     }
     if (base == 0) {
         if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
@@ -67,6 +75,9 @@ static unsigned long long strtou_body(const char *s, char **end, int base,
         s = s + 2;
     }
     unsigned long long v = 0;
+    unsigned long long ubase = (unsigned long long)base;
+    unsigned long long umax = 18446744073709551615ULL;
+    int any = 0;
     while (1) {
         int d;
         char c = *s;
@@ -75,23 +86,51 @@ static unsigned long long strtou_body(const char *s, char **end, int base,
         else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
         else break;
         if (d >= base) break;
-        v = v * (unsigned long long)base + (unsigned long long)d;
+        any = 1;
+        if (!*ovf) {
+            if (v > umax / ubase || (v == umax / ubase && (unsigned long long)d > umax % ubase))
+                *ovf = 1;
+            else
+                v = v * ubase + (unsigned long long)d;
+        }
         s = s + 1;
     }
+    if (!any) {
+        if (end) *end = (char *)nptr;
+        return 0;
+    }
     if (end) *end = (char *)s;
+    if (*ovf) return umax;
     return v;
 }
 
 long strtol(const char *s, char **end, int base) {
     int neg;
-    unsigned long long v = strtou_body(s, end, base, &neg);
+    int ovf;
+    unsigned long long v = strtou_body(s, end, base, &neg, &ovf);
+    unsigned long long lim_pos = 9223372036854775807ULL;
+    unsigned long long lim_neg = 9223372036854775808ULL;
+    if (ovf || (!neg && v > lim_pos) || (neg && v > lim_neg)) {
+        errno = 34;
+        if (neg) return -9223372036854775807L - 1L;
+        return 9223372036854775807L;
+    }
     if (neg) return -(long)v;
     return (long)v;
 }
 
+long long strtoll(const char *s, char **end, int base) {
+    return (long long)strtol(s, end, base);
+}
+
 unsigned long long strtoull(const char *s, char **end, int base) {
     int neg;
-    unsigned long long v = strtou_body(s, end, base, &neg);
+    int ovf;
+    unsigned long long v = strtou_body(s, end, base, &neg, &ovf);
+    if (ovf) {
+        errno = 34;
+        return 18446744073709551615ULL;
+    }
     if (neg) return 0ULL - v;
     return v;
 }

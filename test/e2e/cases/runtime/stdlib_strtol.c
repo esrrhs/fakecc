@@ -1,7 +1,7 @@
 // runtime.strtol: converts a string to a long in a given base, reporting where
 // parsing stopped through an endptr.  Pin base-10, sign, endptr, hex,
-// and the base==0 auto-detect path (hex via 0x, octal via 0, else
-// decimal).
+// the base==0 auto-detect path, and glibc overflow saturation (LONG_MAX /
+// LONG_MIN, errno ERANGE=34).
 // expect: 0
 package main;
 import runtime;
@@ -28,6 +28,23 @@ int main() {
 
     /* leading whitespace skipped */
     if (runtime.strtol("  42", 0, 10) != 42) return 9;
+
+    /* glibc saturates instead of wrapping */
+    runtime.errno = 0;
+    v = runtime.strtol("9999999999999999999999", 0, 10);
+    if (v != 9223372036854775807L) return 10;
+    if (runtime.errno != 34) return 11;
+
+    runtime.errno = 0;
+    v = runtime.strtol("-9999999999999999999999", 0, 10);
+    if (v != -9223372036854775807L - 1L) return 12;
+    if (runtime.errno != 34) return 13;
+
+    /* LONG_MIN is in range */
+    runtime.errno = 0;
+    v = runtime.strtol("-9223372036854775808", 0, 10);
+    if (v != -9223372036854775807L - 1L) return 14;
+    if (runtime.errno != 0) return 15;
 
     return 0;
 }

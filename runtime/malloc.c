@@ -10,6 +10,7 @@ struct chunk {
 static struct chunk *freelist_head;
 
 static size_t align8(size_t n) {
+    if (n > ((size_t)-8)) return (size_t)-8;
     return (n + 7) & ~((size_t)7);
 }
 
@@ -19,8 +20,14 @@ static void *map_anon(size_t n) {
     return (void *)p;
 }
 
+static int chunks_adjacent(struct chunk *a, struct chunk *b) {
+    return (char *)a + sizeof(struct chunk) + a->size == (char *)b;
+}
+
 static void heap_grow(size_t need) {
-    size_t region = need + sizeof(struct chunk) + 64;
+    size_t extra = sizeof(struct chunk) + 64;
+    if (need > ((size_t)-1) - extra) return;
+    size_t region = need + extra;
     region = (region + 4095) & ~((size_t)4095);
     if (region < 1048576) region = 1048576;
     char *p = (char *)map_anon(region);
@@ -29,8 +36,28 @@ static void heap_grow(size_t need) {
     struct chunk *c = (struct chunk *)p;
     c->size = region - sizeof(struct chunk);
     c->user_size = 0;
-    c->next_free = freelist_head;
-    freelist_head = c;
+    /* Insert by address so later frees can coalesce with this region. */
+    struct chunk **prev = &freelist_head;
+    struct chunk *n = freelist_head;
+    while (n && n < c) {
+        prev = &n->next_free;
+        n = n->next_free;
+    }
+    c->next_free = n;
+    *prev = c;
+    if (n && chunks_adjacent(c, n)) {
+        c->size = c->size + sizeof(struct chunk) + n->size;
+        c->next_free = n->next_free;
+    }
+}
+
+static int already_free(struct chunk *c) {
+    struct chunk *p = freelist_head;
+    while (p) {
+        if (p == c) return 1;
+        p = p->next_free;
+    }
+    return 0;
 }
 
 void *malloc(size_t n) {
@@ -67,6 +94,7 @@ void *malloc(size_t n) {
     } else {
         *prev = c->next_free;
     }
+    c->next_free = 0;
     c->user_size = orig_n;
     void *ret = (char *)c + sizeof(struct chunk);
     __asan_unpoison_memory_region(ret, n);
@@ -76,12 +104,29 @@ void *malloc(size_t n) {
 void free(void *p) {
     if (p == 0) return;
     struct chunk *c = (struct chunk *)((char *)p - sizeof(struct chunk));
+    if (already_free(c)) return;
     __asan_poison_memory_region(p, c->size);
-    c->next_free = freelist_head;
-    freelist_head = c;
+    struct chunk *left = 0;
+    struct chunk *n = freelist_head;
+    while (n && n < c) {
+        left = n;
+        n = n->next_free;
+    }
+    c->next_free = n;
+    if (left) left->next_free = c;
+    else freelist_head = c;
+    if (n && chunks_adjacent(c, n)) {
+        c->size = c->size + sizeof(struct chunk) + n->size;
+        c->next_free = n->next_free;
+    }
+    if (left && chunks_adjacent(left, c)) {
+        left->size = left->size + sizeof(struct chunk) + c->size;
+        left->next_free = c->next_free;
+    }
 }
 
 void *calloc(size_t n, size_t m) {
+    if (m != 0 && n > ((size_t)-1) / m) return 0;
     size_t total = n * m;
     void *p = malloc(total);
     if (p == 0) return 0;

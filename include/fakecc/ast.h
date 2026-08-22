@@ -100,6 +100,9 @@ Type type_decay(Type t);
 int  type_is_ptr_or_array(Type t);
 Type type_pointee_or_elem(Type t);
 int  type_funcs_equal(Type a, Type b);  /* true if ret + all params match */
+int  type_is_vla(Type t);               /* any dimension is a VLA */
+/* GCC: a repeated typedef is valid only when it denotes the same type. */
+int  type_same_typedef(Type a, Type b);
 
 struct Expr *expr_clone(const struct Expr *e);
 
@@ -123,6 +126,7 @@ typedef enum {
     EX_SIZEOF_TYPE,  /* sizeof(T)     — compile-time integer */
     EX_SIZEOF_EXPR,  /* sizeof(expr)  — compile-time integer */
     EX_ALIGNOF_TYPE, /* _Alignof(T)  — compile-time integer (alignment) */
+    EX_ALIGNOF_EXPR, /* __alignof__(expr) — GCC; alignment of the object/type */
     EX_TERNARY, /* cond ? then : else — right associative, lower than || */
     EX_INC_DEC, /* ++lvalue / --lvalue (prefix or postfix) */
     EX_COMPOUND_ASSIGN, /* lvalue op= rvalue */
@@ -165,6 +169,7 @@ typedef enum {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out); /* compile-time int fold */
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 
 /* Argument-list holder used by EX_CALL — grows as arguments are parsed. */
 typedef struct {
@@ -182,7 +187,7 @@ struct Expr {
      * Kept OUT of the union so it never aliases with EX_CALL::args/callee. */
     Type va_arg_type;
     union {
-        long long int_val;                             /* EX_INT_LIT — value in the literal's own type */
+        long long int_val;                             /* EX_INT_LIT — low 64 bits (or the whole value if width ≤ 8) */
         struct { BinOp op; Expr *l, *r; } bin;        /* EX_BINOP */
         struct { UnaryOp op; Expr *operand; } un;     /* EX_UNARY */
         struct { char *name; char *pkg; } var;         /* EX_VAR — pkg NULL = unqualified; else pkg.name */
@@ -197,6 +202,7 @@ struct Expr {
         struct { Type target; } sizeof_t;              /* EX_SIZEOF_TYPE */
         struct { Expr *operand; } sizeof_e;            /* EX_SIZEOF_EXPR */
         struct { Type target; } alignof_t;             /* EX_ALIGNOF_TYPE */
+        struct { Expr *operand; } alignof_e;           /* EX_ALIGNOF_EXPR */
         struct { Expr *cond; Expr *then; Expr *else_; } tern; /* EX_TERNARY */
         struct { Expr *operand; int is_inc; int is_prefix; } incdec; /* EX_INC_DEC */
         struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp; /* EX_COMPOUND_ASSIGN */
@@ -207,6 +213,9 @@ struct Expr {
         struct { StmtArray *stmts; } stmt_expr;            /* EX_STMT_EXPR — GNU statement expression ({ ... }) */
         struct { char *label; } label_addr;                /* EX_LABEL_ADDR — &&label address of label */
     } u;
+    /* EX_INT_LIT only: high 64 bits of a width-16 (`__int128`) constant.
+     * Kept after the union so existing Expr field offsets stay GCC-identical. */
+    unsigned long long int_hi;
 };
 
 /* Ownership: Expr uses malloc; tu_free recurses */
@@ -215,6 +224,10 @@ Expr *expr_new_int(long long v, SourceLoc loc);
  * suffix and the value's magnitude: 0x8000000000000000 is unsigned long even
  * with no suffix.  Getting this wrong silently truncates wide constants. */
 Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
+/* Integer literal, including GCC's `__int128` rank for decimal constants
+ * larger than `long long` but still within 64-bit unsigned magnitude. */
+Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
+                       int width, int is_unsigned, SourceLoc loc);
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
 Expr *expr_new_var(const char *name, SourceLoc loc);
@@ -231,6 +244,7 @@ Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
 Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
 Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_alignof_type(Type t, SourceLoc loc);
+Expr *expr_new_alignof_expr(Expr *operand, SourceLoc loc);
 Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
 Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
 Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
@@ -305,6 +319,7 @@ void stmt_array_init(StmtArray *a);
 void stmt_array_push(StmtArray *a, Stmt s);
 void stmt_array_free(StmtArray *a);
 void stmt_free(Stmt *s);
+Stmt stmt_clone(const Stmt *s);
 
 /* Heap-allocated statement helpers used by if/while (which own sub-stmts) */
 Stmt *stmt_alloc(void);
@@ -370,18 +385,16 @@ void import_array_free(ImportArray *a);
 
 /* Struct definition: tag + ordered member list.  Each member has a name,
  * a Type (owned), a computed byte offset within the struct, and a size.
- * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield
- * `unsigned x : N;`.  Bitfield members share a storage unit with adjacent
- * bitfields of the same underlying type (tracked by the struct's
- * `bit_cur_unit` / `bit_cur_used` during member layout). */
+ * `bit_width` is -1 for a normal member, 0 for a zero-width bit-field
+ * (`int : 0`, which starts a new allocation unit), or N (1..64) for a
+ * bitfield `unsigned x : N;`. */
 typedef struct {
     char *name;
     Type type;
     long long offset;
-    int  bit_width;     /* 0 = normal member, else bitfield width in bits */
+    int  bit_width;     /* -1 = normal member, 0 = zero-width bitfield, else bits */
     int  bit_offset;    /* bit position within the unit (0 = LSB); valid when
-                         * bit_width > 0.  Codegen loads the unit, shifts right
-                         * by bit_offset, and masks to (1<<bit_width)-1. */
+                         * bit_width > 0. */
 } StructMember;
 
 typedef struct {
@@ -424,7 +437,7 @@ StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 /* Const variant. */
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 /* Append a member to a struct definition; computes offset (naturally aligned).
- * `bit_width` is 0 for a normal member, or N (1..64) for a bitfield `x : N;`. */
+ * `bit_width` is -1 for a normal member, 0 for `: 0`, or N for `x : N`. */
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
 void struct_def_finish(StructDef *sd);
 void struct_def_apply_sso(StructDef *sd, int is_big_endian);
@@ -499,6 +512,8 @@ void typedef_registry_free(TypedefRegistry *r);
 TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type);
 /* Find a typedef by name; NULL if absent. */
 const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
+TypedefEntry *typedef_registry_get(TypedefRegistry *r, const char *name);
+void typedef_registry_truncate(TypedefRegistry *r, size_t len);
 
 typedef struct {
     PackageDecl package;

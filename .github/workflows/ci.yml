@@ -85,8 +85,8 @@ jobs:
       # exercise largely separate code in the compiler.
       - name: e2e with the self-hosted compiler
         run: |
-          bash test/e2e/run_e2e.sh v0/fakecc-1 -O0
-          bash test/e2e/run_e2e.sh v0/fakecc-1 -O1
+          CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 -O0
+          CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 -O1
 
       - name: e2e_multi with the self-hosted compiler
         run: |

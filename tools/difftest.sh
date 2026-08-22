@@ -33,8 +33,9 @@ shift $((OPTIND - 1))
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+TOOLS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-export FAKECC RUN_TIMEOUT FCC_FLAGS WORK
+export FAKECC RUN_TIMEOUT FCC_FLAGS WORK TOOLS_DIR
 
 difftest_one() {
     local src="$1"
@@ -44,34 +45,80 @@ difftest_one() {
     hash=$(printf '%s' "$src" | md5sum | cut -c1-8)
     local name="${base}_${hash}"
 
+    local gcc_extra
+    local fcc_extra
+    local file_flags
+    local extra_flags
+    gcc_extra=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
+    file_flags=$(sed -n 's|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
+    # Sanitizer flags are fakecc-only: gcc's ASan runtime is a different
+    # implementation and often exits 1 ("runtime does not come first").
+    fcc_extra="$file_flags $gcc_extra"
+    extra_flags="$gcc_extra"
+    for tok in $file_flags; do
+        case "$tok" in
+            -fsanitize=*|-fno-sanitize=*) ;;
+            *) extra_flags="$extra_flags $tok" ;;
+        esac
+    done
+
+    sed -E \
+        -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
+        -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
+        -e 's/\b(runtime|fmt|io|ctype)\.//g' \
+        "$src" > "$WORK/$name.body.c"
+
+    # Prefer a header-free translation: torture ports ship their own libc
+    # prototypes (`fprintf(void*, ...)`, `isprint`) which clash with glibc
+    # headers and used to fail the gcc translation.  gcc still needs <stdarg.h>
+    # for va_arg; drop fakecc's in-source SysV va_list typedef so gcc sees
+    # its own va_list (otherwise the stdio.h fallback fights fprintf).
+    python3 "$TOOLS_DIR/gcc_stdarg_prep.py" < "$WORK/$name.body.c" > "$WORK/$name.prep.c"
     {
         echo '#define _GNU_SOURCE 1'
-        echo '#include <stdio.h>'
-        echo '#include <stdlib.h>'
-        echo '#include <string.h>'
-        echo '#include <ctype.h>'
-        echo '#include <stdarg.h>'
-        echo '#include <stdint.h>'
-        echo '#include <unistd.h>'
-        echo '#include <sys/stat.h>'
-        echo '#define __syscall syscall'
-        sed -E \
-            -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
-            -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
-            -e 's/\b(runtime|fmt|io|ctype)\.//g' \
-            "$src"
+        if grep -qE '\b(va_(list|start|arg|end|copy)|__builtin_va_(list|start|arg|end|copy))\b' \
+               "$WORK/$name.prep.c"; then
+            echo '#include <stdarg.h>'
+        fi
+        # Ports call alloca without <alloca.h>.  gcc warns "implicit
+        # declaration", the harness treats that as failure, and the stdio.h
+        # fallback then clashes with `fprintf(void*, ...)`.
+        if grep -qE '\balloca[[:space:]]*\(' "$WORK/$name.prep.c"; then
+            echo '#define alloca __builtin_alloca'
+        fi
+        cat "$WORK/$name.prep.c"
     } > "$WORK/$name.gcc.c"
-    local extra_flags
-    extra_flags=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
-
-    if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" 2>"$WORK/$name.gcc.err"; then
-        printf '%-28s SKIP (gcc rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.gcc.err")"
-        return 0
+    # Header-free gcc must not accept implicit libc decls (`int getenv()`).
+    # Do not pass -w: we need the diagnostic.  Fall back to glibc headers
+    # when gcc fails or only succeeded by assuming implicit functions.
+    # Ports declare `floor` themselves; gcc still needs libm.  Without -lm the
+    # link fails and the stdio.h fallback then clashes with `fprintf(void*,…)`.
+    if ! gcc -std=gnu99 -D_GNU_SOURCE \
+            $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err" \
+       || grep -qE 'implicit declaration|隐式声明' "$WORK/$name.gcc.err"; then
+        {
+            echo '#define _GNU_SOURCE 1'
+            echo '#include <stdio.h>'
+            echo '#include <stdlib.h>'
+            echo '#include <string.h>'
+            echo '#include <ctype.h>'
+            echo '#include <stdarg.h>'
+            echo '#include <stdint.h>'
+            echo '#include <unistd.h>'
+            echo '#include <sys/stat.h>'
+            echo '#include <errno.h>'
+            echo '#define __syscall syscall'
+            cat "$WORK/$name.body.c"
+        } > "$WORK/$name.gcc.c"
+        if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err"; then
+            printf '%-28s FAIL (gcc rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.gcc.err")"
+            return 1
+        fi
     fi
     local gcc_rc=0
     timeout "$RUN_TIMEOUT" "$WORK/$name.gcc" >"$WORK/$name.gcc.out" 2>"$WORK/$name.gcc.stderr" || gcc_rc=$?
 
-    if ! "$FAKECC" $FCC_FLAGS $extra_flags "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
+    if ! "$FAKECC" $FCC_FLAGS $fcc_extra "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
         local rc=$?
         if [ "$rc" -ge 128 ]; then
             printf '%-28s DIFF (fakecc killed by signal %s; gcc exits %s)\n' \
@@ -104,7 +151,7 @@ export -f difftest_one
 printf "%s\n" "$@" | xargs -P "$JOBS" -n 1 bash -c 'difftest_one "$@"' _ > "$WORK/results.log"
 cat "$WORK/results.log" | sort
 
-if grep -q 'DIFF' "$WORK/results.log"; then
+if grep -qE ' (FAIL|DIFF) ' "$WORK/results.log"; then
     exit 1
 fi
 exit 0
