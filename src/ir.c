@@ -3374,13 +3374,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * first arg lowers directly to the struct base address. */
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
-            if (strcmp(cname, "va_copy") == 0
-                || strcmp(cname, "__builtin_va_copy") == 0) {
-                IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
-                IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
-                emit_struct_copy(fn, dst, src, 24, e->loc);
-                return -1;
-            }
             if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
                 || strcmp(cname, "va_arg") == 0
                 || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_va_end") == 0
@@ -6141,6 +6134,15 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                         i < n ? (unsigned char)e->u.str.bytes[i] : 0, 1, eu, loc);
             emit_inst_w(fn, IR_STORE_PTR, -1, ptr, cv, 0, 1, eu, loc);
         }
+        return;
+    }
+    /* Struct variable element: copy the whole struct bytes.
+     * Compound literals like `Outer o = {some_struct_var}` need this
+     * because the source is a pointer to existing storage, not a literal. */
+    if (ty->kind == TY_STRUCT && e->kind == EX_VAR) {
+        IRValue rv = lower_expr(fn, st, e);
+        int sz = type_size(*ty);
+        if (sz > 0) emit_struct_copy(fn, base, rv, sz, loc);
         return;
     }
     /* Scalar element: lower, coerce to the target width, store via pointer. */
