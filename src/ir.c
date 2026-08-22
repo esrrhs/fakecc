@@ -3374,6 +3374,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * first arg lowers directly to the struct base address. */
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
+            if (strcmp(cname, "va_copy") == 0
+                || strcmp(cname, "__builtin_va_copy") == 0) {
+                IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+                emit_struct_copy(fn, dst, src, 24, e->loc);
+                return -1;
+            }
             if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
                 || strcmp(cname, "va_arg") == 0
                 || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_va_end") == 0
