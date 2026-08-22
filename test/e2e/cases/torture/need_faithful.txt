@@ -32,7 +32,6 @@ nestfunc-6
 nestfunc-7
 nest-stdar-1
 pr103405
-pr115033
 pr115277
 pr116799
 pr117432
@@ -685,5 +684,3 @@ zerolen-1
 zerolen-2
 zero-struct-1
 zero-struct-2
-pr115033
-pr115033
