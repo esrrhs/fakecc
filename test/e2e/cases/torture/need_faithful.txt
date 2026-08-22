@@ -683,3 +683,9 @@ zerolen-2
 zero-struct-1
 zero-struct-2
 pr115033
+stdarg_2
+va_arg_5
+va_arg_6
+va_arg_12
+va_arg_16
+va_arg_17
