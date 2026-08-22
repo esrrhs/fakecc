@@ -6150,7 +6150,7 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         return;
     }
     /* Struct element: copy the whole struct bytes, not a scalar coerce+store. */
-    if (ty->kind == TY_STRUCT || ty->is_vector || type_is_i128(*ty)) {
+    if (ty->kind == TY_STRUCT || type_is_i128(*ty)) {
         IRValue rv = lower_expr(fn, st, e);
         int sz = type_size(*ty);
         if (sz > 0) emit_struct_copy(fn, base, rv, sz, loc);
