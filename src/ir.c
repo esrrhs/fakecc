@@ -3410,22 +3410,35 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 if (is_arg) {
                     if (e->va_arg_type.kind == TY_FLOAT && e->va_arg_type.width == 16) {
                         /* long double: always passed on the stack (MEMORY class),
-                         * never in XMM regs.  Treat as a 16-byte GP aggregate
-                         * that always uses the overflow path. */
-                        IRValue slot = emit_alloca(fn, 16, 16, 1, e->loc);
+                         * never in XMM regs.  Copy 16 bytes from overflow into
+                         * a stack buffer, then fldt from that buffer. */
+                        IRValue slot = emit_alloca(fn, 16, 8, 1, e->loc);
                         IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-                        inst.dst = new_value(fn);
-                        inst.width = 8;
-                        inst.is_unsigned = 1;
-                        inst.is_float = 0;
-                        inst.imm = 16;
-                        inst.force_stack = 1;
-                        inst.float_imm = 0;
-                        inst.call_nargs = 2;
-                        inst.call_args[1] = addr;
-                        ir_inst_array_push(&fn->insts, inst);
-                        set_value_type(fn, inst.dst, 8, 1);
-                        return inst.dst;
+                        /* Aggregate copy: 16 bytes from overflow → buffer */
+                        IRInst copy;
+                        memset(&copy, 0, sizeof(copy));
+                        copy.op = IR_CALL;
+                        copy.loc = e->loc;
+                        copy.call_name = xstrdup("va_arg");
+                        copy.call_callee = -1;
+                        copy.call_nargs = 2;
+                        copy.call_args[0] = ap;
+                        copy.call_args[1] = addr;
+                        copy.dst = new_value(fn);
+                        copy.width = 8;
+                        copy.is_unsigned = 1;
+                        copy.is_float = 0;
+                        copy.imm = 16;
+                        copy.force_stack = 1;
+                        copy.float_imm = 0;
+                        ir_inst_array_push(&fn->insts, copy);
+                        set_value_type(fn, copy.dst, 8, 1);
+                        /* Now load the long double from the buffer */
+                        IRValue ldval = new_value(fn);
+                        emit_inst_w(fn, IR_LOAD_PTR, ldval, copy.dst, -1, 0, 16, 0, e->loc);
+                        set_value_type(fn, ldval, 16, 0);
+                        set_value_float(fn, ldval, 1);
+                        return ldval;
                     }
                     if (e->va_arg_type.kind == TY_STRUCT) {
                         int sz = type_size(e->va_arg_type);
