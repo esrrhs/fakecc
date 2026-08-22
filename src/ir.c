@@ -3374,6 +3374,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * first arg lowers directly to the struct base address. */
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
+            if (strcmp(cname, "va_copy") == 0
+                || strcmp(cname, "__builtin_va_copy") == 0) {
+                /* va_copy(dst, src) = struct copy of va_list (24 bytes). */
+                IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+                emit_struct_copy(fn, dst, src, 24, e->loc);
+                return -1;
+            }
             if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
                 || strcmp(cname, "va_arg") == 0
                 || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_va_end") == 0
@@ -3400,6 +3408,25 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 inst.call_args[0] = ap;
                 inst.call_args[1] = last;
                 if (is_arg) {
+                    if (e->va_arg_type.kind == TY_FLOAT && e->va_arg_type.width == 16) {
+                        /* long double: always passed on the stack (MEMORY class),
+                         * never in XMM regs.  Treat as a 16-byte GP aggregate
+                         * that always uses the overflow path. */
+                        IRValue slot = emit_alloca(fn, 16, 16, 1, e->loc);
+                        IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                        inst.dst = new_value(fn);
+                        inst.width = 8;
+                        inst.is_unsigned = 1;
+                        inst.is_float = 0;
+                        inst.imm = 16;
+                        inst.force_stack = 1;
+                        inst.float_imm = 0;
+                        inst.call_nargs = 2;
+                        inst.call_args[1] = addr;
+                        ir_inst_array_push(&fn->insts, inst);
+                        set_value_type(fn, inst.dst, 8, 1);
+                        return inst.dst;
+                    }
                     if (e->va_arg_type.kind == TY_STRUCT) {
                         int sz = type_size(e->va_arg_type);
                         if (sz <= 0) sz = 8;
