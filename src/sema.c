@@ -966,6 +966,25 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             set_type(e, type_make_void());
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR
+            && (strcmp(e->u.call.callee->u.var.name, "va_copy") == 0 ||
+                strcmp(e->u.call.callee->u.var.name, "__builtin_va_copy") == 0)) {
+            if (e->u.call.args.len != 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_copy takes exactly 2 arguments (dst, src)");
+            }
+            for (int i = 0; i < 2; i++) {
+                Type list_ty = check_expr(e->u.call.args.data[i], st, ft);
+                if (!is_va_list_type(&list_ty)) {
+                    type_free(&list_ty);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "va_copy arguments must be va_list");
+                }
+                type_free(&list_ty);
+            }
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
         /* Type-check the callee expression. */
         Type callee_ty = check_expr(e->u.call.callee, st, ft);
         /* Direct call: callee is `EX_VAR` naming a known function. */
