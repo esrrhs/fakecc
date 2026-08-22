@@ -31,6 +31,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAKECC="${1:-$ROOT/build/fakecc}"
+shift || true
+CC_EXTRA="${CC_FLAGS:-}"
 CASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cases/debug"
 CC_TIMEOUT=${CC_TIMEOUT:-30}
 RUN_TIMEOUT=${RUN_TIMEOUT:-20}
@@ -150,7 +152,13 @@ run_case() {
   n_pass=$((n_pass + 1))
 }
 
-for flags in "-O1" "-O0"; do
+# Accept -O0/-O1 via CC_EXTRA (like run_e2e.sh).  If none given, run both.
+if [ -n "${CC_EXTRA// }" ]; then
+  read -ra flag_list <<< "$CC_EXTRA"
+else
+  flag_list=("-O0" "-O1")
+fi
+for flags in "${flag_list[@]}"; do
   echo "=== gdb e2e: $flags ==="
   while IFS= read -r src; do
     run_case "$src" "$flags"
