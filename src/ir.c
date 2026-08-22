@@ -3374,6 +3374,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * first arg lowers directly to the struct base address. */
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
+            if (strcmp(cname, "va_copy") == 0
+                || strcmp(cname, "__builtin_va_copy") == 0) {
+                IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+                emit_struct_copy(fn, dst, src, 24, e->loc);
+                return -1;
+            }
             if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
                 || strcmp(cname, "va_arg") == 0
                 || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_va_end") == 0
@@ -3400,6 +3407,33 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 inst.call_args[0] = ap;
                 inst.call_args[1] = last;
                 if (is_arg) {
+                    if (e->va_arg_type.kind == TY_FLOAT && e->va_arg_type.width == 16) {
+                        IRValue slot = emit_alloca(fn, 16, 8, 1, e->loc);
+                        IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                        IRInst copy;
+                        memset(&copy, 0, sizeof(copy));
+                        copy.op = IR_CALL;
+                        copy.loc = e->loc;
+                        copy.call_name = xstrdup("va_arg");
+                        copy.call_callee = -1;
+                        copy.call_nargs = 2;
+                        copy.call_args[0] = ap;
+                        copy.call_args[1] = addr;
+                        copy.dst = new_value(fn);
+                        copy.width = 8;
+                        copy.is_unsigned = 1;
+                        copy.is_float = 0;
+                        copy.imm = 16;
+                        copy.force_stack = 1;
+                        copy.float_imm = 0;
+                        ir_inst_array_push(&fn->insts, copy);
+                        set_value_type(fn, copy.dst, 8, 1);
+                        IRValue ldval = new_value(fn);
+                        emit_inst_w(fn, IR_LOAD_PTR, ldval, copy.dst, -1, 0, 16, 0, e->loc);
+                        set_value_type(fn, ldval, 16, 0);
+                        set_value_float(fn, ldval, 1);
+                        return ldval;
+                    }
                     if (e->va_arg_type.kind == TY_STRUCT) {
                         int sz = type_size(e->va_arg_type);
                         if (sz <= 0) sz = 8;
