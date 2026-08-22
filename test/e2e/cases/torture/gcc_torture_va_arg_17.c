@@ -14,21 +14,37 @@ typedef struct {
 typedef __va_list_tag __builtin_va_list[1];
 typedef __builtin_va_list va_list;
 
-void f(int a, int b, ...) {
-    va_list args;
-    va_start(args, b);
-    long double d;
-    d = va_arg(args, long double);
-    if (d != 1.0L) abort();
-    d = va_arg(args, long double);
-    if (d != 2.0L) abort();
-    d = va_arg(args, long double);
-    if (d != 3.0L) abort();
-    va_end(args);
+typedef double TYPE;
+
+void vafunction (char *dummy, ...)
+{
+  va_list ap;
+
+  va_start(ap, dummy);
+  if (va_arg (ap, TYPE) != 1.)
+    abort();
+  if (va_arg (ap, TYPE) != 2.)
+    abort();
+  if (va_arg (ap, TYPE) != 3.)
+    abort();
+  if (va_arg (ap, TYPE) != 4.)
+    abort();
+  if (va_arg (ap, TYPE) != 5.)
+    abort();
+  if (va_arg (ap, TYPE) != 6.)
+    abort();
+  if (va_arg (ap, TYPE) != 7.)
+    abort();
+  if (va_arg (ap, TYPE) != 8.)
+    abort();
+  if (va_arg (ap, TYPE) != 9.)
+    abort();
+  va_end(ap);
 }
 
-int main(void) {
-    f(1, 2, 1.0L, 2.0L, 3.0L);
-    exit(0);
-    return 0;
+int main (void)
+{
+  vafunction( "", 1., 2., 3., 4., 5., 6., 7., 8., 9. );
+  exit(0);
+  return 0;
 }
