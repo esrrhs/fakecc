@@ -29,14 +29,8 @@ void foo(int v, va_list ap) {
 
 void bar(int v) {
     if (v == 0x4006) {
-        double d1 = va_arg(gap, double);
-        long l = va_arg(gap, long);
-        if (d1 != 17.0 || l != 129L) abort();
-    } else if (v == 0x4008) {
-        long long ll = va_arg(*pap, long long);
-        long double ld = va_arg(*pap, long double);
-        int i = va_arg(*pap, int);
-        if (ll != 14LL || ld != 131.0L || i != 17) abort();
+        if (va_arg(gap, double) != 17.0) abort();
+        if (va_arg(gap, long) != 129L) abort();
     }
     bar_arg = v;
 }

@@ -17,16 +17,15 @@ typedef __builtin_va_list va_list;
 void f(int n, ...) {
     va_list args;
     va_start(args, n);
-    int i; long long ll; long double ld; double d;
-    i = va_arg(args, int); if (i != 10) abort();
-    ll = va_arg(args, long long); if (ll != 10000000000LL) abort();
-    i = va_arg(args, int); if (i != 11) abort();
-    ld = va_arg(args, long double); if (ld != 3.14L) abort();
-    i = va_arg(args, int); if (i != 12) abort();
-    i = va_arg(args, int); if (i != 13) abort();
-    ll = va_arg(args, long long); if (ll != 20000000000LL) abort();
-    i = va_arg(args, int); if (i != 14) abort();
-    d = va_arg(args, double); if (d != 2.72) abort();
+    if (va_arg(args, int) != 10) abort();
+    if (va_arg(args, long long) != 10000000000LL) abort();
+    if (va_arg(args, int) != 11) abort();
+    if (va_arg(args, long double) != 3.14L) abort();
+    if (va_arg(args, int) != 12) abort();
+    if (va_arg(args, int) != 13) abort();
+    if (va_arg(args, long long) != 20000000000LL) abort();
+    if (va_arg(args, int) != 14) abort();
+    if (va_arg(args, double) != 2.72) abort();
     va_end(args);
 }
 

@@ -14,16 +14,24 @@ typedef struct {
 typedef __va_list_tag __builtin_va_list[1];
 typedef __builtin_va_list va_list;
 
+int foo_arg, bar_arg;
 long x;
+double d;
 va_list gap;
 va_list *pap;
 
+void foo(int v, va_list ap) {
+    switch (v) {
+    case 5: foo_arg = va_arg(ap, int); break;
+    default: abort();
+    }
+}
+
 void bar(int v) {
     if (v == 0x4008) {
-        long long ll = va_arg(*pap, long long);
-        long double ld = va_arg(*pap, long double);
-        int i = va_arg(*pap, int);
-        if (ll != 14LL || ld != 131.0L || i != 17) abort();
+        if (va_arg(*pap, long long) != 14LL) abort();
+        if (va_arg(*pap, long double) != 131.0L) abort();
+        if (va_arg(*pap, int) != 17) abort();
     }
 }
 

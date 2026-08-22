@@ -1381,7 +1381,17 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
         /* end: */
         patch_rel32(b, jmp_end, b->len);
         if (dst >= 0) {
-            spill_if_needed_xmm(b, dst, 0, ra_xmm, gp_spill_area);
+            /* Result is in XMM0; move it to the assigned register if needed */
+            if (ra_xmm && dst < ra_xmm->num_values) {
+                int vr = ra_xmm->reg[dst];
+                if (vr >= 0 && vr < 16 && vr != 0) {
+                    emit_sse_mov_rr(b, vr, 0);  /* xmm_vr = xmm0 */
+                } else if (vr < 0) {
+                    /* Spill XMM0 to the assigned spill slot */
+                    emit_sse_store_spill(b, 0,
+                        spill_offset_xmm(ra_xmm->spill_slot[dst], gp_spill_area));
+                }
+            }
         }
     }
 }
