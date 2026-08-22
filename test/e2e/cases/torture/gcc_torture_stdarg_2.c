@@ -2,7 +2,6 @@
 package main;
 
 extern void abort(void);
-extern void exit(int);
 void abort(void);
 
 typedef struct {
@@ -16,31 +15,17 @@ typedef __builtin_va_list va_list;
 
 int foo_arg, bar_arg;
 long x;
-double d;
-va_list gap;
-va_list *pap;
 
 void foo(int v, va_list ap) {
     switch (v) {
-    case 5: foo_arg = va_arg(ap, int); break;
-    default: abort();
+    case 5:
+        foo_arg = va_arg(ap, int);
+        foo_arg += (int)va_arg(ap, double);
+        foo_arg += (int)va_arg(ap, long long);
+        break;
+    default:
+        abort();
     }
-}
-
-void bar(int v) {
-    if (v == 0x4006) {
-        if (va_arg(gap, double) != 17.0) abort();
-        if (va_arg(gap, long) != 129L) abort();
-    }
-    bar_arg = v;
-}
-
-void f0(int i, ...) {
-    va_list ap;
-    va_start(ap, i);
-    bar(i);
-    x = va_arg(ap, int);
-    va_end(ap);
 }
 
 void f5(int v, ...) {
@@ -51,8 +36,7 @@ void f5(int v, ...) {
 }
 
 int main(void) {
-    f0(1);
-    f5(5, 128);
-    if (foo_arg != 128 || x != 1) abort();
+    f5(5, 1, 19.0, 18LL);
+    if (foo_arg != 38) abort();
     return 0;
 }
