@@ -46,6 +46,9 @@ pr20621-1.c
 # Complex by-value nested struct/union passing - not fully supported.
 pr23324.c
 
+# Old-style function declaration with parameter mismatch.
+pr34982.c
+
 # Case range (GCC extension) not supported by fakecc.
 pr34154.c
 
