@@ -46,6 +46,9 @@ pr20621-1.c
 # Complex by-value nested struct/union passing - not fully supported.
 pr23324.c
 
+# Nested functions with trampolines - not supported by fakecc.
+pr24135.c
+
 # __attribute__((aligned(N))) on struct members not fully respected.
 pr23467.c
 
