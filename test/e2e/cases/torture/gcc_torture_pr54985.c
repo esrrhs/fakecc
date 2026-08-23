@@ -5,8 +5,7 @@ typedef struct st {
     int a;
 } ST;
 
-int __attribute__((noinline))
-foo(ST *s, int c)
+int foo(ST *s, int c)
 {
   int first = 1;
   int count = c;
@@ -29,7 +28,7 @@ foo(ST *s, int c)
 
 extern void abort(void);
 
-int main (void)
+int main(void)
 {
   ST _1[2] = {{2}, {1}};
   if (foo(_1, 2) != 0)
