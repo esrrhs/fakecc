@@ -46,6 +46,9 @@ pr20621-1.c
 # Complex by-value nested struct/union passing - not fully supported.
 pr23324.c
 
+# Truncation through multiple function calls - runtime crash.
+pr39240.c
+
 # __builtin_isinf/f/l not supported by fakecc.
 pr39228.c
 
