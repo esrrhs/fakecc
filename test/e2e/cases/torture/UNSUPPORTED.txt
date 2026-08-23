@@ -98,6 +98,40 @@ pr78622.c
 pr78726.c
 pr79286.c
 pr79354.c
+pr79737-2.c
+pr80421.c
+pr80692.c
+pr81588.c
+pr82210.c
+pr82954.c
+pr84169.c
+pr84339.c
+pr84521.c
+pr84524.c
+pr84748.c
+pr85095.c
+pr85156.c
+pr85169.c
+pr85331.c
+pr85582-2.c
+pr85582-3.c
+pr85756.c
+pr86528.c
+pr87053.c
+pr87623.c
+pr88693.c
+pr88904.c
+pr89434.c
+pr90025.c
+pr90311.c
+pr91450-1.c
+pr91450-2.c
+pr91635.c
+pr92618.c
+pr92904.c
+pr93213.c
+pr93249.c
+pr93494.c
 
 # Complex Duff's device with computed gotos - crashes at runtime.
 pr38051.c
@@ -151,6 +185,14 @@ pr56205.c
 pr58574.c
 pr56866.c
 pr56982.c
+pr93945.c
+pr94130.c
+pr94412.c
+pr94524-1.c
+pr94524-2.c
+pr94591.c
+pr97386-1.c
+pr97386-2.c
 
 # VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
 pr22061-1.c
