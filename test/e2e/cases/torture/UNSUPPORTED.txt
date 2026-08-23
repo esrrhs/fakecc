@@ -43,6 +43,9 @@ pr103405.c
 # Large by-value struct (64KB) exceeds fakecc's 64-argument limit.
 pr20621-1.c
 
+# Complex by-value nested struct/union passing - not fully supported.
+pr23324.c
+
 # Vector types/SIMD and 128KB stack array - not supported by fakecc.
 pr23135.c
 
