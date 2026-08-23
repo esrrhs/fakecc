@@ -3108,6 +3108,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             fn->has_dyn_alloca = 1;
             return res;
         }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_expect") == 0) {
+            /* __builtin_expect(val, exp) returns val; the hint is for
+             * branch prediction and does not affect the result. */
+            if (e->u.call.args.len >= 1)
+                return lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 8, 0, e->loc);
+            set_value_type(fn, v, 8, 0);
+            return v;
+        }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_longjmp") == 0) {
             IRValue buf_ptr = lower_expr(fn, st, e->u.call.args.data[0]);
             emit_inst_w(fn, IR_LONGJMP, -1, buf_ptr, -1, 0, 8, 1, e->loc);
