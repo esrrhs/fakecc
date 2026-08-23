@@ -94,6 +94,9 @@ pr44683.c
 # Vector types/SIMD and 128KB stack array - not supported by fakecc.
 pr23135.c
 
+# __builtin_apply/__builtin_apply_args not supported by fakecc.
+pr47237.c
+
 # VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
 pr22061-1.c
 pr22061-2.c
