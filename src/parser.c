@@ -3658,10 +3658,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
         fn.is_unprototyped = 1;
     }
 
-    if (fn.is_variadic && fn.params.len == 0) {
-        die_at(fn.loc.file, fn.loc.line, fn.loc.col,
-               "'...' must follow a named parameter");
-    }
+    /* Note: GCC allows '...' without a named parameter before it
+     * (old-style varargs: `void f(...)`).  We accept it too. */
 
     expect_kind(p, TK_RPAREN, "')'");
 
