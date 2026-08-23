@@ -64,6 +64,9 @@ pr38051.c
 # Old-style function declaration with parameter mismatch.
 pr34982.c
 
+# Zero-size array - runtime crash.
+pr42570.c
+
 # VLA in struct with offsetof - runtime crash.
 pr41935.c
 
