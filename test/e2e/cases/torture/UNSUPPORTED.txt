@@ -67,6 +67,7 @@ pr57344-1.c
 pr57344-2.c
 pr57344-3.c
 pr57344-4.c
+pr57568.c
 
 # Complex Duff's device with computed gotos - crashes at runtime.
 pr38051.c
