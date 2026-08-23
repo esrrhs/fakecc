@@ -3,8 +3,7 @@
 // expect: 0
 package main;
 
-__attribute__((noinline)) int
-foo (int *x, int y)
+int foo(int *x, int y)
 {
   int z = *x;
   if (y > z && y <= 16)
@@ -13,8 +12,7 @@ foo (int *x, int y)
   return z;
 }
 
-int
-main (void)
+int main(void)
 {
   int i;
   for (i = 1; i < 17; i++)
