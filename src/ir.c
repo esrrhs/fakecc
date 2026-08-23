@@ -3110,7 +3110,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_expect") == 0) {
             /* __builtin_expect(val, exp) returns val; the hint is for
-             * branch prediction and does not affect the result. */
+             * branch prediction and does not affect the result.
+             * Both arguments must be evaluated for side effects. */
+            if (e->u.call.args.len >= 2) {
+                IRValue exp = lower_expr(fn, st, e->u.call.args.data[1]);
+                (void)exp;
+                return lower_expr(fn, st, e->u.call.args.data[0]);
+            }
             if (e->u.call.args.len >= 1)
                 return lower_expr(fn, st, e->u.call.args.data[0]);
             IRValue v = new_value(fn);

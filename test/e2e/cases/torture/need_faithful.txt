@@ -1,7 +1,7 @@
 # GCC c-torture/execute tests NOT yet ported to fakecc
 # Total GCC tests: 1676
-# Already ported: 991
-# Not ported: 685
+# Already ported: 1473
+# Not ported: 201
 
 20000822-1
 20010209-1
@@ -99,7 +99,6 @@ pr65427
 pr65648
 pr65956
 pr68328
-pr68381
 pr69320-2
 pr69691
 pr70460
@@ -128,60 +127,37 @@ pr84521
 pr84524
 pr84748
 pr85095
-pr85156
 pr85169
 pr85331
 pr85582-2
 pr85582-3
 pr85756
-pr86528
-pr87053
 pr87623
-pr88693
 pr88904
 pr89434
-pr90025
-pr90311
-pr91450-1
-pr91450-2
-pr91635
 pr92618
 pr92904
 pr93213
 pr93249
-pr93494
 pr93945
 pr94130
 pr94412
 pr94524-1
 pr94524-2
 pr94591
-pr97386-1
-pr97386-2
 pr98474
-pr98681
 pr98853-1
-pr98853-2
-pr99079
 printf-1
 printf-2
 printf-chk-1
-pta-field-1
-pta-field-2
-ptr-arith-1
 pure-1
 pushpop_macro
 regstack-1
-restrict-1
 return-addr
 scal-to-vec1
 scal-to-vec2
 scal-to-vec3
-scope-1
-shiftdi
 shiftdi-2
-shiftopt-1
-signed1bitfield-1
 simd-1
 simd-2
 simd-4
@@ -192,16 +168,11 @@ stdarg-1
 stkalign
 strcmp-1
 strcpy-1
-strcpy-2
 strct-pack-1
 strct-pack-2
 strct-pack-3
-strct-pack-4
 strct-stdarg-1
 strct-varg-1
-string-opt-17
-string-opt-18
-string-opt-5
 strlen-1
 strlen-2
 strlen-3
@@ -210,19 +181,9 @@ strlen-5
 strlen-6
 strlen-7
 strncmp-1
-struct-aliasing-1
-struct-cpy-1
-struct-ini-1
-struct-ini-2
-struct-ini-3
-struct-ini-4
 struct-ret-1
-struct-ret-2
-tstdi-1
-unroll-1
 usad-run
 user-printf
-usmul
 va-arg-21
 va-arg-22
 va-arg-24
@@ -232,21 +193,10 @@ vfprintf-chk-1
 vla-dealloc-1
 vprintf-1
 vprintf-chk-1
-vrp-1
-vrp-2
-vrp-3
-vrp-4
-vrp-5
-vrp-6
-vrp-7
 wchar_t-1
-widechar-1
-widechar-2
 widechar-3
 zerolen-1
 zerolen-2
-zero-struct-1
-zero-struct-2
 pr115033
 stdarg_2
 va_arg_5

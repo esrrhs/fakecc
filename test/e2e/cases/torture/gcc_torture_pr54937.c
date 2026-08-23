@@ -7,10 +7,9 @@ extern void abort(void);
 int a[1];
 void (*terminate_me)(int);
 
-__attribute__((noinline))
-void
-t(int c)
-{ int i;
+void t(int c)
+{
+  int i;
   for (i=0;i<c;i++)
     {
       if (i)
@@ -19,8 +18,7 @@ t(int c)
     }
 }
 
-int
-main(void)
+int main(void)
 {
   terminate_me = exit;
   t(100);
