@@ -7,14 +7,12 @@ extern void exit(int);
 int a[6], c = 1, d;
 short e;
 
-int __attribute__ ((noinline))
-fn1 (int p)
+int fn1(int p)
 {
   return a[p];
 }
 
-int
-main (void)
+int main(void)
 {
   a[0] = 1;
   if (c)
