@@ -8,8 +8,7 @@ typedef unsigned int uint32_t;
 uint32_t a;
 int b;
 
-int
-main (void)
+int main(void)
 {
   uint32_t c;
   for (a = 7; a <= 1; a++)
