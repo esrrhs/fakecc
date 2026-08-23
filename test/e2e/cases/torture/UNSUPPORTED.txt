@@ -46,6 +46,9 @@ pr20621-1.c
 # Complex by-value nested struct/union passing - not fully supported.
 pr23324.c
 
+# Complex Duff's device with computed gotos - crashes at runtime.
+pr38051.c
+
 # Old-style function declaration with parameter mismatch.
 pr34982.c
 
