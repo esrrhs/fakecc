@@ -20,17 +20,17 @@ struct S1
 
 struct S1 x = { 1, {{2, 3}, {4, 5}}, {{6, 7}, {8, 9}} };
 
-struct S1 func (void)
+struct S1 func(void)
 {
   return x;
 }
 
-int main (void)
+int main(void)
 {
-  struct S1 ret = func ();
+  struct S1 ret = func();
 
   if (ret.m2[1].m1 != 9)
-    abort ();
+    abort();
 
   return 0;
 }
