@@ -54,6 +54,7 @@ pr39228.c
 
 # Inline assembly (asm volatile) not supported by fakecc.
 pr38533.c
+pr40022.c
 
 # Complex Duff's device with computed gotos - crashes at runtime.
 pr38051.c
