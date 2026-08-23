@@ -46,6 +46,9 @@ pr20621-1.c
 # Complex by-value nested struct/union passing - not fully supported.
 pr23324.c
 
+# Case range (GCC extension) not supported by fakecc.
+pr34154.c
+
 # Bit-field sign extension issue (24-bit long int bit-field).
 pr31448-2.c
 
