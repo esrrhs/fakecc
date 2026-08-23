@@ -32,7 +32,6 @@ nestfunc-6
 nestfunc-7
 nest-stdar-1
 pr103405
-pr116799
 pr15262
 pr15262-1
 pr15262-2
