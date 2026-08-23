@@ -5,25 +5,22 @@ package main;
 
 char e;
 
-__attribute__((noinline)) void
-bar (char x)
+void bar(char x)
 {
-  if (x != 0x54 && x != (char) 0x87)
-    __builtin_abort ();
+  if (x != 0x54 && x != (char)0x87)
+    __builtin_abort();
 }
 
-__attribute__((noinline)) void
-foo (const char *x)
+void foo(const char *x)
 {
   char d = x[0];
   int c = d;
   if ((c >= 0 && c <= 0x7f) == 0)
     e = d;
-  bar (d);
+  bar(d);
 }
 
-__attribute__((noinline)) void
-baz (const char *x)
+void baz(const char *x)
 {
   char d = x[0];
   int c = d;
@@ -31,23 +28,22 @@ baz (const char *x)
     e = d;
 }
 
-int
-main (void)
+int main(void)
 {
   const char c[] = { 0x54, 0x87 };
   e = 0x21;
-  foo (c);
+  foo(c);
   if (e != 0x21)
-    __builtin_abort ();
-  foo (c + 1);
-  if (e != (char) 0x87)
-    __builtin_abort ();
+    __builtin_abort();
+  foo(c + 1);
+  if (e != (char)0x87)
+    __builtin_abort();
   e = 0x21;
-  baz (c);
+  baz(c);
   if (e != 0x21)
-    __builtin_abort ();
-  baz (c + 1);
-  if (e != (char) 0x87)
-    __builtin_abort ();
+    __builtin_abort();
+  baz(c + 1);
+  if (e != (char)0x87)
+    __builtin_abort();
   return 0;
 }
