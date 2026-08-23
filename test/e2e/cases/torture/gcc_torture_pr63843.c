@@ -1,0 +1,30 @@
+/* PR rtl-optimization/63843 */
+
+// expect: 0
+package main;
+
+static inline unsigned short foo (unsigned short v)
+{
+  return (v << 8) | (v >> 8);
+}
+
+unsigned short __attribute__((noinline))
+bar (unsigned char *x)
+{
+  unsigned int a;
+  unsigned short b;
+  __builtin_memcpy (&a, &x[0], sizeof (a));
+  a ^= 0x80808080U;
+  __builtin_memcpy (&x[0], &a, sizeof (a));
+  __builtin_memcpy (&b, &x[2], sizeof (b));
+  return foo (b);
+}
+
+int
+main (void)
+{
+  unsigned char x[8] = { 0x01, 0x01, 0x01, 0x01 };
+  if (bar (x) != 0x8181U)
+    __builtin_abort ();
+  return 0;
+}
