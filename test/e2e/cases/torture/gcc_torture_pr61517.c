@@ -4,8 +4,7 @@ package main;
 int a, b, *c = &a;
 unsigned short d;
 
-int
-main (void)
+int main(void)
 {
   unsigned int e = a;
   *c = 1;
@@ -16,7 +15,7 @@ main (void)
     }
 
   if (a != 0)
-    __builtin_abort ();
+    __builtin_abort();
 
   return 0;
 }
