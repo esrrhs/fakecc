@@ -5,14 +5,13 @@ package main;
 
 int c = 1;
 
-static int *foo (int *p)
+static int *foo(int *p)
 {
   return p;
 }
 
-int
-main (void)
+int main(void)
 {
-  *foo (&c) = 2;
+  *foo(&c) = 2;
   return c - 2;
 }
