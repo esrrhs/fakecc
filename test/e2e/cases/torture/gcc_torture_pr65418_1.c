@@ -1,22 +1,18 @@
-/* PR tree-optimization/65418 */
+/* PR tree-optimization/65418-1 */
 
 // expect: 0
 package main;
 
-__attribute__((noinline)) int
-foo (int x)
-{
+static int foo(int x) {
   if (x == -216 || x == -132 || x == -218 || x == -146)
-     return 1;
+    return 1;
   return 0;
 }
 
-int
-main (void)
-{
-  volatile int i;
+int main(void) {
+  int i;
   for (i = -230; i < -120; i++)
-    if (foo (i) != (i == -216 || i == -132 || i == -218 || i == -146))
-      __builtin_abort ();
+    if (foo(i) != (i == -216 || i == -132 || i == -218 || i == -146))
+      __builtin_abort();
   return 0;
 }

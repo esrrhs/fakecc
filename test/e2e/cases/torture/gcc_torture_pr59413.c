@@ -3,21 +3,17 @@
 // expect: 0
 package main;
 
-typedef unsigned int uint32_t;
+static unsigned int a;
+static int b;
 
-uint32_t a;
-int b;
-
-int main(void)
-{
-  uint32_t c;
-  for (a = 7; a <= 1; a++)
-    {
-      char d = a;
-      c = d;
-      b = a == c;
-    }
+int main(void) {
+  unsigned int c;
+  for (a = 7; a <= 1; a++) {
+    char d = a;
+    c = d;
+    b = a == c;
+  }
   if (a != 7)
-    __builtin_abort ();
+    __builtin_abort();
   return 0;
 }

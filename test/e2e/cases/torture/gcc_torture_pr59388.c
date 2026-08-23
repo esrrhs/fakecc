@@ -3,12 +3,10 @@
 // expect: 0
 package main;
 
-int a;
-struct S { unsigned int f:1; } b;
+static int a;
+static struct S { unsigned int f:1; } b;
 
-int
-main (void)
-{
+int main(void) {
   a = (0 < b.f) | b.f;
   return a;
 }

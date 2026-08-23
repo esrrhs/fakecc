@@ -1,12 +1,12 @@
+/* pr59221.c */
+
 // expect: 0
 package main;
 
-int a = 1, b, d;
-short e;
+static int a = 1, b, d;
+static short e;
 
-int
-main (void)
-{
+int main(void) {
   for (; b; b++)
     ;
   short f = a;
@@ -15,6 +15,6 @@ main (void)
   int h = e;
   d = h == 83647 ? 0 : h;
   if (d != 1)
-    __builtin_abort ();
+    __builtin_abort();
   return 0;
 }
