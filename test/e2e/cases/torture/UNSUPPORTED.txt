@@ -46,6 +46,9 @@ pr20621-1.c
 # Complex by-value nested struct/union passing - not fully supported.
 pr23324.c
 
+# __attribute__((aligned(N))) on struct members not fully respected.
+pr23467.c
+
 # Vector types/SIMD and 128KB stack array - not supported by fakecc.
 pr23135.c
 
