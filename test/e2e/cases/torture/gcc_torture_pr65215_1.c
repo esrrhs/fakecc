@@ -3,23 +3,20 @@
 // expect: 0
 package main;
 
-static inline unsigned int
-foo (unsigned int x)
+static unsigned int foo(unsigned int x)
 {
   return (x >> 24) | ((x >> 8) & 0xff00) | ((x << 8) & 0xff0000) | (x << 24);
 }
 
-__attribute__((noinline)) unsigned int
-bar (unsigned long long *x)
+unsigned int bar(unsigned long long *x)
 {
-  return foo (*x);
+  return foo(*x);
 }
 
-int
-main (void)
+int main(void)
 {
-  unsigned long long l = foo (0xdeadbeefU) | 0xfeedbea800000000ULL;
-  if (bar (&l) != 0xdeadbeefU)
-    __builtin_abort ();
+  unsigned long long l = foo(0xdeadbeefU) | 0xfeedbea800000000ULL;
+  if (bar(&l) != 0xdeadbeefU)
+    __builtin_abort();
   return 0;
 }
