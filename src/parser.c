@@ -3636,6 +3636,11 @@ static FunctionDecl parse_function_decl(Parser *p) {
             die_at(fn.loc.file, fn.loc.line, fn.loc.col,
                    "more than 16 parameters not supported");
         }
+    } else if (peek(p)->kind == TK_ELLIPSIS) {
+        /* Old-style varargs with no named parameters: `f(...)`. */
+        advance(p);
+        fn.is_variadic = 1;
+        fn.is_unprototyped = 1;
     } else if (peek(p)->kind != TK_RPAREN) {
         /* K&R identifier list: `f(a, b)`. */
         fn.is_unprototyped = 1;
@@ -3657,9 +3662,6 @@ static FunctionDecl parse_function_decl(Parser *p) {
     } else {
         fn.is_unprototyped = 1;
     }
-
-    /* Note: GCC allows '...' without a named parameter before it
-     * (old-style varargs: `void f(...)`).  We accept it too. */
 
     expect_kind(p, TK_RPAREN, "')'");
 
