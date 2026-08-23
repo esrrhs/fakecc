@@ -7,8 +7,7 @@ int a, *d, **e = &d, f;
 char c;
 struct S { int f1; } b;
 
-int
-main (void)
+int main(void)
 {
   for (a = -19; a; a++)
     {
