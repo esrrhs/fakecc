@@ -8,8 +8,7 @@ volatile int d;
 static int *volatile *e = &tmp;
 unsigned int f;
 
-static void
-fn1 (int *p)
+static void fn1(int *p)
 {
   int g;
   for (; f < 1; f++)
@@ -19,15 +18,14 @@ fn1 (int *p)
 	*c = p;
 
 	if (tmp != &a)
-	  __builtin_abort ();
+	  __builtin_abort();
 
 	*e = 0;
       }
 }
 
-int
-main (void)
+int main(void)
 {
-  fn1 (&a);
+  fn1(&a);
   return 0;
 }
