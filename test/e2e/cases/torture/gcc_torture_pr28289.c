@@ -1,33 +1,29 @@
-// expect: 1
+// expect: 0
 package main;
 
 extern void exit(int);
 int ok(int);
 
-static int gen_x86_64_shrd (int a __attribute__ ((__unused__)))
+static int gen_x86_64_shrd(int a __attribute__((__unused__)))
 {
   return 0;
 }
 
-void
-ix86_split_ashr (int mode)
+void ix86_split_ashr(int mode)
 {
-          (mode != 0
-                      ? ok
-                      : gen_x86_64_shrd) (0);
+  (mode != 0 ? ok : gen_x86_64_shrd)(0);
 }
 
 volatile int one = 1;
 
-int
-ok (int i)
+int ok(int i)
 {
-  exit (i);
+  exit(i);
+  return i;
 }
 
-int
-main (void)
+int main(void)
 {
-  ix86_split_ashr (one);
+  ix86_split_ashr(one);
   return 1;
 }
