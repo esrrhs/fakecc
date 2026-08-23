@@ -5,24 +5,21 @@ package main;
 
 int a;
 
-static void
-foo (const char *p1, int p2)
+static void foo(const char *p1, int p2)
 {
-  if (__builtin_strcmp (p1, "hello") != 0)
-    __builtin_abort ();
+  if (__builtin_strcmp(p1, "hello") != 0)
+    __builtin_abort();
 }
 
-static void
-bar (const char *p1)
+static void bar(const char *p1)
 {
-  if (__builtin_strcmp (p1, "hello") != 0)
-    __builtin_abort ();
+  if (__builtin_strcmp(p1, "hello") != 0)
+    __builtin_abort();
 }
 
-int
-main (void)
+int main(void)
 {
-  foo ("hello", a);
-  bar ("hello");
+  foo("hello", a);
+  bar("hello");
   return 0;
 }
