@@ -6,15 +6,14 @@ package main;
 int a, b;
 static int *c = &b;
 
-int
-main (void)
+int main(void)
 {
   int *d = &a;
   for (a = 0; a < 12; a++)
     *c |= *d / 9;
 
   if (b != 1)
-    __builtin_abort ();
+    __builtin_abort();
 
   return 0;
 }
