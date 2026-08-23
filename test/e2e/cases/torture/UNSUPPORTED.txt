@@ -85,6 +85,9 @@ pr24135.c
 # __attribute__((aligned(N))) on struct members not fully respected.
 pr23467.c
 
+# __builtin_copysign not supported by fakecc.
+pr44683.c
+
 # Vector types/SIMD and 128KB stack array - not supported by fakecc.
 pr23135.c
 
