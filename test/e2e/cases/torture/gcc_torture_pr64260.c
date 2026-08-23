@@ -5,8 +5,7 @@ package main;
 
 int a = 1, b;
 
-void
-foo (char p)
+void foo(char p)
 {
   int t = 0;
   for (; b < 1; b++)
@@ -18,11 +17,10 @@ foo (char p)
     }
 }
 
-int
-main (void)
+int main(void)
 {
-  foo (0);
+  foo(0);
   if (a != 0)
-    __builtin_abort ();
+    __builtin_abort();
   return 0;
 }
