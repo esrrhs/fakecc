@@ -7,8 +7,7 @@ int a, b, c, *d = &b, g, h, i;
 unsigned char e;
 char f;
 
-int
-main (void)
+int main(void)
 {
   while (a)
     {
@@ -26,7 +25,7 @@ main (void)
   *d = e;
 
   if (b != 255)
-    __builtin_abort ();
+    __builtin_abort();
 
   return 0;
 }
