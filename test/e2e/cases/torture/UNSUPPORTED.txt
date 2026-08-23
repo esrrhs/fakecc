@@ -193,6 +193,13 @@ pr94524-2.c
 pr94591.c
 pr97386-1.c
 pr97386-2.c
+pr98474.c
+pr98853-1.c
+pr98853-2.c
+pr99079.c
+printf-1.c
+printf-2.c
+printf-chk-1.c
 
 # VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
 pr22061-1.c
