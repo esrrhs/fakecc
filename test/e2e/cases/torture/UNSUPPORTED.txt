@@ -41,8 +41,6 @@ pr103405.c
 20070919-1.c
 
 
-# Complex by-value nested struct/union passing - not fully supported.
-pr23324.c
 
 # Multiple malloc calls - runtime hang.
 pr43008.c
@@ -312,8 +310,6 @@ pr23467
 # __builtin_copysign not supported by fakecc.
 pr44683
 
-# Complex by-value nested struct/union passing - not fully supported.
-pr23324
 
 
 # Multiple malloc calls - runtime hang.
@@ -519,8 +515,6 @@ pr20020412-1
 # _Decimal64 - not supported by fakecc.
 pr80692
 
-# Complex by-value nested struct/union passing - not fully supported.
-pr23324
 
 
 # Complex sprintf format - not fully supported.
