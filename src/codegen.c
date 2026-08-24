@@ -3035,7 +3035,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (nargs > IR_CALL_MAX_ARGS) nargs = IR_CALL_MAX_ARGS;
                 int target_reg[IR_CALL_MAX_ARGS];   /* native reg code, -1=stack */
                 int target_is_xmm[IR_CALL_MAX_ARGS];
-                int n_gp = 0, n_xmm = 0, n_stack = 0;
+                int n_gp = 0, n_xmm = 0;
                 int mem_arg_idx = -1; /* sentinel slot for MEMORY struct copy */
                 for (int k = 0; k < nargs; k++) {
                     /* Sentinel slot for a MEMORY struct passed by inline stack
@@ -3044,7 +3044,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (inst->call_args[k] < 0 && inst->call_arg_on_stack[k]) {
                         target_reg[k] = -1;
                         target_is_xmm[k] = 0;
-                        n_stack += (inst->mem_arg_size + 7) / 8;
                         mem_arg_idx = k;
                         continue;
                     }
@@ -3055,7 +3054,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         /* MEMORY-class eightbyte or long double: stack only. */
                         target_reg[k] = -1;
                         target_is_xmm[k] = 0;
-                        n_stack += is_ld ? 2 : 1;
                     } else if (is_float) {
                         if (n_xmm < 8) {
                             target_reg[k] = n_xmm; /* XMM0..7 */
@@ -3064,7 +3062,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         } else {
                             target_reg[k] = -1;
                             target_is_xmm[k] = 0;
-                            n_stack++;
                         }
                     } else {
                         if (n_gp < 6) {
@@ -3073,7 +3070,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         } else {
                             target_reg[k] = -1;
                             target_is_xmm[k] = 0;
-                            n_stack++;
                         }
                     }
                 }
