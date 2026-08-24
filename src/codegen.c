@@ -1307,13 +1307,36 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
             emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
             patch_rel32(b, jmp_end, b->len);
         } else {
+            /* MEMORY-class struct: the caller allocates a tmp copy and passes
+             * its address as one GP register argument (new pointer-passing ABI).
+             *
+             * Step 1: load the pointer from [reg_save_area + gp_offset] if
+             * gp_offset < 48; otherwise from overflow_arg_area.
+             * Step 2: advance gp_offset by 8 (or overflow by 8).
+             * Step 3: dereference the pointer and copy n8 qwords to dst. */
+            emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
+            emit_cmp_imm32(b, REG_RCX, 48);
+            size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
+            /* Register path: load pointer from [reg_save_area + gp_offset] */
+            emit_load_base_off(b, REG_RDX, ap_reg, VA_REG_OFF); /* rdx = save_area */
+            emit_add_rr(b, REG_RDX, REG_RCX);                   /* rdx = save_area+gp_offset */
+            emit_load_base_off(b, REG_RDX, REG_RDX, 0);         /* rdx = ptr to struct */
+            emit_add_imm32(b, REG_RCX, 8);
+            emit_store_base_off32(b, ap_reg, REG_RCX, VA_GP_OFF);
+            size_t jmp_end = emit_jmp_rel32(b);
+            /* Overflow path: load pointer from [overflow_arg_area] */
+            size_t ov_off = b->len;
+            patch_rel32(b, jae_ov, ov_off);
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
-            for (int i = 0; i < n8; i++) {
-                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
-                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
-            }
-            emit_add_imm32(b, REG_R11, ov_step);
+            emit_load_base_off(b, REG_RDX, REG_R11, 0); /* rdx = ptr to struct */
+            emit_add_imm32(b, REG_R11, 8);
             emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            /* End: dereference ptr (in RDX) and copy n8 qwords to dst (RSI). */
+            patch_rel32(b, jmp_end, b->len);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_R11, REG_RDX, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_R11, i * 8);
+            }
         }
         if (dst >= 0) {
             if (ra && dst < ra->num_values && ra->reg[dst] >= 0

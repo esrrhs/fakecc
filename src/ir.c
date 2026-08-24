@@ -894,8 +894,37 @@ static IRValue emit_add_const(IRFunction *fn, IRValue ptr, int delta,
  * assignment) must move the bytes, not the pointer.  Chosen width is always
  * a power of two no larger than the remaining bytes and no larger than 8, so
  * it matches a single LOAD_PTR/STORE_PTR on the codegen side. */
+/* Byte count above which emit_struct_copy delegates to memcpy instead of
+ * unrolling per-chunk load/store.  Unrolling a 64KB struct generates ~8k
+ * IR instructions and times out the optimizer; a single memcpy call is
+ * O(1) IR.  The cutoff balances code size against memcpy call overhead. */
+#define STRUCT_COPY_MEMCPY_THRESHOLD 64
+
 static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
                               int size, SourceLoc loc) {
+    if (size > STRUCT_COPY_MEMCPY_THRESHOLD) {
+        /* Large copy: call memcpy(dst, src, size).  The caller is responsible
+         * for declaring memcpy (it is not a builtin).  Emit a direct named
+         * call so codegen patches it like any other external call. */
+        IRValue sz_val = new_value(fn);
+        emit_inst_w(fn, IR_CONST, sz_val, -1, -1, (int64_t)size, 8, 1, loc);
+        IRInst inst;
+        memset(&inst, 0, sizeof(inst));
+        inst.op = IR_CALL;
+        inst.dst = -1;
+        inst.a = -1;
+        inst.b = -1;
+        inst.imm = 0;
+        inst.loc = loc;
+        inst.call_name = xstrdup("memcpy");
+        inst.call_callee = -1;
+        inst.call_args[0] = dst;
+        inst.call_args[1] = src;
+        inst.call_args[2] = sz_val;
+        inst.call_nargs = 3;
+        ir_inst_array_push(&fn->insts, inst);
+        return;
+    }
     int off = 0;
     while (size > 0) {
         int w = (size >= 8) ? 8 : (size >= 4) ? 4 : (size >= 2) ? 2 : 1;
@@ -3513,30 +3542,26 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     }
                     continue;
                 }
-                /* MEMORY: copy eightbytes onto the outgoing stack. */
-                int nmem = (asz + 7) / 8;
-                if (nmem < 1) nmem = 1;
-                for (int k = 0; k < nmem; k++) {
-                    if (nargs >= arg_limit) {
-                        fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
-                                IR_CALL_MAX_ARGS);
-                        exit(1);
-                    }
-                    int off = k * 8;
-                    int remain = asz - off;
-                    int w = remain >= 8 ? 8 : remain >= 4 ? 4 : remain >= 2 ? 2 : 1;
-                    IRValue a = emit_add_const(fn, av, off, e->loc);
-                    IRValue v = new_value(fn);
-                    emit_inst_w(fn, IR_LOAD_PTR, v, a, -1, 0, w, 1, e->loc);
-                    if (w < 8) {
-                        IRValue wide = new_value(fn);
-                        emit_inst_w(fn, IR_ZEXT, wide, v, -1, w, 8, 1, e->loc);
-                        v = wide;
-                    }
-                    arg_vals[nargs] = v;
-                    arg_on_stack[nargs] = 1;
-                    nargs++;
+                /* MEMORY: pass a pointer to a stack-allocated copy.  Instead
+                 * of expanding into per-eightbyte args (which blows
+                 * IR_CALL_MAX_ARGS on large structs), the caller copies the
+                 * struct bytes into a temporary alloca and passes its address
+                 * as a single pointer arg; the callee copies from that pointer
+                 * into its local slot.  Internally consistent (both sides are
+                 * fakecc-compiled) though not identical to GCC/SysV's inline
+                 * stack copy. */
+                IRValue tmp_alloca = emit_alloca(fn, asz, 8, 1, e->loc);
+                IRValue tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1, 8, 1,
+                                              e->loc);
+                emit_struct_copy(fn, tmp_addr, av, asz, e->loc);
+                if (nargs >= arg_limit) {
+                    fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                            IR_CALL_MAX_ARGS);
+                    exit(1);
                 }
+                arg_vals[nargs] = tmp_addr;
+                arg_on_stack[nargs] = 0;
+                nargs++;
                 continue;
             }
             if (nargs >= arg_limit) {
@@ -6286,11 +6311,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * Struct formals ≤16 bytes expand into 1–2 register PARAMs; larger
          * (MEMORY) formals expand into stack-only eightbyte PARAMs. */
         IRValue param_ebs[64][2];
-        int param_nreg[64]; /* >0 reg ebs; 0 MEMORY; -1 scalar */
-        IRValue param_mem_vals[256];
-        int param_mem_base[64];
-        int param_mem_n[64];
-        int mem_nvals = 0;
+        int param_nreg[64]; /* >0 reg ebs; 0 MEMORY (by stack copy); -1 scalar */
         int next_pidx = 0;
         if (irfn.ret_is_struct && irfn.ret_reg_n == 0) {
             irfn.sret_value = new_value(&irfn);
@@ -6300,8 +6321,6 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
             SourceLoc ploc = fd->params.data[p].loc;
-            param_mem_base[p] = 0;
-            param_mem_n[p] = 0;
             if (pty.kind == TY_STRUCT || pty.is_vector || type_is_i128(pty)) {
                 SysVRegClass cls[2];
                 int nreg;
@@ -6323,21 +6342,14 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                             set_value_float(&irfn, param_ebs[p][k], 1);
                     }
                 } else {
-                    /* MEMORY: eightbytes arrive on the stack only. */
-                    int total = type_size(pty);
-                    int nmem = (total + 7) / 8;
-                    if (nmem < 1) nmem = 1;
-                    if (mem_nvals + nmem > 256) nmem = 256 - mem_nvals;
-                    param_nreg[p] = 0;
-                    param_mem_base[p] = mem_nvals;
-                    param_mem_n[p] = nmem;
-                    for (int k = 0; k < nmem; k++) {
-                        IRValue v = new_value(&irfn);
-                        emit_inst_w(&irfn, IR_PARAM, v, -1, -1, next_pidx++,
-                                    8, 1, ploc);
-                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
-                        param_mem_vals[mem_nvals++] = v;
-                    }
+                    /* MEMORY: arrive as a single pointer to a stack copy.
+                     * The caller copied the struct bytes into a temporary
+                     * alloca and passes its address; the callee copies from
+                     * that pointer into the local slot. */
+                    param_nreg[p] = -1; /* scalar (pointer) */
+                    param_ebs[p][0] = new_value(&irfn);
+                    emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
+                                next_pidx++, 8, 1, ploc);
                 }
             } else {
                 param_nreg[p] = -1;
@@ -6382,27 +6394,10 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     store_agg_regs(&irfn, addr, total, param_nreg[p], cls,
                                    param_ebs[p], ploc);
                 } else {
-                    /* MEMORY: store each incoming stack eightbyte into the
+                    /* MEMORY: the incoming arg is a pointer to a stack copy
+                     * of the struct bytes.  Copy from that pointer into the
                      * local slot. */
-                    SysVRegClass cls[2] = { SYSV_CLS_INTEGER, SYSV_CLS_INTEGER };
-                    for (int k = 0; k < param_mem_n[p]; k++) {
-                        int off = k * 8;
-                        int remain = total - off;
-                        if (remain <= 0) break;
-                        int w = remain >= 8 ? 8 : remain >= 4 ? 4
-                              : remain >= 2 ? 2 : 1;
-                        IRValue a = emit_add_const(&irfn, addr, off, ploc);
-                        IRValue v = param_mem_vals[param_mem_base[p] + k];
-                        if (w < 8) {
-                            IRValue t = new_value(&irfn);
-                            emit_inst_w(&irfn, IR_TRUNC, t, v, -1, 8, w, 1,
-                                        ploc);
-                            v = t;
-                        }
-                        emit_inst_w(&irfn, IR_STORE_PTR, -1, a, v, 0, w, 1,
-                                    ploc);
-                        (void)cls;
-                    }
+                    emit_struct_copy(&irfn, addr, param_ebs[p][0], total, ploc);
                 }
             } else if (pinned) {
                 int total = type_size(pty);
@@ -6423,7 +6418,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 if (irfn.ret_is_struct && irfn.ret_reg_n == 0) pidx = 1;
                 for (size_t q = 0; q < p; q++) {
                     if (param_nreg[q] > 0) pidx += param_nreg[q];
-                    else if (param_nreg[q] == 0) pidx += param_mem_n[q];
+                    else if (param_nreg[q] == 0) pidx += 1; /* MEMORY: 1 slot */
                     else pidx += 1;
                 }
                 ir_add_dbg_var(&irfn, pname, ploc, IR_DBG_PARAM, pty, slot, pidx);
