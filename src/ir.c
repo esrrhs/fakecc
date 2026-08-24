@@ -3493,10 +3493,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue arg_vals[IR_CALL_MAX_ARGS];
         unsigned char arg_on_stack[IR_CALL_MAX_ARGS];
         int nargs = 0;
-        int call_mem_arg_size = 0;  /* 0 = no memory arg */
-        int call_mem_arg_slot = -1;
-        const char *call_mem_arg_name = NULL;
-        IRValue call_mem_arg_alloca = -1;
         memset(arg_on_stack, 0, sizeof(arg_on_stack));
         /* Reserve a slot if the return needs a hidden sret pointer. */
         int is_void_pre = (e->type.kind == TY_VOID);
@@ -3546,41 +3542,25 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     }
                     continue;
                 }
-                /* MEMORY: pass by inline stack copy.  Instead of expanding
-                 * into per-eightbyte args (which blows IR_CALL_MAX_ARGS on
-                 * large structs), reserve a single sentinel arg slot and
-                 * record a mem_arg: the caller will copy `asz` bytes from
-                 * `*av` onto the outgoing stack at this slot.  The callee
-                 * reads from the matching incoming stack offset.  This
-                 * matches GCC/SysV: struct bytes live on the stack between
-                 * caller and callee, no pointer indirection. */
+                /* MEMORY: pass a pointer to a stack-allocated copy.  Instead
+                 * of expanding into per-eightbyte args (which blows
+                 * IR_CALL_MAX_ARGS on large structs), the caller copies the
+                 * struct bytes into a temporary alloca and passes its address
+                 * as a single pointer arg; the callee copies from that pointer
+                 * into its local slot.  Internally consistent (both sides are
+                 * fakecc-compiled) though not identical to GCC/SysV's inline
+                 * stack copy. */
+                IRValue tmp_alloca = emit_alloca(fn, asz, 8, 1, e->loc);
+                IRValue tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1, 8, 1,
+                                              e->loc);
+                emit_struct_copy(fn, tmp_addr, av, asz, e->loc);
                 if (nargs >= arg_limit) {
                     fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
                             IR_CALL_MAX_ARGS);
                     exit(1);
                 }
-                arg_vals[nargs] = -1; /* sentinel: mem_arg placeholder */
-                arg_on_stack[nargs] = 1;
-                call_mem_arg_size = asz;
-                call_mem_arg_slot = nargs;
-                /* Determine the source kind by inspecting how `av` was
-                 * produced.  Look at the most recent instruction with dst==av. */
-                call_mem_arg_name = NULL;
-                call_mem_arg_alloca = -1;
-                for (size_t j = 0; j < fn->insts.len; j++) {
-                    const IRInst *pi = &fn->insts.data[j];
-                    if (pi->dst != av) continue;
-                    if (pi->op == IR_GADDR && pi->call_name) {
-                        call_mem_arg_name = xstrdup(pi->call_name);
-                    } else if (pi->op == IR_ADDR && pi->a >= 0) {
-                        call_mem_arg_alloca = pi->a;
-                    }
-                    break;
-                }
-                if (!call_mem_arg_name && call_mem_arg_alloca < 0) {
-                    /* Fallback: treat as local alloca */
-                    call_mem_arg_alloca = av;
-                }
+                arg_vals[nargs] = tmp_addr;
+                arg_on_stack[nargs] = 0;
                 nargs++;
                 continue;
             }
@@ -3752,10 +3732,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.width = ret_in_mem ? 8
                       : (is_void ? 0 : (e->type.width ? e->type.width : 4));
         inst.is_unsigned = ret_in_mem ? 1 : e->type.is_unsigned;
-        inst.mem_arg_size = call_mem_arg_size;
-        inst.mem_arg_slot = call_mem_arg_slot;
-        inst.mem_arg_name = call_mem_arg_name;
-        inst.mem_arg_alloca = call_mem_arg_alloca;
         ir_inst_array_push(&fn->insts, inst);
         if (!is_void && !is_ret_struct) {
             set_value_type(fn, v, inst.width, inst.is_unsigned);
@@ -6366,15 +6342,14 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                             set_value_float(&irfn, param_ebs[p][k], 1);
                     }
                 } else {
-                    /* MEMORY: the struct bytes arrive on the incoming stack
-                     * (copied there by the caller).  No IR_PARAM is created
-                     * for it — the reconstruction below emits an
-                     * IR_MEM_ARG_LOAD that copies from [rbp + stack_off]
-                     * into the local slot.  param_nreg[p] = 0 marks this
-                     * formal as a memory-arg struct for reconstruction and
-                     * stack-offset accounting. */
-                    param_nreg[p] = 0;
-                    param_ebs[p][0] = -1; /* no SSA value; loaded from stack */
+                    /* MEMORY: arrive as a single pointer to a stack copy.
+                     * The caller copied the struct bytes into a temporary
+                     * alloca and passes its address; the callee copies from
+                     * that pointer into the local slot. */
+                    param_nreg[p] = -1; /* scalar (pointer) */
+                    param_ebs[p][0] = new_value(&irfn);
+                    emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
+                                next_pidx++, 8, 1, ploc);
                 }
             } else {
                 param_nreg[p] = -1;
@@ -6387,10 +6362,6 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     set_value_float(&irfn, param_ebs[p][0], 1);
             }
         }
-        /* Track the SysV stack-slot index so MEMORY struct params can compute
-         * their incoming stack offset (16 + 8 * stack_slot_idx).  Each GP/XMM
-         * arg that spills to the stack, and each MEMORY struct, consumes slots. */
-        int stack_slot_idx = 0;
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
             int pw = pty.kind == TY_PTR ? 8 : (pty.width ? pty.width : 4);
@@ -6423,21 +6394,10 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     store_agg_regs(&irfn, addr, total, param_nreg[p], cls,
                                    param_ebs[p], ploc);
                 } else {
-                    /* MEMORY: the struct bytes arrive on the incoming
-                     * stack at a slot determined by the number of prior
-                     * stack-passed args.  Emit IR_MEM_ARG_LOAD so the
-                     * callee's prologue copies them into the local slot.
-                     * This matches GCC/SysV: no pointer indirection. */
-                    IRInst inst;
-                    memset(&inst, 0, sizeof(inst));
-                    inst.op = IR_MEM_ARG_LOAD;
-                    inst.dst = -1;
-                    inst.a = slot; /* destination alloca */
-                    inst.b = stack_slot_idx; /* stack-slot index */
-                    inst.imm = total; /* bytes to copy */
-                    inst.width = 0;
-                    inst.loc = ploc;
-                    ir_inst_array_push(&irfn.insts, inst);
+                    /* MEMORY: the incoming arg is a pointer to a stack copy
+                     * of the struct bytes.  Copy from that pointer into the
+                     * local slot. */
+                    emit_struct_copy(&irfn, addr, param_ebs[p][0], total, ploc);
                 }
             } else if (pinned) {
                 int total = type_size(pty);
