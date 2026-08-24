@@ -633,6 +633,7 @@ enum UnaryOp {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 struct ExprArray {
     Expr **data;
     size_t len;
@@ -1898,13 +1899,26 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
             emit_store_base_off(b, ap_reg, REG_R11, 8);
             patch_rel32(b, jmp_end, b->len);
         } else {
+            emit_load_base_off32(b, REG_RCX, ap_reg, 0);
+            emit_cmp_imm32(b, REG_RCX, 48);
+            size_t jae_ov = emit_jcc_rel32(b, 0x83);
+            emit_load_base_off(b, REG_RDX, ap_reg, 16);
+            emit_add_rr(b, REG_RDX, REG_RCX);
+            emit_load_base_off(b, REG_RDX, REG_RDX, 0);
+            emit_add_imm32(b, REG_RCX, 8);
+            emit_store_base_off32(b, ap_reg, REG_RCX, 0);
+            size_t jmp_end = emit_jmp_rel32(b);
+            size_t ov_off = b->len;
+            patch_rel32(b, jae_ov, ov_off);
             emit_load_base_off(b, REG_R11, ap_reg, 8);
-            for (int i = 0; i < n8; i++) {
-                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
-                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
-            }
-            emit_add_imm32(b, REG_R11, ov_step);
+            emit_load_base_off(b, REG_RDX, REG_R11, 0);
+            emit_add_imm32(b, REG_R11, 8);
             emit_store_base_off(b, ap_reg, REG_R11, 8);
+            patch_rel32(b, jmp_end, b->len);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_R11, REG_RDX, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_R11, i * 8);
+            }
         }
         if (dst >= 0) {
             if (ra && dst < ra->num_values && ra->reg[dst] >= 0

@@ -275,6 +275,7 @@ enum UnaryOp {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 struct ExprArray {
     Expr **data;
     size_t len;
@@ -1526,7 +1527,7 @@ static long long parse_array_size_ext(Parser *p, Expr **dim_expr) {
     long long val = 0;
     if (fold_const_int(e, &val)) {
         expr_free(e);
-        return val > 0 ? val : 1;
+        return val >= 0 ? val : 1;
     }
     if (e->kind == EX_VAR) {
         const EnumConstant *ec =
@@ -2136,6 +2137,26 @@ static Expr *parse_unary(Parser *p) {
         expr_free(arg);
         return expr_new_int(is_const ? 1 : 0, loc);
     }
+    if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_choose_expr") == 0) {
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        Expr *cond = parse_assign(p);
+        expect_kind(p, TK_COMMA, "','");
+        Expr *then = parse_assign(p);
+        expect_kind(p, TK_COMMA, "','");
+        Expr *else_ = parse_assign(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        long long v;
+        int is_const = fold_const_int(cond, &v) || (cond->kind == EX_STR) || (cond->kind == EX_FLOAT_LIT);
+        expr_free(cond);
+        if (is_const) {
+            expr_free(else_);
+            return then;
+        } else {
+            expr_free(then);
+            return else_;
+        }
+    }
     if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_offsetof") == 0) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
@@ -2301,8 +2322,6 @@ static int u128_fits(unsigned long long lo, unsigned long long hi,
         : ((1ULL << (bits - 1)) - 1ULL);
     return lo <= max;
 }
-/* (hi:lo) * base + digit.  base is 8, 10, or 16.  Returns 1 on 128-bit
- * overflow.  Schoolbook 64-bit multiply-split-into-32-bit halves. */
 static int u128_mul_add(unsigned long long *lo, unsigned long long *hi,
                         unsigned base, unsigned digit) {
     unsigned long long a = *lo >> 32, b = *lo & 0xffffffffULL;
@@ -2327,11 +2346,6 @@ static int u128_mul_add(unsigned long long *lo, unsigned long long *hi,
     *hi = new_hi;
     return 0;
 }
-
-/* Parse and validate the integer suffix.  Writes the body end (past the
- * last suffix char) to *body_end, and reports whether `u` / `l` appear.
- * Rejects malformed suffixes like `123LLL`, `123lul`, `123UU`.
- * Accepts `U`, `L`, `LL`, `UL`, `LU`, `ULL`, `LLU`, and any case variant. */
 static int parse_int_suffix(const char *text, size_t n, size_t *body_end,
                             int *suffix_u, int *suffix_l) {
     size_t pos = n;
@@ -2339,10 +2353,10 @@ static int parse_int_suffix(const char *text, size_t n, size_t *body_end,
     while (pos > 0) {
         char c = text[pos - 1];
         if (c == 'u' || c == 'U') {
-            if (u) return 0;            /* duplicate 'u' */
+            if (u) return 0;
             u = 1; pos--;
         } else if (c == 'l' || c == 'L') {
-            if (l >= 2) return 0;       /* more than two 'l' */
+            if (l >= 2) return 0;
             l++; pos--;
         } else break;
     }
@@ -2351,20 +2365,17 @@ static int parse_int_suffix(const char *text, size_t n, size_t *body_end,
     *suffix_l = (l > 0) ? 1 : 0;
     return 1;
 }
-
 static void int_literal_typed(const char *text, SourceLoc loc,
                               unsigned long long *out_lo, unsigned long long *out_hi,
                               int *out_width, int *out_unsigned) {
     size_t n = runtime.strlen(text);
     int suffix_u = 0, suffix_l = 0;
     size_t body = n;
-
     if (!parse_int_suffix(text, n, &body, &suffix_u, &suffix_l)) {
         die_at(loc.file, loc.line, loc.col, "invalid suffix on integer constant");
         suffix_u = 0; suffix_l = 0;
         body = n;
     }
-
     int base = 10;
     size_t i = 0;
     int decimal = 1;
@@ -2396,8 +2407,8 @@ static void int_literal_typed(const char *text, SourceLoc loc,
             return;
         }
         if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
-            runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant "
-                            "is too large for its type\n", loc.file, loc.line, loc.col);
+            runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant is too large "
+                    "for its type\n", loc.file, loc.line, loc.col);
             lo = 0; hi = 0;
             {
                 unsigned long long tlo = 0;
@@ -2417,13 +2428,13 @@ static void int_literal_typed(const char *text, SourceLoc loc,
             break;
         }
     }
-    /* Hex / octal wider than 64 bits: wrap to low 64 bits (GCC behaviour). */
     if (!decimal && hi != 0) {
-        runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant "
-                        "is too large for its type\n", loc.file, loc.line, loc.col);
+        runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant is too large "
+                "for its type\n", loc.file, loc.line, loc.col);
         hi = 0;
     }
-    int width, is_unsigned;
+int width;
+int is_unsigned;
     if (suffix_u) {
         is_unsigned = 1;
         if (u128_fits(lo, hi, 32, 1) && !suffix_l) width = 4;
@@ -3820,6 +3831,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
             die_at(fn.loc.file, fn.loc.line, fn.loc.col,
                    "more than 16 parameters not supported");
         }
+    } else if (peek(p)->kind == TK_ELLIPSIS) {
+        advance(p);
+        fn.is_variadic = 1;
+        fn.is_unprototyped = 1;
     } else if (peek(p)->kind != TK_RPAREN) {
         fn.is_unprototyped = 1;
         for (;;) {
@@ -3839,10 +3854,6 @@ static FunctionDecl parse_function_decl(Parser *p) {
         }
     } else {
         fn.is_unprototyped = 1;
-    }
-    if (fn.is_variadic && fn.params.len == 0) {
-        die_at(fn.loc.file, fn.loc.line, fn.loc.col,
-               "'...' must follow a named parameter");
     }
     expect_kind(p, TK_RPAREN, "')'");
     if (nkr > 0) {

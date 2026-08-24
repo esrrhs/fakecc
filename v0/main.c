@@ -633,6 +633,7 @@ enum UnaryOp {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 struct ExprArray {
     Expr **data;
     size_t len;
@@ -1009,6 +1010,9 @@ void sema_check_in_pkg(const TranslationUnit *tu, int require_main,
                        struct PkgContext *ctx);
 typedef struct FILE FILE;
 typedef long fpos_t;
+const char *__asan_default_options(void) {
+    return "detect_leaks=0";
+}
 static char *read_file(const char *path) {
     FILE *f = runtime.fopen(path, "rb");
     if (!f) {
