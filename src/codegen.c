@@ -539,12 +539,15 @@ static void emit_x87_arith_pop(Buffer *b, int op) {
 }
 
 /* fstpt [rsp]  →  DB /7 [mod=00 reg=7 rm=4 SIB=0x24].  Store st0 to a 16-byte
- * slot at [rsp] and pop.  Used to push long-double call args. */
+ * slot at [rsp] and pop.  (Unused — long double args now use fstpt [rcx]
+ * with a computed offset.  Kept for reference.) */
+#if 0
 static void emit_x87_fstpt_rsp(Buffer *b) {
     emit_byte(b, 0xDB);
     emit_modrm(b, 0, 7, 4); /* mod=00 rm=100 => SIB follows */
     emit_byte(b, 0x24);     /* SIB: base=rsp, index=none */
 }
+#endif
 
 /* fcomip st0, st1  →  DF F1.  Compare st0 to st1, pop st0, set ZF/CF.
  * Used for long-double comparisons (IR_FCMP ld). */
@@ -2555,6 +2558,35 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
 
+            case IR_MEM_ARG_LOAD: {
+                /* Copy inst->imm bytes from the incoming stack at slot
+                 * inst->b into the local alloca inst->a.  Source is at
+                 * [rbp + 16 + 8*inst->b]; dest is the pinned alloca at
+                 * alloca_off[inst->a].  Emit memcpy(dst, src, size). */
+                int stack_off = 16 + 8 * inst->b;
+                /* leaq stack_off(%rbp), %rsi (source) */
+                emit_lea_rbp(&out->text, REG_RSI, stack_off);
+                /* leaq alloca_off[a](%rbp), %rdi (destination) */
+                int dst_off = (inst->a >= 0 && inst->a < fn->next_value_id)
+                              ? alloca_off[inst->a] : 0;
+                emit_lea_rbp(&out->text, REG_RDI, dst_off);
+                /* movq $size, %rdx */
+                emit_mov_imm64(&out->text, REG_RDX, (int64_t)inst->imm);
+                /* call memcpy */
+                size_t poff = emit_call_rel32(&out->text);
+                size_t aft = out->text.len;
+                if (num_call_patches >= cap_call_patches) {
+                    cap_call_patches = cap_call_patches ? cap_call_patches * 2 : 8;
+                    call_patches = xrealloc(call_patches,
+                                             cap_call_patches * sizeof(CallPatch));
+                }
+                call_patches[num_call_patches].patch_off = poff;
+                call_patches[num_call_patches].callee = xstrdup("memcpy");
+                call_patches[num_call_patches].after_off = aft;
+                num_call_patches++;
+                break;
+            }
+
             case IR_FADDR: {
                 /* dst = &function; function name in inst->call_name.  Emit
                  * `lea r, [rip+0]` and record an FnAddrPatch resolved against
@@ -3004,7 +3036,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int target_reg[IR_CALL_MAX_ARGS];   /* native reg code, -1=stack */
                 int target_is_xmm[IR_CALL_MAX_ARGS];
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
+                int mem_arg_idx = -1; /* sentinel slot for MEMORY struct copy */
                 for (int k = 0; k < nargs; k++) {
+                    /* Sentinel slot for a MEMORY struct passed by inline stack
+                     * copy: call_args[k] < 0 marks it.  It occupies
+                     * ceil(mem_arg_size/8) stack slots. */
+                    if (inst->call_args[k] < 0 && inst->call_arg_on_stack[k]) {
+                        target_reg[k] = -1;
+                        target_is_xmm[k] = 0;
+                        n_stack += (inst->mem_arg_size + 7) / 8;
+                        mem_arg_idx = k;
+                        continue;
+                    }
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
                     int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
                     int force_stack = inst->call_arg_on_stack[k] || is_ld;
@@ -3034,33 +3077,66 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         }
                     }
                 }
-                /* Alignment: at call time rsp must be 16-aligned.  The reg-arg
-                 * dance is balanced (pushes == pops), so only the nstack
-                 * pushes shift alignment.  Pad iff nstack is odd. */
-                int need_pad = (n_stack & 1);
-                if (need_pad) emit_sub_rsp_imm32(&out->text, 8);
+                /* Compute the byte offset (from rsp) where each stack arg
+                 * lands.  SysV orders stack args by ascending arg index at
+                 * [rsp+8], [rsp+16], ...  The mem_arg occupies a contiguous
+                 * region of mem_arg_size bytes (rounded up to 8); regular
+                 * stack args occupy 8 bytes each (16 for long double). */
+                int stack_byte_off[IR_CALL_MAX_ARGS];
+                int stack_pos = 8; /* next free byte offset from rsp */
+                for (int k = 0; k < nargs; k++) {
+                    if (target_reg[k] >= 0) {
+                        stack_byte_off[k] = -1;
+                        continue;
+                    }
+                    if (inst->call_args[k] < 0 && inst->call_arg_on_stack[k]) {
+                        /* mem_arg: align to 8 bytes */
+                        stack_pos = (stack_pos + 7) & ~7;
+                        stack_byte_off[k] = stack_pos;
+                        stack_pos += (inst->mem_arg_size + 7) & ~7;
+                    } else if (value_is_ld(fn, inst->call_args[k])) {
+                        stack_byte_off[k] = stack_pos;
+                        stack_pos += 16;
+                    } else {
+                        stack_byte_off[k] = stack_pos;
+                        stack_pos += 8;
+                    }
+                }
+                int total_stack_bytes = stack_pos - 8;
+                /* Alignment: at call time rsp must be 16-aligned.  Round up
+                 * to the next 16-byte boundary to guarantee alignment
+                 * regardless of the frame layout above. */
+                total_stack_bytes = (total_stack_bytes + 15) & ~15;
+                if (total_stack_bytes > 0)
+                    emit_sub_rsp_imm32(&out->text, total_stack_bytes);
 
-                /* Push stack-passed args right-to-left (highest index first)
-                 * so they end up at [rsp+8], [rsp+16], ... in order. */
+                /* Store regular stack-passed args at their computed offsets. */
                 for (int k = nargs - 1; k >= 0; k--) {
                     if (target_reg[k] >= 0) continue; /* reg-passed */
+                    if (inst->call_args[k] < 0 && inst->call_arg_on_stack[k])
+                        continue; /* mem_arg copied below */
+                    int off = stack_byte_off[k];
                     if (value_is_ld(fn, inst->call_args[k])) {
-                        /* long double: 16-byte stack slot.  fldt its home slot,
-                         * alloc 16 bytes, fstpt [rsp].  Clobbers RCX. */
                         emit_ld_load(&out->text, inst->call_args[k], ld_off);
-                        emit_sub_rsp_imm32(&out->text, 16);
-                        emit_x87_fstpt_rsp(&out->text);
+                        emit_rex_wrb(&out->text, 1, REG_RCX, REG_RSP);
+                        emit_byte(&out->text, 0x8D);
+                        if (off >= -128 && off <= 127) {
+                            emit_modrm(&out->text, 1, REG_RCX & 7, 4);
+                            emit_byte(&out->text, 0x24);
+                            emit_byte(&out->text, (uint8_t)(off & 0xFF));
+                        } else {
+                            emit_modrm(&out->text, 2, REG_RCX & 7, 4);
+                            emit_byte(&out->text, 0x24);
+                            emit_int32(&out->text, off);
+                        }
+                        emit_x87_fstptRCX(&out->text);
                     } else if (value_is_float_class(fn, inst->call_args[k])) {
-                        /* float/double past XMM0-7 (or in a MEMORY eightbyte):
-                         * it lives in the XMM file, so it has to be fetched
-                         * from there even though it travels on the stack. */
                         ensure_reg_xmm(&out->text, inst->call_args[k],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
-                        emit_sub_rsp_imm32(&out->text, 8);
-                        emit_sse_store_rsp(&out->text, XMM_SCRATCH0);
+                        emit_sse_store_rsp_off(&out->text, XMM_SCRATCH0, off);
                     } else {
                         ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
-                        emit_push_r(&out->text, REG_RAX);
+                        emit_store_rsp_off(&out->text, REG_RAX, off);
                     }
                 }
 
@@ -3088,6 +3164,57 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 /* Pop callee into R11 first. */
                 if (!inst->call_name) {
                     emit_pop_r(&out->text, REG_R11);
+                }
+                /* Copy the mem_arg (if any) onto the stack via memcpy.
+                 * At this point all register args are pushed onto the dance,
+                 * so rdi/rsi/rdx are free for the memcpy call. */
+                if (mem_arg_idx >= 0) {
+                    int dst_off = stack_byte_off[mem_arg_idx];
+                    /* Load source address into rsi.  The source description
+                     * is stored directly in the call instruction, so we can
+                     * emit the address without consulting the register
+                     * allocator. */
+                    if (inst->mem_arg_name) {
+                        /* Global: lea symbol(%rip), %rsi with GOT/PC32 reloc */
+                        int gsym = emit_module_find_symbol(out, inst->mem_arg_name);
+                        int defined_here = (gsym >= 0 && out->syms[gsym].shndx != SECT_UNDEF);
+                        if (defined_here) {
+                            size_t patch = emit_lea_rip(&out->text, REG_RSI);
+                            emit_module_add_reloc(out, patch, R_X86_64_PC32, gsym, -4);
+                        } else {
+                            if (gsym < 0)
+                                gsym = emit_module_add_undefined(out, inst->mem_arg_name);
+                            size_t patch = emit_load_rip(&out->text, REG_RSI);
+                            emit_module_add_reloc(out, patch, R_X86_64_GOTPCREL, gsym, -4);
+                        }
+                    } else if (inst->mem_arg_alloca >= 0 && inst->mem_arg_alloca < fn->next_value_id) {
+                        /* Local alloca: lea alloca_off(%rbp), %rsi */
+                        emit_lea_rbp(&out->text, REG_RSI, alloca_off[inst->mem_arg_alloca]);
+                    }
+                    /* leaq dst_off(%rsp), %rdi */
+                    emit_rex_wrb(&out->text, 1, REG_RDI, REG_RSP);
+                    emit_byte(&out->text, 0x8D);
+                    if (dst_off >= -128 && dst_off <= 127) {
+                        emit_modrm(&out->text, 1, REG_RDI & 7, 4);
+                        emit_byte(&out->text, 0x24);
+                        emit_byte(&out->text, (uint8_t)(dst_off & 0xFF));
+                    } else {
+                        emit_modrm(&out->text, 2, REG_RDI & 7, 4);
+                        emit_byte(&out->text, 0x24);
+                        emit_int32(&out->text, dst_off);
+                    }
+                    emit_mov_imm64(&out->text, REG_RDX, (int64_t)inst->mem_arg_size);
+                    size_t poff = emit_call_rel32(&out->text);
+                    size_t aft = out->text.len;
+                    if (num_call_patches >= cap_call_patches) {
+                        cap_call_patches = cap_call_patches ? cap_call_patches * 2 : 8;
+                        call_patches = xrealloc(call_patches,
+                                                 cap_call_patches * sizeof(CallPatch));
+                    }
+                    call_patches[num_call_patches].patch_off = poff;
+                    call_patches[num_call_patches].callee = xstrdup("memcpy");
+                    call_patches[num_call_patches].after_off = aft;
+                    num_call_patches++;
                 }
                 /* Distribute in forward order (arg 0 on top of the dance). */
                 for (int k = 0; k < nargs; k++) {
@@ -3240,8 +3367,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
 
                 /* Tear down stack args + padding. */
-                int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
-                if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);
+                if (total_stack_bytes > 0)
+                    emit_add_rsp_imm32(&out->text, total_stack_bytes);
 
                 /* Multi-eightbyte aggregate return: save hi (RDX/XMM1) first
                  * so capturing lo into a home that aliases RDX/XMM1 is safe. */

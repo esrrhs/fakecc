@@ -79,6 +79,12 @@ typedef enum {
     IR_STACK_SAVE,  /* dst = %rsp — save stack pointer */
     IR_STACK_RESTORE, /* %rsp = a — restore stack pointer */
     IR_LONGJMP,     /* a = buf ptr — restore %rbp, %rsp and jump to buf[1] */
+    /* MEMORY-class struct arg load: copy `imm` bytes from the incoming stack
+     * at slot `b` into the local alloca `a`.  Codegen emits a memcpy from
+     * [rbp + 16 + 8*b] to `a`.  This is how large by-value structs arrive in
+     * the callee under SysV: bytes on the stack, no pointer indirection
+     * (matches GCC).  `dst` is unused (-1). */
+    IR_MEM_ARG_LOAD,
     /* Debug-only marker (emitted by mem2reg under -g): from here on, source
      * variable `imm` (index into fn->dbg_vars) lives in SSA value `a`.
      *
@@ -125,6 +131,23 @@ typedef struct {
     int      force_stack;
     /* IR_CALL only: per-arg force_stack (MEMORY-class aggregate eightbytes). */
     unsigned char call_arg_on_stack[IR_CALL_MAX_ARGS];
+    /* IR_CALL only: MEMORY-class struct passed by inline stack copy.
+     * Instead of expanding a large struct into per-eightbyte args (which
+     * blows IR_CALL_MAX_ARGS), the caller copies `mem_arg_size` bytes from
+     * `*mem_arg_src` onto the outgoing stack at the slot occupied by arg
+     * `mem_arg_slot`.  The callee reads from the matching incoming stack
+     * offset ([rbp + 16 + 8*slot]).  This matches GCC/SysV: struct bytes
+     * live on the stack between caller and callee, no pointer indirection.
+     * 0 when no memory arg is present. */
+    int      mem_arg_size;
+    int      mem_arg_slot; /* arg index where the struct's first byte goes */
+    /* Source description for the memory arg.  Either a global (name in
+     * mem_arg_name, emitted via lea+reloc) or a local pinned alloca (SSA
+     * value in mem_arg_alloca, emitted via lea rbp+off).  Storing the
+     * description directly avoids register-allocation hazards where an
+     * SSA value's register is reused for another live value. */
+    const char *mem_arg_name;   /* global symbol name (kind=global) */
+    IRValue     mem_arg_alloca; /* alloca SSA value (kind=local) */
     /* Slice 7b/c: for IR_ALLOCA only. Total bytes reserved on the stack when
      * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
      * mem2reg promotes get 0 here (they never reach codegen anyway). */
