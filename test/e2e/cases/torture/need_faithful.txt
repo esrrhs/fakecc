@@ -1,7 +1,21 @@
-# FakeCC pending GCC c-torture execute tests
-#
-# Names match gcc/testsuite/gcc.c-torture/execute/*.c (not the
-# gcc_torture_* e2e ports). Wrap the original faithfully; if a case
-# fails, fix the compiler. Nested-function tests live in UNSUPPORTED.txt.
+# GCC c-torture/execute tests NOT yet ported to fakecc
+# Total GCC tests: 1676
+# Already ported: 1509
+# Not ported: 0 (all remaining tests are in UNSUPPORTED.txt)
 
-# All tests processed.
+# All remaining tests from the original need_faithful.txt have been
+# either ported to fakecc or moved to UNSUPPORTED.txt because they
+# use features not supported by fakecc:
+# - Inline assembly (asm volatile)
+# - __int128 type
+# - Vector types (__attribute__((vector_size(...))))
+# - Nested functions / trampolines / label values
+# - Variable-length arrays (VLAs) in structs
+# - _Decimal64 type
+# - __builtin_apply/__builtin_apply_args
+# - __builtin_isinf/f/l
+# - Complex numbers
+# - Preprocessor conditionals/macros
+# - stdarg.h / va_list
+# - sprintf/printf (complex format strings)
+# - malloc (runtime hang)

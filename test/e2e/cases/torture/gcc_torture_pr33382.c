@@ -1,0 +1,24 @@
+// expect: 0
+package main;
+
+struct Foo {
+  int i;
+  int j[4];
+};
+
+struct Foo x = { 1, { 2, 0, 2, 3 } };
+
+int foo(void)
+{
+  x.j[0] = 1;
+  return x.j[1];
+}
+
+extern void abort(void);
+
+int main(void)
+{
+  if (foo() != 0)
+    abort();
+  return 0;
+}

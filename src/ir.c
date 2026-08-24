@@ -3108,6 +3108,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             fn->has_dyn_alloca = 1;
             return res;
         }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_expect") == 0) {
+            /* __builtin_expect(val, exp) returns val; the hint is for
+             * branch prediction and does not affect the result.
+             * Both arguments must be evaluated for side effects. */
+            if (e->u.call.args.len >= 2) {
+                IRValue exp = lower_expr(fn, st, e->u.call.args.data[1]);
+                (void)exp;
+                return lower_expr(fn, st, e->u.call.args.data[0]);
+            }
+            if (e->u.call.args.len >= 1)
+                return lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 8, 0, e->loc);
+            set_value_type(fn, v, 8, 0);
+            return v;
+        }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_longjmp") == 0) {
             IRValue buf_ptr = lower_expr(fn, st, e->u.call.args.data[0]);
             emit_inst_w(fn, IR_LONGJMP, -1, buf_ptr, -1, 0, 8, 1, e->loc);
@@ -3374,6 +3390,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * first arg lowers directly to the struct base address. */
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
+            if (strcmp(cname, "va_copy") == 0
+                || strcmp(cname, "__builtin_va_copy") == 0) {
+                IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+                emit_struct_copy(fn, dst, src, 24, e->loc);
+                return -1;
+            }
             if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
                 || strcmp(cname, "va_arg") == 0
                 || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_va_end") == 0

@@ -1767,6 +1767,31 @@ static Expr *parse_unary(Parser *p) {
         expr_free(arg);
         return expr_new_int(is_const ? 1 : 0, loc);
     }
+    if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_choose_expr") == 0) {
+        /* __builtin_choose_expr(const_expr, expr1, expr2): if const_expr is a
+         * compile-time constant, return expr1, else expr2.  Unlike the ternary
+         * operator, the unselected branch is discarded at compile time.
+         * Use parse_assign (not parse_expr) so commas separate arguments
+         * instead of being parsed as the comma operator. */
+        advance(p);
+        expect_kind(p, TK_LPAREN, "'('");
+        Expr *cond = parse_assign(p);
+        expect_kind(p, TK_COMMA, "','");
+        Expr *then = parse_assign(p);
+        expect_kind(p, TK_COMMA, "','");
+        Expr *else_ = parse_assign(p);
+        expect_kind(p, TK_RPAREN, "')'");
+        long long v;
+        int is_const = fold_const_int(cond, &v) || (cond->kind == EX_STR) || (cond->kind == EX_FLOAT_LIT);
+        expr_free(cond);
+        if (is_const) {
+            expr_free(else_);
+            return then;
+        } else {
+            expr_free(then);
+            return else_;
+        }
+    }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_offsetof") == 0) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
@@ -3636,6 +3661,11 @@ static FunctionDecl parse_function_decl(Parser *p) {
             die_at(fn.loc.file, fn.loc.line, fn.loc.col,
                    "more than 16 parameters not supported");
         }
+    } else if (peek(p)->kind == TK_ELLIPSIS) {
+        /* Old-style varargs with no named parameters: `f(...)`. */
+        advance(p);
+        fn.is_variadic = 1;
+        fn.is_unprototyped = 1;
     } else if (peek(p)->kind != TK_RPAREN) {
         /* K&R identifier list: `f(a, b)`. */
         fn.is_unprototyped = 1;
@@ -3656,11 +3686,6 @@ static FunctionDecl parse_function_decl(Parser *p) {
         }
     } else {
         fn.is_unprototyped = 1;
-    }
-
-    if (fn.is_variadic && fn.params.len == 0) {
-        die_at(fn.loc.file, fn.loc.line, fn.loc.col,
-               "'...' must follow a named parameter");
     }
 
     expect_kind(p, TK_RPAREN, "')'");
