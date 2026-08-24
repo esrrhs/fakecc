@@ -3083,7 +3083,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * region of mem_arg_size bytes (rounded up to 8); regular
                  * stack args occupy 8 bytes each (16 for long double). */
                 int stack_byte_off[IR_CALL_MAX_ARGS];
-                int stack_pos = 8; /* next free byte offset from rsp */
+                int stack_pos = 0; /* next free byte offset from rsp (before call) */
                 for (int k = 0; k < nargs; k++) {
                     if (target_reg[k] >= 0) {
                         stack_byte_off[k] = -1;
@@ -3102,7 +3102,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         stack_pos += 8;
                     }
                 }
-                int total_stack_bytes = stack_pos - 8;
+                int total_stack_bytes = stack_pos;
                 /* Alignment: at call time rsp must be 16-aligned.  Round up
                  * to the next 16-byte boundary to guarantee alignment
                  * regardless of the frame layout above. */
@@ -3110,11 +3110,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (total_stack_bytes > 0)
                     emit_sub_rsp_imm32(&out->text, total_stack_bytes);
 
-                /* Store regular stack-passed args at their computed offsets. */
+                /* Store regular stack-passed args at their computed offsets.
+                 * This must happen BEFORE the reg-arg dance (which clobbers
+                 * registers via push/pop).  At this point rsp is stable
+                 * (after the sub rsp above) and registers hold arg values. */
                 for (int k = nargs - 1; k >= 0; k--) {
                     if (target_reg[k] >= 0) continue; /* reg-passed */
                     if (inst->call_args[k] < 0 && inst->call_arg_on_stack[k])
-                        continue; /* mem_arg copied below */
+                        continue; /* mem_arg copied later */
                     int off = stack_byte_off[k];
                     if (value_is_ld(fn, inst->call_args[k])) {
                         emit_ld_load(&out->text, inst->call_args[k], ld_off);
@@ -3139,7 +3142,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_store_rsp_off(&out->text, REG_RAX, off);
                     }
                 }
-
                 /* Reg-arg dance: push all reg-arg values in reverse order,
                  * then load them into their targets in forward order.  Saving
                  * everything to the stack first dodges cross-arg clobbers. */
