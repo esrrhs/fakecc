@@ -1,0 +1,6 @@
+Vendored from GCC 16.2.0: gcc/testsuite/gcc.c-torture/
+Upstream: https://gcc.gnu.org/
+License: GPL-3.0-or-later (see COPYING3 in this directory).
+
+Reference copy only — not part of fakecc's e2e suite.
+Paths in test/e2e/cases/torture/need_faithful.txt are relative to this directory.

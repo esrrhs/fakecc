@@ -1,7 +1,9 @@
 # GCC 16.2.0 gcc.c-torture C-source inventory
-# Source: gcc-16.2.0/gcc/testsuite/gcc.c-torture/
+# Local copy: test/e2e/gcc.c-torture/
+# Upstream: GCC 16.2.0 gcc/testsuite/gcc.c-torture/
 # Suites: execute/ compile/ compat/ unsorted/
 # Listed: every *.c file (including execute/ieee, execute/builtins, execute/builtins/lib)
+# Paths below are relative to the local copy (keep the execute/ etc. prefix).
 # Omitted: DejaGnu harness (*.exp, *.x) and headers (*.h); counts below.
 # Generated: 2026-08-25
 #

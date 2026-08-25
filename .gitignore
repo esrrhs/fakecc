@@ -14,6 +14,8 @@ build/
 *.ilk
 *.map
 *.exp
+# DejaGnu drivers inside the vendored GCC c-torture reference
+!test/e2e/gcc.c-torture/**/*.exp
 
 # Precompiled Headers
 *.gch
