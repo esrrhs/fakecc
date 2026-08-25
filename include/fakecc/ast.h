@@ -288,10 +288,12 @@ struct StmtArray {
 };
 
 /* One case arm of a switch.  `is_default` marks the default arm; otherwise
- * `value` is the constant case value.  `stmts` owns the arm's statements. */
+ * `value` is the constant case value (or range low value).  `stmts` owns the arm's statements. */
 typedef struct {
     int is_default;
-    int value;          /* case value (valid when !is_default) */
+    long long value;          /* case value (or range low value) */
+    long long high_value;     /* range high value when is_range */
+    int is_range;             /* 1 for case low ... high: */
     char *label_name;   /* synthetic label name */
     StmtArray stmts;    /* statements in this arm */
 } SwitchCase;
@@ -325,8 +327,8 @@ Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void  stmt_free_ptr(Stmt *s);
 
-/* Switch helper: append a case arm (default if is_default) to a ST_SWITCH. */
-void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
+void switch_push_case(Stmt *s, int is_default, long long value, const char *label_name);
+void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name);
 
 /* ------------------------------------------------------------------ */
 /* Function & package declarations                                     */

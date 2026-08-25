@@ -2846,9 +2846,9 @@ static Stmt parse_stmt(Parser *p);
 /* Evaluate a constant in a case label — may be an integer literal or an enum
  * constant defined in this file, a sibling file, or an imported package.
  * `name` is the case label name for error messages. */
-static int case_constant_value(Parser *p, const char *text) {
+static long long case_constant_value(Parser *p, const char *text) {
     if (text[0] >= '0' && text[0] <= '9') {
-        return int_literal_value(text);
+        return (long long)strtoll(text, NULL, 0);
     }
     const EnumConstant *ec =
         enum_registry_find_constant(&p->tu->enums, text);
@@ -3261,7 +3261,9 @@ static Stmt parse_stmt(Parser *p) {
         const Token *kw = peek(p);
         advance(p);  /* consume "case" */
         const Token *cv = peek(p);
-        int value;
+        long long value = 0;
+        long long high_value = 0;
+        int is_range = 0;
         if (cv->kind == TK_IDENT) {
             value = case_constant_value(p, cv->text);
             advance(p);
@@ -3272,13 +3274,30 @@ static Stmt parse_stmt(Parser *p) {
                 die_at(cv->loc.file, cv->loc.line, cv->loc.col,
                        "case label must be an integer constant expression");
             expr_free(ce);
-            value = (int)folded;
+            value = folded;
+        }
+        if (peek(p)->kind == TK_ELLIPSIS) {
+            advance(p); /* consume "..." */
+            const Token *hv = peek(p);
+            if (hv->kind == TK_IDENT) {
+                high_value = case_constant_value(p, hv->text);
+                advance(p);
+            } else {
+                Expr *he = parse_ternary(p);
+                long long folded_h;
+                if (!fold_const_int(he, &folded_h))
+                    die_at(hv->loc.file, hv->loc.line, hv->loc.col,
+                           "case range high value must be an integer constant expression");
+                expr_free(he);
+                high_value = folded_h;
+            }
+            is_range = 1;
         }
         expect_kind(p, TK_COLON, "':'");
         char lbl[64];
         if (g_cur_switch) {
             snprintf(lbl, sizeof(lbl), "__sw_%d_case_%d", g_cur_switch->switch_id, g_cur_switch->case_count++);
-            switch_push_case(g_cur_switch->switch_stmt, 0, value, lbl);
+            switch_push_case_range(g_cur_switch->switch_stmt, 0, value, high_value, is_range, lbl);
         } else {
             snprintf(lbl, sizeof(lbl), "__case_%d", p->anon_counter++);
         }

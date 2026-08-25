@@ -684,7 +684,7 @@ void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
 /* Switch case helper                                                    */
 /* ------------------------------------------------------------------ */
 
-void switch_push_case(Stmt *s, int is_default, int value, const char *label_name) {
+void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name) {
     if (s->u.switch_s.num_cases >= s->u.switch_s.cap_cases) {
         int nc = s->u.switch_s.cap_cases ? s->u.switch_s.cap_cases * 2 : 4;
         s->u.switch_s.cases = realloc(s->u.switch_s.cases,
@@ -695,8 +695,14 @@ void switch_push_case(Stmt *s, int is_default, int value, const char *label_name
     SwitchCase *c = &s->u.switch_s.cases[s->u.switch_s.num_cases++];
     c->is_default = is_default;
     c->value = value;
+    c->high_value = high_value;
+    c->is_range = is_range;
     c->label_name = label_name ? xstrdup(label_name) : NULL;
     stmt_array_init(&c->stmts);
+}
+
+void switch_push_case(Stmt *s, int is_default, long long value, const char *label_name) {
+    switch_push_case_range(s, is_default, value, value, 0, label_name);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1309,6 +1315,8 @@ Stmt stmt_clone(const Stmt *s) {
             for (int i = 0; i < s->u.switch_s.num_cases; i++) {
                 r.u.switch_s.cases[i].is_default = s->u.switch_s.cases[i].is_default;
                 r.u.switch_s.cases[i].value = s->u.switch_s.cases[i].value;
+                r.u.switch_s.cases[i].high_value = s->u.switch_s.cases[i].high_value;
+                r.u.switch_s.cases[i].is_range = s->u.switch_s.cases[i].is_range;
                 r.u.switch_s.cases[i].label_name = s->u.switch_s.cases[i].label_name
                     ? xstrdup(s->u.switch_s.cases[i].label_name) : NULL;
                 stmt_array_init(&r.u.switch_s.cases[i].stmts);

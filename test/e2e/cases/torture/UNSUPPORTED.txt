@@ -130,8 +130,6 @@ pr34982.c
 # VLA in struct with offsetof - runtime crash.
 pr41935.c
 
-# Case range (GCC extension) not supported by fakecc.
-pr34154.c
 
 
 # Nested functions with trampolines - not supported by fakecc.
@@ -281,8 +279,6 @@ pr38051
 # Old-style function declaration with parameter mismatch.
 pr34982
 
-# Case range (GCC extension) not supported by fakecc.
-pr34154
 
 # __attribute__((aligned(N))) on struct members not fully respected.
 pr23467
@@ -600,8 +596,6 @@ nestfunc-6
 nestfunc-7
 nest-stdar-1
 
-# Case range (GCC extension) not supported by fakecc.
-pr34154
 
 # Old-style function declaration with parameter mismatch.
 pr34982

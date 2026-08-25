@@ -5391,12 +5391,23 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             for (int i = 0; i < n; i++) {
                 SwitchCase *arm = &s->u.switch_s.cases[i];
                 if (arm->is_default) continue;
-                IRValue cmp_val = new_value(fn);
-                emit_inst_w(fn, IR_CONST, cmp_val, -1, -1, arm->value, vw, vu, s->loc);
-                IRValue eq = emit_bin_w(fn, IR_EQ, v, cmp_val, vw, vu, s->loc);
                 int target_lbl = arm->label_name ? labelmap_find(g_ir_label_map, arm->label_name) : exit_label;
                 int next_check = new_label(fn);
-                emit_cbr(fn, eq, target_lbl, next_check, s->loc);
+                if (arm->is_range) {
+                    IRValue low_val = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, low_val, -1, -1, arm->value, vw, vu, s->loc);
+                    IRValue high_val = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, high_val, -1, -1, arm->high_value, vw, vu, s->loc);
+                    IRValue ge = emit_bin_w(fn, IR_GE, v, low_val, vw, vu, s->loc);
+                    IRValue le = emit_bin_w(fn, IR_LE, v, high_val, vw, vu, s->loc);
+                    IRValue in_range = emit_bin_w(fn, IR_BAND, ge, le, vw, vu, s->loc);
+                    emit_cbr(fn, in_range, target_lbl, next_check, s->loc);
+                } else {
+                    IRValue cmp_val = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, cmp_val, -1, -1, arm->value, vw, vu, s->loc);
+                    IRValue eq = emit_bin_w(fn, IR_EQ, v, cmp_val, vw, vu, s->loc);
+                    emit_cbr(fn, eq, target_lbl, next_check, s->loc);
+                }
                 emit_label(fn, next_check, s->loc);
             }
             emit_br(fn, fallthrough_label, s->loc);
@@ -5441,11 +5452,22 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             int arm_idx = check_case[c];
             SwitchCase *arm = &s->u.switch_s.cases[arm_idx];
             emit_label(fn, check_label[c], s->loc);
-            IRValue cmp_val = new_value(fn);
-            emit_inst_w(fn, IR_CONST, cmp_val, -1, -1, arm->value, vw, vu, s->loc);
-            IRValue eq = emit_bin_w(fn, IR_EQ, v, cmp_val, vw, vu, s->loc);
             int next = (c + 1 < ndispatch) ? check_label[c + 1] : fallthrough_label;
-            emit_cbr(fn, eq, body_label[arm_idx], next, s->loc);
+            if (arm->is_range) {
+                IRValue low_val = new_value(fn);
+                emit_inst_w(fn, IR_CONST, low_val, -1, -1, arm->value, vw, vu, s->loc);
+                IRValue high_val = new_value(fn);
+                emit_inst_w(fn, IR_CONST, high_val, -1, -1, arm->high_value, vw, vu, s->loc);
+                IRValue ge = emit_bin_w(fn, IR_GE, v, low_val, vw, vu, s->loc);
+                IRValue le = emit_bin_w(fn, IR_LE, v, high_val, vw, vu, s->loc);
+                IRValue in_range = emit_bin_w(fn, IR_BAND, ge, le, vw, vu, s->loc);
+                emit_cbr(fn, in_range, body_label[arm_idx], next, s->loc);
+            } else {
+                IRValue cmp_val = new_value(fn);
+                emit_inst_w(fn, IR_CONST, cmp_val, -1, -1, arm->value, vw, vu, s->loc);
+                IRValue eq = emit_bin_w(fn, IR_EQ, v, cmp_val, vw, vu, s->loc);
+                emit_cbr(fn, eq, body_label[arm_idx], next, s->loc);
+            }
         }
 
         /* Bodies, laid out sequentially for fall-through.  Push a loop
