@@ -60,48 +60,100 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # Wall-clock of this job is dominated by self-hosted e2e (~28 min) and
+  # difftest (~30 min), each run twice (-O0 then -O1) on one runner.  Each
+  # suite already saturates nproc, so overlapping them on the same VM does
+  # not help; splitting across runners does.  Recent master: ~62 min serial
+  # vs ~stage2 + max(one suite) ≈ 18 min after the split.
   bootstrap:
-    name: bootstrap (fixed point + self-hosted suite)
+    name: bootstrap (fixed point)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
+      # -O2 only speeds Stage 0 (gcc-built fakecc compiling v0/*.c).  It does
+      # not change fakecc-1's codegen, so the fixed-point comparison is the
+      # same as an unoptimized Stage 0.
       - name: Build stage 0
         run: |
-          cmake -S . -B build
+          cmake -S . -B build -DCMAKE_C_FLAGS="-O2"
           cmake --build build --parallel
 
       # Stage 0 compiles and links fakecc; that fakecc compiles and links
-      # fakecc again.  Both stages must produce byte-identical objects and
-      # binaries, which fails loudly on any miscompilation that is not an
-      # exact fixed point.
+      # fakecc again.  Both stages must produce byte-identical binaries,
+      # which fails loudly on any miscompilation that is not an exact
+      # fixed point.
       - name: Stage 2 fixed point
         run: bash v0/stage2_check.sh
 
-      # A fixed point alone does not prove correctness — a deterministic but
-      # wrong compiler also reproduces itself.  Re-run the full functional
-      # suites with the self-hosted binary, once per optimization level: -O0
-      # and -O1 differ in whether scalars are promoted out of memory, so they
-      # exercise largely separate code in the compiler.
-      - name: e2e with the self-hosted compiler
-        run: |
-          CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 -O0
-          CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 -O1
+      - name: Upload self-hosted compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: fakecc-1
+          path: v0/fakecc-1
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: e2e_multi with the self-hosted compiler
-        run: |
-          bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O0
-          bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O1
+  # A fixed point alone does not prove correctness — a deterministic but
+  # wrong compiler also reproduces itself.  Re-run the functional suites
+  # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are
+  # promoted out of memory, so they stay separate matrix legs.
+  bootstrap-suite:
+    name: bootstrap · ${{ matrix.label }}
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: e2e -O0
+            suite: e2e
+            opt: -O0
+          - label: e2e -O1
+            suite: e2e
+            opt: -O1
+          - label: difftest -O0
+            suite: difftest
+            opt: -O0
+          - label: difftest -O1
+            suite: difftest
+            opt: -O1
+          - label: multi/shlib/gdb
+            suite: misc
+            opt: ""
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: difftest with the self-hosted compiler
-        run: |
-          bash test/e2e/run_difftest.sh v0/fakecc-1 -O0
-          bash test/e2e/run_difftest.sh v0/fakecc-1 -O1
+      - name: Download self-hosted compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: fakecc-1
+          path: v0
 
-      - name: e2e_shlib with the self-hosted compiler
+      - name: Run suite
+        env:
+          SUITE: ${{ matrix.suite }}
+          OPT: ${{ matrix.opt }}
         run: |
-          bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O0
-          bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O1
-
-      - name: gdb debug info with the self-hosted compiler
-        run: bash test/e2e/run_gdb_e2e.sh v0/fakecc-1
+          chmod +x v0/fakecc-1
+          case "$SUITE" in
+            e2e)
+              CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 "$OPT"
+              ;;
+            difftest)
+              bash test/e2e/run_difftest.sh v0/fakecc-1 "$OPT"
+              ;;
+            misc)
+              bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O0
+              bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O1
+              bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O0
+              bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O1
+              bash test/e2e/run_gdb_e2e.sh v0/fakecc-1
+              ;;
+            *)
+              echo "unknown suite: $SUITE" >&2
+              exit 2
+              ;;
+          esac
