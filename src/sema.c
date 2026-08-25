@@ -901,6 +901,19 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             set_type(e, at);
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_shuffle") == 0) {
+            if (e->u.call.args.len < 2 || e->u.call.args.len > 3) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_shuffle takes 2 or 3 arguments");
+            }
+            Type t0 = check_expr(e->u.call.args.data[0], st, ft);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type ti = check_expr(e->u.call.args.data[i], st, ft);
+                type_free(&ti);
+            }
+            set_type(e, t0);
+            return type_clone(e->type);
+        }
         /* __builtin_ctzll(x) — count trailing zeros of a nonzero uint64.  The
          * surrounding code guarantees the argument is nonzero (`_w &&`), so
          * the result is well-defined (1..64).  Returns int. */

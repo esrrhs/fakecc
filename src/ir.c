@@ -3570,6 +3570,90 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 emit_struct_copy(fn, dst, src, 24, e->loc);
                 return -1;
             }
+            if (strcmp(cname, "__builtin_shuffle") == 0) {
+                Type vt = e->type;
+                int total_sz = type_size(vt);
+                int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
+                if (esz <= 0) esz = 4;
+                int count = vt.length > 0 ? vt.length : (total_sz / esz);
+                int is_float = (vt.elem_type && vt.elem_type->kind == TY_FLOAT);
+                int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
+                IRValue v1_addr = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue v2_addr = -1;
+                Expr *mask_expr;
+                if (e->u.call.args.len == 2) {
+                    v2_addr = v1_addr;
+                    mask_expr = e->u.call.args.data[1];
+                } else {
+                    v2_addr = lower_expr(fn, st, e->u.call.args.data[1]);
+                    mask_expr = e->u.call.args.data[2];
+                }
+                IRValue mask_addr = lower_expr(fn, st, mask_expr);
+                Type mt = mask_expr->type;
+                int mesz = mt.elem_type ? type_size(*mt.elem_type) : 4;
+                if (mesz <= 0) mesz = 4;
+                int mu = mt.elem_type ? mt.elem_type->is_unsigned : 0;
+
+                IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+                IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                for (int i = 0; i < count; i++) {
+                    IRValue m_off = emit_add_const(fn, mask_addr, i * mesz, e->loc);
+                    IRValue m_val = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, m_val, m_off, -1, 0, mesz, mu, e->loc);
+                    int total_elems = (e->u.call.args.len == 2) ? count : 2 * count;
+                    IRValue mod_v = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, mod_v, -1, -1, total_elems, mesz, 1, e->loc);
+                    IRValue idx = emit_bin_w(fn, IR_MOD, m_val, mod_v, mesz, 1, e->loc);
+                    idx = coerce(fn, idx, mesz, 1, 8, 1, e->loc);
+
+                    IRValue dst_off = emit_add_const(fn, dst_addr, i * esz, e->loc);
+                    if (e->u.call.args.len == 2) {
+                        IRValue esz_v = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, esz_v, -1, -1, esz, 8, 1, e->loc);
+                        IRValue byte_off = emit_bin_w(fn, IR_MUL, idx, esz_v, 8, 1, e->loc);
+                        IRValue src_off = emit_bin_w(fn, IR_ADD, v1_addr, byte_off, 8, 1, e->loc);
+                        IRValue elem_val = new_value(fn);
+                        emit_inst_w(fn, IR_LOAD_PTR, elem_val, src_off, -1, 0, esz, is_unsigned, e->loc);
+                        if (is_float) set_value_float(fn, elem_val, 1);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, elem_val, 0, esz, is_unsigned, e->loc);
+                        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                    } else {
+                        IRValue count_v = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, count_v, -1, -1, count, 8, 1, e->loc);
+                        IRValue cond = emit_bin_w(fn, IR_LT, idx, count_v, 8, 1, e->loc);
+                        int L_v1 = new_label(fn), L_v2 = new_label(fn), L_done = new_label(fn);
+                        emit_cbr(fn, cond, L_v1, L_v2, e->loc);
+
+                        emit_label(fn, L_v1, e->loc);
+                        IRValue esz_v1 = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, esz_v1, -1, -1, esz, 8, 1, e->loc);
+                        IRValue byte_off1 = emit_bin_w(fn, IR_MUL, idx, esz_v1, 8, 1, e->loc);
+                        IRValue src_off1 = emit_bin_w(fn, IR_ADD, v1_addr, byte_off1, 8, 1, e->loc);
+                        IRValue elem1 = new_value(fn);
+                        emit_inst_w(fn, IR_LOAD_PTR, elem1, src_off1, -1, 0, esz, is_unsigned, e->loc);
+                        if (is_float) set_value_float(fn, elem1, 1);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, elem1, 0, esz, is_unsigned, e->loc);
+                        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                        emit_br(fn, L_done, e->loc);
+
+                        emit_label(fn, L_v2, e->loc);
+                        IRValue idx2 = emit_bin_w(fn, IR_SUB, idx, count_v, 8, 1, e->loc);
+                        IRValue esz_v2 = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, esz_v2, -1, -1, esz, 8, 1, e->loc);
+                        IRValue byte_off2 = emit_bin_w(fn, IR_MUL, idx2, esz_v2, 8, 1, e->loc);
+                        IRValue src_off2 = emit_bin_w(fn, IR_ADD, v2_addr, byte_off2, 8, 1, e->loc);
+                        IRValue elem2 = new_value(fn);
+                        emit_inst_w(fn, IR_LOAD_PTR, elem2, src_off2, -1, 0, esz, is_unsigned, e->loc);
+                        if (is_float) set_value_float(fn, elem2, 1);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, elem2, 0, esz, is_unsigned, e->loc);
+                        if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                        emit_br(fn, L_done, e->loc);
+
+                        emit_label(fn, L_done, e->loc);
+                    }
+                }
+                return dst_addr;
+            }
             if (strcmp(cname, "va_start") == 0 || strcmp(cname, "va_end") == 0
                 || strcmp(cname, "va_arg") == 0
                 || strcmp(cname, "__builtin_va_start") == 0 || strcmp(cname, "__builtin_va_end") == 0

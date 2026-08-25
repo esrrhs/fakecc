@@ -141,7 +141,6 @@ pr56837.c
 pr56866.c
 pr56982.c
 pr56982.c
-pr94591.c
 pr98474.c
 printf-2.c
 printf-chk-1.c
@@ -180,7 +179,6 @@ pr65427
 pr70903
 pr71626-1
 pr71626-2
-pr94591
 simd-1
 simd-2
 simd-4
@@ -318,7 +316,6 @@ pr85756
 pr86528
 pr87623
 pr92904
-pr94591
 pr98474
 
 
@@ -328,7 +325,6 @@ pr65427
 pr70903
 pr71626-1
 pr71626-2
-pr94591
 simd-1
 simd-2
 simd-4
@@ -463,7 +459,6 @@ pr85582-3
 pr85756
 pr87623
 pr92904
-pr94591
 pr98474
 
 
@@ -577,7 +572,6 @@ pr85582-3
 pr85756
 pr87623
 pr92904
-pr94591
 pr98474
 
 # Preprocessor macros/macros which fakecc doesn't support.
