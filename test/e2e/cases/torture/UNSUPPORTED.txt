@@ -177,7 +177,6 @@ pr98474.c
 pr98853-1.c
 pr98853-2.c
 pr99079.c
-printf-1.c
 printf-2.c
 printf-chk-1.c
 va-arg-pack-1.c
@@ -692,7 +691,6 @@ pr98853-1
 
 # Preprocessor macros/macros which fakecc doesn't support.
 pushpop_macro
-printf-1
 printf-2
 printf-chk-1
 stdarg-1
