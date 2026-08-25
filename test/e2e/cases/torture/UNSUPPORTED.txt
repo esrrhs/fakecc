@@ -42,15 +42,6 @@ pr103405.c
 
 
 
-# Multiple malloc calls - runtime hang.
-pr43008.c
-
-# Truncation through multiple function calls - runtime crash.
-pr39240.c
-
-# __builtin_isinf/f/l not supported by fakecc.
-pr39228.c
-
 # Inline assembly (asm volatile) not supported by fakecc.
 pr38533.c
 pr40022.c
@@ -312,15 +303,6 @@ pr44683
 
 
 
-# Multiple malloc calls - runtime hang.
-pr43008
-
-# Truncation through multiple function calls - runtime crash.
-pr39240
-
-# __builtin_isinf/f/l not supported by fakecc.
-pr39228
-
 # VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
 pr22061-1
 pr22061-2
@@ -436,14 +418,8 @@ pr98853-1
 pr98853-2
 pr99079
 
-# __builtin_isinf/f/l not supported by fakecc.
-pr39228
-
 # Zero-size array - runtime crash.
 pr42570
-
-# Multiple malloc calls - runtime hang.
-pr43008
 
 # __builtin_copysign not supported by fakecc.
 pr44683
