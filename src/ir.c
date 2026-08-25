@@ -2137,7 +2137,7 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
     int is_cmp = (bop == BOP_EQ || bop == BOP_NE || bop == BOP_LT || bop == BOP_GT || bop == BOP_LE || bop == BOP_GE);
     int is_shift = (bop == BOP_SHL || bop == BOP_SHR);
 
-    int is_int_div = (bop == BOP_DIV && !is_float);
+    int is_int_div = ((bop == BOP_DIV || bop == BOP_MOD) && !is_float);
     if (is_cmp || is_shift || total_sz > 16 || is_int_div) {
         IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
         IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
@@ -2211,6 +2211,7 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
                     case BOP_SUB: aop = IR_SUB; break;
                     case BOP_MUL: aop = IR_MUL; break;
                     case BOP_DIV: aop = IR_DIV; break;
+                    case BOP_MOD: aop = IR_MOD; break;
                     case BOP_BITAND: case BOP_AND: aop = IR_BAND; break;
                     case BOP_BITOR:  case BOP_OR:  aop = IR_BOR; break;
                     case BOP_BITXOR: aop = IR_BXOR; break;
@@ -2271,7 +2272,7 @@ static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
     }
 
     int is_shift = (op == BOP_SHL || op == BOP_SHR);
-    int is_int_div = (op == BOP_DIV && !is_float);
+    int is_int_div = ((op == BOP_DIV || op == BOP_MOD) && !is_float);
     if (is_shift || total_sz > 16 || is_int_div) {
         for (int i = 0; i < count; i++) {
             IRValue l_off = emit_add_const(fn, addr, i * esz, e->loc);
@@ -2302,6 +2303,7 @@ static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
                     case BOP_SUB: aop = IR_SUB; break;
                     case BOP_MUL: aop = IR_MUL; break;
                     case BOP_DIV: aop = IR_DIV; break;
+                    case BOP_MOD: aop = IR_MOD; break;
                     case BOP_BITAND: case BOP_AND: aop = IR_BAND; break;
                     case BOP_BITOR:  case BOP_OR:  aop = IR_BOR; break;
                     case BOP_BITXOR: aop = IR_BXOR; break;
