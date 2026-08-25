@@ -168,7 +168,6 @@ pr94524-1.c
 pr94524-2.c
 pr94591.c
 pr98474.c
-pr98853-1.c
 pr98853-2.c
 printf-2.c
 printf-chk-1.c
@@ -374,7 +373,6 @@ pr94524-1
 pr94524-2
 pr94591
 pr98474
-pr98853-1
 pr98853-2
 
 
@@ -540,7 +538,6 @@ pr94524-1
 pr94524-2
 pr94591
 pr98474
-pr98853-1
 
 
 # Nested functions / trampolines - not supported by fakecc.
@@ -668,7 +665,6 @@ pr94524-1
 pr94524-2
 pr94591
 pr98474
-pr98853-1
 
 # Preprocessor macros/macros which fakecc doesn't support.
 pushpop_macro
