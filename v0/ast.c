@@ -275,6 +275,7 @@ enum UnaryOp {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 struct ExprArray {
     Expr **data;
     size_t len;
@@ -985,8 +986,15 @@ static int sysv_field_class(Type t) {
     case TY_FLOAT:
         if (t.width == 16) return SV_MEM;
         return SV_SSE;
-    case TY_STRUCT:
-        return SV_MEM;
+    case TY_STRUCT: {
+        SysVRegClass cls[2];
+        int n = sysv_classify_agg(t, cls);
+        if (n == 0) return SV_MEM;
+        int c = SV_NO;
+        for (int i = 0; i < n; i++)
+            c = sysv_merge(c, cls[i] == SYSV_CLS_SSE ? SV_SSE : SV_INT);
+        return c;
+    }
     default:
         return SV_MEM;
     }
@@ -1837,6 +1845,7 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_add(&tu->typedefs, "__SIZE_TYPE__", type_make_int(8, 1));
     typedef_registry_add(&tu->typedefs, "__PTRDIFF_TYPE__", type_make_int(8, 0));
     typedef_registry_add(&tu->typedefs, "__WCHAR_TYPE__", type_make_int(4, 0));
+    typedef_registry_add(&tu->typedefs, "wchar_t", type_make_int(4, 0));
 }
 void tu_free(TranslationUnit *tu) {
     runtime.free(tu->package.name);
@@ -1887,7 +1896,8 @@ int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long 
         return fold_const_int128(e->u.cast.operand, lo, hi);
     }
     if (e->kind == EX_UNARY) {
-        unsigned long long vlo, vhi;
+unsigned long long vlo;
+unsigned long long vhi;
         if (!fold_const_int128(e->u.un.operand, &vlo, &vhi)) return 0;
         switch (e->u.un.op) {
         case UOP_NEG: *lo = 0ULL - vlo; *hi = 0ULL - vhi - (vlo != 0ULL ? 1ULL : 0ULL); return 1;
@@ -1897,7 +1907,10 @@ int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long 
         }
     }
     if (e->kind == EX_BINOP) {
-        unsigned long long llo, lhi, rlo, rhi;
+unsigned long long llo;
+unsigned long long lhi;
+unsigned long long rlo;
+unsigned long long rhi;
         if (!fold_const_int128(e->u.bin.l, &llo, &lhi)) return 0;
         if (!fold_const_int128(e->u.bin.r, &rlo, &rhi)) return 0;
         switch (e->u.bin.op) {
@@ -1935,13 +1948,9 @@ int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long 
     }
     return 0;
 }
-
 int fold_const_int(const Expr *e, long long *out) {
     if (!e) return 0;
     if (e->kind == EX_INT_LIT) {
-        /* int128 literals cannot be folded to a single long long: the high
-         * half would be lost.  Return 0 so the expression is evaluated at
-         * runtime (where i128_alloc/i128_store2 handle both halves). */
         if (e->type.width == 16)
             return 0;
         *out = e->u.int_val;

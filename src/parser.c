@@ -1047,7 +1047,7 @@ static long long parse_array_size_ext(Parser *p, Expr **dim_expr) {
     long long val = 0;
     if (fold_const_int(e, &val)) {
         expr_free(e);
-        return val > 0 ? val : 1;
+        return val >= 0 ? val : 1;
     }
     if (e->kind == EX_VAR) {
         const EnumConstant *ec =

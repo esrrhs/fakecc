@@ -275,6 +275,7 @@ enum UnaryOp {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 struct ExprArray {
     Expr **data;
     size_t len;
@@ -1477,6 +1478,25 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "va_end argument must be a va_list");
             }
             type_free(&list_ty);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "va_copy") == 0 ||
+                runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_copy") == 0)) {
+            if (e->u.call.args.len != 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "va_copy takes exactly 2 arguments (dst, src)");
+            }
+            for (int i = 0; i < 2; i++) {
+                Type list_ty = check_expr(e->u.call.args.data[i], st, ft);
+                if (!is_va_list_type(&list_ty)) {
+                    type_free(&list_ty);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "va_copy arguments must be va_list");
+                }
+                type_free(&list_ty);
+            }
             set_type(e, type_make_void());
             return type_clone(e->type);
         }

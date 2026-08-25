@@ -275,6 +275,7 @@ enum UnaryOp {
 typedef struct StmtArray StmtArray;
 typedef struct Expr Expr;
 int fold_const_int(const Expr *e, long long *out);
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
 struct ExprArray {
     Expr **data;
     size_t len;

@@ -3550,7 +3550,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                  * into its local slot.  Internally consistent (both sides are
                  * fakecc-compiled) though not identical to GCC/SysV's inline
                  * stack copy. */
-                IRValue tmp_alloca = emit_alloca(fn, asz, 8, 1, e->loc);
+                /* Pin the temp slot (alloca_bytes > 0) even for size-0
+                 * types (empty unions): codegen's IR_ADDR requires it. */
+                int copy_sz = asz;
+                if (copy_sz < 1) copy_sz = 1;
+                IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
                 IRValue tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1, 8, 1,
                                               e->loc);
                 emit_struct_copy(fn, tmp_addr, av, asz, e->loc);
@@ -3587,12 +3591,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue sret_addr = -1;
         if (ret_in_mem) {
             int total = type_size(e->type);
+            /* Pin the slot (alloca_bytes > 0) even for size-0 types such as
+             * empty unions — codegen's IR_ADDR requires a pinned alloca. */
+            if (total < 1) total = 1;
             IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
             sret_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
         IRValue slot_addr = -1;
         if (is_ret_struct && ret_nreg > 0) {
             int total = type_size(e->type);
+            if (total < 1) total = 1;
             IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
             slot_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
@@ -4966,6 +4974,9 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         IRValue v;
         if (pinned) {
             int total = type_size(dty);
+            /* A pinned alloca must reserve at least 1 byte so codegen can
+             * form its address (empty unions/structs have size 0). */
+            if (total < 1) total = 1;
             v = emit_alloca(fn, total, dw, du, s->loc);
         } else {
             v = new_value(fn);
@@ -6386,6 +6397,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             IRValue slot;
             if (pty.kind == TY_STRUCT || pty.is_vector || type_is_i128(pty)) {
                 int total = type_size(pty);
+                /* Pin the slot (alloca_bytes > 0) even for size-0 types
+                 * (empty unions): codegen's IR_ADDR requires a pinned alloca. */
+                if (total < 1) total = 1;
                 slot = emit_alloca(&irfn, total, 8, 1, ploc);
                 IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1, ploc);
                 if (param_nreg[p] > 0) {

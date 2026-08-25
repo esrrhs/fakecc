@@ -473,8 +473,18 @@ static int sysv_field_class(Type t) {
     case TY_FLOAT:
         if (t.width == 16) return SV_MEM; /* long double / X87 → MEMORY */
         return SV_SSE;
-    case TY_STRUCT:
-        return SV_MEM; /* nested handled by walking members of the outer def */
+    case TY_STRUCT: {
+        /* Recursively classify a nested struct/union: merge the class of
+         * each of its eightbytes.  This matches GCC/SysV, which classifies
+         * aggregates member-by-member regardless of nesting depth. */
+        SysVRegClass cls[2];
+        int n = sysv_classify_agg(t, cls);
+        if (n == 0) return SV_MEM;
+        int c = SV_NO;
+        for (int i = 0; i < n; i++)
+            c = sysv_merge(c, cls[i] == SYSV_CLS_SSE ? SV_SSE : SV_INT);
+        return c;
+    }
     default:
         return SV_MEM;
     }
