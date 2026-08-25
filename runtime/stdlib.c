@@ -19,6 +19,26 @@ long long llabs(long long x) { return x < 0 ? -x : x; }
 double fabs(double x) { return x < 0.0 ? -x : x; }
 float fabsf(float x) { return x < 0.0f ? -x : x; }
 
+double copysign(double x, double y) {
+    union { double d; unsigned long long u; } ux, uy;
+    ux.d = x;
+    uy.d = y;
+    ux.u = (ux.u & 0x7fffffffffffffffULL) | (uy.u & 0x8000000000000000ULL);
+    return ux.d;
+}
+
+float copysignf(float x, float y) {
+    union { float f; unsigned int u; } ux, uy;
+    ux.f = x;
+    uy.f = y;
+    ux.u = (ux.u & 0x7fffffffU) | (uy.u & 0x80000000U);
+    return ux.f;
+}
+
+long double copysignl(long double x, long double y) {
+    return (long double)copysign((double)x, (double)y);
+}
+
 double floor(double x) {
     if (x != x) return x;
     if (x >= 9223372036854775807.0 || x <= -9223372036854775807.0) return x;

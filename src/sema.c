@@ -749,6 +749,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_fabsl") == 0)
                 ret = type_make_float(16);
+            else if (strcmp(bname, "__builtin_copysign") == 0 || strcmp(bname, "copysign") == 0)
+                ret = type_make_float(8);
+            else if (strcmp(bname, "__builtin_copysignf") == 0 || strcmp(bname, "copysignf") == 0)
+                ret = type_make_float(4);
+            else if (strcmp(bname, "__builtin_copysignl") == 0 || strcmp(bname, "copysignl") == 0)
+                ret = type_make_float(16);
             else if (strcmp(bname, "__builtin_bswap64") == 0)
                 ret = type_make_int(8, 1);
             else if (strcmp(bname, "__builtin_bswap32") == 0)
