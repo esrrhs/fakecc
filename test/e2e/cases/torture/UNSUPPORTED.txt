@@ -126,8 +126,6 @@ pr38051.c
 # Old-style function declaration with parameter mismatch.
 pr34982.c
 
-# Zero-size array - runtime crash.
-pr42570.c
 
 # VLA in struct with offsetof - runtime crash.
 pr41935.c
@@ -411,8 +409,6 @@ pr98853-1
 pr98853-2
 pr99079
 
-# Zero-size array - runtime crash.
-pr42570
 
 # __builtin_copysign not supported by fakecc.
 pr44683
