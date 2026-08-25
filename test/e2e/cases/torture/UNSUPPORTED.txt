@@ -120,8 +120,6 @@ pr93213.c
 pr93249.c
 pr93494.c
 
-# Complex Duff's device with computed gotos - crashes at runtime.
-pr38051.c
 
 
 
@@ -266,8 +264,6 @@ pr80692
 
 
 
-# Complex Duff's device with computed gotos - crashes at runtime.
-pr38051
 
 
 
@@ -587,8 +583,6 @@ nest-stdar-1
 
 
 
-# Complex Duff's device with computed gotos - crashes at runtime.
-pr38051
 
 # __attribute__((aligned(N))) on struct members not fully respected.
 pr23467
