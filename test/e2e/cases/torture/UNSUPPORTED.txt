@@ -691,7 +691,6 @@ vprintf-chk-1
 # Complex sprintf format - not fully supported.
 pr79327
 strlen-6
-strlen-7
 
 # Malloc-dependent tests - runtime hang.
 stdarg_2
