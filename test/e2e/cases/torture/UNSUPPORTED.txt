@@ -701,7 +701,6 @@ printf-chk-1
 stdarg-1
 stkalign
 strct-stdarg-1
-strct-varg-1
 user-printf
 va-arg-21
 va-arg-22
