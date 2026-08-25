@@ -226,34 +226,24 @@ lex_loop_head:
                        "unterminated character literal");
             }
 
-            /* escape sequence */
-            if (source[pos] == '\\') {
-                pos++; col++;  /* skip backslash */
-                if (source[pos] == '\0' || source[pos] == '\n') {
-                    die_at(filename, start_line, start_col,
-                           "unterminated character literal");
-                }
-                if (source[pos] == 'x' || source[pos] == 'X') {
-                    /* hex escape `\xHH...`: consume the hex digits too so the
-                     * closing quote lands in the right place. */
-                    pos++; col++;  /* skip the `x` */
-                    if (!isxdigit((unsigned char)source[pos]))
-                        die_at(filename, start_line, start_col,
-                               "hex escape \\x with no digits");
-                    while (isxdigit((unsigned char)source[pos])) {
+            while (source[pos] != '\'' && source[pos] != '\0' && source[pos] != '\n') {
+                if (source[pos] == '\\') {
+                    pos++; col++;
+                    if (source[pos] == '\0' || source[pos] == '\n') break;
+                    if (source[pos] == 'x' || source[pos] == 'X') {
+                        pos++; col++;
+                        while (isxdigit((unsigned char)source[pos])) { pos++; col++; }
+                    } else if (source[pos] >= '0' && source[pos] <= '7') {
+                        int n = 0;
+                        while (n < 3 && source[pos] >= '0' && source[pos] <= '7') {
+                            pos++; col++; n++;
+                        }
+                    } else {
                         pos++; col++;
                     }
-                } else if (source[pos] >= '0' && source[pos] <= '7') {
-                    /* octal escape `\NNN`: up to 3 octal digits. */
-                    int n = 0;
-                    while (n < 3 && source[pos] >= '0' && source[pos] <= '7') {
-                        pos++; col++; n++;
-                    }
                 } else {
-                    pos++; col++;  /* skip the single escaped char */
+                    pos++; col++;
                 }
-            } else {
-                pos++; col++;  /* skip single char */
             }
 
             /* closing quote */

@@ -2241,7 +2241,18 @@ static int char_literal_value(const char *text) {
         }
         return simple_escape_value((unsigned char)text[2]);
     }
-    return (unsigned char)text[1];
+    const unsigned char *s = (const unsigned char *)text + 1;
+    if (s[0] < 0x80) return s[0];
+    if ((s[0] & 0xe0) == 0xc0 && (s[1] & 0xc0) == 0x80) {
+        return ((s[0] & 0x1f) << 6) | (s[1] & 0x3f);
+    }
+    if ((s[0] & 0xf0) == 0xe0 && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80) {
+        return ((s[0] & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] & 0x3f);
+    }
+    if ((s[0] & 0xf8) == 0xf0 && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80 && (s[3] & 0xc0) == 0x80) {
+        return ((s[0] & 0x07) << 18) | ((s[1] & 0x3f) << 12) | ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
+    }
+    return s[0];
 }
 
 static int is_imag_literal(const char *text) {
@@ -2331,13 +2342,30 @@ static Expr *parse_primary(Parser *p) {
             size_t slen = strlen(src);
             if (slen >= 1 && src[0] == '"') { src++; slen--; }
             if (slen >= 1 && src[slen - 1] == '"') slen--;
-            for (size_t i = 0; i < slen; i++) {
+            for (size_t i = 0; i < slen; ) {
                 int ch;
                 if (src[i] == '\\' && i + 1 < slen) {
                     i++;
                     ch = simple_escape_value((unsigned char)src[i]);
+                    i++;
                 } else {
-                    ch = (unsigned char)src[i];
+                    const unsigned char *s = (const unsigned char *)src + i;
+                    if (s[0] < 0x80) {
+                        ch = s[0];
+                        i++;
+                    } else if ((s[0] & 0xe0) == 0xc0 && i + 1 < slen && (s[1] & 0xc0) == 0x80) {
+                        ch = ((s[0] & 0x1f) << 6) | (s[1] & 0x3f);
+                        i += 2;
+                    } else if ((s[0] & 0xf0) == 0xe0 && i + 2 < slen && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80) {
+                        ch = ((s[0] & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] & 0x3f);
+                        i += 3;
+                    } else if ((s[0] & 0xf8) == 0xf0 && i + 3 < slen && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80 && (s[3] & 0xc0) == 0x80) {
+                        ch = ((s[0] & 0x07) << 18) | ((s[1] & 0x3f) << 12) | ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
+                        i += 4;
+                    } else {
+                        ch = s[0];
+                        i++;
+                    }
                 }
                 wbuf = realloc(wbuf, (size_t)(total + 1) * sizeof(int));
                 wbuf[total++] = ch;

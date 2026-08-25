@@ -704,7 +704,6 @@ vfprintf-chk-1
 vla-dealloc-1
 vprintf-1
 vprintf-chk-1
-wchar_t-1
 
 # Complex sprintf format - not fully supported.
 pr79327

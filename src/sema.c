@@ -1774,6 +1774,15 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
             check_expr(s->u.decl.type.vla_dim, st, ft);
         }
+        if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
+            && s->u.decl.type.kind == TY_ARRAY) {
+            if (s->u.decl.type.length == 0)
+                s->u.decl.type.length = s->u.decl.init->u.compound.target_type.length;
+            Expr *cl = s->u.decl.init;
+            s->u.decl.init = cl->u.compound.init;
+            cl->u.compound.init = NULL;
+            expr_free(cl);
+        }
         /* Infer array length from an empty `[]` declarator when initialized by
          * a string literal: `char s[] = "hi"` → length strlen+1.  (Array length
          * from an init list is inferred later by normalize_init_list.) */
@@ -2077,6 +2086,15 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "global '%s' conflicts with a function of the same name",
                    s->u.decl.name);
+        }
+        if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
+            && s->u.decl.type.kind == TY_ARRAY) {
+            if (s->u.decl.type.length == 0)
+                s->u.decl.type.length = s->u.decl.init->u.compound.target_type.length;
+            Expr *cl = s->u.decl.init;
+            s->u.decl.init = cl->u.compound.init;
+            cl->u.compound.init = NULL;
+            expr_free(cl);
         }
         /* Infer array length from an empty `[]` declarator when initialized by
          * a string literal: `char s[] = "hi"` → length strlen+1.  (Array length

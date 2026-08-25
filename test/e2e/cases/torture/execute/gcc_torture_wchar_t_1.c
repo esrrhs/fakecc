@@ -1,19 +1,20 @@
-/* wchar_t-1.c - simplified */
-
 // expect: 0
 package main;
 
+/* { dg-options "-finput-charset=utf-8" } */
 typedef int wchar_t;
+wchar_t x[] = L"Ä";
+wchar_t y = L'Ä';
+extern void abort (void);
+extern void exit (int);
 
-static wchar_t x[2] = { 196, 0 };
-static wchar_t y = 196;
-
-int main(void) {
-  if (sizeof(x) / sizeof(wchar_t) != 2)
-    __builtin_abort();
-  if (x[0] != y || x[1] != 0)
-    __builtin_abort();
-  if (y != x[0])
-    __builtin_abort();
-  return 0;
+int main (void)
+{
+  if (sizeof (x) / sizeof (wchar_t) != 2)
+    abort ();
+  if (x[0] != L'Ä' || x[1] != L'\0')
+    abort ();
+  if (y != L'Ä')
+    abort ();
+  exit (0);
 }
