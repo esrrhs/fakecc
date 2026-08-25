@@ -45,7 +45,6 @@ pr103405.c
 # Inline assembly (asm volatile) not supported by fakecc.
 pr38533.c
 pr40022.c
-pr40657.c
 pr41239.c
 pr45695.c
 pr46309.c
@@ -405,7 +404,6 @@ pr80421
 pr81588
 pr82954
 pr40022
-pr40657
 pr41239
 pr45695
 
