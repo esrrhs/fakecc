@@ -180,7 +180,6 @@ pr99079.c
 printf-1.c
 printf-2.c
 printf-chk-1.c
-va-arg-24.c
 va-arg-pack-1.c
 pr49419.c
 pr52286.c
@@ -699,7 +698,6 @@ printf-chk-1
 stdarg-1
 stkalign
 user-printf
-va-arg-24
 va-arg-pack-1
 vfprintf-1
 vfprintf-chk-1
