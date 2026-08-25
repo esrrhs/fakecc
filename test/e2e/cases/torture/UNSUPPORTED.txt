@@ -148,7 +148,6 @@ pr51581-2.c
 pr51877.c
 pr51933.c
 pr52286.c
-pr53084.c
 pr58277-1.c
 pr58419.c
 pr53645.c
@@ -170,7 +169,6 @@ printf-chk-1.c
 va-arg-pack-1.c
 pr49419.c
 pr52286.c
-pr53084.c
 
 # VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
 pr22061-1.c
@@ -283,7 +281,6 @@ pr51581-2
 pr51877
 pr51933
 pr52286
-pr53084
 pr53645
 pr53645-2
 pr56205
@@ -455,7 +452,6 @@ pr51581-2
 pr51877
 pr51933
 pr52286
-pr53084
 pr53645
 pr53645-2
 pr56205
@@ -585,7 +581,6 @@ pr51581-2
 pr51877
 pr51933
 pr52286
-pr53084
 pr53645
 pr53645-2
 pr56205

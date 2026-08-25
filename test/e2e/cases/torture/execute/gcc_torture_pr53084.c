@@ -1,15 +1,21 @@
-/* PR middle-end/53084 */
-
 // expect: 0
 package main;
 
-static void bar(const char *p) {
+/* PR middle-end/53084 */
+
+extern void abort (void);
+
+void
+bar (const char *p)
+{
   if (p[0] != 'o' || p[1] != 'o' || p[2])
-    __builtin_abort();
+    abort ();
 }
 
-int main(void) {
-  const char *foo = "foo" + 1;
-  bar(foo);
+int
+main (void)
+{
+  static const char *const foo[] = {"foo" + 1};
+  bar (foo[0]);
   return 0;
 }

@@ -5720,6 +5720,18 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
         *out_offset = 0;
         return 1;
     }
+    if (e->kind == EX_STR) {
+        char name[32];
+        snprintf(name, sizeof name, "__str.%d", g_str_counter++);
+        int nbytes = e->u.str.len + 1;
+        char *init = malloc(nbytes);
+        if (!init) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        memcpy(init, e->u.str.bytes, nbytes);
+        queue_rodata(name, init, nbytes, e->loc);
+        *out_sym = xstrdup(name);
+        *out_offset = 0;
+        return 1;
+    }
     if (e->kind == EX_ADDR) {
         const Expr *sub = e->u.addr.operand;
         while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
