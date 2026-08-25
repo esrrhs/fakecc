@@ -700,7 +700,6 @@ printf-2
 printf-chk-1
 pure-1
 regstack-1
-return-addr
 stdarg-1
 stkalign
 strct-stdarg-1
