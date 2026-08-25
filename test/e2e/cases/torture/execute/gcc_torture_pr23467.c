@@ -1,22 +1,26 @@
-/* pr23467.c - aligned struct member */
-
 // expect: 0
 package main;
 
-struct s1 {
-  int a;
+/* { dg-skip-if "small alignment" { pdp11-*-* } } */
+
+extern void abort (void);
+extern void exit (int);
+
+struct s1
+{
+  int __attribute__ ((aligned (8))) a;
 };
 
-struct {
+struct
+{
   char c;
   struct s1 m;
 } v;
 
-int main(void) {
-  // Check alignment - this is implementation-defined behavior
-  // Just verify the struct works
-  v.m.a = 42;
-  if (v.m.a != 42)
-    __builtin_abort();
-  return 0;
+int
+main (void)
+{
+  if ((int)(long)&v.m & 7)
+    abort ();
+  exit (0);
 }

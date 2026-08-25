@@ -843,7 +843,10 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     const char *tag = sd->tag;
     advance(p);  /* consume '{' */
     while (peek(p)->kind != TK_RBRACE) {
+        int base_align = 0, base_packed = 0, base_sso = 0, base_vec = 0;
+        while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, NULL)) {}
         Type base = parse_specifiers(p);
+        while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, NULL)) {}
         /* Re-fetch sd: parsing `base` may have defined a nested struct. */
         sd = struct_registry_find(&p->tu->structs, tag);
         /* parse_specifiers may have consumed an inline struct/union definition
@@ -858,15 +861,18 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                 && strncmp(base.tag, "__anon_", 7) == 0) {
                 sd = struct_registry_find(&p->tu->structs, tag);
                 if (sd)
-                    struct_def_push_member(sd, "", type_clone(base), -1);
+                    struct_def_push_member_aligned(sd, "", type_clone(base), -1, base_align);
             }
             advance(p);
             type_free(&base);
             continue;
         }
         for (;;) {
+            int align = base_align, packed = base_packed, sso = base_sso, vec = base_vec;
+            while (parse_attribute(p, &align, &packed, &sso, &vec, NULL)) {}
             char *mname = NULL;
             Type mty = parse_declarator(p, type_clone(base), &mname);
+            while (parse_attribute(p, &align, &packed, &sso, &vec, NULL)) {}
             sd = struct_registry_find(&p->tu->structs, tag);
             if (!mname) {
                 if (peek(p)->kind == TK_COLON) {
@@ -893,7 +899,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                 bit_width = int_literal_value(w->text);
                 advance(p);
             }
-            struct_def_push_member(sd, mname, mty, bit_width);
+            struct_def_push_member_aligned(sd, mname, mty, bit_width, align);
             free(mname);
             if (peek(p)->kind == TK_COMMA) {
                 /* More declarators sharing this base type (`int a, b`). */

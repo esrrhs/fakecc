@@ -441,6 +441,7 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
 /* Append a member to a struct definition; computes offset (naturally aligned).
  * `bit_width` is -1 for a normal member, 0 for `: 0`, or N for `x : N`. */
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
+void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align);
 void struct_def_finish(StructDef *sd);
 void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);

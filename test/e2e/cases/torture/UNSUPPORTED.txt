@@ -131,8 +131,6 @@ pr41935.c
 # Nested functions with trampolines - not supported by fakecc.
 pr24135.c
 
-# __attribute__((aligned(N))) on struct members not fully respected.
-pr23467.c
 
 
 # Vector types/SIMD and 128KB stack array - not supported by fakecc.
@@ -267,8 +265,6 @@ pr80692
 
 
 
-# __attribute__((aligned(N))) on struct members not fully respected.
-pr23467
 
 
 
@@ -584,8 +580,6 @@ nest-stdar-1
 
 
 
-# __attribute__((aligned(N))) on struct members not fully respected.
-pr23467
 
 
 # VLA parameter (char a[2][N]) not fully supported in fakecc codegen.

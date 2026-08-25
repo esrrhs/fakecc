@@ -561,6 +561,10 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
 }
 
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width) {
+    struct_def_push_member_aligned(sd, name, ty, bit_width, 0);
+}
+
+void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align) {
     if (sd->num_members >= sd->cap_members) {
         int nc = sd->cap_members ? sd->cap_members * 2 : 4;
         sd->members = realloc(sd->members, nc * sizeof(StructMember));
@@ -568,6 +572,7 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         sd->cap_members = nc;
     }
     long long a = sd->is_packed ? 1 : type_align(ty);
+    if (!sd->is_packed && align > a) a = align;
     long long sz = type_size(ty);
     /* Track the max member alignment for final struct alignment. */
     if (!sd->is_packed && a > sd->align) sd->align = a;
