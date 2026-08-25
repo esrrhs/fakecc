@@ -1,11 +1,10 @@
 // expect: 0
 package main;
 
-extern void abort(void);
-
+extern void abort (void);
 _Complex int a[1024];
 
-__attribute__((noinline)) void
+void
 foo (void)
 {
   int i;
