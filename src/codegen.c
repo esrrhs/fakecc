@@ -1404,7 +1404,13 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
         /* end: */
         patch_rel32(b, jmp_end, b->len);
         if (dst >= 0) {
-            spill_if_needed_xmm(b, dst, 0, ra_xmm, gp_spill_area);
+            if (ra_xmm && dst < ra_xmm->num_values && ra_xmm->reg[dst] >= 0
+                && ra_xmm->reg[dst] < 16) {
+                int dr = ra_xmm->reg[dst];
+                if (dr != 0) emit_sse_mov_rr(b, dr, 0);
+            } else {
+                spill_if_needed_xmm(b, dst, 0, ra_xmm, gp_spill_area);
+            }
         }
     }
 }
