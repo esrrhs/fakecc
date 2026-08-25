@@ -170,7 +170,6 @@ pr94591.c
 pr98474.c
 pr98853-1.c
 pr98853-2.c
-pr99079.c
 printf-2.c
 printf-chk-1.c
 va-arg-pack-1.c
@@ -378,7 +377,6 @@ pr98474
 pr98681
 pr98853-1
 pr98853-2
-pr99079
 
 
 
