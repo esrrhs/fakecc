@@ -1,14 +1,20 @@
-/* pr34982.c - old-style function declaration */
-
 // expect: 0
 package main;
 
-static void something(int i) {
-  if (i != -1)
-    __builtin_abort();
-}
+/* { dg-additional-options "-std=gnu17" } */
 
-int main(void) {
+extern void abort (void);
+
+static void something();
+
+int main()
+{
   something(-1);
   return 0;
+}
+
+static void something(int i)
+{
+  if (i != -1)
+    abort ();
 }

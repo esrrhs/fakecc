@@ -123,8 +123,6 @@ pr93494.c
 # Complex Duff's device with computed gotos - crashes at runtime.
 pr38051.c
 
-# Old-style function declaration with parameter mismatch.
-pr34982.c
 
 
 # VLA in struct with offsetof - runtime crash.
@@ -275,8 +273,6 @@ pr80692
 # Complex Duff's device with computed gotos - crashes at runtime.
 pr38051
 
-# Old-style function declaration with parameter mismatch.
-pr34982
 
 
 # __attribute__((aligned(N))) on struct members not fully respected.
@@ -594,8 +590,6 @@ nestfunc-7
 nest-stdar-1
 
 
-# Old-style function declaration with parameter mismatch.
-pr34982
 
 # Complex Duff's device with computed gotos - crashes at runtime.
 pr38051
