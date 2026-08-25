@@ -1244,13 +1244,35 @@ static void emit_load_gp_viabase(Buffer *b, int dst, int base, int index) {
  *   [rsp+0..+40]   rdi,rsi,rdx,rcx,r8,r9   (8 bytes each, GP regs)
  *   [rsp+48..+176] xmm0-xmm7               (16 bytes each, FP regs)
  * reg_save_area = rsp is filled by va_start. */
-static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
-                        const RAResult *ra_xmm, int gp_spill_area) {
+static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
+                        const RAResult *ra, const RAResult *ra_xmm,
+                        int gp_spill_area, const int *ld_off) {
     int ap = inst->call_args[0];
     ensure_reg(b, ap, REG_RAX, ra);
     int ap_reg = REG_RAX;
     int dst = inst->dst;
     int is_float = inst->is_float;
+
+    if (dst >= 0 && value_is_ld(fn, dst)) {
+        /* long double (X87 class): always passed on the stack. */
+        emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF); /* r11 = overflow_arg_area */
+        emit_add_imm32(b, REG_R11, 15);
+        emit_rex_wrb(b, 1, 0, REG_R11);
+        emit_byte(b, 0x83);
+        emit_modrm(b, 3, 4, REG_R11 & 7); /* and $~15, %r11 */
+        emit_byte(b, 0xF0);
+
+        /* Load 2 qwords from [R11] into [rbp + ld_off[dst]] */
+        emit_load_base_off(b, REG_RDX, REG_R11, 0);
+        emit_store_spill(b, REG_RDX, ld_off[dst]);
+        emit_load_base_off(b, REG_RDX, REG_R11, 8);
+        emit_store_spill(b, REG_RDX, ld_off[dst] + 8);
+
+        /* Advance overflow_arg_area by 16 and save */
+        emit_add_imm32(b, REG_R11, 16);
+        emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+        return;
+    }
 
     /* INTEGER-class aggregate: copy `imm` bytes from the GP save area (or
      * overflow) into the caller-provided slot in call_args[1], then return
@@ -3017,7 +3039,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 if (inst->call_name && strcmp(inst->call_name, "va_arg") == 0) {
-                    emit_va_arg(&out->text, inst, ra, ra_xmm, gp_spill_area);
+                    emit_va_arg(&out->text, fn, inst, ra, ra_xmm, gp_spill_area, ld_off);
                     break;
                 }
                 int nargs = inst->call_nargs;

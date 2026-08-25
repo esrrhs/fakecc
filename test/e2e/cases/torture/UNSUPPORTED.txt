@@ -695,7 +695,6 @@ strlen-7
 
 # Malloc-dependent tests - runtime hang.
 stdarg_2
-va_arg_5
 va_arg_6
 
 # Preprocessor conditionals.
