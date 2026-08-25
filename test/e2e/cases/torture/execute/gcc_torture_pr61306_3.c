@@ -1,6 +1,10 @@
 // expect: 0
 package main;
 
+/* PR tree-optimization/61306 */
+
+extern void abort (void);
+
 short a = -1;
 int b;
 char c;
@@ -11,6 +15,6 @@ main (void)
   c = a;
   b = a | c;
   if (b != -1)
-    __builtin_abort ();
+    abort ();
   return 0;
 }
