@@ -294,6 +294,7 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
         return expr_takes_addr_of(e->u.assign.lvalue, name)
             || expr_takes_addr_of(e->u.assign.rvalue, name);
     case EX_CALL: {
+        if (expr_takes_addr_of(e->u.call.callee, name)) return 1;
         for (size_t i = 0; i < e->u.call.args.len; i++)
             if (expr_takes_addr_of(e->u.call.args.data[i], name)) return 1;
         return 0;
@@ -318,7 +319,8 @@ static int expr_takes_addr_of(const Expr *e, const char *name) {
     case EX_INC_DEC:
         return expr_takes_addr_of(e->u.incdec.operand, name);
     case EX_COMPOUND_ASSIGN:
-        return expr_takes_addr_of(e->u.comp.lvalue, name);
+        return expr_takes_addr_of(e->u.comp.lvalue, name)
+            || expr_takes_addr_of(e->u.comp.rvalue, name);
     case EX_COMMA:
         return expr_takes_addr_of(e->u.comma.lhs, name)
             || expr_takes_addr_of(e->u.comma.rhs, name);
@@ -6547,7 +6549,12 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1, ploc);
                 if (param_nreg[p] > 0) {
                     SysVRegClass cls[2];
-                    sysv_classify_agg(pty, cls);
+                    if (type_is_i128(pty)) {
+                        cls[0] = SYSV_CLS_INTEGER;
+                        cls[1] = SYSV_CLS_INTEGER;
+                    } else {
+                        sysv_classify_agg(pty, cls);
+                    }
                     store_agg_regs(&irfn, addr, total, param_nreg[p], cls,
                                    param_ebs[p], ploc);
                 } else {

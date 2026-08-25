@@ -401,6 +401,17 @@ static int symtable_has_since(const SymTable *st, const char *name, size_t mark)
     return 0;
 }
 
+static int type_is_same(Type a, Type b) {
+    if (a.kind != b.kind) return 0;
+    if (a.width != b.width) return 0;
+    if (a.is_unsigned != b.is_unsigned) return 0;
+    if (a.is_vector != b.is_vector) return 0;
+    if (a.kind == TY_STRUCT) {
+        if (a.tag && b.tag && strcmp(a.tag, b.tag) != 0) return 0;
+    }
+    return 1;
+}
+
 /* Conversion rank proxy: float types outrank integer types (C §6.3.1.8).
  *   double (108) > float (104) > pointer (50) > long (8) > int (4) > ... */
 static int type_rank(Type t) {
@@ -1828,6 +1839,8 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             if (s->u.decl.init->kind == EX_INIT_LIST)
                 check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
             discard = check_expr(s->u.decl.init, st, ft); type_free(&discard);
+            if (s->u.decl.init->kind != EX_INIT_LIST)
+                coerce_arg_to_param(&s->u.decl.init, &s->u.decl.type);
         }
         break;
     }
@@ -1853,16 +1866,16 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                            "void function cannot return a value");
                 }
             } else {
-                if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
-                    discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) {
-                    Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
-                    set_type(c, type_clone(g_sema_ret_type));
-                    s->u.value = c;
-                } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
-                           (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
-                    Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
-                    set_type(c, type_clone(g_sema_ret_type));
-                    s->u.value = c;
+                if (!type_is_same(g_sema_ret_type, discard)) {
+                    if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||
+                        (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0) ||
+                        (discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) ||
+                        (g_sema_ret_type.kind == TY_INT && g_sema_ret_type.width == 16) ||
+                        (discard.kind == TY_INT && discard.width == 16)) {
+                        Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                        set_type(c, type_clone(g_sema_ret_type));
+                        s->u.value = c;
+                    }
                 }
             }
             type_free(&discard);
