@@ -459,7 +459,7 @@ static IRValue emit_bswap_val(IRFunction *fn, IRValue v, int uw, SourceLoc loc) 
  * the storage unit, and return 1.  Otherwise return 0.  The storage unit is the
  * naturally-aligned integer (1/2/4 bytes) that holds the bitfield run. */
 static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
-                           int *unit_width, int *is_be) {
+                           int *unit_width, int *is_be, int *is_unsigned) {
     if (e->kind != EX_MEMBER) return 0;
     if (e->u.member.obj->type.kind != TY_STRUCT) return 0;
     const char *tag = e->u.member.obj->type.tag;
@@ -474,6 +474,7 @@ static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
     *bit_offset = m->bit_offset;
     *unit_width = type_size(m->type);
     if (is_be) *is_be = sd->is_big_endian;
+    if (is_unsigned) *is_unsigned = m->type.is_unsigned;
     return 1;
 }
 
@@ -2984,7 +2985,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
             int bit_width = 0, bit_offset = 0, unit_width = 0, is_be = 0;
             if (lv->kind == EX_MEMBER
-                && member_bitfield(lv, &bit_width, &bit_offset, &unit_width, &is_be)) {
+                && member_bitfield(lv, &bit_width, &bit_offset, &unit_width, &is_be, NULL)) {
                 /* Bitfield store: read-modify-write the storage unit.
                  * unit = load(addr);
                  * unit = unit & ~(mask << bit_offset);   // clear the field
@@ -3891,8 +3892,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (e->type.kind == TY_STRUCT || type_is_i128(e->type)) return addr;
         if (e->type.kind == TY_ARRAY)  return addr;
         if (e->type.kind == TY_PTR && member_field_is_array(e)) return addr;
-        int bit_width = 0, bit_offset = 0, unit_width = 0, is_be_bf = 0;
-        int is_bf = member_bitfield(e, &bit_width, &bit_offset, &unit_width, &is_be_bf);
+        int bit_width = 0, bit_offset = 0, unit_width = 0, is_be_bf = 0, m_is_unsigned = 0;
+        int is_bf = member_bitfield(e, &bit_width, &bit_offset, &unit_width, &is_be_bf, &m_is_unsigned);
         int is_be = member_struct_be(e);
         /* Bitfields are loaded as their storage unit (e.g. 4-byte int), then
          * shifted/masked to the member's declared width below. */
@@ -3917,7 +3918,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 v = shifted;
             }
             if (bit_width < w * 8) {
-                int is_signed_bf = (!e->type.is_unsigned && !e->type.is_bool);
+                int is_signed_bf = (!m_is_unsigned && !e->type.is_bool);
                 if (e->type.enum_id > 0) {
                     is_signed_bf = 0;
                     if (g_ir_tu && (size_t)(e->type.enum_id - 1) < g_ir_tu->enums.len) {
@@ -4229,7 +4230,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Bitfield member: full RMW with masking. */
         int bf_width = 0, bf_offset = 0, bf_unit = 0, is_be = 0;
         if (lv->kind == EX_MEMBER
-            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be)) {
+            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be, NULL)) {
             int uw = bf_unit ? bf_unit : 4;
             int64_t mask = bitfield_mask64(bf_width);
             /* Load the full storage unit. */
@@ -4384,7 +4385,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * (gcc.c-torture/execute/20000113-1.c). */
         int bf_width = 0, bf_offset = 0, bf_unit = 0, is_be = 0;
         if (!is_float && !is_ptr && lv->kind == EX_MEMBER
-            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be)) {
+            && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be, NULL)) {
             int uw = bf_unit ? bf_unit : 4;
             int64_t mask = bitfield_mask64(bf_width);
             IRValue unit = new_value(fn);
@@ -5934,6 +5935,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                 } else {
                     if (cur_idx < sd->num_members) sm = &sd->members[cur_idx++];
                 }
+                if (!sm || sm->name == NULL || sm->name[0] == '\0') continue;
                 if (sm->bit_width > 0) {
                     long long fv = 0;
                     const Expr *el = e->u.init_list.elements[i];
@@ -6192,7 +6194,7 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                 } else {
                     if (cur_idx < sd->num_members) sm = &sd->members[cur_idx++];
                 }
-                if (!sm) continue;
+                if (!sm || sm->name == NULL || sm->name[0] == '\0') continue;
                 IRValue off = new_value(fn);
                 emit_inst_w(fn, IR_CONST, off, -1, -1, sm->offset, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);

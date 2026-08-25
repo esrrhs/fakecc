@@ -1631,6 +1631,11 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
         } else {
+            if (sd && !sd->is_union) {
+                while (cursor < sd->num_members && (sd->members[cursor].name == NULL || sd->members[cursor].name[0] == '\0')) {
+                    cursor++;
+                }
+            }
             pos = cursor;
             member_idx = (sd && sd->is_union) ? 0 : pos;
         }
@@ -1679,6 +1684,11 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
          * following the designated slot, so the cursor always advances to
          * pos+1 (for positional inits pos == cursor, so this is just +1). */
         cursor = pos + 1;
+        if (sd && !sd->is_union) {
+            while (cursor < sd->num_members && (sd->members[cursor].name == NULL || sd->members[cursor].name[0] == '\0')) {
+                cursor++;
+            }
+        }
     }
     /* Consume the now-obsolete desig arrays and the old element buffer. */
     for (int i = 0; i < n; i++)
