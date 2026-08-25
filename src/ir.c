@@ -3215,6 +3215,81 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
         }
         if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_isinf") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_isinff") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_isinfl") == 0) &&
+            e->u.call.args.len > 0) {
+            /* __builtin_isinf(f): returns 1 if f is +/- infinity, 0 otherwise.
+             * IEEE 754: inf has exponent all 1s and mantissa all 0s.
+             * float:  mask 0x7FFFFFFF, compare to 0x7F800000
+             * double: mask 0x7FFFFFFFFFFFFFFF, compare to 0x7FF0000000000000 */
+            Expr *a0 = e->u.call.args.data[0];
+            Type aty = a0->type;
+            if (aty.kind == TY_FLOAT) {
+                IRValue fv = lower_expr(fn, st, a0);
+                if (aty.width == 4) {
+                    IRValue slot = emit_alloca(fn, 4, 4, 1, e->loc);
+                    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, fv, 0, 4, 1, e->loc);
+                    IRValue ival = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, ival, addr, -1, 0, 4, 1, e->loc);
+                    /* Zero-extend to 64-bit for uniform comparison */
+                    IRValue ival64 = coerce(fn, ival, 4, 1, 8, 1, e->loc);
+                    IRValue mask = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, mask, -1, -1, 0x7FFFFFFF, 8, 1, e->loc);
+                    IRValue masked = emit_bin_w(fn, IR_BAND, ival64, mask, 8, 1, e->loc);
+                    IRValue inf_val = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, inf_val, -1, -1, 0x7F800000, 8, 1, e->loc);
+                    IRValue is_inf = emit_bin_w(fn, IR_EQ, masked, inf_val, 8, 1, e->loc);
+                    return coerce(fn, is_inf, 8, 1, 4, 0, e->loc);
+                } else if (aty.width == 8) {
+                    IRValue slot = emit_alloca(fn, 8, 8, 1, e->loc);
+                    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, fv, 0, 8, 1, e->loc);
+                    IRValue ival = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, ival, addr, -1, 0, 8, 1, e->loc);
+                    IRValue mask = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, mask, -1, -1, 0x7FFFFFFFFFFFFFFFLL, 8, 1, e->loc);
+                    IRValue masked = emit_bin_w(fn, IR_BAND, ival, mask, 8, 1, e->loc);
+                    IRValue inf_val = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, inf_val, -1, -1, 0x7FF0000000000000LL, 8, 1, e->loc);
+                    IRValue is_inf = emit_bin_w(fn, IR_EQ, masked, inf_val, 8, 1, e->loc);
+                    return coerce(fn, is_inf, 8, 1, 4, 0, e->loc);
+                } else {
+                    /* long double (80-bit x87, stored in 16 bytes).
+                     * Layout: 10 bytes data (LE) + 6 bytes padding.
+                     * +inf bytes: 00 00 00 00 00 00 00 80 FF 7F
+                     * Check exponent (bytes 8-9, 15 bits) == 0x7FFF
+                     * and mantissa integer bit set, fraction clear. */
+                    IRValue slot = emit_alloca(fn, 16, 16, 1, e->loc);
+                    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, fv, 0, 16, 1, e->loc);
+                    /* Load bytes 8-9 as little-endian 16-bit = exponent + sign */
+                    IRValue exp_addr = emit_add_const(fn, addr, 8, e->loc);
+                    IRValue exp16 = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, exp16, exp_addr, -1, 0, 2, 1, e->loc);
+                    IRValue exp16_64 = coerce(fn, exp16, 2, 1, 8, 1, e->loc);
+                    IRValue exp_mask = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, exp_mask, -1, -1, 0x7FFF, 8, 1, e->loc);
+                    IRValue exp_bits = emit_bin_w(fn, IR_BAND, exp16_64, exp_mask, 8, 1, e->loc);
+                    IRValue exp_max = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, exp_max, -1, -1, 0x7FFF, 8, 1, e->loc);
+                    IRValue exp_ok = emit_bin_w(fn, IR_EQ, exp_bits, exp_max, 8, 1, e->loc);
+                    /* Check mantissa == 0x8000000000000000 (integer=1, fraction=0) */
+                    IRValue mant = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, mant, addr, -1, 0, 8, 1, e->loc);
+                    IRValue mant_mask = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, mant_mask, -1, -1, 0x7FFFFFFFFFFFFFFFLL, 8, 1, e->loc);
+                    IRValue mant_masked = emit_bin_w(fn, IR_BAND, mant, mant_mask, 8, 1, e->loc);
+                    IRValue mant_expected = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, mant_expected, -1, -1, 0x8000000000000000LL, 8, 1, e->loc);
+                    IRValue mant_ok = emit_bin_w(fn, IR_EQ, mant_masked, mant_expected, 8, 1, e->loc);
+                    IRValue is_inf = emit_bin_w(fn, IR_BAND, exp_ok, mant_ok, 8, 1, e->loc);
+                    return coerce(fn, is_inf, 8, 1, 4, 0, e->loc);
+                }
+            }
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
             (strcmp(e->u.call.callee->u.var.name, "__builtin_add_overflow") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_add_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_sadd_overflow") == 0 ||
