@@ -282,8 +282,6 @@ pr80692
 # Complex bit-field with unnamed fields - not fully supported.
 pr31448-2
 
-# Zero-length array - runtime crash.
-zerolen-2
 
 # Complex Duff's device with computed gotos - crashes at runtime.
 pr38051
