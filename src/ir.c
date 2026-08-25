@@ -2403,6 +2403,38 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     case EX_UNARY:
         switch (e->u.un.op) {
         case UOP_NEG: {
+            if (e->u.un.operand->type.is_vector) {
+                Type vt = e->u.un.operand->type;
+                int total_sz = type_size(vt);
+                int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
+                if (esz <= 0) esz = 4;
+                int count = vt.length > 0 ? vt.length : (total_sz / esz);
+                int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
+                int is_float = vt.elem_type ? (vt.elem_type->kind == TY_FLOAT) : 0;
+                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
+                IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+                IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                for (int i = 0; i < count; i++) {
+                    IRValue src_off = emit_add_const(fn, op_addr, i * esz, e->loc);
+                    IRValue dst_off = emit_add_const(fn, dst_addr, i * esz, e->loc);
+                    IRValue val = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, val, src_off, -1, 0, esz, is_unsigned, e->loc);
+                    if (is_float) set_value_float(fn, val, 1);
+                    IRValue neg_val;
+                    if (is_float) {
+                        int64_t negzero = (esz == 4) ? (int64_t)0x80000000
+                                                    : (int64_t)0x8000000000000000LL;
+                        IRValue zero = emit_float_const(fn, esz, negzero, e->loc);
+                        neg_val = emit_bin_w(fn, IR_FSUB, zero, val, esz, 0, e->loc);
+                        set_value_float(fn, neg_val, 1);
+                    } else {
+                        neg_val = emit_bin_w(fn, IR_NEG, val, -1, esz, is_unsigned, e->loc);
+                    }
+                    emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, neg_val, 0, esz, is_unsigned, e->loc);
+                    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                }
+                return dst_addr;
+            }
             if (type_is_i128(e->type) || type_is_i128(e->u.un.operand->type)) {
                 IRValue x = lower_expr(fn, st, e->u.un.operand);
                 IRValue a = i128_as_addr(fn, x, e->u.un.operand->type,
@@ -3886,7 +3918,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     }
     case EX_DEREF: {
         IRValue ptr = lower_expr(fn, st, e->u.deref.operand);
-        if (e->type.kind == TY_STRUCT || e->type.kind == TY_ARRAY || type_is_i128(e->type)) return ptr;
+        if (e->type.kind == TY_STRUCT || e->type.kind == TY_ARRAY || e->type.is_vector || type_is_i128(e->type)) return ptr;
         /* Function lvalue (`*fp` where fp : ptr(func)): no load — the function
          * pointer value IS the caldehyde; it decays at the call site. */
         if (e->type.kind == TY_FUNC) return ptr;
@@ -3911,7 +3943,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int u = e->type.is_unsigned;
         if (e->type.kind == TY_ARRAY) return addr;
-        if (e->type.kind == TY_STRUCT || type_is_i128(e->type)) return addr;
+        if (e->type.kind == TY_STRUCT || e->type.is_vector || type_is_i128(e->type)) return addr;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
         if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
@@ -3923,7 +3955,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * Also handle array-to-pointer decay performed in-place by sema: the
          * node's type may be TY_PTR but the underlying struct field is TY_ARRAY
          * — in that case the member's address IS the pointer value. */
-        if (e->type.kind == TY_STRUCT || type_is_i128(e->type)) return addr;
+        if (e->type.kind == TY_STRUCT || e->type.is_vector || type_is_i128(e->type)) return addr;
         if (e->type.kind == TY_ARRAY)  return addr;
         if (e->type.kind == TY_PTR && member_field_is_array(e)) return addr;
         int bit_width = 0, bit_offset = 0, unit_width = 0, is_be_bf = 0, m_is_unsigned = 0;
