@@ -698,7 +698,6 @@ pushpop_macro
 printf-1
 printf-2
 printf-chk-1
-pure-1
 regstack-1
 stdarg-1
 stkalign
