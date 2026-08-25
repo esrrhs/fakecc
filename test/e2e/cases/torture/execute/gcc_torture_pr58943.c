@@ -1,19 +1,24 @@
-/* PR c/58943 - fixed order */
-
 // expect: 0
 package main;
 
-static unsigned int x[1] = { 2 };
+/* PR c/58943 */
 
-static unsigned int foo(void) {
+extern void abort (void);
+
+unsigned int x[1] = { 2 };
+
+unsigned int
+foo (void)
+{
   x[0] |= 128;
   return 1;
 }
 
-int main(void) {
-  unsigned int r = foo();
-  x[0] |= r;
+int
+main (void)
+{
+  x[0] |= foo ();
   if (x[0] != 131)
-    __builtin_abort();
+    abort ();
   return 0;
 }

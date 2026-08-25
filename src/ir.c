@@ -4512,9 +4512,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (lv->kind == EX_VAR && !is_float) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
             if (entry && !entry->is_global && !entry->pinned) {
+                IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
                 IRValue old = new_value(fn);
                 emit_inst_w(fn, IR_LOAD, old, entry->slot, -1, 0, lw, lu, e->loc);
-                IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
                 IRValue scaled = is_ptr
                     ? scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc)
                     : coerce(fn, rhs, get_value_width(fn, rhs),
@@ -4538,6 +4538,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int bf_width = 0, bf_offset = 0, bf_unit = 0, is_be = 0;
         if (!is_float && !is_ptr && lv->kind == EX_MEMBER
             && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be, NULL)) {
+            IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
             int uw = bf_unit ? bf_unit : 4;
             int64_t mask = bitfield_mask64(bf_width);
             IRValue unit = new_value(fn);
@@ -4573,7 +4574,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue old_p = coerce(fn, old_val, uw,
                                    (!lv->type.is_unsigned && !lv->type.is_bool) ? 0 : 1,
                                    cw, cu, e->loc);
-            IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
             int rw = get_value_width(fn, rhs), ru = get_value_is_unsigned(fn, rhs);
             IRValue rhs_p = coerce(fn, rhs, rw, ru, cw, cu, e->loc);
             IRValue neu = emit_bin_w(fn, ir_op, old_p, rhs_p, cw, cu, e->loc);
@@ -4605,10 +4605,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                           lv->type.is_unsigned, e->loc);
         }
 
+        IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
         IRValue old = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
         if (is_float) set_value_float(fn, old, 1);
-        IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
         IRValue scaled;
         if (is_float) {
             /* The right operand joins the lvalue's float type, whether it
