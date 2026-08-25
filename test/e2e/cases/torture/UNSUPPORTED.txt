@@ -141,7 +141,6 @@ pr56837.c
 pr56866.c
 pr56982.c
 pr56982.c
-pr98474.c
 printf-2.c
 printf-chk-1.c
 va-arg-pack-1.c
@@ -194,7 +193,6 @@ pr84169
 pr84748
 pr85582-2
 pr85582-3
-pr98474
 
 # Inline assembly - not supported by fakecc.
 pr65648
@@ -316,7 +314,6 @@ pr85756
 pr86528
 pr87623
 pr92904
-pr98474
 
 
 
@@ -340,7 +337,6 @@ pr84169
 pr84748
 pr85582-2
 pr85582-3
-pr98474
 
 # Inline assembly - not supported by fakecc.
 pr65648
@@ -459,7 +455,6 @@ pr85582-3
 pr85756
 pr87623
 pr92904
-pr98474
 
 
 # Nested functions / trampolines - not supported by fakecc.
@@ -572,7 +567,6 @@ pr85582-3
 pr85756
 pr87623
 pr92904
-pr98474
 
 # Preprocessor macros/macros which fakecc doesn't support.
 pushpop_macro
