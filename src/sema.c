@@ -1227,8 +1227,16 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         }
         type_free(&ot);
         Type mt = type_clone(m->type);
-        if (m->bit_width > 0)
+        if (m->bit_width > 0) {
             mt.bitfield_width = m->bit_width;
+            if (m->bit_width < 32 || (m->bit_width == 32 && !m->type.is_unsigned)) {
+                mt.width = 4;
+                mt.is_unsigned = 0;
+            } else if (m->bit_width == 32 && m->type.is_unsigned) {
+                mt.width = 4;
+                mt.is_unsigned = 1;
+            }
+        }
         set_type(e, mt);
         return type_clone(e->type);
     }
