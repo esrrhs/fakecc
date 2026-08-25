@@ -692,7 +692,6 @@ vprintf-chk-1
 pr79327
 strlen-6
 strlen-7
-struct-ret-1
 
 # Malloc-dependent tests - runtime hang.
 stdarg_2
