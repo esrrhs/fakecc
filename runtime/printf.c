@@ -528,6 +528,11 @@ int fprintf(FILE *f, const char *fmt, ...) {
     return r;
 }
 
+int vprintf(const char *fmt, va_list ap) {
+    ensure_stdio();
+    return vfprintf(stdout, fmt, ap);
+}
+
 int printf(const char *fmt, ...) {
     ensure_stdio();
     va_list ap;
