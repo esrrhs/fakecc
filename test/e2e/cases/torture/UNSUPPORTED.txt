@@ -283,7 +283,6 @@ pr80692
 pr31448-2
 
 # Zero-length array - runtime crash.
-zerolen-1
 zerolen-2
 
 # Complex Duff's device with computed gotos - crashes at runtime.
