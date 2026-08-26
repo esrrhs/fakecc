@@ -3105,14 +3105,17 @@ static Stmt parse_stmt(Parser *p) {
                 advance(p);
             }
             Stmt s;
+            /* Zero the whole Stmt: decl.align used to be left uninitialized,
+             * so __alignof__(var) could promote a stack-garbage Sym.align over
+             * the type's real alignment (clang -O2 exposed this on stkalign). */
+            memset(&s, 0, sizeof(s));
             s.kind = ST_DECL;
             s.loc = decl_loc;
             s.u.decl.name = decl_name;
             s.u.decl.type = ty;
             s.u.decl.storage_class = storage_class;
-            s.u.decl.init = NULL;
-            s.u.decl.alias_target = NULL;
-            while (parse_attribute(p, NULL, NULL, NULL, NULL, &s.u.decl.alias_target)) {}
+            while (parse_attribute(p, &s.u.decl.align, NULL, NULL, NULL,
+                                   &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {
                 advance(p);
                 /* `extern` may not have an initializer. */
@@ -3129,7 +3132,8 @@ static Stmt parse_stmt(Parser *p) {
                     s.u.decl.init = parse_assign(p);
                 }
             }
-            while (parse_attribute(p, NULL, NULL, NULL, NULL, &s.u.decl.alias_target)) {}
+            while (parse_attribute(p, &s.u.decl.align, NULL, NULL, NULL,
+                                   &s.u.decl.alias_target)) {}
             if (!s.u.decl.alias_target && g_parsed_alias) {
                 s.u.decl.alias_target = g_parsed_alias;
                 g_parsed_alias = NULL;
