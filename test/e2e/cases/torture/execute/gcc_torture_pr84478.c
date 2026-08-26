@@ -1,3 +1,4 @@
+// expect: 0
 package main;
 
 extern void *malloc(unsigned long);

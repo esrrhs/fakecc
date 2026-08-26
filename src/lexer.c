@@ -232,6 +232,9 @@ lex_loop_head:
                     if (source[pos] == '\0' || source[pos] == '\n') break;
                     if (source[pos] == 'x' || source[pos] == 'X') {
                         pos++; col++;
+                        if (!isxdigit((unsigned char)source[pos]))
+                            die_at(filename, start_line, start_col,
+                                   "hex escape \\x with no digits");
                         while (isxdigit((unsigned char)source[pos])) { pos++; col++; }
                     } else if (source[pos] >= '0' && source[pos] <= '7') {
                         int n = 0;

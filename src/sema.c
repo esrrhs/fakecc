@@ -1749,7 +1749,10 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             if (sd && sd->is_union) pos = 0;
         } else {
             if (sd && !sd->is_union) {
-                while (cursor < sd->num_members && (sd->members[cursor].name == NULL || sd->members[cursor].name[0] == '\0')) {
+                while (cursor < sd->num_members
+                       && (sd->members[cursor].name == NULL
+                           || sd->members[cursor].name[0] == '\0')
+                       && sd->members[cursor].bit_width >= 0) {
                     cursor++;
                 }
             }
@@ -1802,7 +1805,10 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
          * pos+1 (for positional inits pos == cursor, so this is just +1). */
         cursor = pos + 1;
         if (sd && !sd->is_union) {
-            while (cursor < sd->num_members && (sd->members[cursor].name == NULL || sd->members[cursor].name[0] == '\0')) {
+            while (cursor < sd->num_members
+                   && (sd->members[cursor].name == NULL
+                       || sd->members[cursor].name[0] == '\0')
+                   && sd->members[cursor].bit_width >= 0) {
                 cursor++;
             }
         }
