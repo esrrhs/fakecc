@@ -55,8 +55,6 @@ pr80692.c
 pr47237.c
 va-arg-pack-1.c
 
-# __sync atomic builtins not supported by fakecc.
-pr122000.c
 
 # GCC vector_size / asm goto not supported by fakecc.
 pr121957.c

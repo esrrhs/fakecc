@@ -981,6 +981,39 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             set_type(e, type_make_int(4, 0));
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR
+            && strncmp(e->u.call.callee->u.var.name, "__sync_", 7) == 0) {
+            const char *sname = e->u.call.callee->u.var.name;
+            if (strcmp(sname, "__sync_synchronize") == 0) {
+                set_type(e, type_make_void());
+                return type_clone(e->type);
+            }
+            if (e->u.call.args.len < 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "atomic builtin takes at least 1 argument");
+            }
+            Type ptr_ty = check_expr(e->u.call.args.data[0], st, ft);
+            if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "atomic builtin first argument must be a pointer");
+            }
+            Type val_ty = type_clone(*ptr_ty.pointee);
+            type_free(&ptr_ty);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type at = check_expr(e->u.call.args.data[i], st, ft);
+                type_free(&at);
+            }
+            if (strcmp(sname, "__sync_lock_release") == 0) {
+                type_free(&val_ty);
+                set_type(e, type_make_void());
+            } else if (strcmp(sname, "__sync_bool_compare_and_swap") == 0) {
+                type_free(&val_ty);
+                set_type(e, type_make_int(4, 0));
+            } else {
+                set_type(e, val_ty);
+            }
+            return type_clone(e->type);
+        }
         /* Recognize the va_start / va_arg / va_end builtins BEFORE the callee
          * lookup, for the same reason as __syscall: they are not real
          * variables/functions. They operate on a `va_list` lvalue (the struct

@@ -3306,6 +3306,80 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             fake_un.u.un.operand = e->u.call.args.data[0];
             return lower_expr(fn, st, &fake_un);
         }
+        if (e->u.call.callee->kind == EX_VAR &&
+            strncmp(e->u.call.callee->u.var.name, "__sync_", 7) == 0) {
+            const char *sname = e->u.call.callee->u.var.name;
+            if (strcmp(sname, "__sync_synchronize") == 0) {
+                return -1;
+            }
+            IRValue addr = lower_expr(fn, st, e->u.call.args.data[0]);
+            int sz = type_size(e->type);
+            int is_u = e->type.is_unsigned;
+            if (strcmp(sname, "__sync_lock_release") == 0) {
+                sz = 4;
+                if (e->u.call.args.data[0]->type.kind == TY_PTR && e->u.call.args.data[0]->type.pointee) {
+                    sz = type_size(*e->u.call.args.data[0]->type.pointee);
+                    is_u = e->u.call.args.data[0]->type.pointee->is_unsigned;
+                }
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, sz, is_u, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, 0, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__sync_bool_compare_and_swap") == 0 ||
+                strcmp(sname, "__sync_val_compare_and_swap") == 0) {
+                int val_sz = sz;
+                int val_u = is_u;
+                if (strcmp(sname, "__sync_bool_compare_and_swap") == 0) {
+                    if (e->u.call.args.data[0]->type.kind == TY_PTR && e->u.call.args.data[0]->type.pointee) {
+                        val_sz = type_size(*e->u.call.args.data[0]->type.pointee);
+                        val_u = e->u.call.args.data[0]->type.pointee->is_unsigned;
+                    }
+                }
+                IRValue old_expected = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue new_desired = lower_expr(fn, st, e->u.call.args.data[2]);
+                IRValue cur_val = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, cur_val, addr, -1, 0, val_sz, val_u, e->loc);
+                set_value_type(fn, cur_val, val_sz, val_u);
+                int L_match = new_label(fn);
+                int L_done = new_label(fn);
+                IRValue eq = emit_bin_w(fn, IR_EQ, cur_val, old_expected, 4, 0, e->loc);
+                emit_inst_w(fn, IR_CBR, -1, eq, L_done, L_match, 4, 0, e->loc);
+                emit_inst_w(fn, IR_LABEL, -1, -1, -1, L_match, 0, 0, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, new_desired, 0, val_sz, val_u, e->loc);
+                emit_inst_w(fn, IR_LABEL, -1, -1, -1, L_done, 0, 0, e->loc);
+                if (strcmp(sname, "__sync_bool_compare_and_swap") == 0) {
+                    return eq;
+                } else {
+                    return cur_val;
+                }
+            }
+            if (strcmp(sname, "__sync_lock_test_and_set") == 0) {
+                IRValue new_val = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue old_val = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, old_val, addr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, old_val, sz, is_u);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, new_val, 0, sz, is_u, e->loc);
+                return old_val;
+            }
+            IRValue delta = lower_expr(fn, st, e->u.call.args.data[1]);
+            IRValue old_val = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, old_val, addr, -1, 0, sz, is_u, e->loc);
+            set_value_type(fn, old_val, sz, is_u);
+            int op = IR_ADD;
+            if (strstr(sname, "_sub_") || strstr(sname, "fetch_and_sub")) op = IR_SUB;
+            else if (strstr(sname, "_and_and_") || strstr(sname, "fetch_and_and")) op = IR_BAND;
+            else if (strstr(sname, "_or_and_") || strstr(sname, "fetch_and_or")) op = IR_BOR;
+            else if (strstr(sname, "_xor_and_") || strstr(sname, "fetch_and_xor")) op = IR_BXOR;
+            else if (strstr(sname, "_add_") || strstr(sname, "fetch_and_add")) op = IR_ADD;
+            IRValue res = emit_bin_w(fn, op, old_val, delta, sz, is_u, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, res, 0, sz, is_u, e->loc);
+            if (strncmp(sname, "__sync_fetch_", 13) == 0) {
+                return old_val;
+            } else {
+                return res;
+            }
+        }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_prefetch") == 0) {
             for (size_t i = 0; i < e->u.call.args.len; i++)
                 lower_expr(fn, st, e->u.call.args.data[i]);
