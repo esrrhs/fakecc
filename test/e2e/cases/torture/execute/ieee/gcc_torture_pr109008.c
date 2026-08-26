@@ -1,6 +1,11 @@
 // expect: 0
 package main;
-__attribute__((noipa)) double
+
+/* PR tree-optimization/109008 */
+
+extern void abort(void);
+
+double
 foo (double eps)
 {
   double d = 1. + eps;
@@ -8,10 +13,11 @@ foo (double eps)
     return eps;
   return 0.0;
 }
+
 int
 main ()
 {
-  if (foo (((double)2.22044604925031308084726333618164062e-16L) / 8.0) == 0.0)
-    __builtin_abort ();
+  if (foo (2.2204460492503131e-16 / 8.0) == 0.0)
+    abort ();
   return 0;
 }
