@@ -1,5 +1,10 @@
 // expect: 0
 package main;
+
+/* PR tree-optimization/109386 */
+
+extern void abort(void);
+
 static inline float
 foo (float x, float y)
 {
@@ -12,9 +17,11 @@ foo (float x, float y)
     }
   return 42.0f;
 }
+
 int
 main ()
 {
   if (!__builtin_isinf (foo (__builtin_inff (), __builtin_nanf (""))))
-    __builtin_abort ();
+    abort ();
+  return 0;
 }
