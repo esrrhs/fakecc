@@ -288,10 +288,9 @@ static void emit_sse_ucomi(Buffer *b, int a, int b_xmm, int is_float) {
     emit_modrm(b, 3, a & 7, b_xmm & 7);
 }
 
-/* cvtsi2sd xmm, r/m64  →  F2 REX.W 0F 2A /r.  Converts a 64-bit (or 32-bit
- * if !is_64) signed GP integer into a double in xmm. */
-static void emit_sse_cvtsi2sd(Buffer *b, int xmm, int gp, int is_64) {
-    emit_byte(b, 0xF2);
+/* cvtsi2ss/sd xmm, r/m64  →  (F3 or F2) REX.W 0F 2A /r. */
+static void emit_sse_cvtsi2s(Buffer *b, int xmm, int gp, int is_64, int is_dst_float) {
+    emit_byte(b, is_dst_float ? 0xF3 : 0xF2);
     emit_rex_wrb(b, is_64 ? 1 : 0, xmm, gp);
     emit_byte(b, 0x0F);
     emit_byte(b, 0x2A);
@@ -3586,6 +3585,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * signedness; inst->width is the destination float width. */
                 int src_w = inst->imm ? (int)inst->imm : 4;
                 int src_u = inst->is_unsigned;
+                int dst_is_f = (inst->width == 4);
                 if (value_is_ld(fn, inst->dst)) {
                     /* int→long double.  Load int into a GP reg, store into dst's
                      * slot, fild from the slot (pushes ld to st0), fstpt the
@@ -3598,34 +3598,31 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                         src_w, src_u);
                     break;
                 }
-                /* dst (float) = (float)a.  Load a into a GP scratch, cvtsi2sd,
-                 * then optionally narrow to float. */
+                /* dst (float) = (float)a.  Load a into a GP scratch. */
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (src_u && src_w == 8) {
-                    /* cvtsi2sd is signed.  Above 2^63 convert u/2 (rounding
+                    /* cvtsi2s is signed.  Above 2^63 convert u/2 (rounding
                      * the odd bit into it so no low bit is lost) and double
                      * the result. */
                     emit_test_rr(&out->text, REG_RAX);
                     size_t j_big = emit_jcc_rel32(&out->text, 0x88); /* js */
-                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX, 1);
+                    emit_sse_cvtsi2s(&out->text, XMM_SCRATCH0, REG_RAX, 1, dst_is_f);
                     size_t j_done = emit_jmp_rel32(&out->text);
                     patch_rel32(&out->text, j_big, out->text.len);
                     emit_mov_rr(&out->text, REG_RDX, REG_RAX);
                     emit_and_imm32(&out->text, REG_RDX, 1);
                     emit_shr_imm8(&out->text, REG_RAX, 1);
                     emit_or_rr(&out->text, REG_RAX, REG_RDX);
-                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX, 1);
+                    emit_sse_cvtsi2s(&out->text, XMM_SCRATCH0, REG_RAX, 1, dst_is_f);
                     emit_sse_arith(&out->text, 0x58 /* add */, XMM_SCRATCH0,
-                                   XMM_SCRATCH0, 0);
+                                   XMM_SCRATCH0, dst_is_f);
                     patch_rel32(&out->text, j_done, out->text.len);
                 } else {
                     if (src_u && src_w < 8)
                         mask_to_width(&out->text, REG_RAX, src_w, 1);
-                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX,
-                                      src_w == 8 || src_u);
+                    emit_sse_cvtsi2s(&out->text, XMM_SCRATCH0, REG_RAX,
+                                      src_w == 8 || src_u, dst_is_f);
                 }
-                if (inst->width == 4)
-                    emit_sse_cvtsd2ss(&out->text, XMM_SCRATCH0, XMM_SCRATCH0);
                 if (dr >= 0 && dr != XMM_SCRATCH0)
                     emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
                 spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
