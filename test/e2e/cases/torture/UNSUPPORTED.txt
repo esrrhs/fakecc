@@ -57,7 +57,6 @@ pr70903.c
 pr71494.c
 pr77767.c
 pr80692.c
-pr81588.c
 pr82210.c
 pr82954.c
 pr84169.c
@@ -142,7 +141,6 @@ pr85582-2
 pr85582-3
 
 # Inline assembly - not supported by fakecc.
-pr81588
 pr82954
 
 # Label values / computed goto - not supported by fakecc.
@@ -200,7 +198,6 @@ pr70903
 pr71494
 pr77767
 pr80692
-pr81588
 pr82210
 pr82954
 pr84169
@@ -240,7 +237,6 @@ pr85582-2
 pr85582-3
 
 # Inline assembly - not supported by fakecc.
-pr81588
 pr82954
 pr41239
 pr45695
@@ -297,7 +293,6 @@ pr70903
 pr71494
 pr77767
 pr80692
-pr81588
 pr82210
 pr82954
 pr84169
@@ -375,7 +370,6 @@ pr70903
 pr71494
 pr77767
 pr80692
-pr81588
 pr82210
 pr82954
 pr84169
