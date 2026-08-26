@@ -2340,6 +2340,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
 
             case IR_COPY: {
+                if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
+                    emit_ld_load(&out->text, inst->a, ld_off);
+                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    break;
+                }
                 if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
                     int dr_xmm = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
                                  ? ra_xmm->reg[inst->dst] : -1;
@@ -2424,6 +2429,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_LOAD: {
+                if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
+                    emit_ld_load(&out->text, inst->a, ld_off);
+                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    break;
+                }
                 if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
                     int dr_xmm = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
                                  ? ra_xmm->reg[inst->dst] : -1;
@@ -2451,6 +2461,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_STORE: {
+                if ((inst->a >= 0 && value_is_ld(fn, inst->a)) || (inst->b >= 0 && value_is_ld(fn, inst->b))) {
+                    emit_ld_load(&out->text, inst->b, ld_off);
+                    emit_ld_store(&out->text, inst->a, ld_off);
+                    break;
+                }
                 if ((inst->a >= 0 && value_is_float_class(fn, inst->a)) || (inst->b >= 0 && value_is_float_class(fn, inst->b))) {
                     int ar_xmm = (ra_xmm && inst->a >= 0 && inst->a < ra_xmm->num_values)
                                  ? ra_xmm->reg[inst->a] : -1;

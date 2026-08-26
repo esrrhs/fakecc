@@ -2150,12 +2150,14 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
             {
                 IRValue ratio = emit_bin_w(fn, div_op, r_imag, r_real, elem_sz, 1, e->loc);
                 set_value_float(fn, ratio, 1);
-                IRValue d2 = emit_bin_w(fn, mul_op, r_imag, ratio, elem_sz, 1, e->loc);
+                IRValue d2 = emit_bin_w(fn, mul_op, ratio, r_imag, elem_sz, 1, e->loc);
                 set_value_float(fn, d2, 1);
                 IRValue denom = emit_bin_w(fn, add_op, r_real, d2, elem_sz, 1, e->loc);
                 set_value_float(fn, denom, 1);
                 
-                IRValue n_r2 = emit_bin_w(fn, mul_op, l_imag, ratio, elem_sz, 1, e->loc);
+                IRValue l_imag_div = emit_bin_w(fn, div_op, l_imag, r_real, elem_sz, 1, e->loc);
+                set_value_float(fn, l_imag_div, 1);
+                IRValue n_r2 = emit_bin_w(fn, mul_op, l_imag_div, r_imag, elem_sz, 1, e->loc);
                 set_value_float(fn, n_r2, 1);
                 IRValue num_r = emit_bin_w(fn, add_op, l_real, n_r2, elem_sz, 1, e->loc);
                 set_value_float(fn, num_r, 1);
@@ -2164,7 +2166,9 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
                 emit_inst_w(fn, IR_STORE, -1, slot_r, res_r, 0, elem_sz, 0, e->loc);
                 fn->insts.data[fn->insts.len - 1].is_float = 1;
                 
-                IRValue n_i2 = emit_bin_w(fn, mul_op, l_real, ratio, elem_sz, 1, e->loc);
+                IRValue l_real_div = emit_bin_w(fn, div_op, l_real, r_real, elem_sz, 1, e->loc);
+                set_value_float(fn, l_real_div, 1);
+                IRValue n_i2 = emit_bin_w(fn, mul_op, l_real_div, r_imag, elem_sz, 1, e->loc);
                 set_value_float(fn, n_i2, 1);
                 IRValue num_i = emit_bin_w(fn, sub_op, l_imag, n_i2, elem_sz, 1, e->loc);
                 set_value_float(fn, num_i, 1);
@@ -2181,12 +2185,14 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
             {
                 IRValue ratio = emit_bin_w(fn, div_op, r_real, r_imag, elem_sz, 1, e->loc);
                 set_value_float(fn, ratio, 1);
-                IRValue d2 = emit_bin_w(fn, mul_op, r_real, ratio, elem_sz, 1, e->loc);
+                IRValue d2 = emit_bin_w(fn, mul_op, ratio, r_real, elem_sz, 1, e->loc);
                 set_value_float(fn, d2, 1);
                 IRValue denom = emit_bin_w(fn, add_op, r_imag, d2, elem_sz, 1, e->loc);
                 set_value_float(fn, denom, 1);
                 
-                IRValue n_r1 = emit_bin_w(fn, mul_op, l_real, ratio, elem_sz, 1, e->loc);
+                IRValue l_real_div = emit_bin_w(fn, div_op, l_real, r_imag, elem_sz, 1, e->loc);
+                set_value_float(fn, l_real_div, 1);
+                IRValue n_r1 = emit_bin_w(fn, mul_op, l_real_div, r_real, elem_sz, 1, e->loc);
                 set_value_float(fn, n_r1, 1);
                 IRValue num_r = emit_bin_w(fn, add_op, n_r1, l_imag, elem_sz, 1, e->loc);
                 set_value_float(fn, num_r, 1);
@@ -2195,7 +2201,9 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
                 emit_inst_w(fn, IR_STORE, -1, slot_r, res_r, 0, elem_sz, 0, e->loc);
                 fn->insts.data[fn->insts.len - 1].is_float = 1;
                 
-                IRValue n_i1 = emit_bin_w(fn, mul_op, l_imag, ratio, elem_sz, 1, e->loc);
+                IRValue l_imag_div = emit_bin_w(fn, div_op, l_imag, r_imag, elem_sz, 1, e->loc);
+                set_value_float(fn, l_imag_div, 1);
+                IRValue n_i1 = emit_bin_w(fn, mul_op, l_imag_div, r_real, elem_sz, 1, e->loc);
                 set_value_float(fn, n_i1, 1);
                 IRValue num_i = emit_bin_w(fn, sub_op, n_i1, l_real, elem_sz, 1, e->loc);
                 set_value_float(fn, num_i, 1);
