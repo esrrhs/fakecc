@@ -1,24 +1,30 @@
-/* PR tree-optimization/65053-2 - simplified */
-
 // expect: 0
 package main;
 
-static int i;
+/* PR tree-optimization/65053 */
 
-int main(void) {
-  unsigned int n = 0;
+extern void abort (void);
+
+int i;
+unsigned int x;
+
+int
+main (void)
+{
+  unsigned int n = x;
   unsigned int u = 32;
   if (n >= 32)
-    __builtin_abort();
+    abort ();
   if (n != 0)
     u = n + 32;
 
-  while (u != 32) {
-    u = 32;
-    i = 1;
-  }
+  while (u != 32)
+    {
+      u = 32;
+      i = 1;
+    }
 
   if (i)
-    __builtin_abort();
+    abort ();
   return 0;
 }
