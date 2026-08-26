@@ -44,7 +44,6 @@ pr103405.c
 
 # Inline assembly (asm volatile) not supported by fakecc.
 pr38533.c
-pr41239.c
 pr45695.c
 pr70460.c
 pr71494.c
@@ -161,7 +160,6 @@ pr92904
 
 
 # Inline assembly - not supported by fakecc.
-pr41239
 pr45695
 
 # Label values / computed goto - not supported by fakecc.
