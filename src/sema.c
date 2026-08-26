@@ -796,9 +796,41 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_labs") == 0 || strcmp(bname, "__builtin_llabs") == 0 || strcmp(bname, "labs") == 0 || strcmp(bname, "llabs") == 0)
                 ret = type_make_int(8, 0);
-            Type fn = type_make_func(ret, NULL, 0);
+            Type p0, p1;
+            Type *params[2];
+            int num_params = 0;
+            if (strcmp(bname, "__builtin_copysignf") == 0 || strcmp(bname, "copysignf") == 0) {
+                p0 = type_make_float(4);
+                p1 = type_make_float(4);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (strcmp(bname, "__builtin_copysign") == 0 || strcmp(bname, "copysign") == 0) {
+                p0 = type_make_float(8);
+                p1 = type_make_float(8);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (strcmp(bname, "__builtin_copysignl") == 0 || strcmp(bname, "copysignl") == 0) {
+                p0 = type_make_float(16);
+                p1 = type_make_float(16);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (strcmp(bname, "__builtin_fabsf") == 0) {
+                p0 = type_make_float(4);
+                params[0] = &p0;
+                num_params = 1;
+            } else if (strcmp(bname, "__builtin_fabs") == 0) {
+                p0 = type_make_float(8);
+                params[0] = &p0;
+                num_params = 1;
+            } else if (strcmp(bname, "__builtin_fabsl") == 0) {
+                p0 = type_make_float(16);
+                params[0] = &p0;
+                num_params = 1;
+            }
+            Type fn = type_make_func(ret, num_params > 0 ? (Type * const *)params : NULL, num_params);
             Type fp = type_make_ptr(fn);
             type_free(&fn);
+            for (int i = 0; i < num_params; i++) type_free(params[i]);
             set_type(e, fp);
             return type_clone(e->type);
         }
