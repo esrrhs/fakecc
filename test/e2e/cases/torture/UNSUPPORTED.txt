@@ -228,7 +228,6 @@ stkalign
 user-printf
 va-arg-pack-1
 vfprintf-chk-1
-vprintf-chk-1
 
 # Complex sprintf format - not fully supported.
 pr79327
