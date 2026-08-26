@@ -5882,7 +5882,7 @@ static int fold_const_float(const Expr *e, long double *out) {
         case BOP_ADD: *out = l + r; return 1;
         case BOP_SUB: *out = l - r; return 1;
         case BOP_MUL: *out = l * r; return 1;
-        case BOP_DIV: if (r == 0) return 0; *out = l / r; return 1;
+        case BOP_DIV: *out = l / r; return 1;
         default: return 0;
         }
     }
