@@ -72,8 +72,6 @@ pr24135.c
 
 
 
-# Vector types/SIMD and 128KB stack array - not supported by fakecc.
-pr23135.c
 
 # __builtin_apply/__builtin_apply_args not supported by fakecc.
 pr47237.c
