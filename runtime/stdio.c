@@ -144,6 +144,44 @@ FILE *fopen(const char *path, const char *mode) {
     return f;
 }
 
+FILE *freopen(const char *path, const char *mode, FILE *stream) {
+    stdio_init();
+    if (stream == 0) return 0;
+    fflush(stream);
+    int flags = 0;
+    int writable = 0;
+    if (mode[0] == 'r') {
+        flags = 0; /* O_RDONLY */
+        if (mode[1] == '+') {
+            flags = 2; /* O_RDWR */
+            writable = 1;
+        }
+    } else if (mode[0] == 'w') {
+        flags = 1 | 64 | 512; /* O_WRONLY|O_CREAT|O_TRUNC */
+        writable = 1;
+        if (mode[1] == 'b' && mode[2] == '+') flags = 2 | 64 | 512;
+        else if (mode[1] == '+') flags = 2 | 64 | 512;
+    } else if (mode[0] == 'a') {
+        flags = 1 | 64 | 1024; /* O_WRONLY|O_CREAT|O_APPEND */
+        writable = 1;
+    } else {
+        return 0;
+    }
+    long fd = __syscall(2, (long)path, (long)flags, 420); /* 0644 */
+    if (fd < 0) return 0;
+    if (stream->fd >= 0 && stream != stdin && stream != stdout && stream != stderr) {
+        __syscall(3, (long)stream->fd);
+    }
+    stream->fd = (int)fd;
+    stream->writable = writable;
+    stream->buf_len = 0;
+    stream->has_ungot = 0;
+    stream->ungot = 0;
+    stream->eof = 0;
+    stream->err = 0;
+    return stream;
+}
+
 int fclose(FILE *f) {
     if (f == 0) return -1;
     fflush(f);

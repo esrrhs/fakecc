@@ -223,5 +223,4 @@ pr92904
 # Preprocessor macros/macros which fakecc doesn't support.
 printf-2
 stkalign
-user-printf
 va-arg-pack-1
