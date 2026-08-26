@@ -227,8 +227,6 @@ stkalign
 user-printf
 va-arg-pack-1
 
-# Complex sprintf format - not fully supported.
-pr79327
 
 # Malloc-dependent tests - runtime hang.
 stdarg_2

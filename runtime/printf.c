@@ -403,6 +403,8 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             }
             if (f_alt && v != 0 && (spec == 'x' || spec == 'X')) {
                 prefix[0] = '0'; prefix[1] = spec; plen = 2;
+            } else if (f_alt && spec == 'o' && v != 0) {
+                prefix[0] = '0'; plen = 1;
             }
             blen = uint_to_buf(body, v, base, upper);
             zero_ok = (precision < 0);
