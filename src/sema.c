@@ -11,6 +11,11 @@ static const StructRegistry *g_sema_structs = NULL;
 static PkgContext *g_sema_pkg = NULL;
 static const TranslationUnit *g_sema_tu = NULL;
 
+const StructRegistry *get_sema_structs(void) {
+    if (g_sema_structs) return g_sema_structs;
+    return g_sema_tu ? &g_sema_tu->structs : NULL;
+}
+
 /* Return type of the function currently being type-checked.  Set per-function
  * before check_stmt_list so ST_RETURN can enforce the void/non-void rules. */
 static Type g_sema_ret_type;

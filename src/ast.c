@@ -94,6 +94,7 @@ void type_free(Type *t) {
 }
 
 extern const StructRegistry *get_ir_structs(void);
+extern const StructRegistry *get_sema_structs(void);
 extern const StructRegistry *get_parser_structs(void);
 
 long long type_size(Type t) {
@@ -120,6 +121,7 @@ long long type_size(Type t) {
     case TY_STRUCT: {
         if (p->tag) {
             const StructRegistry *reg = get_ir_structs();
+            if (!reg) reg = get_sema_structs();
             if (!reg) reg = get_parser_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
@@ -430,6 +432,7 @@ long long type_align(Type t) {
     case TY_STRUCT: {
         if (p->tag) {
             const StructRegistry *reg = get_ir_structs();
+            if (!reg) reg = get_sema_structs();
             if (!reg) reg = get_parser_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);

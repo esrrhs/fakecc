@@ -77,6 +77,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 static char *g_parsed_alias = NULL;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
+static int g_parsed_align = 0;
 
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
@@ -160,6 +161,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                     long long val = 0;
                     if (fold_const_int(e, &val)) {
                         if (align && val > *align) *align = (int)val;
+                        if (val > g_parsed_align) g_parsed_align = (int)val;
                     }
                     expr_free(e);
                     if (peek(p)->kind == TK_RPAREN) {
@@ -168,6 +170,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                     }
                 } else {
                     if (align && 16 > *align) *align = 16;
+                    if (16 > g_parsed_align) g_parsed_align = 16;
                 }
                 continue;
             } else if (strcmp(name, "packed") == 0 || strcmp(name, "__packed__") == 0) {
@@ -878,7 +881,10 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     while (peek(p)->kind != TK_RBRACE) {
         int base_align = 0, base_packed = 0, base_sso = 0, base_vec = 0;
         while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, NULL)) {}
+        g_parsed_align = 0;
         Type base = parse_specifiers(p);
+        if (g_parsed_align > base_align) base_align = g_parsed_align;
+        g_parsed_align = 0;
         while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, NULL)) {}
         /* Re-fetch sd: parsing `base` may have defined a nested struct. */
         sd = struct_registry_find(&p->tu->structs, tag);
@@ -904,7 +910,10 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
             int align = base_align, packed = base_packed, sso = base_sso, vec = base_vec;
             while (parse_attribute(p, &align, &packed, &sso, &vec, NULL)) {}
             char *mname = NULL;
+            g_parsed_align = 0;
             Type mty = parse_declarator(p, type_clone(base), &mname);
+            if (g_parsed_align > align) align = g_parsed_align;
+            g_parsed_align = 0;
             while (parse_attribute(p, &align, &packed, &sso, &vec, NULL)) {}
             sd = struct_registry_find(&p->tu->structs, tag);
             if (!mname) {
