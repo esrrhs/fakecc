@@ -1800,24 +1800,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
     }
 
-    /* Pointer slots that must hold the address of another global (array/struct
-     * decay, or a string literal parked in .rodata) become R_X86_64_64
-     * relocations in .rela.data.  This runs as a second pass so a fixup can
-     * name a global defined later in the module — resolving it against a
-     * half-built symbol table would turn it into an undefined external and
-     * point the slot at a PLT stub. */
-    for (size_t gi = 0; gi < ir->globals.len; gi++) {
-        const IRGlobal *g = &ir->globals.data[gi];
-        for (int fi = 0; fi < g->num_fixups; fi++) {
-            int tsym = emit_module_find_symbol(out, g->fixups[fi].sym);
-            if (tsym < 0)
-                tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
-            emit_module_add_data_reloc(out, global_off[gi] + g->fixups[fi].offset,
-                                       R_X86_64_64, tsym, g->fixups[fi].addend);
-        }
-    }
-    free(global_off);
-
     /* Cross-function call patches (accumulated across every function). */
     CallPatch *call_patches = NULL;
     size_t num_call_patches = 0, cap_call_patches = 0;
@@ -2358,6 +2340,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
 
             case IR_COPY: {
+                if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
+                    int dr_xmm = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->dst] : -1;
+                    int ar_xmm = (ra_xmm && inst->a >= 0 && inst->a < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->a] : -1;
+                    if (dr_xmm >= 0 && ar_xmm >= 0 && dr_xmm == ar_xmm) {
+                        break;
+                    }
+                    ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    if (dr_xmm >= 0 && dr_xmm != XMM_SCRATCH0) {
+                        emit_sse_mov_rr(&out->text, dr_xmm, XMM_SCRATCH0);
+                    }
+                    spill_if_needed_xmm(&out->text, inst->dst, dr_xmm >= 0 ? dr_xmm : XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    break;
+                }
                 if (ra && inst->a >= 0 && inst->a < ra->num_values &&
                     inst->dst >= 0 && inst->dst < ra->num_values &&
                     ra->reg[inst->dst] == ra->reg[inst->a] &&
@@ -2427,6 +2424,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_LOAD: {
+                if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
+                    int dr_xmm = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->dst] : -1;
+                    ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    if (dr_xmm >= 0 && dr_xmm != XMM_SCRATCH0) {
+                        emit_sse_mov_rr(&out->text, dr_xmm, XMM_SCRATCH0);
+                    }
+                    spill_if_needed_xmm(&out->text, inst->dst, dr_xmm >= 0 ? dr_xmm : XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    break;
+                }
                 /* Rarely reached: mem2reg usually eliminates LOAD.  If a LOAD
                  * survives, it copies the SSA value `a` into `dst`.  With
                  * regalloc, `a` may live in a register or a spill slot — both
@@ -2444,6 +2451,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_STORE: {
+                if ((inst->a >= 0 && value_is_float_class(fn, inst->a)) || (inst->b >= 0 && value_is_float_class(fn, inst->b))) {
+                    int ar_xmm = (ra_xmm && inst->a >= 0 && inst->a < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->a] : -1;
+                    if (ar_xmm >= 0) {
+                        ensure_reg_xmm(&out->text, inst->b, ar_xmm, ra_xmm, gp_spill_area);
+                    } else {
+                        ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                        spill_if_needed_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    }
+                    break;
+                }
                 /* [a] = b.  Rarely reached — mem2reg normally removes it.
                  * Route both operands through ensure_reg / spill_if_needed so
                  * each is addressed at its real home; old_load/old_store
@@ -3961,6 +3979,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         emit_module_add_symbol(out, fn->name, binding, 2 /* STT_FUNC */,
                                (uint16_t)SECT_TEXT, start_offset, fn_size);
     }
+
+    /* Pointer slots that must hold the address of another global or function
+     * become R_X86_64_64 relocations in .rela.data. This runs after all globals
+     * and functions are emitted so both are present in the symbol table. */
+    for (size_t gi = 0; gi < ir->globals.len; gi++) {
+        const IRGlobal *g = &ir->globals.data[gi];
+        for (int fi = 0; fi < g->num_fixups; fi++) {
+            int tsym = emit_module_find_symbol(out, g->fixups[fi].sym);
+            if (tsym < 0)
+                tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
+            emit_module_add_data_reloc(out, global_off[gi] + g->fixups[fi].offset,
+                                       R_X86_64_64, tsym, g->fixups[fi].addend);
+        }
+    }
+    free(global_off);
 
     /* ---- Resolve cross-function call patches ---- */
     for (size_t pi = 0; pi < num_call_patches; pi++) {

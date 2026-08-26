@@ -2881,6 +2881,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         } else {
             slot = new_value(fn);
             emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, rw, ru, e->loc);
+            if (rf) set_value_float(fn, slot, 1);
         }
         int L_then = new_label(fn);
         int L_else = new_label(fn);
@@ -2895,7 +2896,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         else if (rf) tc = (tw == rw) ? tv : convert_numeric(fn, tv, tw, rw, ru, 1, e->loc);
         else tc = coerce(fn, tv, tw, tu, rw, ru, e->loc);
         if (use_ptr) emit_inst_w(fn, IR_STORE_PTR, -1, addr, tc, 0, rw, ru, e->loc);
-        else emit_inst_w(fn, IR_STORE, -1, slot, tc, 0, rw, ru, e->loc);
+        else {
+            emit_inst_w(fn, IR_STORE, -1, slot, tc, 0, rw, ru, e->loc);
+            if (rf) fn->insts.data[fn->insts.len - 1].is_float = 1;
+        }
         emit_br(fn, L_done, e->loc);
         emit_label(fn, L_else, e->loc);
         IRValue ev = lower_expr(fn, st, e->u.tern.else_);
@@ -2905,12 +2909,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         else if (rf) ec = (ew == rw) ? ev : convert_numeric(fn, ev, ew, rw, ru, 1, e->loc);
         else ec = coerce(fn, ev, ew, eu, rw, ru, e->loc);
         if (use_ptr) emit_inst_w(fn, IR_STORE_PTR, -1, addr, ec, 0, rw, ru, e->loc);
-        else emit_inst_w(fn, IR_STORE, -1, slot, ec, 0, rw, ru, e->loc);
+        else {
+            emit_inst_w(fn, IR_STORE, -1, slot, ec, 0, rw, ru, e->loc);
+            if (rf) fn->insts.data[fn->insts.len - 1].is_float = 1;
+        }
         emit_br(fn, L_done, e->loc);
         emit_label(fn, L_done, e->loc);
         IRValue result = new_value(fn);
         if (use_ptr) emit_inst_w(fn, IR_LOAD_PTR, result, addr, -1, 0, rw, ru, e->loc);
-        else emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, rw, ru, e->loc);
+        else {
+            emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, rw, ru, e->loc);
+            if (rf) fn->insts.data[fn->insts.len - 1].is_float = 1;
+        }
         if (rf) set_value_float(fn, result, 1);
         return result;
     }
