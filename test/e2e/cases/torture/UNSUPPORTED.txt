@@ -55,7 +55,6 @@ pr57568.c
 pr70460.c
 pr70903.c
 pr71494.c
-pr71626-1.c
 pr71626-2.c
 pr77767.c
 pr78438.c
@@ -135,7 +134,6 @@ pr58277-2.c
 
 # Vector types - not supported by fakecc.
 pr70903
-pr71626-1
 pr71626-2
 simd-1
 simd-2
@@ -215,7 +213,6 @@ pr57568
 pr70460
 pr70903
 pr71494
-pr71626-1
 pr71626-2
 pr77767
 pr78438
@@ -250,7 +247,6 @@ pr92904
 
 # Vector types - not supported by fakecc.
 pr70903
-pr71626-1
 pr71626-2
 simd-1
 simd-2
@@ -329,7 +325,6 @@ pr57568
 pr70460
 pr70903
 pr71494
-pr71626-1
 pr71626-2
 pr77767
 pr78438
@@ -418,7 +413,6 @@ pr56205
 pr70460
 pr70903
 pr71494
-pr71626-1
 pr71626-2
 pr77767
 pr78438
