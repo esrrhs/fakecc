@@ -101,7 +101,6 @@ pr57344-1.c
 pr57344-2.c
 pr57344-3.c
 pr57344-4.c
-pr58277-2.c
 
 
 # Vector types - not supported by fakecc.
