@@ -58,7 +58,6 @@ pr71494.c
 pr77767.c
 pr80692.c
 pr82210.c
-pr84169.c
 pr84339.c
 pr84521.c
 pr84524.c
@@ -134,7 +133,6 @@ scal-to-vec3
 
 # __int128 - not supported by fakecc.
 pr65170
-pr84169
 pr84748
 pr85582-2
 pr85582-3
@@ -198,7 +196,6 @@ pr71494
 pr77767
 pr80692
 pr82210
-pr84169
 pr84339
 pr84521
 pr84524
@@ -229,7 +226,6 @@ scal-to-vec3
 
 # __int128 - not supported by fakecc.
 pr65170
-pr84169
 pr84748
 pr85582-2
 pr85582-3
@@ -291,7 +287,6 @@ pr71494
 pr77767
 pr80692
 pr82210
-pr84169
 pr84339
 pr84521
 pr84524
@@ -367,7 +362,6 @@ pr71494
 pr77767
 pr80692
 pr82210
-pr84169
 pr84339
 pr84521
 pr84524

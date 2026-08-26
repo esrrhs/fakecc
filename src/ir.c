@@ -3394,6 +3394,35 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue b64 = coerce(fn, b, bw, bu, 8, signed_arith ? 0 : 1, e->loc);
             IROpcode op = is_add ? IR_ADD : is_sub ? IR_SUB : IR_MUL;
             IRValue full_res = emit_bin_w(fn, op, a64, b64, 8, signed_arith ? 0 : 1, e->loc);
+            if (tw == 16 && type_is_i128(res_ty)) {
+                IRValue lo = full_res;
+                IRValue hi;
+                if (signed_arith) {
+                    IRValue c63 = i64imm(fn, 63, e->loc);
+                    hi = emit_bin_w(fn, IR_SHR, lo, c63, 8, 0, e->loc);
+                } else {
+                    hi = i64imm(fn, 0, e->loc);
+                }
+                if (!is_p) {
+                    IRValue rptr = lower_expr(fn, st, arg2);
+                    i128_store2(fn, rptr, lo, hi, e->loc);
+                }
+                if (signed_arith && tu) {
+                    IRValue zero_s = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, zero_s, -1, -1, 0, 8, 0, e->loc);
+                    IRValue is_neg = emit_bin_w(fn, IR_LT, full_res, zero_s, 8, 0, e->loc);
+                    return coerce(fn, is_neg, 8, 0, 4, 0, e->loc);
+                } else if (!signed_arith && !tu) {
+                    IRValue zero_s = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, zero_s, -1, -1, 0, 8, 0, e->loc);
+                    IRValue is_neg = emit_bin_w(fn, IR_LT, full_res, zero_s, 8, 0, e->loc);
+                    return coerce(fn, is_neg, 8, 0, 4, 0, e->loc);
+                } else {
+                    IRValue c0 = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, c0, -1, -1, 0, 4, 0, e->loc);
+                    return c0;
+                }
+            }
             IRValue narrow_res = coerce(fn, full_res, 8, signed_arith ? 0 : 1, tw, tu, e->loc);
             if (!is_p) {
                 IRValue rptr = lower_expr(fn, st, arg2);
