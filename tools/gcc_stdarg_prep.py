@@ -107,7 +107,18 @@ def forward_file_scope_funcs(src):
         if name == "main" or name in seen:
             continue
         seen.add(name)
-        decls.append("%s%s %s(%s);" % (static, ret, name, params))
+        # K&R `int g(x, y)` has identifier-only params; emitting `int g(x, y);`
+        # is a GCC 16 error (-Wdeclaration-missing-parameter-type).  Use an
+        # unprototyped declaration instead.
+        raw = params.strip()
+        if raw and raw != "void" and not re.search(
+            r"\b(?:void|int|char|short|long|float|double|signed|unsigned|"
+            r"struct|union|enum|_Bool|const|volatile|restrict)\b|\*",
+            raw,
+        ):
+            decls.append("%s%s %s();" % (static, ret, name))
+        else:
+            decls.append("%s%s %s(%s);" % (static, ret, name, params))
 
     for m in re.finditer(r"^(static\s+)?(\w+)\s*\(([^)]*)\)\s*\{", src, re.M):
         static, name, params = m.group(1) or "", m.group(2), m.group(3)
@@ -120,7 +131,7 @@ def forward_file_scope_funcs(src):
         if name == "main" or name in seen:
             continue
         seen.add(name)
-        decls.append("%sint %s(%s);" % (static, name, params))
+        decls.append("%sint %s();" % (static, name))
 
     if not decls:
         return src
