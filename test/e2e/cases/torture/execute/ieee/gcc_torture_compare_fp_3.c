@@ -1,26 +1,39 @@
 // expect: 0
 package main;
-extern void link_error0 ();
-extern void link_error1 ();
+
+/* Copyright (C) 2004 Free Software Foundation.
+
+   Test for composite comparison always true/false optimization.
+
+   Written by Paolo Bonzini, 26th May 2004.  */
+
+extern void abort(void);
+
+void link_error0 () { abort(); }
+void link_error1 () { abort(); }
+
 void
 test1 (float x, float y)
 {
   if ((x==y) && (x!=y))
     link_error0();
 }
+
 void
 test2 (float x, float y)
 {
   if ((x<y) && (x>y))
     link_error0();
 }
+
 void
 test3 (float x, float y)
 {
   if ((x<y) && (y<x))
     link_error0();
 }
-void
+
+void 
 test4 (float x, float y)
 {
   if ((x==y) || (x!=y))
@@ -29,6 +42,7 @@ test4 (float x, float y)
   else
     link_error1 ();
 }
+
 void
 test5 (float x, float y)
 {
@@ -38,6 +52,7 @@ test5 (float x, float y)
   else
     link_error1 ();
 }
+
 void
 test6 (float x, float y)
 {
@@ -47,6 +62,7 @@ test6 (float x, float y)
   else
     link_error1 ();
 }
+
 void
 test7 (float x, float y)
 {
@@ -56,6 +72,7 @@ test7 (float x, float y)
   else
     link_error1 ();
 }
+
 void
 all_tests (float x, float y)
 {
@@ -67,13 +84,13 @@ all_tests (float x, float y)
   test6 (x, y);
   test7 (x, y);
 }
+
 int
 main ()
 {
   all_tests (0, 0);
   all_tests (1, 2);
   all_tests (4, 3);
+
   return 0;
 }
-void link_error0() {}
-void link_error1() {}
