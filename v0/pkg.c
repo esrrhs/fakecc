@@ -397,7 +397,9 @@ struct StmtArray {
 };
 struct SwitchCase {
     int is_default;
-    int value;
+    long long value;
+    long long high_value;
+    int is_range;
     char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
@@ -437,7 +439,8 @@ void stmt_free(Stmt *s);
 Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
+void switch_push_case(Stmt *s, int is_default, long long value, const char *label_name);
+void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name);
 struct Param {
     char *name;
     Type type;
@@ -515,6 +518,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
 StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
+void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align);
 void struct_def_finish(StructDef *sd);
 void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);

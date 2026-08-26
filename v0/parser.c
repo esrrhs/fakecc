@@ -397,7 +397,9 @@ struct StmtArray {
 };
 struct SwitchCase {
     int is_default;
-    int value;
+    long long value;
+    long long high_value;
+    int is_range;
     char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
@@ -437,7 +439,8 @@ void stmt_free(Stmt *s);
 Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
+void switch_push_case(Stmt *s, int is_default, long long value, const char *label_name);
+void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name);
 struct Param {
     char *name;
     Type type;
@@ -515,6 +518,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
 StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
+void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align);
 void struct_def_finish(StructDef *sd);
 void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
@@ -688,7 +692,27 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 static char *g_parsed_alias = ((void*)0);
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
+static int g_parsed_align = 0;
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
+    if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
+        advance(p);
+        advance(p);
+        int depth = 1;
+        while (depth > 0 && peek(p)->kind != TK_EOF) {
+            if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
+                depth++;
+                advance(p);
+                advance(p);
+            } else if (peek(p)->kind == TK_RBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_RBRACKET) {
+                depth--;
+                advance(p);
+                advance(p);
+            } else {
+                advance(p);
+            }
+        }
+        return 1;
+    }
     if (peek(p)->kind != TK_IDENT) return 0;
     if (runtime.strcmp(peek(p)->text, "__asm__") == 0 || runtime.strcmp(peek(p)->text, "asm") == 0 || runtime.strcmp(peek(p)->text, "__asm") == 0) {
         if (p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LPAREN) {
@@ -751,6 +775,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                     long long val = 0;
                     if (fold_const_int(e, &val)) {
                         if (align && val > *align) *align = (int)val;
+                        if (val > g_parsed_align) g_parsed_align = (int)val;
                     }
                     expr_free(e);
                     if (peek(p)->kind == TK_RPAREN) {
@@ -759,6 +784,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                     }
                 } else {
                     if (align && 16 > *align) *align = 16;
+                    if (16 > g_parsed_align) g_parsed_align = 16;
                 }
                 continue;
             } else if (runtime.strcmp(name, "packed") == 0 || runtime.strcmp(name, "__packed__") == 0) {
@@ -934,6 +960,23 @@ static const Type *find_typedef_with_fallback(Parser *p, const char *name) {
 }
 static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
+    if (k == TK_LBRACKET && pos + 1 < p->tokens->len && p->tokens->data[pos + 1].kind == TK_LBRACKET) {
+        size_t attr_pos = pos + 2;
+        int depth = 1;
+        while (attr_pos < p->tokens->len && depth > 0) {
+            if (p->tokens->data[attr_pos].kind == TK_LBRACKET && attr_pos + 1 < p->tokens->len && p->tokens->data[attr_pos + 1].kind == TK_LBRACKET) {
+                depth++;
+                attr_pos += 2;
+            } else if (p->tokens->data[attr_pos].kind == TK_RBRACKET && attr_pos + 1 < p->tokens->len && p->tokens->data[attr_pos + 1].kind == TK_RBRACKET) {
+                depth--;
+                attr_pos += 2;
+            } else {
+                attr_pos++;
+            }
+        }
+        if (attr_pos < p->tokens->len) return is_type_start(p, attr_pos);
+        return 0;
+    }
     if (k == TK_KW_VOID || k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
         || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED
         || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
@@ -946,6 +989,22 @@ static int is_type_start(const Parser *p, size_t pos) {
         const char *text = p->tokens->data[pos].text;
         if (runtime.strcmp(text, "register") == 0 || runtime.strcmp(text, "auto") == 0)
             return is_type_start(p, pos + 1);
+        if (runtime.strcmp(text, "__attribute__") == 0 || runtime.strcmp(text, "__attribute") == 0) {
+            size_t attr_pos = pos + 1;
+            if (attr_pos < p->tokens->len && p->tokens->data[attr_pos].kind == TK_LPAREN) {
+                int depth = 0;
+                while (attr_pos < p->tokens->len) {
+                    if (p->tokens->data[attr_pos].kind == TK_LPAREN) depth++;
+                    else if (p->tokens->data[attr_pos].kind == TK_RPAREN) {
+                        depth--;
+                        if (depth == 0) { attr_pos++; break; }
+                    }
+                    attr_pos++;
+                }
+                if (attr_pos < p->tokens->len) return is_type_start(p, attr_pos);
+            }
+            return 0;
+        }
         if (runtime.strcmp(text, "__int128") == 0 || runtime.strcmp(text, "__int128_t") == 0 || runtime.strcmp(text, "__uint128_t") == 0)
             return 1;
         if (runtime.strcmp(text, "typeof") == 0 || runtime.strcmp(text, "__typeof__") == 0 || runtime.strcmp(text, "__typeof") == 0)
@@ -997,9 +1056,13 @@ static Type get_or_create_complex_type(Parser *p, Type base) {
     }
     return type_make_struct(tag, sd->size);
 }
-static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile, int *is_restrict, int *is_complex) {
+static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile, int *is_restrict, int *is_complex, int *storage_class, int *vec_size) {
     for (;;) {
-        if (skip_attribute(p)) continue;
+        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        if (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {
+            if (attr_vec > 0 && vec_size) *vec_size = attr_vec;
+            continue;
+        }
         if (peek(p)->kind == TK_KW_CONST) { *is_const = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_VOLATILE) { *is_volatile = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_RESTRICT) {
@@ -1008,12 +1071,35 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
         }
         else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
         else if (is_complex && peek(p)->kind == TK_KW_COMPLEX) { *is_complex = 1; advance(p); }
+        else if (peek(p)->kind == TK_KW_STATIC) {
+            if (storage_class) *storage_class = 1;
+            advance(p);
+        }
+        else if (peek(p)->kind == TK_KW_EXTERN) {
+            if (storage_class) *storage_class = 2;
+            advance(p);
+        }
+        else if (peek(p)->kind == TK_IDENT
+                 && (runtime.strcmp(peek(p)->text, "register") == 0
+                     || runtime.strcmp(peek(p)->text, "auto") == 0)) {
+            advance(p);
+        }
         else break;
     }
 }
-static Type parse_specifiers(Parser *p) {
-    int is_const = 0, is_volatile = 0, is_restrict = 0, is_complex = 0;
-    parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+static Type finish_specifiers(Type t, int is_const, int is_volatile, int is_restrict, int is_complex, int vec_size, Parser *p) {
+    t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+    if (is_complex) t = get_or_create_complex_type(p, t);
+    if (g_parsed_mode_size > 0) {
+        if (t.kind == TY_INT || t.kind == TY_FLOAT) t.width = g_parsed_mode_size;
+        g_parsed_mode_size = 0;
+    }
+    if (vec_size > 0 && !t.is_vector) t = type_make_vector(t, vec_size);
+    return t;
+}
+static Type parse_specifiers_full(Parser *p, int *storage_class) {
+    int is_const = 0, is_volatile = 0, is_restrict = 0, is_complex = 0, attr_vec = 0;
+    parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
     if (peek(p)->kind == TK_IDENT && (runtime.strcmp(peek(p)->text, "typeof") == 0 ||
                                       runtime.strcmp(peek(p)->text, "__typeof__") == 0 ||
                                       runtime.strcmp(peek(p)->text, "__typeof") == 0)) {
@@ -1044,22 +1130,18 @@ static Type parse_specifiers(Parser *p) {
             t = found;
         }
         expect_kind(p, TK_RPAREN, "')'");
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        return t;
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_KW_VOID) {
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_void();
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        return t;
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_KW_STRUCT) {
         advance(p);
-        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        int attr_align = 0, attr_packed = 0, attr_sso = 0;
         while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
@@ -1071,12 +1153,9 @@ static Type parse_specifiers(Parser *p) {
             else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
             Type t = type_make_struct(tag, sd ? sd->size : 0);
-            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-            if (is_complex) t = get_or_create_complex_type(p, t);
-            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
-            return t;
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
         const Token *tag = peek(p);
         if (tag->kind != TK_IDENT) {
@@ -1097,25 +1176,19 @@ static Type parse_specifiers(Parser *p) {
             else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
             Type t = type_make_struct(tag->text, sd ? sd->size : 0);
-            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-            if (is_complex) t = get_or_create_complex_type(p, t);
-            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
-            return t;
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         long long size = sd ? sd->size : 0;
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_struct(tag->text, size);
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        if (attr_vec > 0) t = type_make_vector(t, attr_vec);
-        return t;
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_KW_UNION) {
         advance(p);
-        int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
+        int attr_align = 0, attr_packed = 0, attr_sso = 0;
         while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, ((void*)0))) {}
         if (peek(p)->kind == TK_LBRACE) {
             char tag[64];
@@ -1128,12 +1201,9 @@ static Type parse_specifiers(Parser *p) {
             else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
             Type t = type_make_struct(tag, sd ? sd->size : 0);
-            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-            if (is_complex) t = get_or_create_complex_type(p, t);
-            if (attr_vec > 0) t = type_make_vector(t, attr_vec);
-            return t;
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
         const Token *tag = peek(p);
         if (tag->kind != TK_IDENT) {
@@ -1155,46 +1225,36 @@ static Type parse_specifiers(Parser *p) {
             else if (attr_sso == 2) struct_def_apply_sso(sd, 0);
             parse_struct_body(p, sd);
             sd = struct_registry_find(&p->tu->structs, tag->text);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
             Type t = type_make_struct(tag->text, sd ? sd->size : 0);
-            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-            if (is_complex) t = get_or_create_complex_type(p, t);
-            return t;
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
         StructDef *sd = struct_registry_find(&p->tu->structs, tag->text);
         long long size = sd ? sd->size : 0;
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_struct(tag->text, size);
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        return t;
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_KW_FLOAT) {
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_float(4);
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        return t;
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_KW_DOUBLE) {
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_float(8);
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        return t;
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_KW_LONG
         && p->pos + 1 < p->tokens->len
         && p->tokens->data[p->pos + 1].kind == TK_KW_DOUBLE) {
         advance(p);
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_float(16);
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        return t;
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_KW_ENUM) {
         advance(p);
@@ -1203,12 +1263,10 @@ static Type parse_specifiers(Parser *p) {
             runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
             EnumDef *ed = enum_registry_add(&p->tu->enums, tag, peek(p)->loc);
             parse_enum_body(p, ed);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
             Type t = type_default_int();
             t.enum_id = (int)(ed - p->tu->enums.data + 1);
-            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-            if (is_complex) t = get_or_create_complex_type(p, t);
-            return t;
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
         const Token *tag = peek(p);
         if (tag->kind != TK_IDENT) {
@@ -1221,12 +1279,10 @@ static Type parse_specifiers(Parser *p) {
             parse_enum_body(p, ed);
         }
         EnumDef *ed = enum_registry_find(&p->tu->enums, tag->text);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_default_int();
         if (ed) t.enum_id = (int)(ed - p->tu->enums.data + 1);
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        return t;
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_IDENT) {
         if (tu_has_import(p->tu, peek(p)->text)
@@ -1249,10 +1305,8 @@ static Type parse_specifiers(Parser *p) {
                 const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
                 if (sd) t.width = sd->size;
             }
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
-            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-            if (is_complex) t = get_or_create_complex_type(p, t);
-            return t;
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
         const Type *alias = find_typedef_with_fallback(p, peek(p)->text);
         if (alias) {
@@ -1262,19 +1316,15 @@ static Type parse_specifiers(Parser *p) {
                 const StructDef *sd = struct_registry_find(&p->tu->structs, t.tag);
                 if (sd) t.width = sd->size;
             }
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
-            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-            if (is_complex) t = get_or_create_complex_type(p, t);
-            return t;
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
     }
     if (peek(p)->kind == TK_KW_BOOL) {
         advance(p);
-        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex);
+        parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_bool();
-        t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-        if (is_complex) t = get_or_create_complex_type(p, t);
-        return t;
+        return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     int has_type = 0;
     int is_long = 0;
@@ -1285,6 +1335,11 @@ static Type parse_specifiers(Parser *p) {
     int is_unsigned = 0;
     int is_signed = 0;
     for (;;) {
+        int a_align = 0, a_packed = 0, a_sso = 0, a_vec = 0;
+        if (parse_attribute(p, &a_align, &a_packed, &a_sso, &a_vec, ((void*)0))) {
+            if (a_vec > 0) attr_vec = a_vec;
+            continue;
+        }
         TokenKind k = peek(p)->kind;
         if (k == TK_KW_CONST) { is_const = 1; advance(p); }
         else if (k == TK_KW_VOLATILE) { is_volatile = 1; advance(p); }
@@ -1294,6 +1349,14 @@ static Type parse_specifiers(Parser *p) {
         }
         else if (k == TK_KW_INLINE) { advance(p); }
         else if (k == TK_KW_COMPLEX) { is_complex = 1; advance(p); }
+        else if (k == TK_KW_STATIC) {
+            if (storage_class) *storage_class = 1;
+            advance(p);
+        }
+        else if (k == TK_KW_EXTERN) {
+            if (storage_class) *storage_class = 2;
+            advance(p);
+        }
         else if (k == TK_KW_SIGNED) { is_signed = 1; has_type = 1; advance(p); }
         else if (k == TK_KW_UNSIGNED) { is_unsigned = 1; has_type = 1; advance(p); }
         else if (k == TK_KW_CHAR) { is_char = 1; has_type = 1; advance(p); }
@@ -1304,13 +1367,17 @@ static Type parse_specifiers(Parser *p) {
             if (runtime.strcmp(peek(p)->text, "__uint128_t") == 0) is_unsigned = 1;
             is_int128 = 1; has_type = 1; advance(p);
         }
+        else if (k == TK_IDENT
+                 && (runtime.strcmp(peek(p)->text, "register") == 0
+                     || runtime.strcmp(peek(p)->text, "auto") == 0)) {
+            advance(p);
+        }
         else break;
     }
     if (!has_type) {
         if (is_complex) {
             Type t = get_or_create_complex_type(p, type_make_float(8));
-            t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-            return t;
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
         const Token *t = peek(p);
         die_at(t->loc.file, t->loc.line, t->loc.col,
@@ -1325,31 +1392,44 @@ static Type parse_specifiers(Parser *p) {
     (void)is_int;
     (void)is_signed;
     Type t = type_make_int(width, is_unsigned);
-    t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
-    if (is_complex) t = get_or_create_complex_type(p, t);
-    return t;
+    return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+}
+static Type parse_specifiers(Parser *p) {
+    return parse_specifiers_full(p, ((void*)0));
 }
 static Type parse_type(Parser *p, char **name_out);
 static void parse_struct_body(Parser *p, StructDef *sd) {
     const char *tag = sd->tag;
     advance(p);
     while (peek(p)->kind != TK_RBRACE) {
+        int base_align = 0, base_packed = 0, base_sso = 0, base_vec = 0;
+        while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, ((void*)0))) {}
+        g_parsed_align = 0;
         Type base = parse_specifiers(p);
+        if (g_parsed_align > base_align) base_align = g_parsed_align;
+        g_parsed_align = 0;
+        while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, ((void*)0))) {}
         sd = struct_registry_find(&p->tu->structs, tag);
         if (peek(p)->kind == TK_SEMICOLON) {
             if (base.kind == TY_STRUCT && base.tag
                 && runtime.strncmp(base.tag, "__anon_", 7) == 0) {
                 sd = struct_registry_find(&p->tu->structs, tag);
                 if (sd)
-                    struct_def_push_member(sd, "", type_clone(base), -1);
+                    struct_def_push_member_aligned(sd, "", type_clone(base), -1, base_align);
             }
             advance(p);
             type_free(&base);
             continue;
         }
         for (;;) {
+            int align = base_align, packed = base_packed, sso = base_sso, vec = base_vec;
+            while (parse_attribute(p, &align, &packed, &sso, &vec, ((void*)0))) {}
             char *mname = ((void*)0);
+            g_parsed_align = 0;
             Type mty = parse_declarator(p, type_clone(base), &mname);
+            if (g_parsed_align > align) align = g_parsed_align;
+            g_parsed_align = 0;
+            while (parse_attribute(p, &align, &packed, &sso, &vec, ((void*)0))) {}
             sd = struct_registry_find(&p->tu->structs, tag);
             if (!mname) {
                 if (peek(p)->kind == TK_COLON) {
@@ -1375,7 +1455,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                 bit_width = int_literal_value(w->text);
                 advance(p);
             }
-            struct_def_push_member(sd, mname, mty, bit_width);
+            struct_def_push_member_aligned(sd, mname, mty, bit_width, align);
             runtime.free(mname);
             if (peek(p)->kind == TK_COMMA) {
                 advance(p);
@@ -2072,6 +2152,10 @@ static Expr *parse_unary(Parser *p) {
         advance(p);
         return expr_new_label_addr(lbl->text, loc);
     }
+    if (k == TK_KW_INLINE || (k == TK_IDENT && (runtime.strcmp(peek(p)->text, "__extension__") == 0 || runtime.strcmp(peek(p)->text, "__extension") == 0))) {
+        advance(p);
+        return parse_unary(p);
+    }
     if (k == TK_AMP) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
@@ -2503,7 +2587,18 @@ static int char_literal_value(const char *text) {
         }
         return simple_escape_value((unsigned char)text[2]);
     }
-    return (unsigned char)text[1];
+    const unsigned char *s = (const unsigned char *)text + 1;
+    if (s[0] < 0x80) return s[0];
+    if ((s[0] & 0xe0) == 0xc0 && (s[1] & 0xc0) == 0x80) {
+        return ((s[0] & 0x1f) << 6) | (s[1] & 0x3f);
+    }
+    if ((s[0] & 0xf0) == 0xe0 && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80) {
+        return ((s[0] & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] & 0x3f);
+    }
+    if ((s[0] & 0xf8) == 0xf0 && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80 && (s[3] & 0xc0) == 0x80) {
+        return ((s[0] & 0x07) << 18) | ((s[1] & 0x3f) << 12) | ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
+    }
+    return s[0];
 }
 static int is_imag_literal(const char *text) {
     if (!text) return 0;
@@ -2586,13 +2681,30 @@ int is_unsigned;
             size_t slen = runtime.strlen(src);
             if (slen >= 1 && src[0] == '"') { src++; slen--; }
             if (slen >= 1 && src[slen - 1] == '"') slen--;
-            for (size_t i = 0; i < slen; i++) {
+            for (size_t i = 0; i < slen; ) {
                 int ch;
                 if (src[i] == '\\' && i + 1 < slen) {
                     i++;
                     ch = simple_escape_value((unsigned char)src[i]);
+                    i++;
                 } else {
-                    ch = (unsigned char)src[i];
+                    const unsigned char *s = (const unsigned char *)src + i;
+                    if (s[0] < 0x80) {
+                        ch = s[0];
+                        i++;
+                    } else if ((s[0] & 0xe0) == 0xc0 && i + 1 < slen && (s[1] & 0xc0) == 0x80) {
+                        ch = ((s[0] & 0x1f) << 6) | (s[1] & 0x3f);
+                        i += 2;
+                    } else if ((s[0] & 0xf0) == 0xe0 && i + 2 < slen && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80) {
+                        ch = ((s[0] & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] & 0x3f);
+                        i += 3;
+                    } else if ((s[0] & 0xf8) == 0xf0 && i + 3 < slen && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80 && (s[3] & 0xc0) == 0x80) {
+                        ch = ((s[0] & 0x07) << 18) | ((s[1] & 0x3f) << 12) | ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
+                        i += 4;
+                    } else {
+                        ch = s[0];
+                        i++;
+                    }
                 }
                 wbuf = runtime.realloc(wbuf, (size_t)(total + 1) * sizeof(int));
                 wbuf[total++] = ch;
@@ -3061,9 +3173,9 @@ static int is_function_definition_lookahead(Parser *p) {
     return is_def;
 }
 static Stmt parse_stmt(Parser *p);
-static int case_constant_value(Parser *p, const char *text) {
+static long long case_constant_value(Parser *p, const char *text) {
     if (text[0] >= '0' && text[0] <= '9') {
-        return int_literal_value(text);
+        return (long long)runtime.strtoll(text, ((void*)0), 0);
     }
     const EnumConstant *ec =
         enum_registry_find_constant(&p->tu->enums, text);
@@ -3121,7 +3233,9 @@ static Stmt parse_switch(Parser *p) {
     return s;
 }
 static Stmt parse_stmt(Parser *p) {
-    for (;;) { if (!skip_attribute(p)) break; }
+    if (peek(p)->kind != TK_KW_TYPEDEF && !is_type_start(p, p->pos)) {
+        for (;;) { if (!skip_attribute(p)) break; }
+    }
     TokenKind k = peek(p)->kind;
     if (k == TK_SEMICOLON) {
         SourceLoc loc = peek(p)->loc;
@@ -3167,7 +3281,7 @@ static Stmt parse_stmt(Parser *p) {
                 advance(p);
             } else break;
         }
-        Type base = parse_specifiers(p);
+        Type base = parse_specifiers_full(p, &storage_class);
         for (;;) {
             if (skip_attribute(p)) continue;
             if (peek(p)->kind == TK_KW_STATIC) {
@@ -3428,7 +3542,9 @@ static Stmt parse_stmt(Parser *p) {
         const Token *kw = peek(p);
         advance(p);
         const Token *cv = peek(p);
-        int value;
+        long long value = 0;
+        long long high_value = 0;
+        int is_range = 0;
         if (cv->kind == TK_IDENT) {
             value = case_constant_value(p, cv->text);
             advance(p);
@@ -3439,13 +3555,30 @@ static Stmt parse_stmt(Parser *p) {
                 die_at(cv->loc.file, cv->loc.line, cv->loc.col,
                        "case label must be an integer constant expression");
             expr_free(ce);
-            value = (int)folded;
+            value = folded;
+        }
+        if (peek(p)->kind == TK_ELLIPSIS) {
+            advance(p);
+            const Token *hv = peek(p);
+            if (hv->kind == TK_IDENT) {
+                high_value = case_constant_value(p, hv->text);
+                advance(p);
+            } else {
+                Expr *he = parse_ternary(p);
+                long long folded_h;
+                if (!fold_const_int(he, &folded_h))
+                    die_at(hv->loc.file, hv->loc.line, hv->loc.col,
+                           "case range high value must be an integer constant expression");
+                expr_free(he);
+                high_value = folded_h;
+            }
+            is_range = 1;
         }
         expect_kind(p, TK_COLON, "':'");
         char lbl[64];
         if (g_cur_switch) {
             runtime.snprintf(lbl, sizeof(lbl), "__sw_%d_case_%d", g_cur_switch->switch_id, g_cur_switch->case_count++);
-            switch_push_case(g_cur_switch->switch_stmt, 0, value, lbl);
+            switch_push_case_range(g_cur_switch->switch_stmt, 0, value, high_value, is_range, lbl);
         } else {
             runtime.snprintf(lbl, sizeof(lbl), "__case_%d", p->anon_counter++);
         }
@@ -3514,6 +3647,7 @@ static Stmt parse_stmt(Parser *p) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
         while (peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_CONST ||
+               peek(p)->kind == TK_KW_GOTO ||
                (peek(p)->kind == TK_IDENT && (runtime.strcmp(peek(p)->text, "__volatile__") == 0 ||
                                               runtime.strcmp(peek(p)->text, "__volatile") == 0 ||
                                               runtime.strcmp(peek(p)->text, "goto") == 0 ||
@@ -3627,7 +3761,8 @@ static Stmt parse_stmt(Parser *p) {
                             break;
                         }
                     }
-                    if (match_idx < 0 && oi < num_inputs) match_idx = oi;
+                    if (match_idx < 0 && oi < num_inputs && (!out_constr[oi] || !runtime.strchr(out_constr[oi], '+')))
+                        match_idx = oi;
                     if (match_idx >= 0 && outputs[oi] && inputs[match_idx]) {
                         Expr *assign = expr_new_assign(outputs[oi], inputs[match_idx], loc);
                         outputs[oi] = ((void*)0);

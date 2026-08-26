@@ -603,7 +603,9 @@ struct StmtArray {
 };
 struct SwitchCase {
     int is_default;
-    int value;
+    long long value;
+    long long high_value;
+    int is_range;
     char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
@@ -643,7 +645,8 @@ void stmt_free(Stmt *s);
 Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
+void switch_push_case(Stmt *s, int is_default, long long value, const char *label_name);
+void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name);
 struct Param {
     char *name;
     Type type;
@@ -721,6 +724,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
 StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
+void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align);
 void struct_def_finish(StructDef *sd);
 void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
@@ -1012,8 +1016,9 @@ void mem2reg_writeback(
                         copy.loc = phi->loc;
                         copy.call_name = ((void*)0);
                         copy.call_nargs = 0;
-                        copy.width = 8;
-                        copy.is_unsigned = 0;
+                        copy.width = (phi->dst < fn->value_meta_cap && fn->value_width) ? fn->value_width[phi->dst] : 8;
+                        copy.is_unsigned = (phi->dst < fn->value_meta_cap && fn->value_is_unsigned) ? fn->value_is_unsigned[phi->dst] : 0;
+                        copy.is_float = (phi->dst < fn->value_meta_cap && fn->value_is_float) ? fn->value_is_float[phi->dst] : 0;
                         inst_array_push(&out, copy);
                         break;
                     }
@@ -1170,6 +1175,24 @@ void mem2reg_rename(
     for (size_t ai = 0; ai < num_alloca; ai++) rstack_free(&stacks[ai]);
     runtime.free(stacks);
 }
+static void mem2reg_ensure_value_meta(IRFunction *fn, int v) {
+    if (!fn) return;
+    if (fn->value_meta_cap > 0 && v < fn->value_meta_cap) return;
+    int old_cap = fn->value_meta_cap > 0 ? fn->value_meta_cap : 0;
+    int new_cap = old_cap ? old_cap * 2 : 64;
+    while (new_cap <= v) new_cap *= 2;
+    fn->value_width = xrealloc(fn->value_width, new_cap * sizeof(int));
+    fn->value_is_unsigned = xrealloc(fn->value_is_unsigned, new_cap * sizeof(int));
+    if (fn->value_is_float) {
+        fn->value_is_float = xrealloc(fn->value_is_float, new_cap * sizeof(int));
+        for (int i = old_cap; i < new_cap; i++) fn->value_is_float[i] = 0;
+    }
+    for (int i = old_cap; i < new_cap; i++) {
+        fn->value_width[i] = 4;
+        fn->value_is_unsigned[i] = 0;
+    }
+    fn->value_meta_cap = new_cap;
+}
 int opt_mem2reg(IRFunction *fn, int want_debug)
 {
     CFG cfg;
@@ -1230,6 +1253,19 @@ int opt_mem2reg(IRFunction *fn, int want_debug)
         (const char **)block_stores, &fn->next_value_id);
     for (size_t bi = 0; bi < cfg.num; bi++) runtime.free(block_stores[bi]);
     runtime.free(block_stores);
+    for (size_t bi = 0; bi < cfg.num; bi++) {
+        for (size_t phi_i = 0; phi_i < bp[bi].num_phis; phi_i++) {
+            IRPhi *phi = &bp[bi].phis[phi_i];
+            int slot = phi->alloca_slot;
+            IRValue phi_dst = phi->dst;
+            mem2reg_ensure_value_meta(fn, phi_dst);
+            if (slot >= 0 && slot < fn->value_meta_cap) {
+                if (fn->value_width) fn->value_width[phi_dst] = fn->value_width[slot];
+                if (fn->value_is_unsigned) fn->value_is_unsigned[phi_dst] = fn->value_is_unsigned[slot];
+                if (fn->value_is_float) fn->value_is_float[phi_dst] = fn->value_is_float[slot];
+            }
+        }
+    }
     char *dead = ((void*)0);
     mem2reg_rename(fn, &cfg, &dt, alloca_slots, num_alloca, bp, &dead,
                    want_debug);

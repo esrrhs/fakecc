@@ -260,6 +260,19 @@ void emit_module_free(EmitModule *m) {
 int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
                            uint8_t type, uint16_t shndx, size_t value,
                            size_t size) {
+    if (name) {
+        for (size_t i = 0; i < m->num_syms; i++) {
+            if (m->syms[i].name && runtime.strcmp(m->syms[i].name, name) == 0 &&
+                m->syms[i].shndx == 0) {
+                m->syms[i].binding = binding;
+                m->syms[i].type = type;
+                m->syms[i].shndx = shndx;
+                m->syms[i].value = value;
+                m->syms[i].size = size;
+                return (int)i;
+            }
+        }
+    }
     if (m->num_syms >= m->cap_syms) {
         size_t nc = m->cap_syms ? m->cap_syms * 2 : 8;
         m->syms = runtime.realloc(m->syms, nc * sizeof(EmitSymbol));

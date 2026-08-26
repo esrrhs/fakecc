@@ -397,7 +397,9 @@ struct StmtArray {
 };
 struct SwitchCase {
     int is_default;
-    int value;
+    long long value;
+    long long high_value;
+    int is_range;
     char *label_name;
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
@@ -437,7 +439,8 @@ void stmt_free(Stmt *s);
 Stmt stmt_clone(const Stmt *s);
 Stmt *stmt_alloc(void);
 void stmt_free_ptr(Stmt *s);
-void switch_push_case(Stmt *s, int is_default, int value, const char *label_name);
+void switch_push_case(Stmt *s, int is_default, long long value, const char *label_name);
+void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name);
 struct Param {
     char *name;
     Type type;
@@ -515,6 +518,7 @@ StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc
 StructDef *struct_registry_find(StructRegistry *r, const char *tag);
 const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
+void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align);
 void struct_def_finish(StructDef *sd);
 void struct_def_apply_sso(StructDef *sd, int is_big_endian);
 void struct_def_fixup_self_types(StructDef *sd);
@@ -646,6 +650,10 @@ typedef long fpos_t;
 static const StructRegistry *g_sema_structs = ((void*)0);
 static PkgContext *g_sema_pkg = ((void*)0);
 static const TranslationUnit *g_sema_tu = ((void*)0);
+const StructRegistry *get_sema_structs(void) {
+    if (g_sema_structs) return g_sema_structs;
+    return g_sema_tu ? &g_sema_tu->structs : ((void*)0);
+}
 static Type g_sema_ret_type;
 struct FunSig {
     const char *name;
@@ -988,6 +996,16 @@ static int symtable_has_since(const SymTable *st, const char *name, size_t mark)
         if (st->data[i].name && runtime.strcmp(st->data[i].name, name) == 0) return 1;
     return 0;
 }
+static int type_is_same(Type a, Type b) {
+    if (a.kind != b.kind) return 0;
+    if (a.width != b.width) return 0;
+    if (a.is_unsigned != b.is_unsigned) return 0;
+    if (a.is_vector != b.is_vector) return 0;
+    if (a.kind == TY_STRUCT) {
+        if (a.tag && b.tag && runtime.strcmp(a.tag, b.tag) != 0) return 0;
+    }
+    return 1;
+}
 static int type_rank(Type t) {
     if (t.kind == TY_FLOAT) return 100 + t.width;
     if (t.kind == TY_PTR) return 50;
@@ -1282,6 +1300,18 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_float(4);
             else if (runtime.strcmp(bname, "__builtin_fabsl") == 0)
                 ret = type_make_float(16);
+            else if (runtime.strcmp(bname, "__builtin_copysign") == 0 || runtime.strcmp(bname, "copysign") == 0)
+                ret = type_make_float(8);
+            else if (runtime.strcmp(bname, "__builtin_copysignf") == 0 || runtime.strcmp(bname, "copysignf") == 0)
+                ret = type_make_float(4);
+            else if (runtime.strcmp(bname, "__builtin_copysignl") == 0 || runtime.strcmp(bname, "copysignl") == 0)
+                ret = type_make_float(16);
+            else if (runtime.strcmp(bname, "__builtin_inf") == 0 || runtime.strcmp(bname, "__builtin_huge_val") == 0 || runtime.strcmp(bname, "__builtin_nan") == 0)
+                ret = type_make_float(8);
+            else if (runtime.strcmp(bname, "__builtin_inff") == 0 || runtime.strcmp(bname, "__builtin_huge_valf") == 0 || runtime.strcmp(bname, "__builtin_nanf") == 0)
+                ret = type_make_float(4);
+            else if (runtime.strcmp(bname, "__builtin_infl") == 0 || runtime.strcmp(bname, "__builtin_huge_vall") == 0 || runtime.strcmp(bname, "__builtin_nanl") == 0)
+                ret = type_make_float(16);
             else if (runtime.strcmp(bname, "__builtin_bswap64") == 0)
                 ret = type_make_int(8, 1);
             else if (runtime.strcmp(bname, "__builtin_bswap32") == 0)
@@ -1292,13 +1322,56 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_signbit") == 0 || runtime.strcmp(bname, "__builtin_signbitf") == 0 || runtime.strcmp(bname, "__builtin_signbitl") == 0 || runtime.strcmp(bname, "signbit") == 0)
                 ret = type_make_int(4, 0);
+            else if (runtime.strcmp(bname, "__builtin_isnan") == 0 || runtime.strcmp(bname, "__builtin_isnanf") == 0 || runtime.strcmp(bname, "__builtin_isnanl") == 0 || runtime.strcmp(bname, "isnan") == 0)
+                ret = type_make_int(4, 0);
+            else if (runtime.strcmp(bname, "__builtin_isfinite") == 0 || runtime.strcmp(bname, "__builtin_isfinitef") == 0 || runtime.strcmp(bname, "__builtin_isfinitel") == 0 || runtime.strcmp(bname, "isfinite") == 0)
+                ret = type_make_int(4, 0);
+            else if (runtime.strcmp(bname, "__builtin_isinf") == 0 || runtime.strcmp(bname, "__builtin_isinff") == 0 || runtime.strcmp(bname, "__builtin_isinfl") == 0 || runtime.strcmp(bname, "isinf") == 0)
+                ret = type_make_int(4, 0);
+            else if (runtime.strcmp(bname, "__builtin_isgreater") == 0 || runtime.strcmp(bname, "__builtin_isgreaterequal") == 0 ||
+                     runtime.strcmp(bname, "__builtin_isless") == 0 || runtime.strcmp(bname, "__builtin_islessequal") == 0 ||
+                     runtime.strcmp(bname, "__builtin_islessgreater") == 0 || runtime.strcmp(bname, "__builtin_isunordered") == 0)
+                ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_abs") == 0 || runtime.strcmp(bname, "abs") == 0)
                 ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_labs") == 0 || runtime.strcmp(bname, "__builtin_llabs") == 0 || runtime.strcmp(bname, "labs") == 0 || runtime.strcmp(bname, "llabs") == 0)
                 ret = type_make_int(8, 0);
-            Type fn = type_make_func(ret, ((void*)0), 0);
+Type p0;
+Type p1;
+            Type *params[2];
+            int num_params = 0;
+            if (runtime.strcmp(bname, "__builtin_copysignf") == 0 || runtime.strcmp(bname, "copysignf") == 0) {
+                p0 = type_make_float(4);
+                p1 = type_make_float(4);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (runtime.strcmp(bname, "__builtin_copysign") == 0 || runtime.strcmp(bname, "copysign") == 0) {
+                p0 = type_make_float(8);
+                p1 = type_make_float(8);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (runtime.strcmp(bname, "__builtin_copysignl") == 0 || runtime.strcmp(bname, "copysignl") == 0) {
+                p0 = type_make_float(16);
+                p1 = type_make_float(16);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (runtime.strcmp(bname, "__builtin_fabsf") == 0) {
+                p0 = type_make_float(4);
+                params[0] = &p0;
+                num_params = 1;
+            } else if (runtime.strcmp(bname, "__builtin_fabs") == 0) {
+                p0 = type_make_float(8);
+                params[0] = &p0;
+                num_params = 1;
+            } else if (runtime.strcmp(bname, "__builtin_fabsl") == 0) {
+                p0 = type_make_float(16);
+                params[0] = &p0;
+                num_params = 1;
+            }
+            Type fn = type_make_func(ret, num_params > 0 ? (Type * *)params : ((void*)0), num_params);
             Type fp = type_make_ptr(fn);
             type_free(&fn);
+            for (int i = 0; i < num_params; i++) type_free(params[i]);
             set_type(e, fp);
             return type_clone(e->type);
         }
@@ -1409,6 +1482,19 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             set_type(e, at);
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_shuffle") == 0) {
+            if (e->u.call.args.len < 2 || e->u.call.args.len > 3) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_shuffle takes 2 or 3 arguments");
+            }
+            Type t0 = check_expr(e->u.call.args.data[0], st, ft);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type ti = check_expr(e->u.call.args.data[i], st, ft);
+                type_free(&ti);
+            }
+            set_type(e, t0);
+            return type_clone(e->type);
+        }
         if (e->u.call.callee->kind == EX_VAR
             && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_ctzll") == 0) {
             if (e->u.call.args.len != 1) {
@@ -1418,6 +1504,39 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type at = check_expr(e->u.call.args.data[0], st, ft);
             type_free(&at);
             set_type(e, type_make_int(4, 0));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && runtime.strncmp(e->u.call.callee->u.var.name, "__sync_", 7) == 0) {
+            const char *sname = e->u.call.callee->u.var.name;
+            if (runtime.strcmp(sname, "__sync_synchronize") == 0) {
+                set_type(e, type_make_void());
+                return type_clone(e->type);
+            }
+            if (e->u.call.args.len < 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "atomic builtin takes at least 1 argument");
+            }
+            Type ptr_ty = check_expr(e->u.call.args.data[0], st, ft);
+            if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "atomic builtin first argument must be a pointer");
+            }
+            Type val_ty = type_clone(*ptr_ty.pointee);
+            type_free(&ptr_ty);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type at = check_expr(e->u.call.args.data[i], st, ft);
+                type_free(&at);
+            }
+            if (runtime.strcmp(sname, "__sync_lock_release") == 0) {
+                type_free(&val_ty);
+                set_type(e, type_make_void());
+            } else if (runtime.strcmp(sname, "__sync_bool_compare_and_swap") == 0) {
+                type_free(&val_ty);
+                set_type(e, type_make_int(4, 0));
+            } else {
+                set_type(e, val_ty);
+            }
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
@@ -1710,8 +1829,16 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         }
         type_free(&ot);
         Type mt = type_clone(m->type);
-        if (m->bit_width > 0)
+        if (m->bit_width > 0) {
             mt.bitfield_width = m->bit_width;
+            if (m->bit_width < 32 || (m->bit_width == 32 && !m->type.is_unsigned)) {
+                mt.width = 4;
+                mt.is_unsigned = 0;
+            } else if (m->bit_width == 32 && m->type.is_unsigned) {
+                mt.width = 4;
+                mt.is_unsigned = 1;
+            }
+        }
         set_type(e, mt);
         return type_clone(e->type);
     }
@@ -1770,7 +1897,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT);
         int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT);
         Type res;
-        if (tt.kind == TY_VOID && et.kind == TY_VOID) {
+        if (tt.kind == TY_VOID || et.kind == TY_VOID) {
             res = type_make_void();
         } else if (tt_arith && et_arith) {
             res = usual_arith_conv(tt, et);
@@ -1910,9 +2037,18 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
         return is_const_init(e->u.bin.l, globals) && is_const_init(e->u.bin.r, globals);
     if (e->kind == EX_CAST)
         return is_const_init(e->u.cast.operand, globals);
+    if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
+        const char *name = e->u.call.callee->u.var.name;
+        if (runtime.strcmp(name, "__builtin_inf") == 0 || runtime.strcmp(name, "__builtin_inff") == 0 ||
+            runtime.strcmp(name, "__builtin_infl") == 0 || runtime.strcmp(name, "__builtin_huge_val") == 0 ||
+            runtime.strcmp(name, "__builtin_huge_valf") == 0 || runtime.strcmp(name, "__builtin_huge_vall") == 0 ||
+            runtime.strcmp(name, "__builtin_nan") == 0 || runtime.strcmp(name, "__builtin_nanf") == 0 ||
+            runtime.strcmp(name, "__builtin_nanl") == 0)
+            return 1;
+    }
     if (e->kind == EX_UNARY
         && (e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS)
-        && e->u.un.operand && e->u.un.operand->kind == EX_FLOAT_LIT)
+        && is_const_init(e->u.un.operand, globals))
         return 1;
     long long _fold_tmp;
     if (fold_const_int(e, &_fold_tmp)) return 1;
@@ -2038,6 +2174,14 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
         } else {
+            if (sd && !sd->is_union) {
+                while (cursor < sd->num_members
+                       && (sd->members[cursor].name == ((void*)0)
+                           || sd->members[cursor].name[0] == '\0')
+                       && sd->members[cursor].bit_width >= 0) {
+                    cursor++;
+                }
+            }
             pos = cursor;
             member_idx = (sd && sd->is_union) ? 0 : pos;
         }
@@ -2073,6 +2217,14 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
         expr_free(out[pos]);
         out[pos] = elem;
         cursor = pos + 1;
+        if (sd && !sd->is_union) {
+            while (cursor < sd->num_members
+                   && (sd->members[cursor].name == ((void*)0)
+                       || sd->members[cursor].name[0] == '\0')
+                   && sd->members[cursor].bit_width >= 0) {
+                cursor++;
+            }
+        }
     }
     for (int i = 0; i < n; i++)
         runtime.free(list->u.init_list.desig_member[i]);
@@ -2155,6 +2307,15 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
             check_expr(s->u.decl.type.vla_dim, st, ft);
         }
+        if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
+            && s->u.decl.type.kind == TY_ARRAY) {
+            if (s->u.decl.type.length == 0)
+                s->u.decl.type.length = s->u.decl.init->u.compound.target_type.length;
+            Expr *cl = s->u.decl.init;
+            s->u.decl.init = cl->u.compound.init;
+            cl->u.compound.init = ((void*)0);
+            expr_free(cl);
+        }
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
             && s->u.decl.init && s->u.decl.init->kind == EX_STR
             && s->u.decl.type.elem_type
@@ -2182,6 +2343,8 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             if (s->u.decl.init->kind == EX_INIT_LIST)
                 check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
             discard = check_expr(s->u.decl.init, st, ft); type_free(&discard);
+            if (s->u.decl.init->kind != EX_INIT_LIST)
+                coerce_arg_to_param(&s->u.decl.init, &s->u.decl.type);
         }
         break;
     }
@@ -2204,16 +2367,16 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                            "void function cannot return a value");
                 }
             } else {
-                if ((g_sema_ret_type.kind == TY_INT || g_sema_ret_type.kind == TY_FLOAT) &&
-                    discard.kind == TY_STRUCT && discard.tag && runtime.strncmp(discard.tag, "__complex_", 10) == 0) {
-                    Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
-                    set_type(c, type_clone(g_sema_ret_type));
-                    s->u.value = c;
-                } else if (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && runtime.strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0 &&
-                           (discard.kind == TY_INT || discard.kind == TY_FLOAT)) {
-                    Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
-                    set_type(c, type_clone(g_sema_ret_type));
-                    s->u.value = c;
+                if (!type_is_same(g_sema_ret_type, discard)) {
+                    if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||
+                        (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && runtime.strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0) ||
+                        (discard.kind == TY_STRUCT && discard.tag && runtime.strncmp(discard.tag, "__complex_", 10) == 0) ||
+                        (g_sema_ret_type.kind == TY_INT && g_sema_ret_type.width == 16) ||
+                        (discard.kind == TY_INT && discard.width == 16)) {
+                        Expr *c = expr_new_cast(type_clone(g_sema_ret_type), s->u.value, s->loc);
+                        set_type(c, type_clone(g_sema_ret_type));
+                        s->u.value = c;
+                    }
                 }
             }
             type_free(&discard);
@@ -2412,6 +2575,15 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "global '%s' conflicts with a function of the same name",
                    s->u.decl.name);
+        }
+        if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
+            && s->u.decl.type.kind == TY_ARRAY) {
+            if (s->u.decl.type.length == 0)
+                s->u.decl.type.length = s->u.decl.init->u.compound.target_type.length;
+            Expr *cl = s->u.decl.init;
+            s->u.decl.init = cl->u.compound.init;
+            cl->u.compound.init = ((void*)0);
+            expr_free(cl);
         }
         if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
             && s->u.decl.init && s->u.decl.init->kind == EX_STR
