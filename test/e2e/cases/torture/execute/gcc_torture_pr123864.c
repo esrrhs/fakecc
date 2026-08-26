@@ -1,4 +1,8 @@
 // expect: 0
+// skip_difftest
+// Host GCC 13 still has tree-optimization/123864: __builtin_mul_overflow_p
+// (long long, unsigned, long long) misses overflow, so gcc aborts and the
+// oracle disagrees with the expected GCC 16 behavior this port checks.
 package main;
 [[gnu::noipa]] static int
 foo (long long x)
