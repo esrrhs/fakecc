@@ -58,7 +58,6 @@ pr71494.c
 pr77767.c
 pr80692.c
 pr82210.c
-pr87623.c
 pr92904.c
 
 
@@ -181,7 +180,6 @@ pr71494
 pr77767
 pr80692
 pr82210
-pr87623
 pr92904
 
 
@@ -257,7 +255,6 @@ pr71494
 pr77767
 pr80692
 pr82210
-pr87623
 pr92904
 
 
@@ -322,7 +319,6 @@ pr71494
 pr77767
 pr80692
 pr82210
-pr87623
 pr92904
 
 # Preprocessor macros/macros which fakecc doesn't support.
