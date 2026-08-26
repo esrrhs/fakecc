@@ -1,11 +1,14 @@
 // expect: 0
 package main;
-extern void abort (void) __attribute__ ((noreturn));
-double __attribute__ ((noinline, noclone))
+
+extern void abort (void);
+
+double
 foo (unsigned int x)
 {
   return (double) (float) (x | 0xffff0000);
 }
+
 int
 main ()
 {
