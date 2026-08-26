@@ -1,6 +1,11 @@
 // expect: 0
 package main;
-__attribute__((noipa)) unsigned int
+
+/* PR rtl-optimization/119002 */
+
+extern void abort(void);
+
+unsigned int
 foo (void *x, float y, float z)
 {
   unsigned int a, b;
@@ -14,9 +19,11 @@ foo (void *x, float y, float z)
   a |= b;
   return a;
 }
+
 int
 main ()
 {
   if (foo ((void *) 0, 0.f, __builtin_nanf ("")))
-    __builtin_abort ();
+    abort ();
+  return 0;
 }
