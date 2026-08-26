@@ -61,6 +61,7 @@ static void test_mem2reg_single_var(void) {
     PUSH(IR_RETURN, -1,  2, -1, 0);
 
     IRFunction fn;
+    memset(&fn, 0, sizeof(fn));
     fn.name = NULL;
     fn.insts = insts;
     fn.next_value_id = 3; /* v0=ALLOCA, v1=CONST, v2=LOAD */
@@ -102,6 +103,7 @@ static void test_mem2reg_const_prop(void) {
     PUSH(IR_RETURN, -1,  2, -1, 0);
 
     IRFunction fn;
+    memset(&fn, 0, sizeof(fn));
     fn.name = NULL;
     fn.insts = insts;
     fn.next_value_id = 3;
@@ -146,6 +148,7 @@ static void test_mem2reg_two_vars(void) {
     PUSH(IR_RETURN, -1,  6, -1, 0);
 
     IRFunction fn;
+    memset(&fn, 0, sizeof(fn));
     fn.name = NULL;
     fn.insts = insts;
     fn.next_value_id = 7; /* v0-6 used */
@@ -196,6 +199,7 @@ static void test_mem2reg_undef_read(void) {
     PUSH(IR_RETURN, -1,  1, -1, 0);
 
     IRFunction fn;
+    memset(&fn, 0, sizeof(fn));
     fn.name = NULL;
     fn.insts = insts;
     fn.next_value_id = 2; /* v0=ALLOCA, v1=LOAD */
@@ -237,6 +241,7 @@ static void test_mem2reg_no_allocas(void) {
     PUSH(IR_RETURN, -1,  0, -1, 0);
 
     IRFunction fn;
+    memset(&fn, 0, sizeof(fn));
     fn.name = NULL;
     fn.insts = insts;
     fn.next_value_id = 1;
@@ -284,6 +289,7 @@ static void test_mem2reg_diamond(void) {
     PUSH(IR_RETURN, -1,  4, -1, 0);
 
     IRFunction fn;
+    memset(&fn, 0, sizeof(fn));
     fn.name = NULL;
     fn.insts = insts;
     fn.next_value_id = 5; /* v0-4 used */

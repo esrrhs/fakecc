@@ -466,8 +466,9 @@ void mem2reg_rename(
 /* ================================================================== */
 
 static void mem2reg_ensure_value_meta(IRFunction *fn, int v) {
-    if (!fn || v < fn->value_meta_cap) return;
-    int old_cap = fn->value_meta_cap;
+    if (!fn) return;
+    if (fn->value_meta_cap > 0 && v < fn->value_meta_cap) return;
+    int old_cap = fn->value_meta_cap > 0 ? fn->value_meta_cap : 0;
     int new_cap = old_cap ? old_cap * 2 : 64;
     while (new_cap <= v) new_cap *= 2;
     fn->value_width = xrealloc(fn->value_width, new_cap * sizeof(int));
