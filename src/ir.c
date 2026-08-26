@@ -3788,6 +3788,32 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
             const char *name = e->u.call.callee->u.var.name;
+            if (strcmp(name, "__builtin_isnan") == 0 || strcmp(name, "__builtin_isnanf") == 0 ||
+                strcmp(name, "__builtin_isnanl") == 0 || strcmp(name, "isnan") == 0) {
+                IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
+                int w = get_value_width(fn, arg);
+                return emit_bin_w(fn, IR_FCMP, arg, arg, w, 5 /* NE */, e->loc);
+            }
+            if (strcmp(name, "__builtin_isfinite") == 0 || strcmp(name, "__builtin_isfinitef") == 0 ||
+                strcmp(name, "__builtin_isfinitel") == 0 || strcmp(name, "isfinite") == 0) {
+                IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
+                int w = get_value_width(fn, arg);
+                IRValue diff = emit_bin_w(fn, IR_FSUB, arg, arg, w, 0, e->loc);
+                set_value_float(fn, diff, 1);
+                IRValue zero = emit_float_const(fn, w, 0, e->loc);
+                return emit_bin_w(fn, IR_FCMP, diff, zero, w, 4 /* EQ */, e->loc);
+            }
+            if (strcmp(name, "__builtin_isinf") == 0 || strcmp(name, "__builtin_isinff") == 0 ||
+                strcmp(name, "__builtin_isinfl") == 0 || strcmp(name, "isinf") == 0) {
+                IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
+                int w = get_value_width(fn, arg);
+                IRValue diff = emit_bin_w(fn, IR_FSUB, arg, arg, w, 0, e->loc);
+                set_value_float(fn, diff, 1);
+                IRValue zero = emit_float_const(fn, w, 0, e->loc);
+                IRValue not_fin = emit_bin_w(fn, IR_FCMP, diff, zero, w, 5 /* NE */, e->loc);
+                IRValue not_nan = emit_bin_w(fn, IR_FCMP, arg, arg, w, 4 /* EQ */, e->loc);
+                return emit_bin_w(fn, IR_BAND, not_fin, not_nan, 4, 0, e->loc);
+            }
             if (strcmp(name, "__builtin_inf") == 0 || strcmp(name, "__builtin_inff") == 0 ||
                 strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_val") == 0 ||
                 strcmp(name, "__builtin_huge_valf") == 0 || strcmp(name, "__builtin_huge_vall") == 0 ||

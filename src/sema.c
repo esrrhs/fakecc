@@ -782,6 +782,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_signbit") == 0 || strcmp(bname, "__builtin_signbitf") == 0 || strcmp(bname, "__builtin_signbitl") == 0 || strcmp(bname, "signbit") == 0)
                 ret = type_make_int(4, 0);
+            else if (strcmp(bname, "__builtin_isnan") == 0 || strcmp(bname, "__builtin_isnanf") == 0 || strcmp(bname, "__builtin_isnanl") == 0 || strcmp(bname, "isnan") == 0)
+                ret = type_make_int(4, 0);
+            else if (strcmp(bname, "__builtin_isfinite") == 0 || strcmp(bname, "__builtin_isfinitef") == 0 || strcmp(bname, "__builtin_isfinitel") == 0 || strcmp(bname, "isfinite") == 0)
+                ret = type_make_int(4, 0);
+            else if (strcmp(bname, "__builtin_isinf") == 0 || strcmp(bname, "__builtin_isinff") == 0 || strcmp(bname, "__builtin_isinfl") == 0 || strcmp(bname, "isinf") == 0)
+                ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_abs") == 0 || strcmp(bname, "abs") == 0)
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_labs") == 0 || strcmp(bname, "__builtin_llabs") == 0 || strcmp(bname, "labs") == 0 || strcmp(bname, "llabs") == 0)
