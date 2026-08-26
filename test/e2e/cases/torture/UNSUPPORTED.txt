@@ -66,7 +66,6 @@ pr24135.c
 
 # __builtin_apply/__builtin_apply_args not supported by fakecc.
 pr47237.c
-pr47925.c
 pr51447.c
 printf-2.c
 printf-chk-1.c
@@ -121,7 +120,6 @@ pr22061-4
 
 # __builtin_apply/__builtin_apply_args not supported by fakecc.
 pr47237
-pr47925
 pr51447
 pr70460
 pr71494
@@ -169,7 +167,6 @@ pr80692
 
 # __builtin_apply/__builtin_apply_args not supported by fakecc.
 pr47237
-pr47925
 pr51447
 pr70460
 pr71494
@@ -222,7 +219,6 @@ pr22061-4
 
 # __builtin_apply/__builtin_apply_args not supported by fakecc.
 pr47237
-pr47925
 pr51447
 pr70460
 pr71494
