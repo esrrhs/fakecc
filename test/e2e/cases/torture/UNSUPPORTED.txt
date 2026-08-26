@@ -107,7 +107,6 @@ pr58277-2.c
 
 
 # Vector types - not supported by fakecc.
-simd-2
 simd-4
 simd-5
 simd-6
@@ -181,7 +180,6 @@ pr92904
 
 
 # Vector types - not supported by fakecc.
-simd-2
 simd-4
 simd-5
 simd-6
