@@ -2200,8 +2200,9 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
             IRValue res;
             if (is_cmp) {
                 if (is_float) {
-                    IRValue cval = new_value(fn);
-                    emit_inst_w(fn, IR_FCMP, cval, lv, rv, bop, esz, 0, e->loc);
+                    static const unsigned char cmp_enc[] = {4,5,0,1,2,3};
+                    unsigned char enc = cmp_enc[bop - BOP_EQ];
+                    IRValue cval = emit_fcmp(fn, lv, rv, esz, enc, e->loc);
                     IRValue neg_cval = emit_bin_w(fn, IR_NEG, cval, -1, 4, 0, e->loc);
                     res = coerce(fn, neg_cval, 4, 0, esz, is_unsigned, e->loc);
                 } else {
