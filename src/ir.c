@@ -3786,6 +3786,23 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 return inst.dst;
             }
         }
+        if (e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
+            const char *name = e->u.call.callee->u.var.name;
+            if (strcmp(name, "__builtin_inf") == 0 || strcmp(name, "__builtin_inff") == 0 ||
+                strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_val") == 0 ||
+                strcmp(name, "__builtin_huge_valf") == 0 || strcmp(name, "__builtin_huge_vall") == 0 ||
+                strcmp(name, "__builtin_nan") == 0 || strcmp(name, "__builtin_nanf") == 0 ||
+                strcmp(name, "__builtin_nanl") == 0) {
+                long double ld = 0;
+                fold_const_float(e, &ld);
+                int w = e->type.width ? e->type.width : 8;
+                if (w == 16) return emit_ld_const(fn, ld, e->loc);
+                int64_t bits = 0;
+                if (w == 4) { float f = (float)ld; memcpy(&bits, &f, sizeof(f)); }
+                else { double d = (double)ld; memcpy(&bits, &d, sizeof(d)); }
+                return emit_float_const(fn, w, bits, e->loc);
+            }
+        }
         IRValue arg_vals[IR_CALL_MAX_ARGS];
         unsigned char arg_on_stack[IR_CALL_MAX_ARGS];
         int nargs = 0;
@@ -5808,6 +5825,42 @@ static int fold_const_float(const Expr *e, long double *out) {
     if (e->kind == EX_FLOAT_LIT) {
         *out = strtold(e->u.float_text, NULL);
         return 1;
+    }
+    if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
+        const char *name = e->u.call.callee->u.var.name;
+        if (strcmp(name, "__builtin_inf") == 0 || strcmp(name, "__builtin_huge_val") == 0) {
+            *out = __builtin_inf();
+            return 1;
+        }
+        if (strcmp(name, "__builtin_inff") == 0 || strcmp(name, "__builtin_huge_valf") == 0) {
+            *out = __builtin_inff();
+            return 1;
+        }
+        if (strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_vall") == 0) {
+            *out = __builtin_infl();
+            return 1;
+        }
+        if (strcmp(name, "__builtin_nan") == 0) {
+            const char *tag = "";
+            if (e->u.call.args.len > 0 && e->u.call.args.data[0]->kind == EX_STR)
+                tag = e->u.call.args.data[0]->u.str.bytes;
+            *out = __builtin_nan(tag);
+            return 1;
+        }
+        if (strcmp(name, "__builtin_nanf") == 0) {
+            const char *tag = "";
+            if (e->u.call.args.len > 0 && e->u.call.args.data[0]->kind == EX_STR)
+                tag = e->u.call.args.data[0]->u.str.bytes;
+            *out = __builtin_nanf(tag);
+            return 1;
+        }
+        if (strcmp(name, "__builtin_nanl") == 0) {
+            const char *tag = "";
+            if (e->u.call.args.len > 0 && e->u.call.args.data[0]->kind == EX_STR)
+                tag = e->u.call.args.data[0]->u.str.bytes;
+            *out = __builtin_nanl(tag);
+            return 1;
+        }
     }
     if (e->kind == EX_CAST)
         return fold_const_float(e->u.cast.operand, out);

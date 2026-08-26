@@ -766,6 +766,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_copysignl") == 0 || strcmp(bname, "copysignl") == 0)
                 ret = type_make_float(16);
+            else if (strcmp(bname, "__builtin_inf") == 0 || strcmp(bname, "__builtin_huge_val") == 0 || strcmp(bname, "__builtin_nan") == 0)
+                ret = type_make_float(8);
+            else if (strcmp(bname, "__builtin_inff") == 0 || strcmp(bname, "__builtin_huge_valf") == 0 || strcmp(bname, "__builtin_nanf") == 0)
+                ret = type_make_float(4);
+            else if (strcmp(bname, "__builtin_infl") == 0 || strcmp(bname, "__builtin_huge_vall") == 0 || strcmp(bname, "__builtin_nanl") == 0)
+                ret = type_make_float(16);
             else if (strcmp(bname, "__builtin_bswap64") == 0)
                 ret = type_make_int(8, 1);
             else if (strcmp(bname, "__builtin_bswap32") == 0)
@@ -1495,11 +1501,18 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
         return is_const_init(e->u.bin.l, globals) && is_const_init(e->u.bin.r, globals);
     if (e->kind == EX_CAST)
         return is_const_init(e->u.cast.operand, globals);
-    /* -1.5 / +1.5: fold_const_int below rejects these, since the operand is
-     * not an integer. */
+    if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
+        const char *name = e->u.call.callee->u.var.name;
+        if (strcmp(name, "__builtin_inf") == 0 || strcmp(name, "__builtin_inff") == 0 ||
+            strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_val") == 0 ||
+            strcmp(name, "__builtin_huge_valf") == 0 || strcmp(name, "__builtin_huge_vall") == 0 ||
+            strcmp(name, "__builtin_nan") == 0 || strcmp(name, "__builtin_nanf") == 0 ||
+            strcmp(name, "__builtin_nanl") == 0)
+            return 1;
+    }
     if (e->kind == EX_UNARY
         && (e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS)
-        && e->u.un.operand && e->u.un.operand->kind == EX_FLOAT_LIT)
+        && is_const_init(e->u.un.operand, globals))
         return 1;
     /* A constant integer expression: `(1u << 14) - 1u`, `-1`, etc. */
     long long _fold_tmp;
