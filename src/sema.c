@@ -1334,7 +1334,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT);
         int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT);
         Type res;
-        if (tt.kind == TY_VOID && et.kind == TY_VOID) {
+        if (tt.kind == TY_VOID || et.kind == TY_VOID) {
             res = type_make_void();
         } else if (tt_arith && et_arith) {
             res = usual_arith_conv(tt, et);
