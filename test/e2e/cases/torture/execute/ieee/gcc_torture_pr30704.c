@@ -1,9 +1,13 @@
 // expect: 0
 package main;
-typedef long unsigned int size_t;
+
+/* PR middle-end/30704 */
+
+typedef unsigned long size_t;
 extern void abort (void);
 extern int memcmp (const void *, const void *, size_t);
 extern void *memcpy (void *, const void *, size_t);
+
 long long
 f1 (void)
 {
@@ -12,6 +16,7 @@ f1 (void)
   memcpy (&t, &d, sizeof (long long));
   return t;
 }
+
 double
 f2 (void)
 {
@@ -20,6 +25,7 @@ f2 (void)
   memcpy (&d, &t, sizeof (long long));
   return d;
 }
+
 int
 main ()
 {
@@ -28,14 +34,18 @@ main ()
     long long ll;
     double d;
   } u;
-  if (sizeof (long long) != sizeof (double) || (-1021) != -1021)
+
+  if (sizeof (long long) != sizeof (double))
     return 0;
+
   u.ll = f1 ();
   if (u.d != 0x0.fffffffffffff000p-1022)
     abort ();
+
   u.d = f2 ();
   if (u.ll != 0x000fedcba9876543LL)
     abort ();
+
   double b = 234.0;
   long long c;
   double d = b;
@@ -43,5 +53,6 @@ main ()
   long long e = c;
   if (memcmp (&e, &d, sizeof (double)) != 0)
     abort ();
+
   return 0;
 }
