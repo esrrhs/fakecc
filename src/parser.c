@@ -79,6 +79,25 @@ static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
 
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
+    if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
+        advance(p);
+        advance(p);
+        int depth = 1;
+        while (depth > 0 && peek(p)->kind != TK_EOF) {
+            if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
+                depth++;
+                advance(p);
+                advance(p);
+            } else if (peek(p)->kind == TK_RBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_RBRACKET) {
+                depth--;
+                advance(p);
+                advance(p);
+            } else {
+                advance(p);
+            }
+        }
+        return 1;
+    }
     if (peek(p)->kind != TK_IDENT) return 0;
     if (strcmp(peek(p)->text, "__asm__") == 0 || strcmp(peek(p)->text, "asm") == 0 || strcmp(peek(p)->text, "__asm") == 0) {
         if (p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LPAREN) {
@@ -339,6 +358,23 @@ static const Type *find_typedef_with_fallback(Parser *p, const char *name) {
 /* Recognize a type at position `pos` (keywords, typedefs, pkg.Type). */
 static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
+    if (k == TK_LBRACKET && pos + 1 < p->tokens->len && p->tokens->data[pos + 1].kind == TK_LBRACKET) {
+        size_t k = pos + 2;
+        int depth = 1;
+        while (k < p->tokens->len && depth > 0) {
+            if (p->tokens->data[k].kind == TK_LBRACKET && k + 1 < p->tokens->len && p->tokens->data[k + 1].kind == TK_LBRACKET) {
+                depth++;
+                k += 2;
+            } else if (p->tokens->data[k].kind == TK_RBRACKET && k + 1 < p->tokens->len && p->tokens->data[k + 1].kind == TK_RBRACKET) {
+                depth--;
+                k += 2;
+            } else {
+                k++;
+            }
+        }
+        if (k < p->tokens->len) return is_type_start(p, k);
+        return 0;
+    }
     if (k == TK_KW_VOID || k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
         || k == TK_KW_LONG || k == TK_KW_SIGNED || k == TK_KW_UNSIGNED
         || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
@@ -1731,6 +1767,10 @@ static Expr *parse_unary(Parser *p) {
         }
         advance(p);
         return expr_new_label_addr(lbl->text, loc);
+    }
+    if (k == TK_KW_INLINE || (k == TK_IDENT && (strcmp(peek(p)->text, "__extension__") == 0 || strcmp(peek(p)->text, "__extension") == 0))) {
+        advance(p);
+        return parse_unary(p);
     }
     if (k == TK_AMP) {
         SourceLoc loc = peek(p)->loc;
