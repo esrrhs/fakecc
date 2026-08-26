@@ -52,7 +52,6 @@ pr57344-2.c
 pr57344-3.c
 pr57344-4.c
 pr57568.c
-pr68328.c
 pr68381.c
 pr69320-2.c
 pr69691.c
@@ -159,7 +158,6 @@ pr85582-2
 pr85582-3
 
 # Inline assembly - not supported by fakecc.
-pr68328
 pr69320-2
 pr69691
 pr78438
@@ -220,7 +218,6 @@ pr57344-2
 pr57344-3
 pr57344-4
 pr57568
-pr68328
 pr68381
 pr69320-2
 pr69691
@@ -282,7 +279,6 @@ pr85582-2
 pr85582-3
 
 # Inline assembly - not supported by fakecc.
-pr68328
 pr69320-2
 pr69691
 pr78438
@@ -342,7 +338,6 @@ pr57344-2
 pr57344-3
 pr57344-4
 pr57568
-pr68328
 pr68381
 pr69320-2
 pr69691
@@ -436,7 +431,6 @@ pr51933
 pr53645
 pr53645-2
 pr56205
-pr68328
 pr68381
 pr69320-2
 pr69691
