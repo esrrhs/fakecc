@@ -7,6 +7,8 @@
 # Prefer GCC 16 from the Ubuntu toolchain test PPA.
 set -euo pipefail
 
+sudo apt-get update
+sudo apt-get install -y software-properties-common
 sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
 sudo apt-get update
 sudo apt-get install -y gcc-16 g++-16
