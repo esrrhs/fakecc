@@ -1798,6 +1798,7 @@ static IRValue convert_numeric(IRFunction *fn, IRValue v,
         op = (dst_w > src_w) ? IR_FPEXT : IR_FPTRUNC;
         emit_inst_f(fn, op, res, v, -1, dst_w, loc);
         set_value_type(fn, res, dst_w, 0);
+        set_value_float(fn, res, 1);
         return res;
     }
     if (src_float && !to_float) {
@@ -2102,13 +2103,24 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
 
     IRValue l_addr = lower_expr(fn, st, e->u.bin.l);
     if (!lt.is_vector) {
+        int sw = get_value_width(fn, l_addr);
+        int sf = get_value_is_float(fn, l_addr);
+        int su = get_value_is_unsigned(fn, l_addr);
+        if (esz == 16 && !is_float) {
+            l_addr = i128_as_addr(fn, l_addr, lt, is_unsigned, e->loc);
+        } else if (sf != is_float) {
+            l_addr = convert_numeric(fn, l_addr, sw, esz, is_unsigned, is_float, e->loc);
+        } else if (is_float) {
+            if (sw != esz) l_addr = convert_numeric(fn, l_addr, sw, esz, is_unsigned, 1, e->loc);
+        } else {
+            l_addr = coerce(fn, l_addr, sw, su, esz, is_unsigned, e->loc);
+        }
         IRValue l_slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
         IRValue l_buf = emit_bin_w(fn, IR_ADDR, l_slot, -1, 8, 1, e->loc);
         for (int i = 0; i < count; i++) {
             IRValue off = emit_add_const(fn, l_buf, i * esz, e->loc);
             if (esz == 16 && !is_float) {
-                IRValue src = i128_as_addr(fn, l_addr, lt, is_unsigned, e->loc);
-                emit_struct_copy(fn, off, src, 16, e->loc);
+                emit_struct_copy(fn, off, l_addr, 16, e->loc);
             } else {
                 emit_inst_w(fn, IR_STORE_PTR, -1, off, l_addr, 0, esz, is_unsigned, e->loc);
                 if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
@@ -2119,13 +2131,24 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
 
     IRValue r_addr = lower_expr(fn, st, e->u.bin.r);
     if (!rt.is_vector) {
+        int sw = get_value_width(fn, r_addr);
+        int sf = get_value_is_float(fn, r_addr);
+        int su = get_value_is_unsigned(fn, r_addr);
+        if (esz == 16 && !is_float) {
+            r_addr = i128_as_addr(fn, r_addr, rt, is_unsigned, e->loc);
+        } else if (sf != is_float) {
+            r_addr = convert_numeric(fn, r_addr, sw, esz, is_unsigned, is_float, e->loc);
+        } else if (is_float) {
+            if (sw != esz) r_addr = convert_numeric(fn, r_addr, sw, esz, is_unsigned, 1, e->loc);
+        } else {
+            r_addr = coerce(fn, r_addr, sw, su, esz, is_unsigned, e->loc);
+        }
         IRValue r_slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
         IRValue r_buf = emit_bin_w(fn, IR_ADDR, r_slot, -1, 8, 1, e->loc);
         for (int i = 0; i < count; i++) {
             IRValue off = emit_add_const(fn, r_buf, i * esz, e->loc);
             if (esz == 16 && !is_float) {
-                IRValue src = i128_as_addr(fn, r_addr, rt, is_unsigned, e->loc);
-                emit_struct_copy(fn, off, src, 16, e->loc);
+                emit_struct_copy(fn, off, r_addr, 16, e->loc);
             } else {
                 emit_inst_w(fn, IR_STORE_PTR, -1, off, r_addr, 0, esz, is_unsigned, e->loc);
                 if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
@@ -2261,12 +2284,28 @@ static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
     IRValue addr = lower_lvalue_addr(fn, st, lv);
     IRValue rhs_addr = lower_expr(fn, st, e->u.comp.rvalue);
     if (!e->u.comp.rvalue->type.is_vector) {
+        int sw = get_value_width(fn, rhs_addr);
+        int sf = get_value_is_float(fn, rhs_addr);
+        int su = get_value_is_unsigned(fn, rhs_addr);
+        if (esz == 16 && !is_float) {
+            rhs_addr = i128_as_addr(fn, rhs_addr, e->u.comp.rvalue->type, is_unsigned, e->loc);
+        } else if (sf != is_float) {
+            rhs_addr = convert_numeric(fn, rhs_addr, sw, esz, is_unsigned, is_float, e->loc);
+        } else if (is_float) {
+            if (sw != esz) rhs_addr = convert_numeric(fn, rhs_addr, sw, esz, is_unsigned, 1, e->loc);
+        } else {
+            rhs_addr = coerce(fn, rhs_addr, sw, su, esz, is_unsigned, e->loc);
+        }
         IRValue r_slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
         IRValue r_buf = emit_bin_w(fn, IR_ADDR, r_slot, -1, 8, 1, e->loc);
         for (int i = 0; i < count; i++) {
             IRValue off = emit_add_const(fn, r_buf, i * esz, e->loc);
-            emit_inst_w(fn, IR_STORE_PTR, -1, off, rhs_addr, 0, esz, is_unsigned, e->loc);
-            if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+            if (esz == 16 && !is_float) {
+                emit_struct_copy(fn, off, rhs_addr, 16, e->loc);
+            } else {
+                emit_inst_w(fn, IR_STORE_PTR, -1, off, rhs_addr, 0, esz, is_unsigned, e->loc);
+                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+            }
         }
         rhs_addr = r_buf;
     }
