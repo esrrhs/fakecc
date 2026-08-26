@@ -788,6 +788,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_isinf") == 0 || strcmp(bname, "__builtin_isinff") == 0 || strcmp(bname, "__builtin_isinfl") == 0 || strcmp(bname, "isinf") == 0)
                 ret = type_make_int(4, 0);
+            else if (strcmp(bname, "__builtin_isgreater") == 0 || strcmp(bname, "__builtin_isgreaterequal") == 0 ||
+                     strcmp(bname, "__builtin_isless") == 0 || strcmp(bname, "__builtin_islessequal") == 0 ||
+                     strcmp(bname, "__builtin_islessgreater") == 0 || strcmp(bname, "__builtin_isunordered") == 0)
+                ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_abs") == 0 || strcmp(bname, "abs") == 0)
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_labs") == 0 || strcmp(bname, "__builtin_llabs") == 0 || strcmp(bname, "labs") == 0 || strcmp(bname, "llabs") == 0)

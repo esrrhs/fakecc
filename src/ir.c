@@ -3814,6 +3814,47 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue not_nan = emit_bin_w(fn, IR_FCMP, arg, arg, w, 4 /* EQ */, e->loc);
                 return emit_bin_w(fn, IR_BAND, not_fin, not_nan, 4, 0, e->loc);
             }
+            if (strcmp(name, "__builtin_isgreater") == 0) {
+                IRValue a = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue b = lower_expr(fn, st, e->u.call.args.data[1]);
+                int w = get_value_width(fn, a);
+                return emit_bin_w(fn, IR_FCMP, a, b, w, 2 /* GT */, e->loc);
+            }
+            if (strcmp(name, "__builtin_isgreaterequal") == 0) {
+                IRValue a = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue b = lower_expr(fn, st, e->u.call.args.data[1]);
+                int w = get_value_width(fn, a);
+                return emit_bin_w(fn, IR_FCMP, a, b, w, 3 /* GE */, e->loc);
+            }
+            if (strcmp(name, "__builtin_isless") == 0) {
+                IRValue a = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue b = lower_expr(fn, st, e->u.call.args.data[1]);
+                int w = get_value_width(fn, a);
+                return emit_bin_w(fn, IR_FCMP, a, b, w, 0 /* LT */, e->loc);
+            }
+            if (strcmp(name, "__builtin_islessequal") == 0) {
+                IRValue a = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue b = lower_expr(fn, st, e->u.call.args.data[1]);
+                int w = get_value_width(fn, a);
+                return emit_bin_w(fn, IR_FCMP, a, b, w, 1 /* LE */, e->loc);
+            }
+            if (strcmp(name, "__builtin_islessgreater") == 0) {
+                IRValue a = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue b = lower_expr(fn, st, e->u.call.args.data[1]);
+                int w = get_value_width(fn, a);
+                IRValue lt = emit_bin_w(fn, IR_FCMP, a, b, w, 0 /* LT */, e->loc);
+                IRValue gt = emit_bin_w(fn, IR_FCMP, a, b, w, 2 /* GT */, e->loc);
+                return emit_bin_w(fn, IR_BOR, lt, gt, 4, 0, e->loc);
+            }
+            if (strcmp(name, "__builtin_isunordered") == 0) {
+                IRValue a = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue b = lower_expr(fn, st, e->u.call.args.data[1]);
+                int wa = get_value_width(fn, a);
+                int wb = get_value_width(fn, b);
+                IRValue nan_a = emit_bin_w(fn, IR_FCMP, a, a, wa, 5 /* NE */, e->loc);
+                IRValue nan_b = emit_bin_w(fn, IR_FCMP, b, b, wb, 5 /* NE */, e->loc);
+                return emit_bin_w(fn, IR_BOR, nan_a, nan_b, 4, 0, e->loc);
+            }
             if (strcmp(name, "__builtin_inf") == 0 || strcmp(name, "__builtin_inff") == 0 ||
                 strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_val") == 0 ||
                 strcmp(name, "__builtin_huge_valf") == 0 || strcmp(name, "__builtin_huge_vall") == 0 ||
