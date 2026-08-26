@@ -45,7 +45,6 @@ pr103405.c
 # Inline assembly (asm volatile) not supported by fakecc.
 pr70460.c
 pr71494.c
-pr77767.c
 pr80692.c
 pr82210.c
 pr92904.c
@@ -92,7 +91,6 @@ pr70460
 pr71494
 
 # Nested functions - not supported by fakecc.
-pr77767
 
 # VLA in struct - not supported by fakecc.
 pr82210
@@ -123,7 +121,6 @@ pr47237
 pr51447
 pr70460
 pr71494
-pr77767
 pr80692
 pr82210
 pr92904
@@ -142,7 +139,6 @@ pr70460
 pr71494
 
 # Nested functions - not supported by fakecc.
-pr77767
 
 # VLA in struct - not supported by fakecc.
 pr82210
@@ -170,7 +166,6 @@ pr47237
 pr51447
 pr70460
 pr71494
-pr77767
 pr80692
 pr82210
 pr92904
@@ -222,7 +217,6 @@ pr47237
 pr51447
 pr70460
 pr71494
-pr77767
 pr80692
 pr82210
 pr92904
