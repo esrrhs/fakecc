@@ -1732,6 +1732,7 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static int fold_const_float(const Expr *e, long double *out);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
+static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceLoc loc);
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                        const FunctionDecl *cur_fd);
 
@@ -1922,9 +1923,7 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     case EX_INDEX: {
         IRValue base = lower_expr(fn, st, e->u.idx.array);
         IRValue idx  = lower_expr(fn, st, e->u.idx.index);
-        int esize = type_size(e->type);
-        IRValue esize_v = new_value(fn);
-        emit_inst_w(fn, IR_CONST, esize_v, -1, -1, esize, 8, 1, e->loc);
+        IRValue esize_v = lower_sizeof_type(fn, st, e->type, e->loc);
         int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
         IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
         IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
@@ -4351,9 +4350,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Same as *(a + i*sizeof(elem)) for rvalue use. */
         IRValue base = lower_expr(fn, st, e->u.idx.array);
         IRValue idx  = lower_expr(fn, st, e->u.idx.index);
-        int esize = type_size(e->type);
-        IRValue esize_v = new_value(fn);
-        emit_inst_w(fn, IR_CONST, esize_v, -1, -1, esize, 8, 1, e->loc);
+        IRValue esize_v = lower_sizeof_type(fn, st, e->type, e->loc);
         int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
         IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
         IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);

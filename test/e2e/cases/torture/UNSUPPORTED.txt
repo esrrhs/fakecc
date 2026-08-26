@@ -32,193 +32,29 @@ nestfunc-5.c
 nestfunc-6.c
 nestfunc-7.c
 pr103405.c
+pr22061-3.c
+pr22061-4.c
+pr24135.c
 
-# GNU variable-length structures (VLAs inside struct definitions) and C99 runtime VLAs.
+# GNU variable-length structures (VLAs inside struct definitions) and C99 runtime VLAs in struct.
 20020412-1.c
 20040308-1.c
 20040423-1.c
 20041218-2.c
 20070919-1.c
+pr41935.c
+pr82210.c
 
-
-
-# Inline assembly (asm volatile) not supported by fakecc.
+# Inline assembly / computed goto not supported by fakecc.
 pr70460.c
 pr71494.c
-pr80692.c
-pr82210.c
 pr92904.c
 
+# _Decimal64 not supported by fakecc.
+pr80692.c
 
-
-
-# VLA in struct with offsetof - runtime crash.
-pr41935.c
-
-
-
-# Nested functions with trampolines - not supported by fakecc.
-pr24135.c
-
-
-
-
-# __builtin_apply/__builtin_apply_args not supported by fakecc.
+# __builtin_apply / __builtin_apply_args / __builtin_va_arg_pack not supported by fakecc.
 pr47237.c
 pr51447.c
 va-arg-pack-1.c
-
-# VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
-pr22061-1.c
-pr22061-2.c
-pr22061-3.c
-pr22061-4.c
-
-
-
-# Vector types - not supported by fakecc.
-
-# __int128 - not supported by fakecc.
-
-
-# Inline assembly - not supported by fakecc.
-
-
-# Label values / computed goto - not supported by fakecc.
-pr70460
-pr71494
-
-# Nested functions - not supported by fakecc.
-
-# VLA in struct - not supported by fakecc.
-pr82210
-
-# _Decimal64 - not supported by fakecc.
-pr80692
-
-
-
-
-
-
-
-
-
-
-# VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
-pr22061-1
-pr22061-2
-pr22061-3
-pr22061-4
-
-# Complex sprintf format - not fully supported.
-
-
-# __builtin_apply/__builtin_apply_args not supported by fakecc.
-pr47237
-pr51447
-pr70460
-pr71494
-pr80692
-pr82210
-pr92904
-
-
-
-# Vector types - not supported by fakecc.
-
-# __int128 - not supported by fakecc.
-
-
-# Inline assembly - not supported by fakecc.
-
-# Label values / computed goto - not supported by fakecc.
-pr70460
-pr71494
-
-# Nested functions - not supported by fakecc.
-
-# VLA in struct - not supported by fakecc.
-pr82210
-pr22061-1
-pr22061-2
-pr22061-3
-pr22061-4
-pr41935
-pr20040308-1
-pr20040423-1
-pr20041218-2
-pr20070919-1
-pr20020412-1
-
-# _Decimal64 - not supported by fakecc.
-pr80692
-
-
-
-# Complex sprintf format - not fully supported.
-
-
-# __builtin_apply/__builtin_apply_args not supported by fakecc.
-pr47237
-pr51447
-pr70460
-pr71494
-pr80692
-pr82210
-pr92904
-
-
-# Nested functions / trampolines - not supported by fakecc.
-pr24135
-pr103405
-pr20000822-1
-pr20010209-1
-pr20030501-1
-pr20040520-1
-pr20061220-1
-pr20090219-1
-920415-1
-920428-2
-920501-7
-920612-2
-920721-4
-921017-1
-921215-1
-931002-1
-comp-goto-2
-nest-align-1
-nestfunc-1
-nestfunc-2
-nestfunc-3
-nestfunc-5
-nestfunc-6
-nestfunc-7
-nest-stdar-1
-
-
-
-
-
-
-# VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
-pr22061-1
-pr22061-2
-pr22061-3
-pr22061-4
-
-# Complex sprintf format - not fully supported.
-
-
-# __builtin_apply/__builtin_apply_args not supported by fakecc.
-pr47237
-pr51447
-pr70460
-pr71494
-pr80692
-pr82210
-pr92904
-
-# Preprocessor macros/macros which fakecc doesn't support.
-va-arg-pack-1
 
