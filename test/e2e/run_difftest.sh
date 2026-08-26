@@ -17,12 +17,11 @@ if [ ! -x "$FAKECC" ]; then
     exit 2
 fi
 # Collect every .c case except the gdb/debug suite (which uses gdb
-# breakpoints, not exit codes), expect_error cases (rejected by design,
-# gcc would accept them), and skip_difftest cases (host gcc is a known-
-# buggy oracle, e.g. tree-optimization/123864).
+# breakpoints, not exit codes) and the expect_error cases (rejected
+# by design, gcc would accept them).
 files=()
 for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
-    if grep -qE '^// expect_error|^// skip_difftest' "$f"; then
+    if grep -q '^// expect_error' "$f"; then
         continue
     fi
     files+=("$f")
