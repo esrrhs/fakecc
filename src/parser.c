@@ -3448,6 +3448,7 @@ static Stmt parse_stmt(Parser *p) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
         while (peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_CONST ||
+               peek(p)->kind == TK_KW_GOTO ||
                (peek(p)->kind == TK_IDENT && (strcmp(peek(p)->text, "__volatile__") == 0 ||
                                               strcmp(peek(p)->text, "__volatile") == 0 ||
                                               strcmp(peek(p)->text, "goto") == 0 ||
