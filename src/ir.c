@@ -1042,6 +1042,35 @@ static void emit_br(IRFunction *fn, int label, SourceLoc loc);
 static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
                      SourceLoc loc);
 
+static IRValue emit_float_abs(IRFunction *fn, IRValue v, int elem_sz, SourceLoc loc) {
+    IRValue zero = emit_float_const(fn, elem_sz, 0, loc);
+    IRValue lt0 = emit_fcmp(fn, v, zero, elem_sz, 0 /* LT */, loc);
+    IRValue neg_v = emit_bin_w(fn, IR_FSUB, zero, v, elem_sz, 0, loc);
+    set_value_float(fn, neg_v, 1);
+    
+    IRValue slot = new_value(fn);
+    emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, elem_sz, 0, loc);
+    set_value_float(fn, slot, 1);
+    
+    int Lt = new_label(fn), Lf = new_label(fn), Ld = new_label(fn);
+    emit_cbr(fn, lt0, Lt, Lf, loc);
+    emit_label(fn, Lt, loc);
+    emit_inst_w(fn, IR_STORE, -1, slot, neg_v, 0, elem_sz, 0, loc);
+    fn->insts.data[fn->insts.len - 1].is_float = 1;
+    emit_br(fn, Ld, loc);
+    emit_label(fn, Lf, loc);
+    emit_inst_w(fn, IR_STORE, -1, slot, v, 0, elem_sz, 0, loc);
+    fn->insts.data[fn->insts.len - 1].is_float = 1;
+    emit_br(fn, Ld, loc);
+    emit_label(fn, Ld, loc);
+    
+    IRValue res = new_value(fn);
+    emit_inst_w(fn, IR_LOAD, res, slot, -1, 0, elem_sz, 0, loc);
+    fn->insts.data[fn->insts.len - 1].is_float = 1;
+    set_value_float(fn, res, 1);
+    return res;
+}
+
 /* Scalar __int128 is a 16-byte INTEGER pair (lo, hi) in memory, matching
  * SysV AMD64.  SSA values for these expressions are addresses, not 128-bit
  * registers — arithmetic is expanded into 64-bit ops (add+carry, schoolbook
@@ -2062,19 +2091,147 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
         IRValue i2 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
         out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
     } else if (bop == BOP_DIV) {
-        IRValue d1 = emit_bin_w(fn, mul_op, r_real, r_real, elem_sz, 1, e->loc);
-        IRValue d2 = emit_bin_w(fn, mul_op, r_imag, r_imag, elem_sz, 1, e->loc);
-        IRValue denom = emit_bin_w(fn, add_op, d1, d2, elem_sz, 1, e->loc);
-        
-        IRValue n_r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
-        IRValue n_r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
-        IRValue num_r = emit_bin_w(fn, add_op, n_r1, n_r2, elem_sz, 1, e->loc);
-        out_r = emit_bin_w(fn, div_op, num_r, denom, elem_sz, 1, e->loc);
-        
-        IRValue n_i1 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
-        IRValue n_i2 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
-        IRValue num_i = emit_bin_w(fn, sub_op, n_i1, n_i2, elem_sz, 1, e->loc);
-        out_i = emit_bin_w(fn, div_op, num_i, denom, elem_sz, 1, e->loc);
+        if (is_float && elem_sz <= 8) {
+            /* Float/double complex division: compute via 80-bit long double (16-byte)
+             * to prevent intermediate overflow/underflow in denominator and numerators. */
+            IRValue a = convert_numeric(fn, l_real, elem_sz, 16, 0, 1, e->loc);
+            IRValue b = convert_numeric(fn, l_imag, elem_sz, 16, 0, 1, e->loc);
+            IRValue c = convert_numeric(fn, r_real, elem_sz, 16, 0, 1, e->loc);
+            IRValue d = convert_numeric(fn, r_imag, elem_sz, 16, 0, 1, e->loc);
+            
+            IRValue c2 = emit_bin_w(fn, IR_FMUL, c, c, 16, 0, e->loc);
+            set_value_float(fn, c2, 1);
+            IRValue d2 = emit_bin_w(fn, IR_FMUL, d, d, 16, 0, e->loc);
+            set_value_float(fn, d2, 1);
+            IRValue denom = emit_bin_w(fn, IR_FADD, c2, d2, 16, 0, e->loc);
+            set_value_float(fn, denom, 1);
+            
+            IRValue ac = emit_bin_w(fn, IR_FMUL, a, c, 16, 0, e->loc);
+            set_value_float(fn, ac, 1);
+            IRValue bd = emit_bin_w(fn, IR_FMUL, b, d, 16, 0, e->loc);
+            set_value_float(fn, bd, 1);
+            IRValue num_r = emit_bin_w(fn, IR_FADD, ac, bd, 16, 0, e->loc);
+            set_value_float(fn, num_r, 1);
+            IRValue div_r = emit_bin_w(fn, IR_FDIV, num_r, denom, 16, 0, e->loc);
+            set_value_float(fn, div_r, 1);
+            
+            IRValue bc = emit_bin_w(fn, IR_FMUL, b, c, 16, 0, e->loc);
+            set_value_float(fn, bc, 1);
+            IRValue ad = emit_bin_w(fn, IR_FMUL, a, d, 16, 0, e->loc);
+            set_value_float(fn, ad, 1);
+            IRValue num_i = emit_bin_w(fn, IR_FSUB, bc, ad, 16, 0, e->loc);
+            set_value_float(fn, num_i, 1);
+            IRValue div_i = emit_bin_w(fn, IR_FDIV, num_i, denom, 16, 0, e->loc);
+            set_value_float(fn, div_i, 1);
+            
+            out_r = convert_numeric(fn, div_r, 16, elem_sz, 0, 1, e->loc);
+            out_i = convert_numeric(fn, div_i, 16, elem_sz, 0, 1, e->loc);
+        } else if (is_float) {
+            /* 16-byte long double complex division: Smith's algorithm */
+            IRValue abs_r = emit_float_abs(fn, r_real, elem_sz, e->loc);
+            IRValue abs_i = emit_float_abs(fn, r_imag, elem_sz, e->loc);
+            IRValue cond = emit_fcmp(fn, abs_i, abs_r, elem_sz, 1 /* LE */, e->loc);
+            
+            IRValue slot_r = new_value(fn);
+            emit_inst_w(fn, IR_ALLOCA, slot_r, -1, -1, 0, elem_sz, 0, e->loc);
+            set_value_float(fn, slot_r, 1);
+            IRValue slot_i = new_value(fn);
+            emit_inst_w(fn, IR_ALLOCA, slot_i, -1, -1, 0, elem_sz, 0, e->loc);
+            set_value_float(fn, slot_i, 1);
+            
+            int L_then = new_label(fn);
+            int L_else = new_label(fn);
+            int L_done = new_label(fn);
+            
+            emit_cbr(fn, cond, L_then, L_else, e->loc);
+            
+            /* Then: |r_imag| <= |r_real| */
+            emit_label(fn, L_then, e->loc);
+            {
+                IRValue ratio = emit_bin_w(fn, div_op, r_imag, r_real, elem_sz, 1, e->loc);
+                set_value_float(fn, ratio, 1);
+                IRValue d2 = emit_bin_w(fn, mul_op, r_imag, ratio, elem_sz, 1, e->loc);
+                set_value_float(fn, d2, 1);
+                IRValue denom = emit_bin_w(fn, add_op, r_real, d2, elem_sz, 1, e->loc);
+                set_value_float(fn, denom, 1);
+                
+                IRValue n_r2 = emit_bin_w(fn, mul_op, l_imag, ratio, elem_sz, 1, e->loc);
+                set_value_float(fn, n_r2, 1);
+                IRValue num_r = emit_bin_w(fn, add_op, l_real, n_r2, elem_sz, 1, e->loc);
+                set_value_float(fn, num_r, 1);
+                IRValue res_r = emit_bin_w(fn, div_op, num_r, denom, elem_sz, 1, e->loc);
+                set_value_float(fn, res_r, 1);
+                emit_inst_w(fn, IR_STORE, -1, slot_r, res_r, 0, elem_sz, 0, e->loc);
+                fn->insts.data[fn->insts.len - 1].is_float = 1;
+                
+                IRValue n_i2 = emit_bin_w(fn, mul_op, l_real, ratio, elem_sz, 1, e->loc);
+                set_value_float(fn, n_i2, 1);
+                IRValue num_i = emit_bin_w(fn, sub_op, l_imag, n_i2, elem_sz, 1, e->loc);
+                set_value_float(fn, num_i, 1);
+                IRValue res_i = emit_bin_w(fn, div_op, num_i, denom, elem_sz, 1, e->loc);
+                set_value_float(fn, res_i, 1);
+                emit_inst_w(fn, IR_STORE, -1, slot_i, res_i, 0, elem_sz, 0, e->loc);
+                fn->insts.data[fn->insts.len - 1].is_float = 1;
+                
+                emit_br(fn, L_done, e->loc);
+            }
+            
+            /* Else: |r_imag| > |r_real| */
+            emit_label(fn, L_else, e->loc);
+            {
+                IRValue ratio = emit_bin_w(fn, div_op, r_real, r_imag, elem_sz, 1, e->loc);
+                set_value_float(fn, ratio, 1);
+                IRValue d2 = emit_bin_w(fn, mul_op, r_real, ratio, elem_sz, 1, e->loc);
+                set_value_float(fn, d2, 1);
+                IRValue denom = emit_bin_w(fn, add_op, r_imag, d2, elem_sz, 1, e->loc);
+                set_value_float(fn, denom, 1);
+                
+                IRValue n_r1 = emit_bin_w(fn, mul_op, l_real, ratio, elem_sz, 1, e->loc);
+                set_value_float(fn, n_r1, 1);
+                IRValue num_r = emit_bin_w(fn, add_op, n_r1, l_imag, elem_sz, 1, e->loc);
+                set_value_float(fn, num_r, 1);
+                IRValue res_r = emit_bin_w(fn, div_op, num_r, denom, elem_sz, 1, e->loc);
+                set_value_float(fn, res_r, 1);
+                emit_inst_w(fn, IR_STORE, -1, slot_r, res_r, 0, elem_sz, 0, e->loc);
+                fn->insts.data[fn->insts.len - 1].is_float = 1;
+                
+                IRValue n_i1 = emit_bin_w(fn, mul_op, l_imag, ratio, elem_sz, 1, e->loc);
+                set_value_float(fn, n_i1, 1);
+                IRValue num_i = emit_bin_w(fn, sub_op, n_i1, l_real, elem_sz, 1, e->loc);
+                set_value_float(fn, num_i, 1);
+                IRValue res_i = emit_bin_w(fn, div_op, num_i, denom, elem_sz, 1, e->loc);
+                set_value_float(fn, res_i, 1);
+                emit_inst_w(fn, IR_STORE, -1, slot_i, res_i, 0, elem_sz, 0, e->loc);
+                fn->insts.data[fn->insts.len - 1].is_float = 1;
+                
+                emit_br(fn, L_done, e->loc);
+            }
+            
+            emit_label(fn, L_done, e->loc);
+            out_r = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, out_r, slot_r, -1, 0, elem_sz, 0, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            set_value_float(fn, out_r, 1);
+            
+            out_i = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, out_i, slot_i, -1, 0, elem_sz, 0, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            set_value_float(fn, out_i, 1);
+        } else {
+            IRValue d1 = emit_bin_w(fn, mul_op, r_real, r_real, elem_sz, 1, e->loc);
+            IRValue d2 = emit_bin_w(fn, mul_op, r_imag, r_imag, elem_sz, 1, e->loc);
+            IRValue denom = emit_bin_w(fn, add_op, d1, d2, elem_sz, 1, e->loc);
+            
+            IRValue n_r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
+            IRValue n_r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
+            IRValue num_r = emit_bin_w(fn, add_op, n_r1, n_r2, elem_sz, 1, e->loc);
+            out_r = emit_bin_w(fn, div_op, num_r, denom, elem_sz, 1, e->loc);
+            
+            IRValue n_i1 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
+            IRValue n_i2 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
+            IRValue num_i = emit_bin_w(fn, sub_op, n_i1, n_i2, elem_sz, 1, e->loc);
+            out_i = emit_bin_w(fn, div_op, num_i, denom, elem_sz, 1, e->loc);
+        }
     } else {
         out_r = l_real; out_i = l_imag;
     }
