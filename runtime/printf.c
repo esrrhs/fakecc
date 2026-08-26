@@ -295,6 +295,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
         int width = 0;
         int precision = -1;
         int long_count = 0;
+        int short_count = 0;
         int f_minus = 0, f_zero = 0, f_plus = 0, f_space = 0, f_alt = 0;
         int flagging = 1;
         while (flagging) {
@@ -329,13 +330,13 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 }
             }
         }
-        /* Length modifiers.  Only l/ll change how the argument is read; the
-         * rest are accepted and ignored because default promotion already
-         * gives the right register contents. */
+        /* Length modifiers.  Only l/ll and h/hh change how the argument is
+         * interpreted; the rest are accepted and ignored. */
         int lenning = 1;
         while (lenning) {
             if (fmt[i] == 'l') { long_count = long_count + 1; i = i + 1; }
-            else if (fmt[i] == 'h' || fmt[i] == 'z' || fmt[i] == 'j'
+            else if (fmt[i] == 'h') { short_count = short_count + 1; i = i + 1; }
+            else if (fmt[i] == 'z' || fmt[i] == 'j'
                      || fmt[i] == 't' || fmt[i] == 'L') i = i + 1;
             else lenning = 0;
         }
@@ -365,7 +366,12 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             long long v;
             if (long_count >= 2) v = va_arg(ap, long long);
             else if (long_count == 1) v = (long long)va_arg(ap, long);
-            else v = (long long)va_arg(ap, int);
+            else {
+                int iv = va_arg(ap, int);
+                if (short_count >= 2) v = (long long)(signed char)iv;
+                else if (short_count == 1) v = (long long)(short)iv;
+                else v = (long long)iv;
+            }
             unsigned long long u;
             if (v < 0) { prefix[0] = '-'; plen = 1; u = (unsigned long long)(-v); }
             else {
@@ -389,7 +395,12 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 v = (unsigned long long)(unsigned long)va_arg(ap, void *);
             } else if (long_count >= 2) v = va_arg(ap, unsigned long long);
             else if (long_count == 1) v = (unsigned long long)va_arg(ap, unsigned long);
-            else v = (unsigned long long)va_arg(ap, unsigned int);
+            else {
+                unsigned int uv = va_arg(ap, unsigned int);
+                if (short_count >= 2) v = (unsigned long long)(unsigned char)uv;
+                else if (short_count == 1) v = (unsigned long long)(unsigned short)uv;
+                else v = (unsigned long long)uv;
+            }
             if (f_alt && v != 0 && (spec == 'x' || spec == 'X')) {
                 prefix[0] = '0'; prefix[1] = spec; plen = 2;
             }

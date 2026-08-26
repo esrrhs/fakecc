@@ -56,7 +56,6 @@ pr70460.c
 pr70903.c
 pr71494.c
 pr77767.c
-pr78622.c
 pr78726.c
 pr79286.c
 pr79354.c
@@ -183,7 +182,7 @@ pr22061-3
 pr22061-4
 
 # Complex sprintf format - not fully supported.
-pr78622
+
 
 # __builtin_apply/__builtin_apply_args not supported by fakecc.
 pr47237
@@ -208,7 +207,6 @@ pr70460
 pr70903
 pr71494
 pr77767
-pr78622
 pr78726
 pr79286
 pr79354
@@ -289,7 +287,7 @@ pr80692
 
 
 # Complex sprintf format - not fully supported.
-pr78622
+
 
 # __builtin_apply/__builtin_apply_args not supported by fakecc.
 pr47237
@@ -314,7 +312,6 @@ pr70460
 pr70903
 pr71494
 pr77767
-pr78622
 pr78726
 pr79286
 pr79354
@@ -378,7 +375,7 @@ pr22061-3
 pr22061-4
 
 # Complex sprintf format - not fully supported.
-pr78622
+
 
 # __builtin_apply/__builtin_apply_args not supported by fakecc.
 pr47237
@@ -398,7 +395,6 @@ pr70460
 pr70903
 pr71494
 pr77767
-pr78622
 pr78726
 pr79286
 pr79354
