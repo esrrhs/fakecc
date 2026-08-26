@@ -119,7 +119,7 @@ scal-to-vec2
 scal-to-vec3
 
 # __int128 - not supported by fakecc.
-pr65170
+
 
 # Inline assembly - not supported by fakecc.
 
@@ -196,7 +196,7 @@ scal-to-vec2
 scal-to-vec3
 
 # __int128 - not supported by fakecc.
-pr65170
+
 
 # Inline assembly - not supported by fakecc.
 pr41239
