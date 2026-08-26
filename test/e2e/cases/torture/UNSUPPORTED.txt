@@ -67,7 +67,6 @@ pr24135.c
 pr47237.c
 pr51447.c
 printf-2.c
-printf-chk-1.c
 va-arg-pack-1.c
 
 # VLA parameter (char a[2][N]) not fully supported in fakecc codegen.
@@ -224,7 +223,6 @@ pr92904
 # Preprocessor macros/macros which fakecc doesn't support.
 pushpop_macro
 printf-2
-printf-chk-1
 stdarg-1
 stkalign
 user-printf
