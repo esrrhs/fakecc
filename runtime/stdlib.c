@@ -66,6 +66,81 @@ double sqrt(double x) {
     return g;
 }
 
+double sin(double x) {
+    if (x == 0.0 || x != x) return x;
+    double pi2 = 6.28318530717958647692;
+    double pi = 3.14159265358979323846;
+    long long k = (long long)(x / pi2);
+    x = x - (double)k * pi2;
+    while (x > pi) x = x - pi2;
+    while (x < -pi) x = x + pi2;
+    if (x == 0.0) return x;
+    double term = x;
+    double sum = x;
+    double x2 = x * x;
+    for (int i = 1; i <= 12; i++) {
+        term = -term * x2 / (double)((2 * i) * (2 * i + 1));
+        sum = sum + term;
+    }
+    return sum;
+}
+float sinf(float x) {
+    if (x == 0.0f || x != x) return x;
+    return (float)sin((double)x);
+}
+
+double cos(double x) {
+    if (x != x) return x;
+    double pi_half = 1.57079632679489661923;
+    return sin(pi_half - x);
+}
+float cosf(float x) { return (float)cos((double)x); }
+
+double tan(double x) {
+    if (x == 0.0 || x != x) return x;
+    return sin(x) / cos(x);
+}
+float tanf(float x) {
+    if (x == 0.0f || x != x) return x;
+    return (float)tan((double)x);
+}
+
+double atan(double x) {
+    if (x == 0.0 || x != x) return x;
+    int neg = 0;
+    if (x < 0.0) { neg = 1; x = -x; }
+    int inv = 0;
+    if (x > 1.0) { inv = 1; x = 1.0 / x; }
+    double res = 0.0;
+    if (x > 0.4142135623730950) {
+        double y = (x - 1.0) / (1.0 + x);
+        double term = y;
+        double y2 = y * y;
+        double s = y;
+        for (int i = 1; i <= 15; i++) {
+            term = -term * y2;
+            s = s + term / (double)(2 * i + 1);
+        }
+        res = 0.78539816339744830962 + s;
+    } else {
+        double term = x;
+        double x2 = x * x;
+        double s = x;
+        for (int i = 1; i <= 15; i++) {
+            term = -term * x2;
+            s = s + term / (double)(2 * i + 1);
+        }
+        res = s;
+    }
+    if (inv) res = 1.57079632679489661923 - res;
+    if (neg) res = -res;
+    return res;
+}
+float atanf(float x) {
+    if (x == 0.0f || x != x) return x;
+    return (float)atan((double)x);
+}
+
 
 /* Shared body of the strto* family: parses [ws][sign][base prefix][digits] and
  * returns the magnitude, with the sign reported through *neg.  On overflow
