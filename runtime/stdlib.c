@@ -405,17 +405,43 @@ static long double strtofp_body(const char *s, char **end) {
     }
     if (end) *end = (char *)s;
 
-    long double chunk = pow10_exact(27);
-    while (dexp >= 27) {
-        mant = mant * chunk;
-        dexp = dexp - 27;
+    /* Scale by powers of ten without leaping past the finite range into
+     * +inf.  Near LDBL_MAX (~1.19e4932), mant*10^27 can round up to
+     * infinity even when the mathematical value is still finite — then
+     * self-hosted fakecc embeds LDBL_MAX literals as inf (ieee/pr36332).
+     * Clamp that rounding overflow to the finite max; only a clearly
+     * out-of-range mantissa becomes ±inf. */
+    {
+        long double ld_max = 0xf.fffffffffffffffp+16380L;
+        long double pos_inf = 1.0L / 0.0L;
+        while (dexp > 0) {
+            int step = dexp;
+            if (step > 27) step = 27;
+            long double factor = pow10_exact(step);
+            long double next = mant * factor;
+            if (next > ld_max) {
+                /* ld_max/factor rounds down, and prior *10^27 steps add a
+                 * ULP or two, so an in-range LDBL_MAX input can look
+                 * slightly past the limit.  Pad by ~2^-60 relatively. */
+                long double lim = ld_max / factor;
+                long double lim_pad = lim + lim * 0x1p-60L;
+                if (mant > lim_pad)
+                    mant = pos_inf;
+                else
+                    mant = ld_max;
+                dexp = 0;
+                break;
+            }
+            mant = next;
+            dexp = dexp - step;
+        }
+        while (dexp < 0) {
+            int step = -dexp;
+            if (step > 27) step = 27;
+            mant = mant / pow10_exact(step);
+            dexp = dexp + step;
+        }
     }
-    while (dexp <= -27) {
-        mant = mant / chunk;
-        dexp = dexp + 27;
-    }
-    if (dexp > 0) mant = mant * pow10_exact(dexp);
-    else if (dexp < 0) mant = mant / pow10_exact(-dexp);
 
     if (neg) mant = -mant;
     return mant;
