@@ -4849,8 +4849,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 emit_inst_w(fn, IR_LOAD, old, entry->slot, -1, 0, lw, lu, e->loc);
                 IRValue scaled = is_ptr
                     ? scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc)
-                    : coerce(fn, rhs, get_value_width(fn, rhs),
-                             get_value_is_unsigned(fn, rhs), arith_w, arith_u, e->loc);
+                    : (get_value_is_float(fn, rhs)
+                       ? convert_numeric(fn, rhs, get_value_width(fn, rhs), arith_w, arith_u, 0, e->loc)
+                       : coerce(fn, rhs, get_value_width(fn, rhs),
+                                get_value_is_unsigned(fn, rhs), arith_w, arith_u, e->loc));
                 IRValue old_p = (arith_w == lw && arith_u == lu)
                     ? old : coerce(fn, old, lw, lu, arith_w, arith_u, e->loc);
                 IRValue neu = emit_bin_w(fn, ir_op, old_p, scaled, arith_w, arith_u, e->loc);
@@ -4952,8 +4954,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         } else if (is_ptr) {
             scaled = scale_rhs(fn, rhs, is_ptr, lv->type, op, e->loc);
         } else {
-            scaled = coerce(fn, rhs, get_value_width(fn, rhs),
-                            get_value_is_unsigned(fn, rhs), arith_w, arith_u, e->loc);
+            scaled = (get_value_is_float(fn, rhs))
+                     ? convert_numeric(fn, rhs, get_value_width(fn, rhs), arith_w, arith_u, 0, e->loc)
+                     : coerce(fn, rhs, get_value_width(fn, rhs),
+                              get_value_is_unsigned(fn, rhs), arith_w, arith_u, e->loc);
         }
         IRValue old_p = old;
         if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))

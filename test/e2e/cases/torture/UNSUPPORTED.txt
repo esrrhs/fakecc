@@ -225,8 +225,3 @@ printf-2
 stkalign
 user-printf
 va-arg-pack-1
-
-
-# Malloc-dependent tests - runtime hang.
-stdarg_2
-
