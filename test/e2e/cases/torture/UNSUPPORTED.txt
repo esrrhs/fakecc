@@ -221,7 +221,6 @@ pr82210
 pr92904
 
 # Preprocessor macros/macros which fakecc doesn't support.
-pushpop_macro
 printf-2
 stkalign
 user-printf
