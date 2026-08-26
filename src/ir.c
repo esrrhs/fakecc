@@ -4071,6 +4071,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Expand aggregates into per-eightbyte SSA args.  Register-class
          * eightbytes travel in GP/XMM; MEMORY-class eightbytes are forced
          * onto the stack (SysV). */
+        int call_used_gp = ret_in_mem_pre ? 1 : 0;
+        int call_used_xmm = 0;
         for (int i = 0; i < (int)e->u.call.args.len; i++) {
             Expr *arg = e->u.call.args.data[i];
             IRValue av = lower_expr(fn, st, arg);
@@ -4087,6 +4089,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     nreg = sysv_classify_agg(arg->type, cls);
                 }
                 if (nreg > 0) {
+                    int need_gp = 0, need_fp = 0;
+                    for (int k = 0; k < nreg; k++) {
+                        if (cls[k] == SYSV_CLS_SSE) need_fp++;
+                        else need_gp++;
+                    }
+                    int fits_in_regs = (call_used_gp + need_gp <= 6 && call_used_xmm + need_fp <= 8);
+                    if (fits_in_regs) {
+                        call_used_gp += need_gp;
+                        call_used_xmm += need_fp;
+                    }
                     IRValue ebs[2];
                     load_agg_regs(fn, av, asz, nreg, cls, ebs, e->loc);
                     for (int k = 0; k < nreg; k++) {
@@ -4096,7 +4108,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                             exit(1);
                         }
                         arg_vals[nargs] = ebs[k];
-                        arg_on_stack[nargs] = 0;
+                        arg_on_stack[nargs] = !fits_in_regs;
                         nargs++;
                     }
                     continue;
@@ -4124,6 +4136,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 }
                 arg_vals[nargs] = tmp_addr;
                 arg_on_stack[nargs] = 0;
+                if (call_used_gp < 6) call_used_gp++;
                 nargs++;
                 continue;
             }
@@ -4133,8 +4146,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 exit(1);
             }
             arg_vals[nargs] = av;
-                arg_on_stack[nargs] = 0;
-                nargs++;
+            arg_on_stack[nargs] = 0;
+            if (get_value_is_float(fn, av)) {
+                if (call_used_xmm < 8) call_used_xmm++;
+            } else {
+                if (call_used_gp < 6) call_used_gp++;
+            }
+            nargs++;
         }
         /* Void call: no result value (width 0).  Still emit the call for its
          * side effects; dst=-1 marks "no result". */

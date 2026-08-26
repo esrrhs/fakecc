@@ -47,8 +47,6 @@ pr71494.c
 pr41935.c
 pr82210.c
 
-# Inline assembly not supported by fakecc.
-pr92904.c
 
 # _Decimal64 not supported by fakecc.
 pr80692.c
