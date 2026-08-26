@@ -91,8 +91,6 @@ difftest_one() {
     # Header-free gcc must not accept implicit libc decls (`int getenv()`).
     # Do not pass -w: we need the diagnostic.  Fall back to glibc headers
     # when gcc fails or only succeeded by assuming implicit functions.
-    # Ports declare `floor` themselves; gcc still needs libm.  Without -lm the
-    # link fails and the stdio.h fallback then clashes with `fprintf(void*,…)`.
     #
     # GCC 16 promotes several historically soft diagnostics to errors
     # (-Wint-conversion, -Wimplicit-int).  Torture ports intentionally use

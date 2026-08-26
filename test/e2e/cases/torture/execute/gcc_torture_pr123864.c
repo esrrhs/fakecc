@@ -1,4 +1,5 @@
 // expect: 0
+// skip_difftest: host gcc miscompiles this case (upstream GCC PR 123864)
 package main;
 [[gnu::noipa]] static int
 foo (long long x)
