@@ -362,20 +362,23 @@ static const Type *find_typedef_with_fallback(Parser *p, const char *name) {
 static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
     if (k == TK_LBRACKET && pos + 1 < p->tokens->len && p->tokens->data[pos + 1].kind == TK_LBRACKET) {
-        size_t k = pos + 2;
+        /* Do not shadow TokenKind `k`: fakecc assigns both to one stack
+         * slot, so `size_t k = pos + 2` clobbers the kind and `int` is no
+         * longer recognized as a type (bootstrap dies on `int errno;`). */
+        size_t attr_pos = pos + 2;
         int depth = 1;
-        while (k < p->tokens->len && depth > 0) {
-            if (p->tokens->data[k].kind == TK_LBRACKET && k + 1 < p->tokens->len && p->tokens->data[k + 1].kind == TK_LBRACKET) {
+        while (attr_pos < p->tokens->len && depth > 0) {
+            if (p->tokens->data[attr_pos].kind == TK_LBRACKET && attr_pos + 1 < p->tokens->len && p->tokens->data[attr_pos + 1].kind == TK_LBRACKET) {
                 depth++;
-                k += 2;
-            } else if (p->tokens->data[k].kind == TK_RBRACKET && k + 1 < p->tokens->len && p->tokens->data[k + 1].kind == TK_RBRACKET) {
+                attr_pos += 2;
+            } else if (p->tokens->data[attr_pos].kind == TK_RBRACKET && attr_pos + 1 < p->tokens->len && p->tokens->data[attr_pos + 1].kind == TK_RBRACKET) {
                 depth--;
-                k += 2;
+                attr_pos += 2;
             } else {
-                k++;
+                attr_pos++;
             }
         }
-        if (k < p->tokens->len) return is_type_start(p, k);
+        if (attr_pos < p->tokens->len) return is_type_start(p, attr_pos);
         return 0;
     }
     if (k == TK_KW_VOID || k == TK_KW_INT || k == TK_KW_CHAR || k == TK_KW_SHORT
@@ -391,18 +394,18 @@ static int is_type_start(const Parser *p, size_t pos) {
         if (strcmp(text, "register") == 0 || strcmp(text, "auto") == 0)
             return is_type_start(p, pos + 1);
         if (strcmp(text, "__attribute__") == 0 || strcmp(text, "__attribute") == 0) {
-            size_t k = pos + 1;
-            if (k < p->tokens->len && p->tokens->data[k].kind == TK_LPAREN) {
+            size_t attr_pos = pos + 1;
+            if (attr_pos < p->tokens->len && p->tokens->data[attr_pos].kind == TK_LPAREN) {
                 int depth = 0;
-                while (k < p->tokens->len) {
-                    if (p->tokens->data[k].kind == TK_LPAREN) depth++;
-                    else if (p->tokens->data[k].kind == TK_RPAREN) {
+                while (attr_pos < p->tokens->len) {
+                    if (p->tokens->data[attr_pos].kind == TK_LPAREN) depth++;
+                    else if (p->tokens->data[attr_pos].kind == TK_RPAREN) {
                         depth--;
-                        if (depth == 0) { k++; break; }
+                        if (depth == 0) { attr_pos++; break; }
                     }
-                    k++;
+                    attr_pos++;
                 }
-                if (k < p->tokens->len) return is_type_start(p, k);
+                if (attr_pos < p->tokens->len) return is_type_start(p, attr_pos);
             }
             return 0;
         }
