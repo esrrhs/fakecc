@@ -5591,7 +5591,13 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
          * break → L_exit.  Bodies are laid out sequentially so a missing
          * break falls through to the next arm. */
         IRValue v = lower_expr(fn, st, s->u.switch_s.cond);
-        int vw = get_value_width(fn, v), vu = get_value_is_unsigned(fn, v);
+        int is_i128 = s->u.switch_s.cond ? type_is_i128(s->u.switch_s.cond->type) : 0;
+        int vw = is_i128 ? 16 : get_value_width(fn, v);
+        int vu = is_i128 ? s->u.switch_s.cond->type.is_unsigned : get_value_is_unsigned(fn, v);
+        IRValue vlo = -1, vhi = -1;
+        if (is_i128) {
+            i128_load2(fn, v, &vlo, &vhi, s->loc);
+        }
 
         int n = s->u.switch_s.num_cases;
         int has_default = 0;
@@ -5614,7 +5620,14 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 if (arm->is_default) continue;
                 int target_lbl = arm->label_name ? labelmap_find(g_ir_label_map, arm->label_name) : exit_label;
                 int next_check = new_label(fn);
-                if (arm->is_range) {
+                if (is_i128) {
+                    int64_t arm_lo = arm->value;
+                    int64_t arm_hi = (arm_lo < 0 && !vu) ? -1LL : 0LL;
+                    IRValue eq_lo = emit_bin_w(fn, IR_EQ, vlo, i64imm(fn, arm_lo, s->loc), 8, 1, s->loc);
+                    IRValue eq_hi = emit_bin_w(fn, IR_EQ, vhi, i64imm(fn, arm_hi, s->loc), 8, 1, s->loc);
+                    IRValue eq = emit_bin_w(fn, IR_BAND, eq_lo, eq_hi, 4, 0, s->loc);
+                    emit_cbr(fn, eq, target_lbl, next_check, s->loc);
+                } else if (arm->is_range) {
                     IRValue low_val = new_value(fn);
                     emit_inst_w(fn, IR_CONST, low_val, -1, -1, arm->value, vw, vu, s->loc);
                     IRValue high_val = new_value(fn);
