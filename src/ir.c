@@ -5898,6 +5898,13 @@ static int get_global_elem_size(const Expr *e) {
             }
         }
     }
+    if (e->kind == EX_INDEX) {
+        if (e->type.kind == TY_ARRAY && e->type.elem_type)
+            return type_size(*e->type.elem_type);
+        if (e->type.kind == TY_PTR && e->type.pointee)
+            return type_size(*e->type.pointee);
+        return get_global_elem_size(e->u.idx.array);
+    }
     if (e->kind == EX_BINOP) {
         return get_global_elem_size(e->u.bin.l);
     }
@@ -6052,6 +6059,19 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             *out_offset = off;
             return 1;
         }
+    }
+    if (e->kind == EX_INDEX) {
+        const char *sym = NULL;
+        int off = 0;
+        if (!eval_global_addr_offset(e->u.idx.array, &sym, &off))
+            return 0;
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx))
+            return 0;
+        int esz = get_global_elem_size(e->u.idx.array);
+        *out_sym = sym;
+        *out_offset = off + (int)(idx * esz);
+        return 1;
     }
     if (e->kind == EX_DEREF) {
         return eval_global_addr_offset(e->u.deref.operand, out_sym, out_offset);
