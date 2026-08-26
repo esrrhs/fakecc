@@ -107,7 +107,6 @@ pr58277-2.c
 
 
 # Vector types - not supported by fakecc.
-simd-5
 simd-6
 scal-to-vec1
 scal-to-vec2
@@ -179,7 +178,6 @@ pr92904
 
 
 # Vector types - not supported by fakecc.
-simd-5
 simd-6
 scal-to-vec1
 scal-to-vec2
