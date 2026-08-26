@@ -3516,7 +3516,8 @@ static Stmt parse_stmt(Parser *p) {
                             break;
                         }
                     }
-                    if (match_idx < 0 && oi < num_inputs) match_idx = oi;
+                    if (match_idx < 0 && oi < num_inputs && (!out_constr[oi] || !strchr(out_constr[oi], '+')))
+                        match_idx = oi;
                     if (match_idx >= 0 && outputs[oi] && inputs[match_idx]) {
                         Expr *assign = expr_new_assign(outputs[oi], inputs[match_idx], loc);
                         outputs[oi] = NULL;
