@@ -96,11 +96,12 @@ difftest_one() {
     # (-Wint-conversion, -Wimplicit-int).  Torture ports intentionally use
     # those constructs; keep them as warnings so the header-free path still
     # works, while implicit-function-declaration remains detectable.
+    # Do not pass -Wno-*-declaration-missing-parameter-type: that option
+    # exists only on GCC 14+, and unknown -Wno-error=* is a hard error on
+    # Ubuntu 24.04's GCC 13.  K&R forwards are rewritten in gcc_stdarg_prep.py.
     if ! gcc -std=gnu99 -D_GNU_SOURCE \
             -Wno-error=int-conversion -Wno-error=implicit-int \
             -Wno-error=incompatible-pointer-types \
-            -Wno-error=declaration-missing-parameter-type \
-            -Wno-declaration-missing-parameter-type \
             $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err" \
        || grep -qE 'implicit declaration|隐式声明' "$WORK/$name.gcc.err"; then
         {
@@ -141,8 +142,6 @@ PY
         if ! gcc -std=gnu99 -D_GNU_SOURCE -w \
                 -Wno-error=int-conversion -Wno-error=implicit-int \
                 -Wno-error=incompatible-pointer-types \
-                -Wno-error=declaration-missing-parameter-type \
-                -Wno-declaration-missing-parameter-type \
                 $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err"; then
             printf '%-28s FAIL (gcc rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.gcc.err")"
             return 1
