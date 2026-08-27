@@ -1295,7 +1295,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             else if (runtime.strcmp(bname, "__builtin_strcat") == 0 || runtime.strcmp(bname, "__builtin_strcpy") == 0 ||
                      runtime.strcmp(bname, "__builtin_strncat") == 0 || runtime.strcmp(bname, "__builtin_strncpy") == 0)
                 ret = type_make_ptr(type_make_int(1, 0));
-            else if (runtime.strcmp(bname, "__builtin_strlen") == 0)
+            else if (runtime.strcmp(bname, "__builtin_strlen") == 0 || runtime.strcmp(bname, "__builtin_strspn") == 0)
                 ret = type_make_int(8, 1);
             else if (runtime.strcmp(bname, "__builtin_fabs") == 0)
                 ret = type_make_float(8);

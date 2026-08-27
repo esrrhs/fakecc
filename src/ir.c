@@ -4209,6 +4209,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 else if (strcmp(cname, "__builtin_strcmp") == 0) inst.call_name = xstrdup("strcmp");
                 else if (strcmp(cname, "__builtin_strncmp") == 0) inst.call_name = xstrdup("strncmp");
                 else if (strcmp(cname, "__builtin_strlen") == 0) inst.call_name = xstrdup("strlen");
+                else if (strcmp(cname, "__builtin_strspn") == 0) inst.call_name = xstrdup("strspn");
                 else if (strcmp(cname, "__builtin_strcpy") == 0) inst.call_name = xstrdup("strcpy");
                 else if (strcmp(cname, "__builtin_strncpy") == 0) inst.call_name = xstrdup("strncpy");
                 else if (strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");

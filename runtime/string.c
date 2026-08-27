@@ -128,6 +128,26 @@ char *strncpy(char *dst, const char *src, size_t n) {
     return dst;
 }
 
+/* ISO C strspn: length of the initial segment of s that consists only of
+ * characters from accept. Same contract as glibc/GCC. */
+size_t strspn(const char *s, const char *accept) {
+    size_t i = 0;
+    while (s[i] != 0) {
+        const char *p = accept;
+        int found = 0;
+        while (*p != 0) {
+            if (s[i] == *p) {
+                found = 1;
+                break;
+            }
+            p = p + 1;
+        }
+        if (found == 0) break;
+        i = i + 1;
+    }
+    return i;
+}
+
 char *strchr(const char *s, int c) {
     char ch = (char)c;
     size_t i = 0;
