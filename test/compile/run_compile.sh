@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compile-only test suite: compile each case with `fakecc -c $file -o /tmp/xxx.o`.
-# Verifies compiler robustness (no crash / ICE / segfault on edge cases).
+# Verifies compiler robustness (no crash / ICE / segfault / error on edge cases).
 #
 #   test/compile/run_compile.sh [FAKECC] [FLAGS...]
 #
@@ -23,15 +23,7 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# Extract known non-OK cases from need_faithful.txt
-KNOWN_FILE="$WORK/known_fails.txt"
-if [ -f "$COMPILE_DIR/need_faithful.txt" ]; then
-    grep -E '^[A-Za-z0-9_-]+\.c' "$COMPILE_DIR/need_faithful.txt" | sort -u > "$KNOWN_FILE"
-else
-    touch "$KNOWN_FILE"
-fi
-
-export FAKECC CC_FLAGS CC_TIMEOUT WORK COMPILE_DIR KNOWN_FILE
+export FAKECC CC_FLAGS CC_TIMEOUT WORK COMPILE_DIR
 
 compile_one() {
     local src="$1"
@@ -54,32 +46,15 @@ compile_one() {
         } > "$body"
     fi
 
-    local is_known=0
-    if grep -qx "$filename" "$KNOWN_FILE" 2>/dev/null; then
-        is_known=1
-    fi
-
     local rc=0
     timeout "$CC_TIMEOUT" "$FAKECC" $CC_FLAGS -c "$body" -o "$out" 2>"$err" || rc=$?
 
     if [ "$rc" -ge 128 ]; then
-        if [ "$is_known" -eq 1 ]; then
-            printf 'KNOWN_CRASH %s (signal %s)\n' "$filename" "$((rc - 128))" >> "$WORK/results.txt"
-        else
-            printf 'FAIL_CRASH  %s (signal %s: %s)\n' "$filename" "$((rc - 128))" "$(head -1 "$err")" >> "$WORK/results.txt"
-        fi
+        printf 'FAIL_CRASH   %-30s (signal %s: %s)\n' "$filename" "$((rc - 128))" "$(head -1 "$err")" >> "$WORK/results.txt"
     elif [ "$rc" -eq 124 ]; then
-        if [ "$is_known" -eq 1 ]; then
-            printf 'KNOWN_TIMEOUT %s\n' "$filename" >> "$WORK/results.txt"
-        else
-            printf 'FAIL_TIMEOUT  %s\n' "$filename" >> "$WORK/results.txt"
-        fi
+        printf 'FAIL_TIMEOUT %-30s (>%ss)\n' "$filename" "$CC_TIMEOUT" >> "$WORK/results.txt"
     elif [ "$rc" -ne 0 ]; then
-        if [ "$is_known" -eq 1 ]; then
-            printf 'KNOWN_REJECT %s\n' "$filename" >> "$WORK/results.txt"
-        else
-            printf 'FAIL_REJECT  %s (%s)\n' "$filename" "$(head -1 "$err")" >> "$WORK/results.txt"
-        fi
+        printf 'FAIL_REJECT  %-30s (%s)\n' "$filename" "$(head -1 "$err")" >> "$WORK/results.txt"
     else
         printf 'OK           %s\n' "$filename" >> "$WORK/results.txt"
     fi
@@ -96,24 +71,18 @@ if [ ${#files[@]} -eq 0 ]; then
     exit 1
 fi
 
-echo "Running compile robustness suite (${#files[@]} cases) with $FAKECC $CC_FLAGS..."
+echo "Running compile suite (${#files[@]} cases) with $FAKECC $CC_FLAGS..."
 touch "$WORK/results.txt"
 printf '%s\n' "${files[@]}" | xargs -P "$JOBS" -I {} bash -c 'compile_one "$@"' _ {}
 
 ok_cnt=$(grep -c '^OK ' "$WORK/results.txt" || true)
-known_cnt=$(grep -c '^KNOWN_' "$WORK/results.txt" || true)
 fail_cnt=$(grep -c '^FAIL_' "$WORK/results.txt" || true)
 
-echo "--- Compile Suite Summary ---"
-echo "  Passed (OK):       $ok_cnt"
-echo "  Known Non-OK:      $known_cnt"
-echo "  Unexpected Fails:  $fail_cnt"
-
 if [ "$fail_cnt" -gt 0 ]; then
-    echo "Regressions detected in compile suite:"
+    echo "FAIL: $fail_cnt regressions detected in compile suite ($ok_cnt passed):"
     grep '^FAIL_' "$WORK/results.txt"
     exit 1
 fi
 
-echo "PASS compile suite (${#files[@]} cases)"
+echo "PASS compile suite (${#files[@]} cases passed)"
 exit 0

@@ -1,18 +1,18 @@
-# GCC c-torture compile-only tests not yet compiling cleanly (non-OK in FakeCC)
-# Total evaluated: 2003  OK: 1539  Remaining non-OK: 464
+# GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
+# Total: 464 (out of 2003 original GCC compile cases)
 #
 
-# === CRASHES (4) ===
+# === Crashes / Segfaults (4) ===
 20011109-1.c
 pr28865.c
 pr53748.c
 pr94621.c
 
-# === TIMEOUTS (2) ===
+# === Timeouts (2) ===
 20151204.c
 pr65680.c
 
-# === REJECTS (458) ===
+# === Compile Rejects (458) ===
 20000120-2.c
 20000211-1.c
 20000403-1.c
