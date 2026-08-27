@@ -1949,6 +1949,10 @@ static int bos_is_sprintf_chk_builtin(const char *n) {
     return n && strcmp(n, "__builtin___sprintf_chk") == 0;
 }
 
+static int bos_is_stpcpy_chk_builtin(const char *n) {
+    return n && strcmp(n, "__builtin___stpcpy_chk") == 0;
+}
+
 static const char *bos_chk_plain_name(const char *n) {
     if (strstr(n, "mempcpy")) return "mempcpy";
     if (strstr(n, "memcpy")) return "memcpy";
@@ -2573,6 +2577,39 @@ static int bos_cstr_len(const Expr *e, unsigned long long *out) {
     return 1;
 }
 
+/* Exact or proven-max C-string length. Locals only for pointer variables
+ * (file-scope pointers can be asm-clobbered / reassigned). */
+static int bos_cstr_len_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
+    e = bos_skip_cast(e);
+    if (bos_cstr_len(e, out)) return 1;
+    if (!e || e->kind != EX_VAR || !e->u.var.name) return 0;
+    if (bos_is_param(e->u.var.name)) return 0;
+    const IRSlot *slot = NULL;
+    if (st) {
+        for (size_t i = st->len; i > 0; i--)
+            if (strcmp(st->data[i-1].name, e->u.var.name) == 0) {
+                slot = &st->data[i-1];
+                break;
+            }
+    }
+    if (!slot || slot->ty.is_volatile) return 0;
+    const Expr *srcs[32];
+    int saw_unk = 0;
+    int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
+    if (saw_unk || ns == 0) return 0;
+    unsigned long long mx = 0;
+    int any = 0;
+    for (int i = 0; i < ns; i++) {
+        unsigned long long sl = 0;
+        if (!bos_cstr_len(srcs[i], &sl)) return 0;
+        if (!any || sl > mx) mx = sl;
+        any = 1;
+    }
+    if (!any) return 0;
+    *out = mx;
+    return 1;
+}
+
 /* Exact sprintf output length (excluding NUL) when the format is a known
  * string using only literal text, %% , %s (known C string), and %c. */
 static int bos_sprintf_out_len(const Expr *fmt, const Expr **va, int nva,
@@ -2668,6 +2705,44 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
         args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
     }
     return bos_emit_named_call_w(fn, "__sprintf_chk", args, nargs, e->loc, 4, 0);
+}
+
+/* __builtin___stpcpy_chk(dst, src, size).
+ * Fold to stpcpy(dst, src) when dest size is unknown (-1) or strlen(src)
+ * is proven < size (NUL needs one extra byte). Otherwise __stpcpy_chk. */
+static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
+                                             const Expr *e) {
+    const Expr *size_e = e->u.call.args.data[2];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    int fold_plain = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (size_const) {
+        unsigned long long slen = 0;
+        if (bos_cstr_len_max(st, e->u.call.args.data[1], &slen) && slen < size_val)
+            fold_plain = 1;
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+    if (fold_plain) {
+        IRValue args[2];
+        args[0] = dst;
+        args[1] = src;
+        return bos_emit_named_call(fn, "stpcpy", args, 2, e->loc);
+    }
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    IRValue args[3];
+    args[0] = dst;
+    args[1] = src;
+    args[2] = szv;
+    return bos_emit_named_call(fn, "__stpcpy_chk", args, 3, e->loc);
 }
 
 
@@ -4235,6 +4310,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 return lower_fortify_snprintf_chk_call(fn, st, e);
             if (bos_is_sprintf_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
                 return lower_fortify_sprintf_chk_call(fn, st, e);
+            if (bos_is_stpcpy_chk_builtin(bos_cn) && e->u.call.args.len >= 3)
+                return lower_fortify_stpcpy_chk_call(fn, st, e);
             if (bos_is_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
                 return lower_fortify_chk_call(fn, st, e);
         }
@@ -5242,6 +5319,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 else if (strcmp(cname, "__builtin_strlen") == 0) inst.call_name = xstrdup("strlen");
                 else if (strcmp(cname, "__builtin_strspn") == 0) inst.call_name = xstrdup("strspn");
                 else if (strcmp(cname, "__builtin_strcpy") == 0) inst.call_name = xstrdup("strcpy");
+                else if (strcmp(cname, "__builtin_stpcpy") == 0) inst.call_name = xstrdup("stpcpy");
                 else if (strcmp(cname, "__builtin_strncpy") == 0) inst.call_name = xstrdup("strncpy");
                 else if (strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");
                 else if (strcmp(cname, "__builtin_strncat") == 0) inst.call_name = xstrdup("strncat");
