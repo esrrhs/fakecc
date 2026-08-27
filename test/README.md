@@ -41,6 +41,7 @@ test/
 │   │   ├── torture/        # GCC C-Torture 经典测试套件
 │   │   │   ├── execute/    # GCC Torture 1,653 个执行测试
 │   │   │   │   └── ieee/   # GCC 69 个 IEEE 浮点规范测试
+│   │   │   ├── builtins/   # GCC 30 个标准库 Builtin 函数测试
 │   │   │   ├── compat/     # GCC 7 个结构体/联合体 ABI 兼容性测试
 │   │   │   ├── other/      # 复杂回归测试
 │   │   │   └── UNSUPPORTED.txt # 记录 FakeCC 故意不支持的 GNU 扩展清单
