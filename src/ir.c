@@ -1945,6 +1945,10 @@ static int bos_is_snprintf_chk_builtin(const char *n) {
     return n && strcmp(n, "__builtin___snprintf_chk") == 0;
 }
 
+static int bos_is_sprintf_chk_builtin(const char *n) {
+    return n && strcmp(n, "__builtin___sprintf_chk") == 0;
+}
+
 static const char *bos_chk_plain_name(const char *n) {
     if (strstr(n, "mempcpy")) return "mempcpy";
     if (strstr(n, "memcpy")) return "memcpy";
@@ -2494,6 +2498,176 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
         args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
     }
     return bos_emit_named_call_w(fn, "__snprintf_chk", args, nargs, e->loc, 4, 0);
+}
+
+/* Known C-string bytes (NUL not included in *nbytes) plus a byte offset. */
+static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long long *off) {
+    e = bos_skip_cast(e);
+    if (!e) return 0;
+    if (e->kind == EX_COMMA)
+        return bos_cstr_info(e->u.comma.rhs, bytes, nbytes, off);
+    if (e->kind == EX_STR) {
+        *bytes = e->u.str.bytes ? e->u.str.bytes : "";
+        *nbytes = e->u.str.len;
+        *off = 0;
+        return 1;
+    }
+    if (e->kind == EX_ADDR)
+        return bos_cstr_info(e->u.addr.operand, bytes, nbytes, off);
+    if (e->kind == EX_INDEX) {
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx)) return 0;
+        if (!bos_cstr_info(e->u.idx.array, bytes, nbytes, off)) return 0;
+        int esz = bos_ptr_elem_size(e->u.idx.array->type);
+        *off += idx * (long long)esz;
+        return 1;
+    }
+    if (e->kind == EX_BINOP && (e->u.bin.op == BOP_ADD || e->u.bin.op == BOP_SUB)) {
+        const Expr *ptr = NULL, *idxe = NULL;
+        Type pty;
+        int lptr = type_is_ptr_or_array(e->u.bin.l->type);
+        int rptr = type_is_ptr_or_array(e->u.bin.r->type);
+        if (lptr && !rptr) { ptr = e->u.bin.l; idxe = e->u.bin.r; pty = e->u.bin.l->type; }
+        else if (rptr && !lptr && e->u.bin.op == BOP_ADD) {
+            ptr = e->u.bin.r; idxe = e->u.bin.l; pty = e->u.bin.r->type;
+        } else
+            return 0;
+        long long idx = 0;
+        if (!fold_const_int(idxe, &idx)) return 0;
+        if (!bos_cstr_info(ptr, bytes, nbytes, off)) return 0;
+        int esz = bos_ptr_elem_size(pty);
+        long long delta = idx * (long long)esz;
+        if (e->u.bin.op == BOP_SUB) delta = -delta;
+        *off += delta;
+        return 1;
+    }
+    if (e->kind == EX_VAR && e->u.var.name && g_ir_tu) {
+        /* Follow file-scope char arrays only. Pointer variables (s2/s3/ptr)
+         * can be reassigned or asm-clobbered, matching GCC c_strlen. */
+        if (e->type.kind == TY_PTR) return 0;
+        if (e->type.is_volatile) return 0;
+        for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+            const Stmt *gs = &g_ir_tu->globals.data[i];
+            if (gs->kind != ST_DECL || !gs->u.decl.name) continue;
+            if (strcmp(gs->u.decl.name, e->u.var.name) != 0) continue;
+            if (gs->u.decl.type.kind != TY_ARRAY) return 0;
+            if (gs->u.decl.type.is_volatile) return 0;
+            const Expr *init = bos_skip_cast(gs->u.decl.init);
+            if (!init || init->kind != EX_STR) return 0;
+            *bytes = init->u.str.bytes ? init->u.str.bytes : "";
+            *nbytes = init->u.str.len;
+            *off = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int bos_cstr_len(const Expr *e, unsigned long long *out) {
+    const char *b = NULL;
+    int n = 0;
+    long long off = 0;
+    if (!bos_cstr_info(e, &b, &n, &off)) return 0;
+    if (off < 0 || off > n) return 0;
+    *out = (unsigned long long)(n - off);
+    return 1;
+}
+
+/* Exact sprintf output length (excluding NUL) when the format is a known
+ * string using only literal text, %% , %s (known C string), and %c. */
+static int bos_sprintf_out_len(const Expr *fmt, const Expr **va, int nva,
+                               unsigned long long *out) {
+    const char *s = NULL;
+    int n = 0;
+    long long off = 0;
+    if (!bos_cstr_info(fmt, &s, &n, &off)) return 0;
+    if (off < 0 || off > n) return 0;
+    s += off;
+    n -= (int)off;
+    unsigned long long total = 0;
+    int ai = 0;
+    for (int i = 0; i < n; i++) {
+        if (s[i] != '%') {
+            total++;
+            continue;
+        }
+        if (i + 1 >= n) return 0;
+        i++;
+        if (s[i] == '%') {
+            total++;
+            continue;
+        }
+        if (s[i] == 's') {
+            if (ai >= nva) return 0;
+            unsigned long long sl = 0;
+            if (!bos_cstr_len(va[ai], &sl)) return 0;
+            total += sl;
+            ai++;
+            continue;
+        }
+        if (s[i] == 'c') {
+            if (ai >= nva) return 0;
+            total += 1;
+            ai++;
+            continue;
+        }
+        return 0;
+    }
+    *out = total;
+    return 1;
+}
+
+/* __builtin___sprintf_chk(dst, flag, size, fmt, ...).
+ * Fold to sprintf(dst, fmt, ...) when dest size is unknown (-1) or the
+ * formatted output (plus NUL) is proven to fit. Otherwise call __sprintf_chk. */
+static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
+                                              const Expr *e) {
+    const Expr *size_e = e->u.call.args.data[2];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    int fold_plain = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (size_const && e->u.call.args.len >= 4) {
+        const Expr **va = NULL;
+        int nva = (int)e->u.call.args.len - 4;
+        if (nva > 0) va = (const Expr **)&e->u.call.args.data[4];
+        unsigned long long olen = 0;
+        if (bos_sprintf_out_len(e->u.call.args.data[3], va, nva, &olen)
+            && olen < size_val)
+            fold_plain = 1;
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue args[IR_CALL_MAX_ARGS];
+    int nargs = 0;
+    args[nargs++] = dst;
+    if (fold_plain) {
+        for (int i = 3; i < (int)e->u.call.args.len; i++) {
+            if (nargs >= IR_CALL_MAX_ARGS) {
+                fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
+                exit(1);
+            }
+            args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+        }
+        return bos_emit_named_call_w(fn, "sprintf", args, nargs, e->loc, 4, 0);
+    }
+    args[nargs++] = lower_expr(fn, st, e->u.call.args.data[1]);
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    args[nargs++] = szv;
+    for (int i = 3; i < (int)e->u.call.args.len; i++) {
+        if (nargs >= IR_CALL_MAX_ARGS) {
+            fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
+            exit(1);
+        }
+        args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+    }
+    return bos_emit_named_call_w(fn, "__sprintf_chk", args, nargs, e->loc, 4, 0);
 }
 
 
@@ -4059,6 +4233,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
             if (bos_is_snprintf_chk_builtin(bos_cn) && e->u.call.args.len >= 5)
                 return lower_fortify_snprintf_chk_call(fn, st, e);
+            if (bos_is_sprintf_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
+                return lower_fortify_sprintf_chk_call(fn, st, e);
             if (bos_is_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
                 return lower_fortify_chk_call(fn, st, e);
         }
