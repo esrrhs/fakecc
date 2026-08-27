@@ -1477,17 +1477,29 @@ Type p1;
             set_type(e, type_make_int(8, 0));
             return type_clone(e->type);
         }
-        if (e->u.call.callee->kind == EX_VAR &&
-            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
-             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
-             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
-            if (e->u.call.args.len != 1) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "conjugate builtin takes exactly 1 argument");
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *cn = e->u.call.callee->u.var.name;
+            int is_conj = (runtime.strcmp(cn, "__builtin_conjf") == 0 || runtime.strcmp(cn, "__builtin_conj") == 0 ||
+                           runtime.strcmp(cn, "__builtin_conjl") == 0);
+            int is_crealf = (runtime.strcmp(cn, "__builtin_crealf") == 0 || runtime.strcmp(cn, "__builtin_cimagf") == 0);
+            int is_creal = (runtime.strcmp(cn, "__builtin_creal") == 0 || runtime.strcmp(cn, "__builtin_cimag") == 0);
+            int is_creall = (runtime.strcmp(cn, "__builtin_creall") == 0 || runtime.strcmp(cn, "__builtin_cimagl") == 0);
+            if (is_conj || is_crealf || is_creal || is_creall) {
+                if (e->u.call.args.len != 1) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "complex builtin takes exactly 1 argument");
+                }
+                Type at = check_expr(e->u.call.args.data[0], st, ft);
+                if (is_conj) {
+                    set_type(e, at);
+                    return type_clone(e->type);
+                }
+                type_free(&at);
+                if (is_crealf) set_type(e, type_make_float(4));
+                else if (is_creall) set_type(e, type_make_float(16));
+                else set_type(e, type_make_float(8));
+                return type_clone(e->type);
             }
-            Type at = check_expr(e->u.call.args.data[0], st, ft);
-            set_type(e, at);
-            return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_shuffle") == 0) {
             if (e->u.call.args.len < 2 || e->u.call.args.len > 3) {

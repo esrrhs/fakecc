@@ -74,7 +74,6 @@ builtins/vsprintf-chk.c
 # GCC DejaGnu compiler-option / optimization-specific builtin transformations
 # (-fno-builtin-*, __builtin_complex, GCC inline asm labels, and constant folding drivers)
 builtins/abs-1.c
-builtins/complex-1.c
 builtins/memops-asm.c
 builtins/strstr-asm.c
 builtins/uabs-1.c

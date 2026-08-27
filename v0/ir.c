@@ -3766,18 +3766,44 @@ IRValue pr;
         return coerced;
     }
     case EX_CALL: {
-        if (e->u.call.callee->kind == EX_VAR &&
-            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
-             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
-             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
-            Expr fake_un;
-            runtime.memset(&fake_un, 0, sizeof(fake_un));
-            fake_un.kind = EX_UNARY;
-            fake_un.type = e->type;
-            fake_un.loc = e->loc;
-            fake_un.u.un.op = UOP_BITNOT;
-            fake_un.u.un.operand = e->u.call.args.data[0];
-            return lower_expr(fn, st, &fake_un);
+        if (e->u.call.callee->kind == EX_VAR && e->u.call.args.len > 0) {
+            const char *cn = e->u.call.callee->u.var.name;
+            if (runtime.strcmp(cn, "__builtin_conjf") == 0 || runtime.strcmp(cn, "__builtin_conj") == 0 ||
+                runtime.strcmp(cn, "__builtin_conjl") == 0 ||
+                runtime.strcmp(cn, "conjf") == 0 || runtime.strcmp(cn, "conj") == 0 || runtime.strcmp(cn, "conjl") == 0) {
+                Expr fake_un;
+                runtime.memset(&fake_un, 0, sizeof(fake_un));
+                fake_un.kind = EX_UNARY;
+                fake_un.type = e->type;
+                fake_un.loc = e->loc;
+                fake_un.u.un.op = UOP_BITNOT;
+                fake_un.u.un.operand = e->u.call.args.data[0];
+                return lower_expr(fn, st, &fake_un);
+            }
+            if (runtime.strcmp(cn, "__builtin_crealf") == 0 || runtime.strcmp(cn, "__builtin_creal") == 0 ||
+                runtime.strcmp(cn, "__builtin_creall") == 0 ||
+                runtime.strcmp(cn, "crealf") == 0 || runtime.strcmp(cn, "creal") == 0 || runtime.strcmp(cn, "creall") == 0 ||
+                runtime.strcmp(cn, "__builtin_cimagf") == 0 || runtime.strcmp(cn, "__builtin_cimag") == 0 ||
+                runtime.strcmp(cn, "__builtin_cimagl") == 0 ||
+                runtime.strcmp(cn, "cimagf") == 0 || runtime.strcmp(cn, "cimag") == 0 || runtime.strcmp(cn, "cimagl") == 0) {
+                int imag = runtime.strstr(cn, "cimag") != 0;
+                Type cty = e->u.call.args.data[0]->type;
+                int total_sz = type_size(cty);
+                int elem_sz = total_sz / 2;
+                int is_unsigned = (cty.tag && runtime.strstr(cty.tag, "unsigned") != 0);
+                int is_float = (cty.tag && (runtime.strstr(cty.tag, "float") || runtime.strstr(cty.tag, "double") ||
+                                            runtime.strstr(cty.tag, "ldouble")));
+                IRValue op_addr = lower_expr(fn, st, e->u.call.args.data[0]);
+                if (imag) {
+                    IRValue off = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                    op_addr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
+                }
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, v, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, v, 1);
+                return v;
+            }
         }
         if (e->u.call.callee->kind == EX_VAR &&
             runtime.strncmp(e->u.call.callee->u.var.name, "__sync_", 7) == 0) {
