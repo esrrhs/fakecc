@@ -1823,6 +1823,567 @@ static const StructMember *ir_find_struct_member(const StructDef *sd, const char
     return NULL;
 }
 
+/* GCC Fortify: __builtin_object_size and __builtin___*_chk folding.
+ * Matches GCC's compile-time object-size / chk split (type 0/1 unknown →
+ * (size_t)-1, type 2/3 unknown → 0; chk with size == -1 or proven n <= size
+ * becomes the plain memcpy/memset/...).  Pointer arguments of
+ * __builtin_object_size are not evaluated. */
+
+typedef struct {
+    int known;
+    long long whole_size;
+    long long whole_off;
+    long long inner_size;
+    long long inner_off;
+} BosRef;
+
+typedef struct {
+    IRSymTable *st;
+    const char *vis[24];
+    int nvis;
+    int bos_type;
+} BosCtx;
+
+static const Expr *bos_skip_cast(const Expr *e) {
+    while (e && e->kind == EX_CAST)
+        e = e->u.cast.operand;
+    return e;
+}
+
+static int bos_ptr_elem_size(Type t) {
+    long long s = 1;
+    if (t.kind == TY_ARRAY && t.elem_type)
+        s = type_size(*t.elem_type);
+    else if (t.kind == TY_PTR && t.pointee)
+        s = type_size(*t.pointee);
+    if (s <= 0) s = 1;
+    return (int)s;
+}
+
+static unsigned long long bos_unk(int bos_type) {
+    return (bos_type & 2) ? 0ull : ~(unsigned long long)0;
+}
+
+static int bos_is_unk(unsigned long long v, int bos_type) {
+    return (bos_type & 2) ? 0 : (v == ~(unsigned long long)0);
+}
+
+static unsigned long long bos_remaining(BosRef r, int bos_type) {
+    if (!r.known) return bos_unk(bos_type);
+    long long sz = (bos_type & 1) ? r.inner_size : r.whole_size;
+    long long off = (bos_type & 1) ? r.inner_off : r.whole_off;
+    if (off < 0) off = 0;
+    if (sz <= off) return 0;
+    return (unsigned long long)(sz - off);
+}
+
+static BosRef bos_ref_unk(void) {
+    BosRef r;
+    r.known = 0;
+    r.whole_size = r.whole_off = r.inner_size = r.inner_off = 0;
+    return r;
+}
+
+static BosRef bos_ref_make(long long sz, long long off) {
+    BosRef r;
+    r.known = 1;
+    r.whole_size = sz;
+    r.whole_off = off;
+    r.inner_size = sz;
+    r.inner_off = off;
+    return r;
+}
+
+static int bos_is_param(const char *name) {
+    if (!g_ir_cur_fd || !name) return 0;
+    for (size_t i = 0; i < g_ir_cur_fd->params.len; i++) {
+        if (g_ir_cur_fd->params.data[i].name &&
+            strcmp(g_ir_cur_fd->params.data[i].name, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int bos_lvalue_is_name(const Expr *e, const char *name) {
+    e = bos_skip_cast(e);
+    return e && e->kind == EX_VAR && e->u.var.name && name &&
+           strcmp(e->u.var.name, name) == 0;
+}
+
+static int bos_is_memcpy_family(const char *n) {
+    if (!n) return 0;
+    if (strcmp(n, "memcpy") == 0 || strcmp(n, "memmove") == 0 ||
+        strcmp(n, "mempcpy") == 0 || strcmp(n, "memset") == 0)
+        return 1;
+    if (strcmp(n, "__builtin_memcpy") == 0 || strcmp(n, "__builtin_memmove") == 0 ||
+        strcmp(n, "__builtin_mempcpy") == 0 || strcmp(n, "__builtin_memset") == 0)
+        return 1;
+    if (strcmp(n, "__memcpy_chk") == 0 || strcmp(n, "__memmove_chk") == 0 ||
+        strcmp(n, "__mempcpy_chk") == 0 || strcmp(n, "__memset_chk") == 0)
+        return 1;
+    if (strcmp(n, "__builtin___memcpy_chk") == 0 ||
+        strcmp(n, "__builtin___memmove_chk") == 0 ||
+        strcmp(n, "__builtin___mempcpy_chk") == 0 ||
+        strcmp(n, "__builtin___memset_chk") == 0)
+        return 1;
+    return 0;
+}
+
+static int bos_is_alloca(const char *n) {
+    return n && (strcmp(n, "__builtin_alloca") == 0 || strcmp(n, "alloca") == 0);
+}
+
+static int bos_is_chk_builtin(const char *n) {
+    return n && (strcmp(n, "__builtin___memcpy_chk") == 0 ||
+                 strcmp(n, "__builtin___memmove_chk") == 0 ||
+                 strcmp(n, "__builtin___mempcpy_chk") == 0 ||
+                 strcmp(n, "__builtin___memset_chk") == 0);
+}
+
+static const char *bos_chk_plain_name(const char *n) {
+    if (strstr(n, "mempcpy")) return "mempcpy";
+    if (strstr(n, "memcpy")) return "memcpy";
+    if (strstr(n, "memmove")) return "memmove";
+    if (strstr(n, "memset")) return "memset";
+    return "memcpy";
+}
+
+static const char *bos_chk_rt_name(const char *n) {
+    if (strstr(n, "mempcpy")) return "__mempcpy_chk";
+    if (strstr(n, "memcpy")) return "__memcpy_chk";
+    if (strstr(n, "memmove")) return "__memmove_chk";
+    if (strstr(n, "memset")) return "__memset_chk";
+    return "__memcpy_chk";
+}
+
+static void bos_collect_expr(const Expr *e, const char *name,
+                             const Expr **out, int *n, int cap, int *saw_unk);
+static void bos_collect_stmt(const Stmt *s, const char *name,
+                             const Expr **out, int *n, int cap, int *saw_unk);
+
+static void bos_collect_expr(const Expr *e, const char *name,
+                             const Expr **out, int *n, int cap, int *saw_unk) {
+    if (!e) return;
+    if (e->kind == EX_ASSIGN && bos_lvalue_is_name(e->u.assign.lvalue, name)) {
+        if (*n < cap) out[(*n)++] = e->u.assign.rvalue;
+        else *saw_unk = 1;
+        bos_collect_expr(e->u.assign.lvalue, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.assign.rvalue, name, out, n, cap, saw_unk);
+        return;
+    }
+    if (e->kind == EX_COMPOUND_ASSIGN && bos_lvalue_is_name(e->u.comp.lvalue, name)) {
+        *saw_unk = 1;
+    }
+    switch (e->kind) {
+    case EX_BINOP:
+        bos_collect_expr(e->u.bin.l, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.bin.r, name, out, n, cap, saw_unk);
+        break;
+    case EX_UNARY:
+        bos_collect_expr(e->u.un.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_ASSIGN:
+        bos_collect_expr(e->u.assign.lvalue, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.assign.rvalue, name, out, n, cap, saw_unk);
+        break;
+    case EX_CALL:
+        bos_collect_expr(e->u.call.callee, name, out, n, cap, saw_unk);
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            bos_collect_expr(e->u.call.args.data[i], name, out, n, cap, saw_unk);
+        break;
+    case EX_ADDR:
+        bos_collect_expr(e->u.addr.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_DEREF:
+        bos_collect_expr(e->u.deref.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_INDEX:
+        bos_collect_expr(e->u.idx.array, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.idx.index, name, out, n, cap, saw_unk);
+        break;
+    case EX_MEMBER:
+        bos_collect_expr(e->u.member.obj, name, out, n, cap, saw_unk);
+        break;
+    case EX_CAST:
+        bos_collect_expr(e->u.cast.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_TERNARY:
+        bos_collect_expr(e->u.tern.cond, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.tern.then, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.tern.else_, name, out, n, cap, saw_unk);
+        break;
+    case EX_INC_DEC:
+        bos_collect_expr(e->u.incdec.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_COMPOUND_ASSIGN:
+        bos_collect_expr(e->u.comp.lvalue, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.comp.rvalue, name, out, n, cap, saw_unk);
+        break;
+    case EX_COMMA:
+        bos_collect_expr(e->u.comma.lhs, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.comma.rhs, name, out, n, cap, saw_unk);
+        break;
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                bos_collect_stmt(&e->u.stmt_expr.stmts->data[i], name, out, n, cap, saw_unk);
+        }
+        break;
+    case EX_COMPOUND_LITERAL:
+        bos_collect_expr(e->u.compound.init, name, out, n, cap, saw_unk);
+        break;
+    default:
+        break;
+    }
+}
+
+static void bos_collect_stmt(const Stmt *s, const char *name,
+                             const Expr **out, int *n, int cap, int *saw_unk) {
+    if (!s) return;
+    switch (s->kind) {
+    case ST_DECL:
+        if (s->u.decl.name && name && strcmp(s->u.decl.name, name) == 0 && s->u.decl.init) {
+            if (*n < cap) out[(*n)++] = s->u.decl.init;
+            else *saw_unk = 1;
+        }
+        bos_collect_expr(s->u.decl.init, name, out, n, cap, saw_unk);
+        break;
+    case ST_EXPR:
+        bos_collect_expr(s->u.expr, name, out, n, cap, saw_unk);
+        break;
+    case ST_RETURN:
+        bos_collect_expr(s->u.value, name, out, n, cap, saw_unk);
+        break;
+    case ST_IF:
+        bos_collect_expr(s->u.if_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.if_s.then_s, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.if_s.else_s, name, out, n, cap, saw_unk);
+        break;
+    case ST_WHILE:
+        bos_collect_expr(s->u.while_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.while_s.body, name, out, n, cap, saw_unk);
+        break;
+    case ST_DO_WHILE:
+        bos_collect_expr(s->u.do_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.do_s.body, name, out, n, cap, saw_unk);
+        break;
+    case ST_FOR:
+        bos_collect_stmt(s->u.for_s.init, name, out, n, cap, saw_unk);
+        bos_collect_expr(s->u.for_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_expr(s->u.for_s.step, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.for_s.body, name, out, n, cap, saw_unk);
+        break;
+    case ST_LABEL:
+        bos_collect_stmt(s->u.label_s.stmt, name, out, n, cap, saw_unk);
+        break;
+    case ST_SWITCH:
+        bos_collect_expr(s->u.switch_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.switch_s.body, name, out, n, cap, saw_unk);
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                bos_collect_stmt(&s->u.switch_s.cases[i].stmts.data[j], name, out, n, cap, saw_unk);
+        break;
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            bos_collect_stmt(&s->u.block.data[i], name, out, n, cap, saw_unk);
+        break;
+    default:
+        break;
+    }
+}
+
+static int bos_collect_sources(const char *name, const Expr **out, int cap, int *saw_unk) {
+    int n = 0;
+    *saw_unk = 0;
+    if (g_ir_cur_fd) {
+        for (size_t i = 0; i < g_ir_cur_fd->body.len; i++)
+            bos_collect_stmt(&g_ir_cur_fd->body.data[i], name, out, &n, cap, saw_unk);
+    }
+    if (g_ir_tu) {
+        for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+            const Stmt *gs = &g_ir_tu->globals.data[i];
+            if (gs->kind == ST_DECL && gs->u.decl.name && name &&
+                strcmp(gs->u.decl.name, name) == 0 && gs->u.decl.init) {
+                if (n < cap) out[n++] = gs->u.decl.init;
+                else *saw_unk = 1;
+            }
+        }
+    }
+    return n;
+}
+
+static unsigned long long bos_eval(BosCtx *ctx, const Expr *e);
+static BosRef bos_objref(BosCtx *ctx, const Expr *e);
+
+static int bos_vis_push(BosCtx *ctx, const char *name) {
+    for (int i = 0; i < ctx->nvis; i++)
+        if (ctx->vis[i] && name && strcmp(ctx->vis[i], name) == 0)
+            return 0;
+    if (ctx->nvis >= 24) return 0;
+    ctx->vis[ctx->nvis++] = name;
+    return 1;
+}
+
+static void bos_vis_pop(BosCtx *ctx) {
+    if (ctx->nvis > 0) ctx->nvis--;
+}
+
+static BosRef bos_objref(BosCtx *ctx, const Expr *e) {
+    e = bos_skip_cast(e);
+    if (!e) return bos_ref_unk();
+    if (e->kind == EX_COMMA)
+        return bos_objref(ctx, e->u.comma.rhs);
+    if (e->kind == EX_ADDR)
+        return bos_objref(ctx, e->u.addr.operand);
+    if (e->kind == EX_STR)
+        return bos_ref_make((long long)e->u.str.len + 1, 0);
+    if (e->kind == EX_COMPOUND_LITERAL) {
+        long long sz = type_size(e->u.compound.target_type);
+        if (sz <= 0) sz = type_size(e->type);
+        if (sz <= 0) return bos_ref_unk();
+        return bos_ref_make(sz, 0);
+    }
+    if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
+        const char *cn = e->u.call.callee->u.var.name;
+        if (bos_is_alloca(cn) && e->u.call.args.len > 0) {
+            long long sz = 0;
+            if (!fold_const_int(e->u.call.args.data[0], &sz) || sz < 0)
+                return bos_ref_unk();
+            return bos_ref_make(sz, 0);
+        }
+        if (bos_is_memcpy_family(cn) && e->u.call.args.len > 0) {
+            unsigned long long rem = bos_eval(ctx, e->u.call.args.data[0]);
+            if (bos_is_unk(rem, ctx->bos_type)) return bos_ref_unk();
+            return bos_ref_make((long long)rem, 0);
+        }
+        return bos_ref_unk();
+    }
+    if (e->kind == EX_MEMBER) {
+        BosRef base = bos_objref(ctx, e->u.member.obj);
+        if (!base.known) return bos_ref_unk();
+        Type ot = e->u.member.obj->type;
+        if (ot.kind == TY_PTR && ot.pointee) ot = *ot.pointee;
+        if (ot.kind != TY_STRUCT || !ot.tag) return bos_ref_unk();
+        const StructDef *sd = g_ir_structs ? struct_registry_find_c(g_ir_structs, ot.tag) : NULL;
+        const StructMember *sm = ir_find_struct_member(sd, e->u.member.name);
+        if (!sm) return bos_ref_unk();
+        long long msz = type_size(sm->type);
+        if (msz < 0) return bos_ref_unk();
+        base.whole_off += sm->offset;
+        base.inner_size = msz;
+        base.inner_off = 0;
+        return base;
+    }
+    if (e->kind == EX_INDEX) {
+        BosRef base = bos_objref(ctx, e->u.idx.array);
+        if (!base.known) return bos_ref_unk();
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx)) return bos_ref_unk();
+        int esz = bos_ptr_elem_size(e->u.idx.array->type);
+        long long delta = idx * (long long)esz;
+        base.whole_off += delta;
+        base.inner_off += delta;
+        return base;
+    }
+    if (e->kind == EX_BINOP && (e->u.bin.op == BOP_ADD || e->u.bin.op == BOP_SUB)) {
+        const Expr *ptr = NULL, *idxe = NULL;
+        Type pty;
+        int lptr = type_is_ptr_or_array(e->u.bin.l->type);
+        int rptr = type_is_ptr_or_array(e->u.bin.r->type);
+        if (lptr && !rptr) { ptr = e->u.bin.l; idxe = e->u.bin.r; pty = e->u.bin.l->type; }
+        else if (rptr && !lptr && e->u.bin.op == BOP_ADD) {
+            ptr = e->u.bin.r; idxe = e->u.bin.l; pty = e->u.bin.r->type;
+        } else
+            return bos_ref_unk();
+        BosRef base = bos_objref(ctx, ptr);
+        if (!base.known) return bos_ref_unk();
+        long long idx = 0;
+        if (!fold_const_int(idxe, &idx)) return bos_ref_unk();
+        int esz = bos_ptr_elem_size(pty);
+        long long delta = idx * (long long)esz;
+        if (e->u.bin.op == BOP_SUB) delta = -delta;
+        base.whole_off += delta;
+        base.inner_off += delta;
+        return base;
+    }
+    if (e->kind == EX_VAR && e->u.var.name) {
+        if (bos_is_param(e->u.var.name)) return bos_ref_unk();
+        const IRSlot *slot = irsymtable_find(ctx->st, e->u.var.name);
+        if (!slot) return bos_ref_unk();
+        if (slot->ty.kind == TY_ARRAY || slot->ty.kind == TY_STRUCT) {
+            long long sz = type_size(slot->ty);
+            if (sz <= 0) return bos_ref_unk();
+            return bos_ref_make(sz, 0);
+        }
+        if (slot->ty.kind == TY_PTR) {
+            if (!bos_vis_push(ctx, e->u.var.name)) return bos_ref_unk();
+            const Expr *srcs[32];
+            int saw_unk = 0;
+            int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
+            unsigned long long acc = 0;
+            int any = 0;
+            if (!saw_unk) {
+                for (int i = 0; i < ns; i++) {
+                    unsigned long long v = bos_eval(ctx, srcs[i]);
+                    if (!any) { acc = v; any = 1; }
+                    else if (bos_is_unk(acc, ctx->bos_type) || bos_is_unk(v, ctx->bos_type)) {
+                        acc = bos_unk(ctx->bos_type);
+                    } else if (ctx->bos_type & 2) {
+                        if (v < acc) acc = v;
+                    } else {
+                        if (v > acc) acc = v;
+                    }
+                }
+            }
+            bos_vis_pop(ctx);
+            if (saw_unk || !any || bos_is_unk(acc, ctx->bos_type))
+                return bos_ref_unk();
+            return bos_ref_make((long long)acc, 0);
+        }
+        return bos_ref_unk();
+    }
+    return bos_ref_unk();
+}
+
+static unsigned long long bos_eval(BosCtx *ctx, const Expr *e) {
+    e = bos_skip_cast(e);
+    if (!e) return bos_unk(ctx->bos_type);
+    if (e->kind == EX_COMMA)
+        return bos_eval(ctx, e->u.comma.rhs);
+    if (e->kind == EX_TERNARY) {
+        unsigned long long a = bos_eval(ctx, e->u.tern.then);
+        unsigned long long b = bos_eval(ctx, e->u.tern.else_);
+        if (bos_is_unk(a, ctx->bos_type) || bos_is_unk(b, ctx->bos_type))
+            return bos_unk(ctx->bos_type);
+        if (ctx->bos_type & 2)
+            return a < b ? a : b;
+        return a > b ? a : b;
+    }
+    if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
+        const char *cn = e->u.call.callee->u.var.name;
+        if (bos_is_memcpy_family(cn) && e->u.call.args.len > 0)
+            return bos_eval(ctx, e->u.call.args.data[0]);
+    }
+    BosRef r = bos_objref(ctx, e);
+    return bos_remaining(r, ctx->bos_type);
+}
+
+static unsigned long long compute_builtin_object_size(IRSymTable *st, const Expr *ptr, int bos_type) {
+    BosCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.st = st;
+    ctx.bos_type = bos_type;
+    return bos_eval(&ctx, ptr);
+}
+
+static int bos_int_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
+    e = bos_skip_cast(e);
+    long long c = 0;
+    if (fold_const_int(e, &c)) {
+        *out = (unsigned long long)c;
+        return 1;
+    }
+    if (!e || e->kind != EX_VAR || !e->u.var.name) return 0;
+    const IRSlot *slot = irsymtable_find(st, e->u.var.name);
+    if (!slot || slot->ty.is_volatile) return 0;
+    const Expr *srcs[32];
+    int saw_unk = 0;
+    int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
+    if (saw_unk || ns == 0) return 0;
+    unsigned long long mx = 0;
+    int any = 0;
+    for (int i = 0; i < ns; i++) {
+        long long v = 0;
+        if (!fold_const_int(srcs[i], &v)) return 0;
+        unsigned long long u = (unsigned long long)v;
+        if (!any || u > mx) mx = u;
+        any = 1;
+    }
+    if (!any) return 0;
+    *out = mx;
+    return 1;
+}
+
+static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
+                                   IRValue *args, int nargs, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.loc = loc;
+    inst.call_name = xstrdup(name);
+    inst.call_callee = -1;
+    inst.call_nargs = nargs;
+    for (int i = 0; i < nargs; i++)
+        inst.call_args[i] = args[i];
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, 8, 1);
+    return dst;
+}
+
+static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    const char *cn = e->u.call.callee->u.var.name;
+    const Expr *size_e = e->u.call.args.data[3];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = 0;
+    if (size_e && size_e->kind == EX_CALL && size_e->u.call.callee &&
+        size_e->u.call.callee->kind == EX_VAR &&
+        strcmp(size_e->u.call.callee->u.var.name, "__builtin_object_size") == 0 &&
+        size_e->u.call.args.len >= 1) {
+        long long bt = 0;
+        if (size_e->u.call.args.len >= 2)
+            fold_const_int(size_e->u.call.args.data[1], &bt);
+        size_val = compute_builtin_object_size(st, size_e->u.call.args.data[0], (int)bt);
+        size_const = 1;
+    } else {
+        long long sc = 0;
+        if (fold_const_int(size_e, &sc)) {
+            size_val = (unsigned long long)sc;
+            size_const = 1;
+        }
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue a1 = lower_expr(fn, st, e->u.call.args.data[1]);
+    IRValue a2 = lower_expr(fn, st, e->u.call.args.data[2]);
+    int fold_plain = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (size_const) {
+        long long nconst = 0;
+        unsigned long long nmax = 0;
+        if (fold_const_int(e->u.call.args.data[2], &nconst)) {
+            if ((unsigned long long)nconst <= size_val)
+                fold_plain = 1;
+        } else if (bos_int_max(st, e->u.call.args.data[2], &nmax) && nmax <= size_val) {
+            fold_plain = 1;
+        }
+    }
+    if (fold_plain) {
+        IRValue args[3];
+        args[0] = dst;
+        args[1] = a1;
+        args[2] = a2;
+        return bos_emit_named_call(fn, bos_chk_plain_name(cn), args, 3, e->loc);
+    }
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    IRValue args[4];
+    args[0] = dst;
+    args[1] = a1;
+    args[2] = a2;
+    args[3] = szv;
+    return bos_emit_named_call(fn, bos_chk_rt_name(cn), args, 4, e->loc);
+}
+
+
 static void emit_zero_bytes(IRFunction *fn, IRValue base, int total, SourceLoc loc) {
     int off = 0;
     while (off + 8 <= total) {
@@ -3371,6 +3932,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return coerced;
     }
     case EX_CALL: {
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *bos_cn = e->u.call.callee->u.var.name;
+            if (strcmp(bos_cn, "__builtin_object_size") == 0 && e->u.call.args.len >= 1) {
+                long long bos_type = 0;
+                if (e->u.call.args.len >= 2)
+                    fold_const_int(e->u.call.args.data[1], &bos_type);
+                unsigned long long sz = compute_builtin_object_size(st, e->u.call.args.data[0], (int)bos_type);
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_CONST, v, -1, -1, (int64_t)sz, 8, 1, e->loc);
+                set_value_type(fn, v, 8, 1);
+                return v;
+            }
+            if (bos_is_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
+                return lower_fortify_chk_call(fn, st, e);
+        }
         if (e->u.call.callee->kind == EX_VAR && e->u.call.args.len > 0) {
             const char *cn = e->u.call.callee->u.var.name;
             if (strcmp(cn, "__builtin_conjf") == 0 || strcmp(cn, "__builtin_conj") == 0 ||
