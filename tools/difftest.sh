@@ -119,7 +119,7 @@ difftest_one() {
             # Drop port libc prototypes that clash with glibc (GCC 16+).
             # fprintf(void*,...) vs FILE* is the common one; strip the whole
             # extern-decl line for names the headers above already provide.
-            python3 - "$WORK/$name.prep.c" <<'PY'
+            python3 - "$WORK/$name.body.c" <<'PY'
 import re, sys
 src = open(sys.argv[1], encoding="latin-1").read()
 libc = (
@@ -136,6 +136,9 @@ src = re.sub(
     src,
     flags=re.M,
 )
+src = re.sub(r"typedef\s+[^;]*\bfpos_t\s*;", "", src)
+src = re.sub(r"typedef\s+struct\s+_?IO_FILE\s+FILE\s*;", "", src)
+src = re.sub(r"typedef\s+struct\s+FILE\s+FILE\s*;", "", src)
 sys.stdout.buffer.write(src.encode("latin-1"))
 PY
         } > "$WORK/$name.gcc.c"

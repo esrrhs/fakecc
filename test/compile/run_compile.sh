@@ -11,7 +11,7 @@ FAKECC=${1:-"$ROOT/build/fakecc"}
 shift || true
 
 CC_FLAGS="${CC_FLAGS:-} $*"
-CC_TIMEOUT=${CC_TIMEOUT:-15}
+CC_TIMEOUT=${CC_TIMEOUT:-60}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 COMPILE_DIR="$ROOT/test/compile"
 

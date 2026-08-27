@@ -162,8 +162,6 @@ def prep(src):
     src = re.sub(r"typedef\s+__builtin_va_list\s+va_list\s*;", "", src)
     src = re.sub(r"typedef\s+__builtin_va_list\s+__gnuc_va_list\s*;", "", src)
     src = re.sub(r"typedef\s+__gnuc_va_list\s+va_list\s*;", "", src)
-    src = re.sub(r"typedef\s+[^;]*\bfpos_t\s*;", "", src)
-    src = re.sub(r"typedef\s+struct\s+_?IO_FILE\s+FILE\s*;", "", src)
     # fakecc accepts the C23 builtin; gcc 13 does not.  Same ABI as va_start.
     src = re.sub(r"\b__builtin_c23_va_start\b", "__builtin_va_start", src)
     src = forward_file_scope_funcs(src)
