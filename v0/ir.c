@@ -2544,7 +2544,8 @@ static int bos_is_snprintf_chk_builtin(const char *n) {
 }
 
 static int bos_is_sprintf_chk_builtin(const char *n) {
-    return n && runtime.strcmp(n, "__builtin___sprintf_chk") == 0;
+    return n && (runtime.strcmp(n, "__builtin___sprintf_chk") == 0 ||
+                 runtime.strcmp(n, "__builtin___vsprintf_chk") == 0);
 }
 
 static int bos_is_stpcpy_chk_builtin(const char *n) {
@@ -3353,11 +3354,17 @@ static int bos_sprintf_out_len(const Expr *fmt, const Expr **va, int nva,
     return 1;
 }
 
-/* __builtin___sprintf_chk(dst, flag, size, fmt, ...).
- * Fold to sprintf(dst, fmt, ...) when dest size is unknown (-1) or the
- * formatted output (plus NUL) is proven to fit. Otherwise call __sprintf_chk. */
+/* __builtin___sprintf_chk(dst, flag, size, fmt, ...) and
+ * __builtin___vsprintf_chk(dst, flag, size, fmt, ap).
+ * Fold to sprintf/vsprintf when dest size is unknown (-1) or the
+ * formatted output (plus NUL) is proven to fit. vsprintf args live in
+ * va_list, so output length is only proven for conversion-free formats. */
 static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
                                               const Expr *e) {
+    const char *cn = e->u.call.callee->u.var.name;
+    int is_v = cn && runtime.strstr(cn, "vsprintf") != 0;
+    const char *plain = is_v ? "vsprintf" : "sprintf";
+    const char *chk = is_v ? "__vsprintf_chk" : "__sprintf_chk";
     const Expr *size_e = e->u.call.args.data[2];
     unsigned long long size_val = ~(unsigned long long)0;
     int size_const = bos_eval_size_arg(st, size_e, &size_val);
@@ -3366,8 +3373,11 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
         fold_plain = 1;
     else if (size_const && e->u.call.args.len >= 4) {
         const Expr **va = NULL;
-        int nva = (int)e->u.call.args.len - 4;
-        if (nva > 0) va = (const Expr **)&e->u.call.args.data[4];
+        int nva = 0;
+        if (!is_v) {
+            nva = (int)e->u.call.args.len - 4;
+            if (nva > 0) va = (const Expr **)&e->u.call.args.data[4];
+        }
         unsigned long long olen = 0;
         if (bos_sprintf_out_len(e->u.call.args.data[3], va, nva, &olen)
             && olen < size_val)
@@ -3385,7 +3395,7 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
             }
             args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
         }
-        return bos_emit_named_call_w(fn, "sprintf", args, nargs, e->loc, 4, 0);
+        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0);
     }
     args[nargs++] = lower_expr(fn, st, e->u.call.args.data[1]);
     IRValue szv = new_value(fn);
@@ -3403,7 +3413,7 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
         }
         args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
     }
-    return bos_emit_named_call_w(fn, "__sprintf_chk", args, nargs, e->loc, 4, 0);
+    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
 }
 
 /* __builtin___stpcpy_chk / __builtin___strcpy_chk (dst, src, size).
