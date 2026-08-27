@@ -4576,6 +4576,7 @@ IRValue hi;
                 else if (runtime.strcmp(cname, "__builtin_strncmp") == 0) inst.call_name = xstrdup("strncmp");
                 else if (runtime.strcmp(cname, "__builtin_strlen") == 0) inst.call_name = xstrdup("strlen");
                 else if (runtime.strcmp(cname, "__builtin_strcpy") == 0) inst.call_name = xstrdup("strcpy");
+                else if (runtime.strcmp(cname, "__builtin_strncpy") == 0) inst.call_name = xstrdup("strncpy");
                 else if (runtime.strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");
                 else if (runtime.strcmp(cname, "__builtin_strncat") == 0) inst.call_name = xstrdup("strncat");
                 else if (runtime.strcmp(cname, "__builtin_fabs") == 0) inst.call_name = xstrdup("fabs");
