@@ -2539,7 +2539,8 @@ static int bos_is_chk_builtin(const char *n) {
 
 
 static int bos_is_snprintf_chk_builtin(const char *n) {
-    return n && runtime.strcmp(n, "__builtin___snprintf_chk") == 0;
+    return n && (runtime.strcmp(n, "__builtin___snprintf_chk") == 0 ||
+                 runtime.strcmp(n, "__builtin___vsnprintf_chk") == 0);
 }
 
 static int bos_is_sprintf_chk_builtin(const char *n) {
@@ -3106,11 +3107,13 @@ static int bos_eval_size_arg(IRSymTable *st, const Expr *size_e,
     return 0;
 }
 
-/* __builtin___snprintf_chk(dst, n, flag, size, fmt, ...).
- * Fold to snprintf(dst, n, fmt, ...) when size is unknown (-1) or n is proven
- * <= size. Otherwise call __snprintf_chk with the same extra args. */
+/* __builtin___snprintf_chk(dst, n, flag, size, fmt, ...) and
+ * __builtin___vsnprintf_chk(dst, n, flag, size, fmt, ap).
+ * Fold to snprintf/vsnprintf when size is unknown (-1) or n is proven
+ * <= size. Check vsnprintf before snprintf (substring). */
 static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
                                                const Expr *e) {
+    const char *cn = e->u.call.callee->u.var.name;
     const Expr *size_e = e->u.call.args.data[3];
     unsigned long long size_val = ~(unsigned long long)0;
     int size_const = bos_eval_size_arg(st, size_e, &size_val);
@@ -3127,6 +3130,9 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
             fold_plain = 1;
         }
     }
+    int is_v = cn && runtime.strstr(cn, "vsnprintf") != 0;
+    const char *plain = is_v ? "vsnprintf" : "snprintf";
+    const char *chk = is_v ? "__vsnprintf_chk" : "__snprintf_chk";
     IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
     IRValue nval = lower_expr(fn, st, e->u.call.args.data[1]);
     IRValue args[IR_CALL_MAX_ARGS];
@@ -3141,7 +3147,7 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
             }
             args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
         }
-        return bos_emit_named_call_w(fn, "snprintf", args, nargs, e->loc, 4, 0);
+        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0);
     }
     args[nargs++] = lower_expr(fn, st, e->u.call.args.data[2]);
     IRValue szv = new_value(fn);
@@ -3159,7 +3165,7 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
         }
         args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
     }
-    return bos_emit_named_call_w(fn, "__snprintf_chk", args, nargs, e->loc, 4, 0);
+    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
 }
 
 /* Known C-string bytes (NUL not included in *nbytes) plus a byte offset. */
