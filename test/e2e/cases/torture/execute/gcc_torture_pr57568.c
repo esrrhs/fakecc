@@ -1,14 +1,15 @@
-/* PR target/57568 - simplified */
-
 // expect: 0
 package main;
 
-static int a[6][9];
-static int b = 1;
+/* PR target/57568 */
 
-int main(void) {
-  int *c = &a[3][5];
+extern void abort (void);
+int a[6][9] = { }, b = 1, *c = &a[3][5];
+
+int
+main ()
+{
   if (b && (*c = *c + *c))
-    __builtin_abort();
+    abort ();
   return 0;
 }

@@ -594,7 +594,7 @@ RUNTIME_FUNCS = frozenset({
     "printf", "putchar", "puts", "qsort", "realloc", "snprintf", "sprintf",
     "strcmp", "strchr", "strcpy", "strdup", "strerror", "strlen", "strncmp",
     "strncpy", "strrchr", "strstr", "strtod", "strtof", "strtold", "strtol",
-    "strtoul", "strtoull", "vfprintf", "vsnprintf", "vsprintf",
+    "strtoll", "strtoul", "strtoull", "vfprintf", "vsnprintf", "vsprintf",
 })
 
 

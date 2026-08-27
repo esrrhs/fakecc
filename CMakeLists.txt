@@ -33,6 +33,7 @@ add_library(fakecc_core
     src/pkg.c
 )
 target_include_directories(fakecc_core PUBLIC include)
+target_link_libraries(fakecc_core PUBLIC m)
 
 add_executable(fakecc src/main.c)
 target_link_libraries(fakecc PRIVATE fakecc_core)

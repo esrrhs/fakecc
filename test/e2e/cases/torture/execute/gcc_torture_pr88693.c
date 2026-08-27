@@ -1,45 +1,62 @@
-/* PR tree-optimization/88693 */
-
 // expect: 0
 package main;
 
-static void foo(char *p) {
-  if (__builtin_strlen(p) != 9)
-    __builtin_abort();
+/* PR tree-optimization/88693 */
+
+extern void abort (void);
+extern unsigned long strlen (const char *);
+extern void *memcpy (void *, const void *, unsigned long);
+extern void *memset (void *, int, unsigned long);
+
+void
+foo (char *p)
+{
+  if (strlen (p) != 9)
+    abort ();
 }
 
-static void quux(char *p) {
+void
+quux (char *p)
+{
   int i;
   for (i = 0; i < 100; i++)
     if (p[i] != 'x')
-      __builtin_abort();
+      abort ();
 }
 
-static void qux(void) {
+void
+qux (void)
+{
   char b[100];
-  __builtin_memset(b, 'x', sizeof(b));
-  quux(b);
+  memset (b, 'x', sizeof (b));
+  quux (b);
 }
 
-static void bar(void) {
+void
+bar (void)
+{
   static unsigned char u[9] = "abcdefghi";
   char b[100];
-  __builtin_memcpy(b, u, sizeof(u));
-  b[sizeof(u)] = 0;
-  foo(b);
+  memcpy (b, u, sizeof (u));
+  b[sizeof (u)] = 0;
+  foo (b);
 }
 
-static void baz(void) {
-  static unsigned char u[] = {'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r'};
+void
+baz (void)
+{
+  static unsigned char u[] = { 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r' };
   char b[100];
-  __builtin_memcpy(b, u, sizeof(u));
-  b[sizeof(u)] = 0;
-  foo(b);
+  memcpy (b, u, sizeof (u));
+  b[sizeof (u)] = 0;
+  foo (b);
 }
 
-int main(void) {
-  qux();
-  bar();
-  baz();
+int
+main (void)
+{
+  qux ();
+  bar ();
+  baz ();
   return 0;
 }

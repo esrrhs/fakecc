@@ -1,67 +1,81 @@
-/* PR middle-end/91450 */
-
 // expect: 0
 package main;
 
-static void foo(int a, int b) {
+/* PR middle-end/91450 */
+
+extern void abort (void);
+
+void
+foo (int a, int b)
+{
   unsigned long long r;
-  if (__builtin_mul_overflow(a, b, &r))
-    __builtin_abort();
+  if (__builtin_mul_overflow (a, b, &r))
+    abort ();
   if (r != 0)
-    __builtin_abort();
+    abort ();
 }
 
-static void bar(int a, int b) {
+void
+bar (int a, int b)
+{
   unsigned long long r;
   if (a >= 0)
     return;
-  if (__builtin_mul_overflow(a, b, &r))
-    __builtin_abort();
+  if (__builtin_mul_overflow (a, b, &r))
+    abort ();
   if (r != 0)
-    __builtin_abort();
+    abort ();
 }
 
-static void baz(int a, int b) {
+void
+baz (int a, int b)
+{
   unsigned long long r;
   if (b >= 0)
     return;
-  if (__builtin_mul_overflow(a, b, &r))
-    __builtin_abort();
+  if (__builtin_mul_overflow (a, b, &r))
+    abort ();
   if (r != 0)
-    __builtin_abort();
+    abort ();
 }
 
-static void qux(int a, int b) {
+void
+qux (int a, int b)
+{
   unsigned long long r;
   if (a >= 0)
     return;
   if (b < 0)
     return;
-  if (__builtin_mul_overflow(a, b, &r))
-    __builtin_abort();
+  if (__builtin_mul_overflow (a, b, &r))
+    abort ();
   if (r != 0)
-    __builtin_abort();
+    abort ();
 }
 
-static void quux(int a, int b) {
+void
+quux (int a, int b)
+{
   unsigned long long r;
   if (a < 0)
     return;
   if (b >= 0)
     return;
-  if (__builtin_mul_overflow(a, b, &r))
-    __builtin_abort();
+  if (__builtin_mul_overflow (a, b, &r))
+    abort ();
   if (r != 0)
-    __builtin_abort();
+    abort ();
 }
 
-int main(void) {
-  foo(-4, 0);
-  foo(0, -4);
-  foo(0, 0);
-  bar(-4, 0);
-  baz(0, -4);
-  qux(-4, 0);
-  quux(0, -4);
+int
+main (void)
+{
+  foo (-4, 0);
+  foo (0, -4);
+  foo (0, 0);
+  bar (-4, 0);
+  baz (0, -4);
+  qux (-4, 0);
+  quux (0, -4);
   return 0;
 }

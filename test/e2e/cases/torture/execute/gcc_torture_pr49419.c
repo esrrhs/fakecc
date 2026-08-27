@@ -1,9 +1,9 @@
-/* PR tree-optimization/49419 */
-
 // expect: 0
 package main;
 
-extern void abort(void);
+/* PR tree-optimization/49419 */
+
+extern void abort (void);
 
 struct S { int w, x, y; } *t;
 

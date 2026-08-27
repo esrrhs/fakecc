@@ -18,6 +18,27 @@ long long llabs(long long x) { return x < 0 ? -x : x; }
 
 double fabs(double x) { return x < 0.0 ? -x : x; }
 float fabsf(float x) { return x < 0.0f ? -x : x; }
+long double fabsl(long double x) { return x < 0.0L ? -x : x; }
+
+double copysign(double x, double y) {
+    union { double d; unsigned long long u; } ux, uy;
+    ux.d = x;
+    uy.d = y;
+    ux.u = (ux.u & 0x7fffffffffffffffULL) | (uy.u & 0x8000000000000000ULL);
+    return ux.d;
+}
+
+float copysignf(float x, float y) {
+    union { float f; unsigned int u; } ux, uy;
+    ux.f = x;
+    uy.f = y;
+    ux.u = (ux.u & 0x7fffffffU) | (uy.u & 0x80000000U);
+    return ux.f;
+}
+
+long double copysignl(long double x, long double y) {
+    return (long double)copysign((double)x, (double)y);
+}
 
 double floor(double x) {
     if (x != x) return x;
@@ -44,6 +65,81 @@ double sqrt(double x) {
         n = n + 1;
     }
     return g;
+}
+
+double sin(double x) {
+    if (x == 0.0 || x != x) return x;
+    double pi2 = 6.28318530717958647692;
+    double pi = 3.14159265358979323846;
+    long long k = (long long)(x / pi2);
+    x = x - (double)k * pi2;
+    while (x > pi) x = x - pi2;
+    while (x < -pi) x = x + pi2;
+    if (x == 0.0) return x;
+    double term = x;
+    double sum = x;
+    double x2 = x * x;
+    for (int i = 1; i <= 12; i++) {
+        term = -term * x2 / (double)((2 * i) * (2 * i + 1));
+        sum = sum + term;
+    }
+    return sum;
+}
+float sinf(float x) {
+    if (x == 0.0f || x != x) return x;
+    return (float)sin((double)x);
+}
+
+double cos(double x) {
+    if (x != x) return x;
+    double pi_half = 1.57079632679489661923;
+    return sin(pi_half - x);
+}
+float cosf(float x) { return (float)cos((double)x); }
+
+double tan(double x) {
+    if (x == 0.0 || x != x) return x;
+    return sin(x) / cos(x);
+}
+float tanf(float x) {
+    if (x == 0.0f || x != x) return x;
+    return (float)tan((double)x);
+}
+
+double atan(double x) {
+    if (x == 0.0 || x != x) return x;
+    int neg = 0;
+    if (x < 0.0) { neg = 1; x = -x; }
+    int inv = 0;
+    if (x > 1.0) { inv = 1; x = 1.0 / x; }
+    double res = 0.0;
+    if (x > 0.4142135623730950) {
+        double y = (x - 1.0) / (1.0 + x);
+        double term = y;
+        double y2 = y * y;
+        double s = y;
+        for (int i = 1; i <= 15; i++) {
+            term = -term * y2;
+            s = s + term / (double)(2 * i + 1);
+        }
+        res = 0.78539816339744830962 + s;
+    } else {
+        double term = x;
+        double x2 = x * x;
+        double s = x;
+        for (int i = 1; i <= 15; i++) {
+            term = -term * x2;
+            s = s + term / (double)(2 * i + 1);
+        }
+        res = s;
+    }
+    if (inv) res = 1.57079632679489661923 - res;
+    if (neg) res = -res;
+    return res;
+}
+float atanf(float x) {
+    if (x == 0.0f || x != x) return x;
+    return (float)atan((double)x);
 }
 
 
@@ -309,17 +405,43 @@ static long double strtofp_body(const char *s, char **end) {
     }
     if (end) *end = (char *)s;
 
-    long double chunk = pow10_exact(27);
-    while (dexp >= 27) {
-        mant = mant * chunk;
-        dexp = dexp - 27;
+    /* Scale by powers of ten without leaping past the finite range into
+     * +inf.  Near LDBL_MAX (~1.19e4932), mant*10^27 can round up to
+     * infinity even when the mathematical value is still finite — then
+     * self-hosted fakecc embeds LDBL_MAX literals as inf (ieee/pr36332).
+     * Clamp that rounding overflow to the finite max; only a clearly
+     * out-of-range mantissa becomes ±inf. */
+    {
+        long double ld_max = 0xf.fffffffffffffffp+16380L;
+        long double pos_inf = 1.0L / 0.0L;
+        while (dexp > 0) {
+            int step = dexp;
+            if (step > 27) step = 27;
+            long double factor = pow10_exact(step);
+            long double next = mant * factor;
+            if (next > ld_max) {
+                /* ld_max/factor rounds down, and prior *10^27 steps add a
+                 * ULP or two, so an in-range LDBL_MAX input can look
+                 * slightly past the limit.  Pad by ~2^-60 relatively. */
+                long double lim = ld_max / factor;
+                long double lim_pad = lim + lim * 0x1p-60L;
+                if (mant > lim_pad)
+                    mant = pos_inf;
+                else
+                    mant = ld_max;
+                dexp = 0;
+                break;
+            }
+            mant = next;
+            dexp = dexp - step;
+        }
+        while (dexp < 0) {
+            int step = -dexp;
+            if (step > 27) step = 27;
+            mant = mant / pow10_exact(step);
+            dexp = dexp + step;
+        }
     }
-    while (dexp <= -27) {
-        mant = mant / chunk;
-        dexp = dexp + 27;
-    }
-    if (dexp > 0) mant = mant * pow10_exact(dexp);
-    else if (dexp < 0) mant = mant / pow10_exact(-dexp);
 
     if (neg) mant = -mant;
     return mant;

@@ -94,6 +94,7 @@ void type_free(Type *t) {
 }
 
 extern const StructRegistry *get_ir_structs(void);
+extern const StructRegistry *get_sema_structs(void);
 extern const StructRegistry *get_parser_structs(void);
 
 long long type_size(Type t) {
@@ -120,6 +121,7 @@ long long type_size(Type t) {
     case TY_STRUCT: {
         if (p->tag) {
             const StructRegistry *reg = get_ir_structs();
+            if (!reg) reg = get_sema_structs();
             if (!reg) reg = get_parser_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
@@ -430,6 +432,7 @@ long long type_align(Type t) {
     case TY_STRUCT: {
         if (p->tag) {
             const StructRegistry *reg = get_ir_structs();
+            if (!reg) reg = get_sema_structs();
             if (!reg) reg = get_parser_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
@@ -561,6 +564,10 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
 }
 
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width) {
+    struct_def_push_member_aligned(sd, name, ty, bit_width, 0);
+}
+
+void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align) {
     if (sd->num_members >= sd->cap_members) {
         int nc = sd->cap_members ? sd->cap_members * 2 : 4;
         sd->members = realloc(sd->members, nc * sizeof(StructMember));
@@ -568,6 +575,7 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
         sd->cap_members = nc;
     }
     long long a = sd->is_packed ? 1 : type_align(ty);
+    if (!sd->is_packed && align > a) a = align;
     long long sz = type_size(ty);
     /* Track the max member alignment for final struct alignment. */
     if (!sd->is_packed && a > sd->align) sd->align = a;
@@ -684,7 +692,7 @@ void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
 /* Switch case helper                                                    */
 /* ------------------------------------------------------------------ */
 
-void switch_push_case(Stmt *s, int is_default, int value, const char *label_name) {
+void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name) {
     if (s->u.switch_s.num_cases >= s->u.switch_s.cap_cases) {
         int nc = s->u.switch_s.cap_cases ? s->u.switch_s.cap_cases * 2 : 4;
         s->u.switch_s.cases = realloc(s->u.switch_s.cases,
@@ -695,8 +703,14 @@ void switch_push_case(Stmt *s, int is_default, int value, const char *label_name
     SwitchCase *c = &s->u.switch_s.cases[s->u.switch_s.num_cases++];
     c->is_default = is_default;
     c->value = value;
+    c->high_value = high_value;
+    c->is_range = is_range;
     c->label_name = label_name ? xstrdup(label_name) : NULL;
     stmt_array_init(&c->stmts);
+}
+
+void switch_push_case(Stmt *s, int is_default, long long value, const char *label_name) {
+    switch_push_case_range(s, is_default, value, value, 0, label_name);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1309,6 +1323,8 @@ Stmt stmt_clone(const Stmt *s) {
             for (int i = 0; i < s->u.switch_s.num_cases; i++) {
                 r.u.switch_s.cases[i].is_default = s->u.switch_s.cases[i].is_default;
                 r.u.switch_s.cases[i].value = s->u.switch_s.cases[i].value;
+                r.u.switch_s.cases[i].high_value = s->u.switch_s.cases[i].high_value;
+                r.u.switch_s.cases[i].is_range = s->u.switch_s.cases[i].is_range;
                 r.u.switch_s.cases[i].label_name = s->u.switch_s.cases[i].label_name
                     ? xstrdup(s->u.switch_s.cases[i].label_name) : NULL;
                 stmt_array_init(&r.u.switch_s.cases[i].stmts);

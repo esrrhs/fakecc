@@ -1,16 +1,18 @@
-/* PR tree-optimization/54471 */
-
 // expect: 0
 package main;
 
-extern void abort(void);
+/* PR tree-optimization/54471 */
 
-__attribute__ ((noinline))
-unsigned long long
-foo (unsigned long long ixi, unsigned ctr)
+extern void abort (void);
+
+typedef long long T;
+typedef unsigned long long UT;
+
+UT
+foo (T ixi, unsigned ctr)
 {
-  unsigned long long irslt = 1;
-  unsigned long long ix = ixi;
+  UT irslt = 1;
+  T ix = ixi;
 
   for (; ctr; ctr--)
     {
@@ -26,7 +28,7 @@ foo (unsigned long long ixi, unsigned ctr)
 int
 main (void)
 {
-  unsigned long long res;
+  UT res;
 
   res = foo (3, 4);
   return 0;

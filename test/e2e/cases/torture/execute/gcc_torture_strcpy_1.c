@@ -1,40 +1,63 @@
-/* strcpy-1.c - simplified */
-
 // expect: 0
 package main;
 
-int main(void) {
-  char buf1[64];
-  char buf2[64];
+/* Copyright (C) 2002  Free Software Foundation.
+
+   Test strcpy with various combinations of pointer alignments and lengths to
+   make sure any optimizations in the library are correct.  */
+
+extern void abort (void);
+extern void exit (int);
+extern char *strcpy (char *, const char *);
+
+static union {
+  char buf[97];
+  long long align_int;
+  long double align_fp;
+} u1, u2;
+
+int
+main (void)
+{
   int off1, off2, len, i;
-  char *q;
+  char *p, *q, c;
 
-  for (off1 = 0; off1 < 4; off1++)
-    for (off2 = 0; off2 < 4; off2++)
-      for (len = 1; len < 10; len++) {
-        for (i = 0; i < 64; i++) {
-          buf1[i] = 'a';
-          buf2[i] = 'A' + (i % 26);
-        }
-        buf2[off2 + len] = '\0';
+  for (off1 = 0; off1 < 8; off1++)
+    for (off2 = 0; off2 < 8; off2++)
+      for (len = 1; len < 80; len++)
+	{
+	  for (i = 0, c = 'A'; i < 97; i++, c++)
+	    {
+	      u1.buf[i] = 'a';
+	      if (c >= 'A' + 31)
+		c = 'A';
+	      u2.buf[i] = c;
+	    }
+	  u2.buf[off2 + len] = '\0';
 
-        __builtin_strcpy(buf1 + off1, buf2 + off2);
+	  p = strcpy (u1.buf + off1, u2.buf + off2);
+	  if (p != u1.buf + off1)
+	    abort ();
 
-        q = buf1;
-        for (i = 0; i < off1; i++, q++)
-          if (*q != 'a')
-            __builtin_abort();
+	  q = u1.buf;
+	  for (i = 0; i < off1; i++, q++)
+	    if (*q != 'a')
+	      abort ();
 
-        for (i = 0; i < len; i++, q++)
-          if (*q != buf2[off2 + i])
-            __builtin_abort();
+	  for (i = 0, c = 'A' + off2; i < len; i++, q++, c++)
+	    {
+	      if (c >= 'A' + 31)
+		c = 'A';
+	      if (*q != c)
+		abort ();
+	    }
 
-        if (*q++ != '\0')
-          __builtin_abort();
-        for (i = 0; i < 4; i++, q++)
-          if (*q != 'a')
-            __builtin_abort();
-      }
+	  if (*q++ != '\0')
+	    abort ();
+	  for (i = 0; i < 8; i++, q++)
+	    if (*q != 'a')
+	      abort ();
+	}
 
-  return 0;
+  exit (0);
 }

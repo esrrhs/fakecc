@@ -288,10 +288,9 @@ static void emit_sse_ucomi(Buffer *b, int a, int b_xmm, int is_float) {
     emit_modrm(b, 3, a & 7, b_xmm & 7);
 }
 
-/* cvtsi2sd xmm, r/m64  →  F2 REX.W 0F 2A /r.  Converts a 64-bit (or 32-bit
- * if !is_64) signed GP integer into a double in xmm. */
-static void emit_sse_cvtsi2sd(Buffer *b, int xmm, int gp, int is_64) {
-    emit_byte(b, 0xF2);
+/* cvtsi2ss/sd xmm, r/m64  →  (F3 or F2) REX.W 0F 2A /r. */
+static void emit_sse_cvtsi2s(Buffer *b, int xmm, int gp, int is_64, int is_dst_float) {
+    emit_byte(b, is_dst_float ? 0xF3 : 0xF2);
     emit_rex_wrb(b, is_64 ? 1 : 0, xmm, gp);
     emit_byte(b, 0x0F);
     emit_byte(b, 0x2A);
@@ -1244,13 +1243,35 @@ static void emit_load_gp_viabase(Buffer *b, int dst, int base, int index) {
  *   [rsp+0..+40]   rdi,rsi,rdx,rcx,r8,r9   (8 bytes each, GP regs)
  *   [rsp+48..+176] xmm0-xmm7               (16 bytes each, FP regs)
  * reg_save_area = rsp is filled by va_start. */
-static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
-                        const RAResult *ra_xmm, int gp_spill_area) {
+static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
+                        const RAResult *ra, const RAResult *ra_xmm,
+                        int gp_spill_area, const int *ld_off) {
     int ap = inst->call_args[0];
     ensure_reg(b, ap, REG_RAX, ra);
     int ap_reg = REG_RAX;
     int dst = inst->dst;
     int is_float = inst->is_float;
+
+    if (dst >= 0 && value_is_ld(fn, dst)) {
+        /* long double (X87 class): always passed on the stack. */
+        emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF); /* r11 = overflow_arg_area */
+        emit_add_imm32(b, REG_R11, 15);
+        emit_rex_wrb(b, 1, 0, REG_R11);
+        emit_byte(b, 0x83);
+        emit_modrm(b, 3, 4, REG_R11 & 7); /* and $~15, %r11 */
+        emit_byte(b, 0xF0);
+
+        /* Load 2 qwords from [R11] into [rbp + ld_off[dst]] */
+        emit_load_base_off(b, REG_RDX, REG_R11, 0);
+        emit_store_spill(b, REG_RDX, ld_off[dst]);
+        emit_load_base_off(b, REG_RDX, REG_R11, 8);
+        emit_store_spill(b, REG_RDX, ld_off[dst] + 8);
+
+        /* Advance overflow_arg_area by 16 and save */
+        emit_add_imm32(b, REG_R11, 16);
+        emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+        return;
+    }
 
     /* INTEGER-class aggregate: copy `imm` bytes from the GP save area (or
      * overflow) into the caller-provided slot in call_args[1], then return
@@ -1404,7 +1425,13 @@ static void emit_va_arg(Buffer *b, const IRInst *inst, const RAResult *ra,
         /* end: */
         patch_rel32(b, jmp_end, b->len);
         if (dst >= 0) {
-            spill_if_needed_xmm(b, dst, 0, ra_xmm, gp_spill_area);
+            if (ra_xmm && dst < ra_xmm->num_values && ra_xmm->reg[dst] >= 0
+                && ra_xmm->reg[dst] < 16) {
+                int dr = ra_xmm->reg[dst];
+                if (dr != 0) emit_sse_mov_rr(b, dr, 0);
+            } else {
+                spill_if_needed_xmm(b, dst, 0, ra_xmm, gp_spill_area);
+            }
         }
     }
 }
@@ -1771,24 +1798,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_module_add_dbg_global(out, &gv);
         }
     }
-
-    /* Pointer slots that must hold the address of another global (array/struct
-     * decay, or a string literal parked in .rodata) become R_X86_64_64
-     * relocations in .rela.data.  This runs as a second pass so a fixup can
-     * name a global defined later in the module — resolving it against a
-     * half-built symbol table would turn it into an undefined external and
-     * point the slot at a PLT stub. */
-    for (size_t gi = 0; gi < ir->globals.len; gi++) {
-        const IRGlobal *g = &ir->globals.data[gi];
-        for (int fi = 0; fi < g->num_fixups; fi++) {
-            int tsym = emit_module_find_symbol(out, g->fixups[fi].sym);
-            if (tsym < 0)
-                tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
-            emit_module_add_data_reloc(out, global_off[gi] + g->fixups[fi].offset,
-                                       R_X86_64_64, tsym, g->fixups[fi].addend);
-        }
-    }
-    free(global_off);
 
     /* Cross-function call patches (accumulated across every function). */
     CallPatch *call_patches = NULL;
@@ -2330,6 +2339,26 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
 
             case IR_COPY: {
+                if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
+                    emit_ld_load(&out->text, inst->a, ld_off);
+                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    break;
+                }
+                if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
+                    int dr_xmm = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->dst] : -1;
+                    int ar_xmm = (ra_xmm && inst->a >= 0 && inst->a < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->a] : -1;
+                    if (dr_xmm >= 0 && ar_xmm >= 0 && dr_xmm == ar_xmm) {
+                        break;
+                    }
+                    ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    if (dr_xmm >= 0 && dr_xmm != XMM_SCRATCH0) {
+                        emit_sse_mov_rr(&out->text, dr_xmm, XMM_SCRATCH0);
+                    }
+                    spill_if_needed_xmm(&out->text, inst->dst, dr_xmm >= 0 ? dr_xmm : XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    break;
+                }
                 if (ra && inst->a >= 0 && inst->a < ra->num_values &&
                     inst->dst >= 0 && inst->dst < ra->num_values &&
                     ra->reg[inst->dst] == ra->reg[inst->a] &&
@@ -2399,6 +2428,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_LOAD: {
+                if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
+                    emit_ld_load(&out->text, inst->a, ld_off);
+                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    break;
+                }
+                if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
+                    int dr_xmm = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->dst] : -1;
+                    ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    if (dr_xmm >= 0 && dr_xmm != XMM_SCRATCH0) {
+                        emit_sse_mov_rr(&out->text, dr_xmm, XMM_SCRATCH0);
+                    }
+                    spill_if_needed_xmm(&out->text, inst->dst, dr_xmm >= 0 ? dr_xmm : XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    break;
+                }
                 /* Rarely reached: mem2reg usually eliminates LOAD.  If a LOAD
                  * survives, it copies the SSA value `a` into `dst`.  With
                  * regalloc, `a` may live in a register or a spill slot — both
@@ -2416,6 +2460,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_STORE: {
+                if ((inst->a >= 0 && value_is_ld(fn, inst->a)) || (inst->b >= 0 && value_is_ld(fn, inst->b))) {
+                    emit_ld_load(&out->text, inst->b, ld_off);
+                    emit_ld_store(&out->text, inst->a, ld_off);
+                    break;
+                }
+                if ((inst->a >= 0 && value_is_float_class(fn, inst->a)) || (inst->b >= 0 && value_is_float_class(fn, inst->b))) {
+                    int ar_xmm = (ra_xmm && inst->a >= 0 && inst->a < ra_xmm->num_values)
+                                 ? ra_xmm->reg[inst->a] : -1;
+                    if (ar_xmm >= 0) {
+                        ensure_reg_xmm(&out->text, inst->b, ar_xmm, ra_xmm, gp_spill_area);
+                    } else {
+                        ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                        spill_if_needed_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                    }
+                    break;
+                }
                 /* [a] = b.  Rarely reached — mem2reg normally removes it.
                  * Route both operands through ensure_reg / spill_if_needed so
                  * each is addressed at its real home; old_load/old_store
@@ -3011,7 +3071,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 if (inst->call_name && strcmp(inst->call_name, "va_arg") == 0) {
-                    emit_va_arg(&out->text, inst, ra, ra_xmm, gp_spill_area);
+                    emit_va_arg(&out->text, fn, inst, ra, ra_xmm, gp_spill_area, ld_off);
                     break;
                 }
                 int nargs = inst->call_nargs;
@@ -3525,6 +3585,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * signedness; inst->width is the destination float width. */
                 int src_w = inst->imm ? (int)inst->imm : 4;
                 int src_u = inst->is_unsigned;
+                int dst_is_f = (inst->width == 4);
                 if (value_is_ld(fn, inst->dst)) {
                     /* int→long double.  Load int into a GP reg, store into dst's
                      * slot, fild from the slot (pushes ld to st0), fstpt the
@@ -3537,34 +3598,31 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                         src_w, src_u);
                     break;
                 }
-                /* dst (float) = (float)a.  Load a into a GP scratch, cvtsi2sd,
-                 * then optionally narrow to float. */
+                /* dst (float) = (float)a.  Load a into a GP scratch. */
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (src_u && src_w == 8) {
-                    /* cvtsi2sd is signed.  Above 2^63 convert u/2 (rounding
+                    /* cvtsi2s is signed.  Above 2^63 convert u/2 (rounding
                      * the odd bit into it so no low bit is lost) and double
                      * the result. */
                     emit_test_rr(&out->text, REG_RAX);
                     size_t j_big = emit_jcc_rel32(&out->text, 0x88); /* js */
-                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX, 1);
+                    emit_sse_cvtsi2s(&out->text, XMM_SCRATCH0, REG_RAX, 1, dst_is_f);
                     size_t j_done = emit_jmp_rel32(&out->text);
                     patch_rel32(&out->text, j_big, out->text.len);
                     emit_mov_rr(&out->text, REG_RDX, REG_RAX);
                     emit_and_imm32(&out->text, REG_RDX, 1);
                     emit_shr_imm8(&out->text, REG_RAX, 1);
                     emit_or_rr(&out->text, REG_RAX, REG_RDX);
-                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX, 1);
+                    emit_sse_cvtsi2s(&out->text, XMM_SCRATCH0, REG_RAX, 1, dst_is_f);
                     emit_sse_arith(&out->text, 0x58 /* add */, XMM_SCRATCH0,
-                                   XMM_SCRATCH0, 0);
+                                   XMM_SCRATCH0, dst_is_f);
                     patch_rel32(&out->text, j_done, out->text.len);
                 } else {
                     if (src_u && src_w < 8)
                         mask_to_width(&out->text, REG_RAX, src_w, 1);
-                    emit_sse_cvtsi2sd(&out->text, XMM_SCRATCH0, REG_RAX,
-                                      src_w == 8 || src_u);
+                    emit_sse_cvtsi2s(&out->text, XMM_SCRATCH0, REG_RAX,
+                                      src_w == 8 || src_u, dst_is_f);
                 }
-                if (inst->width == 4)
-                    emit_sse_cvtsd2ss(&out->text, XMM_SCRATCH0, XMM_SCRATCH0);
                 if (dr >= 0 && dr != XMM_SCRATCH0)
                     emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
                 spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
@@ -3933,6 +3991,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         emit_module_add_symbol(out, fn->name, binding, 2 /* STT_FUNC */,
                                (uint16_t)SECT_TEXT, start_offset, fn_size);
     }
+
+    /* Pointer slots that must hold the address of another global or function
+     * become R_X86_64_64 relocations in .rela.data. This runs after all globals
+     * and functions are emitted so both are present in the symbol table. */
+    for (size_t gi = 0; gi < ir->globals.len; gi++) {
+        const IRGlobal *g = &ir->globals.data[gi];
+        for (int fi = 0; fi < g->num_fixups; fi++) {
+            int tsym = emit_module_find_symbol(out, g->fixups[fi].sym);
+            if (tsym < 0)
+                tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
+            emit_module_add_data_reloc(out, global_off[gi] + g->fixups[fi].offset,
+                                       R_X86_64_64, tsym, g->fixups[fi].addend);
+        }
+    }
+    free(global_off);
 
     /* ---- Resolve cross-function call patches ---- */
     for (size_t pi = 0; pi < num_call_patches; pi++) {

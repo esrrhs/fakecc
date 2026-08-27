@@ -91,9 +91,17 @@ difftest_one() {
     # Header-free gcc must not accept implicit libc decls (`int getenv()`).
     # Do not pass -w: we need the diagnostic.  Fall back to glibc headers
     # when gcc fails or only succeeded by assuming implicit functions.
-    # Ports declare `floor` themselves; gcc still needs libm.  Without -lm the
-    # link fails and the stdio.h fallback then clashes with `fprintf(void*,…)`.
+    #
+    # GCC 16 promotes several historically soft diagnostics to errors
+    # (-Wint-conversion, -Wimplicit-int).  Torture ports intentionally use
+    # those constructs; keep them as warnings so the header-free path still
+    # works, while implicit-function-declaration remains detectable.
+    # Do not pass -Wno-*-declaration-missing-parameter-type: that option
+    # exists only on GCC 14+, and unknown -Wno-error=* is a hard error on
+    # Ubuntu 24.04's GCC 13.  K&R forwards are rewritten in gcc_stdarg_prep.py.
     if ! gcc -std=gnu99 -D_GNU_SOURCE \
+            -Wno-error=int-conversion -Wno-error=implicit-int \
+            -Wno-error=incompatible-pointer-types \
             $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err" \
        || grep -qE 'implicit declaration|隐式声明' "$WORK/$name.gcc.err"; then
         {
@@ -108,9 +116,33 @@ difftest_one() {
             echo '#include <sys/stat.h>'
             echo '#include <errno.h>'
             echo '#define __syscall syscall'
-            cat "$WORK/$name.body.c"
+            # Drop port libc prototypes that clash with glibc (GCC 16+).
+            # fprintf(void*,...) vs FILE* is the common one; strip the whole
+            # extern-decl line for names the headers above already provide.
+            python3 - "$WORK/$name.body.c" <<'PY'
+import re, sys
+src = open(sys.argv[1], encoding="latin-1").read()
+libc = (
+    "abort|abs|atoi|atol|atof|calloc|ceil|exit|fabs|floor|fprintf|free|"
+    "isalnum|isalpha|isdigit|islower|isprint|isspace|isupper|isxdigit|"
+    "labs|malloc|memchr|memcmp|memcpy|memmove|memset|pow|printf|putchar|"
+    "puts|realloc|snprintf|sprintf|sqrt|strcat|strchr|strcmp|strcpy|"
+    "strlen|strncat|strncmp|strncpy|strrchr|strstr|"
+    "rand|srand|stdin|stdout|stderr|open|close|read|write|unlink|tmpnam"
+)
+src = re.sub(
+    rf"^extern\s+[^;\n]*\b(?:{libc})\s*(?:\([^;\n]*\))?;\s*\n?",
+    "",
+    src,
+    flags=re.M,
+)
+sys.stdout.buffer.write(src.encode("latin-1"))
+PY
         } > "$WORK/$name.gcc.c"
-        if ! gcc -std=gnu99 -D_GNU_SOURCE -w $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err"; then
+        if ! gcc -std=gnu99 -D_GNU_SOURCE -w \
+                -Wno-error=int-conversion -Wno-error=implicit-int \
+                -Wno-error=incompatible-pointer-types \
+                $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err"; then
             printf '%-28s FAIL (gcc rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.gcc.err")"
             return 1
         fi
