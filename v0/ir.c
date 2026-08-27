@@ -4156,12 +4156,14 @@ IRValue hi;
             (runtime.strcmp(e->u.call.callee->u.var.name, "abs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "labs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "llabs") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "imaxabs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_abs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_labs") == 0 ||
-             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_llabs") == 0) &&
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_llabs") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_imaxabs") == 0) &&
             e->u.call.args.len > 0) {
             const char *bname = e->u.call.callee->u.var.name;
-            int bw = (runtime.strstr(bname, "llabs") || runtime.strstr(bname, "labs")) ? 8 : 4;
+            int bw = (runtime.strstr(bname, "llabs") || runtime.strstr(bname, "labs") || runtime.strstr(bname, "imaxabs")) ? 8 : 4;
             IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
             arg = coerce(fn, arg, get_value_width(fn, arg), get_value_is_unsigned(fn, arg), bw, 0, e->loc);
             IRValue slot = new_value(fn);

@@ -802,7 +802,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_abs") == 0 || strcmp(bname, "abs") == 0)
                 ret = type_make_int(4, 0);
-            else if (strcmp(bname, "__builtin_labs") == 0 || strcmp(bname, "__builtin_llabs") == 0 || strcmp(bname, "labs") == 0 || strcmp(bname, "llabs") == 0)
+            else if (strcmp(bname, "__builtin_labs") == 0 || strcmp(bname, "__builtin_llabs") == 0 || strcmp(bname, "__builtin_imaxabs") == 0 || strcmp(bname, "labs") == 0 || strcmp(bname, "llabs") == 0 || strcmp(bname, "imaxabs") == 0)
                 ret = type_make_int(8, 0);
             Type p0, p1;
             Type *params[2];
