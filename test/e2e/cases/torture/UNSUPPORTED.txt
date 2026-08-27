@@ -80,7 +80,6 @@ builtins/fputs.c
 builtins/memops-asm.c
 builtins/pr22237-1.c
 builtins/sprintf.c
-builtins/strcat.c
 builtins/strncat.c
 builtins/strncmp.c
 builtins/strncpy.c

@@ -87,6 +87,20 @@ char *strcpy(char *dst, const char *src) {
     return dst;
 }
 
+/* ISO C strcat: copy src onto the terminating NUL of dst and return dst.
+ * Same contract as glibc/GCC: dest and src must not overlap. */
+char *strcat(char *dst, const char *src) {
+    size_t i = 0;
+    while (dst[i] != 0) i = i + 1;
+    size_t j = 0;
+    while (1) {
+        dst[i + j] = src[j];
+        if (src[j] == 0) break;
+        j = j + 1;
+    }
+    return dst;
+}
+
 char *strncpy(char *dst, const char *src, size_t n) {
     size_t i = 0;
     while (i < n && src[i] != 0) {
