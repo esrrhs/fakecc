@@ -804,6 +804,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_labs") == 0 || strcmp(bname, "__builtin_llabs") == 0 || strcmp(bname, "__builtin_imaxabs") == 0 || strcmp(bname, "labs") == 0 || strcmp(bname, "llabs") == 0 || strcmp(bname, "imaxabs") == 0)
                 ret = type_make_int(8, 0);
+            else if (strcmp(bname, "__builtin_uabs") == 0)
+                ret = type_make_int(4, 1);
+            else if (strcmp(bname, "__builtin_ulabs") == 0 || strcmp(bname, "__builtin_ullabs") == 0 || strcmp(bname, "__builtin_umaxabs") == 0)
+                ret = type_make_int(8, 1);
             Type p0, p1;
             Type *params[2];
             int num_params = 0;

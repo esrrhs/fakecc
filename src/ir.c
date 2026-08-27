@@ -3784,6 +3784,44 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             set_value_type(fn, result, bw, 0);
             return result;
         }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "uabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "ulabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "ullabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "umaxabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_uabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ulabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ullabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umaxabs") == 0) &&
+            e->u.call.args.len > 0) {
+            const char *bname = e->u.call.callee->u.var.name;
+            int bw = (strstr(bname, "ulabs") || strstr(bname, "ullabs") || strstr(bname, "umaxabs")) ? 8 : 4;
+            IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
+            arg = coerce(fn, arg, get_value_width(fn, arg), get_value_is_unsigned(fn, arg), bw, 0, e->loc);
+            IRValue slot = new_value(fn);
+            emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, bw, 1, e->loc);
+            int L_neg = new_label(fn);
+            int L_pos = new_label(fn);
+            int L_done = new_label(fn);
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, bw, 0, e->loc);
+            IRValue cond = new_value(fn);
+            emit_inst_w(fn, IR_LT, cond, arg, zero, 0, bw, 0, e->loc);
+            emit_cbr(fn, cond, L_neg, L_pos, e->loc);
+            emit_label(fn, L_neg, e->loc);
+            IRValue neg = new_value(fn);
+            emit_inst_w(fn, IR_NEG, neg, arg, -1, 0, bw, 1, e->loc);
+            emit_inst_w(fn, IR_STORE, -1, slot, neg, 0, bw, 1, e->loc);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_pos, e->loc);
+            emit_inst_w(fn, IR_STORE, -1, slot, arg, 0, bw, 1, e->loc);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_done, e->loc);
+            IRValue result = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, bw, 1, e->loc);
+            set_value_type(fn, result, bw, 1);
+            return result;
+        }
         /* The va_start / va_arg / va_end builtins.  They are lowered to a
          * named IR_CALL (call_name = the builtin) so codegen can dispatch by
          * name, exactly like __syscall.  The va_list is already a pointer to

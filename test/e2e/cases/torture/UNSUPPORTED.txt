@@ -78,4 +78,3 @@ builtins/complex-1.c
 builtins/memops-asm.c
 builtins/strstr-asm.c
 builtins/uabs-1.c
-builtins/uabs-3.c
