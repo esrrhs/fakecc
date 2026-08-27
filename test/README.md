@@ -51,7 +51,8 @@ test/
 │   ├── run_difftest.sh     # GCC 差分测试驱动脚本
 │   ├── run_multi_e2e.sh    # 多文件编译与静态链接测试驱动脚本
 │   ├── run_shlib_e2e.sh    # 动态共享库（.so）链接测试驱动脚本
-│   └── run_gdb_e2e.sh      # 真实 GDB 断点与变量追踪测试驱动脚本
+│   ├── run_gdb_e2e.sh      # 真实 GDB 断点与变量追踪测试驱动脚本
+│   └── gcc.c-torture/      # GCC 16.2.0 C-Torture 原始测试套件（参考镜像）
 └── compile/                # 编译器健壮性仅编译测试套件（Compile-Only Suite）
     ├── *.c                 # 2,003 个 GCC 历史边界压力用例
     └── run_compile.sh      # 健壮性编译驱动脚本（fakecc -c）
