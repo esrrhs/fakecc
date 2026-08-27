@@ -338,6 +338,8 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     int has_dyn_alloca;
+    int needs_apply_args;
+    int needs_apply;
     IRValue sret_value;
     IRDebugVar *dbg_vars;
     size_t num_dbg_vars;

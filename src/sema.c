@@ -753,9 +753,9 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         if (strncmp(e->u.var.name, "__builtin_", 10) == 0 || strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
             Type ret = type_default_int();
-            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0)
+            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)
                 ret = type_make_void();
-            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0)
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0)
                 ret = type_make_ptr(type_make_void());
             else if (strcmp(bname, "__builtin_strcat") == 0 || strcmp(bname, "__builtin_strcpy") == 0 ||
                      strcmp(bname, "__builtin_strncat") == 0 || strcmp(bname, "__builtin_strncpy") == 0)
@@ -1031,6 +1031,39 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             } else {
                 set_type(e, val_ty);
             }
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__builtin_apply_args") == 0) {
+            if (e->u.call.args.len != 0) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_apply_args takes no arguments");
+            }
+            set_type(e, type_make_ptr(type_make_void()));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__builtin_apply") == 0) {
+            if (e->u.call.args.len != 3) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_apply takes 3 arguments");
+            }
+            for (size_t i = 0; i < e->u.call.args.len; i++) {
+                Type at = check_expr(e->u.call.args.data[i], st, ft);
+                type_free(&at);
+            }
+            set_type(e, type_make_ptr(type_make_void()));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__builtin_return") == 0) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_return takes 1 argument");
+            }
+            Type at = check_expr(e->u.call.args.data[0], st, ft);
+            type_free(&at);
+            set_type(e, type_make_void());
             return type_clone(e->type);
         }
         /* Recognize the va_start / va_arg / va_end builtins BEFORE the callee

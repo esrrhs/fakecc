@@ -186,6 +186,8 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     int has_dyn_alloca;
+    int needs_apply_args;
+    int needs_apply;
     IRValue sret_value;
     IRDebugVar *dbg_vars;
     size_t num_dbg_vars;
@@ -4290,6 +4292,62 @@ IRValue hi;
         }
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
+            if (runtime.strcmp(cname, "__builtin_apply_args") == 0) {
+                fn->needs_apply_args = 1;
+                IRInst inst;
+                runtime.memset(&inst, 0, sizeof(inst));
+                inst.op = IR_CALL;
+                inst.dst = new_value(fn);
+                inst.a = -1; inst.b = -1;
+                inst.loc = e->loc;
+                inst.call_name = xstrdup("__builtin_apply_args");
+                inst.call_callee = -1;
+                inst.call_nargs = 0;
+                inst.width = 8;
+                inst.is_unsigned = 1;
+                ir_inst_array_push(&fn->insts, inst);
+                set_value_type(fn, inst.dst, 8, 1);
+                return inst.dst;
+            }
+            if (runtime.strcmp(cname, "__builtin_apply") == 0) {
+                fn->needs_apply = 1;
+                fn->has_dyn_alloca = 1;
+                IRValue fptr = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue ablk = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue asz = lower_expr(fn, st, e->u.call.args.data[2]);
+                IRInst inst;
+                runtime.memset(&inst, 0, sizeof(inst));
+                inst.op = IR_CALL;
+                inst.dst = new_value(fn);
+                inst.a = -1; inst.b = -1;
+                inst.loc = e->loc;
+                inst.call_name = xstrdup("__builtin_apply");
+                inst.call_callee = -1;
+                inst.call_nargs = 3;
+                inst.call_args[0] = fptr;
+                inst.call_args[1] = ablk;
+                inst.call_args[2] = asz;
+                inst.width = 8;
+                inst.is_unsigned = 1;
+                ir_inst_array_push(&fn->insts, inst);
+                set_value_type(fn, inst.dst, 8, 1);
+                return inst.dst;
+            }
+            if (runtime.strcmp(cname, "__builtin_return") == 0) {
+                IRValue rp = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRInst inst;
+                runtime.memset(&inst, 0, sizeof(inst));
+                inst.op = IR_CALL;
+                inst.dst = -1;
+                inst.a = -1; inst.b = -1;
+                inst.loc = e->loc;
+                inst.call_name = xstrdup("__builtin_return");
+                inst.call_callee = -1;
+                inst.call_nargs = 1;
+                inst.call_args[0] = rp;
+                ir_inst_array_push(&fn->insts, inst);
+                return -1;
+            }
             if (runtime.strcmp(cname, "va_copy") == 0
                 || runtime.strcmp(cname, "__builtin_va_copy") == 0) {
                 IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);

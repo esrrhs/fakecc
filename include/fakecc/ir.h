@@ -225,6 +225,13 @@ typedef struct {
     int   is_variadic;
     int   is_static;  /* 1 = `static` function — LOCAL linkage */
     int   has_dyn_alloca; /* 1 = function uses dynamic alloca / VLA */
+    /* GNU __builtin_apply_args: save incoming arg regs at prologue (GCC
+     * migrates the save to function entry so later calls cannot clobber
+     * them).  Layout matches GCC x86-64 SysV apply_args_size(). */
+    int   needs_apply_args;
+    /* GNU __builtin_apply: reserve a result block and allow a dynamic
+     * outgoing-arg allocation (has_dyn_alloca is also set). */
+    int   needs_apply;
     /* Slice 13: SSA value of the hidden sret pointer param (param index 0)
      * when ret_is_struct && ret_reg_n == 0.  The return statement copies
      * struct bytes into *sret_value and returns the pointer in RAX. */

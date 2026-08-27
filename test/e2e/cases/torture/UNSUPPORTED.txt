@@ -51,8 +51,7 @@ pr82210.c
 # _Decimal64 not supported by fakecc.
 pr80692.c
 
-# __builtin_apply / __builtin_apply_args / __builtin_va_arg_pack not supported by fakecc.
-pr47237.c
+# __builtin_va_arg_pack not supported by fakecc.
 va-arg-pack-1.c
 
 # GCC Fortify Source __builtin_object_size / __builtin___*_chk buffer overflow checks

@@ -338,6 +338,8 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     int has_dyn_alloca;
+    int needs_apply_args;
+    int needs_apply;
     IRValue sret_value;
     IRDebugVar *dbg_vars;
     size_t num_dbg_vars;
@@ -1828,6 +1830,114 @@ static void emit_load_base_off32(Buffer *b, int dst, int base, int off) {
         emit_int32(b, off);
     }
 }
+
+#define APPLY_ARGS_SIZE    192
+#define APPLY_RESULT_SIZE  64
+#define APPLY_ARGS_RAX     8
+#define APPLY_ARGS_RDX     16
+#define APPLY_ARGS_RCX     24
+#define APPLY_ARGS_RSI     32
+#define APPLY_ARGS_RDI     40
+#define APPLY_ARGS_R8      48
+#define APPLY_ARGS_R9      56
+#define APPLY_ARGS_XMM     64
+#define APPLY_RES_RAX      0
+#define APPLY_RES_RDX      8
+#define APPLY_RES_RSI      16
+#define APPLY_RES_RDI      24
+#define APPLY_RES_XMM0     32
+#define APPLY_RES_XMM1     48
+static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int has_dyn_alloca);
+static void emit_sse_movaps_base_off(Buffer *b, int xmm, int base, int off, int store) {
+    emit_rex_wrb(b, 0, xmm, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, store ? 0x29 : 0x28);
+    int need_sib = ((base & 7) == 4);
+    if (off >= -128 && off <= 127) {
+        emit_modrm(b, 1, xmm, need_sib ? 4 : base);
+        if (need_sib) emit_byte(b, 0x24);
+        emit_byte(b, (uint8_t)(off & 0xFF));
+    } else {
+        emit_modrm(b, 2, xmm, need_sib ? 4 : base);
+        if (need_sib) emit_byte(b, 0x24);
+        emit_int32(b, off);
+    }
+}
+static void emit_fill_apply_args(Buffer *b, int base) {
+    emit_store_rsp_off(b, REG_RAX, base + APPLY_ARGS_RAX);
+    emit_store_rsp_off(b, REG_RDX, base + APPLY_ARGS_RDX);
+    emit_store_rsp_off(b, REG_RCX, base + APPLY_ARGS_RCX);
+    emit_store_rsp_off(b, REG_RSI, base + APPLY_ARGS_RSI);
+    emit_store_rsp_off(b, REG_RDI, base + APPLY_ARGS_RDI);
+    emit_store_rsp_off(b, REG_R8,  base + APPLY_ARGS_R8);
+    emit_store_rsp_off(b, REG_R9,  base + APPLY_ARGS_R9);
+    for (int x = 0; x < 8; x++)
+        emit_sse_store_rsp_off(b, x, base + APPLY_ARGS_XMM + 16 * x);
+    emit_lea_rbp(b, REG_RCX, 16);
+    emit_store_rsp_off(b, REG_RCX, base + 0);
+}
+static void emit_builtin_apply_args(Buffer *b, const IRInst *inst, const RAResult *ra,
+                                    int dr, int apply_args_rbp_off) {
+    int target = (dr >= 0) ? dr : REG_RAX;
+    emit_lea_rbp(b, target, apply_args_rbp_off);
+    if (dr < 0)
+        spill_if_needed(b, inst->dst, REG_RAX, ra);
+}
+static void emit_builtin_apply(Buffer *b, const IRInst *inst, const RAResult *ra,
+                               int dr, int result_rbp_off, int saved_sp_rbp_off) {
+    ensure_reg(b, inst->call_args[0], REG_RAX, ra);
+    emit_store_spill(b, REG_RAX, result_rbp_off + 0);
+    ensure_reg(b, inst->call_args[1], REG_RAX, ra);
+    emit_store_spill(b, REG_RAX, result_rbp_off + 8);
+    ensure_reg(b, inst->call_args[2], REG_RAX, ra);
+    emit_store_spill(b, REG_RAX, result_rbp_off + 16);
+    emit_store_spill(b, REG_RSP, saved_sp_rbp_off);
+    emit_load_spill(b, REG_R11, result_rbp_off + 0);
+    emit_load_spill(b, REG_R10, result_rbp_off + 8);
+    emit_load_spill(b, REG_RCX, result_rbp_off + 16);
+    emit_mov_rr(b, REG_RDX, REG_RCX);
+    emit_add_imm32(b, REG_RCX, 15);
+    emit_and_imm32(b, REG_RCX, (int32_t)-16);
+    emit_sub_rr(b, REG_RSP, REG_RCX);
+    emit_load_base_off(b, REG_RSI, REG_R10, 0);
+    emit_mov_rr(b, REG_RDI, REG_RSP);
+    emit_mov_rr(b, REG_RCX, REG_RDX);
+    emit_byte(b, 0xFC);
+    emit_byte(b, 0xF3);
+    emit_byte(b, 0xA4);
+    emit_load_base_off(b, REG_RAX, REG_R10, APPLY_ARGS_RAX);
+    emit_load_base_off(b, REG_RDX, REG_R10, APPLY_ARGS_RDX);
+    emit_load_base_off(b, REG_RCX, REG_R10, APPLY_ARGS_RCX);
+    emit_load_base_off(b, REG_RSI, REG_R10, APPLY_ARGS_RSI);
+    emit_load_base_off(b, REG_RDI, REG_R10, APPLY_ARGS_RDI);
+    emit_load_base_off(b, REG_R8,  REG_R10, APPLY_ARGS_R8);
+    emit_load_base_off(b, REG_R9,  REG_R10, APPLY_ARGS_R9);
+    for (int x = 0; x < 8; x++)
+        emit_sse_movaps_base_off(b, x, REG_R10, APPLY_ARGS_XMM + 16 * x, 0);
+    emit_indirect_call(b, REG_R11);
+    emit_store_spill(b, REG_RAX, result_rbp_off + APPLY_RES_RAX);
+    emit_store_spill(b, REG_RDX, result_rbp_off + APPLY_RES_RDX);
+    emit_store_spill(b, REG_RSI, result_rbp_off + APPLY_RES_RSI);
+    emit_store_spill(b, REG_RDI, result_rbp_off + APPLY_RES_RDI);
+    emit_sse_movaps_base_off(b, 0, REG_RBP, result_rbp_off + APPLY_RES_XMM0, 1);
+    emit_sse_movaps_base_off(b, 1, REG_RBP, result_rbp_off + APPLY_RES_XMM1, 1);
+    emit_load_spill(b, REG_RSP, saved_sp_rbp_off);
+    int target = (dr >= 0) ? dr : REG_RAX;
+    emit_lea_rbp(b, target, result_rbp_off);
+    if (dr < 0)
+        spill_if_needed(b, inst->dst, REG_RAX, ra);
+}
+static void emit_builtin_return(Buffer *b, const IRInst *inst, const RAResult *ra,
+                                int stack_size, const int cs_used[3], int has_dyn_alloca) {
+    ensure_reg(b, inst->call_args[0], REG_R10, ra);
+    emit_load_base_off(b, REG_RAX, REG_R10, APPLY_RES_RAX);
+    emit_load_base_off(b, REG_RDX, REG_R10, APPLY_RES_RDX);
+    emit_load_base_off(b, REG_RSI, REG_R10, APPLY_RES_RSI);
+    emit_load_base_off(b, REG_RDI, REG_R10, APPLY_RES_RDI);
+    emit_sse_movaps_base_off(b, 0, REG_R10, APPLY_RES_XMM0, 0);
+    emit_sse_movaps_base_off(b, 1, REG_R10, APPLY_RES_XMM1, 0);
+    emit_epilogue(b, stack_size, cs_used, has_dyn_alloca);
+}
 static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
                           int gp_offset, int fp_offset, int overflow_off) {
     int ap = inst->call_args[0];
@@ -2359,10 +2469,30 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         int stack_size = gp_spill_area + xmm_spill_area + pinned_area + ld_area;
         if (!ra && stack_size == 0) stack_size = 8 * fn->next_value_id;
         if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
-        if (fn->is_variadic) stack_size += 176;
+        int apply_args_rsp_off = -1, apply_result_rsp_off = -1, apply_saved_sp_rsp_off = -1;
+        int bottom_extra = 0;
+        if (fn->is_variadic) bottom_extra = 176;
+        if (fn->needs_apply_args) {
+            apply_args_rsp_off = bottom_extra;
+            bottom_extra += APPLY_ARGS_SIZE;
+        }
+        if (fn->needs_apply) {
+            apply_result_rsp_off = bottom_extra;
+            bottom_extra += APPLY_RESULT_SIZE;
+            apply_saved_sp_rsp_off = bottom_extra;
+            bottom_extra += 8;
+        }
+        stack_size += bottom_extra;
         if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
         curr_cs_count = cs_count;
         if (((cs_count) & 1) != 0) stack_size += 8;
+        int frame_down = cs_save_area + stack_size;
+        int apply_args_rbp_off = (apply_args_rsp_off >= 0)
+            ? -(frame_down - apply_args_rsp_off) : 0;
+        int apply_result_rbp_off = (apply_result_rsp_off >= 0)
+            ? -(frame_down - apply_result_rsp_off) : 0;
+        int apply_saved_sp_rbp_off = (apply_saved_sp_rsp_off >= 0)
+            ? -(frame_down - apply_saved_sp_rsp_off) : 0;
         emit_byte(&out->text, 0x55);
         size_t after_push_rbp_pc = out->text.len;
         emit_rex_w(&out->text);
@@ -2443,6 +2573,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_sse_store_rsp_off(&out->text, 6, 144);
             emit_sse_store_rsp_off(&out->text, 7, 160);
         }
+        if (fn->needs_apply_args)
+            emit_fill_apply_args(&out->text, apply_args_rsp_off);
         for (int p = nparams - 1; p >= 0; p--) {
             if (arrive_reg[p] < 0) continue;
             if (arrive_is_xmm[p]) {
@@ -3301,6 +3433,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                         }
                     }
+                    break;
+                }
+                if (inst->call_name && runtime.strcmp(inst->call_name, "__builtin_apply_args") == 0) {
+                    emit_builtin_apply_args(&out->text, inst, ra, dr, apply_args_rbp_off);
+                    break;
+                }
+                if (inst->call_name && runtime.strcmp(inst->call_name, "__builtin_apply") == 0) {
+                    emit_builtin_apply(&out->text, inst, ra, dr,
+                                       apply_result_rbp_off, apply_saved_sp_rbp_off);
+                    break;
+                }
+                if (inst->call_name && runtime.strcmp(inst->call_name, "__builtin_return") == 0) {
+                    emit_builtin_return(&out->text, inst, ra, stack_size, cs_used,
+                                        fn->has_dyn_alloca);
                     break;
                 }
                 if (inst->call_name && runtime.strcmp(inst->call_name, "va_start") == 0) {
