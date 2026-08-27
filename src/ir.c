@@ -1938,7 +1938,8 @@ static int bos_is_chk_builtin(const char *n) {
                  strcmp(n, "__builtin___memmove_chk") == 0 ||
                  strcmp(n, "__builtin___mempcpy_chk") == 0 ||
                  strcmp(n, "__builtin___memset_chk") == 0 ||
-                 strcmp(n, "__builtin___stpncpy_chk") == 0);
+                 strcmp(n, "__builtin___stpncpy_chk") == 0 ||
+                 strcmp(n, "__builtin___strncpy_chk") == 0);
 }
 
 
@@ -1969,6 +1970,7 @@ static const char *bos_chk_plain_name(const char *n) {
     if (strstr(n, "memmove")) return "memmove";
     if (strstr(n, "memset")) return "memset";
     if (strstr(n, "stpncpy")) return "stpncpy";
+    if (strstr(n, "strncpy")) return "strncpy";
     return "memcpy";
 }
 
@@ -1978,6 +1980,7 @@ static const char *bos_chk_rt_name(const char *n) {
     if (strstr(n, "memmove")) return "__memmove_chk";
     if (strstr(n, "memset")) return "__memset_chk";
     if (strstr(n, "stpncpy")) return "__stpncpy_chk";
+    if (strstr(n, "strncpy")) return "__strncpy_chk";
     return "__memcpy_chk";
 }
 
