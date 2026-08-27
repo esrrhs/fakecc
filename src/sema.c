@@ -757,7 +757,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_void();
             else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0 || strcmp(bname, "__builtin___memcpy_chk") == 0 || strcmp(bname, "__builtin___memmove_chk") == 0 || strcmp(bname, "__builtin___mempcpy_chk") == 0 || strcmp(bname, "__builtin___memset_chk") == 0)
                 ret = type_make_ptr(type_make_void());
-            else if (strcmp(bname, "__builtin_strcat") == 0 || strcmp(bname, "__builtin_strcpy") == 0 ||
+            else if (strcmp(bname, "__builtin_strcat") == 0 || strcmp(bname, "__builtin___strcat_chk") == 0 ||
+                     strcmp(bname, "__builtin_strcpy") == 0 || strcmp(bname, "__builtin___strcpy_chk") == 0 ||
                      strcmp(bname, "__builtin_stpcpy") == 0 || strcmp(bname, "__builtin___stpcpy_chk") == 0 ||
                      strcmp(bname, "__builtin_stpncpy") == 0 || strcmp(bname, "__builtin___stpncpy_chk") == 0 ||
                      strcmp(bname, "__builtin_strncat") == 0 || strcmp(bname, "__builtin_strncpy") == 0)

@@ -1951,7 +1951,12 @@ static int bos_is_sprintf_chk_builtin(const char *n) {
 }
 
 static int bos_is_stpcpy_chk_builtin(const char *n) {
-    return n && strcmp(n, "__builtin___stpcpy_chk") == 0;
+    return n && (strcmp(n, "__builtin___stpcpy_chk") == 0 ||
+                 strcmp(n, "__builtin___strcpy_chk") == 0);
+}
+
+static int bos_is_strcat_chk_builtin(const char *n) {
+    return n && strcmp(n, "__builtin___strcat_chk") == 0;
 }
 
 static const char *bos_chk_plain_name(const char *n) {
@@ -2548,11 +2553,50 @@ static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long lo
         *off += delta;
         return 1;
     }
-    if (e->kind == EX_VAR && e->u.var.name && g_ir_tu) {
-        /* Follow file-scope char arrays only. Pointer variables (s2/s3/ptr)
-         * can be reassigned or asm-clobbered, matching GCC c_strlen. */
-        if (e->type.kind == TY_PTR) return 0;
+    if (e->kind == EX_VAR && e->u.var.name) {
         if (e->type.is_volatile) return 0;
+        /* Local pointer to a single known C string (e.g. const char *x2 = "").
+         * File-scope pointers can be asm-clobbered, so those stay unknown. */
+        if (e->type.kind == TY_PTR) {
+            if (bos_is_param(e->u.var.name)) return 0;
+            if (g_ir_tu) {
+                for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+                    const Stmt *gs = &g_ir_tu->globals.data[i];
+                    if (gs->kind == ST_DECL && gs->u.decl.name &&
+                        strcmp(gs->u.decl.name, e->u.var.name) == 0)
+                        return 0;
+                }
+            }
+            static int depth;
+            if (depth >= 8) return 0;
+            const Expr *srcs[32];
+            int saw_unk = 0;
+            int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
+            if (saw_unk || ns == 0) return 0;
+            depth++;
+            const char *b0 = NULL;
+            int n0 = 0;
+            long long o0 = 0;
+            int ok = 1;
+            for (int i = 0; i < ns; i++) {
+                const char *b = NULL;
+                int n = 0;
+                long long o = 0;
+                if (!bos_cstr_info(srcs[i], &b, &n, &o)) { ok = 0; break; }
+                if (i == 0) { b0 = b; n0 = n; o0 = o; }
+                else if (n != n0 || o != o0 || memcmp(b, b0, (size_t)n) != 0) {
+                    ok = 0;
+                    break;
+                }
+            }
+            depth--;
+            if (!ok) return 0;
+            *bytes = b0 ? b0 : "";
+            *nbytes = n0;
+            *off = o0;
+            return 1;
+        }
+        if (!g_ir_tu) return 0;
         for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
             const Stmt *gs = &g_ir_tu->globals.data[i];
             if (gs->kind != ST_DECL || !gs->u.decl.name) continue;
@@ -2710,11 +2754,13 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
     return bos_emit_named_call_w(fn, "__sprintf_chk", args, nargs, e->loc, 4, 0);
 }
 
-/* __builtin___stpcpy_chk(dst, src, size).
- * Fold to stpcpy(dst, src) when dest size is unknown (-1) or strlen(src)
- * is proven < size (NUL needs one extra byte). Otherwise __stpcpy_chk. */
+/* __builtin___stpcpy_chk / __builtin___strcpy_chk (dst, src, size).
+ * Fold to stpcpy/strcpy when dest size is unknown (-1) or strlen(src)
+ * is proven < size (NUL needs one extra byte). */
 static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
                                              const Expr *e) {
+    const char *cn = e->u.call.callee->u.var.name;
+    int is_stp = cn && strstr(cn, "stpcpy") != NULL;
     const Expr *size_e = e->u.call.args.data[2];
     unsigned long long size_val = ~(unsigned long long)0;
     int size_const = bos_eval_size_arg(st, size_e, &size_val);
@@ -2732,7 +2778,7 @@ static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
         IRValue args[2];
         args[0] = dst;
         args[1] = src;
-        return bos_emit_named_call(fn, "stpcpy", args, 2, e->loc);
+        return bos_emit_named_call(fn, is_stp ? "stpcpy" : "strcpy", args, 2, e->loc);
     }
     IRValue szv = new_value(fn);
     if (size_const) {
@@ -2745,7 +2791,51 @@ static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
     args[0] = dst;
     args[1] = src;
     args[2] = szv;
-    return bos_emit_named_call(fn, "__stpcpy_chk", args, 3, e->loc);
+    return bos_emit_named_call(fn, is_stp ? "__stpcpy_chk" : "__strcpy_chk", args, 3, e->loc);
+}
+
+/* __builtin___strcat_chk(dst, src, size).
+ * Fold to strcat when dest size is unknown (-1), the source is a known
+ * empty string (GCC treats strcat(d,"") as a no-op), or both string
+ * lengths are known and strlen(dst)+strlen(src) < size. */
+static IRValue lower_fortify_strcat_chk_call(IRFunction *fn, IRSymTable *st,
+                                             const Expr *e) {
+    const Expr *size_e = e->u.call.args.data[2];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    int fold_plain = 0;
+    unsigned long long slen = 0;
+    int src_known = bos_cstr_len_max(st, e->u.call.args.data[1], &slen);
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (src_known && slen == 0)
+        fold_plain = 1;
+    else if (size_const && src_known) {
+        unsigned long long dlen = 0;
+        if (bos_cstr_len_max(st, e->u.call.args.data[0], &dlen)
+            && dlen + slen < size_val)
+            fold_plain = 1;
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+    if (fold_plain) {
+        IRValue args[2];
+        args[0] = dst;
+        args[1] = src;
+        return bos_emit_named_call(fn, "strcat", args, 2, e->loc);
+    }
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    IRValue args[3];
+    args[0] = dst;
+    args[1] = src;
+    args[2] = szv;
+    return bos_emit_named_call(fn, "__strcat_chk", args, 3, e->loc);
 }
 
 
@@ -4315,6 +4405,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 return lower_fortify_sprintf_chk_call(fn, st, e);
             if (bos_is_stpcpy_chk_builtin(bos_cn) && e->u.call.args.len >= 3)
                 return lower_fortify_stpcpy_chk_call(fn, st, e);
+            if (bos_is_strcat_chk_builtin(bos_cn) && e->u.call.args.len >= 3)
+                return lower_fortify_strcat_chk_call(fn, st, e);
             if (bos_is_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
                 return lower_fortify_chk_call(fn, st, e);
         }
@@ -5322,6 +5414,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 else if (strcmp(cname, "__builtin_strlen") == 0) inst.call_name = xstrdup("strlen");
                 else if (strcmp(cname, "__builtin_strspn") == 0) inst.call_name = xstrdup("strspn");
                 else if (strcmp(cname, "__builtin_strcpy") == 0) inst.call_name = xstrdup("strcpy");
+                else if (strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");
                 else if (strcmp(cname, "__builtin_stpcpy") == 0) inst.call_name = xstrdup("stpcpy");
                 else if (strcmp(cname, "__builtin_stpncpy") == 0) inst.call_name = xstrdup("stpncpy");
                 else if (strcmp(cname, "__builtin_strncpy") == 0) inst.call_name = xstrdup("strncpy");
