@@ -94,6 +94,11 @@ foreach(lvl O0 O1)
     add_test(NAME e2e_shlib_${lvl}
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_shlib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # Compile-only robustness suite (2,003 GCC edge-case tests).
+    add_test(NAME compile_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/compile/run_compile.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endforeach()
 
 # DWARF against a real gdb.  Runs both -O0 and -O1 internally, since the

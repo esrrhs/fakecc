@@ -136,6 +136,9 @@ src = re.sub(
     src,
     flags=re.M,
 )
+src = re.sub(r"typedef\s+[^;]*\bfpos_t\s*;", "", src)
+src = re.sub(r"typedef\s+struct\s+_?IO_FILE\s+FILE\s*;", "", src)
+src = re.sub(r"typedef\s+struct\s+FILE\s+FILE\s*;", "", src)
 sys.stdout.buffer.write(src.encode("latin-1"))
 PY
         } > "$WORK/$name.gcc.c"
