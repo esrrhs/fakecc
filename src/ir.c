@@ -1937,7 +1937,8 @@ static int bos_is_chk_builtin(const char *n) {
     return n && (strcmp(n, "__builtin___memcpy_chk") == 0 ||
                  strcmp(n, "__builtin___memmove_chk") == 0 ||
                  strcmp(n, "__builtin___mempcpy_chk") == 0 ||
-                 strcmp(n, "__builtin___memset_chk") == 0);
+                 strcmp(n, "__builtin___memset_chk") == 0 ||
+                 strcmp(n, "__builtin___stpncpy_chk") == 0);
 }
 
 
@@ -1958,6 +1959,7 @@ static const char *bos_chk_plain_name(const char *n) {
     if (strstr(n, "memcpy")) return "memcpy";
     if (strstr(n, "memmove")) return "memmove";
     if (strstr(n, "memset")) return "memset";
+    if (strstr(n, "stpncpy")) return "stpncpy";
     return "memcpy";
 }
 
@@ -1966,6 +1968,7 @@ static const char *bos_chk_rt_name(const char *n) {
     if (strstr(n, "memcpy")) return "__memcpy_chk";
     if (strstr(n, "memmove")) return "__memmove_chk";
     if (strstr(n, "memset")) return "__memset_chk";
+    if (strstr(n, "stpncpy")) return "__stpncpy_chk";
     return "__memcpy_chk";
 }
 
@@ -5320,6 +5323,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 else if (strcmp(cname, "__builtin_strspn") == 0) inst.call_name = xstrdup("strspn");
                 else if (strcmp(cname, "__builtin_strcpy") == 0) inst.call_name = xstrdup("strcpy");
                 else if (strcmp(cname, "__builtin_stpcpy") == 0) inst.call_name = xstrdup("stpcpy");
+                else if (strcmp(cname, "__builtin_stpncpy") == 0) inst.call_name = xstrdup("stpncpy");
                 else if (strcmp(cname, "__builtin_strncpy") == 0) inst.call_name = xstrdup("strncpy");
                 else if (strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");
                 else if (strcmp(cname, "__builtin_strncat") == 0) inst.call_name = xstrdup("strncat");

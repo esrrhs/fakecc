@@ -759,6 +759,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_ptr(type_make_void());
             else if (strcmp(bname, "__builtin_strcat") == 0 || strcmp(bname, "__builtin_strcpy") == 0 ||
                      strcmp(bname, "__builtin_stpcpy") == 0 || strcmp(bname, "__builtin___stpcpy_chk") == 0 ||
+                     strcmp(bname, "__builtin_stpncpy") == 0 || strcmp(bname, "__builtin___stpncpy_chk") == 0 ||
                      strcmp(bname, "__builtin_strncat") == 0 || strcmp(bname, "__builtin_strncpy") == 0)
                 ret = type_make_ptr(type_make_int(1, 0));
             else if (strcmp(bname, "__builtin_strlen") == 0 || strcmp(bname, "__builtin_strspn") == 0 || strcmp(bname, "__builtin_object_size") == 0)
