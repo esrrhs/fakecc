@@ -101,6 +101,20 @@ char *strcat(char *dst, const char *src) {
     return dst;
 }
 
+/* ISO C strncat: append at most n chars of src onto dst, always NUL-terminate.
+ * Same contract as glibc/GCC: dest and src must not overlap. */
+char *strncat(char *dst, const char *src, size_t n) {
+    size_t i = 0;
+    while (dst[i] != 0) i = i + 1;
+    size_t j = 0;
+    while (j < n && src[j] != 0) {
+        dst[i + j] = src[j];
+        j = j + 1;
+    }
+    dst[i + j] = 0;
+    return dst;
+}
+
 char *strncpy(char *dst, const char *src, size_t n) {
     size_t i = 0;
     while (i < n && src[i] != 0) {
