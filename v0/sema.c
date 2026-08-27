@@ -1288,11 +1288,18 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         if (runtime.strncmp(e->u.var.name, "__builtin_", 10) == 0 || runtime.strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
             Type ret = type_default_int();
-            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0 || runtime.strcmp(bname, "__builtin_prefetch") == 0 || runtime.strcmp(bname, "__builtin_stack_restore") == 0 || runtime.strcmp(bname, "__builtin_longjmp") == 0)
+            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0 || runtime.strcmp(bname, "__builtin_prefetch") == 0 || runtime.strcmp(bname, "__builtin_stack_restore") == 0 || runtime.strcmp(bname, "__builtin_longjmp") == 0 || runtime.strcmp(bname, "__builtin_return") == 0)
                 ret = type_make_void();
-            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0 || runtime.strcmp(bname, "alloca") == 0 || runtime.strcmp(bname, "__builtin_frame_address") == 0 || runtime.strcmp(bname, "__builtin_return_address") == 0 || runtime.strcmp(bname, "__builtin_stack_save") == 0)
+            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0 || runtime.strcmp(bname, "alloca") == 0 || runtime.strcmp(bname, "__builtin_frame_address") == 0 || runtime.strcmp(bname, "__builtin_return_address") == 0 || runtime.strcmp(bname, "__builtin_stack_save") == 0 || runtime.strcmp(bname, "__builtin_apply_args") == 0 || runtime.strcmp(bname, "__builtin_apply") == 0 || runtime.strcmp(bname, "__builtin___memcpy_chk") == 0 || runtime.strcmp(bname, "__builtin___memmove_chk") == 0 || runtime.strcmp(bname, "__builtin___mempcpy_chk") == 0 || runtime.strcmp(bname, "__builtin___memset_chk") == 0)
                 ret = type_make_ptr(type_make_void());
-            else if (runtime.strcmp(bname, "__builtin_strlen") == 0)
+            else if (runtime.strcmp(bname, "__builtin_strcat") == 0 || runtime.strcmp(bname, "__builtin___strcat_chk") == 0 ||
+                     runtime.strcmp(bname, "__builtin_strcpy") == 0 || runtime.strcmp(bname, "__builtin___strcpy_chk") == 0 ||
+                     runtime.strcmp(bname, "__builtin_stpcpy") == 0 || runtime.strcmp(bname, "__builtin___stpcpy_chk") == 0 ||
+                     runtime.strcmp(bname, "__builtin_stpncpy") == 0 || runtime.strcmp(bname, "__builtin___stpncpy_chk") == 0 ||
+                     runtime.strcmp(bname, "__builtin_strncat") == 0 || runtime.strcmp(bname, "__builtin___strncat_chk") == 0 ||
+                     runtime.strcmp(bname, "__builtin_strncpy") == 0 || runtime.strcmp(bname, "__builtin___strncpy_chk") == 0)
+                ret = type_make_ptr(type_make_int(1, 0));
+            else if (runtime.strcmp(bname, "__builtin_strlen") == 0 || runtime.strcmp(bname, "__builtin_strspn") == 0 || runtime.strcmp(bname, "__builtin_object_size") == 0)
                 ret = type_make_int(8, 1);
             else if (runtime.strcmp(bname, "__builtin_fabs") == 0)
                 ret = type_make_float(8);
@@ -1334,8 +1341,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_abs") == 0 || runtime.strcmp(bname, "abs") == 0)
                 ret = type_make_int(4, 0);
-            else if (runtime.strcmp(bname, "__builtin_labs") == 0 || runtime.strcmp(bname, "__builtin_llabs") == 0 || runtime.strcmp(bname, "labs") == 0 || runtime.strcmp(bname, "llabs") == 0)
+            else if (runtime.strcmp(bname, "__builtin_labs") == 0 || runtime.strcmp(bname, "__builtin_llabs") == 0 || runtime.strcmp(bname, "__builtin_imaxabs") == 0 || runtime.strcmp(bname, "labs") == 0 || runtime.strcmp(bname, "llabs") == 0 || runtime.strcmp(bname, "imaxabs") == 0)
                 ret = type_make_int(8, 0);
+            else if (runtime.strcmp(bname, "__builtin_uabs") == 0)
+                ret = type_make_int(4, 1);
+            else if (runtime.strcmp(bname, "__builtin_ulabs") == 0 || runtime.strcmp(bname, "__builtin_ullabs") == 0 || runtime.strcmp(bname, "__builtin_umaxabs") == 0)
+                ret = type_make_int(8, 1);
 Type p0;
 Type p1;
             Type *params[2];
@@ -1470,17 +1481,29 @@ Type p1;
             set_type(e, type_make_int(8, 0));
             return type_clone(e->type);
         }
-        if (e->u.call.callee->kind == EX_VAR &&
-            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
-             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
-             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
-            if (e->u.call.args.len != 1) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "conjugate builtin takes exactly 1 argument");
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *cn = e->u.call.callee->u.var.name;
+            int is_conj = (runtime.strcmp(cn, "__builtin_conjf") == 0 || runtime.strcmp(cn, "__builtin_conj") == 0 ||
+                           runtime.strcmp(cn, "__builtin_conjl") == 0);
+            int is_crealf = (runtime.strcmp(cn, "__builtin_crealf") == 0 || runtime.strcmp(cn, "__builtin_cimagf") == 0);
+            int is_creal = (runtime.strcmp(cn, "__builtin_creal") == 0 || runtime.strcmp(cn, "__builtin_cimag") == 0);
+            int is_creall = (runtime.strcmp(cn, "__builtin_creall") == 0 || runtime.strcmp(cn, "__builtin_cimagl") == 0);
+            if (is_conj || is_crealf || is_creal || is_creall) {
+                if (e->u.call.args.len != 1) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "complex builtin takes exactly 1 argument");
+                }
+                Type at = check_expr(e->u.call.args.data[0], st, ft);
+                if (is_conj) {
+                    set_type(e, at);
+                    return type_clone(e->type);
+                }
+                type_free(&at);
+                if (is_crealf) set_type(e, type_make_float(4));
+                else if (is_creall) set_type(e, type_make_float(16));
+                else set_type(e, type_make_float(8));
+                return type_clone(e->type);
             }
-            Type at = check_expr(e->u.call.args.data[0], st, ft);
-            set_type(e, at);
-            return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_shuffle") == 0) {
             if (e->u.call.args.len < 2 || e->u.call.args.len > 3) {
@@ -1537,6 +1560,39 @@ Type p1;
             } else {
                 set_type(e, val_ty);
             }
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_apply_args") == 0) {
+            if (e->u.call.args.len != 0) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_apply_args takes no arguments");
+            }
+            set_type(e, type_make_ptr(type_make_void()));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_apply") == 0) {
+            if (e->u.call.args.len != 3) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_apply takes 3 arguments");
+            }
+            for (size_t i = 0; i < e->u.call.args.len; i++) {
+                Type at = check_expr(e->u.call.args.data[i], st, ft);
+                type_free(&at);
+            }
+            set_type(e, type_make_ptr(type_make_void()));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_return") == 0) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_return takes 1 argument");
+            }
+            Type at = check_expr(e->u.call.args.data[0], st, ft);
+            type_free(&at);
+            set_type(e, type_make_void());
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR

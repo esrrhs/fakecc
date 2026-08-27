@@ -51,40 +51,7 @@ pr82210.c
 # _Decimal64 not supported by fakecc.
 pr80692.c
 
-# __builtin_apply / __builtin_apply_args / __builtin_va_arg_pack not supported by fakecc.
-pr47237.c
+# __builtin_va_arg_pack not supported by fakecc.
 va-arg-pack-1.c
 
-# GCC Fortify Source __builtin_object_size / __builtin___*_chk buffer overflow checks
-builtins/memcpy-chk.c
-builtins/memmove-chk.c
-builtins/mempcpy-chk.c
-builtins/memset-chk.c
-builtins/snprintf-chk.c
-builtins/sprintf-chk.c
-builtins/stpcpy-chk.c
-builtins/stpncpy-chk.c
-builtins/strcat-chk.c
-builtins/strcpy-chk.c
-builtins/strncat-chk.c
-builtins/strncpy-chk.c
-builtins/vsnprintf-chk.c
-builtins/vsprintf-chk.c
 
-# GCC DejaGnu compiler-option / optimization-specific builtin transformations
-# (-fno-builtin-*, __builtin_complex, GCC inline asm labels, and constant folding drivers)
-builtins/abs-1.c
-builtins/abs-3.c
-builtins/complex-1.c
-builtins/fputs.c
-builtins/memops-asm.c
-builtins/pr22237-1.c
-builtins/sprintf.c
-builtins/strcat.c
-builtins/strncat.c
-builtins/strncmp.c
-builtins/strncpy.c
-builtins/strspn.c
-builtins/strstr-asm.c
-builtins/uabs-1.c
-builtins/uabs-3.c

@@ -48,6 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # difftest hardcodes host `gcc` as the oracle.  Runner images ship GCC
+      # 13.2 (no uabs builtins; tree-optimization/123864).  Install GCC 16 so
+      # the oracle matches local GCC 16.2.0 (also used when matrix.cc is gcc).
+      - name: Install host GCC 16
+        run: bash tools/ci_install_host_gcc.sh
+
       - name: Configure
         run: cmake -S . -B build -DCMAKE_C_FLAGS="${{ matrix.config.cflags }}"
         env:
@@ -71,6 +77,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install host GCC 16
+        run: bash tools/ci_install_host_gcc.sh
 
       # -O2 only speeds Stage 0 (gcc-built fakecc compiling v0/*.c).  It does
       # not change fakecc-1's codegen, so the fixed-point comparison is the
@@ -125,6 +134,10 @@ jobs:
             opt: ""
     steps:
       - uses: actions/checkout@v4
+
+      # Needed for the difftest matrix legs (host gcc is the oracle).
+      - name: Install host GCC 16
+        run: bash tools/ci_install_host_gcc.sh
 
       - name: Download self-hosted compiler
         uses: actions/download-artifact@v4

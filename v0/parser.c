@@ -3344,6 +3344,9 @@ static Stmt parse_stmt(Parser *p) {
             if (!s.u.decl.alias_target && g_parsed_alias) {
                 s.u.decl.alias_target = g_parsed_alias;
                 g_parsed_alias = ((void*)0);
+            } else if (g_parsed_alias) {
+                runtime.free(g_parsed_alias);
+                g_parsed_alias = ((void*)0);
             }
             stmt_array_push(&decls, s);
             if (peek(p)->kind == TK_COMMA) {
@@ -4052,6 +4055,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
     while (parse_attribute(p, &fn.align, ((void*)0), ((void*)0), ((void*)0), &fn.alias_target)) {}
     if (!fn.alias_target && g_parsed_alias) {
         fn.alias_target = g_parsed_alias;
+        g_parsed_alias = ((void*)0);
+    } else if (g_parsed_alias) {
+        runtime.free(g_parsed_alias);
         g_parsed_alias = ((void*)0);
     }
     if (g_parsed_no_instrument) {

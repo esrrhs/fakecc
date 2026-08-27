@@ -225,6 +225,13 @@ typedef struct {
     int   is_variadic;
     int   is_static;  /* 1 = `static` function — LOCAL linkage */
     int   has_dyn_alloca; /* 1 = function uses dynamic alloca / VLA */
+    /* GNU __builtin_apply_args: save incoming arg regs at prologue (GCC
+     * migrates the save to function entry so later calls cannot clobber
+     * them).  Layout matches GCC x86-64 SysV apply_args_size(). */
+    int   needs_apply_args;
+    /* GNU __builtin_apply: reserve a result block and allow a dynamic
+     * outgoing-arg allocation (has_dyn_alloca is also set). */
+    int   needs_apply;
     /* Slice 13: SSA value of the hidden sret pointer param (param index 0)
      * when ret_is_struct && ret_reg_n == 0.  The return statement copies
      * struct bytes into *sret_value and returns the pointer in RAX. */
@@ -303,6 +310,12 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 
 extern int g_instrument_functions;
 extern int g_sanitize_address;
+extern int g_no_builtin;
+
+/* GCC -fno-builtin / -fno-builtin-NAME: do not expand the library name as a
+ * builtin. Explicit __builtin_* names are never disabled. */
+void ir_disable_builtin(const char *name);
+int ir_builtin_disabled(const char *name);
 
 /* Return the live struct registry during lowering (NULL outside it).
  * type_size() uses this to refresh stale cached struct widths. */

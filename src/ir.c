@@ -51,12 +51,48 @@ static int g_vla_walk_serial = 0;
 static int g_vla_scan_addrs_only = 0;
 int g_instrument_functions = 0;
 int g_sanitize_address = 0;
+int g_no_builtin = 0;
+#define IR_MAX_NO_BUILTIN 64
+static char *g_no_builtin_names[IR_MAX_NO_BUILTIN];
+static int g_n_no_builtin_names;
+
+void ir_disable_builtin(const char *name) {
+    if (!name || !*name) return;
+    if (g_n_no_builtin_names >= IR_MAX_NO_BUILTIN) return;
+    g_no_builtin_names[g_n_no_builtin_names++] = xstrdup(name);
+}
+
+int ir_builtin_disabled(const char *name) {
+    if (!name) return 0;
+    if (strncmp(name, "__builtin_", 10) == 0) return 0;
+    for (int i = 0; i < g_n_no_builtin_names; i++) {
+        if (strcmp(g_no_builtin_names[i], name) == 0) return 1;
+    }
+    return g_no_builtin;
+}
 
 /* Return the live struct registry during lowering, NULL outside it.
  * type_size() uses this to refresh stale cached struct widths. */
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : NULL;
 }
+
+static const char *lookup_asm_alias(const char *name) {
+    if (!g_ir_tu || !name) return NULL;
+    for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
+        if (strcmp(g_ir_tu->functions.data[i].name, name) == 0 &&
+            g_ir_tu->functions.data[i].alias_target)
+            return g_ir_tu->functions.data[i].alias_target;
+    }
+    for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+        const Stmt *s = &g_ir_tu->globals.data[i];
+        if (s->kind == ST_DECL && s->u.decl.name && s->u.decl.alias_target &&
+            strcmp(s->u.decl.name, name) == 0)
+            return s->u.decl.alias_target;
+    }
+    return NULL;
+}
+
 
 /* Loop-stack: (continue_label, break_label).  Pushed on entry to every
  * loop-lowering block; popped on exit.  ST_BREAK / ST_CONTINUE consult the
@@ -1787,6 +1823,1159 @@ static const StructMember *ir_find_struct_member(const StructDef *sd, const char
     return NULL;
 }
 
+/* GCC Fortify: __builtin_object_size and __builtin___*_chk folding.
+ * Matches GCC's compile-time object-size / chk split (type 0/1 unknown →
+ * (size_t)-1, type 2/3 unknown → 0; chk with size == -1 or proven n <= size
+ * becomes the plain memcpy/memset/...).  Pointer arguments of
+ * __builtin_object_size are not evaluated. */
+
+typedef struct {
+    int known;
+    long long whole_size;
+    long long whole_off;
+    long long inner_size;
+    long long inner_off;
+} BosRef;
+
+typedef struct {
+    IRSymTable *st;
+    const char *vis[24];
+    int nvis;
+    int bos_type;
+} BosCtx;
+
+static const Expr *bos_skip_cast(const Expr *e) {
+    while (e && e->kind == EX_CAST)
+        e = e->u.cast.operand;
+    return e;
+}
+
+static int bos_ptr_elem_size(Type t) {
+    long long s = 1;
+    if (t.kind == TY_ARRAY && t.elem_type)
+        s = type_size(*t.elem_type);
+    else if (t.kind == TY_PTR && t.pointee)
+        s = type_size(*t.pointee);
+    if (s <= 0) s = 1;
+    return (int)s;
+}
+
+static unsigned long long bos_unk(int bos_type) {
+    return (bos_type & 2) ? 0ull : ~(unsigned long long)0;
+}
+
+static int bos_is_unk(unsigned long long v, int bos_type) {
+    return (bos_type & 2) ? 0 : (v == ~(unsigned long long)0);
+}
+
+static unsigned long long bos_remaining(BosRef r, int bos_type) {
+    if (!r.known) return bos_unk(bos_type);
+    long long sz = (bos_type & 1) ? r.inner_size : r.whole_size;
+    long long off = (bos_type & 1) ? r.inner_off : r.whole_off;
+    if (off < 0) off = 0;
+    if (sz <= off) return 0;
+    return (unsigned long long)(sz - off);
+}
+
+static BosRef bos_ref_unk(void) {
+    BosRef r;
+    r.known = 0;
+    r.whole_size = r.whole_off = r.inner_size = r.inner_off = 0;
+    return r;
+}
+
+static BosRef bos_ref_make(long long sz, long long off) {
+    BosRef r;
+    r.known = 1;
+    r.whole_size = sz;
+    r.whole_off = off;
+    r.inner_size = sz;
+    r.inner_off = off;
+    return r;
+}
+
+static int bos_is_param(const char *name) {
+    if (!g_ir_cur_fd || !name) return 0;
+    for (size_t i = 0; i < g_ir_cur_fd->params.len; i++) {
+        if (g_ir_cur_fd->params.data[i].name &&
+            strcmp(g_ir_cur_fd->params.data[i].name, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int bos_lvalue_is_name(const Expr *e, const char *name) {
+    e = bos_skip_cast(e);
+    return e && e->kind == EX_VAR && e->u.var.name && name &&
+           strcmp(e->u.var.name, name) == 0;
+}
+
+static int bos_is_memcpy_family(const char *n) {
+    if (!n) return 0;
+    if (strcmp(n, "memcpy") == 0 || strcmp(n, "memmove") == 0 ||
+        strcmp(n, "mempcpy") == 0 || strcmp(n, "memset") == 0)
+        return 1;
+    if (strcmp(n, "__builtin_memcpy") == 0 || strcmp(n, "__builtin_memmove") == 0 ||
+        strcmp(n, "__builtin_mempcpy") == 0 || strcmp(n, "__builtin_memset") == 0)
+        return 1;
+    if (strcmp(n, "__memcpy_chk") == 0 || strcmp(n, "__memmove_chk") == 0 ||
+        strcmp(n, "__mempcpy_chk") == 0 || strcmp(n, "__memset_chk") == 0)
+        return 1;
+    if (strcmp(n, "__builtin___memcpy_chk") == 0 ||
+        strcmp(n, "__builtin___memmove_chk") == 0 ||
+        strcmp(n, "__builtin___mempcpy_chk") == 0 ||
+        strcmp(n, "__builtin___memset_chk") == 0)
+        return 1;
+    return 0;
+}
+
+static int bos_is_alloca(const char *n) {
+    return n && (strcmp(n, "__builtin_alloca") == 0 || strcmp(n, "alloca") == 0);
+}
+
+static int bos_is_chk_builtin(const char *n) {
+    return n && (strcmp(n, "__builtin___memcpy_chk") == 0 ||
+                 strcmp(n, "__builtin___memmove_chk") == 0 ||
+                 strcmp(n, "__builtin___mempcpy_chk") == 0 ||
+                 strcmp(n, "__builtin___memset_chk") == 0 ||
+                 strcmp(n, "__builtin___stpncpy_chk") == 0 ||
+                 strcmp(n, "__builtin___strncpy_chk") == 0);
+}
+
+
+static int bos_is_snprintf_chk_builtin(const char *n) {
+    return n && (strcmp(n, "__builtin___snprintf_chk") == 0 ||
+                 strcmp(n, "__builtin___vsnprintf_chk") == 0);
+}
+
+static int bos_is_sprintf_chk_builtin(const char *n) {
+    return n && (strcmp(n, "__builtin___sprintf_chk") == 0 ||
+                 strcmp(n, "__builtin___vsprintf_chk") == 0);
+}
+
+static int bos_is_stpcpy_chk_builtin(const char *n) {
+    return n && (strcmp(n, "__builtin___stpcpy_chk") == 0 ||
+                 strcmp(n, "__builtin___strcpy_chk") == 0);
+}
+
+static int bos_is_strcat_chk_builtin(const char *n) {
+    return n && strcmp(n, "__builtin___strcat_chk") == 0;
+}
+
+static int bos_is_strncat_chk_builtin(const char *n) {
+    return n && strcmp(n, "__builtin___strncat_chk") == 0;
+}
+
+static const char *bos_chk_plain_name(const char *n) {
+    if (strstr(n, "mempcpy")) return "mempcpy";
+    if (strstr(n, "memcpy")) return "memcpy";
+    if (strstr(n, "memmove")) return "memmove";
+    if (strstr(n, "memset")) return "memset";
+    if (strstr(n, "stpncpy")) return "stpncpy";
+    if (strstr(n, "strncpy")) return "strncpy";
+    return "memcpy";
+}
+
+static const char *bos_chk_rt_name(const char *n) {
+    if (strstr(n, "mempcpy")) return "__mempcpy_chk";
+    if (strstr(n, "memcpy")) return "__memcpy_chk";
+    if (strstr(n, "memmove")) return "__memmove_chk";
+    if (strstr(n, "memset")) return "__memset_chk";
+    if (strstr(n, "stpncpy")) return "__stpncpy_chk";
+    if (strstr(n, "strncpy")) return "__strncpy_chk";
+    return "__memcpy_chk";
+}
+
+static void bos_collect_expr(const Expr *e, const char *name,
+                             const Expr **out, int *n, int cap, int *saw_unk);
+static void bos_collect_stmt(const Stmt *s, const char *name,
+                             const Expr **out, int *n, int cap, int *saw_unk);
+
+static void bos_collect_expr(const Expr *e, const char *name,
+                             const Expr **out, int *n, int cap, int *saw_unk) {
+    if (!e) return;
+    if (e->kind == EX_ASSIGN && bos_lvalue_is_name(e->u.assign.lvalue, name)) {
+        if (*n < cap) out[(*n)++] = e->u.assign.rvalue;
+        else *saw_unk = 1;
+        bos_collect_expr(e->u.assign.lvalue, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.assign.rvalue, name, out, n, cap, saw_unk);
+        return;
+    }
+    if (e->kind == EX_COMPOUND_ASSIGN && bos_lvalue_is_name(e->u.comp.lvalue, name)) {
+        *saw_unk = 1;
+    }
+    switch (e->kind) {
+    case EX_BINOP:
+        bos_collect_expr(e->u.bin.l, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.bin.r, name, out, n, cap, saw_unk);
+        break;
+    case EX_UNARY:
+        bos_collect_expr(e->u.un.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_ASSIGN:
+        bos_collect_expr(e->u.assign.lvalue, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.assign.rvalue, name, out, n, cap, saw_unk);
+        break;
+    case EX_CALL:
+        bos_collect_expr(e->u.call.callee, name, out, n, cap, saw_unk);
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            bos_collect_expr(e->u.call.args.data[i], name, out, n, cap, saw_unk);
+        break;
+    case EX_ADDR:
+        bos_collect_expr(e->u.addr.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_DEREF:
+        bos_collect_expr(e->u.deref.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_INDEX:
+        bos_collect_expr(e->u.idx.array, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.idx.index, name, out, n, cap, saw_unk);
+        break;
+    case EX_MEMBER:
+        bos_collect_expr(e->u.member.obj, name, out, n, cap, saw_unk);
+        break;
+    case EX_CAST:
+        bos_collect_expr(e->u.cast.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_TERNARY:
+        bos_collect_expr(e->u.tern.cond, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.tern.then, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.tern.else_, name, out, n, cap, saw_unk);
+        break;
+    case EX_INC_DEC:
+        bos_collect_expr(e->u.incdec.operand, name, out, n, cap, saw_unk);
+        break;
+    case EX_COMPOUND_ASSIGN:
+        bos_collect_expr(e->u.comp.lvalue, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.comp.rvalue, name, out, n, cap, saw_unk);
+        break;
+    case EX_COMMA:
+        bos_collect_expr(e->u.comma.lhs, name, out, n, cap, saw_unk);
+        bos_collect_expr(e->u.comma.rhs, name, out, n, cap, saw_unk);
+        break;
+    case EX_STMT_EXPR:
+        if (e->u.stmt_expr.stmts) {
+            for (size_t i = 0; i < e->u.stmt_expr.stmts->len; i++)
+                bos_collect_stmt(&e->u.stmt_expr.stmts->data[i], name, out, n, cap, saw_unk);
+        }
+        break;
+    case EX_COMPOUND_LITERAL:
+        bos_collect_expr(e->u.compound.init, name, out, n, cap, saw_unk);
+        break;
+    default:
+        break;
+    }
+}
+
+static void bos_collect_stmt(const Stmt *s, const char *name,
+                             const Expr **out, int *n, int cap, int *saw_unk) {
+    if (!s) return;
+    switch (s->kind) {
+    case ST_DECL:
+        if (s->u.decl.name && name && strcmp(s->u.decl.name, name) == 0 && s->u.decl.init) {
+            if (*n < cap) out[(*n)++] = s->u.decl.init;
+            else *saw_unk = 1;
+        }
+        bos_collect_expr(s->u.decl.init, name, out, n, cap, saw_unk);
+        break;
+    case ST_EXPR:
+        bos_collect_expr(s->u.expr, name, out, n, cap, saw_unk);
+        break;
+    case ST_RETURN:
+        bos_collect_expr(s->u.value, name, out, n, cap, saw_unk);
+        break;
+    case ST_IF:
+        bos_collect_expr(s->u.if_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.if_s.then_s, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.if_s.else_s, name, out, n, cap, saw_unk);
+        break;
+    case ST_WHILE:
+        bos_collect_expr(s->u.while_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.while_s.body, name, out, n, cap, saw_unk);
+        break;
+    case ST_DO_WHILE:
+        bos_collect_expr(s->u.do_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.do_s.body, name, out, n, cap, saw_unk);
+        break;
+    case ST_FOR:
+        bos_collect_stmt(s->u.for_s.init, name, out, n, cap, saw_unk);
+        bos_collect_expr(s->u.for_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_expr(s->u.for_s.step, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.for_s.body, name, out, n, cap, saw_unk);
+        break;
+    case ST_LABEL:
+        bos_collect_stmt(s->u.label_s.stmt, name, out, n, cap, saw_unk);
+        break;
+    case ST_SWITCH:
+        bos_collect_expr(s->u.switch_s.cond, name, out, n, cap, saw_unk);
+        bos_collect_stmt(s->u.switch_s.body, name, out, n, cap, saw_unk);
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                bos_collect_stmt(&s->u.switch_s.cases[i].stmts.data[j], name, out, n, cap, saw_unk);
+        break;
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            bos_collect_stmt(&s->u.block.data[i], name, out, n, cap, saw_unk);
+        break;
+    default:
+        break;
+    }
+}
+
+
+static int bos_stmt_declares(const Stmt *s, const char *name) {
+    if (!s || !name) return 0;
+    switch (s->kind) {
+    case ST_DECL:
+        if (s->u.decl.name && strcmp(s->u.decl.name, name) == 0)
+            return 1;
+        return 0;
+    case ST_IF:
+        return bos_stmt_declares(s->u.if_s.then_s, name)
+            || bos_stmt_declares(s->u.if_s.else_s, name);
+    case ST_WHILE:
+        return bos_stmt_declares(s->u.while_s.body, name);
+    case ST_DO_WHILE:
+        return bos_stmt_declares(s->u.do_s.body, name);
+    case ST_FOR:
+        return bos_stmt_declares(s->u.for_s.init, name)
+            || bos_stmt_declares(s->u.for_s.body, name);
+    case ST_LABEL:
+        return bos_stmt_declares(s->u.label_s.stmt, name);
+    case ST_SWITCH: {
+        if (bos_stmt_declares(s->u.switch_s.body, name))
+            return 1;
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                if (bos_stmt_declares(&s->u.switch_s.cases[i].stmts.data[j], name))
+                    return 1;
+        return 0;
+    }
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            if (bos_stmt_declares(&s->u.block.data[i], name))
+                return 1;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int bos_cur_fn_declares(const char *name) {
+    if (!g_ir_cur_fd || !name) return 0;
+    for (size_t i = 0; i < g_ir_cur_fd->body.len; i++)
+        if (bos_stmt_declares(&g_ir_cur_fd->body.data[i], name))
+            return 1;
+    return 0;
+}
+
+static int bos_collect_sources(const char *name, const Expr **out, int cap, int *saw_unk) {
+    int n = 0;
+    *saw_unk = 0;
+    int is_local = bos_cur_fn_declares(name);
+    if (g_ir_cur_fd) {
+        for (size_t i = 0; i < g_ir_cur_fd->body.len; i++)
+            bos_collect_stmt(&g_ir_cur_fd->body.data[i], name, out, &n, cap, saw_unk);
+    }
+    if (!is_local && g_ir_tu) {
+        for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+            const Stmt *gs = &g_ir_tu->globals.data[i];
+            if (gs->kind == ST_DECL && gs->u.decl.name && name &&
+                strcmp(gs->u.decl.name, name) == 0 && gs->u.decl.init) {
+                if (n < cap) out[n++] = gs->u.decl.init;
+                else *saw_unk = 1;
+            }
+        }
+    }
+    return n;
+}
+
+static unsigned long long bos_eval(BosCtx *ctx, const Expr *e);
+static BosRef bos_objref(BosCtx *ctx, const Expr *e);
+
+static int bos_vis_push(BosCtx *ctx, const char *name) {
+    for (int i = 0; i < ctx->nvis; i++)
+        if (ctx->vis[i] && name && strcmp(ctx->vis[i], name) == 0)
+            return 0;
+    if (ctx->nvis >= 24) return 0;
+    ctx->vis[ctx->nvis++] = name;
+    return 1;
+}
+
+static void bos_vis_pop(BosCtx *ctx) {
+    if (ctx->nvis > 0) ctx->nvis--;
+}
+
+static BosRef bos_objref(BosCtx *ctx, const Expr *e) {
+    e = bos_skip_cast(e);
+    if (!e) return bos_ref_unk();
+    if (e->kind == EX_COMMA)
+        return bos_objref(ctx, e->u.comma.rhs);
+    if (e->kind == EX_ADDR)
+        return bos_objref(ctx, e->u.addr.operand);
+    if (e->kind == EX_STR)
+        return bos_ref_make((long long)e->u.str.len + 1, 0);
+    if (e->kind == EX_COMPOUND_LITERAL) {
+        long long sz = type_size(e->u.compound.target_type);
+        if (sz <= 0) sz = type_size(e->type);
+        if (sz <= 0) return bos_ref_unk();
+        return bos_ref_make(sz, 0);
+    }
+    if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
+        const char *cn = e->u.call.callee->u.var.name;
+        if (bos_is_alloca(cn) && e->u.call.args.len > 0) {
+            long long sz = 0;
+            if (!fold_const_int(e->u.call.args.data[0], &sz) || sz < 0)
+                return bos_ref_unk();
+            return bos_ref_make(sz, 0);
+        }
+        if (bos_is_memcpy_family(cn) && e->u.call.args.len > 0) {
+            unsigned long long rem = bos_eval(ctx, e->u.call.args.data[0]);
+            if (bos_is_unk(rem, ctx->bos_type)) return bos_ref_unk();
+            return bos_ref_make((long long)rem, 0);
+        }
+        return bos_ref_unk();
+    }
+    if (e->kind == EX_MEMBER) {
+        BosRef base = bos_objref(ctx, e->u.member.obj);
+        if (!base.known) return bos_ref_unk();
+        Type ot = e->u.member.obj->type;
+        if (ot.kind == TY_PTR && ot.pointee) ot = *ot.pointee;
+        if (ot.kind != TY_STRUCT || !ot.tag) return bos_ref_unk();
+        const StructDef *sd = g_ir_structs ? struct_registry_find_c(g_ir_structs, ot.tag) : NULL;
+        const StructMember *sm = ir_find_struct_member(sd, e->u.member.name);
+        if (!sm) return bos_ref_unk();
+        long long msz = type_size(sm->type);
+        if (msz < 0) return bos_ref_unk();
+        base.whole_off += sm->offset;
+        base.inner_size = msz;
+        base.inner_off = 0;
+        return base;
+    }
+    if (e->kind == EX_INDEX) {
+        BosRef base = bos_objref(ctx, e->u.idx.array);
+        if (!base.known) return bos_ref_unk();
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx)) return bos_ref_unk();
+        int esz = bos_ptr_elem_size(e->u.idx.array->type);
+        long long delta = idx * (long long)esz;
+        base.whole_off += delta;
+        base.inner_off += delta;
+        return base;
+    }
+    if (e->kind == EX_BINOP && (e->u.bin.op == BOP_ADD || e->u.bin.op == BOP_SUB)) {
+        const Expr *ptr = NULL, *idxe = NULL;
+        Type pty;
+        int lptr = type_is_ptr_or_array(e->u.bin.l->type);
+        int rptr = type_is_ptr_or_array(e->u.bin.r->type);
+        if (lptr && !rptr) { ptr = e->u.bin.l; idxe = e->u.bin.r; pty = e->u.bin.l->type; }
+        else if (rptr && !lptr && e->u.bin.op == BOP_ADD) {
+            ptr = e->u.bin.r; idxe = e->u.bin.l; pty = e->u.bin.r->type;
+        } else
+            return bos_ref_unk();
+        BosRef base = bos_objref(ctx, ptr);
+        if (!base.known) return bos_ref_unk();
+        long long idx = 0;
+        if (!fold_const_int(idxe, &idx)) return bos_ref_unk();
+        int esz = bos_ptr_elem_size(pty);
+        long long delta = idx * (long long)esz;
+        if (e->u.bin.op == BOP_SUB) delta = -delta;
+        base.whole_off += delta;
+        base.inner_off += delta;
+        return base;
+    }
+    if (e->kind == EX_VAR && e->u.var.name) {
+        if (bos_is_param(e->u.var.name)) return bos_ref_unk();
+        const IRSlot *slot = irsymtable_find(ctx->st, e->u.var.name);
+        if (!slot) return bos_ref_unk();
+        if (slot->ty.kind == TY_ARRAY || slot->ty.kind == TY_STRUCT) {
+            long long sz = type_size(slot->ty);
+            if (sz <= 0) return bos_ref_unk();
+            return bos_ref_make(sz, 0);
+        }
+        if (slot->ty.kind == TY_PTR) {
+            if (!bos_vis_push(ctx, e->u.var.name)) return bos_ref_unk();
+            const Expr *srcs[32];
+            int saw_unk = 0;
+            int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
+            unsigned long long acc = 0;
+            int any = 0;
+            if (!saw_unk) {
+                for (int i = 0; i < ns; i++) {
+                    unsigned long long v = bos_eval(ctx, srcs[i]);
+                    if (!any) { acc = v; any = 1; }
+                    else if (bos_is_unk(acc, ctx->bos_type) || bos_is_unk(v, ctx->bos_type)) {
+                        acc = bos_unk(ctx->bos_type);
+                    } else if (ctx->bos_type & 2) {
+                        if (v < acc) acc = v;
+                    } else {
+                        if (v > acc) acc = v;
+                    }
+                }
+            }
+            bos_vis_pop(ctx);
+            if (saw_unk || !any || bos_is_unk(acc, ctx->bos_type))
+                return bos_ref_unk();
+            return bos_ref_make((long long)acc, 0);
+        }
+        return bos_ref_unk();
+    }
+    return bos_ref_unk();
+}
+
+static unsigned long long bos_eval(BosCtx *ctx, const Expr *e) {
+    e = bos_skip_cast(e);
+    if (!e) return bos_unk(ctx->bos_type);
+    if (e->kind == EX_COMMA)
+        return bos_eval(ctx, e->u.comma.rhs);
+    if (e->kind == EX_TERNARY) {
+        unsigned long long a = bos_eval(ctx, e->u.tern.then);
+        unsigned long long b = bos_eval(ctx, e->u.tern.else_);
+        if (bos_is_unk(a, ctx->bos_type) || bos_is_unk(b, ctx->bos_type))
+            return bos_unk(ctx->bos_type);
+        if (ctx->bos_type & 2)
+            return a < b ? a : b;
+        return a > b ? a : b;
+    }
+    if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
+        const char *cn = e->u.call.callee->u.var.name;
+        if (bos_is_memcpy_family(cn) && e->u.call.args.len > 0)
+            return bos_eval(ctx, e->u.call.args.data[0]);
+    }
+    BosRef r = bos_objref(ctx, e);
+    return bos_remaining(r, ctx->bos_type);
+}
+
+static unsigned long long compute_builtin_object_size(IRSymTable *st, const Expr *ptr, int bos_type) {
+    BosCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.st = st;
+    ctx.bos_type = bos_type;
+    return bos_eval(&ctx, ptr);
+}
+
+static int bos_int_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
+    e = bos_skip_cast(e);
+    long long c = 0;
+    if (fold_const_int(e, &c)) {
+        *out = (unsigned long long)c;
+        return 1;
+    }
+    if (!e || e->kind != EX_VAR || !e->u.var.name) return 0;
+    /* File-scope objects can be written in other functions (or via asm), so
+     * their initializer is not a proven runtime max.  Only locals. */
+    const IRSlot *slot = NULL;
+    if (st) {
+        for (size_t i = st->len; i > 0; i--)
+            if (strcmp(st->data[i-1].name, e->u.var.name) == 0) {
+                slot = &st->data[i-1];
+                break;
+            }
+    }
+    if (!slot || slot->ty.is_volatile) return 0;
+    const Expr *srcs[32];
+    int saw_unk = 0;
+    int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
+    if (saw_unk || ns == 0) return 0;
+    unsigned long long mx = 0;
+    int any = 0;
+    for (int i = 0; i < ns; i++) {
+        long long v = 0;
+        if (!fold_const_int(srcs[i], &v)) return 0;
+        unsigned long long u = (unsigned long long)v;
+        if (!any || u > mx) mx = u;
+        any = 1;
+    }
+    if (!any) return 0;
+    *out = mx;
+    return 1;
+}
+
+static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
+                                   IRValue *args, int nargs, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.loc = loc;
+    inst.call_name = xstrdup(name);
+    inst.call_callee = -1;
+    inst.call_nargs = nargs;
+    for (int i = 0; i < nargs; i++)
+        inst.call_args[i] = args[i];
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, 8, 1);
+    return dst;
+}
+
+static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    const char *cn = e->u.call.callee->u.var.name;
+    const Expr *size_e = e->u.call.args.data[3];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = 0;
+    if (size_e && size_e->kind == EX_CALL && size_e->u.call.callee &&
+        size_e->u.call.callee->kind == EX_VAR &&
+        strcmp(size_e->u.call.callee->u.var.name, "__builtin_object_size") == 0 &&
+        size_e->u.call.args.len >= 1) {
+        long long bt = 0;
+        if (size_e->u.call.args.len >= 2)
+            fold_const_int(size_e->u.call.args.data[1], &bt);
+        size_val = compute_builtin_object_size(st, size_e->u.call.args.data[0], (int)bt);
+        size_const = 1;
+    } else {
+        long long sc = 0;
+        if (fold_const_int(size_e, &sc)) {
+            size_val = (unsigned long long)sc;
+            size_const = 1;
+        }
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue a1 = lower_expr(fn, st, e->u.call.args.data[1]);
+    IRValue a2 = lower_expr(fn, st, e->u.call.args.data[2]);
+    int fold_plain = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (size_const) {
+        long long nconst = 0;
+        unsigned long long nmax = 0;
+        if (fold_const_int(e->u.call.args.data[2], &nconst)) {
+            if ((unsigned long long)nconst <= size_val)
+                fold_plain = 1;
+        } else if (bos_int_max(st, e->u.call.args.data[2], &nmax) && nmax <= size_val) {
+            fold_plain = 1;
+        }
+    }
+    if (fold_plain) {
+        IRValue args[3];
+        args[0] = dst;
+        args[1] = a1;
+        args[2] = a2;
+        return bos_emit_named_call(fn, bos_chk_plain_name(cn), args, 3, e->loc);
+    }
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    IRValue args[4];
+    args[0] = dst;
+    args[1] = a1;
+    args[2] = a2;
+    args[3] = szv;
+    return bos_emit_named_call(fn, bos_chk_rt_name(cn), args, 4, e->loc);
+}
+
+static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
+                                     IRValue *args, int nargs, SourceLoc loc,
+                                     int width, int is_unsigned) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.loc = loc;
+    inst.call_name = xstrdup(name);
+    inst.call_callee = -1;
+    inst.call_nargs = nargs;
+    for (int i = 0; i < nargs; i++)
+        inst.call_args[i] = args[i];
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, is_unsigned);
+    return dst;
+}
+
+static int bos_eval_size_arg(IRSymTable *st, const Expr *size_e,
+                             unsigned long long *size_val) {
+    *size_val = ~(unsigned long long)0;
+    if (!size_e) return 0;
+    if (size_e->kind == EX_CALL && size_e->u.call.callee &&
+        size_e->u.call.callee->kind == EX_VAR &&
+        strcmp(size_e->u.call.callee->u.var.name, "__builtin_object_size") == 0 &&
+        size_e->u.call.args.len >= 1) {
+        long long bt = 0;
+        if (size_e->u.call.args.len >= 2)
+            fold_const_int(size_e->u.call.args.data[1], &bt);
+        *size_val = compute_builtin_object_size(st, size_e->u.call.args.data[0], (int)bt);
+        return 1;
+    }
+    long long sc = 0;
+    if (fold_const_int(size_e, &sc)) {
+        *size_val = (unsigned long long)sc;
+        return 1;
+    }
+    return 0;
+}
+
+/* __builtin___snprintf_chk(dst, n, flag, size, fmt, ...) and
+ * __builtin___vsnprintf_chk(dst, n, flag, size, fmt, ap).
+ * Fold to snprintf/vsnprintf when size is unknown (-1) or n is proven
+ * <= size. Check vsnprintf before snprintf (substring). */
+static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
+                                               const Expr *e) {
+    const char *cn = e->u.call.callee->u.var.name;
+    const Expr *size_e = e->u.call.args.data[3];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    int fold_plain = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (size_const) {
+        long long nconst = 0;
+        unsigned long long nmax = 0;
+        if (fold_const_int(e->u.call.args.data[1], &nconst)) {
+            if ((unsigned long long)nconst <= size_val)
+                fold_plain = 1;
+        } else if (bos_int_max(st, e->u.call.args.data[1], &nmax) && nmax <= size_val) {
+            fold_plain = 1;
+        }
+    }
+    int is_v = cn && strstr(cn, "vsnprintf") != 0;
+    const char *plain = is_v ? "vsnprintf" : "snprintf";
+    const char *chk = is_v ? "__vsnprintf_chk" : "__snprintf_chk";
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue nval = lower_expr(fn, st, e->u.call.args.data[1]);
+    IRValue args[IR_CALL_MAX_ARGS];
+    int nargs = 0;
+    args[nargs++] = dst;
+    args[nargs++] = nval;
+    if (fold_plain) {
+        for (int i = 4; i < (int)e->u.call.args.len; i++) {
+            if (nargs >= IR_CALL_MAX_ARGS) {
+                fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
+                exit(1);
+            }
+            args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+        }
+        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0);
+    }
+    args[nargs++] = lower_expr(fn, st, e->u.call.args.data[2]);
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    args[nargs++] = szv;
+    for (int i = 4; i < (int)e->u.call.args.len; i++) {
+        if (nargs >= IR_CALL_MAX_ARGS) {
+            fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
+            exit(1);
+        }
+        args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+    }
+    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
+}
+
+/* Known C-string bytes (NUL not included in *nbytes) plus a byte offset. */
+static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long long *off) {
+    e = bos_skip_cast(e);
+    if (!e) return 0;
+    if (e->kind == EX_COMMA)
+        return bos_cstr_info(e->u.comma.rhs, bytes, nbytes, off);
+    if (e->kind == EX_STR) {
+        *bytes = e->u.str.bytes ? e->u.str.bytes : "";
+        *nbytes = e->u.str.len;
+        *off = 0;
+        return 1;
+    }
+    if (e->kind == EX_ADDR)
+        return bos_cstr_info(e->u.addr.operand, bytes, nbytes, off);
+    if (e->kind == EX_INDEX) {
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx)) return 0;
+        if (!bos_cstr_info(e->u.idx.array, bytes, nbytes, off)) return 0;
+        int esz = bos_ptr_elem_size(e->u.idx.array->type);
+        *off += idx * (long long)esz;
+        return 1;
+    }
+    if (e->kind == EX_BINOP && (e->u.bin.op == BOP_ADD || e->u.bin.op == BOP_SUB)) {
+        const Expr *ptr = NULL, *idxe = NULL;
+        Type pty;
+        int lptr = type_is_ptr_or_array(e->u.bin.l->type);
+        int rptr = type_is_ptr_or_array(e->u.bin.r->type);
+        if (lptr && !rptr) { ptr = e->u.bin.l; idxe = e->u.bin.r; pty = e->u.bin.l->type; }
+        else if (rptr && !lptr && e->u.bin.op == BOP_ADD) {
+            ptr = e->u.bin.r; idxe = e->u.bin.l; pty = e->u.bin.r->type;
+        } else
+            return 0;
+        long long idx = 0;
+        if (!fold_const_int(idxe, &idx)) return 0;
+        if (!bos_cstr_info(ptr, bytes, nbytes, off)) return 0;
+        int esz = bos_ptr_elem_size(pty);
+        long long delta = idx * (long long)esz;
+        if (e->u.bin.op == BOP_SUB) delta = -delta;
+        *off += delta;
+        return 1;
+    }
+    if (e->kind == EX_VAR && e->u.var.name) {
+        if (e->type.is_volatile) return 0;
+        /* Local pointer to a single known C string (e.g. const char *x2 = "").
+         * File-scope pointers can be asm-clobbered, so those stay unknown. */
+        if (e->type.kind == TY_PTR) {
+            if (bos_is_param(e->u.var.name)) return 0;
+            /* File-scope pointers can be asm-clobbered. A same-named local
+             * (e.g. test1's s2 = "") is a different object. */
+            if (!bos_cur_fn_declares(e->u.var.name))
+                return 0;
+            static int depth;
+            if (depth >= 8) return 0;
+            const Expr *srcs[32];
+            int saw_unk = 0;
+            int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
+            if (saw_unk || ns == 0) return 0;
+            depth++;
+            const char *b0 = NULL;
+            int n0 = 0;
+            long long o0 = 0;
+            int ok = 1;
+            for (int i = 0; i < ns; i++) {
+                const char *b = NULL;
+                int n = 0;
+                long long o = 0;
+                if (!bos_cstr_info(srcs[i], &b, &n, &o)) { ok = 0; break; }
+                if (i == 0) { b0 = b; n0 = n; o0 = o; }
+                else if (n != n0 || o != o0 || memcmp(b, b0, (size_t)n) != 0) {
+                    ok = 0;
+                    break;
+                }
+            }
+            depth--;
+            if (!ok) return 0;
+            *bytes = b0 ? b0 : "";
+            *nbytes = n0;
+            *off = o0;
+            return 1;
+        }
+        if (!g_ir_tu) return 0;
+        for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+            const Stmt *gs = &g_ir_tu->globals.data[i];
+            if (gs->kind != ST_DECL || !gs->u.decl.name) continue;
+            if (strcmp(gs->u.decl.name, e->u.var.name) != 0) continue;
+            if (gs->u.decl.type.kind != TY_ARRAY) return 0;
+            if (gs->u.decl.type.is_volatile) return 0;
+            const Expr *init = bos_skip_cast(gs->u.decl.init);
+            if (!init || init->kind != EX_STR) return 0;
+            *bytes = init->u.str.bytes ? init->u.str.bytes : "";
+            *nbytes = init->u.str.len;
+            *off = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int bos_cstr_len(const Expr *e, unsigned long long *out) {
+    const char *b = NULL;
+    int n = 0;
+    long long off = 0;
+    if (!bos_cstr_info(e, &b, &n, &off)) return 0;
+    if (off < 0 || off > n) return 0;
+    *out = (unsigned long long)(n - off);
+    return 1;
+}
+
+/* Exact or proven-max C-string length. Locals only for pointer variables
+ * (file-scope pointers can be asm-clobbered / reassigned). */
+static int bos_cstr_len_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
+    e = bos_skip_cast(e);
+    if (bos_cstr_len(e, out)) return 1;
+    if (!e || e->kind != EX_VAR || !e->u.var.name) return 0;
+    if (bos_is_param(e->u.var.name)) return 0;
+    const IRSlot *slot = NULL;
+    if (st) {
+        for (size_t i = st->len; i > 0; i--)
+            if (strcmp(st->data[i-1].name, e->u.var.name) == 0) {
+                slot = &st->data[i-1];
+                break;
+            }
+    }
+    if (!slot || slot->ty.is_volatile) return 0;
+    const Expr *srcs[32];
+    int saw_unk = 0;
+    int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
+    if (saw_unk || ns == 0) return 0;
+    unsigned long long mx = 0;
+    int any = 0;
+    for (int i = 0; i < ns; i++) {
+        unsigned long long sl = 0;
+        if (!bos_cstr_len(srcs[i], &sl)) return 0;
+        if (!any || sl > mx) mx = sl;
+        any = 1;
+    }
+    if (!any) return 0;
+    *out = mx;
+    return 1;
+}
+
+/* Exact sprintf output length (excluding NUL) when the format is a known
+ * string using only literal text, %% , %s (known C string), and %c. */
+static int bos_sprintf_out_len(const Expr *fmt, const Expr **va, int nva,
+                               unsigned long long *out) {
+    const char *s = NULL;
+    int n = 0;
+    long long off = 0;
+    if (!bos_cstr_info(fmt, &s, &n, &off)) return 0;
+    if (off < 0 || off > n) return 0;
+    s += off;
+    n -= (int)off;
+    unsigned long long total = 0;
+    int ai = 0;
+    for (int i = 0; i < n; i++) {
+        if (s[i] != '%') {
+            total++;
+            continue;
+        }
+        if (i + 1 >= n) return 0;
+        i++;
+        if (s[i] == '%') {
+            total++;
+            continue;
+        }
+        if (s[i] == 's') {
+            if (ai >= nva) return 0;
+            unsigned long long sl = 0;
+            if (!bos_cstr_len(va[ai], &sl)) return 0;
+            total += sl;
+            ai++;
+            continue;
+        }
+        if (s[i] == 'c') {
+            if (ai >= nva) return 0;
+            total += 1;
+            ai++;
+            continue;
+        }
+        return 0;
+    }
+    *out = total;
+    return 1;
+}
+
+/* __builtin___sprintf_chk(dst, flag, size, fmt, ...) and
+ * __builtin___vsprintf_chk(dst, flag, size, fmt, ap).
+ * Fold to sprintf/vsprintf when dest size is unknown (-1) or the
+ * formatted output (plus NUL) is proven to fit. vsprintf args live in
+ * va_list, so output length is only proven for conversion-free formats. */
+static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
+                                              const Expr *e) {
+    const char *cn = e->u.call.callee->u.var.name;
+    int is_v = cn && strstr(cn, "vsprintf") != 0;
+    const char *plain = is_v ? "vsprintf" : "sprintf";
+    const char *chk = is_v ? "__vsprintf_chk" : "__sprintf_chk";
+    const Expr *size_e = e->u.call.args.data[2];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    int fold_plain = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (size_const && e->u.call.args.len >= 4) {
+        const Expr **va = NULL;
+        int nva = 0;
+        if (!is_v) {
+            nva = (int)e->u.call.args.len - 4;
+            if (nva > 0) va = (const Expr **)&e->u.call.args.data[4];
+        }
+        unsigned long long olen = 0;
+        if (bos_sprintf_out_len(e->u.call.args.data[3], va, nva, &olen)
+            && olen < size_val)
+            fold_plain = 1;
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue args[IR_CALL_MAX_ARGS];
+    int nargs = 0;
+    args[nargs++] = dst;
+    if (fold_plain) {
+        for (int i = 3; i < (int)e->u.call.args.len; i++) {
+            if (nargs >= IR_CALL_MAX_ARGS) {
+                fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
+                exit(1);
+            }
+            args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+        }
+        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0);
+    }
+    args[nargs++] = lower_expr(fn, st, e->u.call.args.data[1]);
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    args[nargs++] = szv;
+    for (int i = 3; i < (int)e->u.call.args.len; i++) {
+        if (nargs >= IR_CALL_MAX_ARGS) {
+            fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
+            exit(1);
+        }
+        args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+    }
+    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
+}
+
+/* __builtin___stpcpy_chk / __builtin___strcpy_chk (dst, src, size).
+ * Fold to stpcpy/strcpy when dest size is unknown (-1) or strlen(src)
+ * is proven < size (NUL needs one extra byte). */
+static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
+                                             const Expr *e) {
+    const char *cn = e->u.call.callee->u.var.name;
+    int is_stp = cn && strstr(cn, "stpcpy") != NULL;
+    const Expr *size_e = e->u.call.args.data[2];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    int fold_plain = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (size_const) {
+        unsigned long long slen = 0;
+        if (bos_cstr_len_max(st, e->u.call.args.data[1], &slen) && slen < size_val)
+            fold_plain = 1;
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+    if (fold_plain) {
+        IRValue args[2];
+        args[0] = dst;
+        args[1] = src;
+        return bos_emit_named_call(fn, is_stp ? "stpcpy" : "strcpy", args, 2, e->loc);
+    }
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    IRValue args[3];
+    args[0] = dst;
+    args[1] = src;
+    args[2] = szv;
+    return bos_emit_named_call(fn, is_stp ? "__stpcpy_chk" : "__strcpy_chk", args, 3, e->loc);
+}
+
+/* __builtin___strcat_chk(dst, src, size).
+ * Fold to strcat when dest size is unknown (-1), the source is a known
+ * empty string (GCC treats strcat(d,"") as a no-op), or both string
+ * lengths are known and strlen(dst)+strlen(src) < size. */
+static IRValue lower_fortify_strcat_chk_call(IRFunction *fn, IRSymTable *st,
+                                             const Expr *e) {
+    const Expr *size_e = e->u.call.args.data[2];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    int fold_plain = 0;
+    unsigned long long slen = 0;
+    int src_known = bos_cstr_len_max(st, e->u.call.args.data[1], &slen);
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (src_known && slen == 0)
+        fold_plain = 1;
+    else if (size_const && src_known) {
+        unsigned long long dlen = 0;
+        if (bos_cstr_len_max(st, e->u.call.args.data[0], &dlen)
+            && dlen + slen < size_val)
+            fold_plain = 1;
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+    if (fold_plain) {
+        IRValue args[2];
+        args[0] = dst;
+        args[1] = src;
+        return bos_emit_named_call(fn, "strcat", args, 2, e->loc);
+    }
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    IRValue args[3];
+    args[0] = dst;
+    args[1] = src;
+    args[2] = szv;
+    return bos_emit_named_call(fn, "__strcat_chk", args, 3, e->loc);
+}
+
+/* __builtin___strncat_chk(dst, src, n, size).
+ * Fold to strncat when dest size is unknown (-1), n is 0, or src is empty.
+ * If strlen(src) <= n, GCC rewrites to strcat_chk. Otherwise keep
+ * __strncat_chk unless dest+src lengths are proven to fit. */
+static IRValue lower_fortify_strncat_chk_call(IRFunction *fn, IRSymTable *st,
+                                              const Expr *e) {
+    const Expr *size_e = e->u.call.args.data[3];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    unsigned long long slen = 0, nmax = 0, dlen = 0;
+    int src_known = bos_cstr_len_max(st, e->u.call.args.data[1], &slen);
+    int n_known = bos_int_max(st, e->u.call.args.data[2], &nmax);
+    int dst_known = bos_cstr_len_max(st, e->u.call.args.data[0], &dlen);
+    int fold_strncat = 0;
+    int fold_strcat = 0;
+    int emit_strcat_chk = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_strncat = 1;
+    else if (n_known && nmax == 0)
+        fold_strncat = 1;
+    else if (src_known && slen == 0)
+        fold_strncat = 1;
+    else if (src_known && n_known && slen <= nmax) {
+        if (size_const && dst_known && dlen + slen < size_val)
+            fold_strcat = 1;
+        else
+            emit_strcat_chk = 1;
+    } else if (size_const && src_known && n_known && dst_known) {
+        unsigned long long add = slen < nmax ? slen : nmax;
+        if (dlen + add < size_val)
+            fold_strncat = 1;
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+    IRValue nv = lower_expr(fn, st, e->u.call.args.data[2]);
+    if (fold_strcat) {
+        IRValue args[2];
+        args[0] = dst;
+        args[1] = src;
+        return bos_emit_named_call(fn, "strcat", args, 2, e->loc);
+    }
+    if (fold_strncat) {
+        IRValue args[3];
+        args[0] = dst;
+        args[1] = src;
+        args[2] = nv;
+        return bos_emit_named_call(fn, "strncat", args, 3, e->loc);
+    }
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    if (emit_strcat_chk) {
+        IRValue args[3];
+        args[0] = dst;
+        args[1] = src;
+        args[2] = szv;
+        return bos_emit_named_call(fn, "__strcat_chk", args, 3, e->loc);
+    }
+    IRValue args[4];
+    args[0] = dst;
+    args[1] = src;
+    args[2] = nv;
+    args[3] = szv;
+    return bos_emit_named_call(fn, "__strncat_chk", args, 4, e->loc);
+}
+
+
 static void emit_zero_bytes(IRFunction *fn, IRValue base, int total, SourceLoc loc) {
     int off = 0;
     while (off + 8 <= total) {
@@ -3335,18 +4524,69 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return coerced;
     }
     case EX_CALL: {
-        if (e->u.call.callee->kind == EX_VAR &&
-            (strcmp(e->u.call.callee->u.var.name, "__builtin_conjf") == 0 ||
-             strcmp(e->u.call.callee->u.var.name, "__builtin_conj") == 0 ||
-             strcmp(e->u.call.callee->u.var.name, "__builtin_conjl") == 0)) {
-            Expr fake_un;
-            memset(&fake_un, 0, sizeof(fake_un));
-            fake_un.kind = EX_UNARY;
-            fake_un.type = e->type;
-            fake_un.loc = e->loc;
-            fake_un.u.un.op = UOP_BITNOT;
-            fake_un.u.un.operand = e->u.call.args.data[0];
-            return lower_expr(fn, st, &fake_un);
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *bos_cn = e->u.call.callee->u.var.name;
+            if (strcmp(bos_cn, "__builtin_object_size") == 0 && e->u.call.args.len >= 1) {
+                long long bos_type = 0;
+                if (e->u.call.args.len >= 2)
+                    fold_const_int(e->u.call.args.data[1], &bos_type);
+                unsigned long long sz = compute_builtin_object_size(st, e->u.call.args.data[0], (int)bos_type);
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_CONST, v, -1, -1, (int64_t)sz, 8, 1, e->loc);
+                set_value_type(fn, v, 8, 1);
+                return v;
+            }
+            if (bos_is_snprintf_chk_builtin(bos_cn) && e->u.call.args.len >= 5)
+                return lower_fortify_snprintf_chk_call(fn, st, e);
+            if (bos_is_sprintf_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
+                return lower_fortify_sprintf_chk_call(fn, st, e);
+            if (bos_is_stpcpy_chk_builtin(bos_cn) && e->u.call.args.len >= 3)
+                return lower_fortify_stpcpy_chk_call(fn, st, e);
+            if (bos_is_strcat_chk_builtin(bos_cn) && e->u.call.args.len >= 3)
+                return lower_fortify_strcat_chk_call(fn, st, e);
+            if (bos_is_strncat_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
+                return lower_fortify_strncat_chk_call(fn, st, e);
+            if (bos_is_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
+                return lower_fortify_chk_call(fn, st, e);
+        }
+        if (e->u.call.callee->kind == EX_VAR && e->u.call.args.len > 0) {
+            const char *cn = e->u.call.callee->u.var.name;
+            if (strcmp(cn, "__builtin_conjf") == 0 || strcmp(cn, "__builtin_conj") == 0 ||
+                strcmp(cn, "__builtin_conjl") == 0 ||
+                strcmp(cn, "conjf") == 0 || strcmp(cn, "conj") == 0 || strcmp(cn, "conjl") == 0) {
+                Expr fake_un;
+                memset(&fake_un, 0, sizeof(fake_un));
+                fake_un.kind = EX_UNARY;
+                fake_un.type = e->type;
+                fake_un.loc = e->loc;
+                fake_un.u.un.op = UOP_BITNOT;
+                fake_un.u.un.operand = e->u.call.args.data[0];
+                return lower_expr(fn, st, &fake_un);
+            }
+            if (strcmp(cn, "__builtin_crealf") == 0 || strcmp(cn, "__builtin_creal") == 0 ||
+                strcmp(cn, "__builtin_creall") == 0 ||
+                strcmp(cn, "crealf") == 0 || strcmp(cn, "creal") == 0 || strcmp(cn, "creall") == 0 ||
+                strcmp(cn, "__builtin_cimagf") == 0 || strcmp(cn, "__builtin_cimag") == 0 ||
+                strcmp(cn, "__builtin_cimagl") == 0 ||
+                strcmp(cn, "cimagf") == 0 || strcmp(cn, "cimag") == 0 || strcmp(cn, "cimagl") == 0) {
+                int imag = strstr(cn, "cimag") != NULL;
+                Type cty = e->u.call.args.data[0]->type;
+                int total_sz = type_size(cty);
+                int elem_sz = total_sz / 2;
+                int is_unsigned = (cty.tag && strstr(cty.tag, "unsigned") != NULL);
+                int is_float = (cty.tag && (strstr(cty.tag, "float") || strstr(cty.tag, "double") ||
+                                            strstr(cty.tag, "ldouble")));
+                IRValue op_addr = lower_expr(fn, st, e->u.call.args.data[0]);
+                if (imag) {
+                    IRValue off = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                    op_addr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
+                }
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, v, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, v, 1);
+                return v;
+            }
         }
         if (e->u.call.callee->kind == EX_VAR &&
             strncmp(e->u.call.callee->u.var.name, "__sync_", 7) == 0) {
@@ -3750,12 +4990,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             (strcmp(e->u.call.callee->u.var.name, "abs") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "labs") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "llabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "imaxabs") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_abs") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_labs") == 0 ||
-             strcmp(e->u.call.callee->u.var.name, "__builtin_llabs") == 0) &&
-            e->u.call.args.len > 0) {
+             strcmp(e->u.call.callee->u.var.name, "__builtin_llabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_imaxabs") == 0) &&
+            e->u.call.args.len > 0 &&
+            !ir_builtin_disabled(e->u.call.callee->u.var.name)) {
             const char *bname = e->u.call.callee->u.var.name;
-            int bw = (strstr(bname, "llabs") || strstr(bname, "labs")) ? 8 : 4;
+            int bw = (strstr(bname, "llabs") || strstr(bname, "labs") || strstr(bname, "imaxabs")) ? 8 : 4;
             IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
             arg = coerce(fn, arg, get_value_width(fn, arg), get_value_is_unsigned(fn, arg), bw, 0, e->loc);
             IRValue slot = new_value(fn);
@@ -3782,6 +5025,45 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             set_value_type(fn, result, bw, 0);
             return result;
         }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "uabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "ulabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "ullabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "umaxabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_uabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ulabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_ullabs") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_umaxabs") == 0) &&
+            e->u.call.args.len > 0 &&
+            !ir_builtin_disabled(e->u.call.callee->u.var.name)) {
+            const char *bname = e->u.call.callee->u.var.name;
+            int bw = (strstr(bname, "ulabs") || strstr(bname, "ullabs") || strstr(bname, "umaxabs")) ? 8 : 4;
+            IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
+            arg = coerce(fn, arg, get_value_width(fn, arg), get_value_is_unsigned(fn, arg), bw, 0, e->loc);
+            IRValue slot = new_value(fn);
+            emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, bw, 1, e->loc);
+            int L_neg = new_label(fn);
+            int L_pos = new_label(fn);
+            int L_done = new_label(fn);
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, bw, 0, e->loc);
+            IRValue cond = new_value(fn);
+            emit_inst_w(fn, IR_LT, cond, arg, zero, 0, bw, 0, e->loc);
+            emit_cbr(fn, cond, L_neg, L_pos, e->loc);
+            emit_label(fn, L_neg, e->loc);
+            IRValue neg = new_value(fn);
+            emit_inst_w(fn, IR_NEG, neg, arg, -1, 0, bw, 1, e->loc);
+            emit_inst_w(fn, IR_STORE, -1, slot, neg, 0, bw, 1, e->loc);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_pos, e->loc);
+            emit_inst_w(fn, IR_STORE, -1, slot, arg, 0, bw, 1, e->loc);
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_done, e->loc);
+            IRValue result = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, bw, 1, e->loc);
+            set_value_type(fn, result, bw, 1);
+            return result;
+        }
         /* The va_start / va_arg / va_end builtins.  They are lowered to a
          * named IR_CALL (call_name = the builtin) so codegen can dispatch by
          * name, exactly like __syscall.  The va_list is already a pointer to
@@ -3789,6 +5071,64 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
          * first arg lowers directly to the struct base address. */
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
+            if (strcmp(cname, "__builtin_apply_args") == 0) {
+                /* GCC saves incoming arg registers at function entry. Flag
+                 * the function so codegen emits that save in the prologue. */
+                fn->needs_apply_args = 1;
+                IRInst inst;
+                memset(&inst, 0, sizeof(inst));
+                inst.op = IR_CALL;
+                inst.dst = new_value(fn);
+                inst.a = -1; inst.b = -1;
+                inst.loc = e->loc;
+                inst.call_name = xstrdup("__builtin_apply_args");
+                inst.call_callee = -1;
+                inst.call_nargs = 0;
+                inst.width = 8;
+                inst.is_unsigned = 1;
+                ir_inst_array_push(&fn->insts, inst);
+                set_value_type(fn, inst.dst, 8, 1);
+                return inst.dst;
+            }
+            if (strcmp(cname, "__builtin_apply") == 0) {
+                fn->needs_apply = 1;
+                fn->has_dyn_alloca = 1;
+                IRValue fptr = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRValue ablk = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue asz = lower_expr(fn, st, e->u.call.args.data[2]);
+                IRInst inst;
+                memset(&inst, 0, sizeof(inst));
+                inst.op = IR_CALL;
+                inst.dst = new_value(fn);
+                inst.a = -1; inst.b = -1;
+                inst.loc = e->loc;
+                inst.call_name = xstrdup("__builtin_apply");
+                inst.call_callee = -1;
+                inst.call_nargs = 3;
+                inst.call_args[0] = fptr;
+                inst.call_args[1] = ablk;
+                inst.call_args[2] = asz;
+                inst.width = 8;
+                inst.is_unsigned = 1;
+                ir_inst_array_push(&fn->insts, inst);
+                set_value_type(fn, inst.dst, 8, 1);
+                return inst.dst;
+            }
+            if (strcmp(cname, "__builtin_return") == 0) {
+                IRValue rp = lower_expr(fn, st, e->u.call.args.data[0]);
+                IRInst inst;
+                memset(&inst, 0, sizeof(inst));
+                inst.op = IR_CALL;
+                inst.dst = -1;
+                inst.a = -1; inst.b = -1;
+                inst.loc = e->loc;
+                inst.call_name = xstrdup("__builtin_return");
+                inst.call_callee = -1;
+                inst.call_nargs = 1;
+                inst.call_args[0] = rp;
+                ir_inst_array_push(&fn->insts, inst);
+                return -1;
+            }
             if (strcmp(cname, "va_copy") == 0
                 || strcmp(cname, "__builtin_va_copy") == 0) {
                 IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
@@ -4205,12 +5545,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 else if (strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("abort");
                 else if (strcmp(cname, "__builtin_memset") == 0) inst.call_name = xstrdup("memset");
                 else if (strcmp(cname, "__builtin_memcpy") == 0) inst.call_name = xstrdup("memcpy");
+                else if (strcmp(cname, "__builtin_bzero") == 0) inst.call_name = xstrdup("bzero");
+                else if (strcmp(cname, "__builtin_bcopy") == 0) inst.call_name = xstrdup("bcopy");
                 else if (strcmp(cname, "__builtin_memcmp") == 0) inst.call_name = xstrdup("memcmp");
                 else if (strcmp(cname, "__builtin_strcmp") == 0) inst.call_name = xstrdup("strcmp");
                 else if (strcmp(cname, "__builtin_strncmp") == 0) inst.call_name = xstrdup("strncmp");
                 else if (strcmp(cname, "__builtin_strlen") == 0) inst.call_name = xstrdup("strlen");
+                else if (strcmp(cname, "__builtin_strspn") == 0) inst.call_name = xstrdup("strspn");
                 else if (strcmp(cname, "__builtin_strcpy") == 0) inst.call_name = xstrdup("strcpy");
                 else if (strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");
+                else if (strcmp(cname, "__builtin_stpcpy") == 0) inst.call_name = xstrdup("stpcpy");
+                else if (strcmp(cname, "__builtin_stpncpy") == 0) inst.call_name = xstrdup("stpncpy");
+                else if (strcmp(cname, "__builtin_strncpy") == 0) inst.call_name = xstrdup("strncpy");
+                else if (strcmp(cname, "__builtin_strncat") == 0) inst.call_name = xstrdup("strncat");
                 else if (strcmp(cname, "__builtin_fabs") == 0) inst.call_name = xstrdup("fabs");
                 else if (strcmp(cname, "__builtin_fabsf") == 0) inst.call_name = xstrdup("fabsf");
                 else if (strcmp(cname, "__builtin_fabsl") == 0) inst.call_name = xstrdup("fabsl");
@@ -4238,16 +5585,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     }
                 }
                 if (is_direct) {
-                    const char *target_name = cname;
-                    if (g_ir_tu) {
-                        for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
-                            if (strcmp(g_ir_tu->functions.data[i].name, cname) == 0 &&
-                                g_ir_tu->functions.data[i].alias_target) {
-                                target_name = g_ir_tu->functions.data[i].alias_target;
-                            }
-                        }
-                    }
-                    inst.call_name = xstrdup(target_name);
+                    const char *aliased = lookup_asm_alias(cname);
+                    inst.call_name = xstrdup(aliased ? aliased : cname);
                 } else {
                     /* Function-pointer variable: the callee is loaded from a slot.
                      * lower_expr returns the loaded SSA value. */
@@ -6831,6 +8170,24 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
             emit_inst_w(fn, IR_CONST, cv, -1, -1,
                         i < n ? (unsigned char)e->u.str.bytes[i] : 0, 1, eu, loc);
             emit_inst_w(fn, IR_STORE_PTR, -1, ptr, cv, 0, 1, eu, loc);
+        }
+        return;
+    }
+    /* Aggregate rvalue (not a brace list): copy bytes like assignment.
+     * `struct outers o = { rq() };` must memcpy the returned struct into
+     * `inner`, not store rq()'s address as an 8-byte scalar.  Matches GCC.
+     *
+     * Only do this when the initializer's type is itself an aggregate.
+     * Sema fills designated-init / empty `{}` gaps with integer 0; treating
+     * that 0 as a source pointer would load from NULL.  The object was
+     * already emit_zero_bytes'd, so a scalar zero is a no-op. */
+    if ((ty->kind == TY_STRUCT || ty->is_vector || ty->kind == TY_ARRAY)
+        && (e->type.kind == TY_STRUCT || e->type.is_vector
+            || e->type.kind == TY_ARRAY)) {
+        int sz = type_size(*ty);
+        if (sz > 0) {
+            IRValue agg = lower_expr(fn, st, e);
+            emit_struct_copy(fn, base, agg, sz, loc);
         }
         return;
     }

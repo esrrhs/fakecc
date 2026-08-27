@@ -338,6 +338,8 @@ struct IRFunction {
     int is_variadic;
     int is_static;
     int has_dyn_alloca;
+    int needs_apply_args;
+    int needs_apply;
     IRValue sret_value;
     IRDebugVar *dbg_vars;
     size_t num_dbg_vars;
@@ -1254,6 +1256,10 @@ int main(int argc, char **argv) {
             nodefaultlibs = 1;
         } else if (runtime.strcmp(argv[i], "-finstrument-functions") == 0) {
             g_instrument_functions = 1;
+        } else if (runtime.strcmp(argv[i], "-fno-builtin") == 0) {
+            g_no_builtin = 1;
+        } else if (runtime.strncmp(argv[i], "-fno-builtin-", 13) == 0) {
+            ir_disable_builtin(argv[i] + 13);
         } else if (runtime.strcmp(argv[i], "-fsanitize=address") == 0) {
             g_sanitize_address = 1;
         } else if (runtime.strncmp(argv[i], "-fsanitize=", 11) == 0) {
