@@ -823,6 +823,22 @@ static int g_vla_walk_serial = 0;
 static int g_vla_scan_addrs_only = 0;
 int g_instrument_functions = 0;
 int g_sanitize_address = 0;
+int g_no_builtin = 0;
+static char *g_no_builtin_names[64];
+static int g_n_no_builtin_names;
+void ir_disable_builtin(const char *name) {
+    if (!name || !*name) return;
+    if (g_n_no_builtin_names >= 64) return;
+    g_no_builtin_names[g_n_no_builtin_names++] = xstrdup(name);
+}
+int ir_builtin_disabled(const char *name) {
+    if (!name) return 0;
+    if (runtime.strncmp(name, "__builtin_", 10) == 0) return 0;
+    for (int i = 0; i < g_n_no_builtin_names; i++) {
+        if (runtime.strcmp(g_no_builtin_names[i], name) == 0) return 1;
+    }
+    return g_no_builtin;
+}
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : ((void*)0);
 }
@@ -4187,7 +4203,8 @@ IRValue hi;
              runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_labs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_llabs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_imaxabs") == 0) &&
-            e->u.call.args.len > 0) {
+            e->u.call.args.len > 0 &&
+            !ir_builtin_disabled(e->u.call.callee->u.var.name)) {
             const char *bname = e->u.call.callee->u.var.name;
             int bw = (runtime.strstr(bname, "llabs") || runtime.strstr(bname, "labs") || runtime.strstr(bname, "imaxabs")) ? 8 : 4;
             IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);
@@ -4225,7 +4242,8 @@ IRValue hi;
              runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_ulabs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_ullabs") == 0 ||
              runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_umaxabs") == 0) &&
-            e->u.call.args.len > 0) {
+            e->u.call.args.len > 0 &&
+            !ir_builtin_disabled(e->u.call.callee->u.var.name)) {
             const char *bname = e->u.call.callee->u.var.name;
             int bw = (runtime.strstr(bname, "ulabs") || runtime.strstr(bname, "ullabs") || runtime.strstr(bname, "umaxabs")) ? 8 : 4;
             IRValue arg = lower_expr(fn, st, e->u.call.args.data[0]);

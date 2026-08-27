@@ -303,6 +303,12 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 
 extern int g_instrument_functions;
 extern int g_sanitize_address;
+extern int g_no_builtin;
+
+/* GCC -fno-builtin / -fno-builtin-NAME: do not expand the library name as a
+ * builtin. Explicit __builtin_* names are never disabled. */
+void ir_disable_builtin(const char *name);
+int ir_builtin_disabled(const char *name);
 
 /* Return the live struct registry during lowering (NULL outside it).
  * type_size() uses this to refresh stale cached struct widths. */
