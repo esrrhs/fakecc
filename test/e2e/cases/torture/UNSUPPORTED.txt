@@ -77,7 +77,6 @@ builtins/abs-1.c
 builtins/abs-3.c
 builtins/complex-1.c
 builtins/memops-asm.c
-builtins/pr22237-1.c
 builtins/strstr-asm.c
 builtins/uabs-1.c
 builtins/uabs-3.c

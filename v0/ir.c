@@ -6915,6 +6915,14 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         }
         return;
     }
+    if (ty->kind == TY_STRUCT || ty->is_vector || ty->kind == TY_ARRAY) {
+        int sz = type_size(*ty);
+        if (sz > 0) {
+            IRValue agg = lower_expr(fn, st, e);
+            emit_struct_copy(fn, base, agg, sz, loc);
+        }
+        return;
+    }
     IRValue rv = lower_expr(fn, st, e);
     int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
     int rf = get_value_is_float(fn, rv);

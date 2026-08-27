@@ -6837,6 +6837,17 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         }
         return;
     }
+    /* Aggregate rvalue (not a brace list): copy bytes like assignment.
+     * `struct outers o = { rq() };` must memcpy the returned struct into
+     * `inner`, not store rq()'s address as an 8-byte scalar.  Matches GCC. */
+    if (ty->kind == TY_STRUCT || ty->is_vector || ty->kind == TY_ARRAY) {
+        int sz = type_size(*ty);
+        if (sz > 0) {
+            IRValue agg = lower_expr(fn, st, e);
+            emit_struct_copy(fn, base, agg, sz, loc);
+        }
+        return;
+    }
     /* Scalar element: lower, coerce to the target width, store via pointer. */
     IRValue rv = lower_expr(fn, st, e);
     int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
