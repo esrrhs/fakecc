@@ -3137,6 +3137,12 @@ static Stmt parse_stmt(Parser *p) {
             if (!s.u.decl.alias_target && g_parsed_alias) {
                 s.u.decl.alias_target = g_parsed_alias;
                 g_parsed_alias = NULL;
+            } else if (g_parsed_alias) {
+                /* __asm on this declarator already filled alias_target; do not
+                 * leak the name onto the next function (GCC: asm rename is
+                 * per-declarator). */
+                free(g_parsed_alias);
+                g_parsed_alias = NULL;
             }
             stmt_array_push(&decls, s);
             if (peek(p)->kind == TK_COMMA) {
@@ -3896,6 +3902,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
     while (parse_attribute(p, &fn.align, NULL, NULL, NULL, &fn.alias_target)) {}
     if (!fn.alias_target && g_parsed_alias) {
         fn.alias_target = g_parsed_alias;
+        g_parsed_alias = NULL;
+    } else if (g_parsed_alias) {
+        free(g_parsed_alias);
         g_parsed_alias = NULL;
     }
     if (g_parsed_no_instrument) {

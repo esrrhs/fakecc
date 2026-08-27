@@ -77,6 +77,23 @@ const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : NULL;
 }
 
+static const char *lookup_asm_alias(const char *name) {
+    if (!g_ir_tu || !name) return NULL;
+    for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
+        if (strcmp(g_ir_tu->functions.data[i].name, name) == 0 &&
+            g_ir_tu->functions.data[i].alias_target)
+            return g_ir_tu->functions.data[i].alias_target;
+    }
+    for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+        const Stmt *s = &g_ir_tu->globals.data[i];
+        if (s->kind == ST_DECL && s->u.decl.name && s->u.decl.alias_target &&
+            strcmp(s->u.decl.name, name) == 0)
+            return s->u.decl.alias_target;
+    }
+    return NULL;
+}
+
+
 /* Loop-stack: (continue_label, break_label).  Pushed on entry to every
  * loop-lowering block; popped on exit.  ST_BREAK / ST_CONTINUE consult the
  * top entry.  Depth guarded by sema — this stack never underflows. */
@@ -4292,6 +4309,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 else if (strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("abort");
                 else if (strcmp(cname, "__builtin_memset") == 0) inst.call_name = xstrdup("memset");
                 else if (strcmp(cname, "__builtin_memcpy") == 0) inst.call_name = xstrdup("memcpy");
+                else if (strcmp(cname, "__builtin_bzero") == 0) inst.call_name = xstrdup("bzero");
+                else if (strcmp(cname, "__builtin_bcopy") == 0) inst.call_name = xstrdup("bcopy");
                 else if (strcmp(cname, "__builtin_memcmp") == 0) inst.call_name = xstrdup("memcmp");
                 else if (strcmp(cname, "__builtin_strcmp") == 0) inst.call_name = xstrdup("strcmp");
                 else if (strcmp(cname, "__builtin_strncmp") == 0) inst.call_name = xstrdup("strncmp");
@@ -4328,16 +4347,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     }
                 }
                 if (is_direct) {
-                    const char *target_name = cname;
-                    if (g_ir_tu) {
-                        for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
-                            if (strcmp(g_ir_tu->functions.data[i].name, cname) == 0 &&
-                                g_ir_tu->functions.data[i].alias_target) {
-                                target_name = g_ir_tu->functions.data[i].alias_target;
-                            }
-                        }
-                    }
-                    inst.call_name = xstrdup(target_name);
+                    const char *aliased = lookup_asm_alias(cname);
+                    inst.call_name = xstrdup(aliased ? aliased : cname);
                 } else {
                     /* Function-pointer variable: the callee is loaded from a slot.
                      * lower_expr returns the loaded SSA value. */

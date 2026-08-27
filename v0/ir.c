@@ -842,6 +842,22 @@ int ir_builtin_disabled(const char *name) {
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : ((void*)0);
 }
+
+static const char *lookup_asm_alias(const char *name) {
+    if (!g_ir_tu || !name) return ((void*)0);
+    for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
+        if (runtime.strcmp(g_ir_tu->functions.data[i].name, name) == 0 &&
+            g_ir_tu->functions.data[i].alias_target)
+            return g_ir_tu->functions.data[i].alias_target;
+    }
+    for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
+        const Stmt *s = &g_ir_tu->globals.data[i];
+        if (s->kind == ST_DECL && s->u.decl.name && s->u.decl.alias_target &&
+            runtime.strcmp(s->u.decl.name, name) == 0)
+            return s->u.decl.alias_target;
+    }
+    return ((void*)0);
+}
 struct LoopFrame {
     int cont_label;
     int break_label;
@@ -4655,6 +4671,8 @@ IRValue hi;
                 else if (runtime.strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("abort");
                 else if (runtime.strcmp(cname, "__builtin_memset") == 0) inst.call_name = xstrdup("memset");
                 else if (runtime.strcmp(cname, "__builtin_memcpy") == 0) inst.call_name = xstrdup("memcpy");
+                else if (runtime.strcmp(cname, "__builtin_bzero") == 0) inst.call_name = xstrdup("bzero");
+                else if (runtime.strcmp(cname, "__builtin_bcopy") == 0) inst.call_name = xstrdup("bcopy");
                 else if (runtime.strcmp(cname, "__builtin_memcmp") == 0) inst.call_name = xstrdup("memcmp");
                 else if (runtime.strcmp(cname, "__builtin_strcmp") == 0) inst.call_name = xstrdup("strcmp");
                 else if (runtime.strcmp(cname, "__builtin_strncmp") == 0) inst.call_name = xstrdup("strncmp");
@@ -4683,16 +4701,8 @@ IRValue hi;
                     }
                 }
                 if (is_direct) {
-                    const char *target_name = cname;
-                    if (g_ir_tu) {
-                        for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
-                            if (runtime.strcmp(g_ir_tu->functions.data[i].name, cname) == 0 &&
-                                g_ir_tu->functions.data[i].alias_target) {
-                                target_name = g_ir_tu->functions.data[i].alias_target;
-                            }
-                        }
-                    }
-                    inst.call_name = xstrdup(target_name);
+                    const char *aliased = lookup_asm_alias(cname);
+                    inst.call_name = xstrdup(aliased ? aliased : cname);
                 } else {
                     inst.call_callee = lower_expr(fn, st, e->u.call.callee);
                 }
