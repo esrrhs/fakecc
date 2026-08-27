@@ -8175,8 +8175,15 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
     }
     /* Aggregate rvalue (not a brace list): copy bytes like assignment.
      * `struct outers o = { rq() };` must memcpy the returned struct into
-     * `inner`, not store rq()'s address as an 8-byte scalar.  Matches GCC. */
-    if (ty->kind == TY_STRUCT || ty->is_vector || ty->kind == TY_ARRAY) {
+     * `inner`, not store rq()'s address as an 8-byte scalar.  Matches GCC.
+     *
+     * Only do this when the initializer's type is itself an aggregate.
+     * Sema fills designated-init / empty `{}` gaps with integer 0; treating
+     * that 0 as a source pointer would load from NULL.  The object was
+     * already emit_zero_bytes'd, so a scalar zero is a no-op. */
+    if ((ty->kind == TY_STRUCT || ty->is_vector || ty->kind == TY_ARRAY)
+        && (e->type.kind == TY_STRUCT || e->type.is_vector
+            || e->type.kind == TY_ARRAY)) {
         int sz = type_size(*ty);
         if (sz > 0) {
             IRValue agg = lower_expr(fn, st, e);

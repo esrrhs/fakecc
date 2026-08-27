@@ -1,5 +1,6 @@
 // expect: 0
 // flags: -fno-builtin-uabs
+// skip_difftest: host gcc before 15 has no ulabs builtin; the aborting lib is then called
 package main;
 
 /* Port of gcc.c-torture/execute/builtins/uabs-1.c

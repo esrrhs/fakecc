@@ -8248,7 +8248,12 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         }
         return;
     }
-    if (ty->kind == TY_STRUCT || ty->is_vector || ty->kind == TY_ARRAY) {
+    /* Copy only when the initializer is itself an aggregate (rq()-style
+     * struct rvalues).  Sema gap-fills designated / empty `{}` with int 0;
+     * memcpy from that would load NULL. */
+    if ((ty->kind == TY_STRUCT || ty->is_vector || ty->kind == TY_ARRAY)
+        && (e->type.kind == TY_STRUCT || e->type.is_vector
+            || e->type.kind == TY_ARRAY)) {
         int sz = type_size(*ty);
         if (sz > 0) {
             IRValue agg = lower_expr(fn, st, e);

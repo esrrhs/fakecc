@@ -1,4 +1,5 @@
 // expect: 0
+// skip_difftest: host gcc before 15 has no __builtin_uabs family (undefined reference)
 package main;
 
 /* Port of gcc.c-torture/execute/builtins/uabs-3.c (+ lib/main.c).
