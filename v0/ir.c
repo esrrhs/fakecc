@@ -2535,6 +2535,11 @@ static int bos_is_chk_builtin(const char *n) {
                  runtime.strcmp(n, "__builtin___memset_chk") == 0);
 }
 
+
+static int bos_is_snprintf_chk_builtin(const char *n) {
+    return n && runtime.strcmp(n, "__builtin___snprintf_chk") == 0;
+}
+
 static const char *bos_chk_plain_name(const char *n) {
     if (runtime.strstr(n, "mempcpy")) return "mempcpy";
     if (runtime.strstr(n, "memcpy")) return "memcpy";
@@ -2879,7 +2884,16 @@ static int bos_int_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
         return 1;
     }
     if (!e || e->kind != EX_VAR || !e->u.var.name) return 0;
-    const IRSlot *slot = irsymtable_find(st, e->u.var.name);
+    /* File-scope objects can be written in other functions (or via asm), so
+     * their initializer is not a proven runtime max.  Only locals. */
+    const IRSlot *slot = NULL;
+    if (st) {
+        for (size_t i = st->len; i > 0; i--)
+            if (runtime.strcmp(st->data[i-1].name, e->u.var.name) == 0) {
+                slot = &st->data[i-1];
+                break;
+            }
+    }
     if (!slot || slot->ty.is_volatile) return 0;
     const Expr *srcs[32];
     int saw_unk = 0;
@@ -2976,6 +2990,105 @@ static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr
     args[2] = a2;
     args[3] = szv;
     return bos_emit_named_call(fn, bos_chk_rt_name(cn), args, 4, e->loc);
+}
+
+static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
+                                     IRValue *args, int nargs, SourceLoc loc,
+                                     int width, int is_unsigned) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    runtime.memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.loc = loc;
+    inst.call_name = xstrdup(name);
+    inst.call_callee = -1;
+    inst.call_nargs = nargs;
+    for (int i = 0; i < nargs; i++)
+        inst.call_args[i] = args[i];
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, is_unsigned);
+    return dst;
+}
+
+static int bos_eval_size_arg(IRSymTable *st, const Expr *size_e,
+                             unsigned long long *size_val) {
+    *size_val = ~(unsigned long long)0;
+    if (!size_e) return 0;
+    if (size_e->kind == EX_CALL && size_e->u.call.callee &&
+        size_e->u.call.callee->kind == EX_VAR &&
+        runtime.strcmp(size_e->u.call.callee->u.var.name, "__builtin_object_size") == 0 &&
+        size_e->u.call.args.len >= 1) {
+        long long bt = 0;
+        if (size_e->u.call.args.len >= 2)
+            fold_const_int(size_e->u.call.args.data[1], &bt);
+        *size_val = compute_builtin_object_size(st, size_e->u.call.args.data[0], (int)bt);
+        return 1;
+    }
+    long long sc = 0;
+    if (fold_const_int(size_e, &sc)) {
+        *size_val = (unsigned long long)sc;
+        return 1;
+    }
+    return 0;
+}
+
+/* __builtin___snprintf_chk(dst, n, flag, size, fmt, ...).
+ * Fold to snprintf(dst, n, fmt, ...) when size is unknown (-1) or n is proven
+ * <= size. Otherwise call __snprintf_chk with the same extra args. */
+static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
+                                               const Expr *e) {
+    const Expr *size_e = e->u.call.args.data[3];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    int fold_plain = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_plain = 1;
+    else if (size_const) {
+        long long nconst = 0;
+        unsigned long long nmax = 0;
+        if (fold_const_int(e->u.call.args.data[1], &nconst)) {
+            if ((unsigned long long)nconst <= size_val)
+                fold_plain = 1;
+        } else if (bos_int_max(st, e->u.call.args.data[1], &nmax) && nmax <= size_val) {
+            fold_plain = 1;
+        }
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue nval = lower_expr(fn, st, e->u.call.args.data[1]);
+    IRValue args[IR_CALL_MAX_ARGS];
+    int nargs = 0;
+    args[nargs++] = dst;
+    args[nargs++] = nval;
+    if (fold_plain) {
+        for (int i = 4; i < (int)e->u.call.args.len; i++) {
+            if (nargs >= IR_CALL_MAX_ARGS) {
+                fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
+                exit(1);
+            }
+            args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+        }
+        return bos_emit_named_call_w(fn, "snprintf", args, nargs, e->loc, 4, 0);
+    }
+    args[nargs++] = lower_expr(fn, st, e->u.call.args.data[2]);
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    args[nargs++] = szv;
+    for (int i = 4; i < (int)e->u.call.args.len; i++) {
+        if (nargs >= IR_CALL_MAX_ARGS) {
+            fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
+            exit(1);
+        }
+        args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+    }
+    return bos_emit_named_call_w(fn, "__snprintf_chk", args, nargs, e->loc, 4, 0);
 }
 
 
@@ -4374,6 +4487,8 @@ IRValue pr;
                 set_value_type(fn, v, 8, 1);
                 return v;
             }
+            if (bos_is_snprintf_chk_builtin(bos_cn) && e->u.call.args.len >= 5)
+                return lower_fortify_snprintf_chk_call(fn, st, e);
             if (bos_is_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
                 return lower_fortify_chk_call(fn, st, e);
         }
