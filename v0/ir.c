@@ -2554,6 +2554,10 @@ static int bos_is_strcat_chk_builtin(const char *n) {
     return n && runtime.strcmp(n, "__builtin___strcat_chk") == 0;
 }
 
+static int bos_is_strncat_chk_builtin(const char *n) {
+    return n && runtime.strcmp(n, "__builtin___strncat_chk") == 0;
+}
+
 static const char *bos_chk_plain_name(const char *n) {
     if (runtime.strstr(n, "mempcpy")) return "mempcpy";
     if (runtime.strstr(n, "memcpy")) return "memcpy";
@@ -2708,14 +2712,62 @@ static void bos_collect_stmt(const Stmt *s, const char *name,
     }
 }
 
+
+static int bos_stmt_declares(const Stmt *s, const char *name) {
+    if (!s || !name) return 0;
+    switch (s->kind) {
+    case ST_DECL:
+        if (s->u.decl.name && runtime.strcmp(s->u.decl.name, name) == 0)
+            return 1;
+        return 0;
+    case ST_IF:
+        return bos_stmt_declares(s->u.if_s.then_s, name)
+            || bos_stmt_declares(s->u.if_s.else_s, name);
+    case ST_WHILE:
+        return bos_stmt_declares(s->u.while_s.body, name);
+    case ST_DO_WHILE:
+        return bos_stmt_declares(s->u.do_s.body, name);
+    case ST_FOR:
+        return bos_stmt_declares(s->u.for_s.init, name)
+            || bos_stmt_declares(s->u.for_s.body, name);
+    case ST_LABEL:
+        return bos_stmt_declares(s->u.label_s.stmt, name);
+    case ST_SWITCH: {
+        if (bos_stmt_declares(s->u.switch_s.body, name))
+            return 1;
+        for (int i = 0; i < s->u.switch_s.num_cases; i++)
+            for (size_t j = 0; j < s->u.switch_s.cases[i].stmts.len; j++)
+                if (bos_stmt_declares(&s->u.switch_s.cases[i].stmts.data[j], name))
+                    return 1;
+        return 0;
+    }
+    case ST_BLOCK:
+        for (size_t i = 0; i < s->u.block.len; i++)
+            if (bos_stmt_declares(&s->u.block.data[i], name))
+                return 1;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int bos_cur_fn_declares(const char *name) {
+    if (!g_ir_cur_fd || !name) return 0;
+    for (size_t i = 0; i < g_ir_cur_fd->body.len; i++)
+        if (bos_stmt_declares(&g_ir_cur_fd->body.data[i], name))
+            return 1;
+    return 0;
+}
+
 static int bos_collect_sources(const char *name, const Expr **out, int cap, int *saw_unk) {
     int n = 0;
     *saw_unk = 0;
+    int is_local = bos_cur_fn_declares(name);
     if (g_ir_cur_fd) {
         for (size_t i = 0; i < g_ir_cur_fd->body.len; i++)
             bos_collect_stmt(&g_ir_cur_fd->body.data[i], name, out, &n, cap, saw_unk);
     }
-    if (g_ir_tu) {
+    if (!is_local && g_ir_tu) {
         for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
             const Stmt *gs = &g_ir_tu->globals.data[i];
             if (gs->kind == ST_DECL && gs->u.decl.name && name &&
@@ -3154,14 +3206,10 @@ static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long lo
          * File-scope pointers can be asm-clobbered, so those stay unknown. */
         if (e->type.kind == TY_PTR) {
             if (bos_is_param(e->u.var.name)) return 0;
-            if (g_ir_tu) {
-                for (size_t i = 0; i < g_ir_tu->globals.len; i++) {
-                    const Stmt *gs = &g_ir_tu->globals.data[i];
-                    if (gs->kind == ST_DECL && gs->u.decl.name &&
-                        runtime.strcmp(gs->u.decl.name, e->u.var.name) == 0)
-                        return 0;
-                }
-            }
+            /* File-scope pointers can be asm-clobbered. A same-named local
+             * (e.g. test1's s2 = "") is a different object. */
+            if (!bos_cur_fn_declares(e->u.var.name))
+                return 0;
             static int depth;
             if (depth >= 8) return 0;
             const Expr *srcs[32];
@@ -3431,6 +3479,76 @@ static IRValue lower_fortify_strcat_chk_call(IRFunction *fn, IRSymTable *st,
     args[1] = src;
     args[2] = szv;
     return bos_emit_named_call(fn, "__strcat_chk", args, 3, e->loc);
+}
+
+/* __builtin___strncat_chk(dst, src, n, size).
+ * Fold to strncat when dest size is unknown (-1), n is 0, or src is empty.
+ * If strlen(src) <= n, GCC rewrites to strcat_chk. Otherwise keep
+ * __strncat_chk unless dest+src lengths are proven to fit. */
+static IRValue lower_fortify_strncat_chk_call(IRFunction *fn, IRSymTable *st,
+                                              const Expr *e) {
+    const Expr *size_e = e->u.call.args.data[3];
+    unsigned long long size_val = ~(unsigned long long)0;
+    int size_const = bos_eval_size_arg(st, size_e, &size_val);
+    unsigned long long slen = 0, nmax = 0, dlen = 0;
+    int src_known = bos_cstr_len_max(st, e->u.call.args.data[1], &slen);
+    int n_known = bos_int_max(st, e->u.call.args.data[2], &nmax);
+    int dst_known = bos_cstr_len_max(st, e->u.call.args.data[0], &dlen);
+    int fold_strncat = 0;
+    int fold_strcat = 0;
+    int emit_strcat_chk = 0;
+    if (size_const && size_val == ~(unsigned long long)0)
+        fold_strncat = 1;
+    else if (n_known && nmax == 0)
+        fold_strncat = 1;
+    else if (src_known && slen == 0)
+        fold_strncat = 1;
+    else if (src_known && n_known && slen <= nmax) {
+        if (size_const && dst_known && dlen + slen < size_val)
+            fold_strcat = 1;
+        else
+            emit_strcat_chk = 1;
+    } else if (size_const && src_known && n_known && dst_known) {
+        unsigned long long add = slen < nmax ? slen : nmax;
+        if (dlen + add < size_val)
+            fold_strncat = 1;
+    }
+    IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
+    IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
+    IRValue nv = lower_expr(fn, st, e->u.call.args.data[2]);
+    if (fold_strcat) {
+        IRValue args[2];
+        args[0] = dst;
+        args[1] = src;
+        return bos_emit_named_call(fn, "strcat", args, 2, e->loc);
+    }
+    if (fold_strncat) {
+        IRValue args[3];
+        args[0] = dst;
+        args[1] = src;
+        args[2] = nv;
+        return bos_emit_named_call(fn, "strncat", args, 3, e->loc);
+    }
+    IRValue szv = new_value(fn);
+    if (size_const) {
+        emit_inst_w(fn, IR_CONST, szv, -1, -1, (int64_t)size_val, 8, 1, e->loc);
+        set_value_type(fn, szv, 8, 1);
+    } else {
+        szv = lower_expr(fn, st, size_e);
+    }
+    if (emit_strcat_chk) {
+        IRValue args[3];
+        args[0] = dst;
+        args[1] = src;
+        args[2] = szv;
+        return bos_emit_named_call(fn, "__strcat_chk", args, 3, e->loc);
+    }
+    IRValue args[4];
+    args[0] = dst;
+    args[1] = src;
+    args[2] = nv;
+    args[3] = szv;
+    return bos_emit_named_call(fn, "__strncat_chk", args, 4, e->loc);
 }
 
 
@@ -4837,6 +4955,8 @@ IRValue pr;
                 return lower_fortify_stpcpy_chk_call(fn, st, e);
             if (bos_is_strcat_chk_builtin(bos_cn) && e->u.call.args.len >= 3)
                 return lower_fortify_strcat_chk_call(fn, st, e);
+            if (bos_is_strncat_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
+                return lower_fortify_strncat_chk_call(fn, st, e);
             if (bos_is_chk_builtin(bos_cn) && e->u.call.args.len >= 4)
                 return lower_fortify_chk_call(fn, st, e);
         }
@@ -5781,7 +5901,6 @@ IRValue hi;
                 else if (runtime.strcmp(cname, "__builtin_stpcpy") == 0) inst.call_name = xstrdup("stpcpy");
                 else if (runtime.strcmp(cname, "__builtin_stpncpy") == 0) inst.call_name = xstrdup("stpncpy");
                 else if (runtime.strcmp(cname, "__builtin_strncpy") == 0) inst.call_name = xstrdup("strncpy");
-                else if (runtime.strcmp(cname, "__builtin_strcat") == 0) inst.call_name = xstrdup("strcat");
                 else if (runtime.strcmp(cname, "__builtin_strncat") == 0) inst.call_name = xstrdup("strncat");
                 else if (runtime.strcmp(cname, "__builtin_fabs") == 0) inst.call_name = xstrdup("fabs");
                 else if (runtime.strcmp(cname, "__builtin_fabsf") == 0) inst.call_name = xstrdup("fabsf");

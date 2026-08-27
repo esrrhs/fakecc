@@ -55,7 +55,6 @@ pr80692.c
 va-arg-pack-1.c
 
 # GCC Fortify Source __builtin_object_size / __builtin___*_chk buffer overflow checks
-builtins/strncat-chk.c
 builtins/strncpy-chk.c
 builtins/vsnprintf-chk.c
 builtins/vsprintf-chk.c
