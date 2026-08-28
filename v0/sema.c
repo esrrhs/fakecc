@@ -2708,11 +2708,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         symtable_free(&st);
         g_sema_labels = ((void*)0);
         labelset_free(&ls);
-        if (runtime.strcmp(fn->name, "main") == 0 && fn->ret_type.kind != TY_VOID && !has_return) {
-            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                   "function '%s' with non-void return type must return a value",
-                   fn->name);
-        }
+        (void)has_return;
     }
     ftab_free(&ft);
     symtable_free(&globals);

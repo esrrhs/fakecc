@@ -2379,11 +2379,11 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         g_sema_labels = NULL;
         labelset_free(&ls);
 
-        if (strcmp(fn->name, "main") == 0 && fn->ret_type.kind != TY_VOID && !has_return) {
-            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                   "function '%s' with non-void return type must return a value",
-                   fn->name);
-        }
+        /* C99 §5.1.2.2.3: reaching the `}` that terminates `main` returns 0.
+         * GCC accepts a missing return here (and for other non-void functions
+         * as a compile-time warning at most).  IR already appends an implicit
+         * `return 0` when a function does not end in IR_RETURN. */
+        (void)has_return;
     }
 
     ftab_free(&ft);

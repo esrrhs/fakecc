@@ -1,5 +1,5 @@
 # GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
-# Total: 465 (out of 2003 original GCC compile cases)
+# Total: 464 (out of 2003 original GCC compile cases)
 #
 
 # === Crashes / Segfaults (4) ===
@@ -12,7 +12,7 @@ pr94621.c
 20151204.c
 pr65680.c
 
-# === Compile Rejects (459) ===
+# === Compile Rejects (458) ===
 20000120-2.c
 20000211-1.c
 20000403-1.c
@@ -216,7 +216,6 @@ attr-complex-method-2.c
 attr-complex-method.c
 attr-retain-2.c
 attr-used-retain-2.c
-b.c
 band.c
 bcopy.c
 bfx.c
