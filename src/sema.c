@@ -120,6 +120,37 @@ static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) 
     fn->is_static = 0;
 }
 
+
+/* GNU89: a call to an undeclared identifier implicitly declares
+ * `extern int name();` (unprototyped, returns int).  GCC still accepts this
+ * under -std=gnu89; c-torture compile tests that use it pass that flag. */
+static void gnu89_implicit_func(FunTable *t, const char *name, SourceLoc loc) {
+    if (!name || !*name || ftab_find(t, name)) return;
+    TranslationUnit *tu = (TranslationUnit *)g_sema_tu;
+    if (!tu) return;
+    for (size_t i = 0; i < tu->functions.len; i++) {
+        if (strcmp(tu->functions.data[i].name, name) == 0) {
+            ftab_push(t, &tu->functions.data[i]);
+            return;
+        }
+    }
+    if (tu->functions.len >= tu->functions.cap) {
+        /* Body checking holds FunctionDecl *; do not relocate the array. */
+        die_at(loc.file, loc.line, loc.col,
+               "too many implicit function declarations");
+    }
+    FunctionDecl *fn = &tu->functions.data[tu->functions.len++];
+    memset(fn, 0, sizeof(*fn));
+    fn->name = xstrdup(name);
+    fn->ret_type = type_default_int();
+    param_array_init(&fn->params);
+    stmt_array_init(&fn->body);
+    fn->loc = loc;
+    fn->is_extern = 1;
+    fn->is_unprototyped = 1;
+    ftab_push(t, fn);
+}
+
 static void import_pkg_funcs(TranslationUnit *tu, FunTable *ft, Package *pkg) {
     if (!pkg) return;
     for (size_t i = 0; i < pkg->nfuncs; i++) {
@@ -1168,6 +1199,12 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             set_type(e, type_make_void());
             return type_clone(e->type);
         }
+        /* GNU89 implicit `extern int name();` for an undeclared callee. */
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *cname = e->u.call.callee->u.var.name;
+            if (!symtable_find(st, cname) && !ftab_find(ft, cname))
+                gnu89_implicit_func(ft, cname, e->loc);
+        }
         /* Type-check the callee expression. */
         Type callee_ty = check_expr(e->u.call.callee, st, ft);
         /* Direct call: callee is `EX_VAR` naming a known function. */
@@ -2183,6 +2220,17 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
 
     FunTable ft;
     ftab_init(&ft);
+    /* Spare slots so GNU89 implicit decls can append without relocating
+     * FunctionDecl pointers held during body checking. */
+    {
+        size_t need = tu->functions.len + 256;
+        if (need > tu->functions.cap) {
+            tu->functions.data = realloc(tu->functions.data,
+                                         need * sizeof(FunctionDecl));
+            if (!tu->functions.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            tu->functions.cap = need;
+        }
+    }
     int has_main = 0;
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];

@@ -742,6 +742,33 @@ static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) 
     fn->is_extern = 1;
     fn->is_static = 0;
 }
+
+static void gnu89_implicit_func(FunTable *t, const char *name, SourceLoc loc) {
+    if (!name || !*name || ftab_find(t, name)) return;
+    TranslationUnit *tu = (TranslationUnit *)g_sema_tu;
+    if (!tu) return;
+    for (size_t i = 0; i < tu->functions.len; i++) {
+        if (runtime.strcmp(tu->functions.data[i].name, name) == 0) {
+            ftab_push(t, &tu->functions.data[i]);
+            return;
+        }
+    }
+    if (tu->functions.len >= tu->functions.cap) {
+        die_at(loc.file, loc.line, loc.col,
+               "too many implicit function declarations");
+    }
+    FunctionDecl *fn = &tu->functions.data[tu->functions.len++];
+    runtime.memset(fn, 0, sizeof(*fn));
+    fn->name = xstrdup(name);
+    fn->ret_type = type_default_int();
+    param_array_init(&fn->params);
+    stmt_array_init(&fn->body);
+    fn->loc = loc;
+    fn->is_extern = 1;
+    fn->is_unprototyped = 1;
+    ftab_push(t, fn);
+}
+
 static void import_pkg_funcs(TranslationUnit *tu, FunTable *ft, Package *pkg) {
     if (!pkg) return;
     for (size_t i = 0; i < pkg->nfuncs; i++) {
@@ -1685,6 +1712,11 @@ Type p1;
             set_type(e, type_make_void());
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *cname = e->u.call.callee->u.var.name;
+            if (!symtable_find(st, cname) && !ftab_find(ft, cname))
+                gnu89_implicit_func(ft, cname, e->loc);
+        }
         Type callee_ty = check_expr(e->u.call.callee, st, ft);
         if (e->u.call.callee->kind == EX_VAR) {
             const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
@@ -2552,6 +2584,15 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
     g_sema_tu = tu_const;
     FunTable ft;
     ftab_init(&ft);
+    {
+        size_t need = tu->functions.len + 256;
+        if (need > tu->functions.cap) {
+            tu->functions.data = runtime.realloc(tu->functions.data,
+                                         need * sizeof(FunctionDecl));
+            if (!tu->functions.data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            tu->functions.cap = need;
+        }
+    }
     int has_main = 0;
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
