@@ -2645,6 +2645,21 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             }
         }
         if (ftab_find(&ft, s->u.decl.name)) {
+            if (s->u.decl.type.kind == TY_FUNC) {
+                if (s->u.decl.alias_target) {
+                    for (size_t fi = 0; fi < tu->functions.len; fi++) {
+                        if (runtime.strcmp(tu->functions.data[fi].name, s->u.decl.name) == 0) {
+                            if (!tu->functions.data[fi].alias_target)
+                                tu->functions.data[fi].alias_target =
+                                    xstrdup(s->u.decl.alias_target);
+                            break;
+                        }
+                    }
+                }
+                s->kind = ST_EXPR;
+                s->u.expr = ((void*)0);
+                continue;
+            }
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "global '%s' conflicts with a function of the same name",
                    s->u.decl.name);

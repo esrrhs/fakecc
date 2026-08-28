@@ -1125,10 +1125,26 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
                 if (ec) {
                     found = type_default_int();
                 } else {
+                    int got = 0;
                     for (size_t g = 0; g < p->tu->globals.len; g++) {
                         if (p->tu->globals.data[g].kind == ST_DECL &&
                             runtime.strcmp(p->tu->globals.data[g].u.decl.name, tok->text) == 0) {
                             found = type_clone(p->tu->globals.data[g].u.decl.type);
+                            got = 1;
+                            break;
+                        }
+                    }
+                    if (!got) {
+                        for (size_t f = 0; f < p->tu->functions.len; f++) {
+                            const FunctionDecl *fn = &p->tu->functions.data[f];
+                            if (runtime.strcmp(fn->name, tok->text) != 0) continue;
+                            Type *ptys[16];
+                            int n = (int)fn->params.len;
+                            if (n > 16) n = 16;
+                            for (int i = 0; i < n; i++)
+                                ptys[i] = &fn->params.data[i].type;
+                            found = type_make_func_var(fn->ret_type, n ? ptys : NULL,
+                                                       n, fn->is_variadic);
                             break;
                         }
                     }
@@ -3092,6 +3108,19 @@ static int is_function_declaration_lookahead(Parser *p) {
                        || runtime.strcmp(peek(p)->text, "__int128_t") == 0
                        || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
             advance(p);
+        } else if (tk == TK_IDENT
+                   && (runtime.strcmp(peek(p)->text, "typeof") == 0
+                       || runtime.strcmp(peek(p)->text, "__typeof__") == 0
+                       || runtime.strcmp(peek(p)->text, "__typeof") == 0)) {
+            advance(p);
+            if (peek(p)->kind == TK_LPAREN) {
+                int depth = 0;
+                do {
+                    if (peek(p)->kind == TK_LPAREN) depth++;
+                    else if (peek(p)->kind == TK_RPAREN) depth--;
+                    advance(p);
+                } while (depth > 0 && peek(p)->kind != TK_EOF);
+            }
         } else {
             break;
         }
@@ -3151,6 +3180,19 @@ static int is_function_definition_lookahead(Parser *p) {
                        || runtime.strcmp(peek(p)->text, "__int128_t") == 0
                        || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
             advance(p);
+        } else if (tk == TK_IDENT
+                   && (runtime.strcmp(peek(p)->text, "typeof") == 0
+                       || runtime.strcmp(peek(p)->text, "__typeof__") == 0
+                       || runtime.strcmp(peek(p)->text, "__typeof") == 0)) {
+            advance(p);
+            if (peek(p)->kind == TK_LPAREN) {
+                int depth = 0;
+                do {
+                    if (peek(p)->kind == TK_LPAREN) depth++;
+                    else if (peek(p)->kind == TK_RPAREN) depth--;
+                    advance(p);
+                } while (depth > 0 && peek(p)->kind != TK_EOF);
+            }
         } else {
             break;
         }
