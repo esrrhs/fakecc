@@ -3866,6 +3866,9 @@ static Stmt parse_typedef_stmt(Parser *p) {
                 typedef_registry_add(&p->tu->typedefs, decl_name, ty);
             } else if (builtin_va) {
                 type_free(&ty);
+            } else if (runtime.strcmp(decl_name, "wchar_t") == 0) {
+                type_free(&exist->type);
+                exist->type = ty;
             } else if (!type_same_typedef(exist->type, ty)) {
                 die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "redefinition of typedef '%s' with a different type",

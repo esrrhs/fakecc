@@ -3694,6 +3694,13 @@ static Stmt parse_typedef_stmt(Parser *p) {
                 /* The TU predeclares SysV va_list; torture files restated it
                  * with an equivalent layout under a fresh anonymous tag. */
                 type_free(&ty);
+            } else if (strcmp(decl_name, "wchar_t") == 0) {
+                /* C/GCC do not predeclare wchar_t (it comes from <stddef.h>).
+                 * FakeCC injects a convenience typedef for wide literals in TUs
+                 * without headers; a user typedef is the first real definition
+                 * and replaces it. */
+                type_free(&exist->type);
+                exist->type = ty;
             } else if (!type_same_typedef(exist->type, ty)) {
                 die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "redefinition of typedef '%s' with a different type",
