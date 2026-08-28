@@ -2176,6 +2176,14 @@ static Expr *parse_unary(Parser *p) {
             advance(p);
             Type t = parse_type_abstract(p);
             expect_kind(p, TK_RPAREN, "')'");
+            if (peek(p)->kind == TK_LBRACE) {
+                /* Compound literals are postfix expressions (C99 6.5.2.5),
+                 * so `sizeof (T){ ... }` is sizeof of the literal, not of T. */
+                Expr *init = parse_init_list(p);
+                Expr *cl = expr_new_compound_literal(t, init, loc);
+                type_free(&t);
+                return expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+            }
             Expr *e = expr_new_sizeof_type(t, loc);
             type_free(&t);
             return e;

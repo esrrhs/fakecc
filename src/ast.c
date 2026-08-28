@@ -1645,6 +1645,31 @@ int fold_const_int(const Expr *e, long long *out) {
         *out = type_size(e->u.sizeof_t.target);
         return 1;
     }
+    if (e->kind == EX_SIZEOF_EXPR) {
+        const Expr *op = e->u.sizeof_e.operand;
+        if (!op) return 0;
+        Type t = op->type;
+        if (op->kind == EX_COMPOUND_LITERAL)
+            t = op->u.compound.target_type;
+        if (t.kind == TY_VOID && t.width == 0 && !t.tag)
+            return 0;
+        long long sz = type_size(t);
+        if (sz < 0) return 0;
+        *out = sz;
+        return 1;
+    }
+    if (e->kind == EX_TERNARY) {
+        long long c;
+        if (!fold_const_int(e->u.tern.cond, &c)) return 0;
+        if (c) {
+            if (!e->u.tern.then) {
+                *out = c;
+                return 1;
+            }
+            return fold_const_int(e->u.tern.then, out);
+        }
+        return fold_const_int(e->u.tern.else_, out);
+    }
     if (e->kind == EX_ALIGNOF_TYPE) {
         *out = type_align(e->u.alignof_t.target);
         return 1;
