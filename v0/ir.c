@@ -7851,6 +7851,29 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
     }
     return 0;
 }
+static int eval_strlit_byte_offset(const Expr *e, const char **bytes, int *len, int *off) {
+    if (!e) return 0;
+    while (e->kind == EX_CAST) e = e->u.cast.operand;
+    if (e->kind == EX_STR) {
+        *bytes = e->u.str.bytes;
+        *len = e->u.str.len;
+        *off = 0;
+        return 1;
+    }
+    if (e->kind == EX_ADDR)
+        return eval_strlit_byte_offset(e->u.addr.operand, bytes, len, off);
+    if (e->kind == EX_DEREF)
+        return eval_strlit_byte_offset(e->u.deref.operand, bytes, len, off);
+    if (e->kind == EX_INDEX) {
+        if (!eval_strlit_byte_offset(e->u.idx.array, bytes, len, off)) return 0;
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx)) return 0;
+        *off += (int)idx;
+        return 1;
+    }
+    return 0;
+}
+
 static int fold_global_ptrdiff(const Expr *e, long long *out) {
     if (!e || e->kind != EX_BINOP || e->u.bin.op != BOP_SUB) return 0;
     const Expr *l = e->u.bin.l;
@@ -7864,6 +7887,20 @@ static int fold_global_ptrdiff(const Expr *e, long long *out) {
         return 0;
     if (rp->kind != EX_ADDR && rp->kind != EX_LABEL_ADDR && rp->kind != EX_STR)
         return 0;
+    {
+        const char *b1 = ((void*)0), *b2 = ((void*)0);
+        int n1 = 0, n2 = 0, so1 = 0, so2 = 0;
+        if (eval_strlit_byte_offset(l, &b1, &n1, &so1)
+            && eval_strlit_byte_offset(r, &b2, &n2, &so2)
+            && b1 && b2 && n1 == n2 && runtime.memcmp(b1, b2, (size_t)n1) == 0) {
+            int esz = 1;
+            if (l->type.kind == TY_PTR && l->type.pointee)
+                esz = type_size(*l->type.pointee);
+            if (esz < 1) esz = 1;
+            *out = (long long)(so1 - so2) / esz;
+            return 1;
+        }
+    }
     const char *s1 = ((void*)0), *s2 = ((void*)0);
     int o1 = 0, o2 = 0;
     if (!eval_global_addr_offset(l, &s1, &o1)) return 0;
