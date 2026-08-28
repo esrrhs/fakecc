@@ -1,5 +1,5 @@
 # GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
-# Total: 365 (out of 2003 original GCC compile cases)
+# Total: 364 (out of 2003 original GCC compile cases)
 #
 
 # === Crashes / Segfaults (4) ===
@@ -12,7 +12,7 @@ pr94621.c
 20151204.c
 pr65680.c
 
-# === Compile Rejects (359) ===
+# === Compile Rejects (358) ===
 20000211-1.c
 20030305-1.c
 20000922-1.c
@@ -59,7 +59,6 @@ pr65680.c
 20101216-1.c
 20180605-1.c
 900313-1.c
-920409-2.c
 920415-1.c
 920428-2.c
 920428-7.c
