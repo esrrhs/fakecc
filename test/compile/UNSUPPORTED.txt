@@ -2,7 +2,7 @@
 # Total: 73 (out of 2003 original GCC compile cases)
 #
 # Harvest-skipped kinds (nested functions, GNU VLS, DFP, va_arg_pack,
-# preprocessor, and GCC-error cases we must not mark OK) live in SKIPPED.txt.
+# preprocessor) live in SKIPPED.txt.
 #
 
 # === Crashes / Segfaults (4) ===

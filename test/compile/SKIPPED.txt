@@ -6,7 +6,7 @@
 # strip directives just to make a test compile). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 179
+# Total: 178
 #
 
 # GNU nested functions / trampolines (20)
@@ -204,8 +204,3 @@ vector-2.c
 vector-3.c
 vector-align-1.c
 vector-dup-1.c
-
-# GCC expects an error; do not harvest as OK (1)
-# Flexible-array excess initializers: GCC dg-error; FakeCC currently accepts.
-
-20030305-1.c
