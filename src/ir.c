@@ -7501,6 +7501,8 @@ static int fold_const_complex(const Expr *e, long double *r_out, long double *i_
         *i_out = 0.0;
         return 1;
     }
+    if (e->kind == EX_CAST)
+        return fold_const_complex(e->u.cast.operand, r_out, i_out);
     if (e->kind == EX_COMPOUND_LITERAL && e->u.compound.init && e->u.compound.init->kind == EX_INIT_LIST) {
         int n = e->u.compound.init->u.init_list.num_elements;
         long double r = 0.0, i = 0.0, dummy = 0.0;
@@ -7533,6 +7535,17 @@ static int fold_const_complex(const Expr *e, long double *r_out, long double *i_
         }
     }
     return 0;
+}
+
+static int fold_const_complex_rel(const Expr *e, long long *out) {
+    if (!e || e->kind != EX_BINOP) return 0;
+    if (e->u.bin.op != BOP_EQ && e->u.bin.op != BOP_NE) return 0;
+    long double lr = 0.0, li = 0.0, rr = 0.0, ri = 0.0;
+    if (!fold_const_complex(e->u.bin.l, &lr, &li)) return 0;
+    if (!fold_const_complex(e->u.bin.r, &rr, &ri)) return 0;
+    int eq = (lr == rr && li == ri);
+    *out = (e->u.bin.op == BOP_EQ) ? (eq ? 1 : 0) : (eq ? 0 : 1);
+    return 1;
 }
 
 /* Pack a compile-time constant initializer into `bytes` (size `sz`) for a
@@ -8016,7 +8029,8 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     long long _fold_v = 0;
     int have_int = (e->kind == EX_INT_LIT)
                 || fold_const_int(e, &_fold_v)
-                || (ty->kind == TY_INT && fold_global_ptrdiff(e, &_fold_v));
+                || (ty->kind == TY_INT && fold_global_ptrdiff(e, &_fold_v))
+                || (ty->kind == TY_INT && fold_const_complex_rel(e, &_fold_v));
     if (have_int) {
         unsigned long long vlo, vhi = 0;
         if (e->kind == EX_INT_LIT) {
