@@ -1564,6 +1564,11 @@ static IRValue bool_normalize(IRFunction *fn, IRValue v, int w, int u,
     emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, loc);
     return emit_bin_w(fn, IR_NE, i, zero, 4, 0, loc);
 }
+static IRValue cbr_from_scalar(IRFunction *fn, IRValue v, SourceLoc loc) {
+    if (get_value_is_float(fn, v))
+        return bool_normalize(fn, v, get_value_width(fn, v), 0, 1, loc);
+    return v;
+}
 static void emit_inst(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
                       int64_t imm, SourceLoc loc) {
     emit_inst_w(fn, op, dst, a, b, imm, 4, 0, loc);
@@ -4674,7 +4679,7 @@ IRValue pr;
             int L_else = new_label(fn);
             int L_done = new_label(fn);
             IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cond, L_then, L_else, e->loc);
+            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
             emit_label(fn, L_then, e->loc);
             if (e->u.tern.then)
                 lower_expr(fn, st, e->u.tern.then);
@@ -4692,7 +4697,7 @@ IRValue pr;
             int L_else = new_label(fn);
             int L_done = new_label(fn);
             IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cond, L_then, L_else, e->loc);
+            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
             emit_label(fn, L_then, e->loc);
             {
                 IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
@@ -4730,7 +4735,7 @@ IRValue pr;
         int L_else = new_label(fn);
         int L_done = new_label(fn);
         IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-        emit_cbr(fn, cond, L_then, L_else, e->loc);
+        emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
         emit_label(fn, L_then, e->loc);
         IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
         int tw = get_value_width(fn, tv), tu = get_value_is_unsigned(fn, tv), tf = get_value_is_float(fn, tv);

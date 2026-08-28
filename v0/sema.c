@@ -1942,7 +1942,7 @@ Type p1;
     }
     case EX_TERNARY: {
         Type ct = check_expr(e->u.tern.cond, st, ft);
-        if (ct.kind != TY_INT && ct.kind != TY_PTR)
+        if (ct.kind != TY_INT && ct.kind != TY_FLOAT && ct.kind != TY_PTR)
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "ternary condition must be scalar");
         Type tt;

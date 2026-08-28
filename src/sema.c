@@ -1461,12 +1461,13 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
     }
     case EX_TERNARY: {
         /* cond ? then : else
-         * Condition must be scalar (int or pointer).  Result type follows
-         * C §6.5.15: arithmetic operands → UAC; both pointers → that pointer
-         * type; one pointer + null pointer constant (integer 0) → pointer type.
+         * Condition must be scalar (C99 6.2.5 / 6.5.15: arithmetic or pointer,
+         * including float/double).  Result type follows C §6.5.15: arithmetic
+         * operands → UAC; both pointers → that pointer type; one pointer +
+         * null pointer constant (integer 0) → pointer type.
          * GNU `x ?: y` omits `then`; the then-type is the type of `cond`. */
         Type ct = check_expr(e->u.tern.cond, st, ft);
-        if (ct.kind != TY_INT && ct.kind != TY_PTR)
+        if (ct.kind != TY_INT && ct.kind != TY_FLOAT && ct.kind != TY_PTR)
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "ternary condition must be scalar");
         Type tt;
