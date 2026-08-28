@@ -4783,6 +4783,12 @@ IRValue pr;
             emit_inst_w(fn, IR_CONST, v, -1, -1, 0x7fffffff, 4, 0, e->loc);
             return v;
         }
+        if (runtime.strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
+            float f = 3.40282346638528859812e+38F;
+            int64_t bits = 0;
+            memcpy(&bits, &f, sizeof(f));
+            return emit_float_const(fn, 4, bits, e->loc);
+        }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
             if (e->u.var.pkg) {
@@ -7541,6 +7547,10 @@ static int fold_const_float(const Expr *e, long double *out) {
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT) {
         *out = runtime.strtold(e->u.float_text, ((void*)0));
+        return 1;
+    }
+    if (e->kind == EX_VAR && runtime.strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
+        *out = 3.40282346638528859812e+38L;
         return 1;
     }
     if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
