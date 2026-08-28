@@ -1,5 +1,5 @@
 # GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
-# Total: 393 (out of 2003 original GCC compile cases)
+# Total: 392 (out of 2003 original GCC compile cases)
 #
 
 # === Crashes / Segfaults (4) ===
@@ -12,7 +12,7 @@ pr94621.c
 20151204.c
 pr65680.c
 
-# === Compile Rejects (387) ===
+# === Compile Rejects (386) ===
 20000211-1.c
 20000403-1.c
 20000511-1.c
@@ -197,7 +197,6 @@ bitfield-endian-1.c
 bitfield-endian-2.c
 blk.c
 bt386.c
-builtin_constant_p.c
 buns.c
 c2.c
 consec.c
