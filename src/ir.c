@@ -7669,6 +7669,102 @@ static int expr_has_address_constant(const Expr *e) {
     return 0;
 }
 
+/* C99 6.6p9: an integer constant cast to pointer type is an address constant.
+ * `&((T *)0x4000)->m` is that address plus a member offset, stored as an
+ * absolute pointer value (no reloc). */
+static int eval_abs_addr_const(const Expr *e, unsigned long long *out) {
+    if (!e) return 0;
+    if (e->kind == EX_CAST)
+        return eval_abs_addr_const(e->u.cast.operand, out);
+    if (e->kind == EX_ADDR) {
+        const Expr *sub = e->u.addr.operand;
+        while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
+        if (!sub) return 0;
+        if (sub->kind == EX_MEMBER) {
+            unsigned long long base = 0;
+            if (!eval_abs_addr_const(sub->u.member.obj, &base)) return 0;
+            Type mty = get_global_obj_struct_type(sub->u.member.obj);
+            long long moff = 0;
+            if (mty.kind == TY_STRUCT && mty.tag) {
+                const StructDef *sd = struct_registry_find_c(g_ir_structs, mty.tag);
+                if (sd)
+                    struct_lookup_member(g_ir_structs, sd, sub->u.member.name, &moff);
+            }
+            *out = base + (unsigned long long)moff;
+            return 1;
+        }
+        if (sub->kind == EX_DEREF)
+            return eval_abs_addr_const(sub->u.deref.operand, out);
+        if (sub->kind == EX_INDEX) {
+            unsigned long long base = 0;
+            if (!eval_abs_addr_const(sub->u.idx.array, &base)) return 0;
+            long long idx = 0;
+            if (!fold_const_int(sub->u.idx.index, &idx)) return 0;
+            int esz = get_global_elem_size(sub->u.idx.array);
+            if (esz < 1) esz = 1;
+            *out = base + (unsigned long long)(idx * esz);
+            return 1;
+        }
+        return eval_abs_addr_const(sub, out);
+    }
+    if (e->kind == EX_DEREF)
+        return eval_abs_addr_const(e->u.deref.operand, out);
+    if (e->kind == EX_MEMBER) {
+        unsigned long long base = 0;
+        if (!eval_abs_addr_const(e->u.member.obj, &base)) return 0;
+        Type mty = get_global_obj_struct_type(e->u.member.obj);
+        long long moff = 0;
+        if (mty.kind == TY_STRUCT && mty.tag) {
+            const StructDef *sd = struct_registry_find_c(g_ir_structs, mty.tag);
+            if (sd)
+                struct_lookup_member(g_ir_structs, sd, e->u.member.name, &moff);
+        }
+        *out = base + (unsigned long long)moff;
+        return 1;
+    }
+    if (e->kind == EX_INDEX) {
+        unsigned long long base = 0;
+        if (!eval_abs_addr_const(e->u.idx.array, &base)) return 0;
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx)) return 0;
+        int esz = get_global_elem_size(e->u.idx.array);
+        if (esz < 1) esz = 1;
+        *out = base + (unsigned long long)(idx * esz);
+        return 1;
+    }
+    if (e->kind == EX_BINOP) {
+        unsigned long long base = 0;
+        long long delta = 0;
+        if (e->u.bin.op == BOP_ADD) {
+            if (eval_abs_addr_const(e->u.bin.l, &base) && fold_const_int(e->u.bin.r, &delta)) {
+                int esz = addr_const_elem_size(e->u.bin.l);
+                *out = base + (unsigned long long)(delta * esz);
+                return 1;
+            }
+            if (eval_abs_addr_const(e->u.bin.r, &base) && fold_const_int(e->u.bin.l, &delta)) {
+                int esz = addr_const_elem_size(e->u.bin.r);
+                *out = base + (unsigned long long)(delta * esz);
+                return 1;
+            }
+        } else if (e->u.bin.op == BOP_SUB) {
+            if (eval_abs_addr_const(e->u.bin.l, &base) && fold_const_int(e->u.bin.r, &delta)) {
+                int esz = addr_const_elem_size(e->u.bin.l);
+                *out = base - (unsigned long long)(delta * esz);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    {
+        long long imm = 0;
+        if (fold_const_int(e, &imm)) {
+            *out = (unsigned long long)imm;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out_offset) {
     if (!e) return 0;
     if (e->kind == EX_CAST) {
@@ -8176,6 +8272,17 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         add_global_fixup(g, (int)(bytes - g->init_bytes), addr_sym, addr_offset);
         memset(bytes, 0, sz);
         return;
+    }
+    {
+        unsigned long long abs_addr = 0;
+        if (ty->kind == TY_PTR && eval_abs_addr_const(e, &abs_addr)) {
+            int n = sz < 8 ? sz : 8;
+            for (int b = 0; b < n; b++)
+                bytes[b] = (char)((abs_addr >> (8 * b)) & 0xff);
+            for (int b = n; b < sz; b++)
+                bytes[b] = 0;
+            return;
+        }
     }
     die_at(loc.file, loc.line, loc.col,
            "global '%s' initializer must be a compile-time constant", ctx);
