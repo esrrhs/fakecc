@@ -7851,6 +7851,31 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
     }
     return 0;
 }
+static int fold_global_ptrdiff(const Expr *e, long long *out) {
+    if (!e || e->kind != EX_BINOP || e->u.bin.op != BOP_SUB) return 0;
+    const Expr *l = e->u.bin.l;
+    const Expr *r = e->u.bin.r;
+    const Expr *lp = l;
+    const Expr *rp = r;
+    while (lp && lp->kind == EX_CAST) lp = lp->u.cast.operand;
+    while (rp && rp->kind == EX_CAST) rp = rp->u.cast.operand;
+    if (!lp || !rp) return 0;
+    if (lp->kind != EX_ADDR && lp->kind != EX_LABEL_ADDR && lp->kind != EX_STR)
+        return 0;
+    if (rp->kind != EX_ADDR && rp->kind != EX_LABEL_ADDR && rp->kind != EX_STR)
+        return 0;
+    const char *s1 = ((void*)0), *s2 = ((void*)0);
+    int o1 = 0, o2 = 0;
+    if (!eval_global_addr_offset(l, &s1, &o1)) return 0;
+    if (!eval_global_addr_offset(r, &s2, &o2)) return 0;
+    if (!s1 || !s2 || runtime.strcmp(s1, s2) != 0) return 0;
+    int esz = 1;
+    if (l->type.kind == TY_PTR && l->type.pointee)
+        esz = type_size(*l->type.pointee);
+    if (esz < 1) esz = 1;
+    *out = (long long)(o1 - o2) / esz;
+    return 1;
+}
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g) {
@@ -8052,8 +8077,11 @@ unsigned long long vhi;
             return;
         }
     }
-    long long _fold_v;
-    if (e->kind == EX_INT_LIT || fold_const_int(e, &_fold_v)) {
+    long long _fold_v = 0;
+    int have_int = (e->kind == EX_INT_LIT)
+                || fold_const_int(e, &_fold_v)
+                || (ty->kind == TY_INT && fold_global_ptrdiff(e, &_fold_v));
+    if (have_int) {
         unsigned long long vlo, vhi = 0;
         if (e->kind == EX_INT_LIT) {
             vlo = (unsigned long long)e->u.int_val;
