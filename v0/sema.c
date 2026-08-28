@@ -2429,9 +2429,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         break;
     case ST_RETURN:
         if (s->u.value == ((void*)0)) {
-            if (g_sema_ret_type.kind != TY_VOID)
-                die_at(s->loc.file, s->loc.line, s->loc.col,
-                       "non-void function must return a value");
+            /* GNU C: `return;` in a non-void function is not an error. */
         } else {
             discard = check_expr(s->u.value, st, ft);
             if (g_sema_ret_type.kind == TY_VOID) {

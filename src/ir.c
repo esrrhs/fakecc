@@ -6991,6 +6991,32 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             /* void function: bare `return;` or `return void_expr;` */
             if (s->u.value) lower_expr(fn, st, s->u.value);
             emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
+        } else if (!s->u.value) {
+            /* GNU C `return;` in a non-void function: typed zero. */
+            int dw = fn->ret_width, du = fn->ret_is_unsigned;
+            if (fn->ret_is_struct) {
+                if (fn->ret_reg_n > 0) {
+                    IRValue z = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 8, 1, s->loc);
+                    IRValue hi = -1;
+                    if (fn->ret_reg_n > 1) {
+                        hi = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, hi, -1, -1, 0, 8, 1, s->loc);
+                    }
+                    emit_inst_w(fn, IR_RETURN, -1, z, hi, 0, 8, 1, s->loc);
+                } else {
+                    emit_inst_w(fn, IR_RETURN, -1, fn->sret_value, -1, 0,
+                                8, 1, s->loc);
+                }
+            } else if (fn->ret_is_float) {
+                IRValue z = emit_float_const(fn, dw, 0, s->loc);
+                emit_inst_w(fn, IR_RETURN, -1, z, -1, 0, dw, du, s->loc);
+                fn->insts.data[fn->insts.len - 1].is_float = 1;
+            } else {
+                IRValue z = new_value(fn);
+                emit_inst_w(fn, IR_CONST, z, -1, -1, 0, dw, du, s->loc);
+                emit_inst_w(fn, IR_RETURN, -1, z, -1, 0, dw, du, s->loc);
+            }
         } else if (fn->ret_is_struct) {
             IRValue v = lower_expr(fn, st, s->u.value);
             if (fn->ret_reg_n > 0) {
