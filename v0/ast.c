@@ -1977,6 +1977,10 @@ int fold_const_int(const Expr *e, long long *out) {
         *out = 8;
         return 1;
     }
+    if (e->kind == EX_VAR && runtime.strcmp(e->u.var.name, "__INT_MAX__") == 0) {
+        *out = 0x7fffffff;
+        return 1;
+    }
     if (e->kind == EX_CAST) {
         return fold_const_int(e->u.cast.operand, out);
     }

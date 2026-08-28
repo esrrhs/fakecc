@@ -4778,6 +4778,11 @@ IRValue pr;
             emit_inst_w(fn, IR_CONST, v, -1, -1, 8, 4, 0, e->loc);
             return v;
         }
+        if (runtime.strcmp(e->u.var.name, "__INT_MAX__") == 0) {
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 0x7fffffff, 4, 0, e->loc);
+            return v;
+        }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
             if (e->u.var.pkg) {

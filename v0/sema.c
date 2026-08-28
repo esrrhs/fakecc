@@ -1285,6 +1285,11 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             set_type(e, it);
             return type_clone(e->type);
         }
+        if (runtime.strcmp(e->u.var.name, "__INT_MAX__") == 0) {
+            Type it = type_make_int(4, 0);
+            set_type(e, it);
+            return type_clone(e->type);
+        }
         if (runtime.strncmp(e->u.var.name, "__builtin_", 10) == 0 || runtime.strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
             Type ret = type_default_int();

@@ -4333,6 +4333,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             emit_inst_w(fn, IR_CONST, v, -1, -1, 8, 4, 0, e->loc);
             return v;
         }
+        if (strcmp(e->u.var.name, "__INT_MAX__") == 0) {
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 0x7fffffff, 4, 0, e->loc);
+            return v;
+        }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
             /* Not a variable — is it a function name?  A function lvalue
