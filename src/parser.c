@@ -387,12 +387,23 @@ static int is_type_start(const Parser *p, size_t pos) {
         || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN
-        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE
+        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT
         || k == TK_KW_COMPLEX)
         return 1;
+    if (k == TK_KW_INLINE) {
+        /* Lexer maps `__extension__` onto TK_KW_INLINE so declaration prefixes
+         * skip it.  GCC itself treats `__extension__` as a no-op, not a type
+         * specifier: `( __extension__ (T){...} )` is a parenthesized expr. */
+        const char *text = p->tokens->data[pos].text;
+        if (text && (strcmp(text, "__extension__") == 0
+                     || strcmp(text, "__extension") == 0))
+            return pos + 1 < p->tokens->len ? is_type_start(p, pos + 1) : 0;
+        return 1;
+    }
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
-        if (strcmp(text, "register") == 0 || strcmp(text, "auto") == 0)
+        if (strcmp(text, "register") == 0 || strcmp(text, "auto") == 0
+            || strcmp(text, "__extension__") == 0 || strcmp(text, "__extension") == 0)
             return is_type_start(p, pos + 1);
         if (strcmp(text, "__attribute__") == 0 || strcmp(text, "__attribute") == 0) {
             size_t attr_pos = pos + 1;
