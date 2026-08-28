@@ -2465,10 +2465,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         } else {
             discard = check_expr(s->u.value, st, ft);
             if (g_sema_ret_type.kind == TY_VOID) {
-                if (discard.kind != TY_VOID) {
-                    die_at(s->loc.file, s->loc.line, s->loc.col,
-                           "void function cannot return a value");
-                }
+                /* GNU C: `return expr;` in a void function is a warning. */
             } else {
                 if (!type_is_same(g_sema_ret_type, discard)) {
                     if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||

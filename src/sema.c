@@ -2076,18 +2076,16 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
     case ST_RETURN:
-        /* GNU C: bare `return;` in a non-void function is a warning, not an
-         * error (GCC gnu89 / default).  `return expr;` is still forbidden in
-         * a void function. */
+        /* GNU C: bare `return;` in a non-void function, and `return expr;`
+         * in a void function, are warnings not errors (GCC gnu89 / default,
+         * -Wreturn-mismatch).  Evaluate a valued return in a void function
+         * for side effects, then emit a void return. */
         if (s->u.value == NULL) {
             /* IR expands this as a typed zero (GCC expand_null_return). */
         } else {
             discard = check_expr(s->u.value, st, ft);
             if (g_sema_ret_type.kind == TY_VOID) {
-                if (discard.kind != TY_VOID) {
-                    die_at(s->loc.file, s->loc.line, s->loc.col,
-                           "void function cannot return a value");
-                }
+                /* Discard the value (GCC still evaluates it). */
             } else {
                 if (!type_is_same(g_sema_ret_type, discard)) {
                     if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||
