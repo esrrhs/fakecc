@@ -7622,6 +7622,45 @@ static Type get_global_obj_struct_type(const Expr *e) {
     return t;
 }
 
+/* Scale for `addr ± integer` in a static initializer.  After the address is
+ * converted to an integer type, further ± uses a byte addend (GCC relocatable
+ * integer initializers: `(unsigned long)&sym - C`).  Pointer arithmetic uses
+ * the pointee size; GNU `void*` arithmetic uses 1. */
+static int addr_const_elem_size(const Expr *addr_side) {
+    const Expr *e = addr_side;
+    while (e && e->kind == EX_CAST) {
+        if (e->type.kind == TY_INT)
+            return 1;
+        e = e->u.cast.operand;
+    }
+    int esz = get_global_elem_size(addr_side);
+    if (esz < 1) esz = 1;
+    return esz;
+}
+
+/* True if `e` is built from an address constant (`&obj`, string, &&label),
+ * not a scalar object's value.  Used so integer-typed slots record a reloc
+ * for `(uintptr_t)&sym + C` without treating `int x = y` as `&y`. */
+static int expr_has_address_constant(const Expr *e) {
+    if (!e) return 0;
+    while (e->kind == EX_CAST) e = e->u.cast.operand;
+    if (!e) return 0;
+    if (e->kind == EX_ADDR || e->kind == EX_LABEL_ADDR || e->kind == EX_STR)
+        return 1;
+    if (e->kind == EX_BINOP)
+        return expr_has_address_constant(e->u.bin.l)
+            || expr_has_address_constant(e->u.bin.r);
+    if (e->kind == EX_UNARY)
+        return expr_has_address_constant(e->u.un.operand);
+    if (e->kind == EX_MEMBER)
+        return expr_has_address_constant(e->u.member.obj);
+    if (e->kind == EX_INDEX)
+        return expr_has_address_constant(e->u.idx.array);
+    if (e->kind == EX_DEREF)
+        return expr_has_address_constant(e->u.deref.operand);
+    return 0;
+}
+
 static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out_offset) {
     if (!e) return 0;
     if (e->kind == EX_CAST) {
@@ -7699,13 +7738,13 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             int off = 0;
             long long delta = 0;
             if (eval_global_addr_offset(e->u.bin.l, &sym, &off) && fold_const_int(e->u.bin.r, &delta)) {
-                int esz = get_global_elem_size(e->u.bin.l);
+                int esz = addr_const_elem_size(e->u.bin.l);
                 *out_sym = sym;
                 *out_offset = off + (int)(delta * esz);
                 return 1;
             }
             if (eval_global_addr_offset(e->u.bin.r, &sym, &off) && fold_const_int(e->u.bin.l, &delta)) {
-                int esz = get_global_elem_size(e->u.bin.r);
+                int esz = addr_const_elem_size(e->u.bin.r);
                 *out_sym = sym;
                 *out_offset = off + (int)(delta * esz);
                 return 1;
@@ -7715,7 +7754,7 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             int off = 0;
             long long delta = 0;
             if (eval_global_addr_offset(e->u.bin.l, &sym, &off) && fold_const_int(e->u.bin.r, &delta)) {
-                int esz = get_global_elem_size(e->u.bin.l);
+                int esz = addr_const_elem_size(e->u.bin.l);
                 *out_sym = sym;
                 *out_offset = off - (int)(delta * esz);
                 return 1;
@@ -8116,10 +8155,16 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             return;
         }
     }
-    /* Address of a global object (with optional member/array offset/arithmetic). */
+    /* Address of a global object (with optional member/array offset/arithmetic).
+     * GCC also accepts converting that address constant to a pointer-sized
+     * integer (`unsigned long x = (unsigned long)&sym - C`); the object file
+     * still carries a R_X86_64_64 reloc with the integer addend. */
     const char *addr_sym = NULL;
     int addr_offset = 0;
-    if (ty->kind == TY_PTR && g && eval_global_addr_offset(e, &addr_sym, &addr_offset)) {
+    if (g && eval_global_addr_offset(e, &addr_sym, &addr_offset)
+        && (ty->kind == TY_PTR
+            || (ty->kind == TY_INT && ty->width == 8
+                && expr_has_address_constant(e)))) {
         add_global_fixup(g, (int)(bytes - g->init_bytes), addr_sym, addr_offset);
         memset(bytes, 0, sz);
         return;
