@@ -844,6 +844,9 @@ int ir_builtin_disabled(const char *name) {
 const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : ((void*)0);
 }
+const TranslationUnit *get_ir_tu(void) {
+    return g_ir_tu;
+}
 
 static const char *lookup_asm_alias(const char *name) {
     if (!g_ir_tu || !name) return ((void*)0);

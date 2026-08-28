@@ -3,10 +3,14 @@
 # Policy matches test/e2e/cases/torture/UNSUPPORTED.txt: GNU nested functions,
 # GNU variable-length structures, _Decimal*/DFP, and __builtin_va_arg_pack.
 # Also skipped: cases that require a C preprocessor (FakeCC has none; do not
-# strip directives just to make a test compile). Original sources stay in
+# strip directives just to make a test compile). FakeCC follows C99: no
+# implicit function declarations, no bare `return;` in a non-void function,
+# no `return expr;` in a void function, and non-void `main` must return a
+# value (C99 would treat falling off `main` as `return 0`; GCC compile tests
+# use -std=gnu89 / -fpermissive for the rest). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 178
+# Total: 322
 #
 
 # GNU nested functions / trampolines (20)
@@ -44,6 +48,165 @@ pr82564.c
 # __builtin_va_arg_pack (1)
 
 pr37669.c
+
+# C99: no implicit function declarations (127)
+# Call to an undeclared identifier. GCC accepts this as `extern int name();`
+# under -std=gnu89.
+
+20000403-1.c
+20000511-1.c
+20000804-1.c
+20010320-1.c
+20030109-1.c
+20030415-1.c
+20030612-1.c
+20031220-2.c
+20040309-1.c
+20040817-1.c
+20080704-1.c
+20080910-1.c
+20090917-1.c
+20091215-1.c
+20100915-1.c
+20121027-1.c
+920409-2.c
+920428-7.c
+920501-20.c
+920617-1.c
+920625-1.c
+920625-2.c
+920706-1.c
+920808-1.c
+920809-1.c
+920928-2.c
+921012-1.c
+921021-1.c
+921103-1.c
+921111-1.c
+921116-2.c
+921118-1.c
+921202-1.c
+921203-1.c
+930111-1.c
+930118-1.c
+930120-1.c
+930427-2.c
+930503-2.c
+930529-1.c
+930530-1.c
+930602-1.c
+930618-1.c
+931013-2.c
+940718-1.c
+941014-4.c
+941111-1.c
+941113-1.c
+950124-1.c
+950329-1.c
+950612-1.c
+950719-1.c
+950910-1.c
+950922-1.c
+951106-1.c
+951222-1.c
+960319-1.c
+960829-1.c
+970206-1.c
+980825-1.c
+990829-1.c
+abs.c
+ac.c
+andm.c
+andmem.c
+arr.c
+band.c
+bfx.c
+blk.c
+bt386.c
+BUG1.c
+buns.c
+c2.c
+consec.c
+dblbug.c
+di.c
+dm.c
+dse.c
+dshift.c
+e.c
+ex.c
+layout.c
+loop-1.c
+loop386.c
+move_qhi.c
+omit.c
+or386.c
+pr100576.c
+pr103682.c
+pr19121.c
+pr26213.c
+pr29201.c
+pr33133.c
+pr34091.c
+pr36154.c
+pr37381.c
+pr38360.c
+pr40291.c
+pr41182-1.c
+pr44043.c
+pr44063.c
+pr44246.c
+pr45535.c
+pr46934.c
+pr49145.c
+pr49206.c
+pr51694.c
+pr53886.c
+pr82052.c
+r1.c
+round.c
+scal.c
+shft.c
+signext.c
+signext2.c
+str.c
+subcc.c
+test-loop.c
+trunc.c
+udivmod4.c
+volatile-1.c
+xb.c
+xdi.c
+xlop.c
+xorn.c
+xpp.c
+zero-strct-1.c
+
+# C99: return mismatch (16)
+# Bare `return;` in a non-void function, `return expr;` in a void function,
+# or non-void `main` that falls off the end without a return.
+
+20020418-1.c
+20020927-1.c
+20180605-1.c
+920817-1.c
+960704-1.c
+BUG17.c
+BUG23.c
+b.c
+bt.c
+run.c
+sar.c
+shloop.c
+sim.c
+speed.c
+time.c
+v.c
+
+# GCC predefined size/type macros, no preprocessor (1)
+# __SIZEOF_INT__, __SIZE_TYPE__, and similar. No directives, so it was
+# harvested; FakeCC does not define these identifiers.
+
+sizeof-macros-1.c
 
 # Preprocessor required (156)
 # #include / #define / #if / #ifdef / #pragma / etc. Do not strip to harvest.

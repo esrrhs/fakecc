@@ -16,6 +16,10 @@ const StructRegistry *get_sema_structs(void) {
     return g_sema_tu ? &g_sema_tu->structs : NULL;
 }
 
+const TranslationUnit *get_sema_tu(void) {
+    return g_sema_tu;
+}
+
 /* Return type of the function currently being type-checked.  Set per-function
  * before check_stmt_list so ST_RETURN can enforce the void/non-void rules. */
 static Type g_sema_ret_type;
@@ -118,37 +122,6 @@ static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) 
     fn->is_unprototyped = 0;
     fn->is_extern = 1;
     fn->is_static = 0;
-}
-
-
-/* GNU89: a call to an undeclared identifier implicitly declares
- * `extern int name();` (unprototyped, returns int).  GCC still accepts this
- * under -std=gnu89; c-torture compile tests that use it pass that flag. */
-static void gnu89_implicit_func(FunTable *t, const char *name, SourceLoc loc) {
-    if (!name || !*name || ftab_find(t, name)) return;
-    TranslationUnit *tu = (TranslationUnit *)g_sema_tu;
-    if (!tu) return;
-    for (size_t i = 0; i < tu->functions.len; i++) {
-        if (strcmp(tu->functions.data[i].name, name) == 0) {
-            ftab_push(t, &tu->functions.data[i]);
-            return;
-        }
-    }
-    if (tu->functions.len >= tu->functions.cap) {
-        /* Body checking holds FunctionDecl *; do not relocate the array. */
-        die_at(loc.file, loc.line, loc.col,
-               "too many implicit function declarations");
-    }
-    FunctionDecl *fn = &tu->functions.data[tu->functions.len++];
-    memset(fn, 0, sizeof(*fn));
-    fn->name = xstrdup(name);
-    fn->ret_type = type_default_int();
-    param_array_init(&fn->params);
-    stmt_array_init(&fn->body);
-    fn->loc = loc;
-    fn->is_extern = 1;
-    fn->is_unprototyped = 1;
-    ftab_push(t, fn);
 }
 
 static void import_pkg_funcs(TranslationUnit *tu, FunTable *ft, Package *pkg) {
@@ -797,8 +770,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type ret = type_default_int();
             if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)
                 ret = type_make_void();
-            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0 || strcmp(bname, "__builtin___memcpy_chk") == 0 || strcmp(bname, "__builtin___memmove_chk") == 0 || strcmp(bname, "__builtin___mempcpy_chk") == 0 || strcmp(bname, "__builtin___memset_chk") == 0)
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_memmove") == 0 || strcmp(bname, "__builtin_mempcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0 || strcmp(bname, "__builtin___memcpy_chk") == 0 || strcmp(bname, "__builtin___memmove_chk") == 0 || strcmp(bname, "__builtin___mempcpy_chk") == 0 || strcmp(bname, "__builtin___memset_chk") == 0)
                 ret = type_make_ptr(type_make_void());
+            else if (strcmp(bname, "__builtin_bcopy") == 0)
+                ret = type_make_void();
             else if (strcmp(bname, "__builtin_strcat") == 0 || strcmp(bname, "__builtin___strcat_chk") == 0 ||
                      strcmp(bname, "__builtin_strcpy") == 0 || strcmp(bname, "__builtin___strcpy_chk") == 0 ||
                      strcmp(bname, "__builtin_stpcpy") == 0 || strcmp(bname, "__builtin___stpcpy_chk") == 0 ||
@@ -1198,12 +1173,6 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             }
             set_type(e, type_make_void());
             return type_clone(e->type);
-        }
-        /* GNU89 implicit `extern int name();` for an undeclared callee. */
-        if (e->u.call.callee->kind == EX_VAR) {
-            const char *cname = e->u.call.callee->u.var.name;
-            if (!symtable_find(st, cname) && !ftab_find(ft, cname))
-                gnu89_implicit_func(ft, cname, e->loc);
         }
         /* Type-check the callee expression. */
         Type callee_ty = check_expr(e->u.call.callee, st, ft);
@@ -1995,6 +1964,26 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
     }
 }
 
+/* Parser-time folding cannot see object types, so `T a[sizeof g / sizeof *g]`
+ * is parsed as a VLA.  After the dimension is type-checked it is often an
+ * ICE — complete it back to a fixed array so sizeof/object_size see a known
+ * bound and the local is not a DYN_ALLOCA. */
+static void try_fold_vla_type(Type *t, const SymTable *st, FunTable *ft) {
+    while (t && t->kind == TY_ARRAY) {
+        if (t->vla_dim) {
+            Type dt = check_expr(t->vla_dim, st, ft);
+            type_free(&dt);
+            long long n = 0;
+            if (fold_const_int(t->vla_dim, &n) && n >= 0) {
+                expr_free(t->vla_dim);
+                t->vla_dim = NULL;
+                t->length = n;
+            }
+        }
+        t = t->elem_type;
+    }
+}
+
 static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                        size_t scope_mark, int *has_return) {
     Type discard;
@@ -2017,9 +2006,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
             break;
         }
-        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
-            check_expr(s->u.decl.type.vla_dim, st, ft);
-        }
+        try_fold_vla_type(&s->u.decl.type, st, ft);
         if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
             && s->u.decl.type.kind == TY_ARRAY) {
             if (s->u.decl.type.length == 0)
@@ -2076,16 +2063,19 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         discard = check_expr(s->u.expr, st, ft); type_free(&discard);
         break;
     case ST_RETURN:
-        /* GNU C: bare `return;` in a non-void function, and `return expr;`
-         * in a void function, are warnings not errors (GCC gnu89 / default,
-         * -Wreturn-mismatch).  Evaluate a valued return in a void function
-         * for side effects, then emit a void return. */
+        /* Bare `return;` is allowed only in a void function; `return expr;`
+         * is forbidden in a void function unless the expression itself is
+         * void (e.g. `return f();` where f returns void). */
         if (s->u.value == NULL) {
-            /* IR expands this as a typed zero (GCC expand_null_return). */
+            if (g_sema_ret_type.kind != TY_VOID)
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "non-void function must return a value");
         } else {
             discard = check_expr(s->u.value, st, ft);
             if (g_sema_ret_type.kind == TY_VOID) {
-                /* Discard the value (GCC still evaluates it). */
+                if (discard.kind != TY_VOID)
+                    die_at(s->loc.file, s->loc.line, s->loc.col,
+                           "void function cannot return a value");
             } else {
                 if (!type_is_same(g_sema_ret_type, discard)) {
                     if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||
@@ -2218,17 +2208,6 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
 
     FunTable ft;
     ftab_init(&ft);
-    /* Spare slots so GNU89 implicit decls can append without relocating
-     * FunctionDecl pointers held during body checking. */
-    {
-        size_t need = tu->functions.len + 256;
-        if (need > tu->functions.cap) {
-            tu->functions.data = realloc(tu->functions.data,
-                                         need * sizeof(FunctionDecl));
-            if (!tu->functions.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-            tu->functions.cap = need;
-        }
-    }
     int has_main = 0;
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
@@ -2378,6 +2357,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             && s->u.decl.type.elem_type->width == 1) {
             s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
         }
+        try_fold_vla_type(&s->u.decl.type, &globals, &ft);
         /* Normalize a (possibly designated) init list: infer array length,
          * validate designators, expand to positional with zero-fill. */
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
@@ -2463,11 +2443,15 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         g_sema_labels = NULL;
         labelset_free(&ls);
 
-        /* C99 §5.1.2.2.3: reaching the `}` that terminates `main` returns 0.
-         * GCC accepts a missing return here (and for other non-void functions
-         * as a compile-time warning at most).  IR already appends an implicit
-         * `return 0` when a function does not end in IR_RETURN. */
-        (void)has_return;
+        /* Non-void `main` must return a value (FakeCC is stricter than
+         * C99 §5.1.2.2.3, which treats falling off `main` as `return 0`).
+         * Other non-void functions may still fall off; IR appends a typed
+         * zero if the function does not end in IR_RETURN. */
+        if (!has_return && strcmp(fn->name, "main") == 0
+            && fn->ret_type.kind != TY_VOID) {
+            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+                   "non-void function must return a value");
+        }
     }
 
     ftab_free(&ft);

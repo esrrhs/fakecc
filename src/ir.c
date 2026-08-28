@@ -77,6 +77,10 @@ const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : NULL;
 }
 
+const TranslationUnit *get_ir_tu(void) {
+    return g_ir_tu;
+}
+
 static const char *lookup_asm_alias(const char *name) {
     if (!g_ir_tu || !name) return NULL;
     for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
