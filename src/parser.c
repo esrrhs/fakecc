@@ -1527,15 +1527,18 @@ static Expr *parse_assign(Parser *p) {
     return lhs;
 }
 
-/* ternary-expr = or-expr [ "?" expr ":" ternary-expr ]  -- right associative.
+/* ternary-expr = or-expr [ "?" [expr] ":" ternary-expr ]  -- right associative.
  * The middle operand is a full expr (allows e.g. `c ? a = b : d`);
- * the else branch is ternary-expr so right-associativity chains naturally. */
+ * the else branch is ternary-expr so right-associativity chains naturally.
+ * GNU C omits the middle: `x ?: y` is `x ? x : y` with `x` evaluated once. */
 static Expr *parse_ternary(Parser *p) {
     Expr *cond = parse_or(p);
     if (peek(p)->kind != TK_QUESTION) return cond;
     SourceLoc loc = peek(p)->loc;
     advance(p);  /* consume '?' */
-    Expr *then = parse_expr(p);
+    Expr *then = NULL;
+    if (peek(p)->kind != TK_COLON)
+        then = parse_expr(p);
     expect_kind(p, TK_COLON, "':'");
     Expr *else_ = parse_ternary(p);
     return expr_new_ternary(cond, then, else_, loc);

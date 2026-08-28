@@ -1935,8 +1935,13 @@ Type p1;
         if (ct.kind != TY_INT && ct.kind != TY_PTR)
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "ternary condition must be scalar");
-        type_free(&ct);
-        Type tt = check_expr(e->u.tern.then, st, ft);
+        Type tt;
+        if (e->u.tern.then) {
+            type_free(&ct);
+            tt = check_expr(e->u.tern.then, st, ft);
+        } else {
+            tt = ct;
+        }
         Type et = check_expr(e->u.tern.else_, st, ft);
         if (tt.kind == TY_ARRAY) {
             Type d = type_decay(tt); type_free(&tt); tt = d;
@@ -1945,8 +1950,10 @@ Type p1;
             Type d = type_decay(et); type_free(&et); et = d;
         }
         int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
-                               && e->u.tern.then->kind == EX_INT_LIT
-                               && e->u.tern.then->u.int_val == 0);
+                               && ((e->u.tern.then && e->u.tern.then->kind == EX_INT_LIT
+                                    && e->u.tern.then->u.int_val == 0)
+                                   || (!e->u.tern.then && e->u.tern.cond->kind == EX_INT_LIT
+                                       && e->u.tern.cond->u.int_val == 0)));
         int e_is_null_const = (et.kind == TY_INT && et.width == 4
                                && e->u.tern.else_->kind == EX_INT_LIT
                                && e->u.tern.else_->u.int_val == 0);

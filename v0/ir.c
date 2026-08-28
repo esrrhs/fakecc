@@ -4676,7 +4676,8 @@ IRValue pr;
             IRValue cond = lower_expr(fn, st, e->u.tern.cond);
             emit_cbr(fn, cond, L_then, L_else, e->loc);
             emit_label(fn, L_then, e->loc);
-            lower_expr(fn, st, e->u.tern.then);
+            if (e->u.tern.then)
+                lower_expr(fn, st, e->u.tern.then);
             emit_br(fn, L_done, e->loc);
             emit_label(fn, L_else, e->loc);
             lower_expr(fn, st, e->u.tern.else_);
@@ -4694,8 +4695,9 @@ IRValue pr;
             emit_cbr(fn, cond, L_then, L_else, e->loc);
             emit_label(fn, L_then, e->loc);
             {
-                IRValue tv = lower_expr(fn, st, e->u.tern.then);
-                IRValue ta = i128_as_addr(fn, tv, e->u.tern.then->type,
+                IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
+                Type then_ty = e->u.tern.then ? e->u.tern.then->type : e->u.tern.cond->type;
+                IRValue ta = i128_as_addr(fn, tv, then_ty,
                                           e->type.is_unsigned, e->loc);
                 emit_struct_copy(fn, addr, ta, 16, e->loc);
             }
@@ -4730,7 +4732,7 @@ IRValue pr;
         IRValue cond = lower_expr(fn, st, e->u.tern.cond);
         emit_cbr(fn, cond, L_then, L_else, e->loc);
         emit_label(fn, L_then, e->loc);
-        IRValue tv = lower_expr(fn, st, e->u.tern.then);
+        IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
         int tw = get_value_width(fn, tv), tu = get_value_is_unsigned(fn, tv), tf = get_value_is_float(fn, tv);
         IRValue tc;
         if (tf != rf) tc = convert_numeric(fn, tv, tw, rw, ru, rf, e->loc);

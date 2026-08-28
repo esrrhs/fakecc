@@ -1452,13 +1452,19 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         /* cond ? then : else
          * Condition must be scalar (int or pointer).  Result type follows
          * C §6.5.15: arithmetic operands → UAC; both pointers → that pointer
-         * type; one pointer + null pointer constant (integer 0) → pointer type. */
+         * type; one pointer + null pointer constant (integer 0) → pointer type.
+         * GNU `x ?: y` omits `then`; the then-type is the type of `cond`. */
         Type ct = check_expr(e->u.tern.cond, st, ft);
         if (ct.kind != TY_INT && ct.kind != TY_PTR)
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "ternary condition must be scalar");
-        type_free(&ct);
-        Type tt = check_expr(e->u.tern.then, st, ft);
+        Type tt;
+        if (e->u.tern.then) {
+            type_free(&ct);
+            tt = check_expr(e->u.tern.then, st, ft);
+        } else {
+            tt = ct;
+        }
         Type et = check_expr(e->u.tern.else_, st, ft);
         /* Array-to-pointer decay for string literals (now typed as char[N]). */
         if (tt.kind == TY_ARRAY) {
@@ -1468,8 +1474,10 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type d = type_decay(et); type_free(&et); et = d;
         }
         int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
-                               && e->u.tern.then->kind == EX_INT_LIT
-                               && e->u.tern.then->u.int_val == 0);
+                               && ((e->u.tern.then && e->u.tern.then->kind == EX_INT_LIT
+                                    && e->u.tern.then->u.int_val == 0)
+                                   || (!e->u.tern.then && e->u.tern.cond->kind == EX_INT_LIT
+                                       && e->u.tern.cond->u.int_val == 0)));
         int e_is_null_const = (et.kind == TY_INT && et.width == 4
                                && e->u.tern.else_->kind == EX_INT_LIT
                                && e->u.tern.else_->u.int_val == 0);

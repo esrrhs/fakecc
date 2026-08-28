@@ -1930,7 +1930,9 @@ static Expr *parse_ternary(Parser *p) {
     if (peek(p)->kind != TK_QUESTION) return cond;
     SourceLoc loc = peek(p)->loc;
     advance(p);
-    Expr *then = parse_expr(p);
+    Expr *then = ((void*)0);
+    if (peek(p)->kind != TK_COLON)
+        then = parse_expr(p);
     expect_kind(p, TK_COLON, "':'");
     Expr *else_ = parse_ternary(p);
     return expr_new_ternary(cond, then, else_, loc);
