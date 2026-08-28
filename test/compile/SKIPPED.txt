@@ -6,7 +6,7 @@
 # strip directives just to make a test compile). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 178
+# Total: 179
 #
 
 # GNU nested functions / trampolines (20)
@@ -45,7 +45,7 @@ pr82564.c
 
 pr37669.c
 
-# Preprocessor required (155)
+# Preprocessor required (156)
 # #include / #define / #if / #ifdef / #pragma / etc. Do not strip to harvest.
 
 20000211-1.c
@@ -56,6 +56,7 @@ pr37669.c
 20010114-2.c
 20010404-1.c
 20010423-1.c
+20010510-1.c
 20010518-2.c
 20010605-3.c
 20010610-1.c
