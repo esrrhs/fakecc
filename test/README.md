@@ -54,8 +54,9 @@ test/
 │   ├── run_gdb_e2e.sh      # 真实 GDB 断点与变量追踪测试驱动脚本
 │   └── gcc.c-torture/      # GCC 16.2.0 C-Torture 原始测试套件（参考镜像）
 └── compile/                # 编译器健壮性仅编译测试套件（Compile-Only Suite）
-    ├── *.c                 # 1,538 个已支持的编译健壮性用例（通过率 100%）
-    ├── UNSUPPORTED.txt     # 465 个未支持用例清单（待后续逐步支持）
+    ├── *.c                 # 已支持的编译健壮性用例
+    ├── UNSUPPORTED.txt     # 仍待支持：崩溃 / 超时 / 编译拒绝
+    ├── SKIPPED.txt         # 移植循环明确跳过（嵌套函数 / GNU VLS / va_arg_pack / 无预处理器等）
     └── run_compile.sh      # 健壮性编译驱动脚本（fakecc -c）
 ```
 
