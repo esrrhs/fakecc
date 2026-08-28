@@ -1,5 +1,5 @@
 # GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
-# Total: 89 (out of 2003 original GCC compile cases)
+# Total: 88 (out of 2003 original GCC compile cases)
 #
 # Harvest-skipped kinds (nested functions, GNU VLS, DFP, va_arg_pack,
 # preprocessor, and GCC-error cases we must not mark OK) live in SKIPPED.txt.
@@ -15,7 +15,7 @@ pr94621.c
 20151204.c
 pr65680.c
 
-# === Compile Rejects (83) ===
+# === Compile Rejects (82) ===
 20060202-1.c
 20101216-1.c
 900313-1.c
@@ -81,7 +81,6 @@ pr81595.c
 pr83222.c
 pr87647.c
 pr90275.c
-scal.c
 shft.c
 signext.c
 signext2.c
