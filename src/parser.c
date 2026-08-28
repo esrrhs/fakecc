@@ -3706,17 +3706,17 @@ static Stmt parse_typedef_stmt(Parser *p) {
 static FunctionDecl parse_function_decl(Parser *p) {
     for (;;) { if (!skip_attribute(p)) break; }
     SourceLoc fn_loc = peek(p)->loc;
-    /* Consume an optional leading storage class.  `extern` means a
-     * declaration with no body; `static` gives the function LOCAL linkage;
-     * `inline` is a no-op hint accepted so it doesn't choke
-     * parse_type_abstract. */
+    /* Consume an optional leading storage class.  `static` is LOCAL
+     * linkage.  `extern` on a prototype is declaration-only; on a body it
+     * is a definition (or GNU89 `extern inline`, which is not emitted). */
     int is_extern = 0;
     int is_static = 0;
+    int is_inline = 0;
     for (;;) {
         if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_STATIC) { advance(p); is_static = 1; }
         else if (peek(p)->kind == TK_KW_EXTERN) { advance(p); is_extern = 1; }
-        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); is_inline = 1; }
         else break;
     }
     Type ret_ty;
@@ -3923,7 +3923,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
         }
     }
 
-    if (fn.is_extern || peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
+    if (peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
         /* Declaration only / forward declaration — no body. */
         fn.is_extern = 1;
         while (peek(p)->kind == TK_COMMA) {
@@ -3958,6 +3958,13 @@ static FunctionDecl parse_function_decl(Parser *p) {
         expect_kind(p, TK_SEMICOLON, "';'");
         return fn;
     }
+
+    /* Definition (has a body).  `extern int f() { }` is a normal definition
+     * with external linkage.  GNU89 `extern inline` / `extern __inline__`
+     * is an inline-only definition: do not emit a standalone copy, and a
+     * later non-inline definition of the same name is allowed. */
+    if (!(is_extern && is_inline))
+        fn.is_extern = 0;
 
     expect_kind(p, TK_LBRACE, "'{'");
 

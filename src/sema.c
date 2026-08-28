@@ -2330,8 +2330,10 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
 
-        /* `extern` declarations have no body to type-check. */
-        if (fn->is_extern) continue;
+        /* Prototype-only `extern` decls have no body.  GNU89 `extern inline`
+         * definitions keep is_extern (so they are not emitted) but still have
+         * a body that must be type-checked. */
+        if (fn->is_extern && fn->body.len == 0) continue;
 
         SymTable st;
         symtable_init(&st);

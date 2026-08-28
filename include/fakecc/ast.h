@@ -358,7 +358,7 @@ typedef struct {
     SourceLoc loc;
     int    is_variadic; /* 1 = ends with `...` (variadic function) */
     int    is_unprototyped; /* 1 = K&R `foo()` empty identifier list */
-    int    is_extern;   /* 1 = declaration only (`extern int f();`), no body */
+    int    is_extern;   /* 1 = no standalone copy (`extern int f();`, or GNU89 extern inline) */
     int    is_static;   /* 1 = `static` function — LOCAL linkage */
     char  *alias_target; /* __attribute__((alias("..."))) or NULL */
     int    align;       /* alignment attribute */

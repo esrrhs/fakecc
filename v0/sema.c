@@ -2674,7 +2674,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
     }
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
-        if (fn->is_extern) continue;
+        if (fn->is_extern && fn->body.len == 0) continue;
         SymTable st;
         symtable_init(&st);
         for (size_t g = 0; g < globals.len; g++) {

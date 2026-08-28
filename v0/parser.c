@@ -3882,11 +3882,12 @@ static FunctionDecl parse_function_decl(Parser *p) {
     SourceLoc fn_loc = peek(p)->loc;
     int is_extern = 0;
     int is_static = 0;
+    int is_inline = 0;
     for (;;) {
         if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_STATIC) { advance(p); is_static = 1; }
         else if (peek(p)->kind == TK_KW_EXTERN) { advance(p); is_extern = 1; }
-        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); is_inline = 1; }
         else break;
     }
     Type ret_ty;
@@ -4074,7 +4075,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
             }
         }
     }
-    if (fn.is_extern || peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
+    if (peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
         fn.is_extern = 1;
         while (peek(p)->kind == TK_COMMA) {
             advance(p);
@@ -4108,6 +4109,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
         expect_kind(p, TK_SEMICOLON, "';'");
         return fn;
     }
+    if (!(is_extern && is_inline))
+        fn.is_extern = 0;
     expect_kind(p, TK_LBRACE, "'{'");
     const char *saved_fn = p->cur_fn_name;
     size_t saved_td = p->typedef_mark;
