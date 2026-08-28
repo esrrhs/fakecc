@@ -78,6 +78,7 @@ static char *g_parsed_alias = NULL;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
 static int g_parsed_align = 0;
+static int g_parsed_inline = 0;  /* `inline` among type specifiers (`extern int inline f`) */
 
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
@@ -480,7 +481,7 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
         }
-        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (peek(p)->kind == TK_KW_INLINE) { g_parsed_inline = 1; advance(p); }
         else if (is_complex && peek(p)->kind == TK_KW_COMPLEX) { *is_complex = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_STATIC) {
             if (storage_class) *storage_class = 1;
@@ -801,7 +802,7 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
         }
-        else if (k == TK_KW_INLINE) { advance(p); }
+        else if (k == TK_KW_INLINE) { g_parsed_inline = 1; advance(p); }
         else if (k == TK_KW_COMPLEX) { is_complex = 1; advance(p); }
         else if (k == TK_KW_STATIC) {
             if (storage_class) *storage_class = 1;
@@ -3712,6 +3713,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     int is_extern = 0;
     int is_static = 0;
     int is_inline = 0;
+    g_parsed_inline = 0;
     for (;;) {
         if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_STATIC) { advance(p); is_static = 1; }
@@ -3727,6 +3729,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
         || peek(p)->kind == TK_KW_UNION
         || peek(p)->kind == TK_KW_ENUM) {
         ret_ty = parse_return_type(p);
+        if (g_parsed_inline) is_inline = 1;
+        g_parsed_inline = 0;
         for (;;) { if (!skip_attribute(p)) break; }
         name = peek(p);
         if (name->kind != TK_IDENT) {
