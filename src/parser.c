@@ -3712,6 +3712,15 @@ static Stmt parse_typedef_stmt(Parser *p) {
         Type ty = parse_declarator(p, type_clone(base), &decl_name);
         const Token *name = peek(p);
         if (!decl_name) {
+            /* GCC allows `typedef <type> ;` with no declarator — an
+             * anonymous typedef that defines an unnamed type.  It is
+             * useless (the type has no name) but appears in system headers
+             * (e.g. `typedef union { struct X { ... } __data; };`).  Accept
+             * and discard it. */
+            if (name->kind == TK_SEMICOLON) {
+                type_free(&ty);
+                break;
+            }
             if (name->kind != TK_IDENT) {
                 die_at(name->loc.file, name->loc.line, name->loc.col,
                        "expected typedef name but got '%s'", name->text);
