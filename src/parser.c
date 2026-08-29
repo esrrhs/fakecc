@@ -3219,10 +3219,11 @@ static Stmt parse_stmt(Parser *p) {
                                    &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {
                 advance(p);
-                /* `extern` may not have an initializer. */
+                /* GCC allows `extern int x = 0;` — it acts as a definition
+                 * (not just a declaration) when an initializer is present.
+                 * Treat it as a regular definition (clear the extern flag). */
                 if (storage_class == 2) {
-                    die_at(s.loc.file, s.loc.line, s.loc.col,
-                           "cannot initialize an 'extern' variable");
+                    storage_class = 0;
                 }
                 if (peek(p)->kind == TK_LBRACE) {
                     s.u.decl.init = parse_init_list(p);
