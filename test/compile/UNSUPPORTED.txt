@@ -13,7 +13,7 @@ pr53748.c
 20151204.c
 pr65680.c
 
-# === Compile Rejects (61) ===
+# === Compile Rejects (59) ===
 20060202-1.c
 20101216-1.c
 900313-1.c
@@ -73,5 +73,3 @@ pr81595.c
 pr83222.c
 pr87647.c
 pr90275.c
-vector-5.c
-vector-6.c
