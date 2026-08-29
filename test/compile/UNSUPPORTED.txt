@@ -5,17 +5,15 @@
 # preprocessor) live in SKIPPED.txt.
 #
 
-# === Crashes / Segfaults (4) ===
+# === Crashes / Segfaults (2) ===
 20011109-1.c
-pr28865.c
 pr53748.c
-pr94621.c
 
 # === Timeouts (2) ===
 20151204.c
 pr65680.c
 
-# === Compile Rejects (68) ===
+# === Compile Rejects (59) ===
 20060202-1.c
 20101216-1.c
 900313-1.c
@@ -56,7 +54,6 @@ pr17408.c
 pr27863.c
 pr30132.c
 pr34334.c
-pr37056.c
 pr38661.c
 pr43635.c
 pr47141.c
@@ -65,13 +62,7 @@ pr48767.c
 pr50565-1.c
 pr50565-2.c
 pr51856.c
-pr55350.c
-pr55569.c
-pr57331.c
 pr64067.c
-pr65014.c
-pr67485.c
-pr69161.c
 pr70190.c
 pr70916.c
 pr71109.c
@@ -82,5 +73,3 @@ pr81595.c
 pr83222.c
 pr87647.c
 pr90275.c
-vector-5.c
-vector-6.c
