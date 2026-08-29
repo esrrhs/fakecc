@@ -1,0 +1,9 @@
+package main;
+int *bar(void);
+void foo(void) {
+  long x;
+  int *y = bar();
+  for (x = -1 / sizeof(int); x; --x, ++y)
+    *y = 0;
+}
+int main() { return 0; }
