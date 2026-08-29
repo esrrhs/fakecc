@@ -78,6 +78,7 @@ static char *g_parsed_alias = NULL;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
 static int g_parsed_align = 0;
+static int g_parsed_inline = 0;  /* `inline` among type specifiers (`extern int inline f`) */
 
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
@@ -386,12 +387,23 @@ static int is_type_start(const Parser *p, size_t pos) {
         || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN
-        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE
+        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT
         || k == TK_KW_COMPLEX)
         return 1;
+    if (k == TK_KW_INLINE) {
+        /* Lexer maps `__extension__` onto TK_KW_INLINE so declaration prefixes
+         * skip it.  GCC itself treats `__extension__` as a no-op, not a type
+         * specifier: `( __extension__ (T){...} )` is a parenthesized expr. */
+        const char *text = p->tokens->data[pos].text;
+        if (text && (strcmp(text, "__extension__") == 0
+                     || strcmp(text, "__extension") == 0))
+            return pos + 1 < p->tokens->len ? is_type_start(p, pos + 1) : 0;
+        return 1;
+    }
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
-        if (strcmp(text, "register") == 0 || strcmp(text, "auto") == 0)
+        if (strcmp(text, "register") == 0 || strcmp(text, "auto") == 0
+            || strcmp(text, "__extension__") == 0 || strcmp(text, "__extension") == 0)
             return is_type_start(p, pos + 1);
         if (strcmp(text, "__attribute__") == 0 || strcmp(text, "__attribute") == 0) {
             size_t attr_pos = pos + 1;
@@ -480,7 +492,7 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
         }
-        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (peek(p)->kind == TK_KW_INLINE) { g_parsed_inline = 1; advance(p); }
         else if (is_complex && peek(p)->kind == TK_KW_COMPLEX) { *is_complex = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_STATIC) {
             if (storage_class) *storage_class = 1;
@@ -534,10 +546,26 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
                 if (ec) {
                     found = type_default_int();
                 } else {
+                    int got = 0;
                     for (size_t g = 0; g < p->tu->globals.len; g++) {
                         if (p->tu->globals.data[g].kind == ST_DECL &&
                             strcmp(p->tu->globals.data[g].u.decl.name, tok->text) == 0) {
                             found = type_clone(p->tu->globals.data[g].u.decl.type);
+                            got = 1;
+                            break;
+                        }
+                    }
+                    if (!got) {
+                        for (size_t f = 0; f < p->tu->functions.len; f++) {
+                            const FunctionDecl *fn = &p->tu->functions.data[f];
+                            if (strcmp(fn->name, tok->text) != 0) continue;
+                            Type *ptys[16];
+                            int n = (int)fn->params.len;
+                            if (n > 16) n = 16;
+                            for (int i = 0; i < n; i++)
+                                ptys[i] = &fn->params.data[i].type;
+                            found = type_make_func_var(fn->ret_type, n ? ptys : NULL,
+                                                       n, fn->is_variadic);
                             break;
                         }
                     }
@@ -801,7 +829,7 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
         }
-        else if (k == TK_KW_INLINE) { advance(p); }
+        else if (k == TK_KW_INLINE) { g_parsed_inline = 1; advance(p); }
         else if (k == TK_KW_COMPLEX) { is_complex = 1; advance(p); }
         else if (k == TK_KW_STATIC) {
             if (storage_class) *storage_class = 1;
@@ -1527,15 +1555,18 @@ static Expr *parse_assign(Parser *p) {
     return lhs;
 }
 
-/* ternary-expr = or-expr [ "?" expr ":" ternary-expr ]  -- right associative.
+/* ternary-expr = or-expr [ "?" [expr] ":" ternary-expr ]  -- right associative.
  * The middle operand is a full expr (allows e.g. `c ? a = b : d`);
- * the else branch is ternary-expr so right-associativity chains naturally. */
+ * the else branch is ternary-expr so right-associativity chains naturally.
+ * GNU C omits the middle: `x ?: y` is `x ? x : y` with `x` evaluated once. */
 static Expr *parse_ternary(Parser *p) {
     Expr *cond = parse_or(p);
     if (peek(p)->kind != TK_QUESTION) return cond;
     SourceLoc loc = peek(p)->loc;
     advance(p);  /* consume '?' */
-    Expr *then = parse_expr(p);
+    Expr *then = NULL;
+    if (peek(p)->kind != TK_COLON)
+        then = parse_expr(p);
     expect_kind(p, TK_COLON, "':'");
     Expr *else_ = parse_ternary(p);
     return expr_new_ternary(cond, then, else_, loc);
@@ -1802,6 +1833,14 @@ static Expr *parse_unary(Parser *p) {
             advance(p);
             Type t = parse_type_abstract(p);
             expect_kind(p, TK_RPAREN, "')'");
+            if (peek(p)->kind == TK_LBRACE) {
+                /* Compound literals are postfix expressions (C99 6.5.2.5),
+                 * so `sizeof (T){ ... }` is sizeof of the literal, not of T. */
+                Expr *init = parse_init_list(p);
+                Expr *cl = expr_new_compound_literal(t, init, loc);
+                type_free(&t);
+                return expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+            }
             Expr *e = expr_new_sizeof_type(t, loc);
             type_free(&t);
             return e;
@@ -2822,6 +2861,20 @@ static int is_function_declaration_lookahead(Parser *p) {
                        || strcmp(peek(p)->text, "__int128_t") == 0
                        || strcmp(peek(p)->text, "__uint128_t") == 0)) {
             advance(p);
+        } else if (tk == TK_IDENT
+                   && (strcmp(peek(p)->text, "typeof") == 0
+                       || strcmp(peek(p)->text, "__typeof__") == 0
+                       || strcmp(peek(p)->text, "__typeof") == 0)) {
+            /* typeof is a specifier, not a declarator name. */
+            advance(p);
+            if (peek(p)->kind == TK_LPAREN) {
+                int depth = 0;
+                do {
+                    if (peek(p)->kind == TK_LPAREN) depth++;
+                    else if (peek(p)->kind == TK_RPAREN) depth--;
+                    advance(p);
+                } while (depth > 0 && peek(p)->kind != TK_EOF);
+            }
         } else {
             break;
         }
@@ -2882,6 +2935,20 @@ static int is_function_definition_lookahead(Parser *p) {
                        || strcmp(peek(p)->text, "__int128_t") == 0
                        || strcmp(peek(p)->text, "__uint128_t") == 0)) {
             advance(p);
+        } else if (tk == TK_IDENT
+                   && (strcmp(peek(p)->text, "typeof") == 0
+                       || strcmp(peek(p)->text, "__typeof__") == 0
+                       || strcmp(peek(p)->text, "__typeof") == 0)) {
+            /* typeof is a specifier, not a declarator name. */
+            advance(p);
+            if (peek(p)->kind == TK_LPAREN) {
+                int depth = 0;
+                do {
+                    if (peek(p)->kind == TK_LPAREN) depth++;
+                    else if (peek(p)->kind == TK_RPAREN) depth--;
+                    advance(p);
+                } while (depth > 0 && peek(p)->kind != TK_EOF);
+            }
         } else {
             break;
         }
@@ -3671,6 +3738,13 @@ static Stmt parse_typedef_stmt(Parser *p) {
                 /* The TU predeclares SysV va_list; torture files restated it
                  * with an equivalent layout under a fresh anonymous tag. */
                 type_free(&ty);
+            } else if (strcmp(decl_name, "wchar_t") == 0) {
+                /* C/GCC do not predeclare wchar_t (it comes from <stddef.h>).
+                 * FakeCC injects a convenience typedef for wide literals in TUs
+                 * without headers; a user typedef is the first real definition
+                 * and replaces it. */
+                type_free(&exist->type);
+                exist->type = ty;
             } else if (!type_same_typedef(exist->type, ty)) {
                 die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "redefinition of typedef '%s' with a different type",
@@ -3703,17 +3777,18 @@ static Stmt parse_typedef_stmt(Parser *p) {
 static FunctionDecl parse_function_decl(Parser *p) {
     for (;;) { if (!skip_attribute(p)) break; }
     SourceLoc fn_loc = peek(p)->loc;
-    /* Consume an optional leading storage class.  `extern` means a
-     * declaration with no body; `static` gives the function LOCAL linkage;
-     * `inline` is a no-op hint accepted so it doesn't choke
-     * parse_type_abstract. */
+    /* Consume an optional leading storage class.  `static` is LOCAL
+     * linkage.  `extern` on a prototype is declaration-only; on a body it
+     * is a definition (or GNU89 `extern inline`, which is not emitted). */
     int is_extern = 0;
     int is_static = 0;
+    int is_inline = 0;
+    g_parsed_inline = 0;
     for (;;) {
         if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_STATIC) { advance(p); is_static = 1; }
         else if (peek(p)->kind == TK_KW_EXTERN) { advance(p); is_extern = 1; }
-        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); is_inline = 1; }
         else break;
     }
     Type ret_ty;
@@ -3724,6 +3799,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
         || peek(p)->kind == TK_KW_UNION
         || peek(p)->kind == TK_KW_ENUM) {
         ret_ty = parse_return_type(p);
+        if (g_parsed_inline) is_inline = 1;
+        g_parsed_inline = 0;
         for (;;) { if (!skip_attribute(p)) break; }
         name = peek(p);
         if (name->kind != TK_IDENT) {
@@ -3920,7 +3997,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
         }
     }
 
-    if (fn.is_extern || peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
+    if (peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
         /* Declaration only / forward declaration — no body. */
         fn.is_extern = 1;
         while (peek(p)->kind == TK_COMMA) {
@@ -3955,6 +4032,13 @@ static FunctionDecl parse_function_decl(Parser *p) {
         expect_kind(p, TK_SEMICOLON, "';'");
         return fn;
     }
+
+    /* Definition (has a body).  `extern int f() { }` is a normal definition
+     * with external linkage.  GNU89 `extern inline` / `extern __inline__`
+     * is an inline-only definition: do not emit a standalone copy, and a
+     * later non-inline definition of the same name is allowed. */
+    if (!(is_extern && is_inline))
+        fn.is_extern = 0;
 
     expect_kind(p, TK_LBRACE, "'{'");
 

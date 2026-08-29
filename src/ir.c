@@ -77,6 +77,10 @@ const StructRegistry *get_ir_structs(void) {
     return g_ir_tu ? &g_ir_tu->structs : NULL;
 }
 
+const TranslationUnit *get_ir_tu(void) {
+    return g_ir_tu;
+}
+
 static const char *lookup_asm_alias(const char *name) {
     if (!g_ir_tu || !name) return NULL;
     for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
@@ -895,6 +899,14 @@ static IRValue bool_normalize(IRFunction *fn, IRValue v, int w, int u,
     IRValue zero = new_value(fn);
     emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, loc);
     return emit_bin_w(fn, IR_NE, i, zero, 4, 0, loc);
+}
+
+/* CBR is an integer test.  A floating condition is compared against +0.0 so
+ * -0.0 is false (C scalar zero).  Callers keep the original value for GNU `?:`. */
+static IRValue cbr_from_scalar(IRFunction *fn, IRValue v, SourceLoc loc) {
+    if (get_value_is_float(fn, v))
+        return bool_normalize(fn, v, get_value_width(fn, v), 0, 1, loc);
+    return v;
 }
 
 /* Push an instruction (width/signedness default 4/signed). */
@@ -4222,9 +4234,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_else = new_label(fn);
             int L_done = new_label(fn);
             IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cond, L_then, L_else, e->loc);
+            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
             emit_label(fn, L_then, e->loc);
-            lower_expr(fn, st, e->u.tern.then);
+            if (e->u.tern.then)
+                lower_expr(fn, st, e->u.tern.then);
             emit_br(fn, L_done, e->loc);
             emit_label(fn, L_else, e->loc);
             lower_expr(fn, st, e->u.tern.else_);
@@ -4239,11 +4252,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_else = new_label(fn);
             int L_done = new_label(fn);
             IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cond, L_then, L_else, e->loc);
+            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
             emit_label(fn, L_then, e->loc);
             {
-                IRValue tv = lower_expr(fn, st, e->u.tern.then);
-                IRValue ta = i128_as_addr(fn, tv, e->u.tern.then->type,
+                IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
+                Type then_ty = e->u.tern.then ? e->u.tern.then->type : e->u.tern.cond->type;
+                IRValue ta = i128_as_addr(fn, tv, then_ty,
                                           e->type.is_unsigned, e->loc);
                 emit_struct_copy(fn, addr, ta, 16, e->loc);
             }
@@ -4283,9 +4297,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int L_else = new_label(fn);
         int L_done = new_label(fn);
         IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-        emit_cbr(fn, cond, L_then, L_else, e->loc);
+        emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
         emit_label(fn, L_then, e->loc);
-        IRValue tv = lower_expr(fn, st, e->u.tern.then);
+        IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
         int tw = get_value_width(fn, tv), tu = get_value_is_unsigned(fn, tv), tf = get_value_is_float(fn, tv);
         IRValue tc;
         if (tf != rf) tc = convert_numeric(fn, tv, tw, rw, ru, rf, e->loc);
@@ -4330,6 +4344,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_CONST, v, -1, -1, 8, 4, 0, e->loc);
             return v;
+        }
+        if (strcmp(e->u.var.name, "__INT_MAX__") == 0) {
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_CONST, v, -1, -1, 0x7fffffff, 4, 0, e->loc);
+            return v;
+        }
+        if (strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
+            /* 0x7f7fffff — IEEE-754 binary32 FLT_MAX.  Integer bits, not a
+             * C float literal: fakecc's own float immediates are not yet a
+             * bootstrap fixed point. */
+            return emit_float_const(fn, 4, 0x7f7fffff, e->loc);
         }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
@@ -6970,6 +6995,32 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             /* void function: bare `return;` or `return void_expr;` */
             if (s->u.value) lower_expr(fn, st, s->u.value);
             emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
+        } else if (!s->u.value) {
+            /* GNU C `return;` in a non-void function: typed zero. */
+            int dw = fn->ret_width, du = fn->ret_is_unsigned;
+            if (fn->ret_is_struct) {
+                if (fn->ret_reg_n > 0) {
+                    IRValue z = new_value(fn);
+                    emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 8, 1, s->loc);
+                    IRValue hi = -1;
+                    if (fn->ret_reg_n > 1) {
+                        hi = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, hi, -1, -1, 0, 8, 1, s->loc);
+                    }
+                    emit_inst_w(fn, IR_RETURN, -1, z, hi, 0, 8, 1, s->loc);
+                } else {
+                    emit_inst_w(fn, IR_RETURN, -1, fn->sret_value, -1, 0,
+                                8, 1, s->loc);
+                }
+            } else if (fn->ret_is_float) {
+                IRValue z = emit_float_const(fn, dw, 0, s->loc);
+                emit_inst_w(fn, IR_RETURN, -1, z, -1, 0, dw, du, s->loc);
+                fn->insts.data[fn->insts.len - 1].is_float = 1;
+            } else {
+                IRValue z = new_value(fn);
+                emit_inst_w(fn, IR_CONST, z, -1, -1, 0, dw, du, s->loc);
+                emit_inst_w(fn, IR_RETURN, -1, z, -1, 0, dw, du, s->loc);
+            }
         } else if (fn->ret_is_struct) {
             IRValue v = lower_expr(fn, st, s->u.value);
             if (fn->ret_reg_n > 0) {
@@ -7414,6 +7465,13 @@ static int fold_const_float(const Expr *e, long double *out) {
         *out = strtold(e->u.float_text, NULL);
         return 1;
     }
+    if (e->kind == EX_VAR && strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
+        unsigned u = 0x7f7fffffu;
+        float f;
+        memcpy(&f, &u, 4);
+        *out = (long double)f;
+        return 1;
+    }
     if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
         const char *name = e->u.call.callee->u.var.name;
         if (strcmp(name, "__builtin_inf") == 0 || strcmp(name, "__builtin_huge_val") == 0) {
@@ -7494,6 +7552,8 @@ static int fold_const_complex(const Expr *e, long double *r_out, long double *i_
         *i_out = 0.0;
         return 1;
     }
+    if (e->kind == EX_CAST)
+        return fold_const_complex(e->u.cast.operand, r_out, i_out);
     if (e->kind == EX_COMPOUND_LITERAL && e->u.compound.init && e->u.compound.init->kind == EX_INIT_LIST) {
         int n = e->u.compound.init->u.init_list.num_elements;
         long double r = 0.0, i = 0.0, dummy = 0.0;
@@ -7526,6 +7586,17 @@ static int fold_const_complex(const Expr *e, long double *r_out, long double *i_
         }
     }
     return 0;
+}
+
+static int fold_const_complex_rel(const Expr *e, long long *out) {
+    if (!e || e->kind != EX_BINOP) return 0;
+    if (e->u.bin.op != BOP_EQ && e->u.bin.op != BOP_NE) return 0;
+    long double lr = 0.0, li = 0.0, rr = 0.0, ri = 0.0;
+    if (!fold_const_complex(e->u.bin.l, &lr, &li)) return 0;
+    if (!fold_const_complex(e->u.bin.r, &rr, &ri)) return 0;
+    int eq = (lr == rr && li == ri);
+    *out = (e->u.bin.op == BOP_EQ) ? (eq ? 1 : 0) : (eq ? 0 : 1);
+    return 1;
 }
 
 /* Pack a compile-time constant initializer into `bytes` (size `sz`) for a
@@ -7590,6 +7661,141 @@ static Type get_global_obj_struct_type(const Expr *e) {
     else if (t.kind == TY_ARRAY && t.elem_type)
         t = *t.elem_type;
     return t;
+}
+
+/* Scale for `addr ± integer` in a static initializer.  After the address is
+ * converted to an integer type, further ± uses a byte addend (GCC relocatable
+ * integer initializers: `(unsigned long)&sym - C`).  Pointer arithmetic uses
+ * the pointee size; GNU `void*` arithmetic uses 1. */
+static int addr_const_elem_size(const Expr *addr_side) {
+    const Expr *e = addr_side;
+    while (e && e->kind == EX_CAST) {
+        if (e->type.kind == TY_INT)
+            return 1;
+        e = e->u.cast.operand;
+    }
+    int esz = get_global_elem_size(addr_side);
+    if (esz < 1) esz = 1;
+    return esz;
+}
+
+/* True if `e` is built from an address constant (`&obj`, string, &&label),
+ * not a scalar object's value.  Used so integer-typed slots record a reloc
+ * for `(uintptr_t)&sym + C` without treating `int x = y` as `&y`. */
+static int expr_has_address_constant(const Expr *e) {
+    if (!e) return 0;
+    while (e->kind == EX_CAST) e = e->u.cast.operand;
+    if (!e) return 0;
+    if (e->kind == EX_ADDR || e->kind == EX_LABEL_ADDR || e->kind == EX_STR)
+        return 1;
+    if (e->kind == EX_BINOP)
+        return expr_has_address_constant(e->u.bin.l)
+            || expr_has_address_constant(e->u.bin.r);
+    if (e->kind == EX_UNARY)
+        return expr_has_address_constant(e->u.un.operand);
+    if (e->kind == EX_MEMBER)
+        return expr_has_address_constant(e->u.member.obj);
+    if (e->kind == EX_INDEX)
+        return expr_has_address_constant(e->u.idx.array);
+    if (e->kind == EX_DEREF)
+        return expr_has_address_constant(e->u.deref.operand);
+    return 0;
+}
+
+/* C99 6.6p9: an integer constant cast to pointer type is an address constant.
+ * `&((T *)0x4000)->m` is that address plus a member offset, stored as an
+ * absolute pointer value (no reloc). */
+static int eval_abs_addr_const(const Expr *e, unsigned long long *out) {
+    if (!e) return 0;
+    if (e->kind == EX_CAST)
+        return eval_abs_addr_const(e->u.cast.operand, out);
+    if (e->kind == EX_ADDR) {
+        const Expr *sub = e->u.addr.operand;
+        while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
+        if (!sub) return 0;
+        if (sub->kind == EX_MEMBER) {
+            unsigned long long base = 0;
+            if (!eval_abs_addr_const(sub->u.member.obj, &base)) return 0;
+            Type mty = get_global_obj_struct_type(sub->u.member.obj);
+            long long moff = 0;
+            if (mty.kind == TY_STRUCT && mty.tag) {
+                const StructDef *sd = struct_registry_find_c(g_ir_structs, mty.tag);
+                if (sd)
+                    struct_lookup_member(g_ir_structs, sd, sub->u.member.name, &moff);
+            }
+            *out = base + (unsigned long long)moff;
+            return 1;
+        }
+        if (sub->kind == EX_DEREF)
+            return eval_abs_addr_const(sub->u.deref.operand, out);
+        if (sub->kind == EX_INDEX) {
+            unsigned long long base = 0;
+            if (!eval_abs_addr_const(sub->u.idx.array, &base)) return 0;
+            long long idx = 0;
+            if (!fold_const_int(sub->u.idx.index, &idx)) return 0;
+            int esz = get_global_elem_size(sub->u.idx.array);
+            if (esz < 1) esz = 1;
+            *out = base + (unsigned long long)(idx * esz);
+            return 1;
+        }
+        return eval_abs_addr_const(sub, out);
+    }
+    if (e->kind == EX_DEREF)
+        return eval_abs_addr_const(e->u.deref.operand, out);
+    if (e->kind == EX_MEMBER) {
+        unsigned long long base = 0;
+        if (!eval_abs_addr_const(e->u.member.obj, &base)) return 0;
+        Type mty = get_global_obj_struct_type(e->u.member.obj);
+        long long moff = 0;
+        if (mty.kind == TY_STRUCT && mty.tag) {
+            const StructDef *sd = struct_registry_find_c(g_ir_structs, mty.tag);
+            if (sd)
+                struct_lookup_member(g_ir_structs, sd, e->u.member.name, &moff);
+        }
+        *out = base + (unsigned long long)moff;
+        return 1;
+    }
+    if (e->kind == EX_INDEX) {
+        unsigned long long base = 0;
+        if (!eval_abs_addr_const(e->u.idx.array, &base)) return 0;
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx)) return 0;
+        int esz = get_global_elem_size(e->u.idx.array);
+        if (esz < 1) esz = 1;
+        *out = base + (unsigned long long)(idx * esz);
+        return 1;
+    }
+    if (e->kind == EX_BINOP) {
+        unsigned long long base = 0;
+        long long delta = 0;
+        if (e->u.bin.op == BOP_ADD) {
+            if (eval_abs_addr_const(e->u.bin.l, &base) && fold_const_int(e->u.bin.r, &delta)) {
+                int esz = addr_const_elem_size(e->u.bin.l);
+                *out = base + (unsigned long long)(delta * esz);
+                return 1;
+            }
+            if (eval_abs_addr_const(e->u.bin.r, &base) && fold_const_int(e->u.bin.l, &delta)) {
+                int esz = addr_const_elem_size(e->u.bin.r);
+                *out = base + (unsigned long long)(delta * esz);
+                return 1;
+            }
+        } else if (e->u.bin.op == BOP_SUB) {
+            if (eval_abs_addr_const(e->u.bin.l, &base) && fold_const_int(e->u.bin.r, &delta)) {
+                int esz = addr_const_elem_size(e->u.bin.l);
+                *out = base - (unsigned long long)(delta * esz);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    {
+        long long imm = 0;
+        if (fold_const_int(e, &imm)) {
+            *out = (unsigned long long)imm;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out_offset) {
@@ -7669,13 +7875,13 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             int off = 0;
             long long delta = 0;
             if (eval_global_addr_offset(e->u.bin.l, &sym, &off) && fold_const_int(e->u.bin.r, &delta)) {
-                int esz = get_global_elem_size(e->u.bin.l);
+                int esz = addr_const_elem_size(e->u.bin.l);
                 *out_sym = sym;
                 *out_offset = off + (int)(delta * esz);
                 return 1;
             }
             if (eval_global_addr_offset(e->u.bin.r, &sym, &off) && fold_const_int(e->u.bin.l, &delta)) {
-                int esz = get_global_elem_size(e->u.bin.r);
+                int esz = addr_const_elem_size(e->u.bin.r);
                 *out_sym = sym;
                 *out_offset = off + (int)(delta * esz);
                 return 1;
@@ -7685,7 +7891,7 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
             int off = 0;
             long long delta = 0;
             if (eval_global_addr_offset(e->u.bin.l, &sym, &off) && fold_const_int(e->u.bin.r, &delta)) {
-                int esz = get_global_elem_size(e->u.bin.l);
+                int esz = addr_const_elem_size(e->u.bin.l);
                 *out_sym = sym;
                 *out_offset = off - (int)(delta * esz);
                 return 1;
@@ -7731,6 +7937,71 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
         return eval_global_addr_offset(e->u.deref.operand, out_sym, out_offset);
     }
     return 0;
+}
+
+static int eval_strlit_byte_offset(const Expr *e, const char **bytes, int *len, int *off) {
+    if (!e) return 0;
+    while (e->kind == EX_CAST) e = e->u.cast.operand;
+    if (e->kind == EX_STR) {
+        *bytes = e->u.str.bytes;
+        *len = e->u.str.len;
+        *off = 0;
+        return 1;
+    }
+    if (e->kind == EX_ADDR)
+        return eval_strlit_byte_offset(e->u.addr.operand, bytes, len, off);
+    if (e->kind == EX_DEREF)
+        return eval_strlit_byte_offset(e->u.deref.operand, bytes, len, off);
+    if (e->kind == EX_INDEX) {
+        if (!eval_strlit_byte_offset(e->u.idx.array, bytes, len, off)) return 0;
+        long long idx = 0;
+        if (!fold_const_int(e->u.idx.index, &idx)) return 0;
+        *off += (int)idx;
+        return 1;
+    }
+    return 0;
+}
+
+/* Difference of two address constants into the same object: `&a.f - &a` is
+ * an integer constant (C address-constant arithmetic / GCC offsetof-style). */
+static int fold_global_ptrdiff(const Expr *e, long long *out) {
+    if (!e || e->kind != EX_BINOP || e->u.bin.op != BOP_SUB) return 0;
+    const Expr *l = e->u.bin.l;
+    const Expr *r = e->u.bin.r;
+    const Expr *lp = l;
+    const Expr *rp = r;
+    while (lp && lp->kind == EX_CAST) lp = lp->u.cast.operand;
+    while (rp && rp->kind == EX_CAST) rp = rp->u.cast.operand;
+    if (!lp || !rp) return 0;
+    if (lp->kind != EX_ADDR && lp->kind != EX_LABEL_ADDR && lp->kind != EX_STR)
+        return 0;
+    if (rp->kind != EX_ADDR && rp->kind != EX_LABEL_ADDR && rp->kind != EX_STR)
+        return 0;
+    {
+        const char *b1 = NULL, *b2 = NULL;
+        int n1 = 0, n2 = 0, so1 = 0, so2 = 0;
+        if (eval_strlit_byte_offset(l, &b1, &n1, &so1)
+            && eval_strlit_byte_offset(r, &b2, &n2, &so2)
+            && b1 && b2 && n1 == n2 && memcmp(b1, b2, (size_t)n1) == 0) {
+            int esz = 1;
+            if (l->type.kind == TY_PTR && l->type.pointee)
+                esz = type_size(*l->type.pointee);
+            if (esz < 1) esz = 1;
+            *out = (long long)(so1 - so2) / esz;
+            return 1;
+        }
+    }
+    const char *s1 = NULL, *s2 = NULL;
+    int o1 = 0, o2 = 0;
+    if (!eval_global_addr_offset(l, &s1, &o1)) return 0;
+    if (!eval_global_addr_offset(r, &s2, &o2)) return 0;
+    if (!s1 || !s2 || strcmp(s1, s2) != 0) return 0;
+    int esz = 1;
+    if (l->type.kind == TY_PTR && l->type.pointee)
+        esz = type_size(*l->type.pointee);
+    if (esz < 1) esz = 1;
+    *out = (long long)(o1 - o2) / esz;
+    return 1;
 }
 
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
@@ -7808,8 +8079,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                     elem_idx = e->u.init_list.desig_index[i];
                     cur_idx = elem_idx + 1;
                 }
+                int off = elem_idx * esz;
+                if (esz <= 0 || off < 0 || off >= sz) continue;
+                int nsz = esz;
+                if (off + nsz > sz) nsz = sz - off;
                 pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
-                          bytes + elem_idx * esz, esz, ctx, loc, g);
+                          bytes + off, nsz, ctx, loc, g);
             }
             break;
         }
@@ -7868,6 +8143,14 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                         else if (el->kind == EX_INIT_LIST)
                             msz = el->u.init_list.num_elements * type_size(*sm->type.elem_type);
                     }
+                    /* Flexible array members may carry excess initializers
+                     * (gcc.c-torture 20030305-1).  Do not write past the
+                     * allocated object — C99 forbids FAM init, GCC errors;
+                     * FakeCC ignores the excess so compile tests don't ICE. */
+                    if (sm->offset < 0 || sm->offset >= sz) continue;
+                    if (msz < 0) msz = 0;
+                    if (sm->offset + msz > sz) msz = sz - sm->offset;
+                    if (msz <= 0) continue;
                     pack_init(ir, &sm->type, e->u.init_list.elements[i],
                               bytes + sm->offset,
                               msz, ctx, loc, g);
@@ -7941,8 +8224,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             return;
         }
     }
-    long long _fold_v;
-    if (e->kind == EX_INT_LIT || fold_const_int(e, &_fold_v)) {
+    long long _fold_v = 0;
+    int have_int = (e->kind == EX_INT_LIT)
+                || fold_const_int(e, &_fold_v)
+                || (ty->kind == TY_INT && fold_global_ptrdiff(e, &_fold_v))
+                || (ty->kind == TY_INT && fold_const_complex_rel(e, &_fold_v));
+    if (have_int) {
         unsigned long long vlo, vhi = 0;
         if (e->kind == EX_INT_LIT) {
             vlo = (unsigned long long)e->u.int_val;
@@ -8017,13 +8304,30 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             return;
         }
     }
-    /* Address of a global object (with optional member/array offset/arithmetic). */
+    /* Address of a global object (with optional member/array offset/arithmetic).
+     * GCC also accepts converting that address constant to a pointer-sized
+     * integer (`unsigned long x = (unsigned long)&sym - C`); the object file
+     * still carries a R_X86_64_64 reloc with the integer addend. */
     const char *addr_sym = NULL;
     int addr_offset = 0;
-    if (ty->kind == TY_PTR && g && eval_global_addr_offset(e, &addr_sym, &addr_offset)) {
+    if (g && eval_global_addr_offset(e, &addr_sym, &addr_offset)
+        && (ty->kind == TY_PTR
+            || (ty->kind == TY_INT && ty->width == 8
+                && expr_has_address_constant(e)))) {
         add_global_fixup(g, (int)(bytes - g->init_bytes), addr_sym, addr_offset);
         memset(bytes, 0, sz);
         return;
+    }
+    {
+        unsigned long long abs_addr = 0;
+        if (ty->kind == TY_PTR && eval_abs_addr_const(e, &abs_addr)) {
+            int n = sz < 8 ? sz : 8;
+            for (int b = 0; b < n; b++)
+                bytes[b] = (char)((abs_addr >> (8 * b)) & 0xff);
+            for (int b = n; b < sz; b++)
+                bytes[b] = 0;
+            return;
+        }
     }
     die_at(loc.file, loc.line, loc.col,
            "global '%s' initializer must be a compile-time constant", ctx);

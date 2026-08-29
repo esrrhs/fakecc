@@ -16,6 +16,10 @@ const StructRegistry *get_sema_structs(void) {
     return g_sema_tu ? &g_sema_tu->structs : NULL;
 }
 
+const TranslationUnit *get_sema_tu(void) {
+    return g_sema_tu;
+}
+
 /* Return type of the function currently being type-checked.  Set per-function
  * before check_stmt_list so ST_RETURN can enforce the void/non-void rules. */
 static Type g_sema_ret_type;
@@ -36,6 +40,10 @@ typedef struct {
     size_t len;
     size_t cap;
 } FunTable;
+
+/* File-scope so huge functions never materialize a FunTable* local.
+ * Stage 0 miscompiles those from large frames (passes a Type* instead). */
+static FunTable g_sema_ft;
 
 static void ftab_init(FunTable *t) { t->data = NULL; t->len = 0; t->cap = 0; }
 static void ftab_free(FunTable *t) { free(t->data); t->data = NULL; t->len = 0; t->cap = 0; }
@@ -59,8 +67,17 @@ static void ftab_push(FunTable *t, const FunctionDecl *fn) {
 }
 
 static const FunSig *ftab_find(const FunTable *t, const char *name) {
-    for (size_t i = 0; i < t->len; i++)
-        if (strcmp(t->data[i].name, name) == 0) return &t->data[i];
+    if (!t) return NULL;
+    if (t->len > 4096) {
+        fprintf(stderr, "fakecc: internal error: corrupt function table (len=%zu)\n",
+                t->len);
+        exit(1);
+    }
+    for (size_t i = 0; i < t->len; i++) {
+        const char *n = t->data[i].name;
+        if (!n) continue;
+        if (strcmp(n, name) == 0) return &t->data[i];
+    }
     return NULL;
 }
 
@@ -355,8 +372,8 @@ typedef struct {
     size_t cap;
 } SymTable;
 
-static void check_stmt(Stmt *s, SymTable *st, FunTable *ft, size_t scope_mark, int *has_return);
-static void check_stmt_list(StmtArray *body, SymTable *st, FunTable *ft, int *has_return);
+static void check_stmt(Stmt *s, size_t scope_mark, int *has_return);
+static void check_stmt_list(StmtArray *body, int *has_return);
 
 static void symtable_init(SymTable *st) { st->data = NULL; st->len = 0; st->cap = 0; }
 
@@ -528,9 +545,94 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
  * array-length inference, expansion to positional with zero-fill). */
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc);
 
-/* Annotate e->type via type-checking; also returns a clone for use in callers. */
-static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
+static SymTable *g_check_st;
+
+/* Tiny accessors — do not take or return FunTable* from huge functions. */
+static void ftab_cur_init(void) { ftab_init(&g_sema_ft); }
+static void ftab_cur_free(void) { ftab_free(&g_sema_ft); }
+static const FunSig *ftab_lookup(const char *name) {
+    return ftab_find(&g_sema_ft, name);
+}
+static void ftab_add(const FunctionDecl *fn) { ftab_push(&g_sema_ft, fn); }
+static void ftab_add_export(const PkgFuncExport *ex) {
+    ftab_push_export(&g_sema_ft, ex);
+}
+static void ftab_import_pkg(TranslationUnit *tu, Package *pkg) {
+    import_pkg_funcs(tu, &g_sema_ft, pkg);
+}
+static void ftab_fill_extern(const FunSig *ex, const FunctionDecl *fn) {
+    size_t idx = (size_t)(ex - g_sema_ft.data);
+    g_sema_ft.data[idx].is_external = 0;
+    g_sema_ft.data[idx].arity = (int)fn->params.len;
+    g_sema_ft.data[idx].is_variadic = fn->is_variadic;
+    g_sema_ft.data[idx].is_unprototyped = fn->is_unprototyped;
+    g_sema_ft.data[idx].ret_type = fn->ret_type;
+    g_sema_ft.data[idx].loc = fn->loc;
+    for (int k = 0; k < g_sema_ft.data[idx].arity && k < 16; k++)
+        g_sema_ft.data[idx].param_types[k] = fn->params.data[k].type;
+}
+
+/* Must stay tiny: Stage 0 miscompiles pointer stores inside huge frames. */
+static void check_set_st(SymTable *st) { g_check_st = st; }
+
+static Type check_expr_inner(Expr *e);
+
+/* Recurses with only `e`.  FunTable lives in g_sema_ft so huge callers never
+ * pass a FunTable* (Stage 0 miscompiles those from large frames). */
+
+static Type check_ternary_expr(Expr *e) {
+    Type ct = check_expr_inner(e->u.tern.cond);
+    if (ct.kind != TY_INT && ct.kind != TY_FLOAT && ct.kind != TY_PTR)
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "ternary condition must be scalar");
+    type_free(&ct);
+    Expr *th = e->u.tern.then;
+    if (!th) th = e->u.tern.cond;
+    Type tt = check_expr_inner(th);
+    Type et = check_expr_inner(e->u.tern.else_);
+    if (tt.kind == TY_ARRAY) {
+        Type d = type_decay(tt); type_free(&tt); tt = d;
+    }
+    if (et.kind == TY_ARRAY) {
+        Type d = type_decay(et); type_free(&et); et = d;
+    }
+    int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
+                           && ((e->u.tern.then && e->u.tern.then->kind == EX_INT_LIT
+                                && e->u.tern.then->u.int_val == 0)
+                               || (!e->u.tern.then && e->u.tern.cond->kind == EX_INT_LIT
+                                   && e->u.tern.cond->u.int_val == 0)));
+    int e_is_null_const = (et.kind == TY_INT && et.width == 4
+                           && e->u.tern.else_->kind == EX_INT_LIT
+                           && e->u.tern.else_->u.int_val == 0);
+    int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT);
+    int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT);
+    Type res;
+    if (tt.kind == TY_VOID || et.kind == TY_VOID) {
+        res = type_make_void();
+    } else if (tt_arith && et_arith) {
+        res = usual_arith_conv(tt, et);
+    } else if (tt.kind == TY_PTR && et.kind == TY_PTR) {
+        res = type_clone(tt);
+    } else if (tt.kind == TY_PTR && e_is_null_const) {
+        res = type_clone(tt);
+    } else if (et.kind == TY_PTR && t_is_null_const) {
+        res = type_clone(et);
+    } else if (tt.kind == TY_STRUCT && et.kind == TY_STRUCT
+               && strcmp(tt.tag, et.tag) == 0) {
+        res = type_clone(tt);
+    } else {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "ternary branches must both be arithmetic, both be pointer, "
+               "or pointer with null constant");
+    }
+    type_free(&tt); type_free(&et);
+    set_type(e, res);
+    return type_clone(e->type);
+}
+
+static Type check_expr_inner(Expr *e) {
     if (!e) return type_default_int();
+    const SymTable *st = g_check_st;
     switch (e->kind) {
     case EX_INT_LIT:
         /* Width/signedness were derived from the suffix and magnitude by the
@@ -544,8 +646,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         set_type(e, type_make_float(e->type.width ? e->type.width : 8));
         return type_clone(e->type);
     case EX_BINOP: {
-        Type lt = check_expr(e->u.bin.l, st, ft);
-        Type rt = check_expr(e->u.bin.r, st, ft);
+        Type lt = check_expr_inner(e->u.bin.l);
+        Type rt = check_expr_inner(e->u.bin.r);
         /* Array-to-pointer decay for operands (except & / sizeof handled elsewhere). */
         if (lt.kind == TY_ARRAY) {
             Type d = type_decay(lt); type_free(&lt); lt = d;
@@ -629,7 +731,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_UNARY: {
-        Type ot = check_expr(e->u.un.operand, st, ft);
+        Type ot = check_expr_inner(e->u.un.operand);
         if (ot.kind == TY_ARRAY) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
         }
@@ -674,7 +776,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        e->u.var.pkg, e->u.var.name);
             }
             if (pf) {
-                ftab_push_export(ft, pf);
+                ftab_add_export(pf);
                 const Type **ptys = NULL;
                 if (pf->arity > 0) {
                     ptys = malloc(pf->arity * sizeof(Type *));
@@ -699,7 +801,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         }
         /* Not a variable — is it a function name?  A function lvalue decays
          * to a pointer to its type (so `add` and &add both yield `ptr(func)`). */
-        const FunSig *sig = ftab_find(ft, e->u.var.name);
+        const FunSig *sig = ftab_lookup(e->u.var.name);
         if (sig) {
             const Type **ptys = NULL;
             if (sig->arity > 0) {
@@ -721,7 +823,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             const PkgGlobalExport *pg = NULL;
             if (pkg_resolve_sym(g_sema_tu->package.name, e->u.var.name, &pf, &pg)) {
                 if (pf) {
-                    ftab_push_export(ft, pf);
+                    ftab_add_export(pf);
                     const Type **ptys = NULL;
                     if (pf->arity > 0) {
                         ptys = malloc(pf->arity * sizeof(Type *));
@@ -750,13 +852,26 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             set_type(e, it);
             return type_clone(e->type);
         }
+        if (strcmp(e->u.var.name, "__INT_MAX__") == 0) {
+            Type it = type_make_int(4, 0);
+            set_type(e, it);
+            return type_clone(e->type);
+        }
+        if (strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
+            /* GCC predefined: 3.40282346638528859812e+38F, type float. */
+            Type ft = type_make_float(4);
+            set_type(e, ft);
+            return type_clone(e->type);
+        }
         if (strncmp(e->u.var.name, "__builtin_", 10) == 0 || strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
             Type ret = type_default_int();
             if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)
                 ret = type_make_void();
-            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0 || strcmp(bname, "__builtin___memcpy_chk") == 0 || strcmp(bname, "__builtin___memmove_chk") == 0 || strcmp(bname, "__builtin___mempcpy_chk") == 0 || strcmp(bname, "__builtin___memset_chk") == 0)
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_memmove") == 0 || strcmp(bname, "__builtin_mempcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0 || strcmp(bname, "__builtin___memcpy_chk") == 0 || strcmp(bname, "__builtin___memmove_chk") == 0 || strcmp(bname, "__builtin___mempcpy_chk") == 0 || strcmp(bname, "__builtin___memset_chk") == 0)
                 ret = type_make_ptr(type_make_void());
+            else if (strcmp(bname, "__builtin_bcopy") == 0)
+                ret = type_make_void();
             else if (strcmp(bname, "__builtin_strcat") == 0 || strcmp(bname, "__builtin___strcat_chk") == 0 ||
                      strcmp(bname, "__builtin_strcpy") == 0 || strcmp(bname, "__builtin___strcpy_chk") == 0 ||
                      strcmp(bname, "__builtin_stpcpy") == 0 || strcmp(bname, "__builtin___stpcpy_chk") == 0 ||
@@ -878,13 +993,13 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                    e->u.assign.lvalue->loc.col,
                    "expression is not assignable");
         }
-        Type lt = check_expr(e->u.assign.lvalue, st, ft);
+        Type lt = check_expr_inner(e->u.assign.lvalue);
         if (lt.is_const)
             die_at(e->u.assign.lvalue->loc.file,
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "assignment of read-only variable");
-        Type rt = check_expr(e->u.assign.rvalue, st, ft);
+        Type rt = check_expr_inner(e->u.assign.rvalue);
         coerce_arg_to_param(&e->u.assign.rvalue, &lt);
         type_free(&rt);
         set_type(e, lt);
@@ -900,11 +1015,11 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                    "left operand of '%s' must be an lvalue",
                    "compound assign");
-        Type lt = check_expr(lv, st, ft);
+        Type lt = check_expr_inner(lv);
         if (lt.is_const)
             die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                    "compound assignment of read-only variable");
-        Type rt = check_expr(e->u.comp.rvalue, st, ft);
+        Type rt = check_expr_inner(e->u.comp.rvalue);
         BinOp op = e->u.comp.op;
         int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
                            || op == BOP_DIV);
@@ -947,7 +1062,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "__syscall takes 1 to 7 arguments (syscall num + up to 6 args)");
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
-                Type at = check_expr(e->u.call.args.data[i], st, ft);
+                Type at = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&at);
             }
             set_type(e, type_make_int(8, 0));
@@ -965,7 +1080,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "complex builtin takes exactly 1 argument");
                 }
-                Type at = check_expr(e->u.call.args.data[0], st, ft);
+                Type at = check_expr_inner(e->u.call.args.data[0]);
                 if (is_conj) {
                     set_type(e, at);
                     return type_clone(e->type);
@@ -982,9 +1097,9 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_shuffle takes 2 or 3 arguments");
             }
-            Type t0 = check_expr(e->u.call.args.data[0], st, ft);
+            Type t0 = check_expr_inner(e->u.call.args.data[0]);
             for (size_t i = 1; i < e->u.call.args.len; i++) {
-                Type ti = check_expr(e->u.call.args.data[i], st, ft);
+                Type ti = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&ti);
             }
             set_type(e, t0);
@@ -999,7 +1114,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_ctzll takes exactly 1 argument");
             }
-            Type at = check_expr(e->u.call.args.data[0], st, ft);
+            Type at = check_expr_inner(e->u.call.args.data[0]);
             type_free(&at);
             set_type(e, type_make_int(4, 0));
             return type_clone(e->type);
@@ -1015,7 +1130,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "atomic builtin takes at least 1 argument");
             }
-            Type ptr_ty = check_expr(e->u.call.args.data[0], st, ft);
+            Type ptr_ty = check_expr_inner(e->u.call.args.data[0]);
             if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "atomic builtin first argument must be a pointer");
@@ -1023,7 +1138,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             Type val_ty = type_clone(*ptr_ty.pointee);
             type_free(&ptr_ty);
             for (size_t i = 1; i < e->u.call.args.len; i++) {
-                Type at = check_expr(e->u.call.args.data[i], st, ft);
+                Type at = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&at);
             }
             if (strcmp(sname, "__sync_lock_release") == 0) {
@@ -1053,7 +1168,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "__builtin_apply takes 3 arguments");
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
-                Type at = check_expr(e->u.call.args.data[i], st, ft);
+                Type at = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&at);
             }
             set_type(e, type_make_ptr(type_make_void()));
@@ -1065,7 +1180,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_return takes 1 argument");
             }
-            Type at = check_expr(e->u.call.args.data[0], st, ft);
+            Type at = check_expr_inner(e->u.call.args.data[0]);
             type_free(&at);
             set_type(e, type_make_void());
             return type_clone(e->type);
@@ -1083,7 +1198,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_start takes 1 or 2 arguments");
             }
-            Type list_ty = check_expr(e->u.call.args.data[0], st, ft);
+            Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -1091,7 +1206,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             }
             type_free(&list_ty);
             if (e->u.call.args.len == 2) {
-                Type at = check_expr(e->u.call.args.data[1], st, ft);
+                Type at = check_expr_inner(e->u.call.args.data[1]);
                 type_free(&at);
             }
             set_type(e, type_make_void());
@@ -1106,7 +1221,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_arg takes exactly 2 arguments (va_list, type)");
             }
-            Type list_ty = check_expr(e->u.call.args.data[0], st, ft);
+            Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -1128,7 +1243,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_end takes exactly 1 argument (va_list)");
             }
-            Type list_ty = check_expr(e->u.call.args.data[0], st, ft);
+            Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -1146,7 +1261,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                        "va_copy takes exactly 2 arguments (dst, src)");
             }
             for (int i = 0; i < 2; i++) {
-                Type list_ty = check_expr(e->u.call.args.data[i], st, ft);
+                Type list_ty = check_expr_inner(e->u.call.args.data[i]);
                 if (!is_va_list_type(&list_ty)) {
                     type_free(&list_ty);
                     die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -1158,11 +1273,11 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             return type_clone(e->type);
         }
         /* Type-check the callee expression. */
-        Type callee_ty = check_expr(e->u.call.callee, st, ft);
+        Type callee_ty = check_expr_inner(e->u.call.callee);
         /* Direct call: callee is `EX_VAR` naming a known function. */
         if (e->u.call.callee->kind == EX_VAR) {
             const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
-            const FunSig *sig = ftab_find(ft, e->u.call.callee->u.var.name);
+            const FunSig *sig = ftab_lookup(e->u.call.callee->u.var.name);
             if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC) {
                 const Type *fty = &local_fn_sym->type;
                 type_free(&callee_ty);
@@ -1173,7 +1288,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                            fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
                 }
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
-                    Type at = check_expr(e->u.call.args.data[i], st, ft);
+                    Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
                     if (fty->func_params && (int)i < fty->func_nparams)
                         coerce_arg_to_param(&e->u.call.args.data[i],
@@ -1200,7 +1315,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                            sig->arity == 1 ? "" : "s", e->u.call.args.len);
                 }
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
-                    Type at = check_expr(e->u.call.args.data[i], st, ft);
+                    Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
                     if ((int)i < sig->arity)
                         coerce_arg_to_param(&e->u.call.args.data[i],
@@ -1229,7 +1344,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
                            fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
                 }
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
-                    Type at = check_expr(e->u.call.args.data[i], st, ft);
+                    Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
                     if (fty->func_params && (int)i < fty->func_nparams)
                         coerce_arg_to_param(&e->u.call.args.data[i],
@@ -1270,7 +1385,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             }
         }
         for (size_t i = 0; i < e->u.call.args.len; i++) {
-            Type at = check_expr(e->u.call.args.data[i], st, ft);
+            Type at = check_expr_inner(e->u.call.args.data[i]);
             type_free(&at);
             if (fn_ty.func_params && (int)i < fn_ty.func_nparams)
                 coerce_arg_to_param(&e->u.call.args.data[i],
@@ -1291,7 +1406,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_ADDR: {
-        Type ot = check_expr(e->u.addr.operand, st, ft);
+        Type ot = check_expr_inner(e->u.addr.operand);
         /* operand must be lvalue */
         ExprKind ok = e->u.addr.operand->kind;
         if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER
@@ -1312,7 +1427,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_DEREF: {
-        Type ot = check_expr(e->u.deref.operand, st, ft);
+        Type ot = check_expr_inner(e->u.deref.operand);
         if (ot.kind == TY_ARRAY) {
             Type d = type_decay(ot); type_free(&ot); ot = d;
         }
@@ -1327,8 +1442,8 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
     }
     case EX_INDEX: {
         /* a[i] — a must be ptr or array; result = pointee/elem. */
-        Type at = check_expr(e->u.idx.array, st, ft);
-        Type it = check_expr(e->u.idx.index, st, ft);
+        Type at = check_expr_inner(e->u.idx.array);
+        Type it = check_expr_inner(e->u.idx.index);
         /* `a[i]` is defined as `*(a + i)`, and addition commutes, so the
          * pointer is allowed on either side: `3[p]` means `p[3]`.  Normalize
          * by swapping the operands so everything downstream sees the usual
@@ -1379,9 +1494,9 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             e->kind = EX_VAR;
             e->u.var.name = name;
             e->u.var.pkg = pkg;
-            return check_expr(e, st, ft);
+            return check_expr_inner(e);
         }
-        Type ot = check_expr(e->u.member.obj, st, ft);
+        Type ot = check_expr_inner(e->u.member.obj);
         if (ot.kind != TY_STRUCT) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "member access '.%s' on non-struct", e->u.member.name);
@@ -1420,7 +1535,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
             die_at(op->loc.file, op->loc.line, op->loc.col,
                    "operand of '%s' must be an lvalue",
                    e->u.incdec.is_inc ? "++" : "--");
-        Type ot = check_expr(op, st, ft);
+        Type ot = check_expr_inner(op);
         if (ot.is_const)
             die_at(op->loc.file, op->loc.line, op->loc.col,
                    "cannot increment/decrement a read-only variable");
@@ -1442,67 +1557,16 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
     }
     case EX_COMMA: {
         /* a, b: evaluate a (discard result), result is b. */
-        Type lt = check_expr(e->u.comma.lhs, st, ft);
+        Type lt = check_expr_inner(e->u.comma.lhs);
         type_free(&lt);
-        Type rt = check_expr(e->u.comma.rhs, st, ft);
+        Type rt = check_expr_inner(e->u.comma.rhs);
         set_type(e, rt);
         return type_clone(e->type);
     }
-    case EX_TERNARY: {
-        /* cond ? then : else
-         * Condition must be scalar (int or pointer).  Result type follows
-         * C §6.5.15: arithmetic operands → UAC; both pointers → that pointer
-         * type; one pointer + null pointer constant (integer 0) → pointer type. */
-        Type ct = check_expr(e->u.tern.cond, st, ft);
-        if (ct.kind != TY_INT && ct.kind != TY_PTR)
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "ternary condition must be scalar");
-        type_free(&ct);
-        Type tt = check_expr(e->u.tern.then, st, ft);
-        Type et = check_expr(e->u.tern.else_, st, ft);
-        /* Array-to-pointer decay for string literals (now typed as char[N]). */
-        if (tt.kind == TY_ARRAY) {
-            Type d = type_decay(tt); type_free(&tt); tt = d;
-        }
-        if (et.kind == TY_ARRAY) {
-            Type d = type_decay(et); type_free(&et); et = d;
-        }
-        int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
-                               && e->u.tern.then->kind == EX_INT_LIT
-                               && e->u.tern.then->u.int_val == 0);
-        int e_is_null_const = (et.kind == TY_INT && et.width == 4
-                               && e->u.tern.else_->kind == EX_INT_LIT
-                               && e->u.tern.else_->u.int_val == 0);
-        int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT);
-        int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT);
-        Type res;
-        if (tt.kind == TY_VOID || et.kind == TY_VOID) {
-            res = type_make_void();
-        } else if (tt_arith && et_arith) {
-            res = usual_arith_conv(tt, et);
-        } else if (tt.kind == TY_PTR && et.kind == TY_PTR) {
-            res = type_clone(tt);
-        } else if (tt.kind == TY_PTR && e_is_null_const) {
-            res = type_clone(tt);
-        } else if (et.kind == TY_PTR && t_is_null_const) {
-            res = type_clone(et);
-        } else if (tt.kind == TY_STRUCT && et.kind == TY_STRUCT
-                   && strcmp(tt.tag, et.tag) == 0) {
-            /* Both branches are the same struct type — C99 permits returning
-             * a struct by value from a ternary (e.g. `cond ? a : b` where
-             * `a`, `b` are struct values, which here are pointers to bytes). */
-            res = type_clone(tt);
-        } else {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "ternary branches must both be arithmetic, both be pointer, "
-                   "or pointer with null constant");
-        }
-        type_free(&tt); type_free(&et);
-        set_type(e, res);
-        return type_clone(e->type);
-    }
+    case EX_TERNARY:
+        return check_ternary_expr(e);
     case EX_CAST: {
-        Type ot = check_expr(e->u.cast.operand, st, ft);
+        Type ot = check_expr_inner(e->u.cast.operand);
         type_free(&ot);
         /* Result type is the cast target already stored on the expr;
          * we also mirror it on e->type. */
@@ -1513,7 +1577,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         Type *t = &e->u.sizeof_t.target;
         while (t && t->kind == TY_ARRAY) {
             if (t->vla_dim) {
-                Type dt = check_expr(t->vla_dim, st, ft);
+                Type dt = check_expr_inner(t->vla_dim);
                 type_free(&dt);
             }
             t = t->elem_type;
@@ -1522,7 +1586,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         return type_clone(e->type);
     }
     case EX_SIZEOF_EXPR: {
-        Type ot = check_expr(e->u.sizeof_e.operand, st, ft);
+        Type ot = check_expr_inner(e->u.sizeof_e.operand);
         type_free(&ot);
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
         return type_clone(e->type);
@@ -1532,7 +1596,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
         return type_clone(e->type);
     case EX_ALIGNOF_EXPR: {
-        Type ot = check_expr(e->u.alignof_e.operand, st, ft);
+        Type ot = check_expr_inner(e->u.alignof_e.operand);
         long long al = type_align(ot);
         type_free(&ot);
         if (e->u.alignof_e.operand->kind == EX_VAR) {
@@ -1562,7 +1626,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
          * benign int so a stray use in an expression context degrades gracefully
          * (it is rejected upstream anyway). */
         for (int i = 0; i < e->u.init_list.num_elements; i++) {
-            Type et = check_expr(e->u.init_list.elements[i], st, ft);
+            Type et = check_expr_inner(e->u.init_list.elements[i]);
             type_free(&et);
         }
         set_type(e, type_default_int());
@@ -1575,7 +1639,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
         if (init->kind == EX_INIT_LIST)
             normalize_init_list(&e->u.compound.target_type, init, e->loc);
         for (int i = 0; i < init->u.init_list.num_elements; i++) {
-            Type et = check_expr(init->u.init_list.elements[i], st, ft);
+            Type et = check_expr_inner(init->u.init_list.elements[i]);
             type_free(&et);
         }
         set_type(e, type_clone(e->u.compound.target_type));
@@ -1583,7 +1647,7 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
     }
     case EX_STMT_EXPR: {
         int has_ret = 0;
-        check_stmt_list(e->u.stmt_expr.stmts, (SymTable *)st, ft, &has_ret);
+        check_stmt_list(e->u.stmt_expr.stmts, &has_ret);
         Type res_type = type_make_void();
         if (e->u.stmt_expr.stmts && e->u.stmt_expr.stmts->len > 0) {
             Stmt *last = &e->u.stmt_expr.stmts->data[e->u.stmt_expr.stmts->len - 1];
@@ -1609,17 +1673,16 @@ static Type check_expr(Expr *e, const SymTable *st, FunTable *ft) {
     return type_default_int();
 }
 
-static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
-                       size_t scope_mark, int *has_return);
+static void check_stmt(Stmt *s, size_t scope_mark, int *has_return);
 
 static int g_sema_loop_depth = 0;
 static LabelSet *g_sema_labels = NULL;
 
-static void check_stmt_list(StmtArray *body, SymTable *st,
-                            FunTable *ft, int *has_return) {
+static void check_stmt_list(StmtArray *body, int *has_return) {
+    SymTable *st = g_check_st;
     size_t mark = symtable_enter_scope(st);
     for (size_t i = 0; i < body->len; i++)
-        check_stmt(&body->data[i], st, ft, mark, has_return);
+        check_stmt(&body->data[i], mark, has_return);
     symtable_leave_scope(st, mark);
 }
 
@@ -1938,8 +2001,28 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
     }
 }
 
-static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
-                       size_t scope_mark, int *has_return) {
+/* Parser-time folding cannot see object types, so `T a[sizeof g / sizeof *g]`
+ * is parsed as a VLA.  After the dimension is type-checked it is often an
+ * ICE — complete it back to a fixed array so sizeof/object_size see a known
+ * bound and the local is not a DYN_ALLOCA. */
+static void try_fold_vla_type(Type *t) {
+    while (t && t->kind == TY_ARRAY) {
+        if (t->vla_dim) {
+            Type dt = check_expr_inner(t->vla_dim);
+            type_free(&dt);
+            long long n = 0;
+            if (fold_const_int(t->vla_dim, &n) && n >= 0) {
+                expr_free(t->vla_dim);
+                t->vla_dim = NULL;
+                t->length = n;
+            }
+        }
+        t = t->elem_type;
+    }
+}
+
+static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
+    SymTable *st = g_check_st;
     Type discard;
     switch (s->kind) {
     case ST_DECL: {
@@ -1960,9 +2043,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
             symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
             break;
         }
-        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.vla_dim) {
-            check_expr(s->u.decl.type.vla_dim, st, ft);
-        }
+        try_fold_vla_type(&s->u.decl.type);
         if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
             && s->u.decl.type.kind == TY_ARRAY) {
             if (s->u.decl.type.length == 0)
@@ -2006,7 +2087,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST)
                 check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
-            discard = check_expr(s->u.decl.init, st, ft); type_free(&discard);
+            discard = check_expr_inner(s->u.decl.init); type_free(&discard);
             if (s->u.decl.init->kind != EX_INIT_LIST)
                 coerce_arg_to_param(&s->u.decl.init, &s->u.decl.type);
         }
@@ -2016,23 +2097,22 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         if (s->u.expr && s->u.expr->kind == EX_CALL) {
             *has_return = 1;
         }
-        discard = check_expr(s->u.expr, st, ft); type_free(&discard);
+        discard = check_expr_inner(s->u.expr); type_free(&discard);
         break;
     case ST_RETURN:
-        /* Bare `return;` (value==NULL) is allowed only in a void function;
-         * `return expr;` is forbidden in a void function.  Otherwise type-check
-         * the returned expression as usual. */
+        /* Bare `return;` is allowed only in a void function; `return expr;`
+         * is forbidden in a void function unless the expression itself is
+         * void (e.g. `return f();` where f returns void). */
         if (s->u.value == NULL) {
             if (g_sema_ret_type.kind != TY_VOID)
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "non-void function must return a value");
         } else {
-            discard = check_expr(s->u.value, st, ft);
+            discard = check_expr_inner(s->u.value);
             if (g_sema_ret_type.kind == TY_VOID) {
-                if (discard.kind != TY_VOID) {
+                if (discard.kind != TY_VOID)
                     die_at(s->loc.file, s->loc.line, s->loc.col,
                            "void function cannot return a value");
-                }
             } else {
                 if (!type_is_same(g_sema_ret_type, discard)) {
                     if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||
@@ -2051,31 +2131,31 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         *has_return = 1;
         break;
     case ST_IF:
-        discard = check_expr(s->u.if_s.cond, st, ft); type_free(&discard);
-        check_stmt(s->u.if_s.then_s, st, ft, scope_mark, has_return);
-        if (s->u.if_s.else_s) check_stmt(s->u.if_s.else_s, st, ft, scope_mark, has_return);
+        discard = check_expr_inner(s->u.if_s.cond); type_free(&discard);
+        check_stmt(s->u.if_s.then_s, scope_mark, has_return);
+        if (s->u.if_s.else_s) check_stmt(s->u.if_s.else_s, scope_mark, has_return);
         break;
     case ST_WHILE:
-        discard = check_expr(s->u.while_s.cond, st, ft); type_free(&discard);
+        discard = check_expr_inner(s->u.while_s.cond); type_free(&discard);
         g_sema_loop_depth++;
-        check_stmt(s->u.while_s.body, st, ft, scope_mark, has_return);
+        check_stmt(s->u.while_s.body, scope_mark, has_return);
         g_sema_loop_depth--;
         break;
     case ST_DO_WHILE:
         /* Condition must be scalar (int or pointer). */
-        discard = check_expr(s->u.do_s.cond, st, ft);
+        discard = check_expr_inner(s->u.do_s.cond);
         if (discard.kind != TY_INT && discard.kind != TY_PTR)
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "do-while condition must be scalar");
         type_free(&discard);
         g_sema_loop_depth++;
-        check_stmt(s->u.do_s.body, st, ft, scope_mark, has_return);
+        check_stmt(s->u.do_s.body, scope_mark, has_return);
         g_sema_loop_depth--;
         break;
     case ST_GOTO:
         if (s->u.goto_s.target_expr) {
             /* computed goto: goto *ptr_expr; — check the expression */
-            Type t = check_expr(s->u.goto_s.target_expr, st, ft);
+            Type t = check_expr_inner(s->u.goto_s.target_expr);
             type_free(&t);
         } else if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
@@ -2085,11 +2165,11 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
     case ST_LABEL:
         /* Validate the wrapped statement; the label name itself was
          * registered during the collect_labels pre-pass. */
-        check_stmt(s->u.label_s.stmt, st, ft, scope_mark, has_return);
+        check_stmt(s->u.label_s.stmt, scope_mark, has_return);
         break;
     case ST_SWITCH: {
         /* Condition must be integer. */
-        Type ct = check_expr(s->u.switch_s.cond, st, ft);
+        Type ct = check_expr_inner(s->u.switch_s.cond);
         if (ct.kind != TY_INT)
             die_at(s->u.switch_s.cond->loc.file,
                    s->u.switch_s.cond->loc.line,
@@ -2099,11 +2179,11 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         /* Switch introduces a breakable scope. */
         g_sema_loop_depth++;
         if (s->u.switch_s.body)
-            check_stmt(s->u.switch_s.body, st, ft, scope_mark, has_return);
+            check_stmt(s->u.switch_s.body, scope_mark, has_return);
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             SwitchCase *arm = &s->u.switch_s.cases[i];
             for (size_t j = 0; j < arm->stmts.len; j++)
-                check_stmt(&arm->stmts.data[j], st, ft, scope_mark, has_return);
+                check_stmt(&arm->stmts.data[j], scope_mark, has_return);
         }
         g_sema_loop_depth--;
         break;
@@ -2119,19 +2199,19 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
                  * (check_stmt_list would add a nested scope, hiding them). */
                 StmtArray *blk = &s->u.for_s.init->u.block;
                 for (size_t i = 0; i < blk->len; i++)
-                    check_stmt(&blk->data[i], st, ft, mark, has_return);
+                    check_stmt(&blk->data[i], mark, has_return);
             } else {
-                check_stmt(s->u.for_s.init, st, ft, mark, has_return);
+                check_stmt(s->u.for_s.init, mark, has_return);
             }
         }
         if (s->u.for_s.cond) {
-            discard = check_expr(s->u.for_s.cond, st, ft); type_free(&discard);
+            discard = check_expr_inner(s->u.for_s.cond); type_free(&discard);
         }
         if (s->u.for_s.step) {
-            discard = check_expr(s->u.for_s.step, st, ft); type_free(&discard);
+            discard = check_expr_inner(s->u.for_s.step); type_free(&discard);
         }
         g_sema_loop_depth++;
-        check_stmt(s->u.for_s.body, st, ft, mark, has_return);
+        check_stmt(s->u.for_s.body, mark, has_return);
         g_sema_loop_depth--;
         symtable_leave_scope(st, mark);
         if (!s->u.for_s.cond) {
@@ -2148,7 +2228,7 @@ static void check_stmt(Stmt *s, SymTable *st, FunTable *ft,
         }
         break;
     case ST_BLOCK:
-        check_stmt_list(&s->u.block, st, ft, has_return);
+        check_stmt_list(&s->u.block, has_return);
         break;
     }
 }
@@ -2163,12 +2243,11 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
     /* Package name is unrestricted; the linker still requires a `main`
      * symbol for executables. */
 
-    FunTable ft;
-    ftab_init(&ft);
+    ftab_cur_init();
     int has_main = 0;
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
-        const FunSig *ex = ftab_find(&ft, fn->name);
+        const FunSig *ex = ftab_lookup(fn->name);
         if (ex) {
             if (fn->is_extern) {
                 /* A new `extern` decl never overrides what we already have
@@ -2179,22 +2258,14 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             if (ex->is_external) {
                 /* We had only an `extern` decl; this definition replaces
                  * it in place so the slot keeps its position. */
-                size_t idx = (size_t)(ex - ft.data);
-                ft.data[idx].is_external = 0;
-                ft.data[idx].arity = (int)fn->params.len;
-                ft.data[idx].is_variadic = fn->is_variadic;
-                ft.data[idx].is_unprototyped = fn->is_unprototyped;
-                ft.data[idx].ret_type = fn->ret_type;
-                ft.data[idx].loc = fn->loc;
-                for (int k = 0; k < ft.data[idx].arity && k < 16; k++)
-                    ft.data[idx].param_types[k] = fn->params.data[k].type;
+                ftab_fill_extern(ex, fn);
                 if (strcmp(fn->name, "main") == 0) has_main = 1;
                 continue;
             }
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "redefinition of function '%s'", fn->name);
         }
-        ftab_push(&ft, fn);
+        ftab_add(fn);
         if (strcmp(fn->name, "main") == 0 && !fn->is_extern) has_main = 1;
     }
     if (!has_main && require_main) {
@@ -2208,7 +2279,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
      * packages are NOT — those require pkg.sym (see EX_VAR / EX_MEMBER). */
     if (g_sema_pkg && tu->package.name) {
         Package *cur = pkg_find(g_sema_pkg, tu->package.name);
-        import_pkg_funcs(tu, &ft, cur);
+        ftab_import_pkg(tu, cur);
         import_pkg_globals(tu, cur);
     }
     /* Imported packages: extern globals (runtime.stdout) and extern function
@@ -2229,6 +2300,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
      * duplicates against each other or against function names. */
     SymTable globals;
     symtable_init(&globals);
+    check_set_st(&globals);
     for (size_t i = 0; i < tu->globals.len; i++) {
         Stmt *s = &tu->globals.data[i];
         if (s->kind != ST_DECL) continue;
@@ -2273,7 +2345,25 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                 continue;
             }
         }
-        if (ftab_find(&ft, s->u.decl.name)) {
+        if (ftab_lookup(s->u.decl.name)) {
+            if (s->u.decl.type.kind == TY_FUNC) {
+                /* GCC: `extern __typeof (f) f __asm__ ("name")` restates f
+                 * with an assembler name.  Apply the rename; do not treat
+                 * it as a conflicting object. */
+                if (s->u.decl.alias_target) {
+                    for (size_t fi = 0; fi < tu->functions.len; fi++) {
+                        if (strcmp(tu->functions.data[fi].name, s->u.decl.name) == 0) {
+                            if (!tu->functions.data[fi].alias_target)
+                                tu->functions.data[fi].alias_target =
+                                    xstrdup(s->u.decl.alias_target);
+                            break;
+                        }
+                    }
+                }
+                s->kind = ST_EXPR;
+                s->u.expr = NULL;
+                continue;
+            }
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "global '%s' conflicts with a function of the same name",
                    s->u.decl.name);
@@ -2296,6 +2386,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             && s->u.decl.type.elem_type->width == 1) {
             s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
         }
+        try_fold_vla_type(&s->u.decl.type);
         /* Normalize a (possibly designated) init list: infer array length,
          * validate designators, expand to positional with zero-fill. */
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
@@ -2309,7 +2400,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             if (!is_const_init(s->u.decl.init, &globals))
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "global initializer must be a constant");
-            Type dt = check_expr(s->u.decl.init, &globals, &ft);
+            Type dt = check_expr_inner(s->u.decl.init);
             type_free(&dt);
         }
     }
@@ -2317,8 +2408,10 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
 
-        /* `extern` declarations have no body to type-check. */
-        if (fn->is_extern) continue;
+        /* Prototype-only `extern` decls have no body.  GNU89 `extern inline`
+         * definitions keep is_extern (so they are not emitted) but still have
+         * a body that must be type-checked. */
+        if (fn->is_extern && fn->body.len == 0) continue;
 
         SymTable st;
         symtable_init(&st);
@@ -2329,6 +2422,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         }
 
         size_t mark = symtable_enter_scope(&st);
+        check_set_st(&st);
         for (size_t j = 0; j < fn->params.len; j++) {
             if (fn->params.data[j].name && fn->params.data[j].name[0] != '\0') {
                 if (symtable_has_since(&st, fn->params.data[j].name, mark)) {
@@ -2347,7 +2441,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
              * whose pointee is freed later by param_array_free in tu_free). */
             Type pty = fn->params.data[j].type;
             if (pty.vla_dim) {
-                Type dt = check_expr(pty.vla_dim, &st, &ft);
+                Type dt = check_expr_inner(pty.vla_dim);
                 type_free(&dt);
             }
             int own_ptr = 0;
@@ -2372,21 +2466,25 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
 
         g_sema_ret_type = fn->ret_type;
         int has_return = 0;
-        check_stmt_list(&fn->body, &st, &ft, &has_return);
+        check_stmt_list(&fn->body, &has_return);
         symtable_leave_scope(&st, mark);
         symtable_free(&st);
 
         g_sema_labels = NULL;
         labelset_free(&ls);
 
-        if (strcmp(fn->name, "main") == 0 && fn->ret_type.kind != TY_VOID && !has_return) {
+        /* Non-void `main` must return a value (FakeCC is stricter than
+         * C99 §5.1.2.2.3, which treats falling off `main` as `return 0`).
+         * Other non-void functions may still fall off; IR appends a typed
+         * zero if the function does not end in IR_RETURN. */
+        if (!has_return && strcmp(fn->name, "main") == 0
+            && fn->ret_type.kind != TY_VOID) {
             die_at(fn->loc.file, fn->loc.line, fn->loc.col,
-                   "function '%s' with non-void return type must return a value",
-                   fn->name);
+                   "non-void function must return a value");
         }
     }
 
-    ftab_free(&ft);
+    ftab_cur_free();
     symtable_free(&globals);
     g_sema_pkg = NULL;
     g_sema_tu = NULL;

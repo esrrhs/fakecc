@@ -693,6 +693,7 @@ static char *g_parsed_alias = ((void*)0);
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
 static int g_parsed_align = 0;
+static int g_parsed_inline = 0;
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
         advance(p);
@@ -982,12 +983,20 @@ static int is_type_start(const Parser *p, size_t pos) {
         || k == TK_KW_FLOAT || k == TK_KW_DOUBLE || k == TK_KW_BOOL
         || k == TK_KW_STRUCT || k == TK_KW_ENUM || k == TK_KW_UNION
         || k == TK_KW_CONST || k == TK_KW_STATIC || k == TK_KW_EXTERN
-        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT || k == TK_KW_INLINE
+        || k == TK_KW_VOLATILE || k == TK_KW_RESTRICT
         || k == TK_KW_COMPLEX)
         return 1;
+    if (k == TK_KW_INLINE) {
+        const char *text = p->tokens->data[pos].text;
+        if (text && (runtime.strcmp(text, "__extension__") == 0
+                     || runtime.strcmp(text, "__extension") == 0))
+            return pos + 1 < p->tokens->len ? is_type_start(p, pos + 1) : 0;
+        return 1;
+    }
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
-        if (runtime.strcmp(text, "register") == 0 || runtime.strcmp(text, "auto") == 0)
+        if (runtime.strcmp(text, "register") == 0 || runtime.strcmp(text, "auto") == 0
+            || runtime.strcmp(text, "__extension__") == 0 || runtime.strcmp(text, "__extension") == 0)
             return is_type_start(p, pos + 1);
         if (runtime.strcmp(text, "__attribute__") == 0 || runtime.strcmp(text, "__attribute") == 0) {
             size_t attr_pos = pos + 1;
@@ -1069,7 +1078,7 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
         }
-        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (peek(p)->kind == TK_KW_INLINE) { g_parsed_inline = 1; advance(p); }
         else if (is_complex && peek(p)->kind == TK_KW_COMPLEX) { *is_complex = 1; advance(p); }
         else if (peek(p)->kind == TK_KW_STATIC) {
             if (storage_class) *storage_class = 1;
@@ -1116,10 +1125,26 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
                 if (ec) {
                     found = type_default_int();
                 } else {
+                    int got = 0;
                     for (size_t g = 0; g < p->tu->globals.len; g++) {
                         if (p->tu->globals.data[g].kind == ST_DECL &&
                             runtime.strcmp(p->tu->globals.data[g].u.decl.name, tok->text) == 0) {
                             found = type_clone(p->tu->globals.data[g].u.decl.type);
+                            got = 1;
+                            break;
+                        }
+                    }
+                    if (!got) {
+                        for (size_t f = 0; f < p->tu->functions.len; f++) {
+                            const FunctionDecl *fn = &p->tu->functions.data[f];
+                            if (runtime.strcmp(fn->name, tok->text) != 0) continue;
+                            Type *ptys[16];
+                            int n = (int)fn->params.len;
+                            if (n > 16) n = 16;
+                            for (int i = 0; i < n; i++)
+                                ptys[i] = &fn->params.data[i].type;
+                            found = type_make_func_var(fn->ret_type, n ? ptys : ((void*)0),
+                                                       n, fn->is_variadic);
                             break;
                         }
                     }
@@ -1347,7 +1372,7 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col, "invalid use of 'restrict'");
         }
-        else if (k == TK_KW_INLINE) { advance(p); }
+        else if (k == TK_KW_INLINE) { g_parsed_inline = 1; advance(p); }
         else if (k == TK_KW_COMPLEX) { is_complex = 1; advance(p); }
         else if (k == TK_KW_STATIC) {
             if (storage_class) *storage_class = 1;
@@ -1930,7 +1955,9 @@ static Expr *parse_ternary(Parser *p) {
     if (peek(p)->kind != TK_QUESTION) return cond;
     SourceLoc loc = peek(p)->loc;
     advance(p);
-    Expr *then = parse_expr(p);
+    Expr *then = ((void*)0);
+    if (peek(p)->kind != TK_COLON)
+        then = parse_expr(p);
     expect_kind(p, TK_COLON, "':'");
     Expr *else_ = parse_ternary(p);
     return expr_new_ternary(cond, then, else_, loc);
@@ -2173,6 +2200,12 @@ static Expr *parse_unary(Parser *p) {
             advance(p);
             Type t = parse_type_abstract(p);
             expect_kind(p, TK_RPAREN, "')'");
+            if (peek(p)->kind == TK_LBRACE) {
+                Expr *init = parse_init_list(p);
+                Expr *cl = expr_new_compound_literal(t, init, loc);
+                type_free(&t);
+                return expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+            }
             Expr *e = expr_new_sizeof_type(t, loc);
             type_free(&t);
             return e;
@@ -3073,6 +3106,19 @@ static int is_function_declaration_lookahead(Parser *p) {
                        || runtime.strcmp(peek(p)->text, "__int128_t") == 0
                        || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
             advance(p);
+        } else if (tk == TK_IDENT
+                   && (runtime.strcmp(peek(p)->text, "typeof") == 0
+                       || runtime.strcmp(peek(p)->text, "__typeof__") == 0
+                       || runtime.strcmp(peek(p)->text, "__typeof") == 0)) {
+            advance(p);
+            if (peek(p)->kind == TK_LPAREN) {
+                int depth = 0;
+                do {
+                    if (peek(p)->kind == TK_LPAREN) depth++;
+                    else if (peek(p)->kind == TK_RPAREN) depth--;
+                    advance(p);
+                } while (depth > 0 && peek(p)->kind != TK_EOF);
+            }
         } else {
             break;
         }
@@ -3132,6 +3178,19 @@ static int is_function_definition_lookahead(Parser *p) {
                        || runtime.strcmp(peek(p)->text, "__int128_t") == 0
                        || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
             advance(p);
+        } else if (tk == TK_IDENT
+                   && (runtime.strcmp(peek(p)->text, "typeof") == 0
+                       || runtime.strcmp(peek(p)->text, "__typeof__") == 0
+                       || runtime.strcmp(peek(p)->text, "__typeof") == 0)) {
+            advance(p);
+            if (peek(p)->kind == TK_LPAREN) {
+                int depth = 0;
+                do {
+                    if (peek(p)->kind == TK_LPAREN) depth++;
+                    else if (peek(p)->kind == TK_RPAREN) depth--;
+                    advance(p);
+                } while (depth > 0 && peek(p)->kind != TK_EOF);
+            }
         } else {
             break;
         }
@@ -3320,14 +3379,14 @@ static Stmt parse_stmt(Parser *p) {
                 advance(p);
             }
             Stmt s;
+            runtime.memset(&s, 0, sizeof(s));
             s.kind = ST_DECL;
             s.loc = decl_loc;
             s.u.decl.name = decl_name;
             s.u.decl.type = ty;
             s.u.decl.storage_class = storage_class;
-            s.u.decl.init = ((void*)0);
-            s.u.decl.alias_target = ((void*)0);
-            while (parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), &s.u.decl.alias_target)) {}
+            while (parse_attribute(p, &s.u.decl.align, ((void*)0), ((void*)0), ((void*)0),
+                                   &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {
                 advance(p);
                 if (storage_class == 2) {
@@ -3340,7 +3399,8 @@ static Stmt parse_stmt(Parser *p) {
                     s.u.decl.init = parse_assign(p);
                 }
             }
-            while (parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), &s.u.decl.alias_target)) {}
+            while (parse_attribute(p, &s.u.decl.align, ((void*)0), ((void*)0), ((void*)0),
+                                   &s.u.decl.alias_target)) {}
             if (!s.u.decl.alias_target && g_parsed_alias) {
                 s.u.decl.alias_target = g_parsed_alias;
                 g_parsed_alias = ((void*)0);
@@ -3847,6 +3907,9 @@ static Stmt parse_typedef_stmt(Parser *p) {
                 typedef_registry_add(&p->tu->typedefs, decl_name, ty);
             } else if (builtin_va) {
                 type_free(&ty);
+            } else if (runtime.strcmp(decl_name, "wchar_t") == 0) {
+                type_free(&exist->type);
+                exist->type = ty;
             } else if (!type_same_typedef(exist->type, ty)) {
                 die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "redefinition of typedef '%s' with a different type",
@@ -3880,11 +3943,13 @@ static FunctionDecl parse_function_decl(Parser *p) {
     SourceLoc fn_loc = peek(p)->loc;
     int is_extern = 0;
     int is_static = 0;
+    int is_inline = 0;
+    g_parsed_inline = 0;
     for (;;) {
         if (skip_attribute(p)) continue;
         if (peek(p)->kind == TK_KW_STATIC) { advance(p); is_static = 1; }
         else if (peek(p)->kind == TK_KW_EXTERN) { advance(p); is_extern = 1; }
-        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); }
+        else if (peek(p)->kind == TK_KW_INLINE) { advance(p); is_inline = 1; }
         else break;
     }
     Type ret_ty;
@@ -3895,6 +3960,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
         || peek(p)->kind == TK_KW_UNION
         || peek(p)->kind == TK_KW_ENUM) {
         ret_ty = parse_return_type(p);
+        if (g_parsed_inline) is_inline = 1;
+        g_parsed_inline = 0;
         for (;;) { if (!skip_attribute(p)) break; }
         name = peek(p);
         if (name->kind != TK_IDENT) {
@@ -4072,7 +4139,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
             }
         }
     }
-    if (fn.is_extern || peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
+    if (peek(p)->kind == TK_SEMICOLON || peek(p)->kind == TK_COMMA) {
         fn.is_extern = 1;
         while (peek(p)->kind == TK_COMMA) {
             advance(p);
@@ -4106,6 +4173,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
         expect_kind(p, TK_SEMICOLON, "';'");
         return fn;
     }
+    if (!(is_extern && is_inline))
+        fn.is_extern = 0;
     expect_kind(p, TK_LBRACE, "'{'");
     const char *saved_fn = p->cur_fn_name;
     size_t saved_td = p->typedef_mark;

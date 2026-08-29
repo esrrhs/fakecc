@@ -69,6 +69,8 @@ static void test_assign_nonlvalue(void) {
 }
 
 static void test_no_return(void) {
+    /* Non-void `main` must contain a return (or a call / infinite loop that
+     * does not fall through). Falling off the end is an error. */
     T_ASSERT(fork_dies("package main; int main() { int x; x = 5; }"));
 }
 

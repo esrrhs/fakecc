@@ -96,6 +96,8 @@ void type_free(Type *t) {
 extern const StructRegistry *get_ir_structs(void);
 extern const StructRegistry *get_sema_structs(void);
 extern const StructRegistry *get_parser_structs(void);
+extern const TranslationUnit *get_sema_tu(void);
+extern const TranslationUnit *get_ir_tu(void);
 
 long long type_size(Type t) {
     if (t.is_vector) return t.width;
@@ -1515,6 +1517,44 @@ void param_array_free(ParamArray *a) {
 /* Compile-time integer constant folding                               */
 /* ------------------------------------------------------------------ */
 
+/* EX_VAR / *p / a[i] are born with type_default_int().  Folding sizeof of
+ * that dummy type yields 4 and mis-sizes `T a[sizeof g / sizeof *g]`.
+ * Trust those operand types only after sema (or IR) has filled them in. */
+static int sizeof_operand_needs_sema(const Expr *op) {
+    if (!op) return 0;
+    switch (op->kind) {
+    case EX_VAR:
+    case EX_DEREF:
+    case EX_INDEX:
+    case EX_MEMBER:
+    case EX_ADDR:
+    case EX_CALL:
+    case EX_ASSIGN:
+    case EX_COMPOUND_ASSIGN:
+    case EX_INC_DEC:
+    case EX_STMT_EXPR:
+        return 1;
+    case EX_UNARY:
+        return sizeof_operand_needs_sema(op->u.un.operand);
+    case EX_BINOP:
+        return sizeof_operand_needs_sema(op->u.bin.l)
+            || sizeof_operand_needs_sema(op->u.bin.r);
+    case EX_TERNARY:
+        return sizeof_operand_needs_sema(op->u.tern.then)
+            || sizeof_operand_needs_sema(op->u.tern.else_);
+    case EX_COMMA:
+        return sizeof_operand_needs_sema(op->u.comma.rhs);
+    case EX_CAST:
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int fold_sizeof_types_ready(void) {
+    return get_sema_tu() != NULL || get_ir_tu() != NULL;
+}
+
 /* Fold e to a single integer constant.  Returns 1 and writes the value to
  * *out if e is an integer literal, a cast of one, or a unary/binary
  * operation on constant integer operands (e.g. (1u << 14) - 1u).  Returns 0
@@ -1597,6 +1637,10 @@ int fold_const_int(const Expr *e, long long *out) {
         *out = 8;
         return 1;
     }
+    if (e->kind == EX_VAR && strcmp(e->u.var.name, "__INT_MAX__") == 0) {
+        *out = 0x7fffffff;
+        return 1;
+    }
     if (e->kind == EX_CAST) {
         /* Fold through integer casts (e.g. `(int)`); pointer casts are not
          * integer constants, so require the operand to fold to an int. */
@@ -1640,6 +1684,43 @@ int fold_const_int(const Expr *e, long long *out) {
     if (e->kind == EX_SIZEOF_TYPE) {
         *out = type_size(e->u.sizeof_t.target);
         return 1;
+    }
+    if (e->kind == EX_SIZEOF_EXPR) {
+        const Expr *op = e->u.sizeof_e.operand;
+        Type t;
+        if (!op) return 0;
+        if (op->kind == EX_STR) {
+            *out = (long long)op->u.str.len + 1;
+            return 1;
+        }
+        if (op->kind == EX_COMPOUND_LITERAL)
+            t = op->u.compound.target_type;
+        else if (op->kind == EX_CAST)
+            t = op->u.cast.target;
+        else if (sizeof_operand_needs_sema(op) && !fold_sizeof_types_ready())
+            return 0;
+        else
+            t = op->type;
+        if (t.kind == TY_VOID && t.width == 0 && !t.tag)
+            return 0;
+        if (t.kind == TY_ARRAY && t.length <= 0)
+            return 0;
+        long long sz = type_size(t);
+        if (sz < 0) return 0;
+        *out = sz;
+        return 1;
+    }
+    if (e->kind == EX_TERNARY) {
+        long long c;
+        if (!fold_const_int(e->u.tern.cond, &c)) return 0;
+        if (c) {
+            if (!e->u.tern.then) {
+                *out = c;
+                return 1;
+            }
+            return fold_const_int(e->u.tern.then, out);
+        }
+        return fold_const_int(e->u.tern.else_, out);
     }
     if (e->kind == EX_ALIGNOF_TYPE) {
         *out = type_align(e->u.alignof_t.target);

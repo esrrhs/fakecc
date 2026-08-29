@@ -942,6 +942,8 @@ struct TranslationUnit {
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
+void ir_disable_builtin(const char *name);
+int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
@@ -1830,23 +1832,6 @@ static void emit_load_base_off32(Buffer *b, int dst, int base, int off) {
         emit_int32(b, off);
     }
 }
-
-#define APPLY_ARGS_SIZE    192
-#define APPLY_RESULT_SIZE  64
-#define APPLY_ARGS_RAX     8
-#define APPLY_ARGS_RDX     16
-#define APPLY_ARGS_RCX     24
-#define APPLY_ARGS_RSI     32
-#define APPLY_ARGS_RDI     40
-#define APPLY_ARGS_R8      48
-#define APPLY_ARGS_R9      56
-#define APPLY_ARGS_XMM     64
-#define APPLY_RES_RAX      0
-#define APPLY_RES_RDX      8
-#define APPLY_RES_RSI      16
-#define APPLY_RES_RDI      24
-#define APPLY_RES_XMM0     32
-#define APPLY_RES_XMM1     48
 static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int has_dyn_alloca);
 static void emit_sse_movaps_base_off(Buffer *b, int xmm, int base, int off, int store) {
     emit_rex_wrb(b, 0, xmm, base);
@@ -1864,15 +1849,15 @@ static void emit_sse_movaps_base_off(Buffer *b, int xmm, int base, int off, int 
     }
 }
 static void emit_fill_apply_args(Buffer *b, int base) {
-    emit_store_rsp_off(b, REG_RAX, base + APPLY_ARGS_RAX);
-    emit_store_rsp_off(b, REG_RDX, base + APPLY_ARGS_RDX);
-    emit_store_rsp_off(b, REG_RCX, base + APPLY_ARGS_RCX);
-    emit_store_rsp_off(b, REG_RSI, base + APPLY_ARGS_RSI);
-    emit_store_rsp_off(b, REG_RDI, base + APPLY_ARGS_RDI);
-    emit_store_rsp_off(b, REG_R8,  base + APPLY_ARGS_R8);
-    emit_store_rsp_off(b, REG_R9,  base + APPLY_ARGS_R9);
+    emit_store_rsp_off(b, REG_RAX, base + 8);
+    emit_store_rsp_off(b, REG_RDX, base + 16);
+    emit_store_rsp_off(b, REG_RCX, base + 24);
+    emit_store_rsp_off(b, REG_RSI, base + 32);
+    emit_store_rsp_off(b, REG_RDI, base + 40);
+    emit_store_rsp_off(b, REG_R8, base + 48);
+    emit_store_rsp_off(b, REG_R9, base + 56);
     for (int x = 0; x < 8; x++)
-        emit_sse_store_rsp_off(b, x, base + APPLY_ARGS_XMM + 16 * x);
+        emit_sse_store_rsp_off(b, x, base + 64 + 16 * x);
     emit_lea_rbp(b, REG_RCX, 16);
     emit_store_rsp_off(b, REG_RCX, base + 0);
 }
@@ -1905,22 +1890,22 @@ static void emit_builtin_apply(Buffer *b, const IRInst *inst, const RAResult *ra
     emit_byte(b, 0xFC);
     emit_byte(b, 0xF3);
     emit_byte(b, 0xA4);
-    emit_load_base_off(b, REG_RAX, REG_R10, APPLY_ARGS_RAX);
-    emit_load_base_off(b, REG_RDX, REG_R10, APPLY_ARGS_RDX);
-    emit_load_base_off(b, REG_RCX, REG_R10, APPLY_ARGS_RCX);
-    emit_load_base_off(b, REG_RSI, REG_R10, APPLY_ARGS_RSI);
-    emit_load_base_off(b, REG_RDI, REG_R10, APPLY_ARGS_RDI);
-    emit_load_base_off(b, REG_R8,  REG_R10, APPLY_ARGS_R8);
-    emit_load_base_off(b, REG_R9,  REG_R10, APPLY_ARGS_R9);
+    emit_load_base_off(b, REG_RAX, REG_R10, 8);
+    emit_load_base_off(b, REG_RDX, REG_R10, 16);
+    emit_load_base_off(b, REG_RCX, REG_R10, 24);
+    emit_load_base_off(b, REG_RSI, REG_R10, 32);
+    emit_load_base_off(b, REG_RDI, REG_R10, 40);
+    emit_load_base_off(b, REG_R8, REG_R10, 48);
+    emit_load_base_off(b, REG_R9, REG_R10, 56);
     for (int x = 0; x < 8; x++)
-        emit_sse_movaps_base_off(b, x, REG_R10, APPLY_ARGS_XMM + 16 * x, 0);
+        emit_sse_movaps_base_off(b, x, REG_R10, 64 + 16 * x, 0);
     emit_indirect_call(b, REG_R11);
-    emit_store_spill(b, REG_RAX, result_rbp_off + APPLY_RES_RAX);
-    emit_store_spill(b, REG_RDX, result_rbp_off + APPLY_RES_RDX);
-    emit_store_spill(b, REG_RSI, result_rbp_off + APPLY_RES_RSI);
-    emit_store_spill(b, REG_RDI, result_rbp_off + APPLY_RES_RDI);
-    emit_sse_movaps_base_off(b, 0, REG_RBP, result_rbp_off + APPLY_RES_XMM0, 1);
-    emit_sse_movaps_base_off(b, 1, REG_RBP, result_rbp_off + APPLY_RES_XMM1, 1);
+    emit_store_spill(b, REG_RAX, result_rbp_off + 0);
+    emit_store_spill(b, REG_RDX, result_rbp_off + 8);
+    emit_store_spill(b, REG_RSI, result_rbp_off + 16);
+    emit_store_spill(b, REG_RDI, result_rbp_off + 24);
+    emit_sse_movaps_base_off(b, 0, REG_RBP, result_rbp_off + 32, 1);
+    emit_sse_movaps_base_off(b, 1, REG_RBP, result_rbp_off + 48, 1);
     emit_load_spill(b, REG_RSP, saved_sp_rbp_off);
     int target = (dr >= 0) ? dr : REG_RAX;
     emit_lea_rbp(b, target, result_rbp_off);
@@ -1930,12 +1915,12 @@ static void emit_builtin_apply(Buffer *b, const IRInst *inst, const RAResult *ra
 static void emit_builtin_return(Buffer *b, const IRInst *inst, const RAResult *ra,
                                 int stack_size, const int cs_used[3], int has_dyn_alloca) {
     ensure_reg(b, inst->call_args[0], REG_R10, ra);
-    emit_load_base_off(b, REG_RAX, REG_R10, APPLY_RES_RAX);
-    emit_load_base_off(b, REG_RDX, REG_R10, APPLY_RES_RDX);
-    emit_load_base_off(b, REG_RSI, REG_R10, APPLY_RES_RSI);
-    emit_load_base_off(b, REG_RDI, REG_R10, APPLY_RES_RDI);
-    emit_sse_movaps_base_off(b, 0, REG_R10, APPLY_RES_XMM0, 0);
-    emit_sse_movaps_base_off(b, 1, REG_R10, APPLY_RES_XMM1, 0);
+    emit_load_base_off(b, REG_RAX, REG_R10, 0);
+    emit_load_base_off(b, REG_RDX, REG_R10, 8);
+    emit_load_base_off(b, REG_RSI, REG_R10, 16);
+    emit_load_base_off(b, REG_RDI, REG_R10, 24);
+    emit_sse_movaps_base_off(b, 0, REG_R10, 32, 0);
+    emit_sse_movaps_base_off(b, 1, REG_R10, 48, 0);
     emit_epilogue(b, stack_size, cs_used, has_dyn_alloca);
 }
 static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
@@ -2474,11 +2459,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         if (fn->is_variadic) bottom_extra = 176;
         if (fn->needs_apply_args) {
             apply_args_rsp_off = bottom_extra;
-            bottom_extra += APPLY_ARGS_SIZE;
+            bottom_extra += 192;
         }
         if (fn->needs_apply) {
             apply_result_rsp_off = bottom_extra;
-            bottom_extra += APPLY_RESULT_SIZE;
+            bottom_extra += 64;
             apply_saved_sp_rsp_off = bottom_extra;
             bottom_extra += 8;
         }
