@@ -5,11 +5,10 @@
 # preprocessor) live in SKIPPED.txt.
 #
 
-# === Crashes / Segfaults (4) ===
+# === Crashes / Segfaults (3) ===
 20011109-1.c
 pr28865.c
 pr53748.c
-pr94621.c
 
 # === Timeouts (2) ===
 20151204.c

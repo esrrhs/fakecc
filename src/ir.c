@@ -3174,8 +3174,17 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     }
     case EX_MEMBER: {
         IRValue base = lower_lvalue_addr(fn, st, e->u.member.obj);
-        const StructDef *sd = struct_registry_find_c(g_ir_structs,
-                                                     e->u.member.obj->type.tag);
+        /* Resolve the struct tag from the member object's type.  For `p->x`
+         * the parser desugars to `(*p).x`, so the object is a deref whose
+         * type is TY_STRUCT.  But the type may also be TY_PTR (e.g. when the
+         * deref has not been inserted, or for nested member access) — in
+         * that case the struct tag lives on the pointee. */
+        const char *tag = NULL;
+        Type *ot = &e->u.member.obj->type;
+        if (ot->kind == TY_STRUCT) tag = ot->tag;
+        else if (ot->kind == TY_PTR && ot->pointee && ot->pointee->kind == TY_STRUCT)
+            tag = ot->pointee->tag;
+        const StructDef *sd = tag ? struct_registry_find_c(g_ir_structs, tag) : NULL;
         long long off = 0;
         if (sd)
             struct_lookup_member(g_ir_structs, sd, e->u.member.name, &off);
