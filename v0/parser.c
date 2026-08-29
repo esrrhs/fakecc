@@ -1143,7 +1143,7 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
                             if (n > 16) n = 16;
                             for (int i = 0; i < n; i++)
                                 ptys[i] = &fn->params.data[i].type;
-                            found = type_make_func_var(fn->ret_type, n ? ptys : NULL,
+                            found = type_make_func_var(fn->ret_type, n ? ptys : ((void*)0),
                                                        n, fn->is_variadic);
                             break;
                         }
@@ -2201,8 +2201,6 @@ static Expr *parse_unary(Parser *p) {
             Type t = parse_type_abstract(p);
             expect_kind(p, TK_RPAREN, "')'");
             if (peek(p)->kind == TK_LBRACE) {
-                /* Compound literals are postfix expressions (C99 6.5.2.5),
-                 * so `sizeof (T){ ... }` is sizeof of the literal, not of T. */
                 Expr *init = parse_init_list(p);
                 Expr *cl = expr_new_compound_literal(t, init, loc);
                 type_free(&t);
@@ -3381,14 +3379,14 @@ static Stmt parse_stmt(Parser *p) {
                 advance(p);
             }
             Stmt s;
+            runtime.memset(&s, 0, sizeof(s));
             s.kind = ST_DECL;
             s.loc = decl_loc;
             s.u.decl.name = decl_name;
             s.u.decl.type = ty;
             s.u.decl.storage_class = storage_class;
-            s.u.decl.init = ((void*)0);
-            s.u.decl.alias_target = ((void*)0);
-            while (parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), &s.u.decl.alias_target)) {}
+            while (parse_attribute(p, &s.u.decl.align, ((void*)0), ((void*)0), ((void*)0),
+                                   &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {
                 advance(p);
                 if (storage_class == 2) {
@@ -3401,7 +3399,8 @@ static Stmt parse_stmt(Parser *p) {
                     s.u.decl.init = parse_assign(p);
                 }
             }
-            while (parse_attribute(p, ((void*)0), ((void*)0), ((void*)0), ((void*)0), &s.u.decl.alias_target)) {}
+            while (parse_attribute(p, &s.u.decl.align, ((void*)0), ((void*)0), ((void*)0),
+                                   &s.u.decl.alias_target)) {}
             if (!s.u.decl.alias_target && g_parsed_alias) {
                 s.u.decl.alias_target = g_parsed_alias;
                 g_parsed_alias = ((void*)0);

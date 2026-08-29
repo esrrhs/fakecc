@@ -790,6 +790,8 @@ struct TranslationUnit {
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
+void ir_disable_builtin(const char *name);
+int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
 typedef struct FILE FILE;
 typedef long fpos_t;
@@ -847,7 +849,6 @@ const StructRegistry *get_ir_structs(void) {
 const TranslationUnit *get_ir_tu(void) {
     return g_ir_tu;
 }
-
 static const char *lookup_asm_alias(const char *name) {
     if (!g_ir_tu || !name) return ((void*)0);
     for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
@@ -2425,34 +2426,24 @@ static const StructMember *ir_find_struct_member(const StructDef *sd, const char
     }
     return ((void*)0);
 }
-
-/* GCC Fortify: __builtin_object_size and __builtin___*_chk folding.
- * Matches GCC's compile-time object-size / chk split (type 0/1 unknown →
- * (size_t)-1, type 2/3 unknown → 0; chk with size == -1 or proven n <= size
- * becomes the plain memcpy/memset/...).  Pointer arguments of
- * __builtin_object_size are not evaluated. */
-
-typedef struct {
+struct BosRef {
     int known;
     long long whole_size;
     long long whole_off;
     long long inner_size;
     long long inner_off;
-} BosRef;
-
-typedef struct {
+};typedef struct BosRef BosRef;
+struct BosCtx {
     IRSymTable *st;
     const char *vis[24];
     int nvis;
     int bos_type;
-} BosCtx;
-
+};typedef struct BosCtx BosCtx;
 static const Expr *bos_skip_cast(const Expr *e) {
     while (e && e->kind == EX_CAST)
         e = e->u.cast.operand;
     return e;
 }
-
 static int bos_ptr_elem_size(Type t) {
     long long s = 1;
     if (t.kind == TY_ARRAY && t.elem_type)
@@ -2462,15 +2453,12 @@ static int bos_ptr_elem_size(Type t) {
     if (s <= 0) s = 1;
     return (int)s;
 }
-
 static unsigned long long bos_unk(int bos_type) {
     return (bos_type & 2) ? 0ull : ~(unsigned long long)0;
 }
-
 static int bos_is_unk(unsigned long long v, int bos_type) {
     return (bos_type & 2) ? 0 : (v == ~(unsigned long long)0);
 }
-
 static unsigned long long bos_remaining(BosRef r, int bos_type) {
     if (!r.known) return bos_unk(bos_type);
     long long sz = (bos_type & 1) ? r.inner_size : r.whole_size;
@@ -2479,14 +2467,12 @@ static unsigned long long bos_remaining(BosRef r, int bos_type) {
     if (sz <= off) return 0;
     return (unsigned long long)(sz - off);
 }
-
 static BosRef bos_ref_unk(void) {
     BosRef r;
     r.known = 0;
     r.whole_size = r.whole_off = r.inner_size = r.inner_off = 0;
     return r;
 }
-
 static BosRef bos_ref_make(long long sz, long long off) {
     BosRef r;
     r.known = 1;
@@ -2496,7 +2482,6 @@ static BosRef bos_ref_make(long long sz, long long off) {
     r.inner_off = off;
     return r;
 }
-
 static int bos_is_param(const char *name) {
     if (!g_ir_cur_fd || !name) return 0;
     for (size_t i = 0; i < g_ir_cur_fd->params.len; i++) {
@@ -2506,13 +2491,11 @@ static int bos_is_param(const char *name) {
     }
     return 0;
 }
-
 static int bos_lvalue_is_name(const Expr *e, const char *name) {
     e = bos_skip_cast(e);
     return e && e->kind == EX_VAR && e->u.var.name && name &&
            runtime.strcmp(e->u.var.name, name) == 0;
 }
-
 static int bos_is_memcpy_family(const char *n) {
     if (!n) return 0;
     if (runtime.strcmp(n, "memcpy") == 0 || runtime.strcmp(n, "memmove") == 0 ||
@@ -2531,11 +2514,9 @@ static int bos_is_memcpy_family(const char *n) {
         return 1;
     return 0;
 }
-
 static int bos_is_alloca(const char *n) {
     return n && (runtime.strcmp(n, "__builtin_alloca") == 0 || runtime.strcmp(n, "alloca") == 0);
 }
-
 static int bos_is_chk_builtin(const char *n) {
     return n && (runtime.strcmp(n, "__builtin___memcpy_chk") == 0 ||
                  runtime.strcmp(n, "__builtin___memmove_chk") == 0 ||
@@ -2544,31 +2525,24 @@ static int bos_is_chk_builtin(const char *n) {
                  runtime.strcmp(n, "__builtin___stpncpy_chk") == 0 ||
                  runtime.strcmp(n, "__builtin___strncpy_chk") == 0);
 }
-
-
 static int bos_is_snprintf_chk_builtin(const char *n) {
     return n && (runtime.strcmp(n, "__builtin___snprintf_chk") == 0 ||
                  runtime.strcmp(n, "__builtin___vsnprintf_chk") == 0);
 }
-
 static int bos_is_sprintf_chk_builtin(const char *n) {
     return n && (runtime.strcmp(n, "__builtin___sprintf_chk") == 0 ||
                  runtime.strcmp(n, "__builtin___vsprintf_chk") == 0);
 }
-
 static int bos_is_stpcpy_chk_builtin(const char *n) {
     return n && (runtime.strcmp(n, "__builtin___stpcpy_chk") == 0 ||
                  runtime.strcmp(n, "__builtin___strcpy_chk") == 0);
 }
-
 static int bos_is_strcat_chk_builtin(const char *n) {
     return n && runtime.strcmp(n, "__builtin___strcat_chk") == 0;
 }
-
 static int bos_is_strncat_chk_builtin(const char *n) {
     return n && runtime.strcmp(n, "__builtin___strncat_chk") == 0;
 }
-
 static const char *bos_chk_plain_name(const char *n) {
     if (runtime.strstr(n, "mempcpy")) return "mempcpy";
     if (runtime.strstr(n, "memcpy")) return "memcpy";
@@ -2578,7 +2552,6 @@ static const char *bos_chk_plain_name(const char *n) {
     if (runtime.strstr(n, "strncpy")) return "strncpy";
     return "memcpy";
 }
-
 static const char *bos_chk_rt_name(const char *n) {
     if (runtime.strstr(n, "mempcpy")) return "__mempcpy_chk";
     if (runtime.strstr(n, "memcpy")) return "__memcpy_chk";
@@ -2588,12 +2561,10 @@ static const char *bos_chk_rt_name(const char *n) {
     if (runtime.strstr(n, "strncpy")) return "__strncpy_chk";
     return "__memcpy_chk";
 }
-
 static void bos_collect_expr(const Expr *e, const char *name,
                              const Expr **out, int *n, int cap, int *saw_unk);
 static void bos_collect_stmt(const Stmt *s, const char *name,
                              const Expr **out, int *n, int cap, int *saw_unk);
-
 static void bos_collect_expr(const Expr *e, const char *name,
                              const Expr **out, int *n, int cap, int *saw_unk) {
     if (!e) return;
@@ -2669,7 +2640,6 @@ static void bos_collect_expr(const Expr *e, const char *name,
         break;
     }
 }
-
 static void bos_collect_stmt(const Stmt *s, const char *name,
                              const Expr **out, int *n, int cap, int *saw_unk) {
     if (!s) return;
@@ -2724,8 +2694,6 @@ static void bos_collect_stmt(const Stmt *s, const char *name,
         break;
     }
 }
-
-
 static int bos_stmt_declares(const Stmt *s, const char *name) {
     if (!s || !name) return 0;
     switch (s->kind) {
@@ -2763,7 +2731,6 @@ static int bos_stmt_declares(const Stmt *s, const char *name) {
         return 0;
     }
 }
-
 static int bos_cur_fn_declares(const char *name) {
     if (!g_ir_cur_fd || !name) return 0;
     for (size_t i = 0; i < g_ir_cur_fd->body.len; i++)
@@ -2771,7 +2738,6 @@ static int bos_cur_fn_declares(const char *name) {
             return 1;
     return 0;
 }
-
 static int bos_collect_sources(const char *name, const Expr **out, int cap, int *saw_unk) {
     int n = 0;
     *saw_unk = 0;
@@ -2792,10 +2758,8 @@ static int bos_collect_sources(const char *name, const Expr **out, int cap, int 
     }
     return n;
 }
-
 static unsigned long long bos_eval(BosCtx *ctx, const Expr *e);
 static BosRef bos_objref(BosCtx *ctx, const Expr *e);
-
 static int bos_vis_push(BosCtx *ctx, const char *name) {
     for (int i = 0; i < ctx->nvis; i++)
         if (ctx->vis[i] && name && runtime.strcmp(ctx->vis[i], name) == 0)
@@ -2804,11 +2768,9 @@ static int bos_vis_push(BosCtx *ctx, const char *name) {
     ctx->vis[ctx->nvis++] = name;
     return 1;
 }
-
 static void bos_vis_pop(BosCtx *ctx) {
     if (ctx->nvis > 0) ctx->nvis--;
 }
-
 static BosRef bos_objref(BosCtx *ctx, const Expr *e) {
     e = bos_skip_cast(e);
     if (!e) return bos_ref_unk();
@@ -2925,7 +2887,6 @@ static BosRef bos_objref(BosCtx *ctx, const Expr *e) {
     }
     return bos_ref_unk();
 }
-
 static unsigned long long bos_eval(BosCtx *ctx, const Expr *e) {
     e = bos_skip_cast(e);
     if (!e) return bos_unk(ctx->bos_type);
@@ -2948,7 +2909,6 @@ static unsigned long long bos_eval(BosCtx *ctx, const Expr *e) {
     BosRef r = bos_objref(ctx, e);
     return bos_remaining(r, ctx->bos_type);
 }
-
 static unsigned long long compute_builtin_object_size(IRSymTable *st, const Expr *ptr, int bos_type) {
     BosCtx ctx;
     runtime.memset(&ctx, 0, sizeof(ctx));
@@ -2956,7 +2916,6 @@ static unsigned long long compute_builtin_object_size(IRSymTable *st, const Expr
     ctx.bos_type = bos_type;
     return bos_eval(&ctx, ptr);
 }
-
 static int bos_int_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
     e = bos_skip_cast(e);
     long long c = 0;
@@ -2965,9 +2924,7 @@ static int bos_int_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
         return 1;
     }
     if (!e || e->kind != EX_VAR || !e->u.var.name) return 0;
-    /* File-scope objects can be written in other functions (or via asm), so
-     * their initializer is not a proven runtime max.  Only locals. */
-    const IRSlot *slot = NULL;
+    const IRSlot *slot = ((void*)0);
     if (st) {
         for (size_t i = st->len; i > 0; i--)
             if (runtime.strcmp(st->data[i-1].name, e->u.var.name) == 0) {
@@ -2993,7 +2950,6 @@ static int bos_int_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
     *out = mx;
     return 1;
 }
-
 static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
                                    IRValue *args, int nargs, SourceLoc loc) {
     IRValue dst = new_value(fn);
@@ -3013,7 +2969,6 @@ static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
     set_value_type(fn, dst, 8, 1);
     return dst;
 }
-
 static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr *e) {
     const char *cn = e->u.call.callee->u.var.name;
     const Expr *size_e = e->u.call.args.data[3];
@@ -3072,7 +3027,6 @@ static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr
     args[3] = szv;
     return bos_emit_named_call(fn, bos_chk_rt_name(cn), args, 4, e->loc);
 }
-
 static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
                                      IRValue *args, int nargs, SourceLoc loc,
                                      int width, int is_unsigned) {
@@ -3093,7 +3047,6 @@ static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
     set_value_type(fn, dst, width, is_unsigned);
     return dst;
 }
-
 static int bos_eval_size_arg(IRSymTable *st, const Expr *size_e,
                              unsigned long long *size_val) {
     *size_val = ~(unsigned long long)0;
@@ -3115,11 +3068,6 @@ static int bos_eval_size_arg(IRSymTable *st, const Expr *size_e,
     }
     return 0;
 }
-
-/* __builtin___snprintf_chk(dst, n, flag, size, fmt, ...) and
- * __builtin___vsnprintf_chk(dst, n, flag, size, fmt, ap).
- * Fold to snprintf/vsnprintf when size is unknown (-1) or n is proven
- * <= size. Check vsnprintf before snprintf (substring). */
 static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
                                                const Expr *e) {
     const char *cn = e->u.call.callee->u.var.name;
@@ -3144,15 +3092,15 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
     const char *chk = is_v ? "__vsnprintf_chk" : "__snprintf_chk";
     IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
     IRValue nval = lower_expr(fn, st, e->u.call.args.data[1]);
-    IRValue args[IR_CALL_MAX_ARGS];
+    IRValue args[64];
     int nargs = 0;
     args[nargs++] = dst;
     args[nargs++] = nval;
     if (fold_plain) {
         for (int i = 4; i < (int)e->u.call.args.len; i++) {
-            if (nargs >= IR_CALL_MAX_ARGS) {
-                fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
-                exit(1);
+            if (nargs >= 64) {
+                runtime.fprintf(runtime.stderr, "fakecc: too many snprintf_chk arguments\n");
+                runtime.exit(1);
             }
             args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
         }
@@ -3168,16 +3116,14 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
     }
     args[nargs++] = szv;
     for (int i = 4; i < (int)e->u.call.args.len; i++) {
-        if (nargs >= IR_CALL_MAX_ARGS) {
-            fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
-            exit(1);
+        if (nargs >= 64) {
+            runtime.fprintf(runtime.stderr, "fakecc: too many snprintf_chk arguments\n");
+            runtime.exit(1);
         }
         args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
     }
     return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
 }
-
-/* Known C-string bytes (NUL not included in *nbytes) plus a byte offset. */
 static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long long *off) {
     e = bos_skip_cast(e);
     if (!e) return 0;
@@ -3200,7 +3146,7 @@ static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long lo
         return 1;
     }
     if (e->kind == EX_BINOP && (e->u.bin.op == BOP_ADD || e->u.bin.op == BOP_SUB)) {
-        const Expr *ptr = NULL, *idxe = NULL;
+        const Expr *ptr = ((void*)0), *idxe = ((void*)0);
         Type pty;
         int lptr = type_is_ptr_or_array(e->u.bin.l->type);
         int rptr = type_is_ptr_or_array(e->u.bin.r->type);
@@ -3220,12 +3166,8 @@ static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long lo
     }
     if (e->kind == EX_VAR && e->u.var.name) {
         if (e->type.is_volatile) return 0;
-        /* Local pointer to a single known C string (e.g. const char *x2 = "").
-         * File-scope pointers can be asm-clobbered, so those stay unknown. */
         if (e->type.kind == TY_PTR) {
             if (bos_is_param(e->u.var.name)) return 0;
-            /* File-scope pointers can be asm-clobbered. A same-named local
-             * (e.g. test1's s2 = "") is a different object. */
             if (!bos_cur_fn_declares(e->u.var.name))
                 return 0;
             static int depth;
@@ -3235,12 +3177,12 @@ static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long lo
             int ns = bos_collect_sources(e->u.var.name, srcs, 32, &saw_unk);
             if (saw_unk || ns == 0) return 0;
             depth++;
-            const char *b0 = NULL;
+            const char *b0 = ((void*)0);
             int n0 = 0;
             long long o0 = 0;
             int ok = 1;
             for (int i = 0; i < ns; i++) {
-                const char *b = NULL;
+                const char *b = ((void*)0);
                 int n = 0;
                 long long o = 0;
                 if (!bos_cstr_info(srcs[i], &b, &n, &o)) { ok = 0; break; }
@@ -3274,9 +3216,8 @@ static int bos_cstr_info(const Expr *e, const char **bytes, int *nbytes, long lo
     }
     return 0;
 }
-
 static int bos_cstr_len(const Expr *e, unsigned long long *out) {
-    const char *b = NULL;
+    const char *b = ((void*)0);
     int n = 0;
     long long off = 0;
     if (!bos_cstr_info(e, &b, &n, &off)) return 0;
@@ -3284,15 +3225,12 @@ static int bos_cstr_len(const Expr *e, unsigned long long *out) {
     *out = (unsigned long long)(n - off);
     return 1;
 }
-
-/* Exact or proven-max C-string length. Locals only for pointer variables
- * (file-scope pointers can be asm-clobbered / reassigned). */
 static int bos_cstr_len_max(IRSymTable *st, const Expr *e, unsigned long long *out) {
     e = bos_skip_cast(e);
     if (bos_cstr_len(e, out)) return 1;
     if (!e || e->kind != EX_VAR || !e->u.var.name) return 0;
     if (bos_is_param(e->u.var.name)) return 0;
-    const IRSlot *slot = NULL;
+    const IRSlot *slot = ((void*)0);
     if (st) {
         for (size_t i = st->len; i > 0; i--)
             if (runtime.strcmp(st->data[i-1].name, e->u.var.name) == 0) {
@@ -3317,12 +3255,9 @@ static int bos_cstr_len_max(IRSymTable *st, const Expr *e, unsigned long long *o
     *out = mx;
     return 1;
 }
-
-/* Exact sprintf output length (excluding NUL) when the format is a known
- * string using only literal text, %% , %s (known C string), and %c. */
 static int bos_sprintf_out_len(const Expr *fmt, const Expr **va, int nva,
                                unsigned long long *out) {
-    const char *s = NULL;
+    const char *s = ((void*)0);
     int n = 0;
     long long off = 0;
     if (!bos_cstr_info(fmt, &s, &n, &off)) return 0;
@@ -3361,12 +3296,6 @@ static int bos_sprintf_out_len(const Expr *fmt, const Expr **va, int nva,
     *out = total;
     return 1;
 }
-
-/* __builtin___sprintf_chk(dst, flag, size, fmt, ...) and
- * __builtin___vsprintf_chk(dst, flag, size, fmt, ap).
- * Fold to sprintf/vsprintf when dest size is unknown (-1) or the
- * formatted output (plus NUL) is proven to fit. vsprintf args live in
- * va_list, so output length is only proven for conversion-free formats. */
 static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
                                               const Expr *e) {
     const char *cn = e->u.call.callee->u.var.name;
@@ -3380,7 +3309,7 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
     if (size_const && size_val == ~(unsigned long long)0)
         fold_plain = 1;
     else if (size_const && e->u.call.args.len >= 4) {
-        const Expr **va = NULL;
+        const Expr **va = ((void*)0);
         int nva = 0;
         if (!is_v) {
             nva = (int)e->u.call.args.len - 4;
@@ -3392,14 +3321,14 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
             fold_plain = 1;
     }
     IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
-    IRValue args[IR_CALL_MAX_ARGS];
+    IRValue args[64];
     int nargs = 0;
     args[nargs++] = dst;
     if (fold_plain) {
         for (int i = 3; i < (int)e->u.call.args.len; i++) {
-            if (nargs >= IR_CALL_MAX_ARGS) {
-                fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
-                exit(1);
+            if (nargs >= 64) {
+                runtime.fprintf(runtime.stderr, "fakecc: too many sprintf_chk arguments\n");
+                runtime.exit(1);
             }
             args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
         }
@@ -3415,18 +3344,14 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
     }
     args[nargs++] = szv;
     for (int i = 3; i < (int)e->u.call.args.len; i++) {
-        if (nargs >= IR_CALL_MAX_ARGS) {
-            fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
-            exit(1);
+        if (nargs >= 64) {
+            runtime.fprintf(runtime.stderr, "fakecc: too many sprintf_chk arguments\n");
+            runtime.exit(1);
         }
         args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
     }
     return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
 }
-
-/* __builtin___stpcpy_chk / __builtin___strcpy_chk (dst, src, size).
- * Fold to stpcpy/strcpy when dest size is unknown (-1) or strlen(src)
- * is proven < size (NUL needs one extra byte). */
 static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
                                              const Expr *e) {
     const char *cn = e->u.call.callee->u.var.name;
@@ -3463,11 +3388,6 @@ static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
     args[2] = szv;
     return bos_emit_named_call(fn, is_stp ? "__stpcpy_chk" : "__strcpy_chk", args, 3, e->loc);
 }
-
-/* __builtin___strcat_chk(dst, src, size).
- * Fold to strcat when dest size is unknown (-1), the source is a known
- * empty string (GCC treats strcat(d,"") as a no-op), or both string
- * lengths are known and strlen(dst)+strlen(src) < size. */
 static IRValue lower_fortify_strcat_chk_call(IRFunction *fn, IRSymTable *st,
                                              const Expr *e) {
     const Expr *size_e = e->u.call.args.data[2];
@@ -3507,11 +3427,6 @@ static IRValue lower_fortify_strcat_chk_call(IRFunction *fn, IRSymTable *st,
     args[2] = szv;
     return bos_emit_named_call(fn, "__strcat_chk", args, 3, e->loc);
 }
-
-/* __builtin___strncat_chk(dst, src, n, size).
- * Fold to strncat when dest size is unknown (-1), n is 0, or src is empty.
- * If strlen(src) <= n, GCC rewrites to strcat_chk. Otherwise keep
- * __strncat_chk unless dest+src lengths are proven to fit. */
 static IRValue lower_fortify_strncat_chk_call(IRFunction *fn, IRSymTable *st,
                                               const Expr *e) {
     const Expr *size_e = e->u.call.args.data[3];
@@ -3577,8 +3492,6 @@ static IRValue lower_fortify_strncat_chk_call(IRFunction *fn, IRSymTable *st,
     args[3] = szv;
     return bos_emit_named_call(fn, "__strncat_chk", args, 4, e->loc);
 }
-
-
 static void emit_zero_bytes(IRFunction *fn, IRValue base, int total, SourceLoc loc) {
     int off = 0;
     while (off + 8 <= total) {
@@ -4792,10 +4705,7 @@ IRValue pr;
             return v;
         }
         if (runtime.strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
-            float f = 3.40282346638528859812e+38F;
-            int64_t bits = 0;
-            memcpy(&bits, &f, sizeof(f));
-            return emit_float_const(fn, 4, bits, e->loc);
+            return emit_float_const(fn, 4, 0x7f7fffff, e->loc);
         }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
@@ -5020,11 +4930,11 @@ IRValue pr;
                 runtime.strcmp(cn, "__builtin_cimagf") == 0 || runtime.strcmp(cn, "__builtin_cimag") == 0 ||
                 runtime.strcmp(cn, "__builtin_cimagl") == 0 ||
                 runtime.strcmp(cn, "cimagf") == 0 || runtime.strcmp(cn, "cimag") == 0 || runtime.strcmp(cn, "cimagl") == 0) {
-                int imag = runtime.strstr(cn, "cimag") != 0;
+                int imag = runtime.strstr(cn, "cimag") != ((void*)0);
                 Type cty = e->u.call.args.data[0]->type;
                 int total_sz = type_size(cty);
                 int elem_sz = total_sz / 2;
-                int is_unsigned = (cty.tag && runtime.strstr(cty.tag, "unsigned") != 0);
+                int is_unsigned = (cty.tag && runtime.strstr(cty.tag, "unsigned") != ((void*)0));
                 int is_float = (cty.tag && (runtime.strstr(cty.tag, "float") || runtime.strstr(cty.tag, "double") ||
                                             runtime.strstr(cty.tag, "ldouble")));
                 IRValue op_addr = lower_expr(fn, st, e->u.call.args.data[0]);
@@ -7193,7 +7103,6 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             if (s->u.value) lower_expr(fn, st, s->u.value);
             emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
         } else if (!s->u.value) {
-            /* GNU C `return;` in a non-void function: typed zero. */
             int dw = fn->ret_width, du = fn->ret_is_unsigned;
             if (fn->ret_is_struct) {
                 if (fn->ret_reg_n > 0) {
@@ -7584,7 +7493,10 @@ static int fold_const_float(const Expr *e, long double *out) {
         return 1;
     }
     if (e->kind == EX_VAR && runtime.strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
-        *out = 3.40282346638528859812e+38L;
+        unsigned u = 0x7f7fffffu;
+        float f;
+        runtime.memcpy(&f, &u, 4);
+        *out = (long double)f;
         return 1;
     }
     if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
@@ -7797,10 +7709,6 @@ static int expr_has_address_constant(const Expr *e) {
         return expr_has_address_constant(e->u.deref.operand);
     return 0;
 }
-
-/* C99 6.6p9: an integer constant cast to pointer type is an address constant.
- * `&((T *)0x4000)->m` is that address plus a member offset, stored as an
- * absolute pointer value (no reloc). */
 static int eval_abs_addr_const(const Expr *e, unsigned long long *out) {
     if (!e) return 0;
     if (e->kind == EX_CAST)
@@ -7893,7 +7801,6 @@ static int eval_abs_addr_const(const Expr *e, unsigned long long *out) {
     }
     return 0;
 }
-
 static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out_offset) {
     if (!e) return 0;
     if (e->kind == EX_CAST) {
@@ -8056,7 +7963,6 @@ static int eval_strlit_byte_offset(const Expr *e, const char **bytes, int *len, 
     }
     return 0;
 }
-
 static int fold_global_ptrdiff(const Expr *e, long long *out) {
     if (!e || e->kind != EX_BINOP || e->u.bin.op != BOP_SUB) return 0;
     const Expr *l = e->u.bin.l;
@@ -8171,8 +8077,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                     elem_idx = e->u.init_list.desig_index[i];
                     cur_idx = elem_idx + 1;
                 }
+                int off = elem_idx * esz;
+                if (esz <= 0 || off < 0 || off >= sz) continue;
+                int nsz = esz;
+                if (off + nsz > sz) nsz = sz - off;
                 pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
-                          bytes + elem_idx * esz, esz, ctx, loc, g);
+                          bytes + off, nsz, ctx, loc, g);
             }
             break;
         }
@@ -8231,6 +8141,10 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                         else if (el->kind == EX_INIT_LIST)
                             msz = el->u.init_list.num_elements * type_size(*sm->type.elem_type);
                     }
+                    if (sm->offset < 0 || sm->offset >= sz) continue;
+                    if (msz < 0) msz = 0;
+                    if (sm->offset + msz > sz) msz = sz - sm->offset;
+                    if (msz <= 0) continue;
                     pack_init(ir, &sm->type, e->u.init_list.elements[i],
                               bytes + sm->offset,
                               msz, ctx, loc, g);
@@ -8518,9 +8432,6 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         }
         return;
     }
-    /* Copy only when the initializer is itself an aggregate (rq()-style
-     * struct rvalues).  Sema gap-fills designated / empty `{}` with int 0;
-     * memcpy from that would load NULL. */
     if ((ty->kind == TY_STRUCT || ty->is_vector || ty->kind == TY_ARRAY)
         && (e->type.kind == TY_STRUCT || e->type.is_vector
             || e->type.kind == TY_ARRAY)) {

@@ -790,6 +790,8 @@ struct TranslationUnit {
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
+void ir_disable_builtin(const char *name);
+int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
 enum Reg {
     REG_RAX = 0,

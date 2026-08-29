@@ -942,6 +942,8 @@ struct TranslationUnit {
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
+void ir_disable_builtin(const char *name);
+int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 void lex(const char *source, const char *filename, TokenArray *out);

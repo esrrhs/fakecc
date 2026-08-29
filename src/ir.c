@@ -4351,10 +4351,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return v;
         }
         if (strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
-            float f = 3.40282346638528859812e+38F;
-            int64_t bits = 0;
-            memcpy(&bits, &f, sizeof(f));
-            return emit_float_const(fn, 4, bits, e->loc);
+            /* 0x7f7fffff — IEEE-754 binary32 FLT_MAX.  Integer bits, not a
+             * C float literal: fakecc's own float immediates are not yet a
+             * bootstrap fixed point. */
+            return emit_float_const(fn, 4, 0x7f7fffff, e->loc);
         }
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
         if (!entry) {
@@ -7466,7 +7466,10 @@ static int fold_const_float(const Expr *e, long double *out) {
         return 1;
     }
     if (e->kind == EX_VAR && strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
-        *out = 3.40282346638528859812e+38L;
+        unsigned u = 0x7f7fffffu;
+        float f;
+        memcpy(&f, &u, 4);
+        *out = (long double)f;
         return 1;
     }
     if (e->kind == EX_CALL && e->u.call.callee && e->u.call.callee->kind == EX_VAR) {
@@ -8076,8 +8079,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                     elem_idx = e->u.init_list.desig_index[i];
                     cur_idx = elem_idx + 1;
                 }
+                int off = elem_idx * esz;
+                if (esz <= 0 || off < 0 || off >= sz) continue;
+                int nsz = esz;
+                if (off + nsz > sz) nsz = sz - off;
                 pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
-                          bytes + elem_idx * esz, esz, ctx, loc, g);
+                          bytes + off, nsz, ctx, loc, g);
             }
             break;
         }
@@ -8136,6 +8143,14 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                         else if (el->kind == EX_INIT_LIST)
                             msz = el->u.init_list.num_elements * type_size(*sm->type.elem_type);
                     }
+                    /* Flexible array members may carry excess initializers
+                     * (gcc.c-torture 20030305-1).  Do not write past the
+                     * allocated object — C99 forbids FAM init, GCC errors;
+                     * FakeCC ignores the excess so compile tests don't ICE. */
+                    if (sm->offset < 0 || sm->offset >= sz) continue;
+                    if (msz < 0) msz = 0;
+                    if (sm->offset + msz > sz) msz = sz - sm->offset;
+                    if (msz <= 0) continue;
                     pack_init(ir, &sm->type, e->u.init_list.elements[i],
                               bytes + sm->offset,
                               msz, ctx, loc, g);

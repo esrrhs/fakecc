@@ -1902,6 +1902,39 @@ void param_array_free(ParamArray *a) {
     runtime.free(a->data);
     a->data = ((void*)0); a->len = 0; a->cap = 0;
 }
+static int sizeof_operand_needs_sema(const Expr *op) {
+    if (!op) return 0;
+    switch (op->kind) {
+    case EX_VAR:
+    case EX_DEREF:
+    case EX_INDEX:
+    case EX_MEMBER:
+    case EX_ADDR:
+    case EX_CALL:
+    case EX_ASSIGN:
+    case EX_COMPOUND_ASSIGN:
+    case EX_INC_DEC:
+    case EX_STMT_EXPR:
+        return 1;
+    case EX_UNARY:
+        return sizeof_operand_needs_sema(op->u.un.operand);
+    case EX_BINOP:
+        return sizeof_operand_needs_sema(op->u.bin.l)
+            || sizeof_operand_needs_sema(op->u.bin.r);
+    case EX_TERNARY:
+        return sizeof_operand_needs_sema(op->u.tern.then)
+            || sizeof_operand_needs_sema(op->u.tern.else_);
+    case EX_COMMA:
+        return sizeof_operand_needs_sema(op->u.comma.rhs);
+    case EX_CAST:
+        return 0;
+    default:
+        return 0;
+    }
+}
+static int fold_sizeof_types_ready(void) {
+    return get_sema_tu() != ((void*)0) || get_ir_tu() != ((void*)0);
+}
 int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi) {
     if (!e) return 0;
     if (e->kind == EX_INT_LIT) {
@@ -1964,41 +1997,6 @@ unsigned long long rhi;
         }
     }
     return 0;
-}
-const TranslationUnit *get_sema_tu(void);
-const TranslationUnit *get_ir_tu(void);
-static int sizeof_operand_needs_sema(const Expr *op) {
-    if (!op) return 0;
-    switch (op->kind) {
-    case EX_VAR:
-    case EX_DEREF:
-    case EX_INDEX:
-    case EX_MEMBER:
-    case EX_ADDR:
-    case EX_CALL:
-    case EX_ASSIGN:
-    case EX_COMPOUND_ASSIGN:
-    case EX_INC_DEC:
-    case EX_STMT_EXPR:
-        return 1;
-    case EX_UNARY:
-        return sizeof_operand_needs_sema(op->u.un.operand);
-    case EX_BINOP:
-        return sizeof_operand_needs_sema(op->u.bin.l)
-            || sizeof_operand_needs_sema(op->u.bin.r);
-    case EX_TERNARY:
-        return sizeof_operand_needs_sema(op->u.tern.then)
-            || sizeof_operand_needs_sema(op->u.tern.else_);
-    case EX_COMMA:
-        return sizeof_operand_needs_sema(op->u.comma.rhs);
-    case EX_CAST:
-        return 0;
-    default:
-        return 0;
-    }
-}
-static int fold_sizeof_types_ready(void) {
-    return get_sema_tu() != ((void*)0) || get_ir_tu() != ((void*)0);
 }
 int fold_const_int(const Expr *e, long long *out) {
     if (!e) return 0;
