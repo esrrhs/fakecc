@@ -1277,7 +1277,12 @@ static Type check_expr_inner(Expr *e) {
         /* Direct call: callee is `EX_VAR` naming a known function. */
         if (e->u.call.callee->kind == EX_VAR) {
             const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
-            const FunSig *sig = ftab_lookup(e->u.call.callee->u.var.name);
+            /* If a local variable (including a function pointer parameter) has
+             * this name, it shadows any same-named function — do NOT fall
+             * through to the function-table lookup.  GCC accepts
+             * `void f(int(*f)()) { f(); }` (parameter `f` wins). */
+            int have_local = (local_fn_sym != NULL);
+            const FunSig *sig = have_local ? NULL : ftab_lookup(e->u.call.callee->u.var.name);
             if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC) {
                 const Type *fty = &local_fn_sym->type;
                 type_free(&callee_ty);
@@ -1722,6 +1727,17 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
         return 1;
     }
     if (e->kind == EX_VAR) return 1;
+    /* A member access on a global struct variable: `s.f` decays (if an array
+     * member) to &s.f[0], a link-time constant.  The parser leaves e->type as
+     * the default int, so we can't check the member's declared type here —
+     * but any member access on a file-scope object is a constant address. */
+    if (e->kind == EX_MEMBER && e->u.member.obj && e->u.member.obj->kind == EX_VAR) {
+        if (!e->u.member.obj->u.var.pkg) {
+            /* Unqualified name — check if it's a known global */
+            if (symtable_find(globals, e->u.member.obj->u.var.name))
+                return 1;
+        }
+    }
     /* Address of a file-scope object: `&g`, `&g.member`, `&g[i]`, `&(*ptr).member`, etc. */
     if (e->kind == EX_ADDR) {
         const Expr *sub = e->u.addr.operand;
