@@ -2643,11 +2643,28 @@ static Expr *parse_designator_chain(Parser *p, SourceLoc loc) {
     } else if (peek(p)->kind == TK_LBRACKET) {
         advance(p);
         const Token *ix = peek(p);
-        if (ix->kind != TK_INT_LITERAL)
+        if (ix->kind == TK_INT_LITERAL) {
+            idx = int_literal_value(ix->text);
+            advance(p);
+        } else if (ix->kind == TK_IDENT) {
+            /* GCC allows enum constants and other integer constant
+             * expressions in designators: [e0] = ...  Look up the enum
+             * constant; if not found, fall through to error. */
+            const EnumConstant *ec =
+                enum_registry_find_constant(&p->tu->enums, ix->text);
+            if (ec) {
+                idx = ec->value;
+                advance(p);
+            } else {
+                die_at(ix->loc.file, ix->loc.line, ix->loc.col,
+                       "expected integer constant in designator but got '%s'",
+                       ix->text);
+            }
+        } else {
             die_at(ix->loc.file, ix->loc.line, ix->loc.col,
-                   "expected integer constant in designator but got '%s'", ix->text);
-        idx = int_literal_value(ix->text);
-        advance(p);
+                   "expected integer constant in designator but got '%s'",
+                   ix->text);
+        }
         expect_kind(p, TK_RBRACKET, "']'");
         kind = 0;
         if (peek(p)->kind == TK_DOT || peek(p)->kind == TK_LBRACKET) chained = 1;
@@ -2706,20 +2723,37 @@ static Expr *parse_init_list(Parser *p) {
             /* [index] = expr or [start ... end] = expr */
             advance(p);
             const Token *ix = peek(p);
-            if (ix->kind != TK_INT_LITERAL)
+            if (ix->kind == TK_INT_LITERAL) {
+                idx = int_literal_value(ix->text);
+                advance(p);
+            } else if (ix->kind == TK_IDENT) {
+                const EnumConstant *ec =
+                    enum_registry_find_constant(&p->tu->enums, ix->text);
+                if (ec) { idx = ec->value; advance(p); }
+                else die_at(ix->loc.file, ix->loc.line, ix->loc.col,
+                       "expected integer constant in designator but got '%s'",
+                       ix->text);
+            } else {
                 die_at(ix->loc.file, ix->loc.line, ix->loc.col,
                        "expected integer constant in designator but got '%s'",
                        ix->text);
-            idx = int_literal_value(ix->text);
-            advance(p);
+            }
             if (peek(p)->kind == TK_ELLIPSIS) {
                 advance(p);
                 const Token *eix = peek(p);
-                if (eix->kind != TK_INT_LITERAL)
+                if (eix->kind == TK_INT_LITERAL) {
+                    end_idx = int_literal_value(eix->text);
+                    advance(p);
+                } else if (eix->kind == TK_IDENT) {
+                    const EnumConstant *ec =
+                        enum_registry_find_constant(&p->tu->enums, eix->text);
+                    if (ec) { end_idx = ec->value; advance(p); }
+                    else die_at(eix->loc.file, eix->loc.line, eix->loc.col,
+                           "expected integer constant after '...' in designator");
+                } else {
                     die_at(eix->loc.file, eix->loc.line, eix->loc.col,
                            "expected integer constant after '...' in designator");
-                end_idx = int_literal_value(eix->text);
-                advance(p);
+                }
             }
             expect_kind(p, TK_RBRACKET, "']'");
             kind = 0;
@@ -3185,10 +3219,11 @@ static Stmt parse_stmt(Parser *p) {
                                    &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {
                 advance(p);
-                /* `extern` may not have an initializer. */
+                /* GCC allows `extern int x = 0;` — it acts as a definition
+                 * (not just a declaration) when an initializer is present.
+                 * Treat it as a regular definition (clear the extern flag). */
                 if (storage_class == 2) {
-                    die_at(s.loc.file, s.loc.line, s.loc.col,
-                           "cannot initialize an 'extern' variable");
+                    storage_class = 0;
                 }
                 if (peek(p)->kind == TK_LBRACE) {
                     s.u.decl.init = parse_init_list(p);
@@ -3712,6 +3747,15 @@ static Stmt parse_typedef_stmt(Parser *p) {
         Type ty = parse_declarator(p, type_clone(base), &decl_name);
         const Token *name = peek(p);
         if (!decl_name) {
+            /* GCC allows `typedef <type> ;` with no declarator — an
+             * anonymous typedef that defines an unnamed type.  It is
+             * useless (the type has no name) but appears in system headers
+             * (e.g. `typedef union { struct X { ... } __data; };`).  Accept
+             * and discard it. */
+            if (name->kind == TK_SEMICOLON) {
+                type_free(&ty);
+                break;
+            }
             if (name->kind != TK_IDENT) {
                 die_at(name->loc.file, name->loc.line, name->loc.col,
                        "expected typedef name but got '%s'", name->text);
@@ -4018,8 +4062,54 @@ static FunctionDecl parse_function_decl(Parser *p) {
             extra_fn.no_instrument = fn.no_instrument;
             if (peek(p)->kind == TK_LPAREN) {
                 advance(p);
-                while (peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) advance(p);
-                if (peek(p)->kind == TK_RPAREN) advance(p);
+                /* Parse the parameter list properly so the extra declarator
+                 * gets its real parameters (not 0).  Reuse the same parsing
+                 * as the primary function declarator above. */
+                if (peek(p)->kind == TK_KW_VOID
+                    && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+                    advance(p); /* (void) — empty prototyped */
+                } else if (peek(p)->kind != TK_RPAREN
+                           && is_type_start(p, p->pos)) {
+                    for (;;) {
+                        if (!is_type_start(p, p->pos)) break;
+                        char *pn2 = NULL;
+                        Type pt2 = parse_type(p, &pn2);
+                        if (!pn2) pn2 = xstrdup("");
+                        if (pt2.kind == TY_ARRAY && pt2.elem_type) {
+                            Type p2 = type_make_ptr(*pt2.elem_type);
+                            p2.vla_dim = pt2.vla_dim;
+                            pt2.vla_dim = NULL;
+                            type_free(&pt2);
+                            pt2 = p2;
+                        }
+                        param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
+                        free(pn2);
+                        if (peek(p)->kind == TK_COMMA) {
+                            advance(p);
+                            if (peek(p)->kind == TK_ELLIPSIS) {
+                                advance(p); extra_fn.is_variadic = 1; break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                } else if (peek(p)->kind == TK_ELLIPSIS) {
+                    advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
+                } else if (peek(p)->kind != TK_RPAREN) {
+                    extra_fn.is_unprototyped = 1;
+                    for (;;) {
+                        const Token *id = peek(p);
+                        if (id->kind != TK_IDENT) break;
+                        if (nkr >= 16) break;
+                        kr_names[nkr++] = xstrdup(id->text);
+                        advance(p);
+                        if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                        break;
+                    }
+                } else {
+                    extra_fn.is_unprototyped = 1;
+                }
+                expect_kind(p, TK_RPAREN, "')'");
             }
             if (p->tu->functions.len >= p->tu->functions.cap) {
                 size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;

@@ -9,6 +9,42 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
+/* Predefined macro → literal conversion                              */
+/* ------------------------------------------------------------------ */
+/* GCC predefined macros (e.g. __INT_MAX__, __CHAR_BIT__) are replaced
+ * by the preprocessor before the compiler proper sees them.  FakeCC has
+ * no separate preprocessor, so we fold them into literal tokens right
+ * here in the lexer — that makes them valid integer-constant-expressions
+ * in every context (case labels, array bounds, enum values, static
+ * initializers, etc.), exactly as GCC intends.  Returns NULL if `text`
+ * is not a recognised predefined macro.  The returned string is a
+ * static constant and must not be freed. */
+static const char *predefined_macro_literal(const char *text, int *out_is_float) {
+    *out_is_float = 0;
+    if (strcmp(text, "__INT_MAX__") == 0) return "2147483647";
+    if (strcmp(text, "__INT_MIN__") == 0) return "-2147483648";
+    if (strcmp(text, "__UINT_MAX__") == 0) return "4294967295u";
+    if (strcmp(text, "__LONG_MAX__") == 0) return "9223372036854775807l";
+    if (strcmp(text, "__LONG_MIN__") == 0) return "-9223372036854775807l";
+    if (strcmp(text, "__ULONG_MAX__") == 0) return "18446744073709551615ul";
+    if (strcmp(text, "__CHAR_BIT__") == 0) return "8";
+    if (strcmp(text, "__SIZEOF_INT__") == 0) return "4";
+    if (strcmp(text, "__SIZEOF_LONG__") == 0) return "8";
+    if (strcmp(text, "__SIZEOF_LONG_LONG__") == 0) return "8";
+    if (strcmp(text, "__SIZEOF_POINTER__") == 0) return "8";
+    if (strcmp(text, "__SIZEOF_FLOAT__") == 0) return "4";
+    if (strcmp(text, "__SIZEOF_DOUBLE__") == 0) return "8";
+    if (strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0) return "16";
+    if (strcmp(text, "__FLT_MAX__") == 0) { *out_is_float = 1; return "3.40282347e+38f"; }
+    if (strcmp(text, "__DBL_MAX__") == 0) { *out_is_float = 1; return "1.7976931348623157e+308"; }
+    if (strcmp(text, "__FLT_MIN__") == 0) { *out_is_float = 1; return "1.17549435e-38f"; }
+    if (strcmp(text, "__DBL_MIN__") == 0) { *out_is_float = 1; return "2.2250738585072014e-308"; }
+    if (strcmp(text, "__FLT_EPSILON__") == 0) { *out_is_float = 1; return "1.19209290e-7f"; }
+    if (strcmp(text, "__DBL_EPSILON__") == 0) { *out_is_float = 1; return "2.2204460492503131e-16"; }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /* TokenArray helpers                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -433,10 +469,29 @@ lex_loop_head:
                 col++;
             }
             size_t len = pos - start;
+            /* Check for GCC predefined macros — fold them into literal
+             * tokens so they are valid constant expressions everywhere.
+             * `ident` is not yet null-terminated, so build a temporary
+             * null-terminated copy for the lookup. */
+            char ident_buf[64];
+            memcpy(ident_buf, source + start, len);
+            ident_buf[len] = '\0';
+            int is_float = 0;
+            const char *lit = predefined_macro_literal(ident_buf, &is_float);
+            if (lit) {
+                Token t;
+                t.kind = is_float ? TK_FLOAT_LITERAL : TK_INT_LITERAL;
+                t.text = xstrdup(lit);
+                t.loc.file = filename;
+                t.loc.line = start_line;
+                t.loc.col = start_col;
+                token_array_push(out, t);
+                goto lex_loop_head;
+            }
             Token t;
-            t.kind = keyword_kind(source + start, len);
+            t.kind = keyword_kind(ident_buf, len);
             t.text = malloc(len + 1);
-            memcpy(t.text, source + start, len);
+            memcpy(t.text, ident_buf, len);
             t.text[len] = '\0';
             t.loc.file = filename;
             t.loc.line = start_line;
