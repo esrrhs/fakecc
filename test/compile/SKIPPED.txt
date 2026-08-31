@@ -10,7 +10,7 @@
 # use -std=gnu89 / -fpermissive for the rest). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 322
+# Total: 353
 #
 
 # GNU nested functions / trampolines (20)
@@ -341,6 +341,72 @@ pr65593.c
 pr71436.c
 pr72802.c
 pr83069.c
+
+# GIMPLE IR (2)
+# Cases that use -fgimple and __GIMPLE() IR syntax. FakeCC does not support GIMPLE.
+
+pr115143-2.c
+pr115143-3.c
+
+# C99: no implicit function declarations (19 more)
+# K&R-style implicit int, unprototyped definitions, or calls before declaration.
+
+20060202-1.c
+20101216-1.c
+900313-1.c
+921206-1.c
+pr17408.c
+pr47428.c
+pr71109.c
+pr81360.c
+921109-1.c
+921203-2.c
+
+# Complex function pointer declarators (3)
+# `void (*(*x)(void))(float)` — nested function pointer return types.
+# `void (* const (funcp)(time_t))` — unusual parenthesized function pointer name.
+# `T*L92(T*),*L15(T*),...` — K&R function declarations with function pointer return types.
+
+pr43635.c
+991213-2.c
+930126-1.c
+
+# Expected-error test (1)
+# va_arg(ap, void) should be rejected. FakeCC compile suite has no expected-error mechanism.
+
+pr48767.c
+
+# Windows-specific (1)
+# __declspec(dllimport/dllexport). Not supported by FakeCC.
+
+dll.c
+
+# asm goto (1)
+# asm goto with outputs. Not supported by FakeCC.
+
+asmgoto-6.c
+
+# __thread (1)
+# Thread-local storage. Not supported by FakeCC.
+
+pr78694.c
+
+# _Complex (2)
+# _Complex arithmetic. Not supported by FakeCC.
+
+991213-1.c
+pr30132.c
+
+# C23 enum with fixed underlying type (7)
+# `enum e : bool { X };` — C23 feature. FakeCC does not support fixed underlying types.
+
+pr111059-7.c
+pr111059-8.c
+pr111059-9.c
+pr111059-10.c
+pr111059-11.c
+pr111059-12.c
+pr111911-2.c
 pr84195.c
 pr86637-2.c
 pr88347.c

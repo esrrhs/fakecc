@@ -1820,7 +1820,7 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 
 /* Forward decl. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
-static int fold_const_float(const Expr *e, long double *out);
+static int fold_const_float(const Expr *e, long double *out, const IRModule *ir);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceLoc loc);
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
@@ -5393,7 +5393,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 strcmp(name, "__builtin_nan") == 0 || strcmp(name, "__builtin_nanf") == 0 ||
                 strcmp(name, "__builtin_nanl") == 0) {
                 long double ld = 0;
-                fold_const_float(e, &ld);
+                fold_const_float(e, &ld, NULL);
                 int w = e->type.width ? e->type.width : 8;
                 if (w == 16) return emit_ld_const(fn, ld, e->loc);
                 int64_t bits = 0;
@@ -5965,7 +5965,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (sf != df) {
             long double fv;
-            if (sf && !df && fold_const_float(e->u.cast.operand, &fv)) {
+            if (sf && !df && fold_const_float(e->u.cast.operand, &fv, NULL)) {
                 /* GCC folds out-of-range float→int constants to the destination
                  * extrema (INT_MAX / LLONG_MAX / ULLONG_MAX, etc.), not to the
                  * x86 integer-indefinite 0x8000… used at runtime. */
@@ -7468,7 +7468,7 @@ static long double int_lit_to_ld(const Expr *e) {
     return (long double)lo + (long double)hi * scale;
 }
 
-static int fold_const_float(const Expr *e, long double *out) {
+static int fold_const_float(const Expr *e, long double *out, const IRModule *ir) {
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT) {
         *out = strtold(e->u.float_text, NULL);
@@ -7517,11 +7517,23 @@ static int fold_const_float(const Expr *e, long double *out) {
             return 1;
         }
     }
+    /* In a global-init context, resolve EX_VAR to the referenced global's
+     * already-packed bytes (e.g. `const double f = 1 + (double)a;` where `a`
+     * is a const char).  `ir` is NULL when called from non-init sites. */
+    if (e->kind == EX_VAR && ir) {
+        const IRGlobal *src = find_packed_global(ir, e->u.var.name);
+        if (src && src->init_bytes && src->size > 0) {
+            long long iv = 0;
+            memcpy(&iv, src->init_bytes, src->size < 8 ? src->size : 8);
+            *out = (long double)iv;
+            return 1;
+        }
+    }
     if (e->kind == EX_CAST)
-        return fold_const_float(e->u.cast.operand, out);
+        return fold_const_float(e->u.cast.operand, out, ir);
     if (e->kind == EX_UNARY
         && (e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS)) {
-        if (!fold_const_float(e->u.un.operand, out)) return 0;
+        if (!fold_const_float(e->u.un.operand, out, ir)) return 0;
         if (e->u.un.op == UOP_NEG) *out = -*out;
         return 1;
     }
@@ -7531,7 +7543,7 @@ static int fold_const_float(const Expr *e, long double *out) {
     }
     if (e->kind == EX_BINOP) {
         long double l = 0, r = 0;
-        if (!fold_const_float(e->u.bin.l, &l) || !fold_const_float(e->u.bin.r, &r))
+        if (!fold_const_float(e->u.bin.l, &l, ir) || !fold_const_float(e->u.bin.r, &r, ir))
             return 0;
         switch (e->u.bin.op) {
         case BOP_ADD: *out = l + r; return 1;
@@ -7548,6 +7560,11 @@ static int fold_const_float(const Expr *e, long double *out) {
     }
     return 0;
 }
+
+/* Variant of fold_const_float for global initializer packing: also resolves
+ * EX_VAR to the referenced global's initializer when that global has already
+ * been packed (e.g. `const double f = 1 + (double)a;` where `a` is a const
+ * char with a known value).  `ir` may be NULL (falls back to fold_const_float). */
 
 static int fold_const_complex(const Expr *e, long double *r_out, long double *i_out) {
     if (!e) return 0;
@@ -7817,6 +7834,15 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
         *out_offset = 0;
         return 1;
     }
+    /* An array member like `s.f` (where f is `char[3]`) decays to &s.f[0]
+     * — treat it as an address-of-member for offset purposes. */
+    if (e->kind == EX_MEMBER && e->type.kind == TY_ARRAY) {
+        Expr fake_addr;
+        memset(&fake_addr, 0, sizeof(fake_addr));
+        fake_addr.kind = EX_ADDR;
+        fake_addr.u.addr.operand = (Expr *)e;
+        return eval_global_addr_offset(&fake_addr, out_sym, out_offset);
+    }
     if (e->kind == EX_STR) {
         char name[32];
         snprintf(name, sizeof name, "__str.%d", g_str_counter++);
@@ -7974,17 +8000,51 @@ static int eval_strlit_byte_offset(const Expr *e, const char **bytes, int *len, 
 /* Difference of two address constants into the same object: `&a.f - &a` is
  * an integer constant (C address-constant arithmetic / GCC offsetof-style). */
 static int fold_global_ptrdiff(const Expr *e, long long *out) {
-    if (!e || e->kind != EX_BINOP || e->u.bin.op != BOP_SUB) return 0;
-    const Expr *l = e->u.bin.l;
-    const Expr *r = e->u.bin.r;
+    if (!e) return 0;
+    /* Strip leading casts: `(int)(ptrdiff) + N` → `(ptrdiff) + N` */
+    const Expr *ce = e;
+    while (ce && ce->kind == EX_CAST) ce = ce->u.cast.operand;
+    if (!ce) return 0;
+    /* Handle `(ptrdiff) + N` / `(ptrdiff) - N` by peeling the integer offset. */
+    long long offset = 0;
+    const Expr *bin = ce;
+    while (bin && bin->kind == EX_BINOP &&
+           (bin->u.bin.op == BOP_ADD || bin->u.bin.op == BOP_SUB)) {
+        long long rv = 0;
+        if (bin->u.bin.r->kind == EX_INT_LIT) {
+            rv = (long long)bin->u.bin.r->u.int_val;
+        } else if (bin->u.bin.r->kind == EX_CAST
+                   && bin->u.bin.r->u.cast.operand->kind == EX_INT_LIT) {
+            rv = (long long)bin->u.bin.r->u.cast.operand->u.int_val;
+        } else {
+            break;
+        }
+        offset += (bin->u.bin.op == BOP_ADD) ? rv : -rv;
+        bin = bin->u.bin.l;
+        /* Strip casts between peel steps */
+        while (bin && bin->kind == EX_CAST) bin = bin->u.cast.operand;
+    }
+    if (!bin || bin->kind != EX_BINOP || bin->u.bin.op != BOP_SUB) {
+        /* No pointer-subtraction core — but if the whole thing folded to a
+         * pure integer expression (e.g. `0 + 0U`), report that. */
+        if (!bin) return 0;
+        return 0;
+    }
+    const Expr *l = bin->u.bin.l;
+    const Expr *r = bin->u.bin.r;
     const Expr *lp = l;
     const Expr *rp = r;
     while (lp && lp->kind == EX_CAST) lp = lp->u.cast.operand;
     while (rp && rp->kind == EX_CAST) rp = rp->u.cast.operand;
     if (!lp || !rp) return 0;
-    if (lp->kind != EX_ADDR && lp->kind != EX_LABEL_ADDR && lp->kind != EX_STR)
+    /* EX_MEMBER is also accepted — eval_global_addr_offset handles it
+     * (array members decay to &member[0], struct members are link-time
+     * constants). */
+    if (lp->kind != EX_ADDR && lp->kind != EX_LABEL_ADDR && lp->kind != EX_STR
+        && lp->kind != EX_MEMBER)
         return 0;
-    if (rp->kind != EX_ADDR && rp->kind != EX_LABEL_ADDR && rp->kind != EX_STR)
+    if (rp->kind != EX_ADDR && rp->kind != EX_LABEL_ADDR && rp->kind != EX_STR
+        && rp->kind != EX_MEMBER)
         return 0;
     {
         const char *b1 = NULL, *b2 = NULL;
@@ -8009,7 +8069,7 @@ static int fold_global_ptrdiff(const Expr *e, long long *out) {
     if (l->type.kind == TY_PTR && l->type.pointee)
         esz = type_size(*l->type.pointee);
     if (esz < 1) esz = 1;
-    *out = (long long)(o1 - o2) / esz;
+    *out = (long long)(o1 - o2) / esz + offset;
     return 1;
 }
 
@@ -8198,7 +8258,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         /* Float slots must be packed as the target's binary format, not as the
          * integer the literal would fold to. */
         long double fv;
-        if (fold_const_float(e, &fv)) {
+        if (fold_const_float(e, &fv, ir)) {
             if (ty->width == 16) {
                 memcpy(bytes, &fv, 10);
             } else if (ty->width == 4) {
