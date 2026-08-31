@@ -8178,6 +8178,61 @@ static int fold_global_ptrdiff(const Expr *e, long long *out) {
     return 1;
 }
 
+/* If `e` is an address-constant expression whose root object is a file-scope
+ * compound literal (e.g. `&((T){...})`, `&((T){...}).m`, `&((int[]){})[i]`),
+ * return that literal and set *out_off to the byte offset of the referenced
+ * sub-object within it.  Otherwise return NULL.  Used to detect global
+ * initializers that need a compound literal materialized as a static global. */
+static const Expr *find_compound_literal_base(const Expr *e, long long *out_off)
+{
+    if (!e) return NULL;
+    long long off = 0;
+    const Expr *cur = e;
+    for (;;) {
+        while (cur && cur->kind == EX_CAST) cur = cur->u.cast.operand;
+        if (!cur) return NULL;
+        switch (cur->kind) {
+        case EX_ADDR:
+            cur = cur->u.addr.operand;
+            continue;
+        case EX_MEMBER: {
+            const Expr *obj = cur->u.member.obj;
+            while (obj && obj->kind == EX_CAST) obj = obj->u.cast.operand;
+            if (!obj) return NULL;
+            Type mty = (obj->kind == EX_COMPOUND_LITERAL)
+                ? obj->u.compound.target_type
+                : get_global_obj_struct_type(obj);
+            if (mty.kind != TY_STRUCT || !mty.tag) return NULL;
+            const StructDef *sd = struct_registry_find_c(g_ir_structs, mty.tag);
+            if (!sd) return NULL;
+            long long mm = 0;
+            if (!struct_lookup_member(g_ir_structs, sd, cur->u.member.name, &mm))
+                return NULL;
+            off += mm;
+            cur = cur->u.member.obj;
+            continue;
+        }
+        case EX_INDEX: {
+            const Expr *arr = cur->u.idx.array;
+            while (arr && arr->kind == EX_CAST) arr = arr->u.cast.operand;
+            if (!arr) return NULL;
+            long long idx = 0;
+            if (!fold_const_int(cur->u.idx.index, &idx)) return NULL;
+            int esz = get_global_elem_size(arr);
+            if (esz < 1) esz = 1;
+            off += idx * esz;
+            cur = cur->u.idx.array;
+            continue;
+        }
+        case EX_COMPOUND_LITERAL:
+            *out_off = off;
+            return cur;
+        default:
+            return NULL;
+        }
+    }
+}
+
 /* Materialize a file-scope compound literal `(T){...}` as an anonymous static
  * global so that its address becomes a link-time constant — matching GCC's
  * treatment of compound literals at file scope (they get static storage
@@ -8516,48 +8571,24 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             return;
         }
     }
-    /* Address of a file-scope compound literal: `&((T){...})` or
-     * `&((T){...}).member`.  GCC gives such literals static storage, so their
-     * address is a link-time constant.  Materialize the literal as an anonymous
-     * global and add a pointer fixup referencing it (+ member offset). */
+    /* Address of a file-scope compound literal: `&((T){...})`,
+     * `&((T){...}).member`, `&((int[]){...})[i]`, or any address-constant built
+     * from one.  GCC gives such literals static storage, so their address is a
+     * link-time constant.  Materialize the literal as an anonymous global and
+     * add a pointer fixup referencing it (+ member/element offset). */
     if (g && (ty->kind == TY_PTR
               || (ty->kind == TY_INT && ty->width == 8
                   && expr_has_address_constant(e)))) {
-        const Expr *ce = e;
-        while (ce && ce->kind == EX_CAST) ce = ce->u.cast.operand;
-        if (ce && ce->kind == EX_ADDR) {
-            const Expr *sub = ce->u.addr.operand;
-            while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
-            /* Walk down through nested EX_MEMBERs to find the compound literal. */
-            const Expr *cur = sub;
-            long long moff = 0;
-            int ok = 1;
-            while (cur && cur->kind == EX_MEMBER) {
-                const Expr *obj = cur->u.member.obj;
-                const Expr *objp = obj;
-                while (objp && objp->kind == EX_CAST) objp = objp->u.cast.operand;
-                if (!objp) { ok = 0; break; }
-                Type mty = (objp->kind == EX_COMPOUND_LITERAL)
-                    ? objp->u.compound.target_type
-                    : get_global_obj_struct_type(obj);
-                if (mty.kind != TY_STRUCT || !mty.tag) { ok = 0; break; }
-                const StructDef *sd = struct_registry_find_c(g_ir_structs, mty.tag);
-                if (!sd) { ok = 0; break; }
-                long long mm = 0;
-                if (!struct_lookup_member(g_ir_structs, sd,
-                                          cur->u.member.name, &mm)) { ok = 0; break; }
-                moff += mm;
-                cur = obj;
-            }
-            if (ok && cur && cur->kind == EX_COMPOUND_LITERAL) {
-                char *sym = materialize_compound_literal(ir, cur);
-                if (sym) {
-                    add_global_fixup(g, (int)(bytes - g->init_bytes),
-                                     sym, (int)moff);
-                    memset(bytes, 0, sz);
-                    free(sym);
-                    return;
-                }
+        long long clit_off = 0;
+        const Expr *clit = find_compound_literal_base(e, &clit_off);
+        if (clit) {
+            char *sym = materialize_compound_literal(ir, clit);
+            if (sym) {
+                add_global_fixup(g, (int)(bytes - g->init_bytes),
+                                 sym, (int)clit_off);
+                memset(bytes, 0, sz);
+                free(sym);
+                return;
             }
         }
     }
