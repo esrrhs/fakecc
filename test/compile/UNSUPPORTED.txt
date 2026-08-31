@@ -1,13 +1,15 @@
 # GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
-# Total: 5 (out of 2003 original GCC compile cases)
+# Total: 4 (out of 2003 original GCC compile cases)
 #
 # Harvest-skipped kinds (nested functions, GNU VLS, DFP, va_arg_pack,
 # preprocessor) live in SKIPPED.txt.
 #
-
-# === Crashes / Segfaults (2) ===
+# === Crashes / Segfaults (1) ===
 20011109-1.c
-pr53748.c
+# pr53748.c used to crash (ICE) on `x ? (V){...} : (V){...}`: the conditional
+# expression's usual_arith_conv returned a shallow type copy that shared the
+# vector's elem_type with the branch inputs, which were then freed — double-free
+# when the expr was destroyed. Fixed by having usual_arith_conv return a clone.
 
 # === Timeouts (2) ===
 20151204.c
@@ -17,5 +19,7 @@ pr65680.c
 # labels-3.c uses GCC's label-as-values extension (`&&label`, `goto *p`), which
 # FakeCC does not support. The other three rejects (init-1.c, pr64067.c,
 # pr87647.c) were file-scope compound literals; they now compile after FakeCC
-# learned to materialize `&((T){...})` as an anonymous static global.
+# learned to materialize `&((T){...})` as an anonymous static global. pr53748.c
+# was a vector-typed conditional crash; it now compiles after usual_arith_conv
+# learned to return an owned type clone.
 labels-3.c
