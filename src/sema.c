@@ -1738,12 +1738,25 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
                 return 1;
         }
     }
-    /* Address of a file-scope object: `&g`, `&g.member`, `&g[i]`, `&(*ptr).member`, etc. */
+    /* Address of a file-scope object: `&g`, `&g.member`, `&g[i]`, `&(*ptr).member`, etc.
+     * Also `&((T){...})` — GCC gives file-scope compound literals static storage, so
+     * their address is a link-time constant.  The `.member` form (`&((T){...}).f`)
+     * is handled below by the EX_MEMBER-on-compound-literal case. */
     if (e->kind == EX_ADDR) {
         const Expr *sub = e->u.addr.operand;
         while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
         if (sub && (sub->kind == EX_VAR || sub->kind == EX_MEMBER || sub->kind == EX_INDEX || sub->kind == EX_DEREF))
             return 1;
+        if (sub && sub->kind == EX_COMPOUND_LITERAL)
+            return is_const_init(sub->u.compound.init, globals);
+    }
+    /* Member access on a file-scope compound literal: `&((T){...}).f`.  The address
+     * is a link-time constant (static storage + member offset). */
+    if (e->kind == EX_MEMBER) {
+        const Expr *obj = e->u.member.obj;
+        while (obj && obj->kind == EX_CAST) obj = obj->u.cast.operand;
+        if (obj && obj->kind == EX_COMPOUND_LITERAL)
+            return is_const_init(obj->u.compound.init, globals);
     }
     return 0;
 }

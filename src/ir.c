@@ -7399,42 +7399,75 @@ static const IRGlobal *find_packed_global(const IRModule *m, const char *name) {
     return NULL;
 }
 
-/* Rodata globals created while packing an initializer (`const char *p = "x"`
- * needs the bytes to live somewhere before the slot can point at them).  They
- * are queued instead of pushed immediately: pushing reallocs the module's
- * global array, which would dangle the `IRGlobal *g` that pack_init is
- * attaching fixups to. */
+/* Globals created while packing an initializer are queued instead of pushed
+ * immediately: pushing reallocs the module's global array, which would dangle
+ * the `IRGlobal *g` that pack_init is attaching fixups to.  Two kinds:
+ *   - readonly: string-literal bytes (`const char *p = "x"`);
+ *   - writable: file-scope compound literals (`&((T){...})`), which GCC gives
+ *     static storage so their address is a link-time constant. */
 typedef struct {
     char *name;
     char *bytes;
     int   size;
+    int   is_readonly;
     SourceLoc loc;
-} PendingRodata;
-static PendingRodata *g_pending_rodata = NULL;
-static int g_pending_rodata_len = 0;
-static int g_pending_rodata_cap = 0;
+    IRGlobal *tmp_g; /* scratch global for nested fixups, transferred on flush */
+} PendingGlobal;
+static PendingGlobal *g_pending_globals = NULL;
+static int g_pending_globals_len = 0;
+static int g_pending_globals_cap = 0;
 
-static void queue_rodata(const char *name, char *bytes, int size, SourceLoc loc) {
-    if (g_pending_rodata_len >= g_pending_rodata_cap) {
-        int nc = g_pending_rodata_cap ? g_pending_rodata_cap * 2 : 4;
-        g_pending_rodata = realloc(g_pending_rodata, nc * sizeof(PendingRodata));
-        if (!g_pending_rodata) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-        g_pending_rodata_cap = nc;
+static void queue_pending_global(const char *name, char *bytes, int size,
+                                 int is_readonly, SourceLoc loc) {
+    if (g_pending_globals_len >= g_pending_globals_cap) {
+        int nc = g_pending_globals_cap ? g_pending_globals_cap * 2 : 4;
+        g_pending_globals = realloc(g_pending_globals, nc * sizeof(PendingGlobal));
+        if (!g_pending_globals) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        g_pending_globals_cap = nc;
     }
-    g_pending_rodata[g_pending_rodata_len].name = xstrdup(name);
-    g_pending_rodata[g_pending_rodata_len].bytes = bytes;
-    g_pending_rodata[g_pending_rodata_len].size = size;
-    g_pending_rodata[g_pending_rodata_len].loc = loc;
-    g_pending_rodata_len++;
+    g_pending_globals[g_pending_globals_len].name = xstrdup(name);
+    g_pending_globals[g_pending_globals_len].bytes = bytes;
+    g_pending_globals[g_pending_globals_len].size = size;
+    g_pending_globals[g_pending_globals_len].is_readonly = is_readonly;
+    g_pending_globals[g_pending_globals_len].loc = loc;
+    g_pending_globals[g_pending_globals_len].tmp_g = NULL;
+    g_pending_globals_len++;
 }
 
-static void flush_rodata(IRModule *m) {
-    for (int i = 0; i < g_pending_rodata_len; i++) {
-        ir_module_push_global(m, g_pending_rodata[i].name, g_pending_rodata[i].size,
-                              g_pending_rodata[i].bytes, 1, 1, g_pending_rodata[i].loc);
-        free(g_pending_rodata[i].name);
+static void flush_pending_globals(IRModule *m) {
+    for (int i = 0; i < g_pending_globals_len; i++) {
+        IRGlobal *g = ir_module_push_global(m, g_pending_globals[i].name,
+                                             g_pending_globals[i].size,
+                                             g_pending_globals[i].bytes,
+                                             g_pending_globals[i].is_readonly,
+                                             1, g_pending_globals[i].loc);
+        /* Transfer any fixups collected while packing the literal's own init.
+         * tmp->init_bytes aliases the buffer the real global now owns, so it
+         * must not be freed here. */
+        if (g_pending_globals[i].tmp_g) {
+            IRGlobal *t = g_pending_globals[i].tmp_g;
+            if (t->num_fixups > 0) {
+                g->fixups = t->fixups;
+                g->num_fixups = t->num_fixups;
+                g->cap_fixups = t->cap_fixups;
+                t->fixups = NULL;
+                t->num_fixups = 0;
+                t->cap_fixups = 0;
+            }
+            free(t->name);
+            free(t);
+        }
+        free(g_pending_globals[i].name);
     }
-    g_pending_rodata_len = 0;
+    g_pending_globals_len = 0;
+}
+
+/* Legacy wrappers kept for the call sites below. */
+static void queue_rodata(const char *name, char *bytes, int size, SourceLoc loc) {
+    queue_pending_global(name, bytes, size, 1, loc);
+}
+static void flush_rodata(IRModule *m) {
+    flush_pending_globals(m);
 }
 
 /* Evaluate a constant expression as a long double, so a float-typed global can
@@ -8145,6 +8178,98 @@ static int fold_global_ptrdiff(const Expr *e, long long *out) {
     return 1;
 }
 
+/* If `e` is an address-constant expression whose root object is a file-scope
+ * compound literal (e.g. `&((T){...})`, `&((T){...}).m`, `&((int[]){})[i]`),
+ * return that literal and set *out_off to the byte offset of the referenced
+ * sub-object within it.  Otherwise return NULL.  Used to detect global
+ * initializers that need a compound literal materialized as a static global. */
+static const Expr *find_compound_literal_base(const Expr *e, long long *out_off)
+{
+    if (!e) return NULL;
+    long long off = 0;
+    const Expr *cur = e;
+    for (;;) {
+        while (cur && cur->kind == EX_CAST) cur = cur->u.cast.operand;
+        if (!cur) return NULL;
+        switch (cur->kind) {
+        case EX_ADDR:
+            cur = cur->u.addr.operand;
+            continue;
+        case EX_MEMBER: {
+            const Expr *obj = cur->u.member.obj;
+            while (obj && obj->kind == EX_CAST) obj = obj->u.cast.operand;
+            if (!obj) return NULL;
+            Type mty = (obj->kind == EX_COMPOUND_LITERAL)
+                ? obj->u.compound.target_type
+                : get_global_obj_struct_type(obj);
+            if (mty.kind != TY_STRUCT || !mty.tag) return NULL;
+            const StructDef *sd = struct_registry_find_c(g_ir_structs, mty.tag);
+            if (!sd) return NULL;
+            long long mm = 0;
+            if (!struct_lookup_member(g_ir_structs, sd, cur->u.member.name, &mm))
+                return NULL;
+            off += mm;
+            cur = cur->u.member.obj;
+            continue;
+        }
+        case EX_INDEX: {
+            const Expr *arr = cur->u.idx.array;
+            while (arr && arr->kind == EX_CAST) arr = arr->u.cast.operand;
+            if (!arr) return NULL;
+            long long idx = 0;
+            if (!fold_const_int(cur->u.idx.index, &idx)) return NULL;
+            int esz = get_global_elem_size(arr);
+            if (esz < 1) esz = 1;
+            off += idx * esz;
+            cur = cur->u.idx.array;
+            continue;
+        }
+        case EX_COMPOUND_LITERAL:
+            *out_off = off;
+            return cur;
+        default:
+            return NULL;
+        }
+    }
+}
+
+/* Materialize a file-scope compound literal `(T){...}` as an anonymous static
+ * global so that its address becomes a link-time constant — matching GCC's
+ * treatment of compound literals at file scope (they get static storage
+ * duration).  The global is named `__clit.N`.  Returns the symbol name to be
+ * referenced by a fixup (caller takes ownership), or NULL if `e` is not an
+ * EX_COMPOUND_LITERAL. */
+static char *materialize_compound_literal(const IRModule *ir, const Expr *e)
+{
+    if (!e || e->kind != EX_COMPOUND_LITERAL)
+        return NULL;
+    Type target = e->u.compound.target_type;
+    int sz = type_size(target);
+    if (sz <= 0) sz = 8;
+    char *bytes = calloc(sz, 1);
+    if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    char name[32];
+    snprintf(name, sizeof name, "__clit.%d", g_str_counter++);
+    /* Pack the literal's own initializer into `bytes` FIRST (nested pack_init
+     * may queue its own rodata and attach pointer fixups).  A scratch global
+     * collects those fixups; they are transferred to the real global on flush.
+     * We cannot push immediately: that reallocs the module's global array and
+     * would dangle the fixup the caller is about to attach. */
+    IRGlobal *tmp = calloc(1, sizeof(IRGlobal));
+    if (!tmp) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    tmp->name = xstrdup(name);
+    tmp->init_bytes = bytes;
+    tmp->size = sz;
+    if (e->u.compound.init)
+        pack_init(ir, &target, e->u.compound.init, bytes, sz,
+                  name, e->loc, tmp);
+    queue_pending_global(name, bytes, sz, 0, e->loc);
+    /* The most-recently-queued entry is our literal; attach the scratch global
+     * so flush_pending_globals can transfer its fixups. */
+    g_pending_globals[g_pending_globals_len - 1].tmp_g = tmp;
+    return xstrdup(name);
+}
+
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g) {
@@ -8444,6 +8569,27 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             int n = sz < src->size ? sz : src->size;
             memcpy(bytes, src->init_bytes, n);
             return;
+        }
+    }
+    /* Address of a file-scope compound literal: `&((T){...})`,
+     * `&((T){...}).member`, `&((int[]){...})[i]`, or any address-constant built
+     * from one.  GCC gives such literals static storage, so their address is a
+     * link-time constant.  Materialize the literal as an anonymous global and
+     * add a pointer fixup referencing it (+ member/element offset). */
+    if (g && (ty->kind == TY_PTR
+              || (ty->kind == TY_INT && ty->width == 8
+                  && expr_has_address_constant(e)))) {
+        long long clit_off = 0;
+        const Expr *clit = find_compound_literal_base(e, &clit_off);
+        if (clit) {
+            char *sym = materialize_compound_literal(ir, clit);
+            if (sym) {
+                add_global_fixup(g, (int)(bytes - g->init_bytes),
+                                 sym, (int)clit_off);
+                memset(bytes, 0, sz);
+                free(sym);
+                return;
+            }
         }
     }
     /* Address of a global object (with optional member/array offset/arithmetic).
