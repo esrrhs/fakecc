@@ -502,7 +502,11 @@ static Type usual_arith_conv(Type a, Type b) {
     } else {
         res.bitfield_width = 0;
     }
-    return res;
+    /* Return an owned copy: res is a shallow copy of one of the inputs and
+     * shares any heap sub-types (e.g. a vector's elem_type). Callers free their
+     * inputs immediately after, so the result must own its own sub-types or it
+     * dangles.  For plain int/float scalars type_clone is effectively a no-op. */
+    return type_clone(res);
 }
 
 /* Set an expr's type (frees previous). Convenience wrapper. */
