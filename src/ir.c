@@ -7997,6 +7997,70 @@ static int eval_strlit_byte_offset(const Expr *e, const char **bytes, int *len, 
     return 0;
 }
 
+/* Fold the classic offsetof idiom `&((T *)0)->member` to the byte offset of
+ * `member` within T.  GCC treats this as a compile-time integer constant.
+ * Returns 1 and sets *out to the offset if e matches (casts allowed). */
+static int fold_null_offsetof(const Expr *e, long long *out) {
+    if (!e) return 0;
+    const Expr *ce = e;
+    while (ce && ce->kind == EX_CAST) ce = ce->u.cast.operand;
+    if (!ce || ce->kind != EX_ADDR) return 0;
+    const Expr *sub = ce->u.addr.operand;
+    while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
+    if (!sub || sub->kind != EX_MEMBER) return 0;
+    /* The member chain's root must be a null pointer constant: `(T *)0`.
+     * The parser desugars `p->m` to `(*p).m`, so the root is
+     * EX_DEREF(EX_CAST(T*, 0)).  For nested access `a.b.c`, the obj chain is
+     * EX_MEMBER("c", obj=EX_MEMBER("b", obj=EX_MEMBER("a", obj=root))).  Walk
+     * down to the root, collecting member names outer-to-inner; verify the
+     * root is `(T*)0`; then walk the chain inner-to-out accumulating the
+     * byte offset. */
+    const Expr *root = sub;
+    int depth = 0;
+    while (root && root->kind == EX_MEMBER) {
+        root = root->u.member.obj;
+        depth++;
+    }
+    if (!root) return 0;
+    /* root should be EX_DEREF(EX_CAST) or EX_CAST of int lit 0 */
+    const Expr *obj = root;
+    while (obj && (obj->kind == EX_CAST || obj->kind == EX_DEREF)) {
+        if (obj->kind == EX_CAST) obj = obj->u.cast.operand;
+        else obj = obj->u.deref.operand;
+    }
+    if (!obj || obj->kind != EX_INT_LIT || obj->u.int_val != 0) return 0;
+    /* Recover the root struct type from the null-pointer expression. */
+    Type cur_ty = get_global_obj_struct_type(root);
+    if (cur_ty.kind != TY_STRUCT || !cur_ty.tag) return 0;
+    /* Collect member names from outermost to innermost, then walk the chain
+     * from innermost (closest to root) outward, accumulating offsets. */
+    const char *names[16];
+    int n = 0;
+    const Expr *cur = sub;
+    while (cur && cur->kind == EX_MEMBER && n < 16) {
+        names[n] = cur->u.member.name;
+        n++;
+        cur = cur->u.member.obj;
+    }
+    if (n != depth) return 0;
+    long long total = 0;
+    for (int i = n - 1; i >= 0; i--) {
+        const StructDef *sd = struct_registry_find_c(g_ir_structs, cur_ty.tag);
+        if (!sd) return 0;
+        long long moff = 0;
+        const StructMember *sm =
+            struct_lookup_member(g_ir_structs, sd, names[i], &moff);
+        if (!sm) return 0;
+        total += moff;
+        if (i > 0) {
+            cur_ty = sm->type;
+            if (cur_ty.kind != TY_STRUCT || !cur_ty.tag) return 0;
+        }
+    }
+    *out = total;
+    return 1;
+}
+
 /* Difference of two address constants into the same object: `&a.f - &a` is
  * an integer constant (C address-constant arithmetic / GCC offsetof-style). */
 static int fold_global_ptrdiff(const Expr *e, long long *out) {
@@ -8025,8 +8089,16 @@ static int fold_global_ptrdiff(const Expr *e, long long *out) {
         while (bin && bin->kind == EX_CAST) bin = bin->u.cast.operand;
     }
     if (!bin || bin->kind != EX_BINOP || bin->u.bin.op != BOP_SUB) {
-        /* No pointer-subtraction core — but if the whole thing folded to a
-         * pure integer expression (e.g. `0 + 0U`), report that. */
+        /* No pointer-subtraction core.  The whole expression may be a bare
+         * offsetof idiom like `&((T *)0)->member` (possibly ± integer), which
+         * is itself a compile-time constant. */
+        if (bin) {
+            long long moff = 0;
+            if (fold_null_offsetof(bin, &moff)) {
+                *out = moff + offset;
+                return 1;
+            }
+        }
         if (!bin) return 0;
         return 0;
     }
@@ -8297,6 +8369,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     int have_int = (e->kind == EX_INT_LIT)
                 || fold_const_int(e, &_fold_v)
                 || (ty->kind == TY_INT && fold_global_ptrdiff(e, &_fold_v))
+                || (ty->kind == TY_INT && fold_null_offsetof(e, &_fold_v))
                 || (ty->kind == TY_INT && fold_const_complex_rel(e, &_fold_v));
     if (have_int) {
         unsigned long long vlo, vhi = 0;
