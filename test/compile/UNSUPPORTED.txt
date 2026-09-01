@@ -1,5 +1,5 @@
 # GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
-# Total: 3 (out of 2003 original GCC compile cases)
+# Total: 1 (out of 2003 original GCC compile cases)
 #
 # Harvest-skipped kinds (nested functions, GNU VLS, DFP, va_arg_pack,
 # preprocessor) live in SKIPPED.txt.
@@ -13,9 +13,17 @@
 # vector's elem_type with the branch inputs, which were then freed — double-free
 # when the expr was destroyed. Fixed by having usual_arith_conv return a clone.
 
-# === Timeouts (2) ===
-20151204.c
-pr65680.c
+# === Timeouts (0) ===
+# 20151204.c used to hang at -O1: scalar_constfold / scalar_peephole called
+# const_value() per operand, each scanning the whole instruction array — O(n²)
+# on the ~180K instructions from `char[32753] = "A"`.  Fixed by building a
+# const-value cache (value id -> immediate) once per pass.  A second hang in
+# regalloc's MCS ordering was O(n²) over ~143K virtual registers; fixed with a
+# bucket queue so each pick is O(1) amortized.
+# pr65680.c used to hang on `struct S a[10^18][3]`: the IR unconditionally
+# calloc'd init_bytes for every global, then codegen emitted it all into .data
+# (tens of GB).  Fixed by passing init_bytes == NULL to codegen when the
+# global has no initializer, so it goes in .bss (SHT_NOBITS).
 
 # === Compile Rejects (1) ===
 # labels-3.c uses GCC's label-as-values extension (`&&label`, `goto *p`), which

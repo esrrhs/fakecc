@@ -537,21 +537,49 @@ static int *compute_mcs_order(const InterfGraph *g) {
     memset(weight, 0, n * sizeof(int));
     memset(picked, 0, n * sizeof(int));
 
+    /* Bucket queue: weights are in [0, n), so we keep an array of buckets
+     * indexed by weight.  Each bucket is a linked list of vertices that
+     * have EVER had that weight.  A vertex may appear in multiple buckets
+     * (stale entries) when its weight increases; we skip those at pick
+     * time by checking weight[v] == current_bucket.  This makes "pick max
+     * weight" O(1) amortized — overall O(n + m) instead of O(n²), which
+     * matters for large functions (e.g. 20151204.c's 32KB array init has
+     * ~143K virtual registers, where O(n²) would be ~2×10^10 ops). */
+    int *head = xmalloc((n + 1) * sizeof(int));  /* head[w] = first vertex, -1 if empty */
+    int *lnk  = xmalloc(n * sizeof(int));          /* lnk[v] = next vertex in bucket */
+    int *in_bucket = xmalloc(n * sizeof(int));     /* in_bucket[v] = weight bucket v is linked from */
+    for (int w = 0; w <= n; w++) head[w] = -1;
+    for (int v = 0; v < n; v++) { lnk[v] = -1; in_bucket[v] = -1; }
+    /* Initially all vertices have weight 0 → put them in bucket 0. */
+    for (int v = 0; v < n; v++) {
+        lnk[v] = head[0];
+        head[0] = v;
+        in_bucket[v] = 0;
+    }
+    int max_w = 0;  /* current highest non-empty bucket */
+
     /* Build order from last-coloring to first-coloring.
      * pos goes n-1 → 0, storing vertices to be colored last → first. */
     for (int pos = n - 1; pos >= 0; pos--) {
-        int best = -1, best_w = -1;
-        for (int v = 0; v < n; v++) {
-            if (!picked[v] && weight[v] > best_w) {
-                best = v;
-                best_w = weight[v];
+        /* Find the highest bucket with a valid (unpicked, current-weight) vertex. */
+        int best;
+        for (;;) {
+            while (max_w > 0 && head[max_w] < 0) max_w--;
+            if (head[max_w] < 0) {
+                /* Should not happen, but fall back to linear scan. */
+                best = -1;
+                for (int v = 0; v < n; v++) {
+                    if (!picked[v]) { best = v; break; }
+                }
+                break;
             }
-        }
-        /* If all remaining vertices have weight 0, pick any unpicked one. */
-        if (best < 0) {
-            for (int v = 0; v < n; v++) {
-                if (!picked[v]) { best = v; break; }
+            best = head[max_w];
+            head[max_w] = lnk[best];  /* remove from front of bucket */
+            /* Valid if unpicked AND still in this bucket (weight matches). */
+            if (!picked[best] && in_bucket[best] == max_w) {
+                break;
             }
+            /* Otherwise stale — continue scanning. */
         }
 
         picked[best] = 1;
@@ -563,10 +591,22 @@ static int *compute_mcs_order(const InterfGraph *g) {
         /* Increment weights of unpicked neighbors. */
         for (size_t j = 0; j < g->nodes[best].degree; j++) {
             int w = g->nodes[best].neighbors[j];
-            if (!picked[w]) weight[w]++;
+            if (!picked[w]) {
+                int nw = ++weight[w];
+                /* Add w to front of bucket[nw].  We do NOT remove it from
+                 * its old bucket — that entry becomes stale and is skipped
+                 * at pick time via the in_bucket check. */
+                lnk[w] = head[nw];
+                head[nw] = w;
+                in_bucket[w] = nw;
+                if (nw > max_w) max_w = nw;
+            }
         }
     }
 
+    free(head);
+    free(lnk);
+    free(in_bucket);
     free(weight);
     free(picked);
     return order;

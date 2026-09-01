@@ -9,9 +9,56 @@
 /* Internal helpers                                                     */
 /* ================================================================== */
 
+/* Const-value cache: an array indexed by value id that caches the integer
+ * immediate of each IR_CONST instruction.  Building it is O(n); each lookup
+ * is then O(1).  Without it, scalar_constfold / scalar_peephole call
+ * const_value() per operand and scan the whole instruction array each time —
+ * O(n²), which hangs on functions with many instructions (e.g. large array
+ * initialization like 20151204.c's char[32753]). */
+typedef struct {
+    int64_t *imm;   /* imm[v] = immediate of the CONST defining v, if any */
+    char    *valid;  /* valid[v] = 1 if v is a known integer CONST */
+    int      cap;    /* allocated size of imm[] / valid[] */
+} ConstCache;
+
+static void const_cache_build(ConstCache *c, const IRFunction *fn) {
+    int cap = fn->next_value_id;
+    if (cap <= 0) cap = 1;
+    c->imm   = xmalloc(cap * sizeof(int64_t));
+    c->valid = xmalloc(cap * sizeof(char));
+    memset(c->valid, 0, cap * sizeof(char));
+    c->cap = cap;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *inst = &fn->insts.data[i];
+        if (inst->op == IR_CONST && !inst->is_float && inst->dst >= 0
+            && inst->dst < cap) {
+            c->imm[inst->dst]   = inst->imm;
+            c->valid[inst->dst] = 1;
+        }
+    }
+}
+
+static inline void const_cache_lookup(const ConstCache *c, IRValue v, int *found, int64_t *imm) {
+    if (v >= 0 && v < c->cap && c->valid[v]) {
+        *found = 1;
+        *imm = c->imm[v];
+    } else {
+        *found = 0;
+        *imm = 0;
+    }
+}
+
+static void const_cache_free(ConstCache *c) {
+    free(c->imm);
+    free(c->valid);
+    c->imm = NULL; c->valid = NULL; c->cap = 0;
+}
+
 /* Look up the immediate of a CONST defining `v`, or 0 if not a known const.
  * Float CONSTs keep their payload in float_imm, not imm, so they must not be
- * reported as integer constants. */
+ * reported as integer constants.  Kept for callers that don't use the cache
+ * (e.g. one-off lookups outside hot loops). */
+__attribute__((unused))
 static int64_t const_value(const IRInstArray *insts, IRValue v, int *found) {
     *found = 0;
     if (v < 0) return 0;
@@ -56,6 +103,8 @@ static int has_side_effect(IROpcode op) {
 
 int scalar_constfold(IRFunction *fn) {
     int changed = 0;
+    ConstCache cc;
+    const_cache_build(&cc, fn);
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         switch (inst->op) {
@@ -70,8 +119,9 @@ int scalar_constfold(IRFunction *fn) {
         case IR_SHL:
         case IR_SHR: {
             int lf, rf;
-            int64_t lv = const_value(&fn->insts, inst->a, &lf);
-            int64_t rv = const_value(&fn->insts, inst->b, &rf);
+            int64_t lv, rv;
+            const_cache_lookup(&cc, inst->a, &lf, &lv);
+            const_cache_lookup(&cc, inst->b, &rf, &rv);
             if (!lf || !rf) break;
             if (inst->is_float) break;
             int w = inst->width ? inst->width : 4;
@@ -118,7 +168,8 @@ int scalar_constfold(IRFunction *fn) {
         case IR_NEG:
         case IR_BNOT: {
             int f;
-            int64_t v = const_value(&fn->insts, inst->a, &f);
+            int64_t v;
+            const_cache_lookup(&cc, inst->a, &f, &v);
             if (!f) break;
             if (inst->is_float) break;
             int w = inst->width ? inst->width : 4;
@@ -136,6 +187,7 @@ int scalar_constfold(IRFunction *fn) {
             break;
         }
     }
+    const_cache_free(&cc);
     return changed;
 }
 
@@ -203,14 +255,17 @@ int scalar_dce(IRFunction *fn) {
 
 int scalar_peephole(IRFunction *fn) {
     int changed = 0;
+    ConstCache cc;
+    const_cache_build(&cc, fn);
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_ADD || inst->op == IR_SUB || inst->op == IR_MUL ||
             inst->op == IR_BAND || inst->op == IR_BOR || inst->op == IR_BXOR) {
             if (inst->is_float) continue;
             int lf, rf;
-            int64_t lv = const_value(&fn->insts, inst->a, &lf);
-            int64_t rv = const_value(&fn->insts, inst->b, &rf);
+            int64_t lv, rv;
+            const_cache_lookup(&cc, inst->a, &lf, &lv);
+            const_cache_lookup(&cc, inst->b, &rf, &rv);
             if (inst->a >= 0 && inst->a == inst->b) {
                 if (inst->op == IR_SUB || inst->op == IR_BXOR) {
                     inst->op = IR_CONST; inst->a = -1; inst->b = -1; inst->imm = 0; changed = 1; continue;
@@ -239,6 +294,7 @@ int scalar_peephole(IRFunction *fn) {
             }
         }
     }
+    const_cache_free(&cc);
     return changed;
 }
 
