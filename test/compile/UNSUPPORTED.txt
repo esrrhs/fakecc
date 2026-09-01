@@ -1,11 +1,13 @@
 # GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
-# Total: 4 (out of 2003 original GCC compile cases)
+# Total: 3 (out of 2003 original GCC compile cases)
 #
 # Harvest-skipped kinds (nested functions, GNU VLS, DFP, va_arg_pack,
 # preprocessor) live in SKIPPED.txt.
 #
-# === Crashes / Segfaults (1) ===
-20011109-1.c
+# === Crashes / Segfaults (0) ===
+# 20011109-1.c used to crash on function pointer declarations with different
+# return types; fixed by not freeing types in symtable_free/symtable_leave_scope
+# (the AST expressions own their types, the symtable only borrows them).
 # pr53748.c used to crash (ICE) on `x ? (V){...} : (V){...}`: the conditional
 # expression's usual_arith_conv returned a shallow type copy that shared the
 # vector's elem_type with the branch inputs, which were then freed — double-free

@@ -380,7 +380,14 @@ static void symtable_init(SymTable *st) { st->data = NULL; st->len = 0; st->cap 
 static void symtable_free(SymTable *st) {
     for (size_t i = 0; i < st->len; i++) {
         free(st->data[i].name);
-        type_free(&st->data[i].type);
+        /* Do NOT free the type here. The symtable's types are clones made
+         * via type_clone(), but their sub-type pointers (pointee, func_ret,
+         * func_params) may be shared with the AST expressions that reference
+         * those symbols. Freeing here would double-free when the AST is
+         * later destroyed by tu_free(). The types are owned by the AST
+         * expressions that reference them; the symtable only borrows them
+         * during sema. */
+        /* type_free(&st->data[i].type); */
     }
     free(st->data);
     st->data = NULL; st->len = 0; st->cap = 0;
@@ -405,7 +412,14 @@ static void symtable_leave_scope(SymTable *st, size_t mark) {
     while (st->len > mark) {
         st->len--;
         free(st->data[st->len].name);
-        type_free(&st->data[st->len].type);
+        /* Do NOT free the type here. The symtable's types are clones made
+         * via type_clone(), but their sub-type pointers (pointee, func_ret,
+         * func_params) may be shared with the AST expressions that reference
+         * those symbols. Freeing here would double-free when the AST is
+         * later destroyed by tu_free(). The types are owned by the AST
+         * expressions that reference them; the symtable only borrows them
+         * during sema. */
+        /* type_free(&st->data[st->len].type); */
     }
 }
 
