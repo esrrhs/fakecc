@@ -7,9 +7,25 @@
 # the GCC 16.2.0 c-torture ports (same as local).
 set -euo pipefail
 
+# Retry helper: run a command up to N times with a sleep between attempts.
+# Launchpad PPA endpoints occasionally return HTTP 504, causing add-apt-repository
+# to fail.  Retrying handles these transient network errors.
+retry() {
+    local attempts=5 delay=30 n=1
+    until "$@"; do
+        if [ $n -ge $attempts ]; then
+            echo "Command failed after $n attempts: $*" >&2
+            return 1
+        fi
+        echo "Attempt $n/$attempts failed for: $*  (retrying in ${delay}s)" >&2
+        sleep $delay
+        n=$((n + 1))
+    done
+}
+
 sudo apt-get update
 sudo apt-get install -y software-properties-common
-sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+retry sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
 sudo apt-get update
 sudo apt-get install -y gcc-16 g++-16
 
