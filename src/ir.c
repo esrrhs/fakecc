@@ -8855,9 +8855,17 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             }
         }
         if (sz <= 0) sz = 8;
-        char *bytes = calloc(sz, 1);
-        if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         int is_static = (s->u.decl.storage_class == 1);
+        /* Only allocate init bytes when there is an initializer.  An
+         * uninitialized global must have init_bytes == NULL so codegen
+         * places it in .bss (SHT_NOBITS); calloc'ing `sz` here for a huge
+         * array (e.g. pr65680.c's a[10^18][3]) would allocate tens of GB
+         * and then emit it all into .data. */
+        char *bytes = NULL;
+        if (s->u.decl.init) {
+            bytes = calloc(sz, 1);
+            if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        }
         /* Create the global FIRST so pack_init can attach pointer fixups to it
          * when an array/struct member decays to a pointer (e.g. `.regs = ARR`). */
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
