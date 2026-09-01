@@ -394,6 +394,13 @@ static int expr_has_label_addr(const Expr *e) {
             if (expr_has_label_addr(e->u.init_list.elements[i])) return 1;
     }
     if (e->kind == EX_CAST) return expr_has_label_addr(e->u.cast.operand);
+    /* Label-address arithmetic (`&&l2 - &&l1`) and negation (`-&&l1`) must also
+     * be detected so static locals with such initializers are dynamically
+     * initialized on the stack rather than packed as compile-time constants. */
+    if (e->kind == EX_BINOP)
+        return expr_has_label_addr(e->u.bin.l) || expr_has_label_addr(e->u.bin.r);
+    if (e->kind == EX_UNARY)
+        return expr_has_label_addr(e->u.un.operand);
     return 0;
 }
 

@@ -1,5 +1,5 @@
 # GCC c-torture compile-only tests currently unsupported / non-OK in FakeCC
-# Total: 1 (out of 2003 original GCC compile cases)
+# Total: 0 (out of 2003 original GCC compile cases)
 #
 # Harvest-skipped kinds (nested functions, GNU VLS, DFP, va_arg_pack,
 # preprocessor) live in SKIPPED.txt.
@@ -25,11 +25,17 @@
 # (tens of GB).  Fixed by passing init_bytes == NULL to codegen when the
 # global has no initializer, so it goes in .bss (SHT_NOBITS).
 
-# === Compile Rejects (1) ===
-# labels-3.c uses GCC's label-as-values extension (`&&label`, `goto *p`), which
-# FakeCC does not support. The other three rejects (init-1.c, pr64067.c,
-# pr87647.c) were file-scope compound literals; they now compile after FakeCC
-# learned to materialize `&((T){...})` as an anonymous static global. pr53748.c
-# was a vector-typed conditional crash; it now compiles after usual_arith_conv
-# learned to return an owned type clone.
-labels-3.c
+# === Compile Rejects (0) ===
+# labels-3.c used to be the sole remaining reject: its static jump table
+# `static const short ar[] = { &&l1 - &&l1, &&l2 - &&l1 }` is a label-address
+# difference used as a compile-time constant.  The general `&&label` / `goto *p`
+# extension already worked end-to-end, but expr_has_label_addr() did not
+# recurse into EX_BINOP / EX_UNARY, so a static local whose initializer was a
+# label-address *expression* (not a bare `&&label`) was misrouted into the
+# compile-time pack_init() path and rejected.  Fixed by recursing into binop/
+# unary, so such initializers take the dynamic stack-init fallback.  The other
+# three rejects (init-1.c, pr64067.c, pr87647.c) were file-scope compound
+# literals; they now compile after FakeCC learned to materialize `&((T){...})`
+# as an anonymous static global. pr53748.c was a vector-typed conditional
+# crash; it now compiles after usual_arith_conv learned to return an owned
+# type clone.
