@@ -99,6 +99,7 @@ static TokenKind keyword_kind(const char *s, size_t len) {
         if (memcmp(s, "goto", 4) == 0) return TK_KW_GOTO;
         if (memcmp(s, "case", 4) == 0) return TK_KW_CASE;
         if (memcmp(s, "void", 4) == 0) return TK_KW_VOID;
+        if (memcmp(s, "bool", 4) == 0) return TK_KW_BOOL;
         break;
     case 5:
         if (memcmp(s, "while", 5) == 0) return TK_KW_WHILE;

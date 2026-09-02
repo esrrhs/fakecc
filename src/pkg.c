@@ -405,6 +405,9 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         if (ed->tag && strncmp(ed->tag, "__anon_", 7) == 0) continue;
         if (!enum_registry_find(&pkg->enums, ed->tag)) {
             EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
+            ne->has_underlying_type = ed->has_underlying_type;
+            if (ed->has_underlying_type)
+                ne->underlying_type = type_clone(ed->underlying_type);
             for (int c = 0; c < ed->num_constants; c++)
                 enum_def_push_constant(ne, ed->constants[c].name, 1,
                                        ed->constants[c].value, ed->loc);

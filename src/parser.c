@@ -51,6 +51,8 @@ static int is_name_token(TokenKind k) {
  * parse_specifiers, which calls them for anonymous types). */
 static void parse_struct_body(Parser *p, StructDef *sd);
 static void parse_enum_body(Parser *p, EnumDef *ed);
+static Type parse_enum_underlying_type(Parser *p);
+static void parse_enum_underlying_opt(Parser *p, EnumDef *ed);
 static int int_literal_value(const char *text);
 static Type parse_declarator(Parser *p, Type base, char **name_out);
 static FunctionDecl parse_function_decl(Parser *p);
@@ -722,36 +724,37 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
         Type t = type_make_float(16);
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
-    /* enum Tag — treated as int for the type system. */
+    /* enum Tag — treated as int for the type system (or C23 fixed underlying). */
     if (peek(p)->kind == TK_KW_ENUM) {
         advance(p);
-        if (peek(p)->kind == TK_LBRACE) {
-            /* Anonymous enum definition (`typedef enum { ... } Name;`).
-             * Register it under a unique tag so its constants resolve, even
-             * though the type itself is just int. */
-            char tag[64];
-            snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
-            EnumDef *ed = enum_registry_add(&p->tu->enums, tag, peek(p)->loc);
-            parse_enum_body(p, ed);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
-            Type t = type_default_int();
-            t.enum_id = (int)(ed - p->tu->enums.data + 1);
-            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+        const Token *tag = NULL;
+        if (peek(p)->kind == TK_IDENT) {
+            tag = peek(p);
+            advance(p);
         }
-        const Token *tag = peek(p);
-        if (tag->kind != TK_IDENT) {
-            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
-                   "expected enum tag but got '%s'", tag->text);
+        EnumDef *ed = NULL;
+        if (peek(p)->kind == TK_LBRACE || peek(p)->kind == TK_COLON) {
+            char anon_tag[64];
+            const char *reg_tag = tag ? tag->text : NULL;
+            SourceLoc reg_loc = tag ? tag->loc : peek(p)->loc;
+            if (!reg_tag) {
+                snprintf(anon_tag, sizeof(anon_tag), "__anon_%d", p->anon_counter++);
+                reg_tag = anon_tag;
+            }
+            ed = enum_registry_add(&p->tu->enums, reg_tag, reg_loc);
+            parse_enum_underlying_opt(p, ed);
+            if (peek(p)->kind == TK_LBRACE)
+                parse_enum_body(p, ed);
+        } else if (tag) {
+            ed = enum_registry_find(&p->tu->enums, tag->text);
+        } else {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col,
+                   "expected enum tag or '{' but got '%s'", t->text);
         }
-        advance(p);
-        if (peek(p)->kind == TK_LBRACE) {
-            EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, peek(p)->loc);
-            parse_enum_body(p, ed);
-        }
-        EnumDef *ed = enum_registry_find(&p->tu->enums, tag->text);
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
-        Type t = type_default_int();
-        if (ed) t.enum_id = (int)(ed - p->tu->enums.data + 1);
+        Type t = ed ? enum_def_as_type(ed, (int)(ed - p->tu->enums.data + 1))
+                    : type_default_int();
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     /* typedef name — local, pkg.Type, or same-package fallback. */
@@ -1022,6 +1025,60 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
      * their pointee->width is stale.  Re-fetch sd and correct all widths. */
     sd = struct_registry_find(&p->tu->structs, tag);
     if (sd) struct_def_fixup_self_types(sd);
+}
+
+static Type parse_enum_underlying_type(Parser *p) {
+    if (peek(p)->kind == TK_KW_BOOL) {
+        advance(p);
+        return type_make_bool();
+    }
+    int has_type = 0;
+    int is_long = 0;
+    int is_short = 0;
+    int is_char = 0;
+    int is_unsigned = 0;
+    int is_int128 = 0;
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k == TK_KW_SIGNED) { has_type = 1; advance(p); }
+        else if (k == TK_KW_UNSIGNED) { is_unsigned = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_CHAR) { is_char = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_SHORT) { is_short = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_INT) { has_type = 1; advance(p); }
+        else if (k == TK_KW_LONG) { is_long++; has_type = 1; advance(p); }
+        else if (k == TK_IDENT && (strcmp(peek(p)->text, "__int128") == 0
+                                   || strcmp(peek(p)->text, "__int128_t") == 0
+                                   || strcmp(peek(p)->text, "__uint128_t") == 0)) {
+            if (strcmp(peek(p)->text, "__uint128_t") == 0) is_unsigned = 1;
+            is_int128 = 1; has_type = 1; advance(p);
+        }
+        else break;
+    }
+    if (!has_type) {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "expected integer type for enum underlying type but got '%s'",
+               t->text);
+    }
+    int width = 4;
+    if (is_int128) width = 16;
+    else if (is_char) width = 1;
+    else if (is_short) width = 2;
+    else if (is_long >= 1) width = 8;
+    return type_make_int(width, is_unsigned);
+}
+
+static void parse_enum_underlying_opt(Parser *p, EnumDef *ed) {
+    if (peek(p)->kind != TK_COLON) return;
+    advance(p);
+    Type ut = parse_enum_underlying_type(p);
+    if (ut.kind != TY_INT) {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "enum underlying type must be an integer type");
+    }
+    ed->has_underlying_type = 1;
+    ed->underlying_type = ut;
 }
 
 static void parse_enum_body(Parser *p, EnumDef *ed) {
@@ -4287,26 +4344,30 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
             }
         }
 
-        /* Enum definition: `enum TAG { IDENT [= expr], ... };`
+        /* Enum definition: `enum TAG [ : type ] { IDENT [= expr], ... };`
          * Distinguish from `enum TAG var;` global by lookahead — after
-         * `enum TAG` we expect `{` for a definition. */
+         * `enum TAG` we expect `:` or `{` for a definition. */
         if (peek(&p)->kind == TK_KW_ENUM) {
             size_t save = p.pos;
             advance(&p);
             const Token *tag = peek(&p);
-            if (tag->kind == TK_IDENT) advance(&p);
-            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
-                /* Enum definition. */
+            int has_tag = (tag->kind == TK_IDENT);
+            if (has_tag) advance(&p);
+            int is_def = 0;
+            if (peek(&p)->kind == TK_COLON) is_def = 1;
+            if (peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) is_def = 1;
+            if (has_tag && is_def) {
                 if (enum_registry_find(&tu->enums, tag->text)) {
                     die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of enum '%s'", tag->text);
                 }
                 EnumDef *ed = enum_registry_add(&tu->enums, tag->text, tag->loc);
-                parse_enum_body(&p, ed);
+                parse_enum_underlying_opt(&p, ed);
+                if (peek(&p)->kind == TK_LBRACE)
+                    parse_enum_body(&p, ed);
                 expect_kind(&p, TK_SEMICOLON, "';'");
                 continue;
             } else {
-                /* Not a definition-only — reset and fall through to declaration. */
                 p.pos = save;
             }
         }
