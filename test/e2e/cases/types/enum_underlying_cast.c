@@ -1,5 +1,5 @@
 // expect: 1
-// skip_difftest: gcc needs -std=c23 for `enum : bool`; FakeCC accepts bool here only.
+// gcc_flags: -std=gnu23
 package main;
 
 enum Bit : bool { ZERO, ONE };
