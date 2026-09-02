@@ -1118,6 +1118,10 @@ static int expr_has_label_addr(const Expr *e) {
             if (expr_has_label_addr(e->u.init_list.elements[i])) return 1;
     }
     if (e->kind == EX_CAST) return expr_has_label_addr(e->u.cast.operand);
+    if (e->kind == EX_BINOP)
+        return expr_has_label_addr(e->u.bin.l) || expr_has_label_addr(e->u.bin.r);
+    if (e->kind == EX_UNARY)
+        return expr_has_label_addr(e->u.un.operand);
     return 0;
 }
 static int stmt_takes_addr_of(const Stmt *s, const char *name) {
@@ -2413,7 +2417,7 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
     return ((void*)0);
 }
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
-static int fold_const_float(const Expr *e, long double *out);
+static int fold_const_float(const Expr *e, long double *out, const IRModule *ir);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceLoc loc);
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
@@ -3645,8 +3649,12 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     }
     case EX_MEMBER: {
         IRValue base = lower_lvalue_addr(fn, st, e->u.member.obj);
-        const StructDef *sd = struct_registry_find_c(g_ir_structs,
-                                                     e->u.member.obj->type.tag);
+        const char *tag = ((void*)0);
+        Type *ot = &e->u.member.obj->type;
+        if (ot->kind == TY_STRUCT) tag = ot->tag;
+        else if (ot->kind == TY_PTR && ot->pointee && ot->pointee->kind == TY_STRUCT)
+            tag = ot->pointee->tag;
+        const StructDef *sd = tag ? struct_registry_find_c(g_ir_structs, tag) : ((void*)0);
         long long off = 0;
         if (sd)
             struct_lookup_member(g_ir_structs, sd, e->u.member.name, &off);
@@ -5680,7 +5688,7 @@ IRValue hi;
                 runtime.strcmp(name, "__builtin_nan") == 0 || runtime.strcmp(name, "__builtin_nanf") == 0 ||
                 runtime.strcmp(name, "__builtin_nanl") == 0) {
                 long double ld = 0;
-                fold_const_float(e, &ld);
+                fold_const_float(e, &ld, ((void*)0));
                 int w = e->type.width ? e->type.width : 8;
                 if (w == 16) return emit_ld_const(fn, ld, e->loc);
                 int64_t bits = 0;
@@ -6187,7 +6195,7 @@ IRValue hi;
         }
         if (sf != df) {
             long double fv;
-            if (sf && !df && fold_const_float(e->u.cast.operand, &fv)) {
+            if (sf && !df && fold_const_float(e->u.cast.operand, &fv, ((void*)0))) {
                 int bits = dw * 8;
                 if (bits <= 0) bits = 32;
                 if (bits > 64) bits = 64;
@@ -7433,35 +7441,62 @@ static const IRGlobal *find_packed_global(const IRModule *m, const char *name) {
             return &m->globals.data[i];
     return ((void*)0);
 }
-struct PendingRodata {
+struct PendingGlobal {
     char *name;
     char *bytes;
     int size;
+    int is_readonly;
     SourceLoc loc;
-};typedef struct PendingRodata PendingRodata;
-static PendingRodata *g_pending_rodata = ((void*)0);
-static int g_pending_rodata_len = 0;
-static int g_pending_rodata_cap = 0;
-static void queue_rodata(const char *name, char *bytes, int size, SourceLoc loc) {
-    if (g_pending_rodata_len >= g_pending_rodata_cap) {
-        int nc = g_pending_rodata_cap ? g_pending_rodata_cap * 2 : 4;
-        g_pending_rodata = runtime.realloc(g_pending_rodata, nc * sizeof(PendingRodata));
-        if (!g_pending_rodata) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
-        g_pending_rodata_cap = nc;
+    IRGlobal *tmp_g;
+};typedef struct PendingGlobal PendingGlobal;
+static PendingGlobal *g_pending_globals = ((void*)0);
+static int g_pending_globals_len = 0;
+static int g_pending_globals_cap = 0;
+static void queue_pending_global(const char *name, char *bytes, int size,
+                                 int is_readonly, SourceLoc loc) {
+    if (g_pending_globals_len >= g_pending_globals_cap) {
+        int nc = g_pending_globals_cap ? g_pending_globals_cap * 2 : 4;
+        g_pending_globals = runtime.realloc(g_pending_globals, nc * sizeof(PendingGlobal));
+        if (!g_pending_globals) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        g_pending_globals_cap = nc;
     }
-    g_pending_rodata[g_pending_rodata_len].name = xstrdup(name);
-    g_pending_rodata[g_pending_rodata_len].bytes = bytes;
-    g_pending_rodata[g_pending_rodata_len].size = size;
-    g_pending_rodata[g_pending_rodata_len].loc = loc;
-    g_pending_rodata_len++;
+    g_pending_globals[g_pending_globals_len].name = xstrdup(name);
+    g_pending_globals[g_pending_globals_len].bytes = bytes;
+    g_pending_globals[g_pending_globals_len].size = size;
+    g_pending_globals[g_pending_globals_len].is_readonly = is_readonly;
+    g_pending_globals[g_pending_globals_len].loc = loc;
+    g_pending_globals[g_pending_globals_len].tmp_g = ((void*)0);
+    g_pending_globals_len++;
+}
+static void flush_pending_globals(IRModule *m) {
+    for (int i = 0; i < g_pending_globals_len; i++) {
+        IRGlobal *g = ir_module_push_global(m, g_pending_globals[i].name,
+                                             g_pending_globals[i].size,
+                                             g_pending_globals[i].bytes,
+                                             g_pending_globals[i].is_readonly,
+                                             1, g_pending_globals[i].loc);
+        if (g_pending_globals[i].tmp_g) {
+            IRGlobal *t = g_pending_globals[i].tmp_g;
+            if (t->num_fixups > 0) {
+                g->fixups = t->fixups;
+                g->num_fixups = t->num_fixups;
+                g->cap_fixups = t->cap_fixups;
+                t->fixups = ((void*)0);
+                t->num_fixups = 0;
+                t->cap_fixups = 0;
+            }
+            runtime.free(t->name);
+            runtime.free(t);
+        }
+        runtime.free(g_pending_globals[i].name);
+    }
+    g_pending_globals_len = 0;
+}
+static void queue_rodata(const char *name, char *bytes, int size, SourceLoc loc) {
+    queue_pending_global(name, bytes, size, 1, loc);
 }
 static void flush_rodata(IRModule *m) {
-    for (int i = 0; i < g_pending_rodata_len; i++) {
-        ir_module_push_global(m, g_pending_rodata[i].name, g_pending_rodata[i].size,
-                              g_pending_rodata[i].bytes, 1, 1, g_pending_rodata[i].loc);
-        runtime.free(g_pending_rodata[i].name);
-    }
-    g_pending_rodata_len = 0;
+    flush_pending_globals(m);
 }
 static long double ld_two64(void) {
     long double t = 65536.0L;
@@ -7486,7 +7521,7 @@ static long double int_lit_to_ld(const Expr *e) {
     }
     return (long double)lo + (long double)hi * scale;
 }
-static int fold_const_float(const Expr *e, long double *out) {
+static int fold_const_float(const Expr *e, long double *out, const IRModule *ir) {
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT) {
         *out = runtime.strtold(e->u.float_text, ((void*)0));
@@ -7535,11 +7570,20 @@ static int fold_const_float(const Expr *e, long double *out) {
             return 1;
         }
     }
+    if (e->kind == EX_VAR && ir) {
+        const IRGlobal *src = find_packed_global(ir, e->u.var.name);
+        if (src && src->init_bytes && src->size > 0) {
+            long long iv = 0;
+            runtime.memcpy(&iv, src->init_bytes, src->size < 8 ? src->size : 8);
+            *out = (long double)iv;
+            return 1;
+        }
+    }
     if (e->kind == EX_CAST)
-        return fold_const_float(e->u.cast.operand, out);
+        return fold_const_float(e->u.cast.operand, out, ir);
     if (e->kind == EX_UNARY
         && (e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS)) {
-        if (!fold_const_float(e->u.un.operand, out)) return 0;
+        if (!fold_const_float(e->u.un.operand, out, ir)) return 0;
         if (e->u.un.op == UOP_NEG) *out = -*out;
         return 1;
     }
@@ -7549,7 +7593,7 @@ static int fold_const_float(const Expr *e, long double *out) {
     }
     if (e->kind == EX_BINOP) {
         long double l = 0, r = 0;
-        if (!fold_const_float(e->u.bin.l, &l) || !fold_const_float(e->u.bin.r, &r))
+        if (!fold_const_float(e->u.bin.l, &l, ir) || !fold_const_float(e->u.bin.r, &r, ir))
             return 0;
         switch (e->u.bin.op) {
         case BOP_ADD: *out = l + r; return 1;
@@ -7811,6 +7855,13 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
         *out_offset = 0;
         return 1;
     }
+    if (e->kind == EX_MEMBER && e->type.kind == TY_ARRAY) {
+        Expr fake_addr;
+        runtime.memset(&fake_addr, 0, sizeof(fake_addr));
+        fake_addr.kind = EX_ADDR;
+        fake_addr.u.addr.operand = (Expr *)e;
+        return eval_global_addr_offset(&fake_addr, out_sym, out_offset);
+    }
     if (e->kind == EX_STR) {
         char name[32];
         runtime.snprintf(name, sizeof name, "__str.%d", g_str_counter++);
@@ -7963,18 +8014,100 @@ static int eval_strlit_byte_offset(const Expr *e, const char **bytes, int *len, 
     }
     return 0;
 }
+static int fold_null_offsetof(const Expr *e, long long *out) {
+    if (!e) return 0;
+    const Expr *ce = e;
+    while (ce && ce->kind == EX_CAST) ce = ce->u.cast.operand;
+    if (!ce || ce->kind != EX_ADDR) return 0;
+    const Expr *sub = ce->u.addr.operand;
+    while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
+    if (!sub || sub->kind != EX_MEMBER) return 0;
+    const Expr *root = sub;
+    int depth = 0;
+    while (root && root->kind == EX_MEMBER) {
+        root = root->u.member.obj;
+        depth++;
+    }
+    if (!root) return 0;
+    const Expr *obj = root;
+    while (obj && (obj->kind == EX_CAST || obj->kind == EX_DEREF)) {
+        if (obj->kind == EX_CAST) obj = obj->u.cast.operand;
+        else obj = obj->u.deref.operand;
+    }
+    if (!obj || obj->kind != EX_INT_LIT || obj->u.int_val != 0) return 0;
+    Type cur_ty = get_global_obj_struct_type(root);
+    if (cur_ty.kind != TY_STRUCT || !cur_ty.tag) return 0;
+    const char *names[16];
+    int n = 0;
+    const Expr *cur = sub;
+    while (cur && cur->kind == EX_MEMBER && n < 16) {
+        names[n] = cur->u.member.name;
+        n++;
+        cur = cur->u.member.obj;
+    }
+    if (n != depth) return 0;
+    long long total = 0;
+    for (int i = n - 1; i >= 0; i--) {
+        const StructDef *sd = struct_registry_find_c(g_ir_structs, cur_ty.tag);
+        if (!sd) return 0;
+        long long moff = 0;
+        const StructMember *sm =
+            struct_lookup_member(g_ir_structs, sd, names[i], &moff);
+        if (!sm) return 0;
+        total += moff;
+        if (i > 0) {
+            cur_ty = sm->type;
+            if (cur_ty.kind != TY_STRUCT || !cur_ty.tag) return 0;
+        }
+    }
+    *out = total;
+    return 1;
+}
 static int fold_global_ptrdiff(const Expr *e, long long *out) {
-    if (!e || e->kind != EX_BINOP || e->u.bin.op != BOP_SUB) return 0;
-    const Expr *l = e->u.bin.l;
-    const Expr *r = e->u.bin.r;
+    if (!e) return 0;
+    const Expr *ce = e;
+    while (ce && ce->kind == EX_CAST) ce = ce->u.cast.operand;
+    if (!ce) return 0;
+    long long offset = 0;
+    const Expr *bin = ce;
+    while (bin && bin->kind == EX_BINOP &&
+           (bin->u.bin.op == BOP_ADD || bin->u.bin.op == BOP_SUB)) {
+        long long rv = 0;
+        if (bin->u.bin.r->kind == EX_INT_LIT) {
+            rv = (long long)bin->u.bin.r->u.int_val;
+        } else if (bin->u.bin.r->kind == EX_CAST
+                   && bin->u.bin.r->u.cast.operand->kind == EX_INT_LIT) {
+            rv = (long long)bin->u.bin.r->u.cast.operand->u.int_val;
+        } else {
+            break;
+        }
+        offset += (bin->u.bin.op == BOP_ADD) ? rv : -rv;
+        bin = bin->u.bin.l;
+        while (bin && bin->kind == EX_CAST) bin = bin->u.cast.operand;
+    }
+    if (!bin || bin->kind != EX_BINOP || bin->u.bin.op != BOP_SUB) {
+        if (bin) {
+            long long moff = 0;
+            if (fold_null_offsetof(bin, &moff)) {
+                *out = moff + offset;
+                return 1;
+            }
+        }
+        if (!bin) return 0;
+        return 0;
+    }
+    const Expr *l = bin->u.bin.l;
+    const Expr *r = bin->u.bin.r;
     const Expr *lp = l;
     const Expr *rp = r;
     while (lp && lp->kind == EX_CAST) lp = lp->u.cast.operand;
     while (rp && rp->kind == EX_CAST) rp = rp->u.cast.operand;
     if (!lp || !rp) return 0;
-    if (lp->kind != EX_ADDR && lp->kind != EX_LABEL_ADDR && lp->kind != EX_STR)
+    if (lp->kind != EX_ADDR && lp->kind != EX_LABEL_ADDR && lp->kind != EX_STR
+        && lp->kind != EX_MEMBER)
         return 0;
-    if (rp->kind != EX_ADDR && rp->kind != EX_LABEL_ADDR && rp->kind != EX_STR)
+    if (rp->kind != EX_ADDR && rp->kind != EX_LABEL_ADDR && rp->kind != EX_STR
+        && rp->kind != EX_MEMBER)
         return 0;
     {
         const char *b1 = ((void*)0), *b2 = ((void*)0);
@@ -7999,8 +8132,80 @@ static int fold_global_ptrdiff(const Expr *e, long long *out) {
     if (l->type.kind == TY_PTR && l->type.pointee)
         esz = type_size(*l->type.pointee);
     if (esz < 1) esz = 1;
-    *out = (long long)(o1 - o2) / esz;
+    *out = (long long)(o1 - o2) / esz + offset;
     return 1;
+}
+static const Expr *find_compound_literal_base(const Expr *e, long long *out_off)
+{
+    if (!e) return ((void*)0);
+    long long off = 0;
+    const Expr *cur = e;
+    for (;;) {
+        while (cur && cur->kind == EX_CAST) cur = cur->u.cast.operand;
+        if (!cur) return ((void*)0);
+        switch (cur->kind) {
+        case EX_ADDR:
+            cur = cur->u.addr.operand;
+            continue;
+        case EX_MEMBER: {
+            const Expr *obj = cur->u.member.obj;
+            while (obj && obj->kind == EX_CAST) obj = obj->u.cast.operand;
+            if (!obj) return ((void*)0);
+            Type mty = (obj->kind == EX_COMPOUND_LITERAL)
+                ? obj->u.compound.target_type
+                : get_global_obj_struct_type(obj);
+            if (mty.kind != TY_STRUCT || !mty.tag) return ((void*)0);
+            const StructDef *sd = struct_registry_find_c(g_ir_structs, mty.tag);
+            if (!sd) return ((void*)0);
+            long long mm = 0;
+            if (!struct_lookup_member(g_ir_structs, sd, cur->u.member.name, &mm))
+                return ((void*)0);
+            off += mm;
+            cur = cur->u.member.obj;
+            continue;
+        }
+        case EX_INDEX: {
+            const Expr *arr = cur->u.idx.array;
+            while (arr && arr->kind == EX_CAST) arr = arr->u.cast.operand;
+            if (!arr) return ((void*)0);
+            long long idx = 0;
+            if (!fold_const_int(cur->u.idx.index, &idx)) return ((void*)0);
+            int esz = get_global_elem_size(arr);
+            if (esz < 1) esz = 1;
+            off += idx * esz;
+            cur = cur->u.idx.array;
+            continue;
+        }
+        case EX_COMPOUND_LITERAL:
+            *out_off = off;
+            return cur;
+        default:
+            return ((void*)0);
+        }
+    }
+}
+static char *materialize_compound_literal(const IRModule *ir, const Expr *e)
+{
+    if (!e || e->kind != EX_COMPOUND_LITERAL)
+        return ((void*)0);
+    Type target = e->u.compound.target_type;
+    int sz = type_size(target);
+    if (sz <= 0) sz = 8;
+    char *bytes = runtime.calloc(sz, 1);
+    if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    char name[32];
+    runtime.snprintf(name, sizeof name, "__clit.%d", g_str_counter++);
+    IRGlobal *tmp = runtime.calloc(1, sizeof(IRGlobal));
+    if (!tmp) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    tmp->name = xstrdup(name);
+    tmp->init_bytes = bytes;
+    tmp->size = sz;
+    if (e->u.compound.init)
+        pack_init(ir, &target, e->u.compound.init, bytes, sz,
+                  name, e->loc, tmp);
+    queue_pending_global(name, bytes, sz, 0, e->loc);
+    g_pending_globals[g_pending_globals_len - 1].tmp_g = tmp;
+    return xstrdup(name);
 }
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
@@ -8178,7 +8383,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     }
     if (ty->kind == TY_FLOAT) {
         long double fv;
-        if (fold_const_float(e, &fv)) {
+        if (fold_const_float(e, &fv, ir)) {
             if (ty->width == 16) {
                 runtime.memcpy(bytes, &fv, 10);
             } else if (ty->width == 4) {
@@ -8215,6 +8420,7 @@ unsigned long long vhi;
     int have_int = (e->kind == EX_INT_LIT)
                 || fold_const_int(e, &_fold_v)
                 || (ty->kind == TY_INT && fold_global_ptrdiff(e, &_fold_v))
+                || (ty->kind == TY_INT && fold_null_offsetof(e, &_fold_v))
                 || (ty->kind == TY_INT && fold_const_complex_rel(e, &_fold_v));
     if (have_int) {
         unsigned long long vlo, vhi = 0;
@@ -8281,6 +8487,22 @@ unsigned long long vhi;
             int n = sz < src->size ? sz : src->size;
             runtime.memcpy(bytes, src->init_bytes, n);
             return;
+        }
+    }
+    if (g && (ty->kind == TY_PTR
+              || (ty->kind == TY_INT && ty->width == 8
+                  && expr_has_address_constant(e)))) {
+        long long clit_off = 0;
+        const Expr *clit = find_compound_literal_base(e, &clit_off);
+        if (clit) {
+            char *sym = materialize_compound_literal(ir, clit);
+            if (sym) {
+                add_global_fixup(g, (int)(bytes - g->init_bytes),
+                                 sym, (int)clit_off);
+                runtime.memset(bytes, 0, sz);
+                runtime.free(sym);
+                return;
+            }
         }
     }
     const char *addr_sym = ((void*)0);
@@ -8503,9 +8725,12 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             }
         }
         if (sz <= 0) sz = 8;
-        char *bytes = runtime.calloc(sz, 1);
-        if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         int is_static = (s->u.decl.storage_class == 1);
+        char *bytes = ((void*)0);
+        if (s->u.decl.init) {
+            bytes = runtime.calloc(sz, 1);
+            if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        }
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
                                             0, is_static, s->loc);
         if (s->u.decl.init) {

@@ -800,6 +800,42 @@ void scalar_renumber(IRFunction *fn);
 void scalar_cleanup(IRFunction *fn);
 typedef struct FILE FILE;
 typedef long fpos_t;
+struct ConstCache {
+    int64_t *imm;
+    char *valid;
+    int cap;
+};typedef struct ConstCache ConstCache;
+static void const_cache_build(ConstCache *c, const IRFunction *fn) {
+    int cap = fn->next_value_id;
+    if (cap <= 0) cap = 1;
+    c->imm = xmalloc(cap * sizeof(int64_t));
+    c->valid = xmalloc(cap * sizeof(char));
+    runtime.memset(c->valid, 0, cap * sizeof(char));
+    c->cap = cap;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *inst = &fn->insts.data[i];
+        if (inst->op == IR_CONST && !inst->is_float && inst->dst >= 0
+            && inst->dst < cap) {
+            c->imm[inst->dst] = inst->imm;
+            c->valid[inst->dst] = 1;
+        }
+    }
+}
+static inline void const_cache_lookup(const ConstCache *c, IRValue v, int *found, int64_t *imm) {
+    if (v >= 0 && v < c->cap && c->valid[v]) {
+        *found = 1;
+        *imm = c->imm[v];
+    } else {
+        *found = 0;
+        *imm = 0;
+    }
+}
+static void const_cache_free(ConstCache *c) {
+    runtime.free(c->imm);
+    runtime.free(c->valid);
+    c->imm = ((void*)0); c->valid = ((void*)0); c->cap = 0;
+}
+
 static int64_t const_value(const IRInstArray *insts, IRValue v, int *found) {
     *found = 0;
     if (v < 0) return 0;
@@ -830,6 +866,8 @@ static int has_side_effect(IROpcode op) {
 }
 int scalar_constfold(IRFunction *fn) {
     int changed = 0;
+    ConstCache cc;
+    const_cache_build(&cc, fn);
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         switch (inst->op) {
@@ -845,8 +883,10 @@ int scalar_constfold(IRFunction *fn) {
         case IR_SHR: {
 int lf;
 int rf;
-            int64_t lv = const_value(&fn->insts, inst->a, &lf);
-            int64_t rv = const_value(&fn->insts, inst->b, &rf);
+int64_t lv;
+int64_t rv;
+            const_cache_lookup(&cc, inst->a, &lf, &lv);
+            const_cache_lookup(&cc, inst->b, &rf, &rv);
             if (!lf || !rf) break;
             if (inst->is_float) break;
             int w = inst->width ? inst->width : 4;
@@ -889,7 +929,8 @@ int rf;
         case IR_NEG:
         case IR_BNOT: {
             int f;
-            int64_t v = const_value(&fn->insts, inst->a, &f);
+            int64_t v;
+            const_cache_lookup(&cc, inst->a, &f, &v);
             if (!f) break;
             if (inst->is_float) break;
             int w = inst->width ? inst->width : 4;
@@ -907,6 +948,7 @@ int rf;
             break;
         }
     }
+    const_cache_free(&cc);
     return changed;
 }
 int scalar_dce(IRFunction *fn) {
@@ -955,6 +997,8 @@ int scalar_dce(IRFunction *fn) {
 }
 int scalar_peephole(IRFunction *fn) {
     int changed = 0;
+    ConstCache cc;
+    const_cache_build(&cc, fn);
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (inst->op == IR_ADD || inst->op == IR_SUB || inst->op == IR_MUL ||
@@ -962,8 +1006,10 @@ int scalar_peephole(IRFunction *fn) {
             if (inst->is_float) continue;
 int lf;
 int rf;
-            int64_t lv = const_value(&fn->insts, inst->a, &lf);
-            int64_t rv = const_value(&fn->insts, inst->b, &rf);
+int64_t lv;
+int64_t rv;
+            const_cache_lookup(&cc, inst->a, &lf, &lv);
+            const_cache_lookup(&cc, inst->b, &rf, &rv);
             if (inst->a >= 0 && inst->a == inst->b) {
                 if (inst->op == IR_SUB || inst->op == IR_BXOR) {
                     inst->op = IR_CONST; inst->a = -1; inst->b = -1; inst->imm = 0; changed = 1; continue;
@@ -992,6 +1038,7 @@ int rf;
             }
         }
     }
+    const_cache_free(&cc);
     return changed;
 }
 void scalar_renumber(IRFunction *fn) {

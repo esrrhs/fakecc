@@ -972,7 +972,6 @@ static void symtable_init(SymTable *st) { st->data = ((void*)0); st->len = 0; st
 static void symtable_free(SymTable *st) {
     for (size_t i = 0; i < st->len; i++) {
         runtime.free(st->data[i].name);
-        type_free(&st->data[i].type);
     }
     runtime.free(st->data);
     st->data = ((void*)0); st->len = 0; st->cap = 0;
@@ -994,7 +993,6 @@ static void symtable_leave_scope(SymTable *st, size_t mark) {
     while (st->len > mark) {
         st->len--;
         runtime.free(st->data[st->len].name);
-        type_free(&st->data[st->len].type);
     }
 }
 static const Sym *symtable_find(const SymTable *st, const char *name) {
@@ -1070,7 +1068,7 @@ static Type usual_arith_conv(Type a, Type b) {
     } else {
         res.bitfield_width = 0;
     }
-    return res;
+    return type_clone(res);
 }
 static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
 static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
@@ -1779,7 +1777,8 @@ Type p1;
         Type callee_ty = check_expr_inner(e->u.call.callee);
         if (e->u.call.callee->kind == EX_VAR) {
             const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
-            const FunSig *sig = ftab_lookup(e->u.call.callee->u.var.name);
+            int have_local = (local_fn_sym != ((void*)0));
+            const FunSig *sig = have_local ? ((void*)0) : ftab_lookup(e->u.call.callee->u.var.name);
             if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC) {
                 const Type *fty = &local_fn_sym->type;
                 type_free(&callee_ty);
@@ -2171,11 +2170,25 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
         return 1;
     }
     if (e->kind == EX_VAR) return 1;
+    if (e->kind == EX_MEMBER && e->u.member.obj && e->u.member.obj->kind == EX_VAR) {
+        if (!e->u.member.obj->u.var.pkg) {
+            if (symtable_find(globals, e->u.member.obj->u.var.name))
+                return 1;
+        }
+    }
     if (e->kind == EX_ADDR) {
         const Expr *sub = e->u.addr.operand;
         while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
         if (sub && (sub->kind == EX_VAR || sub->kind == EX_MEMBER || sub->kind == EX_INDEX || sub->kind == EX_DEREF))
             return 1;
+        if (sub && sub->kind == EX_COMPOUND_LITERAL)
+            return is_const_init(sub->u.compound.init, globals);
+    }
+    if (e->kind == EX_MEMBER) {
+        const Expr *obj = e->u.member.obj;
+        while (obj && obj->kind == EX_CAST) obj = obj->u.cast.operand;
+        if (obj && obj->kind == EX_COMPOUND_LITERAL)
+            return is_const_init(obj->u.compound.init, globals);
     }
     return 0;
 }

@@ -141,6 +141,30 @@ void token_array_push(TokenArray *a, Token t);
 void lex(const char *source, const char *filename, TokenArray *out);
 typedef struct FILE FILE;
 typedef long fpos_t;
+static const char *predefined_macro_literal(const char *text, int *out_is_float) {
+    *out_is_float = 0;
+    if (runtime.strcmp(text, "__INT_MAX__") == 0) return "2147483647";
+    if (runtime.strcmp(text, "__INT_MIN__") == 0) return "-2147483648";
+    if (runtime.strcmp(text, "__UINT_MAX__") == 0) return "4294967295u";
+    if (runtime.strcmp(text, "__LONG_MAX__") == 0) return "9223372036854775807l";
+    if (runtime.strcmp(text, "__LONG_MIN__") == 0) return "-9223372036854775807l";
+    if (runtime.strcmp(text, "__ULONG_MAX__") == 0) return "18446744073709551615ul";
+    if (runtime.strcmp(text, "__CHAR_BIT__") == 0) return "8";
+    if (runtime.strcmp(text, "__SIZEOF_INT__") == 0) return "4";
+    if (runtime.strcmp(text, "__SIZEOF_LONG__") == 0) return "8";
+    if (runtime.strcmp(text, "__SIZEOF_LONG_LONG__") == 0) return "8";
+    if (runtime.strcmp(text, "__SIZEOF_POINTER__") == 0) return "8";
+    if (runtime.strcmp(text, "__SIZEOF_FLOAT__") == 0) return "4";
+    if (runtime.strcmp(text, "__SIZEOF_DOUBLE__") == 0) return "8";
+    if (runtime.strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0) return "16";
+    if (runtime.strcmp(text, "__FLT_MAX__") == 0) { *out_is_float = 1; return "3.40282347e+38f"; }
+    if (runtime.strcmp(text, "__DBL_MAX__") == 0) { *out_is_float = 1; return "1.7976931348623157e+308"; }
+    if (runtime.strcmp(text, "__FLT_MIN__") == 0) { *out_is_float = 1; return "1.17549435e-38f"; }
+    if (runtime.strcmp(text, "__DBL_MIN__") == 0) { *out_is_float = 1; return "2.2250738585072014e-308"; }
+    if (runtime.strcmp(text, "__FLT_EPSILON__") == 0) { *out_is_float = 1; return "1.19209290e-7f"; }
+    if (runtime.strcmp(text, "__DBL_EPSILON__") == 0) { *out_is_float = 1; return "2.2204460492503131e-16"; }
+    return ((void*)0);
+}
 void token_array_init(TokenArray *a) {
     a->data = ((void*)0);
     a->len = 0;
@@ -507,10 +531,25 @@ lex_loop_head:
                 col++;
             }
             size_t len = pos - start;
+            char ident_buf[64];
+            runtime.memcpy(ident_buf, source + start, len);
+            ident_buf[len] = '\0';
+            int is_float = 0;
+            const char *lit = predefined_macro_literal(ident_buf, &is_float);
+            if (lit) {
+                Token t;
+                t.kind = is_float ? TK_FLOAT_LITERAL : TK_INT_LITERAL;
+                t.text = xstrdup(lit);
+                t.loc.file = filename;
+                t.loc.line = start_line;
+                t.loc.col = start_col;
+                token_array_push(out, t);
+                goto lex_loop_head;
+            }
             Token t;
-            t.kind = keyword_kind(source + start, len);
+            t.kind = keyword_kind(ident_buf, len);
             t.text = runtime.malloc(len + 1);
-            runtime.memcpy(t.text, source + start, len);
+            runtime.memcpy(t.text, ident_buf, len);
             t.text[len] = '\0';
             t.loc.file = filename;
             t.loc.line = start_line;

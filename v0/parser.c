@@ -660,6 +660,9 @@ struct Parser {
     int anon_counter;
     const char *cur_fn_name;
     size_t typedef_mark;
+    int save_fn_params;
+    int has_last_fn_params;
+    ParamArray last_fn_params;
 };typedef struct Parser Parser;
 static const Token *peek(const Parser *p) {
     return &p->tokens->data[p->pos];
@@ -1597,6 +1600,9 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
                 pty.vla_dim = ((void*)0);
                 type_free(&pty);
                 pty = ptr;
+            } else if (pty.kind == TY_FUNC) {
+                Type ptr = type_make_ptr(pty);
+                pty = ptr;
             }
             if (!pname_in) {
                 pname_in = xstrdup("");
@@ -1793,6 +1799,16 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 int is_var = 0;
                 ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
+                if (p->save_fn_params) {
+                    param_array_init(&p->last_fn_params);
+                    for (size_t i = 0; i < params.len; i++) {
+                        param_array_push(&p->last_fn_params,
+                            params.data[i].name ? xstrdup(params.data[i].name) : xstrdup(""),
+                            type_clone(params.data[i].type),
+                            params.data[i].loc);
+                    }
+                    p->has_last_fn_params = 1;
+                }
                 t = make_func_type(t, &params, is_var);
                 break;
             }
@@ -1856,25 +1872,6 @@ static Type parse_type(Parser *p, char **name_out) {
     return parse_declarator(p, base, name_out);
 }
 static Type parse_type_name(Parser *p);
-static Type parse_return_type(Parser *p) {
-    Type base = parse_specifiers(p);
-    Type t = base;
-    while (peek(p)->kind == TK_STAR) {
-        advance(p);
-        for (;;) {
-            if (skip_attribute(p)) continue;
-            if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
-                advance(p);
-                continue;
-            }
-            break;
-        }
-        Type w = type_make_ptr(t);
-        type_free(&t);
-        t = w;
-    }
-    return t;
-}
 static Type parse_type_abstract(Parser *p) {
     return parse_type_name(p);
 }
@@ -2903,11 +2900,25 @@ static Expr *parse_designator_chain(Parser *p, SourceLoc loc) {
     } else if (peek(p)->kind == TK_LBRACKET) {
         advance(p);
         const Token *ix = peek(p);
-        if (ix->kind != TK_INT_LITERAL)
+        if (ix->kind == TK_INT_LITERAL) {
+            idx = int_literal_value(ix->text);
+            advance(p);
+        } else if (ix->kind == TK_IDENT) {
+            const EnumConstant *ec =
+                enum_registry_find_constant(&p->tu->enums, ix->text);
+            if (ec) {
+                idx = ec->value;
+                advance(p);
+            } else {
+                die_at(ix->loc.file, ix->loc.line, ix->loc.col,
+                       "expected integer constant in designator but got '%s'",
+                       ix->text);
+            }
+        } else {
             die_at(ix->loc.file, ix->loc.line, ix->loc.col,
-                   "expected integer constant in designator but got '%s'", ix->text);
-        idx = int_literal_value(ix->text);
-        advance(p);
+                   "expected integer constant in designator but got '%s'",
+                   ix->text);
+        }
         expect_kind(p, TK_RBRACKET, "']'");
         kind = 0;
         if (peek(p)->kind == TK_DOT || peek(p)->kind == TK_LBRACKET) chained = 1;
@@ -2961,20 +2972,37 @@ static Expr *parse_init_list(Parser *p) {
         } else if (peek(p)->kind == TK_LBRACKET) {
             advance(p);
             const Token *ix = peek(p);
-            if (ix->kind != TK_INT_LITERAL)
+            if (ix->kind == TK_INT_LITERAL) {
+                idx = int_literal_value(ix->text);
+                advance(p);
+            } else if (ix->kind == TK_IDENT) {
+                const EnumConstant *ec =
+                    enum_registry_find_constant(&p->tu->enums, ix->text);
+                if (ec) { idx = ec->value; advance(p); }
+                else die_at(ix->loc.file, ix->loc.line, ix->loc.col,
+                       "expected integer constant in designator but got '%s'",
+                       ix->text);
+            } else {
                 die_at(ix->loc.file, ix->loc.line, ix->loc.col,
                        "expected integer constant in designator but got '%s'",
                        ix->text);
-            idx = int_literal_value(ix->text);
-            advance(p);
+            }
             if (peek(p)->kind == TK_ELLIPSIS) {
                 advance(p);
                 const Token *eix = peek(p);
-                if (eix->kind != TK_INT_LITERAL)
+                if (eix->kind == TK_INT_LITERAL) {
+                    end_idx = int_literal_value(eix->text);
+                    advance(p);
+                } else if (eix->kind == TK_IDENT) {
+                    const EnumConstant *ec =
+                        enum_registry_find_constant(&p->tu->enums, eix->text);
+                    if (ec) { end_idx = ec->value; advance(p); }
+                    else die_at(eix->loc.file, eix->loc.line, eix->loc.col,
+                           "expected integer constant after '...' in designator");
+                } else {
                     die_at(eix->loc.file, eix->loc.line, eix->loc.col,
                            "expected integer constant after '...' in designator");
-                end_idx = int_literal_value(eix->text);
-                advance(p);
+                }
             }
             expect_kind(p, TK_RBRACKET, "']'");
             kind = 0;
@@ -3140,6 +3168,40 @@ static int is_function_declaration_lookahead(Parser *p) {
         if (peek(p)->kind == TK_RBRACKET) advance(p);
     }
     int is_func = (!has_bracket && saw_name && peek(p)->kind == TK_LPAREN);
+    if (!is_func && !saw_name && peek(p)->kind == TK_LPAREN) {
+        size_t pos = p->pos;
+        int depth = 0;
+        int saw_inner_paren = 0;
+        while (pos < p->tokens->len) {
+            if (p->tokens->data[pos].kind == TK_LPAREN) {
+                depth++;
+                if (depth > 1) saw_inner_paren = 1;
+            } else if (p->tokens->data[pos].kind == TK_RPAREN) {
+                depth--;
+                if (depth == 0) { pos++; break; }
+            }
+            pos++;
+        }
+        if (depth == 0 && saw_inner_paren) {
+            while (pos < p->tokens->len && (p->tokens->data[pos].kind == TK_LBRACKET || p->tokens->data[pos].kind == TK_LPAREN)) {
+                int d = 0;
+                TokenKind open = p->tokens->data[pos].kind;
+                TokenKind close = (open == TK_LPAREN) ? TK_RPAREN : TK_RBRACKET;
+                while (pos < p->tokens->len) {
+                    if (p->tokens->data[pos].kind == open) d++;
+                    else if (p->tokens->data[pos].kind == close) {
+                        d--;
+                        if (d == 0) { pos++; break; }
+                    }
+                    pos++;
+                }
+            }
+            while (pos < p->tokens->len && (p->tokens->data[pos].kind == TK_KW_CONST || p->tokens->data[pos].kind == TK_KW_VOLATILE || p->tokens->data[pos].kind == TK_KW_RESTRICT)) pos++;
+            if (pos < p->tokens->len && p->tokens->data[pos].kind == TK_LBRACE) {
+                is_func = 1;
+            }
+        }
+    }
     p->pos = save;
     return is_func;
 }
@@ -3390,8 +3452,7 @@ static Stmt parse_stmt(Parser *p) {
             if (peek(p)->kind == TK_ASSIGN) {
                 advance(p);
                 if (storage_class == 2) {
-                    die_at(s.loc.file, s.loc.line, s.loc.col,
-                           "cannot initialize an 'extern' variable");
+                    storage_class = 0;
                 }
                 if (peek(p)->kind == TK_LBRACE) {
                     s.u.decl.init = parse_init_list(p);
@@ -3884,6 +3945,10 @@ static Stmt parse_typedef_stmt(Parser *p) {
         Type ty = parse_declarator(p, type_clone(base), &decl_name);
         const Token *name = peek(p);
         if (!decl_name) {
+            if (name->kind == TK_SEMICOLON) {
+                type_free(&ty);
+                break;
+            }
             if (name->kind != TK_IDENT) {
                 die_at(name->loc.file, name->loc.line, name->loc.col,
                        "expected typedef name but got '%s'", name->text);
@@ -3953,22 +4018,61 @@ static FunctionDecl parse_function_decl(Parser *p) {
         else break;
     }
     Type ret_ty;
-    const Token *name;
+    const Token *name = ((void*)0);
+    char *grouped_fn_name = ((void*)0);
+    ParamArray grouped_fn_params;
+    int is_grouped_fn = 0;
     if (is_type_start(p, p->pos)
         || peek(p)->kind == TK_KW_VOID
         || peek(p)->kind == TK_KW_STRUCT
         || peek(p)->kind == TK_KW_UNION
         || peek(p)->kind == TK_KW_ENUM) {
-        ret_ty = parse_return_type(p);
-        if (g_parsed_inline) is_inline = 1;
-        g_parsed_inline = 0;
-        for (;;) { if (!skip_attribute(p)) break; }
-        name = peek(p);
-        if (name->kind != TK_IDENT) {
-            die_at(name->loc.file, name->loc.line, name->loc.col,
-                   "expected function name but got '%s'", name->text);
+        Type base = parse_specifiers(p);
+        if (peek(p)->kind == TK_LPAREN) {
+            p->save_fn_params = 1;
+            p->has_last_fn_params = 0;
+            Type dt = parse_declarator(p, base, &grouped_fn_name);
+            p->save_fn_params = 0;
+            if (grouped_fn_name && dt.kind == TY_FUNC && dt.func_ret) {
+                ret_ty = type_clone(*dt.func_ret);
+                if (p->has_last_fn_params) {
+                    grouped_fn_params = p->last_fn_params;
+                    p->has_last_fn_params = 0;
+                } else {
+                    param_array_init(&grouped_fn_params);
+                }
+                is_grouped_fn = 1;
+            } else {
+                die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
+                       "expected function declarator");
+            }
+            type_free(&dt);
+        } else {
+            ret_ty = base;
+            while (peek(p)->kind == TK_STAR) {
+                advance(p);
+                for (;;) {
+                    if (skip_attribute(p)) continue;
+                    if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
+                        advance(p);
+                        continue;
+                    }
+                    break;
+                }
+                Type w = type_make_ptr(ret_ty);
+                type_free(&ret_ty);
+                ret_ty = w;
+            }
+            if (g_parsed_inline) is_inline = 1;
+            g_parsed_inline = 0;
+            for (;;) { if (!skip_attribute(p)) break; }
+            name = peek(p);
+            if (name->kind != TK_IDENT) {
+                die_at(name->loc.file, name->loc.line, name->loc.col,
+                       "expected function name but got '%s'", name->text);
+            }
+            advance(p);
         }
-        advance(p);
     } else if (peek(p)->kind == TK_IDENT) {
         ret_ty = type_default_int();
         name = peek(p);
@@ -3980,11 +4084,14 @@ static FunctionDecl parse_function_decl(Parser *p) {
         name = t;
         ret_ty = type_default_int();
     }
-    expect_kind(p, TK_LPAREN, "'('");
     FunctionDecl fn;
-    fn.name = xstrdup(name->text);
+    fn.name = is_grouped_fn ? grouped_fn_name : xstrdup(name->text);
     fn.ret_type = ret_ty;
-    param_array_init(&fn.params);
+    if (is_grouped_fn) {
+        fn.params = grouped_fn_params;
+    } else {
+        param_array_init(&fn.params);
+    }
     stmt_array_init(&fn.body);
     fn.loc = fn_loc;
     fn.is_variadic = 0;
@@ -3997,6 +4104,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
     g_parsed_no_instrument = 0;
     char *kr_names[16];
     int nkr = 0;
+    (void)kr_names;
+    if (!is_grouped_fn) {
+        expect_kind(p, TK_LPAREN, "'('");
     if (peek(p)->kind == TK_KW_VOID
         && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
         advance(p);
@@ -4017,6 +4127,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 ptr.vla_dim = pty.vla_dim;
                 pty.vla_dim = ((void*)0);
                 type_free(&pty);
+                pty = ptr;
+            } else if (pty.kind == TY_FUNC) {
+                Type ptr = type_make_ptr(pty);
                 pty = ptr;
             }
             param_array_push(&fn.params, pname, pty, peek(p)->loc);
@@ -4095,6 +4208,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
                     Type ptr = type_make_ptr(*ty.elem_type);
                     type_free(&ty);
                     ty = ptr;
+                } else if (ty.kind == TY_FUNC) {
+                    Type ptr = type_make_ptr(ty);
+                    ty = ptr;
                 }
                 int found = 0;
                 for (int i = 0; i < nkr; i++) {
@@ -4118,6 +4234,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
             param_array_push(&fn.params, kr_names[i], kr_ty[i], fn.loc);
             runtime.free(kr_names[i]);
         }
+    }
     }
     while (parse_attribute(p, &fn.align, ((void*)0), ((void*)0), ((void*)0), &fn.alias_target)) {}
     if (!fn.alias_target && g_parsed_alias) {
@@ -4159,8 +4276,51 @@ static FunctionDecl parse_function_decl(Parser *p) {
             extra_fn.no_instrument = fn.no_instrument;
             if (peek(p)->kind == TK_LPAREN) {
                 advance(p);
-                while (peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) advance(p);
-                if (peek(p)->kind == TK_RPAREN) advance(p);
+                if (peek(p)->kind == TK_KW_VOID
+                    && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+                    advance(p);
+                } else if (peek(p)->kind != TK_RPAREN
+                           && is_type_start(p, p->pos)) {
+                    for (;;) {
+                        if (!is_type_start(p, p->pos)) break;
+                        char *pn2 = ((void*)0);
+                        Type pt2 = parse_type(p, &pn2);
+                        if (!pn2) pn2 = xstrdup("");
+                        if (pt2.kind == TY_ARRAY && pt2.elem_type) {
+                            Type p2 = type_make_ptr(*pt2.elem_type);
+                            p2.vla_dim = pt2.vla_dim;
+                            pt2.vla_dim = ((void*)0);
+                            type_free(&pt2);
+                            pt2 = p2;
+                        }
+                        param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
+                        runtime.free(pn2);
+                        if (peek(p)->kind == TK_COMMA) {
+                            advance(p);
+                            if (peek(p)->kind == TK_ELLIPSIS) {
+                                advance(p); extra_fn.is_variadic = 1; break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                } else if (peek(p)->kind == TK_ELLIPSIS) {
+                    advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
+                } else if (peek(p)->kind != TK_RPAREN) {
+                    extra_fn.is_unprototyped = 1;
+                    for (;;) {
+                        const Token *id = peek(p);
+                        if (id->kind != TK_IDENT) break;
+                        if (nkr >= 16) break;
+                        kr_names[nkr++] = xstrdup(id->text);
+                        advance(p);
+                        if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                        break;
+                    }
+                } else {
+                    extra_fn.is_unprototyped = 1;
+                }
+                expect_kind(p, TK_RPAREN, "')'");
             }
             if (p->tu->functions.len >= p->tu->functions.cap) {
                 size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
@@ -4223,6 +4383,9 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
     p.anon_counter = 0;
     p.cur_fn_name = ((void*)0);
     p.typedef_mark = 0;
+    p.save_fn_params = 0;
+    p.has_last_fn_params = 0;
+    param_array_init(&p.last_fn_params);
     g_parser_tu = tu;
     if (peek(&p)->kind != TK_KW_PACKAGE) {
         const Token *t = peek(&p);
