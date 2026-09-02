@@ -362,13 +362,9 @@ pr81360.c
 921109-1.c
 921203-2.c
 
-# Complex function pointer declarators (3)
-# `void (*(*x)(void))(float)` — nested function pointer return types.
-# `void (* const (funcp)(time_t))` — unusual parenthesized function pointer name.
+# Complex function pointer declarators (1)
 # `T*L92(T*),*L15(T*),...` — K&R function declarations with function pointer return types.
 
-pr43635.c
-991213-2.c
 930126-1.c
 
 # Expected-error test (1)

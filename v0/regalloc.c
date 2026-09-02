@@ -1223,26 +1223,50 @@ static int *compute_mcs_order(const InterfGraph *g) {
     int *picked = xmalloc(n * sizeof(int));
     runtime.memset(weight, 0, n * sizeof(int));
     runtime.memset(picked, 0, n * sizeof(int));
+    int *head = xmalloc((n + 1) * sizeof(int));
+    int *lnk = xmalloc(n * sizeof(int));
+    int *in_bucket = xmalloc(n * sizeof(int));
+    for (int w = 0; w <= n; w++) head[w] = -1;
+    for (int v = 0; v < n; v++) { lnk[v] = -1; in_bucket[v] = -1; }
+    for (int v = 0; v < n; v++) {
+        lnk[v] = head[0];
+        head[0] = v;
+        in_bucket[v] = 0;
+    }
+    int max_w = 0;
     for (int pos = n - 1; pos >= 0; pos--) {
-        int best = -1, best_w = -1;
-        for (int v = 0; v < n; v++) {
-            if (!picked[v] && weight[v] > best_w) {
-                best = v;
-                best_w = weight[v];
+        int best;
+        for (;;) {
+            while (max_w > 0 && head[max_w] < 0) max_w--;
+            if (head[max_w] < 0) {
+                best = -1;
+                for (int v = 0; v < n; v++) {
+                    if (!picked[v]) { best = v; break; }
+                }
+                break;
             }
-        }
-        if (best < 0) {
-            for (int v = 0; v < n; v++) {
-                if (!picked[v]) { best = v; break; }
+            best = head[max_w];
+            head[max_w] = lnk[best];
+            if (!picked[best] && in_bucket[best] == max_w) {
+                break;
             }
         }
         picked[best] = 1;
         order[pos] = best;
         for (size_t j = 0; j < g->nodes[best].degree; j++) {
             int w = g->nodes[best].neighbors[j];
-            if (!picked[w]) weight[w]++;
+            if (!picked[w]) {
+                int nw = ++weight[w];
+                lnk[w] = head[nw];
+                head[nw] = w;
+                in_bucket[w] = nw;
+                if (nw > max_w) max_w = nw;
+            }
         }
     }
+    runtime.free(head);
+    runtime.free(lnk);
+    runtime.free(in_bucket);
     runtime.free(weight);
     runtime.free(picked);
     return order;

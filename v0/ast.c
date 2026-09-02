@@ -1861,6 +1861,8 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_add(&tu->typedefs, "__UINTMAX_TYPE__", type_make_int(8, 1));
     typedef_registry_add(&tu->typedefs, "__SIZE_TYPE__", type_make_int(8, 1));
     typedef_registry_add(&tu->typedefs, "__PTRDIFF_TYPE__", type_make_int(8, 0));
+    typedef_registry_add(&tu->typedefs, "__INTPTR_TYPE__", type_make_int(8, 0));
+    typedef_registry_add(&tu->typedefs, "__UINTPTR_TYPE__", type_make_int(8, 1));
     typedef_registry_add(&tu->typedefs, "__WCHAR_TYPE__", type_make_int(4, 0));
     typedef_registry_add(&tu->typedefs, "wchar_t", type_make_int(4, 0));
 }

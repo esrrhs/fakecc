@@ -30,6 +30,10 @@ typedef struct {
     const char *cur_fn_name;
     /* tu->typedefs.len at function-body entry; locals are truncated back. */
     size_t typedef_mark;
+    /* When set, parse_declarator captures the inner function declarator's params */
+    int save_fn_params;
+    int has_last_fn_params;
+    ParamArray last_fn_params;
 } Parser;
 
 static const Token *peek(const Parser *p) {
@@ -1106,6 +1110,9 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
                 pty.vla_dim = NULL;
                 type_free(&pty);
                 pty = ptr;
+            } else if (pty.kind == TY_FUNC) {
+                Type ptr = type_make_ptr(pty);
+                pty = ptr;
             }
             if (!pname_in) {
                 pname_in = xstrdup("");
@@ -1341,6 +1348,16 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 int is_var = 0;
                 ParamArray params = parse_param_list(p, &is_var);
                 expect_kind(p, TK_RPAREN, "')'");
+                if (p->save_fn_params) {
+                    param_array_init(&p->last_fn_params);
+                    for (size_t i = 0; i < params.len; i++) {
+                        param_array_push(&p->last_fn_params,
+                            params.data[i].name ? xstrdup(params.data[i].name) : xstrdup(""),
+                            type_clone(params.data[i].type),
+                            params.data[i].loc);
+                    }
+                    p->has_last_fn_params = 1;
+                }
                 t = make_func_type(t, &params, is_var);
                 break;
             }
@@ -1410,26 +1427,6 @@ static Type parse_type(Parser *p, char **name_out) {
 }
 
 static Type parse_type_name(Parser *p);
-
-static Type parse_return_type(Parser *p) {
-    Type base = parse_specifiers(p);
-    Type t = base;
-    while (peek(p)->kind == TK_STAR) {
-        advance(p);
-        for (;;) {
-            if (skip_attribute(p)) continue;
-            if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
-                advance(p);
-                continue;
-            }
-            break;
-        }
-        Type w = type_make_ptr(t);
-        type_free(&t);
-        t = w;
-    }
-    return t;
-}
 
 static Type parse_type_abstract(Parser *p) {
     return parse_type_name(p);
@@ -2930,6 +2927,41 @@ static int is_function_declaration_lookahead(Parser *p) {
         if (peek(p)->kind == TK_RBRACKET) advance(p);
     }
     int is_func = (!has_bracket && saw_name && peek(p)->kind == TK_LPAREN);
+    if (!is_func && !saw_name && peek(p)->kind == TK_LPAREN) {
+        /* Check for grouped function declarator: `(*foo(...))(...) {` */
+        size_t pos = p->pos;
+        int depth = 0;
+        int saw_inner_paren = 0;
+        while (pos < p->tokens->len) {
+            if (p->tokens->data[pos].kind == TK_LPAREN) {
+                depth++;
+                if (depth > 1) saw_inner_paren = 1;
+            } else if (p->tokens->data[pos].kind == TK_RPAREN) {
+                depth--;
+                if (depth == 0) { pos++; break; }
+            }
+            pos++;
+        }
+        if (depth == 0 && saw_inner_paren) {
+            while (pos < p->tokens->len && (p->tokens->data[pos].kind == TK_LBRACKET || p->tokens->data[pos].kind == TK_LPAREN)) {
+                int d = 0;
+                TokenKind open = p->tokens->data[pos].kind;
+                TokenKind close = (open == TK_LPAREN) ? TK_RPAREN : TK_RBRACKET;
+                while (pos < p->tokens->len) {
+                    if (p->tokens->data[pos].kind == open) d++;
+                    else if (p->tokens->data[pos].kind == close) {
+                        d--;
+                        if (d == 0) { pos++; break; }
+                    }
+                    pos++;
+                }
+            }
+            while (pos < p->tokens->len && (p->tokens->data[pos].kind == TK_KW_CONST || p->tokens->data[pos].kind == TK_KW_VOLATILE || p->tokens->data[pos].kind == TK_KW_RESTRICT)) pos++;
+            if (pos < p->tokens->len && p->tokens->data[pos].kind == TK_LBRACE) {
+                is_func = 1;
+            }
+        }
+    }
     p->pos = save;
     return is_func;
 }
@@ -3836,22 +3868,62 @@ static FunctionDecl parse_function_decl(Parser *p) {
         else break;
     }
     Type ret_ty;
-    const Token *name;
+    const Token *name = NULL;
+    char *grouped_fn_name = NULL;
+    ParamArray grouped_fn_params;
+    int is_grouped_fn = 0;
+
     if (is_type_start(p, p->pos)
         || peek(p)->kind == TK_KW_VOID
         || peek(p)->kind == TK_KW_STRUCT
         || peek(p)->kind == TK_KW_UNION
         || peek(p)->kind == TK_KW_ENUM) {
-        ret_ty = parse_return_type(p);
-        if (g_parsed_inline) is_inline = 1;
-        g_parsed_inline = 0;
-        for (;;) { if (!skip_attribute(p)) break; }
-        name = peek(p);
-        if (name->kind != TK_IDENT) {
-            die_at(name->loc.file, name->loc.line, name->loc.col,
-                   "expected function name but got '%s'", name->text);
+        Type base = parse_specifiers(p);
+        if (peek(p)->kind == TK_LPAREN) {
+            p->save_fn_params = 1;
+            p->has_last_fn_params = 0;
+            Type dt = parse_declarator(p, base, &grouped_fn_name);
+            p->save_fn_params = 0;
+            if (grouped_fn_name && dt.kind == TY_FUNC && dt.func_ret) {
+                ret_ty = type_clone(*dt.func_ret);
+                if (p->has_last_fn_params) {
+                    grouped_fn_params = p->last_fn_params;
+                    p->has_last_fn_params = 0;
+                } else {
+                    param_array_init(&grouped_fn_params);
+                }
+                is_grouped_fn = 1;
+            } else {
+                die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
+                       "expected function declarator");
+            }
+            type_free(&dt);
+        } else {
+            ret_ty = base;
+            while (peek(p)->kind == TK_STAR) {
+                advance(p);
+                for (;;) {
+                    if (skip_attribute(p)) continue;
+                    if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
+                        advance(p);
+                        continue;
+                    }
+                    break;
+                }
+                Type w = type_make_ptr(ret_ty);
+                type_free(&ret_ty);
+                ret_ty = w;
+            }
+            if (g_parsed_inline) is_inline = 1;
+            g_parsed_inline = 0;
+            for (;;) { if (!skip_attribute(p)) break; }
+            name = peek(p);
+            if (name->kind != TK_IDENT) {
+                die_at(name->loc.file, name->loc.line, name->loc.col,
+                       "expected function name but got '%s'", name->text);
+            }
+            advance(p);
         }
-        advance(p);
     } else if (peek(p)->kind == TK_IDENT) {
         /* GNU89 implicit-int: `s(i){ ... }` / `main(){ ... }`. */
         ret_ty = type_default_int();
@@ -3865,12 +3937,14 @@ static FunctionDecl parse_function_decl(Parser *p) {
         ret_ty = type_default_int();
     }
 
-    expect_kind(p, TK_LPAREN, "'('");
-
     FunctionDecl fn;
-    fn.name = xstrdup(name->text);
+    fn.name = is_grouped_fn ? grouped_fn_name : xstrdup(name->text);
     fn.ret_type = ret_ty;
-    param_array_init(&fn.params);
+    if (is_grouped_fn) {
+        fn.params = grouped_fn_params;
+    } else {
+        param_array_init(&fn.params);
+    }
     stmt_array_init(&fn.body);
     fn.loc = fn_loc;
     fn.is_variadic = 0;
@@ -3882,13 +3956,17 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
 
+    char *kr_names[16];
+    int nkr = 0;
+    (void)kr_names;
+    if (!is_grouped_fn) {
+        expect_kind(p, TK_LPAREN, "'('");
+
     /* Parameter list.  Three forms:
      *   (void)              — prototyped, no parameters
      *   (int x, char *p)    — prototyped
      *   (a, b) int a; ...   — K&R identifier list, possibly followed by decls
      *   ()                  — K&R unprototyped empty list */
-    char *kr_names[16];
-    int nkr = 0;
     if (peek(p)->kind == TK_KW_VOID
         && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
         advance(p);  /* consume `void` */
@@ -3909,6 +3987,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 ptr.vla_dim = pty.vla_dim;
                 pty.vla_dim = NULL;
                 type_free(&pty);
+                pty = ptr;
+            } else if (pty.kind == TY_FUNC) {
+                Type ptr = type_make_ptr(pty);
                 pty = ptr;
             }
             param_array_push(&fn.params, pname, pty, peek(p)->loc);
@@ -3992,6 +4073,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
                     Type ptr = type_make_ptr(*ty.elem_type);
                     type_free(&ty);
                     ty = ptr;
+                } else if (ty.kind == TY_FUNC) {
+                    Type ptr = type_make_ptr(ty);
+                    ty = ptr;
                 }
                 int found = 0;
                 for (int i = 0; i < nkr; i++) {
@@ -4015,6 +4099,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
             param_array_push(&fn.params, kr_names[i], kr_ty[i], fn.loc);
             free(kr_names[i]);
         }
+    }
     }
 
     /* Optional GCC `__attribute__((...))` annotations (e.g.
@@ -4187,6 +4272,9 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
     p.anon_counter = 0;
     p.cur_fn_name = NULL;
     p.typedef_mark = 0;
+    p.save_fn_params = 0;
+    p.has_last_fn_params = 0;
+    param_array_init(&p.last_fn_params);
 
     g_parser_tu = tu;
     /* must start with package declaration */
