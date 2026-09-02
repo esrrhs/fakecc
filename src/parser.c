@@ -1028,7 +1028,8 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
 }
 
 static Type parse_enum_underlying_type(Parser *p) {
-    if (peek(p)->kind == TK_KW_BOOL) {
+    if (peek(p)->kind == TK_KW_BOOL
+        || (peek(p)->kind == TK_IDENT && strcmp(peek(p)->text, "bool") == 0)) {
         advance(p);
         return type_make_bool();
     }

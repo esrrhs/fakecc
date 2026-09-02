@@ -35,7 +35,7 @@ typedef enum {
     TK_KW_TYPEDEF,       /* "typedef" */
     TK_KW_STATIC,        /* "static" */
     TK_KW_EXTERN,        /* "extern" */
-    TK_KW_BOOL,          /* "_Bool" / C23 "bool" */
+    TK_KW_BOOL,          /* "_Bool" */
     TK_KW_VOLATILE,      /* "volatile" */
     TK_KW_RESTRICT,      /* "restrict" */
     TK_KW_INLINE,        /* "inline" */
