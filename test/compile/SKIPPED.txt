@@ -10,7 +10,7 @@
 # use -std=gnu89 / -fpermissive for the rest). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 353
+# Total: 341
 #
 
 # GNU nested functions / trampolines (20)
@@ -393,16 +393,11 @@ pr78694.c
 991213-1.c
 pr30132.c
 
-# C23 enum with fixed underlying type (7)
-# `enum e : bool { X };` — C23 feature. FakeCC does not support fixed underlying types.
+# C23 enum with fixed underlying type (0)
+# `enum e : bool { X };` — supported (C23 fixed underlying types).
 
-pr111059-7.c
-pr111059-8.c
-pr111059-9.c
-pr111059-10.c
-pr111059-11.c
-pr111059-12.c
-pr111911-2.c
+# Preprocessor required (17 more)
+# Mis-filed under the C23 section above; still require a preprocessor.
 pr84195.c
 pr86637-2.c
 pr88347.c

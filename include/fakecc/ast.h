@@ -472,6 +472,8 @@ typedef struct {
     int num_constants;
     int cap_constants;
     SourceLoc loc;
+    int has_underlying_type; /* C23: enum Tag : type */
+    Type underlying_type;    /* valid when has_underlying_type */
 } EnumDef;
 
 typedef struct {
@@ -494,6 +496,8 @@ int  enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
  * EnumConstant, or NULL if not found. */
 const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
                                                 const char *name);
+/* Build the Type for an enum definition (underlying type or int + enum_id). */
+Type enum_def_as_type(const EnumDef *ed, int enum_id);
 
 /* Typedef: a name → Type alias.  The aliased Type is fully owned (heap
  * pointee/elem types and strdup'd tag are cloned on insert). */

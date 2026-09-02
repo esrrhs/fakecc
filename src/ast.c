@@ -746,7 +746,16 @@ EnumDef *enum_registry_add(EnumRegistry *r, const char *tag, SourceLoc loc) {
     ed->tag = tag ? xstrdup(tag) : NULL;
     ed->constants = NULL; ed->num_constants = 0; ed->cap_constants = 0;
     ed->loc = loc;
+    ed->has_underlying_type = 0;
+    ed->underlying_type = type_default_int();
     return ed;
+}
+
+Type enum_def_as_type(const EnumDef *ed, int enum_id) {
+    Type t = (ed && ed->has_underlying_type)
+        ? type_clone(ed->underlying_type) : type_default_int();
+    t.enum_id = enum_id;
+    return t;
 }
 
 EnumDef *enum_registry_find(EnumRegistry *r, const char *tag) {

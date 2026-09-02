@@ -48,13 +48,15 @@ difftest_one() {
     local gcc_extra
     local fcc_extra
     local file_flags
+    local gcc_only_flags
     local extra_flags
     gcc_extra=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
     file_flags=$(sed -n 's|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
+    gcc_only_flags=$(sed -n 's|^//[[:space:]]*gcc_flags:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
     # Sanitizer flags are fakecc-only: gcc's ASan runtime is a different
     # implementation and often exits 1 ("runtime does not come first").
     fcc_extra="$file_flags $gcc_extra"
-    extra_flags="$gcc_extra"
+    extra_flags="$gcc_extra $gcc_only_flags"
     for tok in $file_flags; do
         case "$tok" in
             -fsanitize=*|-fno-sanitize=*) ;;
