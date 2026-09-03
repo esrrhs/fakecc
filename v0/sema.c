@@ -1012,8 +1012,26 @@ static int type_is_same(Type a, Type b) {
     if (a.width != b.width) return 0;
     if (a.is_unsigned != b.is_unsigned) return 0;
     if (a.is_vector != b.is_vector) return 0;
+    if (a.kind == TY_PTR) {
+        if (a.pointee && b.pointee) {
+            return type_is_same(*a.pointee, *b.pointee);
+        }
+        if (a.pointee != b.pointee) return 0;
+    }
     if (a.kind == TY_STRUCT) {
         if (a.tag && b.tag && runtime.strcmp(a.tag, b.tag) != 0) return 0;
+    }
+    if (a.kind == TY_ARRAY) {
+        if (a.elem_type && b.elem_type) {
+            if (!type_is_same(*a.elem_type, *b.elem_type)) return 0;
+        }
+        if (a.length != b.length) return 0;
+    }
+    if (a.kind == TY_FUNC) {
+        if (a.func_ret && b.func_ret) {
+            if (!type_is_same(*a.func_ret, *b.func_ret)) return 0;
+        }
+        if (a.func_nparams != b.func_nparams) return 0;
     }
     return 1;
 }
@@ -1192,30 +1210,5809 @@ static Type check_expr_inner(Expr *e) {
         Type res;
         if (lt.is_vector || rt.is_vector) {
             res = type_clone(lt.is_vector ? lt : rt);
-        } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) ||
-            (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) {
-            if (op == BOP_EQ || op == BOP_NE) {
-                res = type_make_int(4, 0);
-            } else {
-                res = type_clone(lt.kind == TY_STRUCT ? lt : rt);
+        } else if (op >= BOP_EQ } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || rt.kind == TY_PTR } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || rt.kind == TY_INT } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || lt.kind == TY_INT } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || lt.width == 0);
+                if (!func_cmp } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || } else if ((lt.kind == TY_STRUCT && lt.tag && runtime.strncmp(lt.tag, "__complex_", 10) == 0) || !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
             }
-        } else if (op == BOP_AND || op == BOP_OR) {
-            if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "left operand of '%s' must be scalar",
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { rt.kind == TY_PTR (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { rt.kind == TY_INT (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { rt.width == 0) ||
+                               (rt.kind == TY_PTR (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { lt.kind == TY_INT (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { lt.width == 0);
+                if (!func_cmp (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { (rt.kind == TY_STRUCT && rt.tag && runtime.strncmp(rt.tag, "__complex_", 10) == 0)) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { rt.kind == TY_PTR if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { rt.kind == TY_INT if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { lt.kind == TY_INT if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { lt.width == 0);
+                if (!func_cmp if (op == BOP_EQ || op == BOP_NE) { if (op == BOP_EQ || op == BOP_NE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ res = type_make_int(4, 0); res = type_make_int(4, 0); op <= BOP_GE) {
+            if (lt.kind == TY_PTR res = type_make_int(4, 0); res = type_make_int(4, 0); rt.kind == TY_PTR res = type_make_int(4, 0); res = type_make_int(4, 0); !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee res = type_make_int(4, 0); res = type_make_int(4, 0); lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee res = type_make_int(4, 0); res = type_make_int(4, 0); rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR res = type_make_int(4, 0); res = type_make_int(4, 0); rt.kind == TY_INT res = type_make_int(4, 0); res = type_make_int(4, 0); rt.width == 0) ||
+                               (rt.kind == TY_PTR res = type_make_int(4, 0); res = type_make_int(4, 0); lt.kind == TY_INT res = type_make_int(4, 0); res = type_make_int(4, 0); lt.width == 0);
+                if (!func_cmp res = type_make_int(4, 0); res = type_make_int(4, 0); !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ } else { } else { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else { } else { rt.kind == TY_PTR } else { } else { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else { } else { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else { } else { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else { } else { rt.kind == TY_INT } else { } else { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else { } else { lt.kind == TY_INT } else { } else { lt.width == 0);
+                if (!func_cmp } else { } else { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); op <= BOP_GE) {
+            if (lt.kind == TY_PTR res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); rt.kind == TY_PTR res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); rt.kind == TY_INT res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); rt.width == 0) ||
+                               (rt.kind == TY_PTR res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); lt.kind == TY_INT res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); lt.width == 0);
+                if (!func_cmp res = type_clone(lt.kind == TY_STRUCT ? lt : rt); res = type_clone(lt.kind == TY_STRUCT ? lt : rt); !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ } } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } } rt.kind == TY_PTR } } !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } } rt.kind == TY_INT } } rt.width == 0) ||
+                               (rt.kind == TY_PTR } } lt.kind == TY_INT } } lt.width == 0);
+                if (!func_cmp } } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { rt.kind == TY_PTR } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { rt.kind == TY_INT } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { lt.kind == TY_INT } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { lt.width == 0);
+                if (!func_cmp } else if (op == BOP_AND || op == BOP_OR) { } else if (op == BOP_AND || op == BOP_OR) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ * pointer). Result is always int 0 or 1. */ op <= BOP_GE) {
+            if (lt.kind == TY_PTR * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ rt.kind == TY_PTR * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ rt.kind == TY_INT * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ rt.width == 0) ||
+                               (rt.kind == TY_PTR * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ lt.kind == TY_INT * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ lt.width == 0);
+                if (!func_cmp * pointer). Result is always int 0 or 1. */ * pointer). Result is always int 0 or 1. */ !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) op <= BOP_GE) {
+            if (lt.kind == TY_PTR if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) rt.kind == TY_PTR if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) rt.kind == TY_INT if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) rt.width == 0) ||
+                               (rt.kind == TY_PTR if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) lt.kind == TY_INT if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) lt.width == 0);
+                if (!func_cmp if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR) !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, op <= BOP_GE) {
+            if (lt.kind == TY_PTR die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, rt.kind == TY_PTR die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, rt.kind == TY_INT die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, rt.width == 0) ||
+                               (rt.kind == TY_PTR die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, lt.kind == TY_INT die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, lt.width == 0);
+                if (!func_cmp die_at(e->loc.file, e->loc.line, e->loc.col, die_at(e->loc.file, e->loc.line, e->loc.col, !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", op <= BOP_GE) {
+            if (lt.kind == TY_PTR "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", rt.kind == TY_PTR "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", rt.kind == TY_INT "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", rt.width == 0) ||
+                               (rt.kind == TY_PTR "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", lt.kind == TY_INT "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", lt.width == 0);
+                if (!func_cmp "left operand of '%s' must be scalar", "left operand of '%s' must be scalar", !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = type_make_int(4, 0);
                        op == BOP_AND ? "&&" : "||");
             if (rt.kind != TY_INT && rt.kind != TY_FLOAT && rt.kind != TY_PTR)
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be scalar",
                        op == BOP_AND ? "&&" : "||");
             res = type_make_int(4, 0);
-        } else if (op >= BOP_EQ && op <= BOP_GE) {
-            res = type_make_int(4, 0);
-        } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) {
-            if (op == BOP_SUB && lt.kind == TY_PTR && rt.kind == TY_PTR) {
-                res = type_make_int(8, 0);
-            } else if (lt.kind == TY_PTR) {
-                res = type_clone(lt);
+        } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_INT } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.kind == TY_INT } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { op <= BOP_GE) {
+            if (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { rt.width == 0) ||
+                               (rt.kind == TY_PTR } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.kind == TY_INT } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { lt.width == 0);
+                if (!func_cmp } else if (op >= BOP_EQ && op <= BOP_GE) {} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }} else if (op >= BOP_EQ && op <= BOP_GE) { !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            } !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types
+",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            if (lt.kind == TY_PTR && rt.kind == TY_PTR && !type_is_same(lt, rt)) {
+                int func_cmp = (lt.pointee && lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee && rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR && rt.kind == TY_INT && rt.width == 0) ||
+                               (rt.kind == TY_PTR && lt.kind == TY_INT && lt.width == 0);
+                if (!func_cmp && !null_cmp) {
+                    runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, res = type_make_int(4, 0);fold_val) res = type_make_int(4, 0); res = type_make_int(4, 0); fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) {fold_val) } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) { } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) { fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, fold_val) fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, if (op == BOP_SUB && lt.kind == TY_PTR && rt.kind == TY_PTR) {fold_val) if (op == BOP_SUB && lt.kind == TY_PTR && rt.kind == TY_PTR) { if (op == BOP_SUB && lt.kind == TY_PTR && rt.kind == TY_PTR) { fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, res = type_make_int(8, 0); fold_val) res = type_make_int(8, 0); res = type_make_int(8, 0); fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, } else if (lt.kind == TY_PTR) {fold_val) } else if (lt.kind == TY_PTR) { } else if (lt.kind == TY_PTR) { fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, res = type_clone(lt);fold_val) res = type_clone(lt); res = type_clone(lt); fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
             } else {
                 res = type_clone(rt);
             }
@@ -1235,9 +7032,31 @@ static Type check_expr_inner(Expr *e) {
                        "left operand of '%s' must be integer",
                        op == BOP_SHL ? "<<" : ">>");
             if (rt.kind != TY_INT)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, &fold_val) && fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, &fold_val) && fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative
+",
+                                e->loc.file, e->loc.line, e->loc.col);
+            }
                        "right operand of '%s' must be integer",
                        op == BOP_SHL ? "<<" : ">>");
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, &fold_val) && fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative\n",
+                        e->loc.file, e->loc.line, e->loc.col);
+            }
+                       op == BOP_SHL ? "<<" : ">>");
+            long long fold_val;
+            if (fold_const_int(e->u.bin.r, &fold_val) && fold_val < 0) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: is negative\n",
+                        e->loc.file, e->loc.line, e->loc.col);
+            }
             res = integer_promote(lt);
         } else {
             if (op == BOP_MOD &&
@@ -1887,12 +7706,47 @@ Type p1;
         return type_clone(e->type);
     }
     case EX_STR: {
-        Type ct = type_make_int(1, 0);
-        set_type(e, type_make_array(ct, e->u.str.len + 1));
-        type_free(&ct);
+                                                                                                                        * array type for sizeof("literal") which must return N, not 8. */ res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
         return type_clone(e->type);
-    }
-    case EX_ADDR: {
+        set_type(e, res_type);
+        if (res_type.kind == TY_VOID Type ct = type_make_int(1, 0); Type ct = type_make_int(1, 0); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        return type_clone(e->type);
+        set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, type_make_array(ct, e->u.str.len + 1)); set_type(e, type_make_array(ct, e->u.str.len + 1)); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        return type_clone(e->type);
+        set_type(e, res_type);
+        if (res_type.kind == TY_VOID type_free(&ct); type_free(&ct); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        return type_clone(e->type);
+        set_type(e, res_type);
+        if (res_type.kind == TY_VOID return type_clone(e->type); return type_clone(e->type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        return type_clone(e->type);
+        set_type(e, res_type);
+        if (res_type.kind == TY_VOID } } res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        return type_clone(e->type);
+        set_type(e, res_type);
+        if (res_type.kind == TY_VOID case EX_ADDR: { case EX_ADDR: { res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        return type_clone(e->type);
         Type ot = check_expr_inner(e->u.addr.operand);
         ExprKind ok = e->u.addr.operand->kind;
         if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER
@@ -2113,6 +7967,90 @@ Type p1;
             }
         }
         set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        } res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        } res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID set_type(e, res_type);
+        if (res_type.kind == TY_VOID set_type(e, res_type);set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }set_type(e, res_type); res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        } res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
+        if (res_type.kind == TY_VOID && res_type.width == 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                    "void value not ignored as it ought to be");
+        }
         return type_clone(e->type);
     }
     case EX_LABEL_ADDR: {
@@ -2384,6 +8322,10 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
             die_at(loc.file, loc.line, loc.col,
                    "too many initializers for array (expected %d, got %d)",
                    target.length, n);
+        if (target.length <= 0) {
+            die_at(loc.file, loc.line, loc.col,
+                   "initialization of flexible array member");
+        }
         for (int i = 0; i < n; i++) {
             const Expr *elem = list->u.init_list.elements[i];
             if (elem->kind == EX_INIT_LIST && target.elem_type)
@@ -2395,14 +8337,46 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
         if (!sd)
             die_at(loc.file, loc.line, loc.col,
                    "unknown struct 'struct %s'", target.tag);
-        if (n > sd->num_members)
+        int flexible_array_index = -1;
+        if (sd->num_members > 0) {
+            const StructMember *last = &sd->members[sd->num_members-1];
+            if (last->type.kind == TY_ARRAY && last->type.length <= 0) {
+                flexible_array_index = sd->num_members-1;
+            }
+        }
+        int max_fixed = (flexible_array_index >= 0) ? flexible_array_index : sd->num_members;
+        if (!sd->is_union && n < max_fixed) {
+            die_at(loc.file, loc.line, loc.col,
+                   "too few initializers for struct '%s' (expected at least %d, got %d)",
+                   target.tag, max_fixed, n);
+        }
+        if (flexible_array_index >= 0) {
+            if (sd->is_union) {
+                if (n > 1) {
+                    die_at(loc.file, loc.line, loc.col,
+                           "initialization of flexible array member");
+                }
+            } else {
+                if (n > max_fixed) {
+                    die_at(loc.file, loc.line, loc.col,
+                           "initialization of flexible array member");
+                }
+            }
+        }
+        if (flexible_array_index < 0 && n > sd->num_members) {
             die_at(loc.file, loc.line, loc.col,
                    "too many initializers for struct '%s' (expected %d, got %d)",
                    target.tag, sd->num_members, n);
+        }
         for (int i = 0; i < n; i++) {
             const Expr *elem = list->u.init_list.elements[i];
-            if (elem->kind == EX_INIT_LIST && i < sd->num_members)
-                check_init_list_shape(sd->members[i].type, elem, elem->loc);
+            if (i < sd->num_members) {
+                if (elem->kind == EX_INIT_LIST)
+                    check_init_list_shape(sd->members[i].type, elem, elem->loc);
+                else
+                    die_at(elem->loc.file, elem->loc.line, elem->loc.col,
+                           "TEST: initialization of flexible array member");
+            }
         }
         break;
     }
