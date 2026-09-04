@@ -1480,6 +1480,7 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_add(&tu->typedefs, "__UINTPTR_TYPE__", type_make_int(8, 1));
     typedef_registry_add(&tu->typedefs, "__WCHAR_TYPE__", type_make_int(4, 0));
     typedef_registry_add(&tu->typedefs, "wchar_t", type_make_int(4, 0));
+    typedef_registry_add(&tu->typedefs, "__WINT_TYPE__", type_make_int(4, 0));
 }
 
 void tu_free(TranslationUnit *tu) {
