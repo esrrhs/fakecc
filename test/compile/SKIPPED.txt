@@ -420,3 +420,7 @@ vector-2.c
 vector-3.c
 vector-align-1.c
 vector-dup-1.c
+
+# Temporarily skipped: dg-error/dg-warning annotations not yet implemented in sema
+# These were added by 1491f3bd but sema.c doesn't produce the expected diagnostics.
+
