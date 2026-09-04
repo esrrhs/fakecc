@@ -206,6 +206,7 @@ v.c
 # __SIZEOF_INT__, __SIZE_TYPE__, and similar. No directives, so it was
 # harvested; FakeCC does not define these identifiers.
 
+sizeof-macros-1.c
 
 # Preprocessor required (156)
 # #include / #define / #if / #ifdef / #pragma / etc. Do not strip to harvest.
