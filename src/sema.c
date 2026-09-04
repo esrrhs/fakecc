@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 /* Set by sema_check; provides the module StructRegistry for member lookups. */
 static const StructRegistry *g_sema_structs = NULL;
@@ -23,6 +24,28 @@ const TranslationUnit *get_sema_tu(void) {
 /* Return type of the function currently being type-checked.  Set per-function
  * before check_stmt_list so ST_RETURN can enforce the void/non-void rules. */
 static Type g_sema_ret_type;
+
+/* Error counter for sema phase.  Incremented by error emission
+ * helper; checked at the end of sema_check to set process exit code. */
+static int g_sema_error_count = 0;
+
+int sema_has_errors(void) {
+    return g_sema_error_count > 0;
+}
+
+int sema_error_count(void) {
+    return g_sema_error_count;
+}
+
+static void sema_report_error(const SourceLoc *loc, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "%s:%d:%d: error: ", loc->file, loc->line, loc->col);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    g_sema_error_count++;
+}
 
 typedef struct {
     const char *name;
@@ -445,6 +468,10 @@ static int type_is_same(Type a, Type b) {
     if (a.kind == TY_STRUCT) {
         if (a.tag && b.tag && strcmp(a.tag, b.tag) != 0) return 0;
     }
+    if (a.kind == TY_PTR) {
+        if (!a.pointee || !b.pointee) return a.pointee == b.pointee;
+        return type_is_same(*a.pointee, *b.pointee);
+    }
     return 1;
 }
 
@@ -697,6 +724,26 @@ static Type check_expr_inner(Expr *e) {
                        op == BOP_AND ? "&&" : "||");
             res = type_make_int(4, 0);
         } else if (op >= BOP_EQ && op <= BOP_GE) {
+            /* Comparison operators: warn on distinct pointer types (GCC -Wcompare-distinct-pointer-types). */
+            if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
+                int func_cmp = (lt.pointee && lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee && rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR && rt.kind == TY_INT && rt.width == 0) ||
+                               (rt.kind == TY_PTR && lt.kind == TY_INT && lt.width == 0);
+                if (!func_cmp && !null_cmp) {
+                    int is_relational = (op == BOP_LT || op == BOP_LE || op == BOP_GT || op == BOP_GE);
+                    int is_equality = (op == BOP_EQ || op == BOP_NE);
+                    int lt_void = lt.pointee && lt.pointee->kind == TY_VOID;
+                    int rt_void = rt.pointee && rt.pointee->kind == TY_VOID;
+                    if (is_relational && !type_is_same(lt, rt)) {
+                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                                e->loc.file, e->loc.line, e->loc.col);
+                    } else if (is_equality && !lt_void && !rt_void && !type_is_same(lt, rt)) {
+                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                                e->loc.file, e->loc.line, e->loc.col);
+                    }
+                }
+            }
             res = type_make_int(4, 0);
         } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) {
             /* Pointer arithmetic: p+int, int+p, p-int → pointer; p-q → int. */
@@ -729,6 +776,14 @@ static Type check_expr_inner(Expr *e) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be integer",
                        op == BOP_SHL ? "<<" : ">>");
+            /* Warn on negative shift count (GCC -Wshift-count-negative). */
+            if (rt.kind == TY_INT && rt.width <= 8) {
+                long long shift_val;
+                if (fold_const_int(e->u.bin.r, &shift_val) && shift_val < 0) {
+                    fprintf(stderr, "%s:%d:%d: warning: shift count is negative\n",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
             res = integer_promote(lt);
         } else {
             /* ADD / SUB / MUL / DIV / MOD.  MOD requires integer operands. */
@@ -1677,6 +1732,10 @@ static Type check_expr_inner(Expr *e) {
             if (last->kind == ST_EXPR && last->u.expr) {
                 type_free(&res_type);
                 res_type = type_clone(last->u.expr->type);
+                if (res_type.kind == TY_VOID) {
+                    sema_report_error(&last->u.expr->loc,
+                            "void value not ignored as it ought to be");
+                }
             }
         }
         set_type(e, res_type);
@@ -1938,6 +1997,19 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
         if (target->kind == TY_ARRAY || target->is_vector) slot_type = target->elem_type;
         else if (target->kind == TY_STRUCT && sd && member_idx < sd->num_members)
             slot_type = &sd->members[member_idx].type;
+        /* C99 6.7.8p22: a flexible array member (length == 0) whose element
+         * type is a struct cannot be initialized with scalar elements via
+         * bracket elision, because normalize_init_list would mutate the shared
+         * StructDef member type length in place and bypass the later FAM check.
+         * String literals initializing char[] FAMs remain valid (pr28865.c).
+         * Scalar-element FAMs like char*[] are also valid (pr33382.c). */
+        if (slot_type && slot_type->kind == TY_ARRAY && slot_type->length == 0
+                && slot_type->elem_type
+                && slot_type->elem_type->kind == TY_STRUCT
+                && !(elem->kind == EX_STR && slot_type->elem_type->width == 1)) {
+            sema_report_error(&elem->loc,
+                              "initialization of flexible array member");
+        }
         if (slot_type && elem->kind != EX_INIT_LIST
             && (slot_type->kind == TY_ARRAY || slot_type->kind == TY_STRUCT)
             && !init_elem_may_be_aggregate(elem)
@@ -2032,6 +2104,20 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
             die_at(loc.file, loc.line, loc.col,
                    "too many initializers for struct '%s' (expected %d, got %d)",
                    target.tag, sd->num_members, n);
+        /* Reject initializers for a struct member that is a flexible
+         * array member (the last member of a struct with no fixed length),
+         * except for string literal initializing char[] FAM (supported extension). */
+        for (int i = 0; i < n && i < sd->num_members; i++) {
+            const Type *mtype = &sd->members[i].type;
+            if (mtype->kind == TY_ARRAY && mtype->length == 0 && mtype->elem_type) {
+                const Expr *elem = list->u.init_list.elements[i];
+                if (elem->kind == EX_STR && mtype->elem_type->width == 1) {
+                    continue;
+                }
+                die_at(elem->loc.file, elem->loc.line, elem->loc.col,
+                       "initialization of flexible array member");
+            }
+        }
         for (int i = 0; i < n; i++) {
             const Expr *elem = list->u.init_list.elements[i];
             if (elem->kind == EX_INIT_LIST && i < sd->num_members)
@@ -2178,7 +2264,12 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         *has_return = 1;
         break;
     case ST_IF:
-        discard = check_expr_inner(s->u.if_s.cond); type_free(&discard);
+        discard = check_expr_inner(s->u.if_s.cond);
+        if (discard.kind == TY_VOID) {
+            sema_report_error(&s->u.if_s.cond->loc,
+                    "void value not ignored as it ought to be");
+        }
+        type_free(&discard);
         check_stmt(s->u.if_s.then_s, scope_mark, has_return);
         if (s->u.if_s.else_s) check_stmt(s->u.if_s.else_s, scope_mark, has_return);
         break;
