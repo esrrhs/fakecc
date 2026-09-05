@@ -1313,8 +1313,11 @@ static Type check_expr_inner(Expr *e) {
             type_free(&list_ty);
             if (e->va_arg_type.kind == TY_VOID && e->va_arg_type.width == 0
                 && !e->va_arg_type.tag) {
+                /* Matches GCC: "second argument to 'va_arg' is of incomplete
+                 * type 'void'", so the dg-error pattern in the GCC torture
+                 * test pr48767.c matches this diagnostic. */
                 die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "va_arg second argument must be a type");
+                       "second argument to 'va_arg' is of incomplete type 'void'");
             }
             set_type(e, type_clone(e->va_arg_type));
             return type_clone(e->type);
