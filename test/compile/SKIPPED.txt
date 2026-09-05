@@ -10,7 +10,7 @@
 # use -std=gnu89 / -fpermissive for the rest). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 341
+# Total: 340
 #
 
 # GNU nested functions / trampolines (20)
@@ -364,11 +364,6 @@ pr81360.c
 # Complex function pointer declarators (1)
 # `T*L92(T*),*L15(T*),...` — K&R function declarations with function pointer return types.
 
-
-# Expected-error test (1)
-# va_arg(ap, void) should be rejected. FakeCC compile suite has no expected-error mechanism.
-
-pr48767.c
 
 # Windows-specific (1)
 # __declspec(dllimport/dllexport). Not supported by FakeCC.
