@@ -901,6 +901,8 @@ struct EnumDef {
     int num_constants;
     int cap_constants;
     SourceLoc loc;
+    int has_underlying_type;
+    Type underlying_type;
 };typedef struct EnumDef EnumDef;
 struct EnumRegistry {
     EnumDef *data;
@@ -915,6 +917,7 @@ int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
                             int value, SourceLoc loc);
 const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
                                                 const char *name);
+Type enum_def_as_type(const EnumDef *ed, int enum_id);
 struct TypedefEntry {
     char *name;
     Type type;
@@ -1016,6 +1019,9 @@ struct PkgContext;
 void sema_check(const TranslationUnit *tu, int require_main);
 void sema_check_in_pkg(const TranslationUnit *tu, int require_main,
                        struct PkgContext *ctx);
+int sema_has_errors(void);
+int sema_error_count(void);
+int sema_warning_count(void);
 typedef struct FILE FILE;
 typedef long fpos_t;
 const char *__asan_default_options(void) {
@@ -1053,6 +1059,9 @@ static void lower_tu(TranslationUnit *tu, const char *filename,
                      EmitModule *out, int opt_level, int want_debug,
                      PkgContext *pkg) {
     sema_check_in_pkg(tu, 0, pkg);
+    if (sema_has_errors()) {
+        runtime.exit(1);
+    }
     IRModule ir;
     ir_module_init(&ir);
     ir_generate(tu, &ir, opt_level == 0);

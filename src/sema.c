@@ -588,7 +588,7 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
 
 /* Normalize a (possibly designated) initializer list (designator validation,
  * array-length inference, expansion to positional with zero-fill). */
-static void normalize_init_list(Type *target, Expr *list, SourceLoc loc);
+static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested);
 
 static SymTable *g_check_st;
 
@@ -1715,7 +1715,7 @@ static Type check_expr_inner(Expr *e) {
          * type-check every element.  The list's own type is the target type. */
         Expr *init = e->u.compound.init;
         if (init->kind == EX_INIT_LIST)
-            normalize_init_list(&e->u.compound.target_type, init, e->loc);
+            normalize_init_list(&e->u.compound.target_type, init, e->loc, 0);
         for (int i = 0; i < init->u.init_list.num_elements; i++) {
             Type et = check_expr_inner(init->u.init_list.elements[i]);
             type_free(&et);
@@ -1883,7 +1883,7 @@ static int init_elem_may_be_aggregate(const Expr *e) {
  * designators resolve too.  C99 designated-initializer semantics: a designator
  * sets the current position, and subsequent positional elements continue from
  * the slot after it (`[1]=10, 20` → a[1]=10, a[2]=20). */
-static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
+static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested) {
     int n = list->u.init_list.num_elements;
     /* 1. Infer array length for an empty `[]` declarator. */
     if (target->kind == TY_ARRAY && target->length == 0) {
@@ -1988,6 +1988,21 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             continue;
         }
         Expr *elem = list->u.init_list.elements[i];
+
+        /* Reject initialization of flexible array member in a nested context (e.g. within an array).
+         * GCC: "initialization of flexible array member in a nested context".
+         * Empty initializer list `{}` is allowed (no elements initialized). */
+        if (is_nested && target->kind == TY_STRUCT && sd && member_idx == sd->num_members - 1) {
+            const Type *mtype = &sd->members[member_idx].type;
+            if (mtype->kind == TY_ARRAY && mtype->length == 0 && mtype->elem_type) {
+                int is_empty = (elem->kind == EX_INIT_LIST && elem->u.init_list.num_elements == 0);
+                if (!is_empty) {
+                    sema_report_error(&elem->loc,
+                                      "initialization of flexible array member in a nested context");
+                }
+            }
+        }
+
         /* Bracket elision: if this slot expects an aggregate (array or struct)
          * and the source element is a scalar (not an EX_INIT_LIST), collect as
          * many flat elements as that aggregate has leaf scalars and wrap them
@@ -1997,19 +2012,6 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
         if (target->kind == TY_ARRAY || target->is_vector) slot_type = target->elem_type;
         else if (target->kind == TY_STRUCT && sd && member_idx < sd->num_members)
             slot_type = &sd->members[member_idx].type;
-        /* C99 6.7.8p22: a flexible array member (length == 0) whose element
-         * type is a struct cannot be initialized with scalar elements via
-         * bracket elision, because normalize_init_list would mutate the shared
-         * StructDef member type length in place and bypass the later FAM check.
-         * String literals initializing char[] FAMs remain valid (pr28865.c).
-         * Scalar-element FAMs like char*[] are also valid (pr33382.c). */
-        if (slot_type && slot_type->kind == TY_ARRAY && slot_type->length == 0
-                && slot_type->elem_type
-                && slot_type->elem_type->kind == TY_STRUCT
-                && !(elem->kind == EX_STR && slot_type->elem_type->width == 1)) {
-            sema_report_error(&elem->loc,
-                              "initialization of flexible array member");
-        }
         if (slot_type && elem->kind != EX_INIT_LIST
             && (slot_type->kind == TY_ARRAY || slot_type->kind == TY_STRUCT)
             && !init_elem_may_be_aggregate(elem)
@@ -2029,12 +2031,16 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
         /* Recurse into a nested init list to resolve its designators against
          * the sub-type.  Array element types are mutated in place (so an
          * inferred inner length propagates to the parent type); struct member
-         * types carry explicit lengths and need no propagation. */
+         * types carry explicit lengths and need no propagation (clone to avoid
+         * mutating the shared struct definition). */
         if (elem->kind == EX_INIT_LIST) {
             if (target->kind == TY_ARRAY || target->is_vector)
-                normalize_init_list(target->elem_type, elem, elem->loc);
-            else if (sd && member_idx < sd->num_members)
-                normalize_init_list(&sd->members[member_idx].type, elem, elem->loc);
+                normalize_init_list(target->elem_type, elem, elem->loc, 1);
+            else if (sd && member_idx < sd->num_members) {
+                Type sub_type = type_clone(sd->members[member_idx].type);
+                normalize_init_list(&sub_type, elem, elem->loc, 1);
+                type_free(&sub_type);
+            }
         }
         expr_free(out[pos]); /* drop the gap-fill zero (or previous element) */
         out[pos] = elem;
@@ -2104,20 +2110,6 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
             die_at(loc.file, loc.line, loc.col,
                    "too many initializers for struct '%s' (expected %d, got %d)",
                    target.tag, sd->num_members, n);
-        /* Reject initializers for a struct member that is a flexible
-         * array member (the last member of a struct with no fixed length),
-         * except for string literal initializing char[] FAM (supported extension). */
-        for (int i = 0; i < n && i < sd->num_members; i++) {
-            const Type *mtype = &sd->members[i].type;
-            if (mtype->kind == TY_ARRAY && mtype->length == 0 && mtype->elem_type) {
-                const Expr *elem = list->u.init_list.elements[i];
-                if (elem->kind == EX_STR && mtype->elem_type->width == 1) {
-                    continue;
-                }
-                die_at(elem->loc.file, elem->loc.line, elem->loc.col,
-                       "initialization of flexible array member");
-            }
-        }
         for (int i = 0; i < n; i++) {
             const Expr *elem = list->u.init_list.elements[i];
             if (elem->kind == EX_INIT_LIST && i < sd->num_members)
@@ -2215,7 +2207,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         /* Normalize a (possibly designated) init list: infer array length,
          * validate designators, expand to positional with zero-fill. */
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
-            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
+            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc, 0);
         symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST)
@@ -2470,7 +2462,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                         prev->u.decl.type.length = prev->u.decl.init->u.str.len + 1;
                     }
                     if (prev->u.decl.init && prev->u.decl.init->kind == EX_INIT_LIST)
-                        normalize_init_list(&prev->u.decl.type, prev->u.decl.init, prev->loc);
+                        normalize_init_list(&prev->u.decl.type, prev->u.decl.init, prev->loc, 0);
                     if (prev->u.decl.init->kind == EX_INIT_LIST)
                         check_init_list_shape(prev->u.decl.type, prev->u.decl.init, prev->loc);
                     if (!is_const_init(prev->u.decl.init, &globals))
@@ -2528,7 +2520,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         /* Normalize a (possibly designated) init list: infer array length,
          * validate designators, expand to positional with zero-fill. */
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
-            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
+            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc, 0);
         symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
             /* Validate the initializer list shape against the declared type. */

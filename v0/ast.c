@@ -541,6 +541,8 @@ struct EnumDef {
     int num_constants;
     int cap_constants;
     SourceLoc loc;
+    int has_underlying_type;
+    Type underlying_type;
 };typedef struct EnumDef EnumDef;
 struct EnumRegistry {
     EnumDef *data;
@@ -555,6 +557,7 @@ int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
                             int value, SourceLoc loc);
 const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
                                                 const char *name);
+Type enum_def_as_type(const EnumDef *ed, int enum_id);
 struct TypedefEntry {
     char *name;
     Type type;
@@ -1203,7 +1206,15 @@ EnumDef *enum_registry_add(EnumRegistry *r, const char *tag, SourceLoc loc) {
     ed->tag = tag ? xstrdup(tag) : ((void*)0);
     ed->constants = ((void*)0); ed->num_constants = 0; ed->cap_constants = 0;
     ed->loc = loc;
+    ed->has_underlying_type = 0;
+    ed->underlying_type = type_default_int();
     return ed;
+}
+Type enum_def_as_type(const EnumDef *ed, int enum_id) {
+    Type t = (ed && ed->has_underlying_type)
+        ? type_clone(ed->underlying_type) : type_default_int();
+    t.enum_id = enum_id;
+    return t;
 }
 EnumDef *enum_registry_find(EnumRegistry *r, const char *tag) {
     if (!tag) return ((void*)0);
@@ -1865,6 +1876,7 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_add(&tu->typedefs, "__UINTPTR_TYPE__", type_make_int(8, 1));
     typedef_registry_add(&tu->typedefs, "__WCHAR_TYPE__", type_make_int(4, 0));
     typedef_registry_add(&tu->typedefs, "wchar_t", type_make_int(4, 0));
+    typedef_registry_add(&tu->typedefs, "__WINT_TYPE__", type_make_int(4, 0));
 }
 void tu_free(TranslationUnit *tu) {
     runtime.free(tu->package.name);

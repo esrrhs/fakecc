@@ -49,18 +49,9 @@ export FAKECC CC_FLAGS CC_TIMEOUT WORK COMPILE_DIR
 # These are ignored for now; emit a one-line note to stderr.
 parse_expect_directives() {
     local src="$1" kind="$2" out="$3"
-    # Match /* { dg-error "PAT" } */ or /* { dg-error "PAT" "" } */.
-    # The closing braces } */ must appear; target selectors with extra
-    # { ... } blocks are filtered out.
-    # Using grep -E with extended regex; PAT can contain anything except
-    # unescaped quotes.  We capture the quoted pattern and verify the
-    # trailing "}" before "*/" is the right one.
-    grep -oE '/\*[[:space:]]*\{[[:space:]]*dg-'"$kind"'[[:space:]]+"[^"]*"[[:space:]]*\}[[:space:]]*\*/' "$src" 2>/dev/null \
-        | sed -nE 's|.*"([^"]*)".*|\1|p' > "$out" || true
-    # Detect and report target-restricted directives that we skipped.
-    if grep -E "/\*[[:space:]]*\{[[:space:]]*dg-$kind[[:space:]]+\"[^\"]*\"[[:space:]]*\"[[:space:]]*\{[[:space:]]*target" "$src" >/dev/null 2>&1; then
-        echo "run_compile: note: $src has target-restricted dg-$kind directive(s) (skipped)" >&2
-    fi
+    # Match /* { dg-error "PAT" ... } */ or /* { dg-warning "PAT" ... } */.
+    grep -oE '/\*[[:space:]]*\{[[:space:]]*dg-'"$kind"'[[:space:]]+"[^"]*".*\}' "$src" 2>/dev/null \
+        | sed -nE 's|.*/\*[[:space:]]*\{[[:space:]]*dg-'"$kind"'[[:space:]]+"([^"]*)".*|\1|p' > "$out" || true
 }
 export -f parse_expect_directives
 

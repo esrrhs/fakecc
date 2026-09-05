@@ -749,6 +749,8 @@ struct EnumDef {
     int num_constants;
     int cap_constants;
     SourceLoc loc;
+    int has_underlying_type;
+    Type underlying_type;
 };typedef struct EnumDef EnumDef;
 struct EnumRegistry {
     EnumDef *data;
@@ -763,6 +765,7 @@ int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
                             int value, SourceLoc loc);
 const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
                                                 const char *name);
+Type enum_def_as_type(const EnumDef *ed, int enum_id);
 struct TypedefEntry {
     char *name;
     Type type;

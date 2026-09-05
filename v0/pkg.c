@@ -541,6 +541,8 @@ struct EnumDef {
     int num_constants;
     int cap_constants;
     SourceLoc loc;
+    int has_underlying_type;
+    Type underlying_type;
 };typedef struct EnumDef EnumDef;
 struct EnumRegistry {
     EnumDef *data;
@@ -555,6 +557,7 @@ int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
                             int value, SourceLoc loc);
 const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
                                                 const char *name);
+Type enum_def_as_type(const EnumDef *ed, int enum_id);
 struct TypedefEntry {
     char *name;
     Type type;
@@ -970,6 +973,9 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         if (ed->tag && runtime.strncmp(ed->tag, "__anon_", 7) == 0) continue;
         if (!enum_registry_find(&pkg->enums, ed->tag)) {
             EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
+            ne->has_underlying_type = ed->has_underlying_type;
+            if (ed->has_underlying_type)
+                ne->underlying_type = type_clone(ed->underlying_type);
             for (int c = 0; c < ed->num_constants; c++)
                 enum_def_push_constant(ne, ed->constants[c].name, 1,
                                        ed->constants[c].value, ed->loc);
