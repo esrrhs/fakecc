@@ -10,7 +10,7 @@
 # use -std=gnu89 / -fpermissive for the rest). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 340
+# Total: 339
 #
 
 # GNU nested functions / trampolines (20)
@@ -369,11 +369,6 @@ pr81360.c
 # __declspec(dllimport/dllexport). Not supported by FakeCC.
 
 dll.c
-
-# asm goto (1)
-# asm goto with outputs. Not supported by FakeCC.
-
-asmgoto-6.c
 
 # __thread (1)
 # Thread-local storage. Not supported by FakeCC.

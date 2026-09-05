@@ -3715,13 +3715,21 @@ static Stmt parse_stmt(Parser *p) {
         const Token *name = peek(p);
         advance(p);
         advance(p);
-        Stmt inner = parse_stmt(p);
+        Stmt *inner_ptr;
+        if (peek(p)->kind == TK_RBRACE || peek(p)->kind == TK_EOF) {
+            inner_ptr = stmt_alloc();
+            runtime.memset(inner_ptr, 0, sizeof(*inner_ptr));
+            inner_ptr->kind = ST_BLOCK;
+        } else {
+            Stmt inner = parse_stmt(p);
+            inner_ptr = stmt_alloc();
+            *inner_ptr = inner;
+        }
         Stmt s;
         s.kind = ST_LABEL;
         s.loc = name->loc;
         s.u.label_s.name = xstrdup(name->text);
-        s.u.label_s.stmt = stmt_alloc();
-        *s.u.label_s.stmt = inner;
+        s.u.label_s.stmt = inner_ptr;
         return s;
     }
     if (k == TK_KW_CASE) {
