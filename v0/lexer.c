@@ -153,10 +153,15 @@ static const char *predefined_macro_literal(const char *text, int *out_is_float)
     if (runtime.strcmp(text, "__SIZEOF_INT__") == 0) return "4";
     if (runtime.strcmp(text, "__SIZEOF_LONG__") == 0) return "8";
     if (runtime.strcmp(text, "__SIZEOF_LONG_LONG__") == 0) return "8";
+    if (runtime.strcmp(text, "__SIZEOF_SHORT__") == 0) return "2";
     if (runtime.strcmp(text, "__SIZEOF_POINTER__") == 0) return "8";
     if (runtime.strcmp(text, "__SIZEOF_FLOAT__") == 0) return "4";
     if (runtime.strcmp(text, "__SIZEOF_DOUBLE__") == 0) return "8";
     if (runtime.strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0) return "16";
+    if (runtime.strcmp(text, "__SIZEOF_SIZE_T__") == 0) return "8";
+    if (runtime.strcmp(text, "__SIZEOF_WCHAR_T__") == 0) return "4";
+    if (runtime.strcmp(text, "__SIZEOF_WINT_T__") == 0) return "4";
+    if (runtime.strcmp(text, "__SIZEOF_PTRDIFF_T__") == 0) return "8";
     if (runtime.strcmp(text, "__FLT_MAX__") == 0) { *out_is_float = 1; return "3.40282347e+38f"; }
     if (runtime.strcmp(text, "__DBL_MAX__") == 0) { *out_is_float = 1; return "1.7976931348623157e+308"; }
     if (runtime.strcmp(text, "__FLT_MIN__") == 0) { *out_is_float = 1; return "1.17549435e-38f"; }

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 /* Set by sema_check; provides the module StructRegistry for member lookups. */
 static const StructRegistry *g_sema_structs = NULL;
@@ -23,6 +24,28 @@ const TranslationUnit *get_sema_tu(void) {
 /* Return type of the function currently being type-checked.  Set per-function
  * before check_stmt_list so ST_RETURN can enforce the void/non-void rules. */
 static Type g_sema_ret_type;
+
+/* Error counter for sema phase.  Incremented by error emission
+ * helper; checked at the end of sema_check to set process exit code. */
+static int g_sema_error_count = 0;
+
+int sema_has_errors(void) {
+    return g_sema_error_count > 0;
+}
+
+int sema_error_count(void) {
+    return g_sema_error_count;
+}
+
+static void sema_report_error(const SourceLoc *loc, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "%s:%d:%d: error: ", loc->file, loc->line, loc->col);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    g_sema_error_count++;
+}
 
 typedef struct {
     const char *name;
@@ -437,15 +460,29 @@ static int symtable_has_since(const SymTable *st, const char *name, size_t mark)
     return 0;
 }
 
-static int type_is_same(Type a, Type b) {
-    if (a.kind != b.kind) return 0;
-    if (a.width != b.width) return 0;
-    if (a.is_unsigned != b.is_unsigned) return 0;
-    if (a.is_vector != b.is_vector) return 0;
-    if (a.kind == TY_STRUCT) {
-        if (a.tag && b.tag && strcmp(a.tag, b.tag) != 0) return 0;
+static int type_is_same(const Type *a, const Type *b) {
+    if (!a || !b) return a == b;
+    while (a && b) {
+        if (a->kind != b->kind) return 0;
+        if (a->width != b->width) return 0;
+        if (a->is_unsigned != b->is_unsigned) return 0;
+        if (a->is_vector != b->is_vector) return 0;
+        if (a->kind == TY_STRUCT) {
+            if (a->tag && b->tag) {
+                if (strcmp(a->tag, b->tag) != 0) return 0;
+            } else if (a->tag != b->tag) {
+                return 0;
+            }
+            return 1;
+        }
+        if (a->kind == TY_PTR) {
+            a = a->pointee;
+            b = b->pointee;
+            continue;
+        }
+        return 1;
     }
-    return 1;
+    return a == b;
 }
 
 /* Conversion rank proxy: float types outrank integer types (C §6.3.1.8).
@@ -561,7 +598,7 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
 
 /* Normalize a (possibly designated) initializer list (designator validation,
  * array-length inference, expansion to positional with zero-fill). */
-static void normalize_init_list(Type *target, Expr *list, SourceLoc loc);
+static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested);
 
 static SymTable *g_check_st;
 
@@ -697,6 +734,26 @@ static Type check_expr_inner(Expr *e) {
                        op == BOP_AND ? "&&" : "||");
             res = type_make_int(4, 0);
         } else if (op >= BOP_EQ && op <= BOP_GE) {
+            /* Comparison operators: warn on distinct pointer types (GCC -Wcompare-distinct-pointer-types). */
+            if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
+                int func_cmp = (lt.pointee && lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee && rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR && rt.kind == TY_INT && rt.width == 0) ||
+                               (rt.kind == TY_PTR && lt.kind == TY_INT && lt.width == 0);
+                if (!func_cmp && !null_cmp) {
+                    int is_relational = (op == BOP_LT || op == BOP_LE || op == BOP_GT || op == BOP_GE);
+                    int is_equality = (op == BOP_EQ || op == BOP_NE);
+                    int lt_void = lt.pointee && lt.pointee->kind == TY_VOID;
+                    int rt_void = rt.pointee && rt.pointee->kind == TY_VOID;
+                    if (is_relational && !type_is_same(&lt, &rt)) {
+                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                                e->loc.file, e->loc.line, e->loc.col);
+                    } else if (is_equality && !lt_void && !rt_void && !type_is_same(&lt, &rt)) {
+                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                                e->loc.file, e->loc.line, e->loc.col);
+                    }
+                }
+            }
             res = type_make_int(4, 0);
         } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) {
             /* Pointer arithmetic: p+int, int+p, p-int → pointer; p-q → int. */
@@ -729,6 +786,14 @@ static Type check_expr_inner(Expr *e) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be integer",
                        op == BOP_SHL ? "<<" : ">>");
+            /* Warn on negative shift count (GCC -Wshift-count-negative). */
+            if (rt.kind == TY_INT && rt.width <= 8) {
+                long long shift_val;
+                if (fold_const_int(e->u.bin.r, &shift_val) && shift_val < 0) {
+                    fprintf(stderr, "%s:%d:%d: warning: shift count is negative\n",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
             res = integer_promote(lt);
         } else {
             /* ADD / SUB / MUL / DIV / MOD.  MOD requires integer operands. */
@@ -1660,7 +1725,7 @@ static Type check_expr_inner(Expr *e) {
          * type-check every element.  The list's own type is the target type. */
         Expr *init = e->u.compound.init;
         if (init->kind == EX_INIT_LIST)
-            normalize_init_list(&e->u.compound.target_type, init, e->loc);
+            normalize_init_list(&e->u.compound.target_type, init, e->loc, 0);
         for (int i = 0; i < init->u.init_list.num_elements; i++) {
             Type et = check_expr_inner(init->u.init_list.elements[i]);
             type_free(&et);
@@ -1677,6 +1742,10 @@ static Type check_expr_inner(Expr *e) {
             if (last->kind == ST_EXPR && last->u.expr) {
                 type_free(&res_type);
                 res_type = type_clone(last->u.expr->type);
+                if (res_type.kind == TY_VOID) {
+                    sema_report_error(&last->u.expr->loc,
+                            "void value not ignored as it ought to be");
+                }
             }
         }
         set_type(e, res_type);
@@ -1824,7 +1893,7 @@ static int init_elem_may_be_aggregate(const Expr *e) {
  * designators resolve too.  C99 designated-initializer semantics: a designator
  * sets the current position, and subsequent positional elements continue from
  * the slot after it (`[1]=10, 20` → a[1]=10, a[2]=20). */
-static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
+static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested) {
     int n = list->u.init_list.num_elements;
     /* 1. Infer array length for an empty `[]` declarator. */
     if (target->kind == TY_ARRAY && target->length == 0) {
@@ -1929,6 +1998,21 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
             continue;
         }
         Expr *elem = list->u.init_list.elements[i];
+
+        /* Reject initialization of flexible array member in a nested context (e.g. within an array).
+         * GCC: "initialization of flexible array member in a nested context".
+         * Empty initializer list `{}` is allowed (no elements initialized). */
+        if (is_nested && target->kind == TY_STRUCT && sd && member_idx == sd->num_members - 1) {
+            const Type *mtype = &sd->members[member_idx].type;
+            if (mtype->kind == TY_ARRAY && mtype->length == 0 && mtype->elem_type) {
+                int is_empty = (elem->kind == EX_INIT_LIST && elem->u.init_list.num_elements == 0);
+                if (!is_empty) {
+                    sema_report_error(&elem->loc,
+                                      "initialization of flexible array member in a nested context");
+                }
+            }
+        }
+
         /* Bracket elision: if this slot expects an aggregate (array or struct)
          * and the source element is a scalar (not an EX_INIT_LIST), collect as
          * many flat elements as that aggregate has leaf scalars and wrap them
@@ -1957,12 +2041,16 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc) {
         /* Recurse into a nested init list to resolve its designators against
          * the sub-type.  Array element types are mutated in place (so an
          * inferred inner length propagates to the parent type); struct member
-         * types carry explicit lengths and need no propagation. */
+         * types carry explicit lengths and need no propagation (clone to avoid
+         * mutating the shared struct definition). */
         if (elem->kind == EX_INIT_LIST) {
             if (target->kind == TY_ARRAY || target->is_vector)
-                normalize_init_list(target->elem_type, elem, elem->loc);
-            else if (sd && member_idx < sd->num_members)
-                normalize_init_list(&sd->members[member_idx].type, elem, elem->loc);
+                normalize_init_list(target->elem_type, elem, elem->loc, 1);
+            else if (sd && member_idx < sd->num_members) {
+                Type sub_type = type_clone(sd->members[member_idx].type);
+                normalize_init_list(&sub_type, elem, elem->loc, 1);
+                type_free(&sub_type);
+            }
         }
         expr_free(out[pos]); /* drop the gap-fill zero (or previous element) */
         out[pos] = elem;
@@ -2129,7 +2217,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         /* Normalize a (possibly designated) init list: infer array length,
          * validate designators, expand to positional with zero-fill. */
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
-            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
+            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc, 0);
         symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
             if (s->u.decl.init->kind == EX_INIT_LIST)
@@ -2161,7 +2249,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
                     die_at(s->loc.file, s->loc.line, s->loc.col,
                            "void function cannot return a value");
             } else {
-                if (!type_is_same(g_sema_ret_type, discard)) {
+                if (!type_is_same(&g_sema_ret_type, &discard)) {
                     if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||
                         (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0) ||
                         (discard.kind == TY_STRUCT && discard.tag && strncmp(discard.tag, "__complex_", 10) == 0) ||
@@ -2178,7 +2266,12 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         *has_return = 1;
         break;
     case ST_IF:
-        discard = check_expr_inner(s->u.if_s.cond); type_free(&discard);
+        discard = check_expr_inner(s->u.if_s.cond);
+        if (discard.kind == TY_VOID) {
+            sema_report_error(&s->u.if_s.cond->loc,
+                    "void value not ignored as it ought to be");
+        }
+        type_free(&discard);
         check_stmt(s->u.if_s.then_s, scope_mark, has_return);
         if (s->u.if_s.else_s) check_stmt(s->u.if_s.else_s, scope_mark, has_return);
         break;
@@ -2379,7 +2472,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                         prev->u.decl.type.length = prev->u.decl.init->u.str.len + 1;
                     }
                     if (prev->u.decl.init && prev->u.decl.init->kind == EX_INIT_LIST)
-                        normalize_init_list(&prev->u.decl.type, prev->u.decl.init, prev->loc);
+                        normalize_init_list(&prev->u.decl.type, prev->u.decl.init, prev->loc, 0);
                     if (prev->u.decl.init->kind == EX_INIT_LIST)
                         check_init_list_shape(prev->u.decl.type, prev->u.decl.init, prev->loc);
                     if (!is_const_init(prev->u.decl.init, &globals))
@@ -2437,7 +2530,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         /* Normalize a (possibly designated) init list: infer array length,
          * validate designators, expand to positional with zero-fill. */
         if (s->u.decl.init && s->u.decl.init->kind == EX_INIT_LIST)
-            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc);
+            normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc, 0);
         symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
             /* Validate the initializer list shape against the declared type. */

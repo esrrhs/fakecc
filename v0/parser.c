@@ -541,6 +541,8 @@ struct EnumDef {
     int num_constants;
     int cap_constants;
     SourceLoc loc;
+    int has_underlying_type;
+    Type underlying_type;
 };typedef struct EnumDef EnumDef;
 struct EnumRegistry {
     EnumDef *data;
@@ -555,6 +557,7 @@ int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
                             int value, SourceLoc loc);
 const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
                                                 const char *name);
+Type enum_def_as_type(const EnumDef *ed, int enum_id);
 struct TypedefEntry {
     char *name;
     Type type;
@@ -675,6 +678,8 @@ static int is_name_token(TokenKind k) {
 }
 static void parse_struct_body(Parser *p, StructDef *sd);
 static void parse_enum_body(Parser *p, EnumDef *ed);
+static Type parse_enum_underlying_type(Parser *p);
+static void parse_enum_underlying_opt(Parser *p, EnumDef *ed);
 static int int_literal_value(const char *text);
 static Type parse_declarator(Parser *p, Type base, char **name_out);
 static FunctionDecl parse_function_decl(Parser *p);
@@ -1286,30 +1291,34 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
     }
     if (peek(p)->kind == TK_KW_ENUM) {
         advance(p);
-        if (peek(p)->kind == TK_LBRACE) {
-            char tag[64];
-            runtime.snprintf(tag, sizeof(tag), "__anon_%d", p->anon_counter++);
-            EnumDef *ed = enum_registry_add(&p->tu->enums, tag, peek(p)->loc);
-            parse_enum_body(p, ed);
-            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
-            Type t = type_default_int();
-            t.enum_id = (int)(ed - p->tu->enums.data + 1);
-            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+        const Token *tag = ((void*)0);
+        if (peek(p)->kind == TK_IDENT) {
+            tag = peek(p);
+            advance(p);
         }
-        const Token *tag = peek(p);
-        if (tag->kind != TK_IDENT) {
-            die_at(tag->loc.file, tag->loc.line, tag->loc.col,
-                   "expected enum tag but got '%s'", tag->text);
+        EnumDef *ed = ((void*)0);
+        if (peek(p)->kind == TK_LBRACE || peek(p)->kind == TK_COLON) {
+            char anon_tag[64];
+            const char *reg_tag = tag ? tag->text : ((void*)0);
+            SourceLoc reg_loc = tag ? tag->loc : peek(p)->loc;
+            if (!reg_tag) {
+                runtime.snprintf(anon_tag, sizeof(anon_tag), "__anon_%d", p->anon_counter++);
+                reg_tag = anon_tag;
+            }
+            ed = enum_registry_add(&p->tu->enums, reg_tag, reg_loc);
+            parse_enum_underlying_opt(p, ed);
+            if (peek(p)->kind == TK_LBRACE)
+                parse_enum_body(p, ed);
+        } else if (tag) {
+            ed = enum_registry_find(&p->tu->enums, tag->text);
+        } else {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col,
+                   "expected enum tag or '{' but got '%s'", t->text);
         }
-        advance(p);
-        if (peek(p)->kind == TK_LBRACE) {
-            EnumDef *ed = enum_registry_add(&p->tu->enums, tag->text, peek(p)->loc);
-            parse_enum_body(p, ed);
-        }
-        EnumDef *ed = enum_registry_find(&p->tu->enums, tag->text);
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
-        Type t = type_default_int();
-        if (ed) t.enum_id = (int)(ed - p->tu->enums.data + 1);
+        Type t = ed ? enum_def_as_type(ed, (int)(ed - p->tu->enums.data + 1))
+                    : type_default_int();
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_IDENT) {
@@ -1525,6 +1534,59 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     struct_def_finish(sd);
     sd = struct_registry_find(&p->tu->structs, tag);
     if (sd) struct_def_fixup_self_types(sd);
+}
+static Type parse_enum_underlying_type(Parser *p) {
+    if (peek(p)->kind == TK_KW_BOOL
+        || (peek(p)->kind == TK_IDENT && runtime.strcmp(peek(p)->text, "bool") == 0)) {
+        advance(p);
+        return type_make_bool();
+    }
+    int has_type = 0;
+    int is_long = 0;
+    int is_short = 0;
+    int is_char = 0;
+    int is_unsigned = 0;
+    int is_int128 = 0;
+    for (;;) {
+        TokenKind k = peek(p)->kind;
+        if (k == TK_KW_SIGNED) { has_type = 1; advance(p); }
+        else if (k == TK_KW_UNSIGNED) { is_unsigned = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_CHAR) { is_char = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_SHORT) { is_short = 1; has_type = 1; advance(p); }
+        else if (k == TK_KW_INT) { has_type = 1; advance(p); }
+        else if (k == TK_KW_LONG) { is_long++; has_type = 1; advance(p); }
+        else if (k == TK_IDENT && (runtime.strcmp(peek(p)->text, "__int128") == 0
+                                   || runtime.strcmp(peek(p)->text, "__int128_t") == 0
+                                   || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
+            if (runtime.strcmp(peek(p)->text, "__uint128_t") == 0) is_unsigned = 1;
+            is_int128 = 1; has_type = 1; advance(p);
+        }
+        else break;
+    }
+    if (!has_type) {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "expected integer type for enum underlying type but got '%s'",
+               t->text);
+    }
+    int width = 4;
+    if (is_int128) width = 16;
+    else if (is_char) width = 1;
+    else if (is_short) width = 2;
+    else if (is_long >= 1) width = 8;
+    return type_make_int(width, is_unsigned);
+}
+static void parse_enum_underlying_opt(Parser *p, EnumDef *ed) {
+    if (peek(p)->kind != TK_COLON) return;
+    advance(p);
+    Type ut = parse_enum_underlying_type(p);
+    if (ut.kind != TY_INT) {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "enum underlying type must be an integer type");
+    }
+    ed->has_underlying_type = 1;
+    ed->underlying_type = ut;
 }
 static void parse_enum_body(Parser *p, EnumDef *ed) {
     advance(p);
@@ -4261,74 +4323,249 @@ static FunctionDecl parse_function_decl(Parser *p) {
         while (peek(p)->kind == TK_COMMA) {
             advance(p);
             for (;;) { if (!skip_attribute(p)) break; }
-            const Token *next_name = peek(p);
-            if (next_name->kind != TK_IDENT) break;
-            advance(p);
-            FunctionDecl extra_fn;
-            runtime.memset(&extra_fn, 0, sizeof(extra_fn));
-            extra_fn.name = xstrdup(next_name->text);
-            extra_fn.ret_type = type_clone(ret_ty);
-            param_array_init(&extra_fn.params);
-            stmt_array_init(&extra_fn.body);
-            extra_fn.loc = next_name->loc;
-            extra_fn.is_extern = 1;
-            extra_fn.is_static = is_static;
-            extra_fn.no_instrument = fn.no_instrument;
-            if (peek(p)->kind == TK_LPAREN) {
-                advance(p);
-                if (peek(p)->kind == TK_KW_VOID
-                    && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+            char *extra_name = ((void*)0);
+            if (is_type_start(p, p->pos)) {
+                Type base = parse_specifiers(p);
+                Type extra_ty = parse_declarator(p, base, &extra_name);
+                type_free(&base);
+                if (!extra_name) {
+                    type_free(&extra_ty);
+                    break;
+                }
+                FunctionDecl extra_fn;
+                runtime.memset(&extra_fn, 0, sizeof(extra_fn));
+                extra_fn.name = extra_name;
+                extra_fn.ret_type = type_clone(ret_ty);
+                param_array_init(&extra_fn.params);
+                stmt_array_init(&extra_fn.body);
+                extra_fn.loc = fn.loc;
+                extra_fn.is_extern = 1;
+                extra_fn.is_static = is_static;
+                extra_fn.no_instrument = fn.no_instrument;
+                if (extra_ty.kind == TY_FUNC) {
+                    for (int i = 0; i < extra_ty.func_nparams; i++) {
+                        char *pname = xstrdup("");
+                        param_array_push(&extra_fn.params, pname, extra_ty.func_params[i], fn.loc);
+                        runtime.free(pname);
+                    }
+                    extra_fn.is_variadic = extra_ty.func_is_variadic;
+                    extra_fn.is_unprototyped = 0;
+                    runtime.free(extra_ty.func_params);
+                    extra_ty.func_params = ((void*)0);
+                    extra_ty.func_nparams = 0;
+                    type_free(&extra_ty);
+                } else if (peek(p)->kind == TK_LPAREN) {
                     advance(p);
-                } else if (peek(p)->kind != TK_RPAREN
-                           && is_type_start(p, p->pos)) {
-                    for (;;) {
-                        if (!is_type_start(p, p->pos)) break;
-                        char *pn2 = ((void*)0);
-                        Type pt2 = parse_type(p, &pn2);
-                        if (!pn2) pn2 = xstrdup("");
-                        if (pt2.kind == TY_ARRAY && pt2.elem_type) {
-                            Type p2 = type_make_ptr(*pt2.elem_type);
-                            p2.vla_dim = pt2.vla_dim;
-                            pt2.vla_dim = ((void*)0);
-                            type_free(&pt2);
-                            pt2 = p2;
-                        }
-                        param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
-                        runtime.free(pn2);
-                        if (peek(p)->kind == TK_COMMA) {
-                            advance(p);
-                            if (peek(p)->kind == TK_ELLIPSIS) {
-                                advance(p); extra_fn.is_variadic = 1; break;
+                    if (peek(p)->kind == TK_KW_VOID
+                        && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+                        advance(p);
+                    } else if (peek(p)->kind != TK_RPAREN
+                               && is_type_start(p, p->pos)) {
+                        for (;;) {
+                            if (!is_type_start(p, p->pos)) break;
+                            char *pn2 = ((void*)0);
+                            Type pt2 = parse_type(p, &pn2);
+                            if (!pn2) pn2 = xstrdup("");
+                            if (pt2.kind == TY_ARRAY && pt2.elem_type) {
+                                Type p2 = type_make_ptr(*pt2.elem_type);
+                                p2.vla_dim = pt2.vla_dim;
+                                pt2.vla_dim = ((void*)0);
+                                type_free(&pt2);
+                                pt2 = p2;
                             }
+                            param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
+                            runtime.free(pn2);
+                            if (peek(p)->kind == TK_COMMA) {
+                                advance(p);
+                                if (peek(p)->kind == TK_ELLIPSIS) {
+                                    advance(p); extra_fn.is_variadic = 1; break;
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    } else if (peek(p)->kind == TK_ELLIPSIS) {
+                        advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
+                    } else if (peek(p)->kind != TK_RPAREN) {
+                        extra_fn.is_unprototyped = 1;
+                        for (;;) {
+                            const Token *id = peek(p);
+                            if (id->kind != TK_IDENT) break;
+                            if (nkr >= 16) break;
+                            kr_names[nkr++] = xstrdup(id->text);
+                            advance(p);
+                            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                            break;
+                        }
+                    } else {
+                        extra_fn.is_unprototyped = 1;
+                    }
+                    expect_kind(p, TK_RPAREN, "')'");
+                } else {
+                    type_free(&extra_ty);
+                }
+                if (p->tu->functions.len >= p->tu->functions.cap) {
+                    size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
+                    p->tu->functions.data = runtime.realloc(p->tu->functions.data,
+                                                 new_cap * sizeof(FunctionDecl));
+                    p->tu->functions.cap = new_cap;
+                }
+                p->tu->functions.data[p->tu->functions.len++] = extra_fn;
+            } else if (peek(p)->kind == TK_STAR) {
+                while (peek(p)->kind == TK_STAR) {
+                    advance(p);
+                    for (;;) {
+                        if (skip_attribute(p)) continue;
+                        if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
+                            advance(p);
                             continue;
                         }
                         break;
                     }
-                } else if (peek(p)->kind == TK_ELLIPSIS) {
-                    advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
-                } else if (peek(p)->kind != TK_RPAREN) {
-                    extra_fn.is_unprototyped = 1;
-                    for (;;) {
-                        const Token *id = peek(p);
-                        if (id->kind != TK_IDENT) break;
-                        if (nkr >= 16) break;
-                        kr_names[nkr++] = xstrdup(id->text);
+                }
+                if (peek(p)->kind != TK_IDENT) break;
+                extra_name = xstrdup(peek(p)->text);
+                advance(p);
+                FunctionDecl extra_fn;
+                runtime.memset(&extra_fn, 0, sizeof(extra_fn));
+                extra_fn.name = extra_name;
+                extra_fn.ret_type = type_clone(ret_ty);
+                param_array_init(&extra_fn.params);
+                stmt_array_init(&extra_fn.body);
+                extra_fn.loc = fn.loc;
+                extra_fn.is_extern = 1;
+                extra_fn.is_static = is_static;
+                extra_fn.no_instrument = fn.no_instrument;
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    if (peek(p)->kind == TK_KW_VOID
+                        && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
                         advance(p);
-                        if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
-                        break;
+                    } else if (peek(p)->kind != TK_RPAREN
+                               && is_type_start(p, p->pos)) {
+                        for (;;) {
+                            if (!is_type_start(p, p->pos)) break;
+                            char *pn2 = ((void*)0);
+                            Type pt2 = parse_type(p, &pn2);
+                            if (!pn2) pn2 = xstrdup("");
+                            if (pt2.kind == TY_ARRAY && pt2.elem_type) {
+                                Type p2 = type_make_ptr(*pt2.elem_type);
+                                p2.vla_dim = pt2.vla_dim;
+                                pt2.vla_dim = ((void*)0);
+                                type_free(&pt2);
+                                pt2 = p2;
+                            }
+                            param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
+                            runtime.free(pn2);
+                            if (peek(p)->kind == TK_COMMA) {
+                                advance(p);
+                                if (peek(p)->kind == TK_ELLIPSIS) {
+                                    advance(p); extra_fn.is_variadic = 1; break;
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    } else if (peek(p)->kind == TK_ELLIPSIS) {
+                        advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
+                    } else if (peek(p)->kind != TK_RPAREN) {
+                        extra_fn.is_unprototyped = 1;
+                        for (;;) {
+                            const Token *id = peek(p);
+                            if (id->kind != TK_IDENT) break;
+                            if (nkr >= 16) break;
+                            kr_names[nkr++] = xstrdup(id->text);
+                            advance(p);
+                            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                            break;
+                        }
+                    } else {
+                        extra_fn.is_unprototyped = 1;
                     }
+                    expect_kind(p, TK_RPAREN, "')'");
                 } else {
                     extra_fn.is_unprototyped = 1;
                 }
-                expect_kind(p, TK_RPAREN, "')'");
+                if (p->tu->functions.len >= p->tu->functions.cap) {
+                    size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
+                    p->tu->functions.data = runtime.realloc(p->tu->functions.data,
+                                                 new_cap * sizeof(FunctionDecl));
+                    p->tu->functions.cap = new_cap;
+                }
+                p->tu->functions.data[p->tu->functions.len++] = extra_fn;
+            } else if (peek(p)->kind == TK_IDENT) {
+                extra_name = xstrdup(peek(p)->text);
+                advance(p);
+                FunctionDecl extra_fn;
+                runtime.memset(&extra_fn, 0, sizeof(extra_fn));
+                extra_fn.name = extra_name;
+                extra_fn.ret_type = type_clone(ret_ty);
+                param_array_init(&extra_fn.params);
+                stmt_array_init(&extra_fn.body);
+                extra_fn.loc = fn.loc;
+                extra_fn.is_extern = 1;
+                extra_fn.is_static = is_static;
+                extra_fn.no_instrument = fn.no_instrument;
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    if (peek(p)->kind == TK_KW_VOID
+                        && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+                        advance(p);
+                    } else if (peek(p)->kind != TK_RPAREN
+                               && is_type_start(p, p->pos)) {
+                        for (;;) {
+                            if (!is_type_start(p, p->pos)) break;
+                            char *pn2 = ((void*)0);
+                            Type pt2 = parse_type(p, &pn2);
+                            if (!pn2) pn2 = xstrdup("");
+                            if (pt2.kind == TY_ARRAY && pt2.elem_type) {
+                                Type p2 = type_make_ptr(*pt2.elem_type);
+                                p2.vla_dim = pt2.vla_dim;
+                                pt2.vla_dim = ((void*)0);
+                                type_free(&pt2);
+                                pt2 = p2;
+                            }
+                            param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
+                            runtime.free(pn2);
+                            if (peek(p)->kind == TK_COMMA) {
+                                advance(p);
+                                if (peek(p)->kind == TK_ELLIPSIS) {
+                                    advance(p); extra_fn.is_variadic = 1; break;
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    } else if (peek(p)->kind == TK_ELLIPSIS) {
+                        advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
+                    } else if (peek(p)->kind != TK_RPAREN) {
+                        extra_fn.is_unprototyped = 1;
+                        for (;;) {
+                            const Token *id = peek(p);
+                            if (id->kind != TK_IDENT) break;
+                            if (nkr >= 16) break;
+                            kr_names[nkr++] = xstrdup(id->text);
+                            advance(p);
+                            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                            break;
+                        }
+                    } else {
+                        extra_fn.is_unprototyped = 1;
+                    }
+                    expect_kind(p, TK_RPAREN, "')'");
+                } else {
+                    extra_fn.is_unprototyped = 1;
+                }
+                if (p->tu->functions.len >= p->tu->functions.cap) {
+                    size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
+                    p->tu->functions.data = runtime.realloc(p->tu->functions.data,
+                                                 new_cap * sizeof(FunctionDecl));
+                    p->tu->functions.cap = new_cap;
+                }
+                p->tu->functions.data[p->tu->functions.len++] = extra_fn;
+            } else {
+                break;
             }
-            if (p->tu->functions.len >= p->tu->functions.cap) {
-                size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
-                p->tu->functions.data = runtime.realloc(p->tu->functions.data,
-                                             new_cap * sizeof(FunctionDecl));
-                p->tu->functions.cap = new_cap;
-            }
-            p->tu->functions.data[p->tu->functions.len++] = extra_fn;
         }
         expect_kind(p, TK_SEMICOLON, "';'");
         return fn;
@@ -4467,14 +4704,20 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
             size_t save = p.pos;
             advance(&p);
             const Token *tag = peek(&p);
-            if (tag->kind == TK_IDENT) advance(&p);
-            if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
+            int has_tag = (tag->kind == TK_IDENT);
+            if (has_tag) advance(&p);
+            int is_def = 0;
+            if (peek(&p)->kind == TK_COLON) is_def = 1;
+            if (peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) is_def = 1;
+            if (has_tag && is_def) {
                 if (enum_registry_find(&tu->enums, tag->text)) {
                     die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of enum '%s'", tag->text);
                 }
                 EnumDef *ed = enum_registry_add(&tu->enums, tag->text, tag->loc);
-                parse_enum_body(&p, ed);
+                parse_enum_underlying_opt(&p, ed);
+                if (peek(&p)->kind == TK_LBRACE)
+                    parse_enum_body(&p, ed);
                 expect_kind(&p, TK_SEMICOLON, "';'");
                 continue;
             } else {

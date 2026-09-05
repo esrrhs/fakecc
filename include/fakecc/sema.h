@@ -14,4 +14,9 @@ void sema_check(const TranslationUnit *tu, int require_main);
 void sema_check_in_pkg(const TranslationUnit *tu, int require_main,
                        struct PkgContext *ctx);
 
+/* Check if the last sema_check run produced errors/warnings. */
+int sema_has_errors(void);
+int sema_error_count(void);
+int sema_warning_count(void);
+
 #endif /* FAKECC_SEMA_H */

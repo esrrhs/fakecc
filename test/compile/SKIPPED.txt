@@ -364,7 +364,6 @@ pr81360.c
 # Complex function pointer declarators (1)
 # `T*L92(T*),*L15(T*),...` — K&R function declarations with function pointer return types.
 
-930126-1.c
 
 # Expected-error test (1)
 # va_arg(ap, void) should be rejected. FakeCC compile suite has no expected-error mechanism.
@@ -386,8 +385,6 @@ asmgoto-6.c
 
 pr78694.c
 
-# _Complex (2)
-# _Complex arithmetic. Not supported by FakeCC.
 
 991213-1.c
 pr30132.c

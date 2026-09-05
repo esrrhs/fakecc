@@ -4190,77 +4190,262 @@ static FunctionDecl parse_function_decl(Parser *p) {
         while (peek(p)->kind == TK_COMMA) {
             advance(p); /* consume ',' */
             for (;;) { if (!skip_attribute(p)) break; }
-            const Token *next_name = peek(p);
-            if (next_name->kind != TK_IDENT) break;
-            advance(p);
-            FunctionDecl extra_fn;
-            memset(&extra_fn, 0, sizeof(extra_fn));
-            extra_fn.name = xstrdup(next_name->text);
-            extra_fn.ret_type = type_clone(ret_ty);
-            param_array_init(&extra_fn.params);
-            stmt_array_init(&extra_fn.body);
-            extra_fn.loc = next_name->loc;
-            extra_fn.is_extern = 1;
-            extra_fn.is_static = is_static;
-            extra_fn.no_instrument = fn.no_instrument;
-            if (peek(p)->kind == TK_LPAREN) {
-                advance(p);
-                /* Parse the parameter list properly so the extra declarator
-                 * gets its real parameters (not 0).  Reuse the same parsing
-                 * as the primary function declarator above. */
-                if (peek(p)->kind == TK_KW_VOID
-                    && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
-                    advance(p); /* (void) — empty prototyped */
-                } else if (peek(p)->kind != TK_RPAREN
-                           && is_type_start(p, p->pos)) {
-                    for (;;) {
-                        if (!is_type_start(p, p->pos)) break;
-                        char *pn2 = NULL;
-                        Type pt2 = parse_type(p, &pn2);
-                        if (!pn2) pn2 = xstrdup("");
-                        if (pt2.kind == TY_ARRAY && pt2.elem_type) {
-                            Type p2 = type_make_ptr(*pt2.elem_type);
-                            p2.vla_dim = pt2.vla_dim;
-                            pt2.vla_dim = NULL;
-                            type_free(&pt2);
-                            pt2 = p2;
-                        }
-                        param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
-                        free(pn2);
-                        if (peek(p)->kind == TK_COMMA) {
-                            advance(p);
-                            if (peek(p)->kind == TK_ELLIPSIS) {
-                                advance(p); extra_fn.is_variadic = 1; break;
+            /* Parse next declarator which may start with type specifiers, *,
+             * or an identifier.  Handle K&R function pointer return types
+             * like `T*L92(T*),*L15(T*)` where the second declarator starts with *.
+             * In K&R style, the prefix * chain is shared — we skip it for
+             * subsequent declarators since ret_ty already includes it. */
+            char *extra_name = NULL;
+            /* Check if next token starts a type specifier (e.g., int, struct, typedef) */
+            if (is_type_start(p, p->pos)) {
+                Type base = parse_specifiers(p);
+                Type extra_ty = parse_declarator(p, base, &extra_name);
+                type_free(&base);
+                if (!extra_name) {
+                    type_free(&extra_ty);
+                    break;
+                }
+                FunctionDecl extra_fn;
+                memset(&extra_fn, 0, sizeof(extra_fn));
+                extra_fn.name = extra_name;
+                extra_fn.ret_type = type_clone(ret_ty);
+                param_array_init(&extra_fn.params);
+                stmt_array_init(&extra_fn.body);
+                extra_fn.loc = fn.loc;
+                extra_fn.is_extern = 1;
+                extra_fn.is_static = is_static;
+                extra_fn.no_instrument = fn.no_instrument;
+                /* If the parsed declarator is a function type, extract its params.
+                 * Otherwise expect optional (param-list) after the name. */
+                if (extra_ty.kind == TY_FUNC) {
+                    /* Convert func_params array to ParamArray. */
+                    for (int i = 0; i < extra_ty.func_nparams; i++) {
+                        char *pname = xstrdup(""); /* parameter names not stored in func type */
+                        param_array_push(&extra_fn.params, pname, extra_ty.func_params[i], fn.loc);
+                        free(pname);
+                    }
+                    extra_fn.is_variadic = extra_ty.func_is_variadic;
+                    extra_fn.is_unprototyped = 0;
+                    free(extra_ty.func_params);
+                    extra_ty.func_params = NULL;
+                    extra_ty.func_nparams = 0;
+                    type_free(&extra_ty);
+                } else if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    if (peek(p)->kind == TK_KW_VOID
+                        && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+                        advance(p); /* (void) — empty prototyped */
+                    } else if (peek(p)->kind != TK_RPAREN
+                               && is_type_start(p, p->pos)) {
+                        for (;;) {
+                            if (!is_type_start(p, p->pos)) break;
+                            char *pn2 = NULL;
+                            Type pt2 = parse_type(p, &pn2);
+                            if (!pn2) pn2 = xstrdup("");
+                            if (pt2.kind == TY_ARRAY && pt2.elem_type) {
+                                Type p2 = type_make_ptr(*pt2.elem_type);
+                                p2.vla_dim = pt2.vla_dim;
+                                pt2.vla_dim = NULL;
+                                type_free(&pt2);
+                                pt2 = p2;
                             }
+                            param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
+                            free(pn2);
+                            if (peek(p)->kind == TK_COMMA) {
+                                advance(p);
+                                if (peek(p)->kind == TK_ELLIPSIS) {
+                                    advance(p); extra_fn.is_variadic = 1; break;
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    } else if (peek(p)->kind == TK_ELLIPSIS) {
+                        advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
+                    } else if (peek(p)->kind != TK_RPAREN) {
+                        extra_fn.is_unprototyped = 1;
+                        for (;;) {
+                            const Token *id = peek(p);
+                            if (id->kind != TK_IDENT) break;
+                            if (nkr >= 16) break;
+                            kr_names[nkr++] = xstrdup(id->text);
+                            advance(p);
+                            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                            break;
+                        }
+                    } else {
+                        extra_fn.is_unprototyped = 1;
+                    }
+                    expect_kind(p, TK_RPAREN, "')'");
+                } else {
+                    type_free(&extra_ty);
+                }
+                if (p->tu->functions.len >= p->tu->functions.cap) {
+                    size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
+                    p->tu->functions.data = realloc(p->tu->functions.data,
+                                                 new_cap * sizeof(FunctionDecl));
+                    p->tu->functions.cap = new_cap;
+                }
+                p->tu->functions.data[p->tu->functions.len++] = extra_fn;
+            } else if (peek(p)->kind == TK_STAR) {
+                /* Leading * in subsequent declarators is just syntactic repetition
+                 * of the shared return type prefix. Skip the * chain. */
+                while (peek(p)->kind == TK_STAR) {
+                    advance(p);
+                    for (;;) {
+                        if (skip_attribute(p)) continue;
+                        if (peek(p)->kind == TK_KW_CONST || peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_RESTRICT) {
+                            advance(p);
                             continue;
                         }
                         break;
                     }
-                } else if (peek(p)->kind == TK_ELLIPSIS) {
-                    advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
-                } else if (peek(p)->kind != TK_RPAREN) {
-                    extra_fn.is_unprototyped = 1;
-                    for (;;) {
-                        const Token *id = peek(p);
-                        if (id->kind != TK_IDENT) break;
-                        if (nkr >= 16) break;
-                        kr_names[nkr++] = xstrdup(id->text);
-                        advance(p);
-                        if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
-                        break;
+                }
+                /* Now expect identifier followed by optional (param-list) */
+                if (peek(p)->kind != TK_IDENT) break;
+                extra_name = xstrdup(peek(p)->text);
+                advance(p);
+                FunctionDecl extra_fn;
+                memset(&extra_fn, 0, sizeof(extra_fn));
+                extra_fn.name = extra_name;
+                extra_fn.ret_type = type_clone(ret_ty);
+                param_array_init(&extra_fn.params);
+                stmt_array_init(&extra_fn.body);
+                extra_fn.loc = fn.loc;
+                extra_fn.is_extern = 1;
+                extra_fn.is_static = is_static;
+                extra_fn.no_instrument = fn.no_instrument;
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    if (peek(p)->kind == TK_KW_VOID
+                        && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+                        advance(p); /* (void) — empty prototyped */
+                    } else if (peek(p)->kind != TK_RPAREN
+                               && is_type_start(p, p->pos)) {
+                        for (;;) {
+                            if (!is_type_start(p, p->pos)) break;
+                            char *pn2 = NULL;
+                            Type pt2 = parse_type(p, &pn2);
+                            if (!pn2) pn2 = xstrdup("");
+                            if (pt2.kind == TY_ARRAY && pt2.elem_type) {
+                                Type p2 = type_make_ptr(*pt2.elem_type);
+                                p2.vla_dim = pt2.vla_dim;
+                                pt2.vla_dim = NULL;
+                                type_free(&pt2);
+                                pt2 = p2;
+                            }
+                            param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
+                            free(pn2);
+                            if (peek(p)->kind == TK_COMMA) {
+                                advance(p);
+                                if (peek(p)->kind == TK_ELLIPSIS) {
+                                    advance(p); extra_fn.is_variadic = 1; break;
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    } else if (peek(p)->kind == TK_ELLIPSIS) {
+                        advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
+                    } else if (peek(p)->kind != TK_RPAREN) {
+                        extra_fn.is_unprototyped = 1;
+                        for (;;) {
+                            const Token *id = peek(p);
+                            if (id->kind != TK_IDENT) break;
+                            if (nkr >= 16) break;
+                            kr_names[nkr++] = xstrdup(id->text);
+                            advance(p);
+                            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                            break;
+                        }
+                    } else {
+                        extra_fn.is_unprototyped = 1;
                     }
+                    expect_kind(p, TK_RPAREN, "')'");
                 } else {
                     extra_fn.is_unprototyped = 1;
                 }
-                expect_kind(p, TK_RPAREN, "')'");
+                if (p->tu->functions.len >= p->tu->functions.cap) {
+                    size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
+                    p->tu->functions.data = realloc(p->tu->functions.data,
+                                                 new_cap * sizeof(FunctionDecl));
+                    p->tu->functions.cap = new_cap;
+                }
+                p->tu->functions.data[p->tu->functions.len++] = extra_fn;
+            } else if (peek(p)->kind == TK_IDENT) {
+                /* Simple identifier case: f, g, etc. (no prefix *) */
+                extra_name = xstrdup(peek(p)->text);
+                advance(p);
+                FunctionDecl extra_fn;
+                memset(&extra_fn, 0, sizeof(extra_fn));
+                extra_fn.name = extra_name;
+                extra_fn.ret_type = type_clone(ret_ty);
+                param_array_init(&extra_fn.params);
+                stmt_array_init(&extra_fn.body);
+                extra_fn.loc = fn.loc;
+                extra_fn.is_extern = 1;
+                extra_fn.is_static = is_static;
+                extra_fn.no_instrument = fn.no_instrument;
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    if (peek(p)->kind == TK_KW_VOID
+                        && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
+                        advance(p); /* (void) — empty prototyped */
+                    } else if (peek(p)->kind != TK_RPAREN
+                               && is_type_start(p, p->pos)) {
+                        for (;;) {
+                            if (!is_type_start(p, p->pos)) break;
+                            char *pn2 = NULL;
+                            Type pt2 = parse_type(p, &pn2);
+                            if (!pn2) pn2 = xstrdup("");
+                            if (pt2.kind == TY_ARRAY && pt2.elem_type) {
+                                Type p2 = type_make_ptr(*pt2.elem_type);
+                                p2.vla_dim = pt2.vla_dim;
+                                pt2.vla_dim = NULL;
+                                type_free(&pt2);
+                                pt2 = p2;
+                            }
+                            param_array_push(&extra_fn.params, pn2, pt2, peek(p)->loc);
+                            free(pn2);
+                            if (peek(p)->kind == TK_COMMA) {
+                                advance(p);
+                                if (peek(p)->kind == TK_ELLIPSIS) {
+                                    advance(p); extra_fn.is_variadic = 1; break;
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    } else if (peek(p)->kind == TK_ELLIPSIS) {
+                        advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
+                    } else if (peek(p)->kind != TK_RPAREN) {
+                        extra_fn.is_unprototyped = 1;
+                        for (;;) {
+                            const Token *id = peek(p);
+                            if (id->kind != TK_IDENT) break;
+                            if (nkr >= 16) break;
+                            kr_names[nkr++] = xstrdup(id->text);
+                            advance(p);
+                            if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
+                            break;
+                        }
+                    } else {
+                        extra_fn.is_unprototyped = 1;
+                    }
+                    expect_kind(p, TK_RPAREN, "')'");
+                } else {
+                    extra_fn.is_unprototyped = 1;
+                }
+                if (p->tu->functions.len >= p->tu->functions.cap) {
+                    size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
+                    p->tu->functions.data = realloc(p->tu->functions.data,
+                                                 new_cap * sizeof(FunctionDecl));
+                    p->tu->functions.cap = new_cap;
+                }
+                p->tu->functions.data[p->tu->functions.len++] = extra_fn;
+            } else {
+                break; /* not a valid declarator start */
             }
-            if (p->tu->functions.len >= p->tu->functions.cap) {
-                size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
-                p->tu->functions.data = realloc(p->tu->functions.data,
-                                             new_cap * sizeof(FunctionDecl));
-                p->tu->functions.cap = new_cap;
-            }
-            p->tu->functions.data[p->tu->functions.len++] = extra_fn;
         }
         expect_kind(p, TK_SEMICOLON, "';'");
         return fn;

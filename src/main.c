@@ -57,6 +57,10 @@ static void lower_tu(TranslationUnit *tu, const char *filename,
                      PkgContext *pkg) {
     sema_check_in_pkg(tu, 0, pkg);
 
+    if (sema_has_errors()) {
+        exit(1);
+    }
+
     IRModule ir;
     ir_module_init(&ir);
     ir_generate(tu, &ir, opt_level == 0);
