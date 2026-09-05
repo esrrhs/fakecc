@@ -509,6 +509,17 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
             advance(p);
         }
         else if (peek(p)->kind == TK_IDENT
+                 && (strcmp(peek(p)->text, "__thread") == 0
+                     || strcmp(peek(p)->text, "_Thread_local") == 0
+                     || strcmp(peek(p)->text, "thread_local") == 0)) {
+            /* GNU __thread / C11 _Thread_local / C23 thread_local: thread-local
+             * storage.  Stored as storage_class 3 so sema/IR can route the
+             * address-of to a TLS-only lowering path; the linker resolves
+             * accesses via %fs:[TPOFF64] (Initial-Exec model). */
+            if (storage_class) *storage_class = 3;
+            advance(p);
+        }
+        else if (peek(p)->kind == TK_IDENT
                  && (strcmp(peek(p)->text, "register") == 0
                      || strcmp(peek(p)->text, "auto") == 0)) {
             advance(p);

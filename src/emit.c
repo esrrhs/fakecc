@@ -17,6 +17,8 @@ void emit_module_init(EmitModule *m) {
     buffer_init(&m->rodata);
     buffer_init(&m->data);
     m->bss_size = 0;
+    buffer_init(&m->tdata);
+    m->tbss_size = 0;
     m->syms = NULL; m->num_syms = 0; m->cap_syms = 0;
     m->relocs = NULL; m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = NULL; m->num_data_relocs = 0; m->cap_data_relocs = 0;
@@ -38,6 +40,7 @@ void emit_module_free(EmitModule *m) {
     buffer_free(&m->text);
     buffer_free(&m->rodata);
     buffer_free(&m->data);
+    buffer_free(&m->tdata);
     free(m->dbg_tu_name);
     for (size_t i = 0; i < m->num_dbg_lines; i++) free(m->dbg_lines[i].file);
     free(m->dbg_lines);

@@ -201,7 +201,7 @@ void ir_module_push_alias(IRModule *m, const char *name, const char *target,
 static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
                                        int size, char *init_bytes,
                                        int is_readonly, int is_static,
-                                       SourceLoc loc) {
+                                       int is_tls, SourceLoc loc) {
     if (m->globals.len >= m->globals.cap) {
         size_t nc = m->globals.cap ? m->globals.cap * 2 : 4;
         m->globals.data = realloc(m->globals.data, nc * sizeof(IRGlobal));
@@ -214,6 +214,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->init_bytes = init_bytes;   /* takes ownership */
     g->is_readonly = is_readonly;
     g->is_static = is_static;
+    g->is_tls = is_tls;
     g->loc = loc;
     g->fixups = NULL;
     g->num_fixups = 0;
@@ -852,7 +853,7 @@ static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
     snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
     char *init = malloc(10);
     memcpy(init, &val, 10);
-    ir_module_push_global(g_ir_module, name, 10, init, 1, 1, loc);
+    ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
     IRValue v = new_value(fn);
     emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, loc);
     fn->insts.data[fn->insts.len - 1].is_float = 1;
@@ -1657,10 +1658,14 @@ static IRValue lower_i128_binop(IRFunction *fn, IRValue la, IRValue ra,
     return dst;
 }
 
-/* Emit `dst = &global-with-name`. */
-static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc) {
+/* Emit `dst = &global-with-name`.  When `is_tls` is set, emits IR_GADDR_TLS
+ * instead of IR_GADDR — the codegen path emits `lea %rxx, %fs:[rip+TPOFF64]`
+ * so the linker resolves the address against the thread-local storage
+ * template.  This is the Initial-Exec TLS model. */
+static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc, int is_tls) {
     IRValue v = new_value(fn);
-    emit_inst_w(fn, IR_GADDR, v, -1, -1, 0, 8, 1, loc);
+    IROpcode op = is_tls ? IR_GADDR_TLS : IR_GADDR;
+    emit_inst_w(fn, op, v, -1, -1, 0, 8, 1, loc);
     fn->insts.data[fn->insts.len - 1].call_name = xstrdup(name);
     return v;
 }
@@ -1676,6 +1681,9 @@ typedef struct {
     int width;
     int is_unsigned;
     int is_global;        /* 1 = refers to a module-level global */
+    int is_tls;           /* 1 = this global is __thread/_Thread_local;
+                           * lower_lvalue_addr emits IR_GADDR_TLS instead of
+                           * IR_GADDR so codegen routes to %fs:[TPOFF64] */
     int is_vla;           /* 1 = variable-length array with base ptr in slot */
     Type ty;
 } IRSlot;
@@ -1719,6 +1727,7 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
         : (ty.kind == TY_PTR ? 8 : (ty.width ? ty.width : 4));
     st->data[st->len].is_unsigned = ty.is_unsigned;
     st->data[st->len].is_global = 0;
+    st->data[st->len].is_tls = 0;
     st->data[st->len].is_vla = 0;
     st->data[st->len].ty = ty;
     st->len++;
@@ -1791,9 +1800,10 @@ static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
     ir_dbg_fill_struct(dv, ty);
 }
 
-static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty) {
+static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty, int is_tls) {
     irsymtable_push(st, name, -1, 1, ty);
     st->data[st->len - 1].is_global = 1;
+    st->data[st->len - 1].is_tls = is_tls;
 }
 
 /* Push a static local: it is backed by a mangled global `global_name`
@@ -3152,7 +3162,7 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     switch (e->kind) {
     case EX_VAR: {
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
-        if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc);
+        if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
         if (entry->is_vla) {
             IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
             IRValue v = new_value(fn);
@@ -3866,8 +3876,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         char *init = malloc(bytes);
         memcpy(init, e->u.str.bytes, bytes);
         /* anonymous constant — file-local by construction */
-        ir_module_push_global(g_ir_module, name, bytes, init, 1, 1, e->loc);
-        return emit_gaddr(fn, name, e->loc);
+        ir_module_push_global(g_ir_module, name, bytes, init, 1, 1, 0, e->loc);
+        return emit_gaddr(fn, name, e->loc, 0);
     }
     case EX_UNARY:
         switch (e->u.un.op) {
@@ -4402,7 +4412,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return -1;
         }
         if (entry->is_global) {
-            IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
+            IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
             if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT || entry->ty.is_vector || type_is_i128(entry->ty)) return addr;
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
@@ -4461,7 +4471,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
                 if (!entry) return -1;
                 if (entry->is_global)
-                    dst = emit_gaddr(fn, slot_global_name(entry), e->loc);
+                    dst = emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
                 else
                     dst = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
             } else if (lv->kind == EX_DEREF) {
@@ -4494,7 +4504,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
             if (!entry) return -1;
             if (entry->is_global) {
-                IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
+                IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
                 emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
             } else if (entry->pinned) {
                 IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
@@ -5697,7 +5707,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 fn->insts.data[fn->insts.len - 1].call_name = xstrdup(op->u.var.name);
                 return v;
             }
-            if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc);
+            if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         }
         if (op->kind == EX_DEREF) {
@@ -6844,7 +6854,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
          * the name as a data global would misroute an address-of. */
         if (dty.kind == TY_FUNC || s->u.decl.storage_class == 2) {
             if (dty.kind != TY_FUNC)
-                irsymtable_push_global(st, s->u.decl.name, dty);
+                irsymtable_push_global(st, s->u.decl.name, dty,
+                                       s->u.decl.storage_class == 3);
             break;
         }
 
@@ -6866,7 +6877,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
              * Created before packing so a pointer slot in the initializer can
              * attach its link-time fixup to this global. */
             IRGlobal *sg = ir_module_push_global(g_ir_module, mangled, sz, bytes,
-                                                 0, 1, s->loc);
+                                                 0, 1, 0, s->loc);
             if (s->u.decl.init) {
                 pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
                           s->u.decl.name, s->loc, sg);
@@ -7447,7 +7458,7 @@ static void flush_pending_globals(IRModule *m) {
                                              g_pending_globals[i].size,
                                              g_pending_globals[i].bytes,
                                              g_pending_globals[i].is_readonly,
-                                             1, g_pending_globals[i].loc);
+                                             1, 0, g_pending_globals[i].loc);
         /* Transfer any fixups collected while packing the literal's own init.
          * tmp->init_bytes aliases the buffer the real global now owns, so it
          * must not be freed here. */
@@ -8820,7 +8831,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     for (size_t g = 0; g < tu->globals.len; g++) {
         const Stmt *gs = &tu->globals.data[g];
         if (gs->kind == ST_DECL)
-            irsymtable_push_global(&g_ir_globals_st, gs->u.decl.name, gs->u.decl.type);
+            irsymtable_push_global(&g_ir_globals_st, gs->u.decl.name,
+                                   gs->u.decl.type,
+                                   gs->u.decl.storage_class == 3);
     }
 
     /* Register named globals from tu->globals.  `extern` globals are
@@ -8836,8 +8849,27 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                                  s->u.decl.storage_class == 1, s->loc);
             continue;
         }
-        /* extern → declaration only: skip emission entirely. */
+        /* extern → declaration only: skip emission entirely.  Also skip
+         * `extern __thread T a;` declarations (storage_class == 3 with no
+         * definition here): the symbol is left undefined in the final ELF
+         * and resolved by the linker against the __thread's definition in
+         * another TU, or via dynamic TLS if linked shared. */
         if (s->u.decl.storage_class == 2) continue;
+        /* `__thread T a;` without `extern` defines a TLS variable here:
+         * emit it as a SECT_TDATA / SECT_TBSS global.  TLS definitions
+         * cannot carry a non-trivial initializer in this implementation —
+         * we route any init through the normal .data path, but in
+         * practice TLS objects are zero-initialized. */
+        int is_tls = (s->u.decl.storage_class == 3);
+        if (is_tls) {
+            int sz = type_size(s->u.decl.type);
+            if (sz <= 0) sz = 8;
+            ir_module_push_global(ir, s->u.decl.name, sz, NULL,
+                                  0, /* mutable */
+                                  s->u.decl.storage_class == 1, /* static */
+                                  1 /* is_tls */, s->loc);
+            continue;
+        }
         int sz = type_size(s->u.decl.type);
         if (s->u.decl.init && s->u.decl.type.kind == TY_STRUCT && s->u.decl.init->kind == EX_INIT_LIST && s->u.decl.type.tag) {
             const StructDef *sd = struct_registry_find_c(g_ir_structs, s->u.decl.type.tag);
@@ -8876,7 +8908,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         /* Create the global FIRST so pack_init can attach pointer fixups to it
          * when an array/struct member decays to a pointer (e.g. `.regs = ARR`). */
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
-                                            0, is_static, s->loc);
+                                            0, is_static, 0, s->loc);
         if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);

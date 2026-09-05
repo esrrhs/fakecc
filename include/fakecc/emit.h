@@ -14,6 +14,8 @@
 #define SECT_RODATA 2
 #define SECT_DATA   3
 #define SECT_BSS    4
+#define SECT_TDATA  5  /* initialized __thread variables (ELF SHF_TLS) */
+#define SECT_TBSS   6  /* zero-initialized __thread variables (SHF_TLS) */
 
 /* ------------------------------------------------------------------ */
 /* Symbol table entry                                                  */
@@ -179,6 +181,8 @@ typedef struct {
     Buffer   rodata;   /* .rodata (string literals, long double constants) */
     Buffer   data;     /* .data (mutable globals) */
     size_t   bss_size; /* .bss total bytes (zero-initialized globals) */
+    Buffer   tdata;    /* .tdata — initialized __thread variables */
+    size_t   tbss_size;/* .tbss total bytes (zero-init __thread variables) */
 
     EmitSymbol *syms;  /* unified symbol table (section + defined + undefined) */
     size_t num_syms, cap_syms;
@@ -267,5 +271,10 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_GOTPCREL  9
 #define R_X86_64_GLOB_DAT  6
 #define R_X86_64_64       10  /* absolute 64-bit (pointer fixups in .data) */
+#define R_X86_64_TPOFF64  18  /* TLS offset: S + A - tls_end, Local-Exec.
+                               * Used with `lea %rxx, %fs:[rip+disp32]` for
+                               * variables defined in this module/executable;
+                               * the linker computes the negative offset from
+                               * the thread pointer. */
 
 #endif /* FAKECC_EMIT_H */

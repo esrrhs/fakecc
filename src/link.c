@@ -22,6 +22,7 @@
 #define PT_LOAD         1
 #define PT_INTERP       3
 #define PT_DYNAMIC      2
+#define PT_TLS          7
 #define PF_X            1
 #define PF_W            2
 #define PF_R            4
@@ -48,6 +49,7 @@
 #define SHF_WRITE        0x1
 #define SHF_ALLOC        0x2
 #define SHF_EXECINSTR    0x4
+#define SHF_TLS          0x400
 
 #define STB_LOCAL        0
 #define STT_SECTION      3
@@ -187,6 +189,18 @@ typedef struct {
     size_t   data_len;
     size_t   bss_file_offset;
     size_t   bss_size;
+    /* Thread-local storage template.  `tls_vaddr` is the start of the TLS
+     * image in memory (after .bss, page-aligned), `tls_file_offset` is where
+     * the initialized portion (.tdata) lives on disk (after .bss filesize
+     * in the RW segment), `tls_filesize` is the on-disk size (== tdata
+     * size; .tbss contributes memsz only), `tls_memsize` is tdata + tbss
+     * size (full template length).  have_tls gates emission of the .tdata
+     * / .tbss section headers and PT_TLS program header. */
+    int      have_tls;
+    uint64_t tls_vaddr;
+    size_t   tls_file_offset;
+    size_t   tls_filesize;
+    size_t   tls_memsize;
     /* Dynamic linking sections (valid only when the output is dynamically
      * linked).  File offsets point into the RX segment where the linker
      * appends .dynstr/.dynsym/.hash/.rela.plt/.rela.dyn/.dynamic; vaddrs are
@@ -318,6 +332,11 @@ static void finalize_sections(
     uint32_t shname_rodata = append_string(&shstrtab, ".rodata");
     uint32_t shname_data = append_string(&shstrtab, ".data");
     uint32_t shname_bss = append_string(&shstrtab, ".bss");
+    uint32_t shname_tdata = 0, shname_tbss = 0;
+    if (lay->have_tls) {
+        shname_tdata = append_string(&shstrtab, ".tdata");
+        shname_tbss = append_string(&shstrtab, ".tbss");
+    }
     uint32_t shname_symtab = append_string(&shstrtab, ".symtab");
     uint32_t shname_strtab = append_string(&shstrtab, ".strtab");
     uint32_t shname_shstrtab = append_string(&shstrtab, ".shstrtab");
@@ -382,8 +401,36 @@ static void finalize_sections(
     write_shdr_exec(elf, shname_bss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE,
                     bss_vaddr, bss_file_offset,
                     bss_size, 0, 0, 8, 0);
+    if (lay->have_tls) {
+        /* .tdata: file-resident initialized __thread variables.
+         * .tbss: zero-init __thread variables (SHT_NOBITS).  Both are
+         * SHF_TLS — the loader uses this flag together with PT_TLS to
+         * allocate the per-thread template. */
+        if (lay->tls_filesize > 0) {
+            write_shdr_exec(elf, shname_tdata, SHT_PROGBITS,
+                            SHF_ALLOC | SHF_TLS,
+                            lay->tls_vaddr, lay->tls_file_offset,
+                            lay->tls_filesize, 0, 0, 8, 0);
+        }
+        if (lay->tls_memsize > lay->tls_filesize) {
+            size_t tbss_bytes = lay->tls_memsize - lay->tls_filesize;
+            write_shdr_exec(elf, shname_tbss, SHT_NOBITS,
+                            SHF_ALLOC | SHF_TLS,
+                            lay->tls_vaddr + lay->tls_filesize,
+                            lay->tls_file_offset + lay->tls_filesize,
+                            tbss_bytes, 0, 0, 8, 0);
+        }
+    }
+    /* Count TLS sections actually emitted — only those with non-zero size
+     * take a slot, so .tdata-only / .tbss-only / both combinations all
+     * produce the right shnum and downstream section indices. */
+    int tls_sections = 0;
+    if (lay->have_tls) {
+        if (lay->tls_filesize > 0) tls_sections++;
+        if (lay->tls_memsize > lay->tls_filesize) tls_sections++;
+    }
     write_shdr_exec(elf, shname_symtab, SHT_SYMTAB, 0, 0, off_symtab,
-                    symtab.len, 6, first_global, 8, ELF64_SYM_SIZE);
+                    symtab.len, 6 + tls_sections, first_global, 8, ELF64_SYM_SIZE);
     write_shdr_exec(elf, shname_strtab, SHT_STRTAB, 0, 0, off_strtab,
                     strtab.len, 0, 0, 1, 0);
     write_shdr_exec(elf, shname_shstrtab, SHT_STRTAB, 0, 0, off_shstrtab,
@@ -404,8 +451,10 @@ static void finalize_sections(
     }
     /* Dynamic sections follow the debug blocks (when present) so the DWARF
      * section indices baked into .debug_info stay valid.  Section index of
-     * the first dynamic section: 8 (no dbg) or 14 (with dbg). */
-    int dyn_base = have_dbg ? 14 : 8;
+     * the first dynamic section: 8 (no dbg) or 14 (with dbg).  When TLS is
+     * present, .tdata and .tbss (only those that exist) take indices 8 and
+     * 9 (or 14 and 15 with debug), shifting dyn_base accordingly. */
+    int dyn_base = (have_dbg ? 14 : 8) + tls_sections;
     if (lay->have_dynamic) {
         /* .dynstr is a string table: use SHT_STRTAB (not SHT_DYNSTR).  readelf
          * resolves DT_NEEDED strings by locating the section whose sh_type is
@@ -437,8 +486,8 @@ static void finalize_sections(
                         dyn_base + 0, 0, 8, 16);
     }
 
-    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + (lay->have_dynamic ? 6 : 0));
-    uint16_t shstrndx = 7;
+    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + tls_sections + (lay->have_dynamic ? 6 : 0));
+    uint16_t shstrndx = (uint16_t)(7 + tls_sections);
     memcpy(elf->data + 40, &shoff, sizeof(shoff));
     memcpy(elf->data + 60, &shnum, sizeof(shnum));
     memcpy(elf->data + 62, &shstrndx, sizeof(shstrndx));
@@ -564,13 +613,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug) {
     /* ---- Merge sections ---- */
-    Buffer text, rodata, data;
+    Buffer text, rodata, data, tdata;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
+    buffer_init(&tdata);
     size_t bss_size = 0;
+    size_t tbss_size = 0;
     size_t *mod_text_off = xcalloc(n, sizeof(size_t));
     size_t *mod_rodata_off = xcalloc(n, sizeof(size_t));
     size_t *mod_data_off = xcalloc(n, sizeof(size_t));
     size_t *mod_bss_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_tdata_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_tbss_off = xcalloc(n, sizeof(size_t));
 
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
@@ -586,6 +639,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         while (bss_size & 7) bss_size++;
         mod_bss_off[i] = bss_size;
         bss_size += m->bss_size;
+        /* .tdata / .tbss concatenated per-module.  tdata is file-resident
+         * (loaded into the TLS template); tbss is zero-fill at run time and
+         * contributes only to memsz of PT_TLS. */
+        while (tdata.len & 7) { char z = 0; buffer_append(&tdata, &z, 1); }
+        mod_tdata_off[i] = tdata.len;
+        buffer_append(&tdata, m->tdata.data, m->tdata.len);
+        while (tbss_size & 7) tbss_size++;
+        mod_tbss_off[i] = tbss_size;
+        tbss_size += m->tbss_size;
     }
 
     /* ---- Per-module symbol base indices ---- */
@@ -870,6 +932,24 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 
     /* ---- Compute final symbol addresses ---- */
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));
+    /* The TLS template (PT_TLS) lives in memory right after .bss but uses
+     * its own virtual address range so the loader can copy/zero it per
+     * thread.  tdata (initialized) is file-resident, tbss (zero-init) is
+     * not.  tls_end_vaddr is p_vaddr + p_memsz; the TPOFF64 reloc writes
+     * `S - tls_end_vaddr + A`, a negative offset from %fs:0 to the symbol. */
+    int have_tls = (tdata.len > 0 || tbss_size > 0);
+    uint64_t tls_vaddr = bss_vaddr + bss_size;
+    while (tls_vaddr & (PAGE_SIZE - 1)) tls_vaddr++;
+    uint64_t tls_end_vaddr = tls_vaddr + tdata.len + tbss_size;
+    /* tdata/tbss virtual offsets inside the TLS template */
+    uint64_t tdata_vaddr = tls_vaddr;
+    uint64_t tbss_vaddr = tls_vaddr + tdata.len;
+    /* .tdata lives on disk right after .data (which itself follows the GOT
+     * inside the RW segment).  Pad to 8-byte alignment first. */
+    size_t tls_file_offset_base = data_file_offset + data.len;
+    while (tls_file_offset_base & 7) tls_file_offset_base++;
+    size_t tls_filesize = tdata.len;
+    size_t tls_memsize = tdata.len + tbss_size;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -885,6 +965,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 sym_addr[gsi] = data_vaddr + mod_data_off[i] + sym->value; break;
             case SECT_BSS:
                 sym_addr[gsi] = bss_vaddr + mod_bss_off[i] + sym->value; break;
+            case SECT_TDATA:
+                sym_addr[gsi] = tdata_vaddr + mod_tdata_off[i] + sym->value; break;
+            case SECT_TBSS:
+                sym_addr[gsi] = tbss_vaddr + mod_tbss_off[i] + sym->value; break;
             default:
                 sym_addr[gsi] = sym->value; break;
             }
@@ -930,6 +1014,55 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 int dgidx = reloc_data_got_idx[gsi];
                 uint64_t got_slot_vaddr = got_vaddr + (3 + num_ext + dgidx) * 8;
                 int32_t disp = (int32_t)(got_slot_vaddr - (P + 4));
+                memcpy(text.data + patch_in_text, &disp, 4);
+                continue;
+            }
+            if (rel->type == R_X86_64_TPOFF64) {
+                /* TLS Local-Exec: `lea %rxx, %fs:[rip+disp32]`.  disp32 is the
+                 * absolute offset from %fs:0 (the thread pointer) to the
+                 * variable; the reloc formula is S + A - tls_end.  The RIP
+                 * register plays no role in the offset — %fs-relative
+                 * addressing consumes disp32 verbatim as the signed
+                 * displacement from %fs:0. */
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                uint64_t S;
+                if (sinfo[gsi].defined
+                    && (sinfo[gsi].shndx == SECT_TDATA
+                        || sinfo[gsi].shndx == SECT_TBSS)) {
+                    S = sym_addr[gsi];
+                } else {
+                    /* Undefined locally — look for a GLOBAL TLS definition in
+                     * another module.  No fallback: TLS Local-Exec cannot
+                     * resolve truly external symbols (would need Initial-Exec
+                     * via GOT, which we don't implement). */
+                    const char *nm = m->syms[rel->sym].name
+                                     ? m->syms[rel->sym].name : "";
+                    size_t found = (size_t)-1;
+                    for (size_t mi = 0; mi < n && found == (size_t)-1; mi++) {
+                        EmitModule *om = mods[mi];
+                        for (size_t mj = 0; mj < om->num_syms; mj++) {
+                            size_t ogsi = mod_sym_base[mi] + mj;
+                            if (sinfo[ogsi].defined
+                                && sinfo[ogsi].binding == 1 /* GLOBAL */
+                                && (sinfo[ogsi].shndx == SECT_TDATA
+                                    || sinfo[ogsi].shndx == SECT_TBSS)
+                                && om->syms[mj].name
+                                && strcmp(om->syms[mj].name, nm) == 0) {
+                                found = sym_addr[ogsi];
+                                break;
+                            }
+                        }
+                    }
+                    if (found == (size_t)-1) {
+                        fprintf(stderr,
+                                "fakecc: undefined TLS symbol '%s' "
+                                "(Local-Exec needs the variable to be defined "
+                                "in the same link unit)\n", nm);
+                        exit(1);
+                    }
+                    S = found;
+                }
+                int32_t disp = (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_end_vaddr);
                 memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
@@ -1163,7 +1296,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
          * across a function call. */
         Buffer elf;
         buffer_init(&elf);
-        uint16_t phnum = 4; /* RX, RW, INTERP, DYNAMIC */
+        uint16_t phnum = have_tls ? 5 : 4; /* RX, RW, [INTERP, DYNAMIC, PT_TLS] */
         write_ehdr(&elf, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base, rx_filesz, rx_filesz, PAGE_SIZE);
         write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
@@ -1173,11 +1306,22 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                    interp_len, interp_len, 1);
         write_phdr(&elf, PT_DYNAMIC, PF_R, hdr_size + dynamic_off, rx_base_vaddr + dynamic_off,
                    dynamic.len, dynamic.len, 8);
+        if (have_tls) {
+            /* PT_TLS: TLS template (file = .tdata, memory = .tdata + .tbss).
+             * Lives outside any PT_LOAD — the loader materializes it
+             * separately per thread. */
+            write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
+                       tls_filesize, tls_memsize, 1);
+        }
         buf_bytes(&elf, rx.data, rx.len);
         while (elf.len < data_file_offset) buf_u8(&elf, 0);
         buf_bytes(&elf, data.data, data.len);
         while (elf.len < data_file_offset + got_data_off) buf_u8(&elf, 0);
         buf_bytes(&elf, got.data, got.len);
+        if (have_tls) {
+            while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
+            buf_bytes(&elf, tdata.data, tdata.len);
+        }
         SectionLayout lay;
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
@@ -1189,6 +1333,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         lay.data_len = data.len;
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
+        lay.have_tls = have_tls;
+        lay.tls_vaddr = tls_vaddr;
+        lay.tls_file_offset = tls_file_offset_base;
+        lay.tls_filesize = tls_filesize;
+        lay.tls_memsize = tls_memsize;
         /* RX content is written right after the program headers (file offset
          * hdr_size), so each dynamic section's file offset is hdr_size + its
          * offset inside the rx buffer.  vaddrs already include base+rx_base. */
@@ -1247,12 +1396,20 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         buffer_init(&elf);
         int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0);
         uint16_t phnum = has_rw ? 2 : 1;
+        if (have_tls) phnum++;
         write_ehdr(&elf, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base,
                    rx_filesz, rx_filesz, PAGE_SIZE);
         if (has_rw) {
             write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
                        bss_data_off, bss_data_off + bss_size, PAGE_SIZE);
+        }
+        if (have_tls) {
+            /* TLS template lives outside any PT_LOAD — appended to the
+             * file after the RW segment, materialized per thread by the
+             * loader. */
+            write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
+                       tls_filesize, tls_memsize, 1);
         }
         while (elf.len < hdr_size)
             buf_u8(&elf, 0);
@@ -1263,6 +1420,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             if (got_bytes > 0)
                 while (elf.len < data_file_offset + got_data_off) buf_u8(&elf, 0);
             buf_bytes(&elf, got.data, got.len);
+        }
+        if (have_tls) {
+            while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
+            buf_bytes(&elf, tdata.data, tdata.len);
         }
         SectionLayout lay;
         lay.code_vaddr = code_vaddr;
@@ -1275,6 +1436,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         lay.data_len = data.len;
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
+        lay.have_tls = have_tls;
+        lay.tls_vaddr = tls_vaddr;
+        lay.tls_file_offset = tls_file_offset_base;
+        lay.tls_filesize = tls_filesize;
+        lay.tls_memsize = tls_memsize;
         lay.have_dynamic = 0;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
@@ -1298,7 +1464,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     free(needed);
     free(runpath);
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
+    buffer_free(&tdata);
     free(mod_text_off); free(mod_rodata_off); free(mod_data_off); free(mod_bss_off);
+    free(mod_tdata_off); free(mod_tbss_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);
     free(reloc_data_got_idx);
     free(plt_entry_off); free(plt_got_fixup);
