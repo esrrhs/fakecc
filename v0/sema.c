@@ -1030,19 +1030,29 @@ static int symtable_has_since(const SymTable *st, const char *name, size_t mark)
         if (st->data[i].name && runtime.strcmp(st->data[i].name, name) == 0) return 1;
     return 0;
 }
-static int type_is_same(Type a, Type b) {
-    if (a.kind != b.kind) return 0;
-    if (a.width != b.width) return 0;
-    if (a.is_unsigned != b.is_unsigned) return 0;
-    if (a.is_vector != b.is_vector) return 0;
-    if (a.kind == TY_STRUCT) {
-        if (a.tag && b.tag && runtime.strcmp(a.tag, b.tag) != 0) return 0;
+static int type_is_same(const Type *a, const Type *b) {
+    if (!a || !b) return a == b;
+    while (a && b) {
+        if (a->kind != b->kind) return 0;
+        if (a->width != b->width) return 0;
+        if (a->is_unsigned != b->is_unsigned) return 0;
+        if (a->is_vector != b->is_vector) return 0;
+        if (a->kind == TY_STRUCT) {
+            if (a->tag && b->tag) {
+                if (runtime.strcmp(a->tag, b->tag) != 0) return 0;
+            } else if (a->tag != b->tag) {
+                return 0;
+            }
+            return 1;
+        }
+        if (a->kind == TY_PTR) {
+            a = a->pointee;
+            b = b->pointee;
+            continue;
+        }
+        return 1;
     }
-    if (a.kind == TY_PTR) {
-        if (!a.pointee || !b.pointee) return a.pointee == b.pointee;
-        return type_is_same(*a.pointee, *b.pointee);
-    }
-    return 1;
+    return a == b;
 }
 static int type_rank(Type t) {
     if (t.kind == TY_FLOAT) return 100 + t.width;
@@ -1247,10 +1257,10 @@ static Type check_expr_inner(Expr *e) {
                     int is_equality = (op == BOP_EQ || op == BOP_NE);
                     int lt_void = lt.pointee && lt.pointee->kind == TY_VOID;
                     int rt_void = rt.pointee && rt.pointee->kind == TY_VOID;
-                    if (is_relational && !type_is_same(lt, rt)) {
+                    if (is_relational && !type_is_same(&lt, &rt)) {
                         runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
                                 e->loc.file, e->loc.line, e->loc.col);
-                    } else if (is_equality && !lt_void && !rt_void && !type_is_same(lt, rt)) {
+                    } else if (is_equality && !lt_void && !rt_void && !type_is_same(&lt, &rt)) {
                         runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
                                 e->loc.file, e->loc.line, e->loc.col);
                     }
@@ -2575,7 +2585,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
                     die_at(s->loc.file, s->loc.line, s->loc.col,
                            "void function cannot return a value");
             } else {
-                if (!type_is_same(g_sema_ret_type, discard)) {
+                if (!type_is_same(&g_sema_ret_type, &discard)) {
                     if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||
                         (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && runtime.strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0) ||
                         (discard.kind == TY_STRUCT && discard.tag && runtime.strncmp(discard.tag, "__complex_", 10) == 0) ||
