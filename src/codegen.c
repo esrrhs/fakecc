@@ -1908,7 +1908,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         uint8_t binding = g->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
         uint16_t shndx;
         size_t off;
-        if (g->is_readonly) {
+        if (g->is_tls) {
+            /* __thread globals live in .tdata (initialized) or .tbss
+             * (zero-init).  The linker assembles them into the TLS
+             * template referenced by PT_TLS, and accesses resolve
+             * via %fs:[TPOFF64]. */
+            if (g->init_bytes) {
+                shndx = SECT_TDATA;
+                off = out->tdata.len;
+                buffer_append(&out->tdata, g->init_bytes, g->size);
+                while (out->tdata.len & 7) { char z = 0; buffer_append(&out->tdata, &z, 1); }
+            } else {
+                shndx = SECT_TBSS;
+                off = out->tbss_size;
+                out->tbss_size += g->size;
+                while (out->tbss_size & 7) out->tbss_size++;
+            }
+        } else if (g->is_readonly) {
             shndx = SECT_RODATA;
             off = out->rodata.len;
             buffer_append(&out->rodata, g->init_bytes, g->size);
@@ -2702,6 +2718,37 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     size_t patch = emit_load_rip(&out->text, target);
                     emit_module_add_reloc(out, patch, R_X86_64_GOTPCREL, gsym, -4);
                 }
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+
+            case IR_GADDR_TLS: {
+                /* dst = &__thread-global; target name in inst->call_name.
+                 *
+                 * Emit `lea %rxx, %fs:[rip+0]` (form: REX.W + 8D + ModRM +
+                 * disp32, with %fs segment override 0x64).  The linker
+                 * fills the disp32 with a TPOFF64 value: `S + A - tls_end`,
+                 * i.e. the negative offset from the thread pointer to the
+                 * variable, computed at static link time from the .tdata /
+                 * .tbss layout.  This is the Initial-Exec TLS model.
+                 *
+                 * The PC-relative addressing uses a 4-byte displacement
+                 * (like PC32) so the patch site records a position just
+                 * after the disp32 starts (the 0x64 / REX / 8D / ModRM
+                 * sequence is 5 bytes, the disp32 is bytes 5..8; the
+                 * "next instruction" is byte 9, so the addend is -4 just
+                 * like R_X86_64_PC32). */
+                int target = dr >= 0 ? dr : REG_RAX;
+                int gsym = emit_module_find_symbol(out, inst->call_name);
+                if (gsym < 0) gsym = emit_module_add_undefined(out, inst->call_name);
+                /* Two-byte %fs segment override prefix: 0x64 0x64.  The
+                 * 64-bit form of LEA needs REX.W (0x48) on top of the
+                 * ModRM for the chosen target.  We re-use `emit_lea_rip`
+                 * after prepending the override. */
+                emit_byte(&out->text, 0x64);  /* %fs prefix (one byte is enough) */
+                size_t patch = emit_lea_rip(&out->text, target);
+                emit_module_add_reloc(out, patch, R_X86_64_TPOFF64, gsym, -4);
                 if (dr < 0)
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
