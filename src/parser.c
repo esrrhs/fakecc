@@ -3536,12 +3536,11 @@ static Stmt parse_stmt(Parser *p) {
         advance(p);          /* consume label name */
         advance(p);          /* consume ':' */
         /* A label may legitimately appear as the last statement in a
-         * function (e.g. the target of an asm goto), in which case the
-         * following token is '}' or another label.  Treat that as an empty
+         * compound statement / function (e.g. C23 / GCC extension / asm goto target),
+         * in which case the following token is '}' or EOF. Treat that as an empty
          * body rather than recursing and failing on '}'. */
         Stmt *inner_ptr;
-        if (peek(p)->kind == TK_RBRACE || peek(p)->kind == TK_EOF ||
-            (peek(p)->kind == TK_IDENT && p->tokens->data[p->pos + 1].kind == TK_COLON)) {
+        if (peek(p)->kind == TK_RBRACE || peek(p)->kind == TK_EOF) {
             inner_ptr = stmt_alloc();
             memset(inner_ptr, 0, sizeof(*inner_ptr));
             inner_ptr->kind = ST_BLOCK;

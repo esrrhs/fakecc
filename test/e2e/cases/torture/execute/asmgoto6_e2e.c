@@ -10,6 +10,8 @@
 // test/compile suite via test/compile/asmgoto-6.c.
 package main;
 
+extern void abort(void);
+
 static int t;
 static int g_called;
 
@@ -28,12 +30,32 @@ void f(void)
 Efault:
 }
 
+static void test_multi_end_labels(void)
+{
+l1:
+l2:
+}
+
+static void test_consecutive_labels_in_if(void)
+{
+    int val = 0;
+    if (0)
+    lbl1:
+    lbl2:
+        val = 1;
+    if (val != 0)
+        abort();
+}
+
 int main(void)
 {
     f();
+    test_multi_end_labels();
+    test_consecutive_labels_in_if();
     /* main returns 0 regardless of asm-goto semantics — see the comment
      * above.  The compile-time check in test/compile/asmgoto-6.c is the
      * strict assertion; this e2e case only guards against the parser
      * regressing in a way that also prevents the program from running. */
     return 0;
 }
+
