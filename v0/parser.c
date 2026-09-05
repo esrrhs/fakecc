@@ -3715,13 +3715,26 @@ static Stmt parse_stmt(Parser *p) {
         const Token *name = peek(p);
         advance(p);
         advance(p);
-        Stmt inner = parse_stmt(p);
+        /* A label may legitimately appear as the last statement in a
+         * function (e.g. the target of an asm goto), in which case the
+         * following token is '}' or another label.  Treat that as an empty
+         * body rather than recursing and failing on '}'. */
+        Stmt *inner_ptr;
+        if (peek(p)->kind == TK_RBRACE || peek(p)->kind == TK_EOF ||
+            (peek(p)->kind == TK_IDENT && p->tokens->data[p->pos + 1].kind == TK_COLON)) {
+            inner_ptr = stmt_alloc();
+            memset(inner_ptr, 0, sizeof(*inner_ptr));
+            inner_ptr->kind = ST_BLOCK;
+        } else {
+            Stmt inner = parse_stmt(p);
+            inner_ptr = stmt_alloc();
+            *inner_ptr = inner;
+        }
         Stmt s;
         s.kind = ST_LABEL;
         s.loc = name->loc;
         s.u.label_s.name = xstrdup(name->text);
-        s.u.label_s.stmt = stmt_alloc();
-        *s.u.label_s.stmt = inner;
+        s.u.label_s.stmt = inner_ptr;
         return s;
     }
     if (k == TK_KW_CASE) {
