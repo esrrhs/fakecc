@@ -302,7 +302,7 @@ struct Stmt {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;   /* ST_DECL: init may be NULL; storage_class: 0=default, 1=static, 2=extern */
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;   /* ST_DECL: init may be NULL; storage_class: 0=default, 1=static, 2=extern; is_tls: __thread/__Thread_local */
         Expr *expr;                                 /* ST_EXPR */
         Expr *value;                                /* ST_RETURN */
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */

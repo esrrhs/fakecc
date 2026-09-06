@@ -70,6 +70,11 @@ typedef enum {
     IR_ZEXT,        /* dst = zeroext(a) — a is smaller width; result is `width` */
     IR_TRUNC,       /* dst = trunc(a) to `width` — no-op at register level */
     IR_GADDR,       /* dst = &global; global name in call_name.  Result is 8-byte ptr. */
+    IR_GADDR_TLS,   /* dst = &__thread global; global name in call_name.
+                     * Result is 8-byte ptr to a thread-local variable; codegen
+                     * emits `lea %rxx, %fs:[rip+TPOFF64]` and the linker
+                     * resolves R_X86_64_TPOFF64 to the negative offset from
+                     * the thread pointer (Initial-Exec model). */
     IR_FADDR,       /* dst = &function; function name in call_name.  Result is 8-byte ptr. */
     IR_LADDR,       /* dst = &label; imm = label_id.  Result is 8-byte ptr. */
     IR_JMP_PTR,     /* jmp *a — indirect jump to pointer value in a */
@@ -268,6 +273,7 @@ typedef struct {
     char *init_bytes;   /* NULL → zero-init (bss).  Otherwise owns `size` bytes. */
     int   is_readonly;  /* 1 = string literal → rodata; 0 = mutable → data */
     int   is_static;    /* 1 = `static` global — LOCAL linkage */
+    int   is_tls;       /* 1 = `__thread` / `_Thread_local` global — .tdata/.tbss */
     SourceLoc loc;
     GlobalFixup *fixups;/* pointer slots needing link-time address patching */
     int   num_fixups, cap_fixups;

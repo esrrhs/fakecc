@@ -17,6 +17,8 @@ void emit_module_init(EmitModule *m) {
     buffer_init(&m->rodata);
     buffer_init(&m->data);
     m->bss_size = 0;
+    buffer_init(&m->tdata);
+    m->tbss_size = 0;
     m->syms = NULL; m->num_syms = 0; m->cap_syms = 0;
     m->relocs = NULL; m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = NULL; m->num_data_relocs = 0; m->cap_data_relocs = 0;
@@ -38,6 +40,7 @@ void emit_module_free(EmitModule *m) {
     buffer_free(&m->text);
     buffer_free(&m->rodata);
     buffer_free(&m->data);
+    buffer_free(&m->tdata);
     free(m->dbg_tu_name);
     for (size_t i = 0; i < m->num_dbg_lines; i++) free(m->dbg_lines[i].file);
     free(m->dbg_lines);
@@ -177,6 +180,7 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
 #define SHF_WRITE       0x1
 #define SHF_ALLOC       0x2
 #define SHF_EXECINSTR   0x4
+#define SHF_TLS         0x400
 
 #define STB_LOCAL       0
 #define STB_GLOBAL      1
@@ -265,6 +269,10 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&shstrtab, ".data", sizeof(".data"));
     uint32_t shname_bss = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".bss", sizeof(".bss"));
+    uint32_t shname_tdata = (uint32_t)shstrtab.len;
+    buf_bytes(&shstrtab, ".tdata", sizeof(".tdata"));
+    uint32_t shname_tbss = (uint32_t)shstrtab.len;
+    buf_bytes(&shstrtab, ".tbss", sizeof(".tbss"));
     uint32_t shname_symtab = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".symtab", sizeof(".symtab"));
     uint32_t shname_strtab = (uint32_t)shstrtab.len;
@@ -297,6 +305,10 @@ void emit_obj(const EmitModule *m, const char *path) {
     uint32_t sym_data = (uint32_t)(symtab.len / ELF64_SYM_SIZE);
     buf_pad(&symtab, ELF64_SYM_SIZE);
     uint32_t sym_bss = (uint32_t)(symtab.len / ELF64_SYM_SIZE);
+    buf_pad(&symtab, ELF64_SYM_SIZE);
+    uint32_t sym_tdata = (uint32_t)(symtab.len / ELF64_SYM_SIZE);
+    buf_pad(&symtab, ELF64_SYM_SIZE);
+    uint32_t sym_tbss = (uint32_t)(symtab.len / ELF64_SYM_SIZE);
     buf_pad(&symtab, ELF64_SYM_SIZE);
 
     /* Emit defined + undefined symbols in ELF-required order: all LOCAL
@@ -347,6 +359,8 @@ void emit_obj(const EmitModule *m, const char *path) {
     memcpy(symtab.data + sym_rodata * ELF64_SYM_SIZE + 4, &sec_info, 1);
     memcpy(symtab.data + sym_data * ELF64_SYM_SIZE + 4, &sec_info, 1);
     memcpy(symtab.data + sym_bss * ELF64_SYM_SIZE + 4, &sec_info, 1);
+    memcpy(symtab.data + sym_tdata * ELF64_SYM_SIZE + 4, &sec_info, 1);
+    memcpy(symtab.data + sym_tbss * ELF64_SYM_SIZE + 4, &sec_info, 1);
 
     /* --- relocation tables (.rela.text and .rela.data) --- */
     /* Relocations reference symbols by their old m->syms[] index.
@@ -391,6 +405,9 @@ void emit_obj(const EmitModule *m, const char *path) {
     size_t off_data = body.len;
     buf_bytes(&body, m->data.data, m->data.len);
     /* .bss contributes size but no bytes. */
+    size_t off_tdata = body.len;
+    buf_bytes(&body, m->tdata.data, m->tdata.len);
+    /* .tbss contributes size but no bytes. */
     size_t off_symtab = body.len;
     buf_bytes(&body, symtab.data, symtab.len);
     size_t off_strtab = body.len;
@@ -412,10 +429,10 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&body, fakecc_dbg.data, fakecc_dbg.len);
 
     size_t shoff = hdr_size + body.len;
-    /* null + 4 data + symtab + strtab + shstrtab + rela.text + rela.data
+    /* null + 6 data/tls + symtab + strtab + shstrtab + rela.text + rela.data
      * + [.fakecc_dbg] */
-    unsigned shnum = have_dbg ? 11 : 10;
-    unsigned shstrndx = 7; /* index of .shstrtab */
+    unsigned shnum = have_dbg ? 13 : 12;
+    unsigned shstrndx = 9; /* index of .shstrtab */
 
     /* --- ELF header --- */
     Buffer elf;
@@ -435,22 +452,29 @@ void emit_obj(const EmitModule *m, const char *path) {
      * all stored offsets below are body-relative, so add hdr_size. */
     /* [0] NULL */
     buf_pad(&elf, ELF64_SHDR_SIZE);
-    /* .text */
+    /* [1] .text */
     write_shdr(&elf, shname_text, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
                0, hdr_size + off_text, m->text.len, 0, 0, 16, 0);
-    /* .rodata */
+    /* [2] .rodata */
     write_shdr(&elf, shname_rodata, SHT_PROGBITS, SHF_ALLOC,
                0, hdr_size + off_rodata, m->rodata.len, 0, 0, 8, 0);
-    /* .data */
+    /* [3] .data */
     write_shdr(&elf, shname_data, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE,
                0, hdr_size + off_data, m->data.len, 0, 0, 8, 0);
-    /* .bss */
+    /* [4] .bss */
     write_shdr(&elf, shname_bss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE,
                0, hdr_size + off_data + m->data.len, m->bss_size, 0, 0, 8, 0);
+    /* [5] .tdata */
+    write_shdr(&elf, shname_tdata, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
+               0, hdr_size + off_tdata, m->tdata.len, 0, 0, 8, 0);
+    /* [6] .tbss */
+    write_shdr(&elf, shname_tbss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
+               0, hdr_size + off_tdata + m->tdata.len, m->tbss_size, 0, 0, 8, 0);
     /* Section indices (0-based): 0=NULL, 1=.text, 2=.rodata, 3=.data, 4=.bss,
-     * 5=.symtab, 6=.strtab, 7=.shstrtab, 8=.rela.text. */
-    unsigned symtab_idx = 5;
-    unsigned strtab_idx = 6;
+     * 5=.tdata, 6=.tbss, 7=.symtab, 8=.strtab, 9=.shstrtab, 10=.rela.text,
+     * 11=.rela.data. */
+    unsigned symtab_idx = 7;
+    unsigned strtab_idx = 8;
     /* Symbol table: sh_info = first_global (computed during symtab emission) */
     write_shdr(&elf, shname_symtab, SHT_SYMTAB, 0,
                0, hdr_size + off_symtab, symtab.len, strtab_idx, first_global, 8,
@@ -556,6 +580,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
      * symtab + rela.text indices. */
     int symtab_idx = -1, rela_text_idx = -1, rela_data_idx = -1, strtab_idx = -1;
     int text_idx = -1, rodata_idx = -1, data_idx = -1, bss_idx = -1;
+    int tdata_idx = -1, tbss_idx = -1;
     int fakecc_dbg_idx = -1;
     for (int s = 0; s < shnum; s++) {
         const unsigned char *sh = buf + shoff + (size_t)s * shentsize;
@@ -566,6 +591,8 @@ int emit_obj_read(const char *path, EmitModule *m) {
         else if (strcmp(sname, ".rodata") == 0 && type == SHT_PROGBITS) rodata_idx = s;
         else if (strcmp(sname, ".data") == 0 && type == SHT_PROGBITS) data_idx = s;
         else if (strcmp(sname, ".bss") == 0 && type == SHT_NOBITS) bss_idx = s;
+        else if (strcmp(sname, ".tdata") == 0 && type == SHT_PROGBITS) tdata_idx = s;
+        else if (strcmp(sname, ".tbss") == 0 && type == SHT_NOBITS) tbss_idx = s;
         else if (strcmp(sname, ".symtab") == 0 && type == SHT_SYMTAB) symtab_idx = s;
         else if (strcmp(sname, ".strtab") == 0 && type == SHT_STRTAB) strtab_idx = s;
         else if (strcmp(sname, ".rela.text") == 0 && type == SHT_RELA) rela_text_idx = s;
@@ -603,6 +630,15 @@ int emit_obj_read(const char *path, EmitModule *m) {
         const unsigned char *sh = buf + shoff + (size_t)bss_idx * shentsize;
         m->bss_size = (size_t)rd_u64(sh + 32);
     }
+    if (tdata_idx >= 0) {
+        const unsigned char *sh = buf + shoff + (size_t)tdata_idx * shentsize;
+        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+        m->tdata.data = malloc(sz); memcpy(m->tdata.data, buf + off, sz); m->tdata.len = sz; m->tdata.cap = sz;
+    }
+    if (tbss_idx >= 0) {
+        const unsigned char *sh = buf + shoff + (size_t)tbss_idx * shentsize;
+        m->tbss_size = (size_t)rd_u64(sh + 32);
+    }
 
     /* Read symbol table. */
     if (symtab_idx >= 0) {
@@ -625,9 +661,17 @@ int emit_obj_read(const char *path, EmitModule *m) {
                 (size_t)name_idx < strtab_len) {
                 name = (const char *)strtab_data + name_idx;
             }
+            uint16_t mapped_shndx = shndx;
+            if (shndx == text_idx) mapped_shndx = SECT_TEXT;
+            else if (shndx == rodata_idx) mapped_shndx = SECT_RODATA;
+            else if (shndx == data_idx) mapped_shndx = SECT_DATA;
+            else if (shndx == bss_idx) mapped_shndx = SECT_BSS;
+            else if (shndx == tdata_idx) mapped_shndx = SECT_TDATA;
+            else if (shndx == tbss_idx) mapped_shndx = SECT_TBSS;
+            else if (shndx == 0) mapped_shndx = SECT_UNDEF;
             emit_module_add_symbol(m, name,
                                    (uint8_t)(info >> 4), (uint8_t)(info & 0xf),
-                                   shndx, (size_t)value, (size_t)size);
+                                   mapped_shndx, (size_t)value, (size_t)size);
         }
     }
 

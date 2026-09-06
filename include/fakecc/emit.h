@@ -14,6 +14,8 @@
 #define SECT_RODATA 2
 #define SECT_DATA   3
 #define SECT_BSS    4
+#define SECT_TDATA  5  /* initialized __thread variables (ELF SHF_TLS) */
+#define SECT_TBSS   6  /* zero-initialized __thread variables (SHF_TLS) */
 
 /* ------------------------------------------------------------------ */
 /* Symbol table entry                                                  */
@@ -179,6 +181,8 @@ typedef struct {
     Buffer   rodata;   /* .rodata (string literals, long double constants) */
     Buffer   data;     /* .data (mutable globals) */
     size_t   bss_size; /* .bss total bytes (zero-initialized globals) */
+    Buffer   tdata;    /* .tdata — initialized __thread variables */
+    size_t   tbss_size;/* .tbss total bytes (zero-init __thread variables) */
 
     EmitSymbol *syms;  /* unified symbol table (section + defined + undefined) */
     size_t num_syms, cap_syms;
@@ -267,5 +271,10 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_GOTPCREL  9
 #define R_X86_64_GLOB_DAT  6
 #define R_X86_64_64       10  /* absolute 64-bit (pointer fixups in .data) */
+#define R_X86_64_TPOFF32  23  /* TLS Local-Exec offset (32-bit signed): S + A - tp_end.
+                               * Patches the imm32 of `addq $imm32, %reg` that follows
+                               * a `movq %fs:0, %reg` to produce the thread-local address.
+                               * The linker computes a negative int32 offset from the
+                               * thread pointer (%fs:0) to the variable in the TLS template. */
 
 #endif /* FAKECC_EMIT_H */

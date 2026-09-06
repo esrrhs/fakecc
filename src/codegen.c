@@ -184,6 +184,31 @@ static void emit_add_imm32(Buffer *b, int reg, int32_t imm) {
     emit_int32(b, imm);
 }
 
+/* Emit `movq %fs:0, %dst` — load the thread pointer from %fs segment base.
+ * Encoding: 64 (FS override) REX.W 8B ModRM(mod=00,reg=dst,rm=4) SIB(00,4,5) 00000000.
+ * This is the standard way to read the TP on x86-64 Linux (glibc convention:
+ * %fs:0 holds a pointer to the DTV/thread structure whose base is the TP). */
+static void emit_mov_fs0_reg(Buffer *b, int dst) {
+    emit_byte(b, 0x64);                  /* %fs segment override */
+    emit_rex_wrb(b, 1, dst, 0);          /* REX.W [REX.R if dst>=8] */
+    emit_byte(b, 0x8B);                  /* MOV r64, r/m64 */
+    emit_modrm(b, 0, dst & 7, 4);        /* mod=00 reg=dst rm=4 (SIB follows) */
+    emit_byte(b, 0x25);                  /* SIB: scale=00 index=4 base=5 → [disp32] */
+    emit_int32(b, 0);                    /* disp32 = 0 → %fs:0 */
+}
+
+/* Emit `addq $0, %dst` and return the patch offset of the imm32.
+ * The caller records a TPOFF32 relocation at the returned offset so the
+ * linker fills in `S + A - tp_end` (a negative int32 value). */
+static size_t emit_add_tls_patch(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, 0, dst);          /* REX.W [REX.B if dst>=8] */
+    emit_byte(b, 0x81);                  /* ADD r/m64, imm32 */
+    emit_modrm(b, 3, 0, dst & 7);        /* mod=11 /0 rm=dst */
+    size_t patch = b->len;
+    emit_int32(b, 0);                    /* placeholder imm32 — filled by linker */
+    return patch;
+}
+
 /* Patch a rel32 at `patch_off` to jump to `target_off`.  The rel32 is relative
  * to the byte after the 4-byte field (i.e. patch_off+4). */
 static void patch_rel32(Buffer *b, size_t patch_off, size_t target_off) {
@@ -1908,7 +1933,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         uint8_t binding = g->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
         uint16_t shndx;
         size_t off;
-        if (g->is_readonly) {
+        if (g->is_tls) {
+            /* __thread globals live in .tdata (initialized) or .tbss
+             * (zero-init).  The linker assembles them into the TLS
+             * template referenced by PT_TLS, and accesses resolve
+             * via %fs:[TPOFF64]. */
+            if (g->init_bytes) {
+                shndx = SECT_TDATA;
+                off = out->tdata.len;
+                buffer_append(&out->tdata, g->init_bytes, g->size);
+                while (out->tdata.len & 7) { char z = 0; buffer_append(&out->tdata, &z, 1); }
+            } else {
+                shndx = SECT_TBSS;
+                off = out->tbss_size;
+                out->tbss_size += g->size;
+                while (out->tbss_size & 7) out->tbss_size++;
+            }
+        } else if (g->is_readonly) {
             shndx = SECT_RODATA;
             off = out->rodata.len;
             buffer_append(&out->rodata, g->init_bytes, g->size);
@@ -2707,6 +2748,36 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
 
+            case IR_GADDR_TLS: {
+                /* dst = &__thread-global; target name in inst->call_name.
+                 *
+                 * Emit the x86-64 Local-Exec (LE) TLS address sequence:
+                 *
+                 *   movq %fs:0, %rdst      # load thread pointer (TP) from %fs base
+                 *   addq $sym@tpoff, %rdst # add negative offset → &sym in TLS block
+                 *
+                 * The linker patches the imm32 of addq with R_X86_64_TPOFF32:
+                 *   value = S + A - tp_end  (a negative int32 for typical layouts)
+                 * where tp_end = tls_vaddr + tls_memsize (the address just past the
+                 * TLS template that %fs:0 points to on Linux/glibc).
+                 *
+                 * NOTE: `lea %fs:[rip+disp32]` is NOT equivalent — on x86-64 the
+                 * `lea` instruction ignores segment overrides entirely, so the %fs
+                 * prefix is a no-op.  The correct TP read is `movq %fs:0, %reg`. */
+                int target = dr >= 0 ? dr : REG_RAX;
+                int gsym = emit_module_find_symbol(out, inst->call_name);
+                if (gsym < 0) gsym = emit_module_add_undefined(out, inst->call_name);
+                /* movq %fs:0, %target */
+                emit_mov_fs0_reg(&out->text, target);
+                /* addq $sym@tpoff, %target — patch slot for TPOFF32 reloc */
+                size_t patch = emit_add_tls_patch(&out->text, target);
+                /* Addend is 0: linker computes S - tp_end directly. */
+                emit_module_add_reloc(out, patch, R_X86_64_TPOFF32, gsym, 0);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
+
             case IR_LADDR: {
                 /* dst = &&label — emit `lea r, [rip+0]` and record a label patch.
                  * imm = label_id.  The patch resolution (label_off[id] - after_off)
@@ -3106,6 +3177,94 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_byte(&out->text, 0x0F);
                     emit_byte(&out->text, 0x05);
                     /* Result in RAX; move to dst or spill. */
+                    if (dr >= 0) {
+                        if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                    } else {
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    }
+                    break;
+                }
+                if (inst->call_name && strcmp(inst->call_name, "__clone") == 0) {
+                    static const int CLONE_ARG_REGS[6] = {
+                        REG_RDI, /* fn */
+                        REG_RSI, /* child_stack */
+                        REG_RDX, /* flags */
+                        REG_RCX, /* arg */
+                        REG_R8,  /* tcb */
+                        REG_R9   /* ctid */
+                    };
+                    int nargs = inst->call_nargs;
+                    for (int k = 0; k < nargs && k < 6; k++) {
+                        ensure_reg(&out->text, inst->call_args[k], REG_RCX, ra);
+                        emit_push_r(&out->text, REG_RCX);
+                    }
+                    for (int k = (nargs < 6 ? nargs : 6) - 1; k >= 0; k--) {
+                        emit_pop_r(&out->text, CLONE_ARG_REGS[k]);
+                    }
+
+                    /* 1. and $-16, %rsi */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x83);
+                    emit_byte(&out->text, 0xe6); emit_byte(&out->text, 0xf0);
+
+                    /* 2. sub $16, %rsi */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x83);
+                    emit_byte(&out->text, 0xee); emit_byte(&out->text, 0x10);
+
+                    /* 3. mov %rcx, (%rsi) -- save arg */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0x0e);
+
+                    /* 4. mov %rdi, 8(%rsi) -- save fn */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0x7e); emit_byte(&out->text, 0x08);
+
+                    /* 5. mov %rdx, %rdi -- flags to %rdi */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xd7);
+
+                    /* 6. mov %r9, %rdx -- parent_tidptr = ctid */
+                    emit_byte(&out->text, 0x4c); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xca);
+
+                    /* 7. mov %r9, %r10 -- child_tidptr = ctid */
+                    emit_byte(&out->text, 0x4d); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xca);
+
+                    /* 8. mov $56, %eax -- sys_clone */
+                    emit_byte(&out->text, 0xb8);
+                    emit_byte(&out->text, 0x38); emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x00); emit_byte(&out->text, 0x00);
+
+                    /* 9. syscall */
+                    emit_byte(&out->text, 0x0f); emit_byte(&out->text, 0x05);
+
+                    /* 10. test %rax, %rax */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x85);
+                    emit_byte(&out->text, 0xc0);
+
+                    /* 11. jnz +15 (jump over child trampoline) */
+                    emit_byte(&out->text, 0x75); emit_byte(&out->text, 0x0f);
+
+                    /* --- Child trampoline (15 bytes) --- */
+                    /* pop %rdi (arg) */
+                    emit_byte(&out->text, 0x5f);
+                    /* pop %rax (fn) */
+                    emit_byte(&out->text, 0x58);
+                    /* call *%rax */
+                    emit_byte(&out->text, 0xff); emit_byte(&out->text, 0xd0);
+                    /* mov %rax, %rdi (exit code) */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xc7);
+                    /* mov $60, %eax (sys_exit) */
+                    emit_byte(&out->text, 0xb8);
+                    emit_byte(&out->text, 0x3c); emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x00); emit_byte(&out->text, 0x00);
+                    /* syscall */
+                    emit_byte(&out->text, 0x0f); emit_byte(&out->text, 0x05);
+                    /* hlt */
+                    emit_byte(&out->text, 0xf4);
+
+                    /* --- Parent continuation --- */
                     if (dr >= 0) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                     } else {
