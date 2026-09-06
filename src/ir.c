@@ -5580,7 +5580,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             /* `__syscall` is an intrinsic — treat it as a named call so codegen
              * emits the raw `syscall` instruction.  It is not in the function
              * table, so the direct-call lookup below would miss it. */
-            if (strcmp(cname, "__syscall") == 0) {
+            if (strcmp(cname, "__syscall") == 0 || strcmp(cname, "__clone") == 0) {
                 inst.call_name = xstrdup(cname);
             } else if (strcmp(cname, "__builtin_ctzll") == 0) {
                 /* ctz intrinsic — codegen emits a `bsf` + fixup. */
@@ -8855,15 +8855,6 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * "defined elsewhere" — the linker resolves the symbol. */
         if (s->u.decl.storage_class == 2) continue;
         int is_tls = s->u.decl.is_tls;
-        if (is_tls) {
-            int sz = type_size(s->u.decl.type);
-            if (sz <= 0) sz = 8;
-            ir_module_push_global(ir, s->u.decl.name, sz, NULL,
-                                  0, /* mutable */
-                                  s->u.decl.storage_class == 1, /* static */
-                                  1 /* is_tls */, s->loc);
-            continue;
-        }
         int sz = type_size(s->u.decl.type);
         if (s->u.decl.init && s->u.decl.type.kind == TY_STRUCT && s->u.decl.init->kind == EX_INIT_LIST && s->u.decl.type.tag) {
             const StructDef *sd = struct_registry_find_c(g_ir_structs, s->u.decl.type.tag);

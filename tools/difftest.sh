@@ -82,6 +82,17 @@ difftest_one() {
                "$WORK/$name.prep.c"; then
             echo '#include <stdarg.h>'
         fi
+        if grep -qE '\bthread_local\b' "$WORK/$name.prep.c"; then
+            echo '#define thread_local _Thread_local'
+        fi
+        if grep -qE '\b(pthread_create|thread_create)\b' "$WORK/$name.prep.c"; then
+            echo '#include <pthread.h>'
+            echo '#define thread_t pthread_t'
+            echo '#define thread_create(t, fn, arg) pthread_create((pthread_t*)(t), NULL, (void*(*)(void*))(fn), (void*)(arg))'
+            echo '#define thread_join(t, res) pthread_join((pthread_t)(t), (void**)(res))'
+            echo '#define thread_exit(res) pthread_exit((void*)(res))'
+            echo '#define thread_self() pthread_self()'
+        fi
         # Ports call alloca without <alloca.h>.  gcc warns "implicit
         # declaration", the harness treats that as failure, and the stdio.h
         # fallback then clashes with `fprintf(void*, ...)`.

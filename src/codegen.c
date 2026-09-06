@@ -3184,6 +3184,94 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     break;
                 }
+                if (inst->call_name && strcmp(inst->call_name, "__clone") == 0) {
+                    static const int CLONE_ARG_REGS[6] = {
+                        REG_RDI, /* fn */
+                        REG_RSI, /* child_stack */
+                        REG_RDX, /* flags */
+                        REG_RCX, /* arg */
+                        REG_R8,  /* tcb */
+                        REG_R9   /* ctid */
+                    };
+                    int nargs = inst->call_nargs;
+                    for (int k = 0; k < nargs && k < 6; k++) {
+                        ensure_reg(&out->text, inst->call_args[k], REG_RCX, ra);
+                        emit_push_r(&out->text, REG_RCX);
+                    }
+                    for (int k = (nargs < 6 ? nargs : 6) - 1; k >= 0; k--) {
+                        emit_pop_r(&out->text, CLONE_ARG_REGS[k]);
+                    }
+
+                    /* 1. and $-16, %rsi */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x83);
+                    emit_byte(&out->text, 0xe6); emit_byte(&out->text, 0xf0);
+
+                    /* 2. sub $16, %rsi */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x83);
+                    emit_byte(&out->text, 0xee); emit_byte(&out->text, 0x10);
+
+                    /* 3. mov %rcx, (%rsi) -- save arg */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0x0e);
+
+                    /* 4. mov %rdi, 8(%rsi) -- save fn */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0x7e); emit_byte(&out->text, 0x08);
+
+                    /* 5. mov %rdx, %rdi -- flags to %rdi */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xd7);
+
+                    /* 6. mov %r9, %rdx -- parent_tidptr = ctid */
+                    emit_byte(&out->text, 0x4c); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xca);
+
+                    /* 7. mov %r9, %r10 -- child_tidptr = ctid */
+                    emit_byte(&out->text, 0x4d); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xca);
+
+                    /* 8. mov $56, %eax -- sys_clone */
+                    emit_byte(&out->text, 0xb8);
+                    emit_byte(&out->text, 0x38); emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x00); emit_byte(&out->text, 0x00);
+
+                    /* 9. syscall */
+                    emit_byte(&out->text, 0x0f); emit_byte(&out->text, 0x05);
+
+                    /* 10. test %rax, %rax */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x85);
+                    emit_byte(&out->text, 0xc0);
+
+                    /* 11. jnz +15 (jump over child trampoline) */
+                    emit_byte(&out->text, 0x75); emit_byte(&out->text, 0x0f);
+
+                    /* --- Child trampoline (15 bytes) --- */
+                    /* pop %rdi (arg) */
+                    emit_byte(&out->text, 0x5f);
+                    /* pop %rax (fn) */
+                    emit_byte(&out->text, 0x58);
+                    /* call *%rax */
+                    emit_byte(&out->text, 0xff); emit_byte(&out->text, 0xd0);
+                    /* mov %rax, %rdi (exit code) */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xc7);
+                    /* mov $60, %eax (sys_exit) */
+                    emit_byte(&out->text, 0xb8);
+                    emit_byte(&out->text, 0x3c); emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x00); emit_byte(&out->text, 0x00);
+                    /* syscall */
+                    emit_byte(&out->text, 0x0f); emit_byte(&out->text, 0x05);
+                    /* hlt */
+                    emit_byte(&out->text, 0xf4);
+
+                    /* --- Parent continuation --- */
+                    if (dr >= 0) {
+                        if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                    } else {
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    }
+                    break;
+                }
                 /* GCC integer bit builtins: keep the full name so codegen
                  * can emit lzcnt/tzcnt/popcnt/bswap instead of a libc call. */
                 if (inst->call_name && strncmp(inst->call_name, "__builtin_", 10) == 0

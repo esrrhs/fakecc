@@ -1151,6 +1151,19 @@ static Type check_expr_inner(Expr *e) {
             set_type(e, type_make_int(8, 0));
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__clone") == 0) {
+            if (e->u.call.args.len != 6) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__clone takes 6 arguments (fn, child_stack, flags, arg, tcb, ctid)");
+            }
+            for (size_t i = 0; i < e->u.call.args.len; i++) {
+                Type at = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&at);
+            }
+            set_type(e, type_make_int(8, 0));
+            return type_clone(e->type);
+        }
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cn = e->u.call.callee->u.var.name;
             int is_conj = (strcmp(cn, "__builtin_conjf") == 0 || strcmp(cn, "__builtin_conj") == 0 ||

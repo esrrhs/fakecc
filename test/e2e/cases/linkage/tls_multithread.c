@@ -1,71 +1,62 @@
 // expect: 0
+// gcc_flags: -pthread
 package main;
 
-const unsigned long CLONE_VM        = 0x00000100;
-const unsigned long CLONE_FS        = 0x00000200;
-const unsigned long CLONE_FILES     = 0x00000400;
-const unsigned long CLONE_SIGHAND   = 0x00000800;
-const unsigned long CLONE_THREAD    = 0x00010000;
-const unsigned long CLONE_SYSVSEM   = 0x00040000;
-const unsigned long CLONE_SETTLS    = 0x00080000;
+import runtime;
 
-__thread int thread_id;
-__thread int thread_accum;
+__thread int thread_id = 0;
+__thread int thread_accum = 1000;
 
-static char stack1[8192];
-static char stack2[8192];
-static char tls_area1[1024];
-static char tls_area2[1024];
-
-volatile int t1_done;
-volatile int t2_done;
-int t1_result;
-int t2_result;
-
-void worker1() {
+void *worker1(void *arg) {
     thread_id = 1;
     thread_accum = 0;
     for (int i = 0; i < 100; i++) thread_accum += 1;
-    t1_result = thread_accum;
-    t1_done = 1;
-    __syscall(60, 0);
+    return (void *)(long)thread_accum;
 }
 
-void worker2() {
+void *worker2(void *arg) {
     thread_id = 2;
     thread_accum = 0;
     for (int i = 0; i < 100; i++) thread_accum += 2;
-    t2_result = thread_accum;
-    t2_done = 1;
-    __syscall(60, 0);
+    return (void *)(long)thread_accum;
+}
+
+void *worker3(void *arg) {
+    thread_id = 3;
+    thread_accum = 0;
+    for (int i = 0; i < 100; i++) thread_accum += 3;
+    return (void *)(long)thread_accum;
 }
 
 int main() {
-    t1_done = 0;
-    t2_done = 0;
-    thread_id = 0;
-    thread_accum = 9999;
+    thread_id = 99;
+    thread_accum = 42;
 
-    unsigned long *tcb1 = (unsigned long *)(tls_area1 + 512);
-    *tcb1 = (unsigned long)tcb1;
-    unsigned long *tcb2 = (unsigned long *)(tls_area2 + 512);
-    *tcb2 = (unsigned long)tcb2;
+    runtime.pthread_t t1, t2, t3;
+    void *res1 = 0;
+    void *res2 = 0;
+    void *res3 = 0;
 
-    unsigned long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS;
+    int r1 = runtime.pthread_create(&t1, 0, worker1, 0);
+    if (r1 != 0) return 1;
 
-    long ret1 = __syscall(56, flags, (long)(stack1 + 8192 - 16), 0, 0, (long)tcb1);
-    if (ret1 == 0) worker1();
+    int r2 = runtime.pthread_create(&t2, 0, worker2, 0);
+    if (r2 != 0) return 2;
 
-    long ret2 = __syscall(56, flags, (long)(stack2 + 8192 - 16), 0, 0, (long)tcb2);
-    if (ret2 == 0) worker2();
+    int r3 = runtime.pthread_create(&t3, 0, worker3, 0);
+    if (r3 != 0) return 3;
 
-    while (!t1_done || !t2_done) {
-    }
+    runtime.pthread_join(t1, &res1);
+    runtime.pthread_join(t2, &res2);
+    runtime.pthread_join(t3, &res3);
 
-    if (t1_result != 100) return 1;
-    if (t2_result != 200) return 2;
-    if (thread_id != 0) return 3;
-    if (thread_accum != 9999) return 4;
+    if ((long)res1 != 100) return 4;
+    if ((long)res2 != 200) return 5;
+    if ((long)res3 != 300) return 6;
+
+    /* Verify main thread TLS was not touched by worker threads */
+    if (thread_id != 99) return 7;
+    if (thread_accum != 42) return 8;
 
     return 0;
 }

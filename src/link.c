@@ -520,25 +520,41 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
                       size_t tls_memsize, size_t tdata_len) {
     size_t prefix_len = 0;
     if (have_tls) {
-        /* TLS startup init for x86-64 Linux:
-         * 1. store tcb_vaddr at [tcb_vaddr] (so %fs:0 yields thread pointer)
-         * 2. arch_prctl(ARCH_SET_FS, tcb_vaddr) via sys_arch_prctl (syscall 158)
-         * Total size: exactly 25 bytes. */
-        prefix_len = 25;
-        // 1. movabs $tcb_vaddr, %rsi (48 be <8-byte-imm>)
+        if (tdata_len > 0) {
+            prefix_len += 27;
+            /* 1. movabs $tls_vaddr, %rsi (48 be <8-byte-imm>) */
+            uint8_t m_rsi[2] = {0x48, 0xbe};
+            buffer_append(code, (const char *)m_rsi, 2);
+            buffer_append(code, (const char *)&tls_vaddr, 8);
+            /* 2. movabs $(tcb_vaddr - tls_memsize), %rdi (48 bf <8-byte-imm>) */
+            uint64_t init_tls_addr = tcb_vaddr - tls_memsize;
+            uint8_t m_rdi[2] = {0x48, 0xbf};
+            buffer_append(code, (const char *)m_rdi, 2);
+            buffer_append(code, (const char *)&init_tls_addr, 8);
+            /* 3. mov $tdata_len, %ecx (b9 <4-byte-imm>) */
+            uint8_t m_ecx[1] = {0xb9};
+            uint32_t td_len32 = (uint32_t)tdata_len;
+            buffer_append(code, (const char *)m_ecx, 1);
+            buffer_append(code, (const char *)&td_len32, 4);
+            /* 4. rep movsb (f3 a4) */
+            uint8_t rep_movsb[2] = {0xf3, 0xa4};
+            buffer_append(code, (const char *)rep_movsb, 2);
+        }
+        prefix_len += 25;
+        /* 5. movabs $tcb_vaddr, %rsi (48 be <8-byte-imm>) */
         uint8_t m_rsi[2] = {0x48, 0xbe};
         buffer_append(code, (const char *)m_rsi, 2);
         buffer_append(code, (const char *)&tcb_vaddr, 8);
-        // 2. mov %rsi, (%rsi) (48 89 36)
+        /* 6. mov %rsi, (%rsi) (48 89 36) */
         uint8_t st_rsi[3] = {0x48, 0x89, 0x36};
         buffer_append(code, (const char *)st_rsi, 3);
-        // 3. mov $158, %eax (b8 9e 00 00 00)
+        /* 7. mov $158, %eax (b8 9e 00 00 00) */
         uint8_t m_eax[5] = {0xb8, 0x9e, 0x00, 0x00, 0x00};
         buffer_append(code, (const char *)m_eax, 5);
-        // 4. mov $0x1002, %edi (bf 02 10 00 00)
+        /* 8. mov $0x1002, %edi (bf 02 10 00 00) */
         uint8_t m_edi[5] = {0xbf, 0x02, 0x10, 0x00, 0x00};
         buffer_append(code, (const char *)m_edi, 5);
-        // 5. syscall (0f 05) -- arch_prctl(0x1002, tcb_vaddr)
+        /* 9. syscall (0f 05) -- arch_prctl(0x1002, tcb_vaddr) */
         uint8_t sysc[2] = {0x0f, 0x05};
         buffer_append(code, (const char *)sysc, 2);
     }
@@ -923,7 +939,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 
     /* ---- Compute layout ---- */
     int have_tls = (tdata.len > 0 || tbss_size > 0);
-    size_t start_size = have_tls ? (START_SIZE + 25) : START_SIZE;
+    size_t start_size = have_tls ? (START_SIZE + 25 + (tdata.len > 0 ? 27 : 0)) : START_SIZE;
     /* phnum is finalized after we know whether a data segment is needed;
      * reserve header space for the maximum (4 phdrs: RX, RW, INTERP, DYNAMIC)
      * so that segment file offsets are stable regardless of which are used. */
@@ -953,8 +969,19 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t layout_got_bytes = need_dynamic
         ? (size_t)(3 + num_ext + num_data_ext) * 8
         : (num_data_ext > 0 ? (size_t)(3 + num_data_ext) * 8 : 0);
-    size_t bss_data_off = layout_got_bytes
+    size_t got_end_off = layout_got_bytes
         ? got_data_off + layout_got_bytes : data.len;
+
+    /* If have_tls, .tdata lives right after GOT in the data segment so it is
+     * resident in memory (part of RW PT_LOAD) and matches standard ELF layout. */
+    size_t tdata_data_off = got_end_off;
+    if (have_tls) while (tdata_data_off & 7) tdata_data_off++;
+    uint64_t tls_vaddr = data_vaddr + tdata_data_off;
+    size_t tls_file_offset_base = data_file_offset + tdata_data_off;
+    size_t rw_filesz = tdata_data_off + (have_tls ? tdata.len : 0);
+
+    size_t bss_data_off = rw_filesz;
+    while (bss_data_off & 7) bss_data_off++;
     uint64_t bss_vaddr = data_vaddr + bss_data_off;
     size_t bss_file_offset = data_file_offset + bss_data_off;
     uint64_t code_vaddr = base + text_offset;
@@ -971,22 +998,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         bss_size += tls_memsize + 16;
     }
     uint64_t tcb_vaddr = bss_vaddr + tls_bss_alloc_off + tls_memsize;
-    /* The TLS template (PT_TLS) lives in memory right after .bss but uses
-     * its own virtual address range so the loader can copy/zero it per
-     * thread.  tdata (initialized) is file-resident, tbss (zero-init) is
-     * not.  tls_end_vaddr is p_vaddr + p_memsz; the TPOFF32 reloc writes
+    /* The TLS template (PT_TLS) lives in memory right after GOT (part of RW PT_LOAD).
+     * tdata (initialized) is file-resident, tbss (zero-init) is not.
+     * tls_end_vaddr is p_vaddr + p_memsz; the TPOFF32 reloc writes
      * `S - tls_end_vaddr + A`, a negative offset from %fs:0 to the symbol. */
-    uint64_t tls_vaddr = bss_vaddr + bss_size;
-    while (tls_vaddr & (PAGE_SIZE - 1)) tls_vaddr++;
     uint64_t tls_end_vaddr = tls_vaddr + tdata.len + tbss_size;
     /* tdata/tbss virtual offsets inside the TLS template */
     uint64_t tdata_vaddr = tls_vaddr;
     uint64_t tbss_vaddr = tls_vaddr + tdata.len;
-    /* .tdata lives on disk right after the RW segment (data + GOT).
-     * bss_file_offset is precisely data_file_offset + bss_data_off.
-     * Pad to 8-byte alignment first. */
-    size_t tls_file_offset_base = bss_file_offset;
-    while (tls_file_offset_base & 7) tls_file_offset_base++;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -1032,6 +1051,29 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                     data_got_addr[j] = sym_addr[ogsi];
                     break;
                 }
+            }
+        }
+    }
+    /* ---- Fill builtin TLS metadata symbols in .data if present ---- */
+    for (size_t mi = 0; mi < n; mi++) {
+        EmitModule *om = mods[mi];
+        for (size_t mj = 0; mj < om->num_syms; mj++) {
+            const char *nm = om->syms[mj].name;
+            if (!nm || om->syms[mj].shndx != SECT_DATA) continue;
+            size_t doff = mod_data_off[mi] + om->syms[mj].value;
+            if (doff + 8 > data.len) continue;
+            if (strcmp(nm, "__fakecc_tls_filesz") == 0) {
+                uint64_t val = have_tls ? tdata.len : 0;
+                memcpy(data.data + doff, &val, 8);
+            } else if (strcmp(nm, "__fakecc_tls_memsz") == 0) {
+                uint64_t val = have_tls ? (tdata.len + tbss_size) : 0;
+                memcpy(data.data + doff, &val, 8);
+            } else if (strcmp(nm, "__fakecc_tls_image") == 0) {
+                uint64_t val = have_tls ? tls_vaddr : 0;
+                memcpy(data.data + doff, &val, 8);
+            } else if (strcmp(nm, "__fakecc_tls_align") == 0) {
+                uint64_t val = 16;
+                memcpy(data.data + doff, &val, 8);
             }
         }
     }
@@ -1316,8 +1358,6 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         buf_bytes(&rx, dynamic.data, dynamic.len);
 
         uint64_t entry = base + start_offset;
-        size_t got_count = 3 + num_ext + num_data_ext;
-        size_t got_bytes = got_count * 8;
         Buffer got;
         buffer_init(&got);
         buf_u64(&got, rx_base_vaddr + dynamic_off); /* GOT[0] */
@@ -1338,18 +1378,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         write_ehdr(&elf, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base, rx_filesz, rx_filesz, PAGE_SIZE);
         write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
-                   got_data_off + got_bytes,
-                   got_data_off + got_bytes + bss_size, PAGE_SIZE);
+                   rw_filesz,
+                   rw_filesz + bss_size, PAGE_SIZE);
         write_phdr(&elf, PT_INTERP, PF_R, hdr_size + interp_off, rx_base_vaddr + interp_off,
                    interp_len, interp_len, 1);
         write_phdr(&elf, PT_DYNAMIC, PF_R, hdr_size + dynamic_off, rx_base_vaddr + dynamic_off,
                    dynamic.len, dynamic.len, 8);
         if (have_tls) {
-            /* PT_TLS: TLS template (file = .tdata, memory = .tdata + .tbss).
-             * Lives outside any PT_LOAD — the loader materializes it
-             * separately per thread. */
             write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
-                       tls_filesize, tls_memsize, 1);
+                       tls_filesize, tls_memsize, 8);
         }
         buf_bytes(&elf, rx.data, rx.len);
         while (elf.len < data_file_offset) buf_u8(&elf, 0);
@@ -1434,7 +1471,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 
         Buffer elf;
         buffer_init(&elf);
-        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0);
+        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0 || (have_tls && tdata.len > 0));
         uint16_t phnum = has_rw ? 2 : 1;
         if (have_tls) phnum++;
         write_ehdr(&elf, entry, ELF64_EHDR_SIZE, phnum);
@@ -1442,14 +1479,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                    rx_filesz, rx_filesz, PAGE_SIZE);
         if (has_rw) {
             write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
-                       bss_data_off, bss_data_off + bss_size, PAGE_SIZE);
+                       rw_filesz, rw_filesz + bss_size, PAGE_SIZE);
         }
         if (have_tls) {
-            /* TLS template lives outside any PT_LOAD — appended to the
-             * file after the RW segment, materialized per thread by the
-             * loader. */
             write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
-                       tls_filesize, tls_memsize, 1);
+                       tls_filesize, tls_memsize, 8);
         }
         while (elf.len < hdr_size)
             buf_u8(&elf, 0);
