@@ -927,7 +927,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     /* phnum is finalized after we know whether a data segment is needed;
      * reserve header space for the maximum (4 phdrs: RX, RW, INTERP, DYNAMIC)
      * so that segment file offsets are stable regardless of which are used. */
-    uint16_t phnum_max = 4;
+    uint16_t phnum_max = have_tls ? 5 : 4;
     size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
