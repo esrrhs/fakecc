@@ -939,7 +939,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 
     /* ---- Compute layout ---- */
     int have_tls = (tdata.len > 0 || tbss_size > 0);
-    size_t start_size = have_tls ? (START_SIZE + 25 + (tdata.len > 0 ? 27 : 0)) : START_SIZE;
+    int init_tls_in_start = have_tls && !need_dynamic;
+    size_t start_size = init_tls_in_start ? (START_SIZE + 25 + (tdata.len > 0 ? 27 : 0)) : START_SIZE;
     /* phnum is finalized after we know whether a data segment is needed;
      * reserve header space for the maximum (4 phdrs: RX, RW, INTERP, DYNAMIC)
      * so that segment file offsets are stable regardless of which are used. */
@@ -1345,7 +1346,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         else if (exit_static_addr)
             exit_call = exit_static_addr;
         gen_start(&rx, base + start_offset, main_addr, exit_call,
-                  have_tls, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
+                  init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t interp_off = rx.len;
@@ -1452,7 +1453,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         Buffer rx;
         buffer_init(&rx);
         gen_start(&rx, base + start_offset, main_addr, exit_static_addr,
-                  have_tls, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
+                  init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
 

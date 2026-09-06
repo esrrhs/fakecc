@@ -27,12 +27,41 @@ unsigned long __fakecc_tls_filesz = 0;
 unsigned long __fakecc_tls_memsz = 0;
 unsigned long __fakecc_tls_align = 16;
 
-static __thread struct __fakecc_thread *__cur_thread;
+static struct __fakecc_thread *__thread_table[128];
 static struct __fakecc_thread __main_thread;
+
+static void __register_thread(struct __fakecc_thread *t) {
+    for (int i = 0; i < 128; i++) {
+        if (!__thread_table[i]) {
+            __thread_table[i] = t;
+            return;
+        }
+    }
+}
+
+static void __unregister_thread(struct __fakecc_thread *t) {
+    for (int i = 0; i < 128; i++) {
+        if (__thread_table[i] == t) {
+            __thread_table[i] = 0;
+            return;
+        }
+    }
+}
+
+static struct __fakecc_thread *__find_current_thread(void) {
+    int tid = (int)__syscall(186 /* sys_gettid */);
+    for (int i = 0; i < 128; i++) {
+        if (__thread_table[i] && __thread_table[i]->tid == tid) {
+            return __thread_table[i];
+        }
+    }
+    return 0;
+}
 
 static void *__fakecc_thread_trampoline(void *arg) {
     struct __fakecc_thread *t = (struct __fakecc_thread *)arg;
-    __cur_thread = t;
+    t->tid = (int)__syscall(186 /* sys_gettid */);
+    __register_thread(t);
     void *res = t->start_routine(t->arg);
     t->retval = res;
     t->done = 1;
@@ -41,10 +70,11 @@ static void *__fakecc_thread_trampoline(void *arg) {
 }
 
 void pthread_exit(void *retval) {
-    if (__cur_thread) {
-        __cur_thread->retval = retval;
-        __cur_thread->done = 1;
-        __syscall(202, (long)&__cur_thread->done, 1 /* FUTEX_WAKE */, 1, 0, 0, 0);
+    struct __fakecc_thread *t = __find_current_thread();
+    if (t) {
+        t->retval = retval;
+        t->done = 1;
+        __syscall(202, (long)&t->done, 1 /* FUTEX_WAKE */, 1, 0, 0, 0);
     }
     __syscall(60, 0);
 }
@@ -54,10 +84,14 @@ void thread_exit(void *retval) {
 }
 
 pthread_t pthread_self(void) {
-    if (!__cur_thread) {
-        __cur_thread = &__main_thread;
+    struct __fakecc_thread *t = __find_current_thread();
+    if (!t) {
+        if (__main_thread.tid == 0) {
+            __main_thread.tid = (int)__syscall(186 /* sys_gettid */);
+        }
+        return (pthread_t)&__main_thread;
     }
-    return (pthread_t)__cur_thread;
+    return (pthread_t)t;
 }
 
 thread_t thread_self(void) {
@@ -144,6 +178,7 @@ int pthread_join(pthread_t thread, void **retval) {
     }
 
     t->joined = 1;
+    __unregister_thread(t);
     if (t->stack_base && t->stack_size) {
         __syscall(11, (long)t->stack_base, (long)t->stack_size);
     }
