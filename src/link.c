@@ -189,6 +189,7 @@ typedef struct {
     size_t   data_len;
     size_t   bss_file_offset;
     size_t   bss_size;
+    size_t   start_size;
     /* Thread-local storage template.  `tls_vaddr` is the start of the TLS
      * image in memory (after .bss, page-aligned), `tls_file_offset` is where
      * the initialized portion (.tdata) lives on disk (after .bss filesize
@@ -257,7 +258,7 @@ static void finalize_sections(
     uint32_t first_global = (uint32_t)(symtab.len / ELF64_SYM_SIZE);
     uint32_t start_name = append_string(&strtab, "_start");
     write_sym(&symtab, start_name, STB_GLOBAL, 2, SECT_TEXT,
-              entry, START_SIZE);
+              entry, lay->start_size);
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -514,24 +515,50 @@ static void finalize_sections(
  * Both forms are exactly START_SIZE bytes so the layout above does not have to
  * know which one it gets. */
 static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
-                      uint64_t exit_plt_vaddr) {
+                      uint64_t exit_plt_vaddr, int have_tls,
+                      uint64_t tls_vaddr, uint64_t tcb_vaddr,
+                      size_t tls_memsize, size_t tdata_len) {
+    size_t prefix_len = 0;
+    if (have_tls) {
+        /* TLS startup init for x86-64 Linux:
+         * 1. store tcb_vaddr at [tcb_vaddr] (so %fs:0 yields thread pointer)
+         * 2. arch_prctl(ARCH_SET_FS, tcb_vaddr) via sys_arch_prctl (syscall 158)
+         * Total size: exactly 25 bytes. */
+        prefix_len = 25;
+        // 1. movabs $tcb_vaddr, %rsi (48 be <8-byte-imm>)
+        uint8_t m_rsi[2] = {0x48, 0xbe};
+        buffer_append(code, (const char *)m_rsi, 2);
+        buffer_append(code, (const char *)&tcb_vaddr, 8);
+        // 2. mov %rsi, (%rsi) (48 89 36)
+        uint8_t st_rsi[3] = {0x48, 0x89, 0x36};
+        buffer_append(code, (const char *)st_rsi, 3);
+        // 3. mov $158, %eax (b8 9e 00 00 00)
+        uint8_t m_eax[5] = {0xb8, 0x9e, 0x00, 0x00, 0x00};
+        buffer_append(code, (const char *)m_eax, 5);
+        // 4. mov $0x1002, %edi (bf 02 10 00 00)
+        uint8_t m_edi[5] = {0xbf, 0x02, 0x10, 0x00, 0x00};
+        buffer_append(code, (const char *)m_edi, 5);
+        // 5. syscall (0f 05) -- arch_prctl(0x1002, tcb_vaddr)
+        uint8_t sysc[2] = {0x0f, 0x05};
+        buffer_append(code, (const char *)sysc, 2);
+    }
     /* SysV ABI: main(argc @ edi, argv @ rsi). At process entry the kernel
      * leaves [rsp]=argc, [rsp+8]=argv. Load them before calling main. */
     uint8_t mov_edi[] = {0x8b, 0x3c, 0x24}; /* mov edi, [rsp] */
     buffer_append(code, (const char *)mov_edi, 3);
     uint8_t lea_rsi[] = {0x48, 0x8d, 0x74, 0x24, 0x08}; /* lea rsi, [rsp+8] */
     buffer_append(code, (const char *)lea_rsi, 5);
-    /* call main (rel32 is relative to end of the 5-byte call, i.e. call_vaddr+8+5) */
+    /* call main (rel32 is relative to end of the 5-byte call, i.e. call_vaddr+prefix_len+8+5) */
     uint8_t call_opcode = 0xe8;
     buffer_append(code, (const char *)&call_opcode, 1);
-    int32_t rel = (int32_t)(main_vaddr - (call_vaddr + 3 + 5 + CALL_SIZE));
+    int32_t rel = (int32_t)(main_vaddr - (call_vaddr + prefix_len + 3 + 5 + CALL_SIZE));
     buffer_append(code, (const char *)&rel, 4);
     uint8_t mov_reg[] = {0x89, 0xc7}; /* mov edi, eax (exit code = main return) */
     buffer_append(code, (const char *)mov_reg, 2);
     if (exit_plt_vaddr != 0) {
         buffer_append(code, (const char *)&call_opcode, 1);
         int32_t erel = (int32_t)(exit_plt_vaddr -
-                                 (call_vaddr + 3 + 5 + CALL_SIZE + 2 + CALL_SIZE));
+                                 (call_vaddr + prefix_len + 3 + 5 + CALL_SIZE + 2 + CALL_SIZE));
         buffer_append(code, (const char *)&erel, 4);
         uint8_t ud2[] = {0x0f, 0x0b}; /* exit() does not return */
         buffer_append(code, (const char *)ud2, 2);
@@ -895,13 +922,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     }
 
     /* ---- Compute layout ---- */
+    int have_tls = (tdata.len > 0 || tbss_size > 0);
+    size_t start_size = have_tls ? (START_SIZE + 25) : START_SIZE;
     /* phnum is finalized after we know whether a data segment is needed;
      * reserve header space for the maximum (4 phdrs: RX, RW, INTERP, DYNAMIC)
      * so that segment file offsets are stable regardless of which are used. */
     uint16_t phnum_max = 4;
     size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum_max;
     size_t start_offset = hdr_size;
-    size_t text_offset = start_offset + START_SIZE;
+    size_t text_offset = start_offset + start_size;
     /* .dynamic size: num_needed×DT_NEEDED + [DT_RUNPATH] + 9 fixed tags +
      * DT_NULL, plus DT_RELA/RELASZ/RELENT when truly-external DATA vars exist. */
     size_t dynamic_size = 0;
@@ -911,7 +940,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
         + rela_plt.len + rela_dyn.len + dynamic_size;
-    size_t rx_content_len = START_SIZE + text.len + rodata.len + dyn_sections_len;
+    size_t rx_content_len = start_size + text.len + rodata.len + dyn_sections_len;
     size_t rx_filesz = hdr_size + rx_content_len;
     size_t data_file_offset = rx_filesz;
     if (data_file_offset & (PAGE_SIZE - 1))
@@ -932,12 +961,21 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 
     /* ---- Compute final symbol addresses ---- */
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));
+    /* Reserve space in .bss for the initial thread's TLS block and TCB */
+    size_t tls_filesize = tdata.len;
+    size_t tls_memsize = tdata.len + tbss_size;
+    size_t tls_bss_alloc_off = 0;
+    if (have_tls) {
+        while (bss_size & 15) bss_size++;
+        tls_bss_alloc_off = bss_size;
+        bss_size += tls_memsize + 16;
+    }
+    uint64_t tcb_vaddr = bss_vaddr + tls_bss_alloc_off + tls_memsize;
     /* The TLS template (PT_TLS) lives in memory right after .bss but uses
      * its own virtual address range so the loader can copy/zero it per
      * thread.  tdata (initialized) is file-resident, tbss (zero-init) is
-     * not.  tls_end_vaddr is p_vaddr + p_memsz; the TPOFF64 reloc writes
+     * not.  tls_end_vaddr is p_vaddr + p_memsz; the TPOFF32 reloc writes
      * `S - tls_end_vaddr + A`, a negative offset from %fs:0 to the symbol. */
-    int have_tls = (tdata.len > 0 || tbss_size > 0);
     uint64_t tls_vaddr = bss_vaddr + bss_size;
     while (tls_vaddr & (PAGE_SIZE - 1)) tls_vaddr++;
     uint64_t tls_end_vaddr = tls_vaddr + tdata.len + tbss_size;
@@ -949,8 +987,6 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
      * Pad to 8-byte alignment first. */
     size_t tls_file_offset_base = bss_file_offset;
     while (tls_file_offset_base & 7) tls_file_offset_base++;
-    size_t tls_filesize = tdata.len;
-    size_t tls_memsize = tdata.len + tbss_size;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -1222,7 +1258,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         }
         /* .dynamic */
         size_t rx_base_vaddr = base + hdr_size;
-        size_t dynstr_off = START_SIZE + text.len + rodata.len + interp_len;
+        size_t dynstr_off = start_size + text.len + rodata.len + interp_len;
         size_t dynsym_off = dynstr_off + dynstr.len;
         size_t hash_off = dynsym_off + dynsym.len;
         size_t rela_plt_off = hash_off + hash.len;
@@ -1266,7 +1302,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             exit_call = code_vaddr + plt_entry_off[exit_ext_idx];
         else if (exit_static_addr)
             exit_call = exit_static_addr;
-        gen_start(&rx, base + start_offset, main_addr, exit_call);
+        gen_start(&rx, base + start_offset, main_addr, exit_call,
+                  have_tls, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t interp_off = rx.len;
@@ -1335,6 +1372,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
         lay.have_tls = have_tls;
+        lay.start_size = start_size;
         lay.tls_vaddr = tls_vaddr;
         lay.tls_file_offset = tls_file_offset_base;
         lay.tls_filesize = tls_filesize;
@@ -1376,7 +1414,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         uint64_t entry = base + start_offset;
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr, exit_static_addr);
+        gen_start(&rx, base + start_offset, main_addr, exit_static_addr,
+                  have_tls, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
 
@@ -1438,6 +1477,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
         lay.have_tls = have_tls;
+        lay.start_size = start_size;
         lay.tls_vaddr = tls_vaddr;
         lay.tls_file_offset = tls_file_offset_base;
         lay.tls_filesize = tls_filesize;

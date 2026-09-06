@@ -183,4 +183,14 @@ echo 'package cycC; import cycA; int c_func(void) { return cycA.a_func(); }' > "
 echo 'package main; import cycA; int main(void) { return cycA.a_func(); }' > "$TMP/cyc_main.c"
 FAKECC_PKG="$TMP/pkg:$FAKECC_PKG" run_multi_fail "$TMP/cyc_main.c"
 
+# Cross-file TLS: file 1 defines __thread, file 2 accesses it
+echo 'package main; __thread int tls_counter; int inc_tls(int v) { tls_counter += v; return tls_counter; }' > "$TMP/tls1.c"
+echo 'package main; extern int inc_tls(int v); int main(void) { inc_tls(10); return inc_tls(5) - 15; }' > "$TMP/tls_main.c"
+run_multi 0 "$TMP/tls1.c" "$TMP/tls_main.c"
+
+# Separate compilation (-c) with TLS object file
+"$FAKECC" $CC_EXTRA -c "$TMP/tls1.c" -o "$TMP/tls1.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/tls_main.c" -o "$TMP/tls_main.o"
+run_multi 0 "$TMP/tls1.o" "$TMP/tls_main.o"
+
 exit $FAIL
