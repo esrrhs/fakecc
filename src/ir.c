@@ -8854,11 +8854,6 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * is 2 (extern) and is_tls is 1, but we still skip because extern means
          * "defined elsewhere" — the linker resolves the symbol. */
         if (s->u.decl.storage_class == 2) continue;
-        /* `__thread T a;` without `extern` defines a TLS variable here:
-         * emit it as a SECT_TDATA / SECT_TBSS global.  TLS definitions
-         * cannot carry a non-trivial initializer in this implementation —
-         * we route any init through the normal .data path, but in
-         * practice TLS objects are zero-initialized. */
         int is_tls = s->u.decl.is_tls;
         if (is_tls) {
             int sz = type_size(s->u.decl.type);
@@ -8907,7 +8902,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         /* Create the global FIRST so pack_init can attach pointer fixups to it
          * when an array/struct member decays to a pointer (e.g. `.regs = ARR`). */
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
-                                            0, is_static, 0, s->loc);
+                                            0, is_static, is_tls, s->loc);
         if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);
