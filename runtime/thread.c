@@ -9,7 +9,11 @@ typedef struct {
     size_t __stacksize;
 } pthread_attr_t;
 
+static const unsigned long FAKECC_THREAD_MAGIC = 0x54485244;
+static const unsigned long FAKECC_STACK_SIZE = 2097152; /* 2MB aligned stack per thread */
+
 struct __fakecc_thread {
+    unsigned long magic;
     void *(*start_routine)(void *);
     void *arg;
     void *retval;
@@ -27,41 +31,11 @@ unsigned long __fakecc_tls_filesz = 0;
 unsigned long __fakecc_tls_memsz = 0;
 unsigned long __fakecc_tls_align = 16;
 
-static struct __fakecc_thread *__thread_table[128];
 static struct __fakecc_thread __main_thread;
-
-static void __register_thread(struct __fakecc_thread *t) {
-    for (int i = 0; i < 128; i++) {
-        if (!__thread_table[i]) {
-            __thread_table[i] = t;
-            return;
-        }
-    }
-}
-
-static void __unregister_thread(struct __fakecc_thread *t) {
-    for (int i = 0; i < 128; i++) {
-        if (__thread_table[i] == t) {
-            __thread_table[i] = 0;
-            return;
-        }
-    }
-}
-
-static struct __fakecc_thread *__find_current_thread(void) {
-    int tid = (int)__syscall(186 /* sys_gettid */);
-    for (int i = 0; i < 128; i++) {
-        if (__thread_table[i] && __thread_table[i]->tid == tid) {
-            return __thread_table[i];
-        }
-    }
-    return 0;
-}
 
 static void *__fakecc_thread_trampoline(void *arg) {
     struct __fakecc_thread *t = (struct __fakecc_thread *)arg;
     t->tid = (int)__syscall(186 /* sys_gettid */);
-    __register_thread(t);
     void *res = t->start_routine(t->arg);
     t->retval = res;
     t->done = 1;
@@ -69,9 +43,26 @@ static void *__fakecc_thread_trampoline(void *arg) {
     return res;
 }
 
+pthread_t pthread_self(void) {
+    int tid = (int)__syscall(186 /* sys_gettid */);
+    int pid = (int)__syscall(39 /* sys_getpid */);
+    if (tid == pid) {
+        __main_thread.tid = pid;
+        return (pthread_t)&__main_thread;
+    }
+    int dummy;
+    unsigned long sp = (unsigned long)&dummy;
+    unsigned long base = sp & ~(FAKECC_STACK_SIZE - 1);
+    struct __fakecc_thread *t = (struct __fakecc_thread *)base;
+    if (t->magic == FAKECC_THREAD_MAGIC) {
+        return (pthread_t)t;
+    }
+    return (pthread_t)&__main_thread;
+}
+
 void pthread_exit(void *retval) {
-    struct __fakecc_thread *t = __find_current_thread();
-    if (t) {
+    struct __fakecc_thread *t = (struct __fakecc_thread *)pthread_self();
+    if (t && t != &__main_thread) {
         t->retval = retval;
         t->done = 1;
         __syscall(202, (long)&t->done, 1 /* FUTEX_WAKE */, 1, 0, 0, 0);
@@ -83,17 +74,6 @@ void thread_exit(void *retval) {
     pthread_exit(retval);
 }
 
-pthread_t pthread_self(void) {
-    struct __fakecc_thread *t = __find_current_thread();
-    if (!t) {
-        if (__main_thread.tid == 0) {
-            __main_thread.tid = (int)__syscall(186 /* sys_gettid */);
-        }
-        return (pthread_t)&__main_thread;
-    }
-    return (pthread_t)t;
-}
-
 thread_t thread_self(void) {
     return (thread_t)pthread_self();
 }
@@ -101,9 +81,23 @@ thread_t thread_self(void) {
 int pthread_create(pthread_t *thread, const void *attr, void *(*start_routine)(void *), void *arg) {
     if (!thread || !start_routine) return -1;
 
-    size_t stack_size = 1024 * 1024; /* 1MB stack */
-    void *stack_base = (void *)__syscall(9, 0, (long)stack_size, 3 /* PROT_READ|PROT_WRITE */, 0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */, -1, 0);
-    if ((long)stack_base < 0) return -1;
+    /* Allocate 4MB, trim to 2MB-aligned 2MB stack */
+    size_t alloc_size = FAKECC_STACK_SIZE * 2;
+    void *raw = (void *)__syscall(9, 0, (long)alloc_size, 3 /* PROT_READ|PROT_WRITE */, 0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */, -1, 0);
+    if ((long)raw < 0) return -1;
+
+    unsigned long aligned = ((unsigned long)raw + FAKECC_STACK_SIZE - 1) & ~(FAKECC_STACK_SIZE - 1);
+    if (aligned > (unsigned long)raw) {
+        __syscall(11, (long)raw, (long)(aligned - (unsigned long)raw));
+    }
+    unsigned long end = aligned + FAKECC_STACK_SIZE;
+    unsigned long raw_end = (unsigned long)raw + alloc_size;
+    if (raw_end > end) {
+        __syscall(11, (long)end, (long)(raw_end - end));
+    }
+
+    void *stack_base = (void *)aligned;
+    size_t stack_size = FAKECC_STACK_SIZE;
 
     size_t tls_memsz = __fakecc_tls_memsz;
     size_t tls_pad = 0;
@@ -128,12 +122,8 @@ int pthread_create(pthread_t *thread, const void *attr, void *(*start_routine)(v
     }
     *(unsigned long *)tcb = tcb; /* %fs:0 -> tcb */
 
-    struct __fakecc_thread *t = (struct __fakecc_thread *)malloc(sizeof(struct __fakecc_thread));
-    if (!t) {
-        __syscall(11, (long)stack_base, (long)stack_size);
-        __syscall(11, (long)tls_base, (long)tls_alloc);
-        return -1;
-    }
+    struct __fakecc_thread *t = (struct __fakecc_thread *)stack_base;
+    t->magic = FAKECC_THREAD_MAGIC;
     t->start_routine = start_routine;
     t->arg = arg;
     t->retval = 0;
@@ -151,7 +141,6 @@ int pthread_create(pthread_t *thread, const void *attr, void *(*start_routine)(v
 
     long ret = __clone(__fakecc_thread_trampoline, stack_top, flags, (void *)t, (void *)tcb, (void *)&t->tid);
     if (ret < 0) {
-        free(t);
         __syscall(11, (long)stack_base, (long)stack_size);
         __syscall(11, (long)tls_base, (long)tls_alloc);
         return (int)(-ret);
@@ -178,14 +167,18 @@ int pthread_join(pthread_t thread, void **retval) {
     }
 
     t->joined = 1;
-    __unregister_thread(t);
-    if (t->stack_base && t->stack_size) {
-        __syscall(11, (long)t->stack_base, (long)t->stack_size);
+    t->magic = 0;
+    void *stack_base = t->stack_base;
+    size_t stack_size = t->stack_size;
+    void *tls_base = t->tls_base;
+    size_t tls_size = t->tls_size;
+
+    if (stack_base && stack_size) {
+        __syscall(11, (long)stack_base, (long)stack_size);
     }
-    if (t->tls_base && t->tls_size) {
-        __syscall(11, (long)t->tls_base, (long)t->tls_size);
+    if (tls_base && tls_size) {
+        __syscall(11, (long)tls_base, (long)tls_size);
     }
-    free(t);
     return 0;
 }
 
