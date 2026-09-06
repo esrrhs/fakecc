@@ -6855,7 +6855,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         if (dty.kind == TY_FUNC || s->u.decl.storage_class == 2) {
             if (dty.kind != TY_FUNC)
                 irsymtable_push_global(st, s->u.decl.name, dty,
-                                       s->u.decl.storage_class == 3);
+                                       s->u.decl.is_tls);
             break;
         }
 
@@ -8833,7 +8833,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         if (gs->kind == ST_DECL)
             irsymtable_push_global(&g_ir_globals_st, gs->u.decl.name,
                                    gs->u.decl.type,
-                                   gs->u.decl.storage_class == 3);
+                                   gs->u.decl.is_tls);
     }
 
     /* Register named globals from tu->globals.  `extern` globals are
@@ -8849,18 +8849,17 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                                  s->u.decl.storage_class == 1, s->loc);
             continue;
         }
-        /* extern → declaration only: skip emission entirely.  Also skip
-         * `extern __thread T a;` declarations (storage_class == 3 with no
-         * definition here): the symbol is left undefined in the final ELF
-         * and resolved by the linker against the __thread's definition in
-         * another TU, or via dynamic TLS if linked shared. */
+        /* extern → declaration only: skip emission entirely.
+         * `extern __thread T a;` declarations are caught here too: storage_class
+         * is 2 (extern) and is_tls is 1, but we still skip because extern means
+         * "defined elsewhere" — the linker resolves the symbol. */
         if (s->u.decl.storage_class == 2) continue;
         /* `__thread T a;` without `extern` defines a TLS variable here:
          * emit it as a SECT_TDATA / SECT_TBSS global.  TLS definitions
          * cannot carry a non-trivial initializer in this implementation —
          * we route any init through the normal .data path, but in
          * practice TLS objects are zero-initialized. */
-        int is_tls = (s->u.decl.storage_class == 3);
+        int is_tls = s->u.decl.is_tls;
         if (is_tls) {
             int sz = type_size(s->u.decl.type);
             if (sz <= 0) sz = 8;

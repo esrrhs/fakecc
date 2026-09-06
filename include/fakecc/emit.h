@@ -271,10 +271,10 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_GOTPCREL  9
 #define R_X86_64_GLOB_DAT  6
 #define R_X86_64_64       10  /* absolute 64-bit (pointer fixups in .data) */
-#define R_X86_64_TPOFF64  18  /* TLS offset: S + A - tls_end, Local-Exec.
-                               * Used with `lea %rxx, %fs:[rip+disp32]` for
-                               * variables defined in this module/executable;
-                               * the linker computes the negative offset from
-                               * the thread pointer. */
+#define R_X86_64_TPOFF32  23  /* TLS Local-Exec offset (32-bit signed): S + A - tp_end.
+                               * Patches the imm32 of `addq $imm32, %reg` that follows
+                               * a `movq %fs:0, %reg` to produce the thread-local address.
+                               * The linker computes a negative int32 offset from the
+                               * thread pointer (%fs:0) to the variable in the TLS template. */
 
 #endif /* FAKECC_EMIT_H */

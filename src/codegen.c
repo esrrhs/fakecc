@@ -184,6 +184,31 @@ static void emit_add_imm32(Buffer *b, int reg, int32_t imm) {
     emit_int32(b, imm);
 }
 
+/* Emit `movq %fs:0, %dst` — load the thread pointer from %fs segment base.
+ * Encoding: 64 (FS override) REX.W 8B ModRM(mod=00,reg=dst,rm=4) SIB(00,4,5) 00000000.
+ * This is the standard way to read the TP on x86-64 Linux (glibc convention:
+ * %fs:0 holds a pointer to the DTV/thread structure whose base is the TP). */
+static void emit_mov_fs0_reg(Buffer *b, int dst) {
+    emit_byte(b, 0x64);                  /* %fs segment override */
+    emit_rex_wrb(b, 1, dst, 0);          /* REX.W [REX.R if dst>=8] */
+    emit_byte(b, 0x8B);                  /* MOV r64, r/m64 */
+    emit_modrm(b, 0, dst & 7, 4);        /* mod=00 reg=dst rm=4 (SIB follows) */
+    emit_byte(b, 0x25);                  /* SIB: scale=00 index=4 base=5 → [disp32] */
+    emit_int32(b, 0);                    /* disp32 = 0 → %fs:0 */
+}
+
+/* Emit `addq $0, %dst` and return the patch offset of the imm32.
+ * The caller records a TPOFF32 relocation at the returned offset so the
+ * linker fills in `S + A - tp_end` (a negative int32 value). */
+static size_t emit_add_tls_patch(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, 0, dst);          /* REX.W [REX.B if dst>=8] */
+    emit_byte(b, 0x81);                  /* ADD r/m64, imm32 */
+    emit_modrm(b, 3, 0, dst & 7);        /* mod=11 /0 rm=dst */
+    size_t patch = b->len;
+    emit_int32(b, 0);                    /* placeholder imm32 — filled by linker */
+    return patch;
+}
+
 /* Patch a rel32 at `patch_off` to jump to `target_off`.  The rel32 is relative
  * to the byte after the 4-byte field (i.e. patch_off+4). */
 static void patch_rel32(Buffer *b, size_t patch_off, size_t target_off) {
@@ -2726,29 +2751,28 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_GADDR_TLS: {
                 /* dst = &__thread-global; target name in inst->call_name.
                  *
-                 * Emit `lea %rxx, %fs:[rip+0]` (form: REX.W + 8D + ModRM +
-                 * disp32, with %fs segment override 0x64).  The linker
-                 * fills the disp32 with a TPOFF64 value: `S + A - tls_end`,
-                 * i.e. the negative offset from the thread pointer to the
-                 * variable, computed at static link time from the .tdata /
-                 * .tbss layout.  This is the Initial-Exec TLS model.
+                 * Emit the x86-64 Local-Exec (LE) TLS address sequence:
                  *
-                 * The PC-relative addressing uses a 4-byte displacement
-                 * (like PC32) so the patch site records a position just
-                 * after the disp32 starts (the 0x64 / REX / 8D / ModRM
-                 * sequence is 5 bytes, the disp32 is bytes 5..8; the
-                 * "next instruction" is byte 9, so the addend is -4 just
-                 * like R_X86_64_PC32). */
+                 *   movq %fs:0, %rdst      # load thread pointer (TP) from %fs base
+                 *   addq $sym@tpoff, %rdst # add negative offset → &sym in TLS block
+                 *
+                 * The linker patches the imm32 of addq with R_X86_64_TPOFF32:
+                 *   value = S + A - tp_end  (a negative int32 for typical layouts)
+                 * where tp_end = tls_vaddr + tls_memsize (the address just past the
+                 * TLS template that %fs:0 points to on Linux/glibc).
+                 *
+                 * NOTE: `lea %fs:[rip+disp32]` is NOT equivalent — on x86-64 the
+                 * `lea` instruction ignores segment overrides entirely, so the %fs
+                 * prefix is a no-op.  The correct TP read is `movq %fs:0, %reg`. */
                 int target = dr >= 0 ? dr : REG_RAX;
                 int gsym = emit_module_find_symbol(out, inst->call_name);
                 if (gsym < 0) gsym = emit_module_add_undefined(out, inst->call_name);
-                /* Two-byte %fs segment override prefix: 0x64 0x64.  The
-                 * 64-bit form of LEA needs REX.W (0x48) on top of the
-                 * ModRM for the chosen target.  We re-use `emit_lea_rip`
-                 * after prepending the override. */
-                emit_byte(&out->text, 0x64);  /* %fs prefix (one byte is enough) */
-                size_t patch = emit_lea_rip(&out->text, target);
-                emit_module_add_reloc(out, patch, R_X86_64_TPOFF64, gsym, -4);
+                /* movq %fs:0, %target */
+                emit_mov_fs0_reg(&out->text, target);
+                /* addq $sym@tpoff, %target — patch slot for TPOFF32 reloc */
+                size_t patch = emit_add_tls_patch(&out->text, target);
+                /* Addend is 0: linker computes S - tp_end directly. */
+                emit_module_add_reloc(out, patch, R_X86_64_TPOFF32, gsym, 0);
                 if (dr < 0)
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;

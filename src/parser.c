@@ -85,6 +85,7 @@ static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
 static int g_parsed_align = 0;
 static int g_parsed_inline = 0;  /* `inline` among type specifiers (`extern int inline f`) */
+static int g_parsed_tls = 0;     /* `__thread`/`_Thread_local` among type specifiers */
 
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
@@ -409,6 +410,8 @@ static int is_type_start(const Parser *p, size_t pos) {
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
         if (strcmp(text, "register") == 0 || strcmp(text, "auto") == 0
+            || strcmp(text, "__thread") == 0 || strcmp(text, "_Thread_local") == 0
+            || strcmp(text, "thread_local") == 0
             || strcmp(text, "__extension__") == 0 || strcmp(text, "__extension") == 0)
             return is_type_start(p, pos + 1);
         if (strcmp(text, "__attribute__") == 0 || strcmp(text, "__attribute") == 0) {
@@ -513,10 +516,11 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
                      || strcmp(peek(p)->text, "_Thread_local") == 0
                      || strcmp(peek(p)->text, "thread_local") == 0)) {
             /* GNU __thread / C11 _Thread_local / C23 thread_local: thread-local
-             * storage.  Stored as storage_class 3 so sema/IR can route the
-             * address-of to a TLS-only lowering path; the linker resolves
-             * accesses via %fs:[TPOFF64] (Initial-Exec model). */
-            if (storage_class) *storage_class = 3;
+             * storage.  Orthogonal to static/extern: set g_parsed_tls so that
+             * `extern __thread T x` keeps storage_class=2 (extern) while also
+             * signalling TLS; the IR emitter reads decl.is_tls to route the
+             * global into .tdata/.tbss and emit IR_GADDR_TLS. */
+            g_parsed_tls = 1;
             advance(p);
         }
         else if (peek(p)->kind == TK_IDENT
@@ -2951,7 +2955,10 @@ static int is_function_declaration_lookahead(Parser *p) {
             }
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "register") == 0
-                       || strcmp(peek(p)->text, "auto") == 0)) {
+                       || strcmp(peek(p)->text, "auto") == 0
+                       || strcmp(peek(p)->text, "__thread") == 0
+                       || strcmp(peek(p)->text, "_Thread_local") == 0
+                       || strcmp(peek(p)->text, "thread_local") == 0)) {
             advance(p);
         } else if (tk == TK_IDENT
                    && find_typedef_with_fallback(p, peek(p)->text)) {
@@ -3245,6 +3252,7 @@ static Stmt parse_stmt(Parser *p) {
         /* Storage class: `static` (persistent) / `extern` (declaration only).
          * `const` is handled inside parse_specifiers. */
         int storage_class = 0; /* 0=default, 1=static, 2=extern */
+        g_parsed_tls = 0;
         for (;;) {
             if (peek(p)->kind == TK_KW_STATIC) {
                 storage_class = 1;
@@ -3255,6 +3263,12 @@ static Stmt parse_stmt(Parser *p) {
             } else if (peek(p)->kind == TK_IDENT
                        && (strcmp(peek(p)->text, "register") == 0
                            || strcmp(peek(p)->text, "auto") == 0)) {
+                advance(p);
+            } else if (peek(p)->kind == TK_IDENT
+                       && (strcmp(peek(p)->text, "__thread") == 0
+                           || strcmp(peek(p)->text, "_Thread_local") == 0
+                           || strcmp(peek(p)->text, "thread_local") == 0)) {
+                g_parsed_tls = 1;
                 advance(p);
             } else break;
         }
@@ -3276,6 +3290,12 @@ static Stmt parse_stmt(Parser *p) {
             } else if (peek(p)->kind == TK_IDENT
                        && (strcmp(peek(p)->text, "register") == 0
                            || strcmp(peek(p)->text, "auto") == 0)) {
+                advance(p);
+            } else if (peek(p)->kind == TK_IDENT
+                       && (strcmp(peek(p)->text, "__thread") == 0
+                           || strcmp(peek(p)->text, "_Thread_local") == 0
+                           || strcmp(peek(p)->text, "thread_local") == 0)) {
+                g_parsed_tls = 1;
                 advance(p);
             } else break;
         }
@@ -3316,6 +3336,7 @@ static Stmt parse_stmt(Parser *p) {
             s.u.decl.name = decl_name;
             s.u.decl.type = ty;
             s.u.decl.storage_class = storage_class;
+            s.u.decl.is_tls = g_parsed_tls;
             while (parse_attribute(p, &s.u.decl.align, NULL, NULL, NULL,
                                    &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {

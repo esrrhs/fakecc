@@ -944,9 +944,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     /* tdata/tbss virtual offsets inside the TLS template */
     uint64_t tdata_vaddr = tls_vaddr;
     uint64_t tbss_vaddr = tls_vaddr + tdata.len;
-    /* .tdata lives on disk right after .data (which itself follows the GOT
-     * inside the RW segment).  Pad to 8-byte alignment first. */
-    size_t tls_file_offset_base = data_file_offset + data.len;
+    /* .tdata lives on disk right after the RW segment (data + GOT).
+     * bss_file_offset is precisely data_file_offset + bss_data_off.
+     * Pad to 8-byte alignment first. */
+    size_t tls_file_offset_base = bss_file_offset;
     while (tls_file_offset_base & 7) tls_file_offset_base++;
     size_t tls_filesize = tdata.len;
     size_t tls_memsize = tdata.len + tbss_size;
@@ -1017,13 +1018,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
-            if (rel->type == R_X86_64_TPOFF64) {
-                /* TLS Local-Exec: `lea %rxx, %fs:[rip+disp32]`.  disp32 is the
-                 * absolute offset from %fs:0 (the thread pointer) to the
-                 * variable; the reloc formula is S + A - tls_end.  The RIP
-                 * register plays no role in the offset — %fs-relative
-                 * addressing consumes disp32 verbatim as the signed
-                 * displacement from %fs:0. */
+            if (rel->type == R_X86_64_TPOFF32) {
+                /* TLS Local-Exec: `movq %fs:0, %reg; addq $sym@tpoff, %reg`.
+                 * The imm32 of the addq is the TLS offset: S + A - tp_end.
+                 * tp_end = tls_vaddr + tls_memsize (address just past the TLS
+                 * template block; on Linux, %fs:0 holds a pointer to this end).
+                 * The result is the signed negative offset from tp_end to the
+                 * variable, which when added to %fs:0 yields &sym. */
                 size_t gsi = mod_sym_base[i] + rel->sym;
                 uint64_t S;
                 if (sinfo[gsi].defined
