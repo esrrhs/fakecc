@@ -10,7 +10,7 @@
 # use -std=gnu89 / -fpermissive for the rest). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 338
+# Total: 336
 #
 
 # GNU nested functions / trampolines (20)
@@ -45,11 +45,10 @@ pr82564.c
 # _Decimal / DFP (0)
 # None remaining among compile rejects.
 
-# __builtin_va_arg_pack (1)
+# __builtin_va_arg_pack (0)
+# None remaining among compile rejects.
 
-pr37669.c
-
-# C99: no implicit function declarations (127)
+# C99: no implicit function declarations (126)
 # Call to an undeclared identifier. GCC accepts this as `extern int name();`
 # under -std=gnu89.
 
@@ -141,7 +140,6 @@ move_qhi.c
 omit.c
 or386.c
 pr100576.c
-pr103682.c
 pr19121.c
 pr26213.c
 pr29201.c
