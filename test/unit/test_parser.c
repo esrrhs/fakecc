@@ -267,12 +267,32 @@ static void test_decl_with_init(void) {
 }
 
 static void test_nested_function(void) {
-    TranslationUnit tu = lex_parse(
-        "package main; int main() { int nested(int x) { return x * 2; } return nested(21); }");
-    T_ASSERT_EQ_INT((int)tu.functions.len, 2);
-    T_ASSERT_STR_EQ(tu.functions.data[0].name, "nested");
-    T_ASSERT_STR_EQ(tu.functions.data[1].name, "main");
-    tu_free(&tu);
+    /* Nested function definitions are not supported by FakeCC; the parser
+     * rejects them with `die_at()` (which exits).  Run in a subprocess so
+     * the parent test runner survives the exit. */
+    int p[2];
+    T_ASSERT_EQ_INT(pipe(p), 0);
+    pid_t pid = fork();
+    T_ASSERT(pid >= 0);
+    if (pid == 0) {
+        /* child: redirect stderr to parent via pipe, then run the parser */
+        close(p[0]);
+        dup2(p[1], 2);
+        close(p[1]);
+        TranslationUnit tu = lex_parse(
+            "package main; int main() { int nested(int x) { return x * 2; } return nested(21); }");
+        tu_free(&tu);
+        _exit(0);
+    }
+    close(p[1]);
+    char buf[4096];
+    ssize_t n = read(p[0], buf, sizeof(buf) - 1);
+    close(p[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (n > 0) buf[n] = '\0'; else buf[0] = '\0';
+    T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 1);  /* rejected */
+    T_ASSERT(strstr(buf, "Nested functions are not supported") != NULL);
 }
 
 static void test_stmt_expr(void) {

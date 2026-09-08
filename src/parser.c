@@ -3233,6 +3233,11 @@ static Stmt parse_stmt(Parser *p) {
             return parse_typedef_stmt(p);
         }
         if (is_function_definition_lookahead(p)) {
+            if (p->cur_fn_name) {
+                SourceLoc loc = peek(p)->loc;
+                die_at(loc.file, loc.line, loc.col,
+                       "Nested functions are not supported in FakeCC");
+            }
             FunctionDecl fn = parse_function_decl(p);
             if (p->tu->functions.len >= p->tu->functions.cap) {
                 size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
