@@ -154,6 +154,8 @@ struct EmitModule {
     Buffer rodata;
     Buffer data;
     size_t bss_size;
+    Buffer tdata;
+    size_t tbss_size;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -246,6 +248,7 @@ enum IROpcode {
     IR_ZEXT,
     IR_TRUNC,
     IR_GADDR,
+    IR_GADDR_TLS,
     IR_FADDR,
     IR_LADDR,
     IR_JMP_PTR,
@@ -361,6 +364,7 @@ struct IRGlobal {
     char *init_bytes;
     int is_readonly;
     int is_static;
+    int is_tls;
     SourceLoc loc;
     GlobalFixup *fixups;
     int num_fixups;
@@ -764,7 +768,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -779,7 +783,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -1124,6 +1128,22 @@ static void emit_add_imm32(Buffer *b, int reg, int32_t imm) {
     emit_byte(b, 0x81);
     emit_modrm(b, 3, 0, reg);
     emit_int32(b, imm);
+}
+static void emit_mov_fs0_reg(Buffer *b, int dst) {
+    emit_byte(b, 0x64);
+    emit_rex_wrb(b, 1, dst, 0);
+    emit_byte(b, 0x8B);
+    emit_modrm(b, 0, dst & 7, 4);
+    emit_byte(b, 0x25);
+    emit_int32(b, 0);
+}
+static size_t emit_add_tls_patch(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, 0, dst);
+    emit_byte(b, 0x81);
+    emit_modrm(b, 3, 0, dst & 7);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
 }
 static void patch_rel32(Buffer *b, size_t patch_off, size_t target_off) {
     int32_t rel = (int32_t)((int64_t)target_off - (int64_t)(patch_off + 4));
@@ -2366,7 +2386,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         uint8_t binding = g->is_static ? 0 : 1 ;
         uint16_t shndx;
         size_t off;
-        if (g->is_readonly) {
+        if (g->is_tls) {
+            if (g->init_bytes) {
+                shndx = 5;
+                off = out->tdata.len;
+                buffer_append(&out->tdata, g->init_bytes, g->size);
+                while (out->tdata.len & 7) { char z = 0; buffer_append(&out->tdata, &z, 1); }
+            } else {
+                shndx = 6;
+                off = out->tbss_size;
+                out->tbss_size += g->size;
+                while (out->tbss_size & 7) out->tbss_size++;
+            }
+        } else if (g->is_readonly) {
             shndx = 2;
             off = out->rodata.len;
             buffer_append(&out->rodata, g->init_bytes, g->size);
@@ -2978,6 +3010,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
             }
+            case IR_GADDR_TLS: {
+                int target = dr >= 0 ? dr : REG_RAX;
+                int gsym = emit_module_find_symbol(out, inst->call_name);
+                if (gsym < 0) gsym = emit_module_add_undefined(out, inst->call_name);
+                emit_mov_fs0_reg(&out->text, target);
+                size_t patch = emit_add_tls_patch(&out->text, target);
+                emit_module_add_reloc(out, patch, 23, gsym, 0);
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                break;
+            }
             case IR_LADDR: {
                 int target = dr >= 0 ? dr : REG_RAX;
                 size_t patch = emit_lea_rip(&out->text, target);
@@ -3314,6 +3357,61 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     emit_byte(&out->text, 0x0F);
                     emit_byte(&out->text, 0x05);
+                    if (dr >= 0) {
+                        if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                    } else {
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    }
+                    break;
+                }
+                if (inst->call_name && runtime.strcmp(inst->call_name, "__clone") == 0) {
+                    static const int CLONE_ARG_REGS[6] = {
+                        REG_RDI,
+                        REG_RSI,
+                        REG_RDX,
+                        REG_RCX,
+                        REG_R8,
+                        REG_R9
+                    };
+                    int nargs = inst->call_nargs;
+                    for (int k = 0; k < nargs && k < 6; k++) {
+                        ensure_reg(&out->text, inst->call_args[k], REG_RCX, ra);
+                        emit_push_r(&out->text, REG_RCX);
+                    }
+                    for (int k = (nargs < 6 ? nargs : 6) - 1; k >= 0; k--) {
+                        emit_pop_r(&out->text, CLONE_ARG_REGS[k]);
+                    }
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x83);
+                    emit_byte(&out->text, 0xe6); emit_byte(&out->text, 0xf0);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x83);
+                    emit_byte(&out->text, 0xee); emit_byte(&out->text, 0x10);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0x0e);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0x7e); emit_byte(&out->text, 0x08);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xd7);
+                    emit_byte(&out->text, 0x4c); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xca);
+                    emit_byte(&out->text, 0x4d); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xca);
+                    emit_byte(&out->text, 0xb8);
+                    emit_byte(&out->text, 0x38); emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x00); emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x0f); emit_byte(&out->text, 0x05);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x85);
+                    emit_byte(&out->text, 0xc0);
+                    emit_byte(&out->text, 0x75); emit_byte(&out->text, 0x0f);
+                    emit_byte(&out->text, 0x5f);
+                    emit_byte(&out->text, 0x58);
+                    emit_byte(&out->text, 0xff); emit_byte(&out->text, 0xd0);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xc7);
+                    emit_byte(&out->text, 0xb8);
+                    emit_byte(&out->text, 0x3c); emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x00); emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x0f); emit_byte(&out->text, 0x05);
+                    emit_byte(&out->text, 0xf4);
                     if (dr >= 0) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                     } else {

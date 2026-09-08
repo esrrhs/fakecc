@@ -94,6 +94,7 @@ enum IROpcode {
     IR_ZEXT,
     IR_TRUNC,
     IR_GADDR,
+    IR_GADDR_TLS,
     IR_FADDR,
     IR_LADDR,
     IR_JMP_PTR,
@@ -209,6 +210,7 @@ struct IRGlobal {
     char *init_bytes;
     int is_readonly;
     int is_static;
+    int is_tls;
     SourceLoc loc;
     GlobalFixup *fixups;
     int num_fixups;
@@ -612,7 +614,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -627,7 +629,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;

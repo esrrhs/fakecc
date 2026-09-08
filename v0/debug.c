@@ -154,6 +154,8 @@ struct EmitModule {
     Buffer rodata;
     Buffer data;
     size_t bss_size;
+    Buffer tdata;
+    size_t tbss_size;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;

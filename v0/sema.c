@@ -404,7 +404,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -419,7 +419,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -1087,6 +1087,21 @@ static Type usual_arith_conv(Type a, Type b) {
     int prec_a = a.bitfield_width > 0 ? a.bitfield_width : a.width * 8;
     int prec_b = b.bitfield_width > 0 ? b.bitfield_width : b.width * 8;
     int prec = prec_a > prec_b ? prec_a : prec_b;
+    int a_cplx = (a.kind == TY_STRUCT && a.tag && runtime.strncmp(a.tag, "__complex_", 10) == 0);
+    int b_cplx = (b.kind == TY_STRUCT && b.tag && runtime.strncmp(b.tag, "__complex_", 10) == 0);
+    if (a_cplx || b_cplx) {
+        if (a_cplx && b_cplx) {
+            return type_clone(type_size(a) >= type_size(b) ? a : b);
+        }
+        Type cty = a_cplx ? a : b;
+        Type non_cplx = a_cplx ? b : a;
+        if (non_cplx.kind == TY_FLOAT && non_cplx.width > (type_size(cty) / 2)) {
+            char tag[64];
+            runtime.snprintf(tag, sizeof(tag), "__complex_%s", non_cplx.width == 16 ? "ldouble" : (non_cplx.width == 8 ? "double" : "float"));
+            return type_make_struct(tag, non_cplx.width * 2);
+        }
+        return type_clone(cty);
+    }
     Type res;
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
         res = type_rank(a) >= type_rank(b) ? a : b;
@@ -1180,8 +1195,10 @@ static Type check_ternary_expr(Expr *e) {
     int e_is_null_const = (et.kind == TY_INT && et.width == 4
                            && e->u.tern.else_->kind == EX_INT_LIT
                            && e->u.tern.else_->u.int_val == 0);
-    int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT);
-    int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT);
+    int tt_cplx = (tt.kind == TY_STRUCT && tt.tag && runtime.strncmp(tt.tag, "__complex_", 10) == 0);
+    int et_cplx = (et.kind == TY_STRUCT && et.tag && runtime.strncmp(et.tag, "__complex_", 10) == 0);
+    int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT || tt_cplx);
+    int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT || et_cplx);
     Type res;
     if (tt.kind == TY_VOID || et.kind == TY_VOID) {
         res = type_make_void();
@@ -1328,7 +1345,8 @@ static Type check_expr_inner(Expr *e) {
             set_type(e, ot);
             return type_clone(e->type);
         }
-        if (e->u.un.op == UOP_BITNOT && ot.kind == TY_STRUCT && ot.tag && runtime.strncmp(ot.tag, "__complex_", 10) == 0) {
+        if ((e->u.un.op == UOP_BITNOT || e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS) &&
+            ot.kind == TY_STRUCT && ot.tag && runtime.strncmp(ot.tag, "__complex_", 10) == 0) {
             set_type(e, ot);
             return type_clone(e->type);
         }
@@ -1643,6 +1661,19 @@ Type p1;
             set_type(e, type_make_int(8, 0));
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR
+            && runtime.strcmp(e->u.call.callee->u.var.name, "__clone") == 0) {
+            if (e->u.call.args.len != 6) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__clone takes 6 arguments (fn, child_stack, flags, arg, tcb, ctid)");
+            }
+            for (size_t i = 0; i < e->u.call.args.len; i++) {
+                Type at = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&at);
+            }
+            set_type(e, type_make_int(8, 0));
+            return type_clone(e->type);
+        }
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cn = e->u.call.callee->u.var.name;
             int is_conj = (runtime.strcmp(cn, "__builtin_conjf") == 0 || runtime.strcmp(cn, "__builtin_conj") == 0 ||
@@ -1725,6 +1756,33 @@ Type p1;
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
+            && runtime.strncmp(e->u.call.callee->u.var.name, "__atomic_", 9) == 0) {
+            const char *sname = e->u.call.callee->u.var.name;
+            if (e->u.call.args.len < 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__atomic builtin takes at least 1 argument");
+            }
+            Type ptr_ty = check_expr_inner(e->u.call.args.data[0]);
+            if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__atomic builtin first argument must be a pointer");
+            }
+            Type val_ty = type_clone(*ptr_ty.pointee);
+            type_free(&ptr_ty);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type at = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&at);
+            }
+            if (runtime.strcmp(sname, "__atomic_store_n") == 0
+                || runtime.strcmp(sname, "__atomic_clear") == 0) {
+                type_free(&val_ty);
+                set_type(e, type_make_void());
+            } else {
+                set_type(e, val_ty);
+            }
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
             && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_apply_args") == 0) {
             if (e->u.call.args.len != 0) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -1795,9 +1853,6 @@ Type p1;
             type_free(&list_ty);
             if (e->va_arg_type.kind == TY_VOID && e->va_arg_type.width == 0
                 && !e->va_arg_type.tag) {
-                /* Matches GCC: "second argument to 'va_arg' is of incomplete
-                 * type 'void'", so the dg-error pattern in the GCC torture
-                 * test pr48767.c matches this diagnostic. */
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "second argument to 'va_arg' is of incomplete type 'void'");
             }

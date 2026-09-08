@@ -94,6 +94,7 @@ enum IROpcode {
     IR_ZEXT,
     IR_TRUNC,
     IR_GADDR,
+    IR_GADDR_TLS,
     IR_FADDR,
     IR_LADDR,
     IR_JMP_PTR,
@@ -209,6 +210,7 @@ struct IRGlobal {
     char *init_bytes;
     int is_readonly;
     int is_static;
+    int is_tls;
     SourceLoc loc;
     GlobalFixup *fixups;
     int num_fixups;
@@ -612,7 +614,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -627,7 +629,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -956,7 +958,7 @@ void ir_module_push_alias(IRModule *m, const char *name, const char *target,
 static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
                                        int size, char *init_bytes,
                                        int is_readonly, int is_static,
-                                       SourceLoc loc) {
+                                       int is_tls, SourceLoc loc) {
     if (m->globals.len >= m->globals.cap) {
         size_t nc = m->globals.cap ? m->globals.cap * 2 : 4;
         m->globals.data = runtime.realloc(m->globals.data, nc * sizeof(IRGlobal));
@@ -969,6 +971,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->init_bytes = init_bytes;
     g->is_readonly = is_readonly;
     g->is_static = is_static;
+    g->is_tls = is_tls;
     g->loc = loc;
     g->fixups = ((void*)0);
     g->num_fixups = 0;
@@ -1530,7 +1533,7 @@ static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
     runtime.snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
     char *init = runtime.malloc(10);
     runtime.memcpy(init, &val, 10);
-    ir_module_push_global(g_ir_module, name, 10, init, 1, 1, loc);
+    ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
     IRValue v = new_value(fn);
     emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, loc);
     fn->insts.data[fn->insts.len - 1].is_float = 1;
@@ -2275,9 +2278,10 @@ static IRValue lower_i128_binop(IRFunction *fn, IRValue la, IRValue ra,
     else i128_add(fn, dst, a, b, loc);
     return dst;
 }
-static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc) {
+static IRValue emit_gaddr(IRFunction *fn, const char *name, SourceLoc loc, int is_tls) {
     IRValue v = new_value(fn);
-    emit_inst_w(fn, IR_GADDR, v, -1, -1, 0, 8, 1, loc);
+    IROpcode op = is_tls ? IR_GADDR_TLS : IR_GADDR;
+    emit_inst_w(fn, op, v, -1, -1, 0, 8, 1, loc);
     fn->insts.data[fn->insts.len - 1].call_name = xstrdup(name);
     return v;
 }
@@ -2289,6 +2293,7 @@ struct IRSlot {
     int width;
     int is_unsigned;
     int is_global;
+    int is_tls;
     int is_vla;
     Type ty;
 };typedef struct IRSlot IRSlot;
@@ -2328,6 +2333,7 @@ static void irsymtable_push(IRSymTable *st, const char *name, IRValue slot,
         : (ty.kind == TY_PTR ? 8 : (ty.width ? ty.width : 4));
     st->data[st->len].is_unsigned = ty.is_unsigned;
     st->data[st->len].is_global = 0;
+    st->data[st->len].is_tls = 0;
     st->data[st->len].is_vla = 0;
     st->data[st->len].ty = ty;
     st->len++;
@@ -2396,9 +2402,10 @@ static void ir_add_dbg_var(IRFunction *fn, const char *name, SourceLoc loc,
     dv->param_idx = param_idx;
     ir_dbg_fill_struct(dv, ty);
 }
-static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty) {
+static void irsymtable_push_global(IRSymTable *st, const char *name, Type ty, int is_tls) {
     irsymtable_push(st, name, -1, 1, ty);
     st->data[st->len - 1].is_global = 1;
+    st->data[st->len - 1].is_tls = is_tls;
 }
 static void irsymtable_push_static_local(IRSymTable *st, const char *name,
                                          const char *global_name, Type ty) {
@@ -3627,7 +3634,7 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     switch (e->kind) {
     case EX_VAR: {
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
-        if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc);
+        if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
         if (entry->is_vla) {
             IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
             IRValue v = new_value(fn);
@@ -4262,8 +4269,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int bytes = e->u.str.len + 1;
         char *init = runtime.malloc(bytes);
         runtime.memcpy(init, e->u.str.bytes, bytes);
-        ir_module_push_global(g_ir_module, name, bytes, init, 1, 1, e->loc);
-        return emit_gaddr(fn, name, e->loc);
+        ir_module_push_global(g_ir_module, name, bytes, init, 1, 1, 0, e->loc);
+        return emit_gaddr(fn, name, e->loc, 0);
     }
     case EX_UNARY:
         switch (e->u.un.op) {
@@ -4299,6 +4306,45 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
                 }
                 return dst_addr;
+            }
+            if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
+                runtime.strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
+                Type cty = e->u.un.operand->type;
+                int total_sz = type_size(cty);
+                int elem_sz = total_sz / 2;
+                int is_float = (runtime.strstr(cty.tag, "float") != ((void*)0) || runtime.strstr(cty.tag, "double") != ((void*)0) || runtime.strstr(cty.tag, "ldouble") != ((void*)0));
+                int is_unsigned = (runtime.strstr(cty.tag, "unsigned") != ((void*)0));
+                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
+                IRValue vr = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vr, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vr, 1);
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                IRValue iaddr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
+                IRValue vi = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vi, 1);
+IRValue neg_vr;
+IRValue neg_vi;
+                if (is_float) {
+                    int64_t negzero = (elem_sz == 4) ? (int64_t)0x80000000 : (int64_t)0x8000000000000000LL;
+                    IRValue zero = emit_float_const(fn, elem_sz, negzero, e->loc);
+                    neg_vr = emit_bin_w(fn, IR_FSUB, zero, vr, elem_sz, 0, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_FSUB, zero, vi, elem_sz, 0, e->loc);
+                    set_value_float(fn, neg_vr, 1);
+                    set_value_float(fn, neg_vi, 1);
+                } else {
+                    neg_vr = emit_bin_w(fn, IR_NEG, vr, -1, elem_sz, 0, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_NEG, vi, -1, elem_sz, 0, e->loc);
+                }
+                IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, neg_vr, 0, elem_sz, 1, e->loc);
+                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                IRValue out_iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, out_iaddr, neg_vi, 0, elem_sz, 1, e->loc);
+                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                return addr;
             }
             if (type_is_i128(e->type) || type_is_i128(e->u.un.operand->type)) {
                 IRValue x = lower_expr(fn, st, e->u.un.operand);
@@ -4645,6 +4691,87 @@ IRValue pr;
             emit_label(fn, L_done, e->loc);
             return addr;
         }
+        if (e->type.kind == TY_STRUCT) {
+            int total_sz = type_size(e->type);
+            int is_cplx = (e->type.tag && runtime.strncmp(e->type.tag, "__complex_", 10) == 0);
+            int elem_sz = is_cplx ? total_sz / 2 : 4;
+            int is_float = is_cplx ? (runtime.strstr(e->type.tag, "float") || runtime.strstr(e->type.tag, "double") || runtime.strstr(e->type.tag, "ldouble")) : 0;
+            IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            int L_then = new_label(fn);
+            int L_else = new_label(fn);
+            int L_done = new_label(fn);
+            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
+            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+            emit_label(fn, L_then, e->loc);
+            {
+                Expr *te = e->u.tern.then ? e->u.tern.then : e->u.tern.cond;
+                if (te->type.kind == TY_STRUCT) {
+                    IRValue ta = lower_expr(fn, st, te);
+                    emit_struct_copy(fn, addr, ta, total_sz, e->loc);
+                } else if (is_cplx) {
+                    IRValue tv = lower_expr(fn, st, te);
+                    int tw = get_value_width(fn, tv);
+                    if (is_float) {
+                        if (!get_value_is_float(fn, tv)) tv = convert_numeric(fn, tv, tw, elem_sz, 0, 1, e->loc);
+                        else if (tw != elem_sz) tv = convert_numeric(fn, tv, tw, elem_sz, 0, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, tv, 0, elem_sz, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].is_float = 1;
+                        IRValue zero = emit_float_const(fn, elem_sz, 0, e->loc);
+                        IRValue off = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, zero, 0, elem_sz, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].is_float = 1;
+                    } else {
+                        tv = coerce(fn, tv, tw, get_value_is_unsigned(fn, tv), elem_sz, 0, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, tv, 0, elem_sz, 1, e->loc);
+                        IRValue zero = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, elem_sz, 0, e->loc);
+                        IRValue off = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, zero, 0, elem_sz, 1, e->loc);
+                    }
+                }
+            }
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_else, e->loc);
+            {
+                Expr *ee = e->u.tern.else_;
+                if (ee->type.kind == TY_STRUCT) {
+                    IRValue ea = lower_expr(fn, st, ee);
+                    emit_struct_copy(fn, addr, ea, total_sz, e->loc);
+                } else if (is_cplx) {
+                    IRValue ev = lower_expr(fn, st, ee);
+                    int ew = get_value_width(fn, ev);
+                    if (is_float) {
+                        if (!get_value_is_float(fn, ev)) ev = convert_numeric(fn, ev, ew, elem_sz, 0, 1, e->loc);
+                        else if (ew != elem_sz) ev = convert_numeric(fn, ev, ew, elem_sz, 0, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, ev, 0, elem_sz, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].is_float = 1;
+                        IRValue zero = emit_float_const(fn, elem_sz, 0, e->loc);
+                        IRValue off = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, zero, 0, elem_sz, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].is_float = 1;
+                    } else {
+                        ev = coerce(fn, ev, ew, get_value_is_unsigned(fn, ev), elem_sz, 0, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, ev, 0, elem_sz, 1, e->loc);
+                        IRValue zero = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, elem_sz, 0, e->loc);
+                        IRValue off = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, zero, 0, elem_sz, 1, e->loc);
+                    }
+                }
+            }
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_done, e->loc);
+            return addr;
+        }
         int rw = e->type.width ? e->type.width : 4;
         int ru = e->type.is_unsigned;
         int rf = (e->type.kind == TY_FLOAT);
@@ -4743,7 +4870,7 @@ IRValue pr;
             return -1;
         }
         if (entry->is_global) {
-            IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
+            IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
             if (entry->ty.kind == TY_ARRAY || entry->ty.kind == TY_STRUCT || entry->ty.is_vector || type_is_i128(entry->ty)) return addr;
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
@@ -4800,7 +4927,7 @@ IRValue pr;
                 const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
                 if (!entry) return -1;
                 if (entry->is_global)
-                    dst = emit_gaddr(fn, slot_global_name(entry), e->loc);
+                    dst = emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
                 else
                     dst = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
             } else if (lv->kind == EX_DEREF) {
@@ -4832,7 +4959,7 @@ IRValue pr;
             const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
             if (!entry) return -1;
             if (entry->is_global) {
-                IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc);
+                IRValue addr = emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
                 emit_inst_w(fn, IR_STORE_PTR, -1, addr, coerced, 0, lw, lu, e->loc);
             } else if (entry->pinned) {
                 IRValue addr = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
@@ -5835,7 +5962,7 @@ IRValue hi;
         inst.call_callee = -1;
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cname = e->u.call.callee->u.var.name;
-            if (runtime.strcmp(cname, "__syscall") == 0) {
+            if (runtime.strcmp(cname, "__syscall") == 0 || runtime.strcmp(cname, "__clone") == 0) {
                 inst.call_name = xstrdup(cname);
             } else if (runtime.strcmp(cname, "__builtin_ctzll") == 0) {
                 inst.call_name = xstrdup(cname);
@@ -5944,7 +6071,7 @@ IRValue hi;
                 fn->insts.data[fn->insts.len - 1].call_name = xstrdup(op->u.var.name);
                 return v;
             }
-            if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc);
+            if (entry->is_global) return emit_gaddr(fn, slot_global_name(entry), e->loc, entry->is_tls);
             return emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
         }
         if (op->kind == EX_DEREF) {
@@ -6970,7 +7097,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         int du = dty.is_unsigned;
         if (dty.kind == TY_FUNC || s->u.decl.storage_class == 2) {
             if (dty.kind != TY_FUNC)
-                irsymtable_push_global(st, s->u.decl.name, dty);
+                irsymtable_push_global(st, s->u.decl.name, dty,
+                                       s->u.decl.is_tls);
             break;
         }
         if (s->u.decl.storage_class == 1 && s->u.decl.init && expr_has_label_addr(s->u.decl.init)) {
@@ -6983,7 +7111,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             runtime.snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
                      s->u.decl.name);
             IRGlobal *sg = ir_module_push_global(g_ir_module, mangled, sz, bytes,
-                                                 0, 1, s->loc);
+                                                 0, 1, 0, s->loc);
             if (s->u.decl.init) {
                 pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
                           s->u.decl.name, s->loc, sg);
@@ -7477,7 +7605,7 @@ static void flush_pending_globals(IRModule *m) {
                                              g_pending_globals[i].size,
                                              g_pending_globals[i].bytes,
                                              g_pending_globals[i].is_readonly,
-                                             1, g_pending_globals[i].loc);
+                                             1, 0, g_pending_globals[i].loc);
         if (g_pending_globals[i].tmp_g) {
             IRGlobal *t = g_pending_globals[i].tmp_g;
             if (t->num_fixups > 0) {
@@ -8693,7 +8821,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     for (size_t g = 0; g < tu->globals.len; g++) {
         const Stmt *gs = &tu->globals.data[g];
         if (gs->kind == ST_DECL)
-            irsymtable_push_global(&g_ir_globals_st, gs->u.decl.name, gs->u.decl.type);
+            irsymtable_push_global(&g_ir_globals_st, gs->u.decl.name,
+                                   gs->u.decl.type,
+                                   gs->u.decl.is_tls);
     }
     for (size_t i = 0; i < tu->globals.len; i++) {
         const Stmt *s = &tu->globals.data[i];
@@ -8704,6 +8834,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             continue;
         }
         if (s->u.decl.storage_class == 2) continue;
+        int is_tls = s->u.decl.is_tls;
         int sz = type_size(s->u.decl.type);
         if (s->u.decl.init && s->u.decl.type.kind == TY_STRUCT && s->u.decl.init->kind == EX_INIT_LIST && s->u.decl.type.tag) {
             const StructDef *sd = struct_registry_find_c(g_ir_structs, s->u.decl.type.tag);
@@ -8735,7 +8866,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         }
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
-                                            0, is_static, s->loc);
+                                            0, is_static, is_tls, s->loc);
         if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);

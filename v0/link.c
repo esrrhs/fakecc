@@ -154,6 +154,8 @@ struct EmitModule {
     Buffer rodata;
     Buffer data;
     size_t bss_size;
+    Buffer tdata;
+    size_t tbss_size;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -308,6 +310,12 @@ struct SectionLayout {
     size_t data_len;
     size_t bss_file_offset;
     size_t bss_size;
+    size_t start_size;
+    int have_tls;
+    uint64_t tls_vaddr;
+    size_t tls_file_offset;
+    size_t tls_filesize;
+    size_t tls_memsize;
     int have_dynamic;
     size_t dynstr_off;
     size_t dynsym_off;
@@ -373,7 +381,7 @@ Buffer debug_frame;
     uint32_t first_global = (uint32_t)(symtab.len / 24);
     uint32_t start_name = append_string(&strtab, "_start");
     write_sym(&symtab, start_name, 1, 2, 1,
-              entry, 22);
+              entry, lay->start_size);
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -443,6 +451,11 @@ Buffer debug_frame;
     uint32_t shname_rodata = append_string(&shstrtab, ".rodata");
     uint32_t shname_data = append_string(&shstrtab, ".data");
     uint32_t shname_bss = append_string(&shstrtab, ".bss");
+    uint32_t shname_tdata = 0, shname_tbss = 0;
+    if (lay->have_tls) {
+        shname_tdata = append_string(&shstrtab, ".tdata");
+        shname_tbss = append_string(&shstrtab, ".tbss");
+    }
     uint32_t shname_symtab = append_string(&shstrtab, ".symtab");
     uint32_t shname_strtab = append_string(&shstrtab, ".strtab");
     uint32_t shname_shstrtab = append_string(&shstrtab, ".shstrtab");
@@ -502,8 +515,29 @@ Buffer debug_frame;
     write_shdr_exec(elf, shname_bss, 8, 0x2 | 0x1,
                     bss_vaddr, bss_file_offset,
                     bss_size, 0, 0, 8, 0);
+    if (lay->have_tls) {
+        if (lay->tls_filesize > 0) {
+            write_shdr_exec(elf, shname_tdata, 1,
+                            0x2 | 0x400,
+                            lay->tls_vaddr, lay->tls_file_offset,
+                            lay->tls_filesize, 0, 0, 8, 0);
+        }
+        if (lay->tls_memsize > lay->tls_filesize) {
+            size_t tbss_bytes = lay->tls_memsize - lay->tls_filesize;
+            write_shdr_exec(elf, shname_tbss, 8,
+                            0x2 | 0x400,
+                            lay->tls_vaddr + lay->tls_filesize,
+                            lay->tls_file_offset + lay->tls_filesize,
+                            tbss_bytes, 0, 0, 8, 0);
+        }
+    }
+    int tls_sections = 0;
+    if (lay->have_tls) {
+        if (lay->tls_filesize > 0) tls_sections++;
+        if (lay->tls_memsize > lay->tls_filesize) tls_sections++;
+    }
     write_shdr_exec(elf, shname_symtab, 2, 0, 0, off_symtab,
-                    symtab.len, 6, first_global, 8, 24);
+                    symtab.len, 6 + tls_sections, first_global, 8, 24);
     write_shdr_exec(elf, shname_strtab, 3, 0, 0, off_strtab,
                     strtab.len, 0, 0, 1, 0);
     write_shdr_exec(elf, shname_shstrtab, 3, 0, 0, off_shstrtab,
@@ -522,7 +556,7 @@ Buffer debug_frame;
         write_shdr_exec(elf, shname_debug_loc, 1, 0, 0,
                         off_debug_loc, debug_loc.len, 0, 0, 1, 0);
     }
-    int dyn_base = have_dbg ? 14 : 8;
+    int dyn_base = (have_dbg ? 14 : 8) + tls_sections;
     if (lay->have_dynamic) {
         write_shdr_exec(elf, shname_dynstr, 3, 0x2,
                         lay->dynstr_vaddr, lay->dynstr_off, lay->dynstr_size,
@@ -544,8 +578,8 @@ Buffer debug_frame;
                         lay->dynamic_off, lay->dynamic_size,
                         dyn_base + 0, 0, 8, 16);
     }
-    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + (lay->have_dynamic ? 6 : 0));
-    uint16_t shstrndx = 7;
+    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + tls_sections + (lay->have_dynamic ? 6 : 0));
+    uint16_t shstrndx = (uint16_t)(7 + tls_sections);
     runtime.memcpy(elf->data + 40, &shoff, sizeof(shoff));
     runtime.memcpy(elf->data + 60, &shnum, sizeof(shnum));
     runtime.memcpy(elf->data + 62, &shstrndx, sizeof(shstrndx));
@@ -559,21 +593,54 @@ Buffer debug_frame;
     buffer_free(&debug_frame); buffer_free(&debug_loc);
 }
 static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
-                      uint64_t exit_plt_vaddr) {
+                      uint64_t exit_plt_vaddr, int have_tls,
+                      uint64_t tls_vaddr, uint64_t tcb_vaddr,
+                      size_t tls_memsize, size_t tdata_len) {
+    size_t prefix_len = 0;
+    if (have_tls) {
+        if (tdata_len > 0) {
+            prefix_len += 27;
+            uint8_t m_rsi[2] = {0x48, 0xbe};
+            buffer_append(code, (const char *)m_rsi, 2);
+            buffer_append(code, (const char *)&tls_vaddr, 8);
+            uint64_t init_tls_addr = tcb_vaddr - tls_memsize;
+            uint8_t m_rdi[2] = {0x48, 0xbf};
+            buffer_append(code, (const char *)m_rdi, 2);
+            buffer_append(code, (const char *)&init_tls_addr, 8);
+            uint8_t m_ecx[1] = {0xb9};
+            uint32_t td_len32 = (uint32_t)tdata_len;
+            buffer_append(code, (const char *)m_ecx, 1);
+            buffer_append(code, (const char *)&td_len32, 4);
+            uint8_t rep_movsb[2] = {0xf3, 0xa4};
+            buffer_append(code, (const char *)rep_movsb, 2);
+        }
+        prefix_len += 25;
+        uint8_t m_rsi[2] = {0x48, 0xbe};
+        buffer_append(code, (const char *)m_rsi, 2);
+        buffer_append(code, (const char *)&tcb_vaddr, 8);
+        uint8_t st_rsi[3] = {0x48, 0x89, 0x36};
+        buffer_append(code, (const char *)st_rsi, 3);
+        uint8_t m_eax[5] = {0xb8, 0x9e, 0x00, 0x00, 0x00};
+        buffer_append(code, (const char *)m_eax, 5);
+        uint8_t m_edi[5] = {0xbf, 0x02, 0x10, 0x00, 0x00};
+        buffer_append(code, (const char *)m_edi, 5);
+        uint8_t sysc[2] = {0x0f, 0x05};
+        buffer_append(code, (const char *)sysc, 2);
+    }
     uint8_t mov_edi[] = {0x8b, 0x3c, 0x24};
     buffer_append(code, (const char *)mov_edi, 3);
     uint8_t lea_rsi[] = {0x48, 0x8d, 0x74, 0x24, 0x08};
     buffer_append(code, (const char *)lea_rsi, 5);
     uint8_t call_opcode = 0xe8;
     buffer_append(code, (const char *)&call_opcode, 1);
-    int32_t rel = (int32_t)(main_vaddr - (call_vaddr + 3 + 5 + 5));
+    int32_t rel = (int32_t)(main_vaddr - (call_vaddr + prefix_len + 3 + 5 + 5));
     buffer_append(code, (const char *)&rel, 4);
     uint8_t mov_reg[] = {0x89, 0xc7};
     buffer_append(code, (const char *)mov_reg, 2);
     if (exit_plt_vaddr != 0) {
         buffer_append(code, (const char *)&call_opcode, 1);
         int32_t erel = (int32_t)(exit_plt_vaddr -
-                                 (call_vaddr + 3 + 5 + 5 + 2 + 5));
+                                 (call_vaddr + prefix_len + 3 + 5 + 5 + 2 + 5));
         buffer_append(code, (const char *)&erel, 4);
         uint8_t ud2[] = {0x0f, 0x0b};
         buffer_append(code, (const char *)ud2, 2);
@@ -641,12 +708,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 Buffer text;
 Buffer rodata;
 Buffer data;
+Buffer tdata;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
+    buffer_init(&tdata);
     size_t bss_size = 0;
+    size_t tbss_size = 0;
     size_t *mod_text_off = xcalloc(n, sizeof(size_t));
     size_t *mod_rodata_off = xcalloc(n, sizeof(size_t));
     size_t *mod_data_off = xcalloc(n, sizeof(size_t));
     size_t *mod_bss_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_tdata_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_tbss_off = xcalloc(n, sizeof(size_t));
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         while (text.len & 15) { char z = 0; buffer_append(&text, &z, 1); }
@@ -661,6 +733,12 @@ Buffer data;
         while (bss_size & 7) bss_size++;
         mod_bss_off[i] = bss_size;
         bss_size += m->bss_size;
+        while (tdata.len & 7) { char z = 0; buffer_append(&tdata, &z, 1); }
+        mod_tdata_off[i] = tdata.len;
+        buffer_append(&tdata, m->tdata.data, m->tdata.len);
+        while (tbss_size & 7) tbss_size++;
+        mod_tbss_off[i] = tbss_size;
+        tbss_size += m->tbss_size;
     }
     size_t *mod_sym_base = xcalloc(n + 1, sizeof(size_t));
     for (size_t i = 0; i < n; i++)
@@ -862,10 +940,13 @@ Buffer dynamic;
             }
         }
     }
-    uint16_t phnum_max = 4;
+    int have_tls = (tdata.len > 0 || tbss_size > 0);
+    int init_tls_in_start = have_tls && !need_dynamic;
+    size_t start_size = init_tls_in_start ? (22 + 25 + (tdata.len > 0 ? 27 : 0)) : 22;
+    uint16_t phnum_max = have_tls ? 5 : 4;
     size_t hdr_size = 64 + 56 * phnum_max;
     size_t start_offset = hdr_size;
-    size_t text_offset = start_offset + 22;
+    size_t text_offset = start_offset + start_size;
     size_t dynamic_size = 0;
     if (need_dynamic) {
         dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0)
@@ -873,7 +954,7 @@ Buffer dynamic;
     }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
         + rela_plt.len + rela_dyn.len + dynamic_size;
-    size_t rx_content_len = 22 + text.len + rodata.len + dyn_sections_len;
+    size_t rx_content_len = start_size + text.len + rodata.len + dyn_sections_len;
     size_t rx_filesz = hdr_size + rx_content_len;
     size_t data_file_offset = rx_filesz;
     if (data_file_offset & (0x1000 - 1))
@@ -886,12 +967,31 @@ Buffer dynamic;
     size_t layout_got_bytes = need_dynamic
         ? (size_t)(3 + num_ext + num_data_ext) * 8
         : (num_data_ext > 0 ? (size_t)(3 + num_data_ext) * 8 : 0);
-    size_t bss_data_off = layout_got_bytes
+    size_t got_end_off = layout_got_bytes
         ? got_data_off + layout_got_bytes : data.len;
+    size_t tdata_data_off = got_end_off;
+    if (have_tls) while (tdata_data_off & 7) tdata_data_off++;
+    uint64_t tls_vaddr = data_vaddr + tdata_data_off;
+    size_t tls_file_offset_base = data_file_offset + tdata_data_off;
+    size_t rw_filesz = tdata_data_off + (have_tls ? tdata.len : 0);
+    size_t bss_data_off = rw_filesz;
+    while (bss_data_off & 7) bss_data_off++;
     uint64_t bss_vaddr = data_vaddr + bss_data_off;
     size_t bss_file_offset = data_file_offset + bss_data_off;
     uint64_t code_vaddr = base + text_offset;
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));
+    size_t tls_filesize = tdata.len;
+    size_t tls_memsize = tdata.len + tbss_size;
+    size_t tls_bss_alloc_off = 0;
+    if (have_tls) {
+        while (bss_size & 15) bss_size++;
+        tls_bss_alloc_off = bss_size;
+        bss_size += tls_memsize + 16;
+    }
+    uint64_t tcb_vaddr = bss_vaddr + tls_bss_alloc_off + tls_memsize;
+    uint64_t tls_end_vaddr = tls_vaddr + tdata.len + tbss_size;
+    uint64_t tdata_vaddr = tls_vaddr;
+    uint64_t tbss_vaddr = tls_vaddr + tdata.len;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -907,6 +1007,10 @@ Buffer dynamic;
                 sym_addr[gsi] = data_vaddr + mod_data_off[i] + sym->value; break;
             case 4:
                 sym_addr[gsi] = bss_vaddr + mod_bss_off[i] + sym->value; break;
+            case 5:
+                sym_addr[gsi] = tdata_vaddr + mod_tdata_off[i] + sym->value; break;
+            case 6:
+                sym_addr[gsi] = tbss_vaddr + mod_tbss_off[i] + sym->value; break;
             default:
                 sym_addr[gsi] = sym->value; break;
             }
@@ -929,6 +1033,28 @@ Buffer dynamic;
             }
         }
     }
+    for (size_t mi = 0; mi < n; mi++) {
+        EmitModule *om = mods[mi];
+        for (size_t mj = 0; mj < om->num_syms; mj++) {
+            const char *nm = om->syms[mj].name;
+            if (!nm || om->syms[mj].shndx != 3) continue;
+            size_t doff = mod_data_off[mi] + om->syms[mj].value;
+            if (doff + 8 > data.len) continue;
+            if (runtime.strcmp(nm, "__fakecc_tls_filesz") == 0) {
+                uint64_t val = have_tls ? tdata.len : 0;
+                runtime.memcpy(data.data + doff, &val, 8);
+            } else if (runtime.strcmp(nm, "__fakecc_tls_memsz") == 0) {
+                uint64_t val = have_tls ? (tdata.len + tbss_size) : 0;
+                runtime.memcpy(data.data + doff, &val, 8);
+            } else if (runtime.strcmp(nm, "__fakecc_tls_image") == 0) {
+                uint64_t val = have_tls ? tls_vaddr : 0;
+                runtime.memcpy(data.data + doff, &val, 8);
+            } else if (runtime.strcmp(nm, "__fakecc_tls_align") == 0) {
+                uint64_t val = 16;
+                runtime.memcpy(data.data + doff, &val, 8);
+            }
+        }
+    }
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
@@ -940,6 +1066,45 @@ Buffer dynamic;
                 int dgidx = reloc_data_got_idx[gsi];
                 uint64_t got_slot_vaddr = got_vaddr + (3 + num_ext + dgidx) * 8;
                 int32_t disp = (int32_t)(got_slot_vaddr - (P + 4));
+                runtime.memcpy(text.data + patch_in_text, &disp, 4);
+                continue;
+            }
+            if (rel->type == 23) {
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                uint64_t S;
+                if (sinfo[gsi].defined
+                    && (sinfo[gsi].shndx == 5
+                        || sinfo[gsi].shndx == 6)) {
+                    S = sym_addr[gsi];
+                } else {
+                    const char *nm = m->syms[rel->sym].name
+                                     ? m->syms[rel->sym].name : "";
+                    size_t found = (size_t)-1;
+                    for (size_t mi = 0; mi < n && found == (size_t)-1; mi++) {
+                        EmitModule *om = mods[mi];
+                        for (size_t mj = 0; mj < om->num_syms; mj++) {
+                            size_t ogsi = mod_sym_base[mi] + mj;
+                            if (sinfo[ogsi].defined
+                                && sinfo[ogsi].binding == 1
+                                && (sinfo[ogsi].shndx == 5
+                                    || sinfo[ogsi].shndx == 6)
+                                && om->syms[mj].name
+                                && runtime.strcmp(om->syms[mj].name, nm) == 0) {
+                                found = sym_addr[ogsi];
+                                break;
+                            }
+                        }
+                    }
+                    if (found == (size_t)-1) {
+                        runtime.fprintf(runtime.stderr,
+                                "fakecc: undefined TLS symbol '%s' "
+                                "(Local-Exec needs the variable to be defined "
+                                "in the same link unit)\n", nm);
+                        runtime.exit(1);
+                    }
+                    S = found;
+                }
+                int32_t disp = (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_end_vaddr);
                 runtime.memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
@@ -1076,7 +1241,7 @@ Buffer dynamic;
             }
         }
         size_t rx_base_vaddr = base + hdr_size;
-        size_t dynstr_off = 22 + text.len + rodata.len + interp_len;
+        size_t dynstr_off = start_size + text.len + rodata.len + interp_len;
         size_t dynsym_off = dynstr_off + dynstr.len;
         size_t hash_off = dynsym_off + dynsym.len;
         size_t rela_plt_off = hash_off + hash.len;
@@ -1117,7 +1282,8 @@ Buffer dynamic;
             exit_call = code_vaddr + plt_entry_off[exit_ext_idx];
         else if (exit_static_addr)
             exit_call = exit_static_addr;
-        gen_start(&rx, base + start_offset, main_addr, exit_call);
+        gen_start(&rx, base + start_offset, main_addr, exit_call,
+                  init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t interp_off = rx.len;
@@ -1129,8 +1295,6 @@ Buffer dynamic;
         buf_bytes(&rx, rela_dyn.data, rela_dyn.len);
         buf_bytes(&rx, dynamic.data, dynamic.len);
         uint64_t entry = base + start_offset;
-        size_t got_count = 3 + num_ext + num_data_ext;
-        size_t got_bytes = got_count * 8;
         Buffer got;
         buffer_init(&got);
         buf_u64(&got, rx_base_vaddr + dynamic_off);
@@ -1142,21 +1306,29 @@ Buffer dynamic;
             buf_u64(&got, data_got_external[j] ? 0 : data_got_addr[j]);
         Buffer elf;
         buffer_init(&elf);
-        uint16_t phnum = 4;
+        uint16_t phnum = have_tls ? 5 : 4;
         write_ehdr(&elf, entry, 64, phnum);
         write_phdr(&elf, 1, 4 | 1, 0, base, rx_filesz, rx_filesz, 0x1000);
         write_phdr(&elf, 1, 4 | 2, data_file_offset, data_vaddr,
-                   got_data_off + got_bytes,
-                   got_data_off + got_bytes + bss_size, 0x1000);
+                   rw_filesz,
+                   rw_filesz + bss_size, 0x1000);
         write_phdr(&elf, 3, 4, hdr_size + interp_off, rx_base_vaddr + interp_off,
                    interp_len, interp_len, 1);
         write_phdr(&elf, 2, 4, hdr_size + dynamic_off, rx_base_vaddr + dynamic_off,
                    dynamic.len, dynamic.len, 8);
+        if (have_tls) {
+            write_phdr(&elf, 7, 4, tls_file_offset_base, tls_vaddr,
+                       tls_filesize, tls_memsize, 8);
+        }
         buf_bytes(&elf, rx.data, rx.len);
         while (elf.len < data_file_offset) buf_u8(&elf, 0);
         buf_bytes(&elf, data.data, data.len);
         while (elf.len < data_file_offset + got_data_off) buf_u8(&elf, 0);
         buf_bytes(&elf, got.data, got.len);
+        if (have_tls) {
+            while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
+            buf_bytes(&elf, tdata.data, tdata.len);
+        }
         SectionLayout lay;
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
@@ -1168,6 +1340,12 @@ Buffer dynamic;
         lay.data_len = data.len;
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
+        lay.have_tls = have_tls;
+        lay.start_size = start_size;
+        lay.tls_vaddr = tls_vaddr;
+        lay.tls_file_offset = tls_file_offset_base;
+        lay.tls_filesize = tls_filesize;
+        lay.tls_memsize = tls_memsize;
         lay.have_dynamic = 1;
         lay.dynstr_off = hdr_size + dynstr_off;
         lay.dynsym_off = hdr_size + dynsym_off;
@@ -1199,7 +1377,8 @@ Buffer dynamic;
         uint64_t entry = base + start_offset;
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr, exit_static_addr);
+        gen_start(&rx, base + start_offset, main_addr, exit_static_addr,
+                  init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t got_bytes = 0;
@@ -1215,14 +1394,19 @@ Buffer dynamic;
         }
         Buffer elf;
         buffer_init(&elf);
-        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0);
+        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0 || (have_tls && tdata.len > 0));
         uint16_t phnum = has_rw ? 2 : 1;
+        if (have_tls) phnum++;
         write_ehdr(&elf, entry, 64, phnum);
         write_phdr(&elf, 1, 4 | 1, 0, base,
                    rx_filesz, rx_filesz, 0x1000);
         if (has_rw) {
             write_phdr(&elf, 1, 4 | 2, data_file_offset, data_vaddr,
-                       bss_data_off, bss_data_off + bss_size, 0x1000);
+                       rw_filesz, rw_filesz + bss_size, 0x1000);
+        }
+        if (have_tls) {
+            write_phdr(&elf, 7, 4, tls_file_offset_base, tls_vaddr,
+                       tls_filesize, tls_memsize, 8);
         }
         while (elf.len < hdr_size)
             buf_u8(&elf, 0);
@@ -1233,6 +1417,10 @@ Buffer dynamic;
             if (got_bytes > 0)
                 while (elf.len < data_file_offset + got_data_off) buf_u8(&elf, 0);
             buf_bytes(&elf, got.data, got.len);
+        }
+        if (have_tls) {
+            while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
+            buf_bytes(&elf, tdata.data, tdata.len);
         }
         SectionLayout lay;
         lay.code_vaddr = code_vaddr;
@@ -1245,6 +1433,12 @@ Buffer dynamic;
         lay.data_len = data.len;
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
+        lay.have_tls = have_tls;
+        lay.start_size = start_size;
+        lay.tls_vaddr = tls_vaddr;
+        lay.tls_file_offset = tls_file_offset_base;
+        lay.tls_filesize = tls_filesize;
+        lay.tls_memsize = tls_memsize;
         lay.have_dynamic = 0;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
@@ -1265,7 +1459,9 @@ Buffer dynamic;
     runtime.free(needed);
     runtime.free(runpath);
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
+    buffer_free(&tdata);
     runtime.free(mod_text_off); runtime.free(mod_rodata_off); runtime.free(mod_data_off); runtime.free(mod_bss_off);
+    runtime.free(mod_tdata_off); runtime.free(mod_tbss_off);
     runtime.free(mod_sym_base); runtime.free(sym_addr); runtime.free(sinfo); runtime.free(reloc_ext_idx);
     runtime.free(reloc_data_got_idx);
     runtime.free(plt_entry_off); runtime.free(plt_got_fixup);

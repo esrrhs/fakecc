@@ -10,7 +10,7 @@
 # use -std=gnu89 / -fpermissive for the rest). Original sources stay in
 # test/e2e/gcc.c-torture/compile/.
 #
-# Total: 338
+# Total: 336
 #
 
 # GNU nested functions / trampolines (24)
@@ -380,11 +380,8 @@ pr115143-3.c
 
 dll.c
 
-# _Complex arithmetic (2)
-# _Complex arithmetic / __complex__ / __imag__. Not supported by FakeCC.
-
-991213-1.c
-pr30132.c
+# _Complex arithmetic (0)
+# Supported (_Complex unary -/+, ternary ?:, typeof(expr), __imag__, __real__).
 
 # Complex function pointer declarators (0)
 # Supported (pr43635.c, 991213-2.c, 930126-1.c).
