@@ -3914,6 +3914,47 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 }
                 return dst_addr;
             }
+            if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
+                strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
+                Type cty = e->u.un.operand->type;
+                int total_sz = type_size(cty);
+                int elem_sz = total_sz / 2;
+                int is_float = (strstr(cty.tag, "float") != NULL || strstr(cty.tag, "double") != NULL || strstr(cty.tag, "ldouble") != NULL);
+                int is_unsigned = (strstr(cty.tag, "unsigned") != NULL);
+                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
+                IRValue vr = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vr, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vr, 1);
+
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                IRValue iaddr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
+                IRValue vi = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vi, 1);
+
+                IRValue neg_vr, neg_vi;
+                if (is_float) {
+                    int64_t negzero = (elem_sz == 4) ? (int64_t)0x80000000 : (int64_t)0x8000000000000000LL;
+                    IRValue zero = emit_float_const(fn, elem_sz, negzero, e->loc);
+                    neg_vr = emit_bin_w(fn, IR_FSUB, zero, vr, elem_sz, 0, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_FSUB, zero, vi, elem_sz, 0, e->loc);
+                    set_value_float(fn, neg_vr, 1);
+                    set_value_float(fn, neg_vi, 1);
+                } else {
+                    neg_vr = emit_bin_w(fn, IR_NEG, vr, -1, elem_sz, 0, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_NEG, vi, -1, elem_sz, 0, e->loc);
+                }
+
+                IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, neg_vr, 0, elem_sz, 1, e->loc);
+                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                IRValue out_iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, out_iaddr, neg_vi, 0, elem_sz, 1, e->loc);
+                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                return addr;
+            }
             if (type_is_i128(e->type) || type_is_i128(e->u.un.operand->type)) {
                 IRValue x = lower_expr(fn, st, e->u.un.operand);
                 IRValue a = i128_as_addr(fn, x, e->u.un.operand->type,
@@ -4294,6 +4335,89 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue ea = i128_as_addr(fn, ev, e->u.tern.else_->type,
                                           e->type.is_unsigned, e->loc);
                 emit_struct_copy(fn, addr, ea, 16, e->loc);
+            }
+            emit_br(fn, L_done, e->loc);
+            emit_label(fn, L_done, e->loc);
+            return addr;
+        }
+        if (e->type.kind == TY_STRUCT) {
+            int total_sz = type_size(e->type);
+            int is_cplx = (e->type.tag && strncmp(e->type.tag, "__complex_", 10) == 0);
+            int elem_sz = is_cplx ? total_sz / 2 : 4;
+            int is_float = is_cplx ? (strstr(e->type.tag, "float") || strstr(e->type.tag, "double") || strstr(e->type.tag, "ldouble")) : 0;
+            IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            int L_then = new_label(fn);
+            int L_else = new_label(fn);
+            int L_done = new_label(fn);
+            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
+            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+
+            emit_label(fn, L_then, e->loc);
+            {
+                Expr *te = e->u.tern.then ? e->u.tern.then : e->u.tern.cond;
+                if (te->type.kind == TY_STRUCT) {
+                    IRValue ta = lower_expr(fn, st, te);
+                    emit_struct_copy(fn, addr, ta, total_sz, e->loc);
+                } else if (is_cplx) {
+                    IRValue tv = lower_expr(fn, st, te);
+                    int tw = get_value_width(fn, tv);
+                    if (is_float) {
+                        if (!get_value_is_float(fn, tv)) tv = convert_numeric(fn, tv, tw, elem_sz, 0, 1, e->loc);
+                        else if (tw != elem_sz) tv = convert_numeric(fn, tv, tw, elem_sz, 0, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, tv, 0, elem_sz, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].is_float = 1;
+                        IRValue zero = emit_float_const(fn, elem_sz, 0, e->loc);
+                        IRValue off = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, zero, 0, elem_sz, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].is_float = 1;
+                    } else {
+                        tv = coerce(fn, tv, tw, get_value_is_unsigned(fn, tv), elem_sz, 0, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, tv, 0, elem_sz, 1, e->loc);
+                        IRValue zero = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, elem_sz, 0, e->loc);
+                        IRValue off = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, zero, 0, elem_sz, 1, e->loc);
+                    }
+                }
+            }
+            emit_br(fn, L_done, e->loc);
+
+            emit_label(fn, L_else, e->loc);
+            {
+                Expr *ee = e->u.tern.else_;
+                if (ee->type.kind == TY_STRUCT) {
+                    IRValue ea = lower_expr(fn, st, ee);
+                    emit_struct_copy(fn, addr, ea, total_sz, e->loc);
+                } else if (is_cplx) {
+                    IRValue ev = lower_expr(fn, st, ee);
+                    int ew = get_value_width(fn, ev);
+                    if (is_float) {
+                        if (!get_value_is_float(fn, ev)) ev = convert_numeric(fn, ev, ew, elem_sz, 0, 1, e->loc);
+                        else if (ew != elem_sz) ev = convert_numeric(fn, ev, ew, elem_sz, 0, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, ev, 0, elem_sz, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].is_float = 1;
+                        IRValue zero = emit_float_const(fn, elem_sz, 0, e->loc);
+                        IRValue off = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, zero, 0, elem_sz, 1, e->loc);
+                        fn->insts.data[fn->insts.len - 1].is_float = 1;
+                    } else {
+                        ev = coerce(fn, ev, ew, get_value_is_unsigned(fn, ev), elem_sz, 0, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, addr, ev, 0, elem_sz, 1, e->loc);
+                        IRValue zero = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, elem_sz, 0, e->loc);
+                        IRValue off = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                        IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                        emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, zero, 0, elem_sz, 1, e->loc);
+                    }
+                }
             }
             emit_br(fn, L_done, e->loc);
             emit_label(fn, L_done, e->loc);

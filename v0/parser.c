@@ -404,7 +404,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -419,7 +419,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -654,6 +654,16 @@ static TranslationUnit *g_parser_tu = ((void*)0);
 const StructRegistry *get_parser_structs(void) {
     return g_parser_tu ? &g_parser_tu->structs : ((void*)0);
 }
+struct ParserLocal {
+    char *name;
+    Type type;
+    int scope_depth;
+};typedef struct ParserLocal ParserLocal;
+struct ParserLocalArray {
+    ParserLocal *data;
+    size_t len;
+    size_t cap;
+};typedef struct ParserLocalArray ParserLocalArray;
 struct Parser {
     const TokenArray *tokens;
     size_t pos;
@@ -666,6 +676,8 @@ struct Parser {
     int save_fn_params;
     int has_last_fn_params;
     ParamArray last_fn_params;
+    ParserLocalArray locals;
+    int scope_depth;
 };typedef struct Parser Parser;
 static const Token *peek(const Parser *p) {
     return &p->tokens->data[p->pos];
@@ -702,6 +714,7 @@ static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
 static int g_parsed_align = 0;
 static int g_parsed_inline = 0;
+static int g_parsed_tls = 0;
 static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *vec_size, char **alias_out) {
     if (peek(p)->kind == TK_LBRACKET && p->pos + 1 < p->tokens->len && p->tokens->data[p->pos + 1].kind == TK_LBRACKET) {
         advance(p);
@@ -1004,6 +1017,8 @@ static int is_type_start(const Parser *p, size_t pos) {
     if (k == TK_IDENT) {
         const char *text = p->tokens->data[pos].text;
         if (runtime.strcmp(text, "register") == 0 || runtime.strcmp(text, "auto") == 0
+            || runtime.strcmp(text, "__thread") == 0 || runtime.strcmp(text, "_Thread_local") == 0
+            || runtime.strcmp(text, "thread_local") == 0
             || runtime.strcmp(text, "__extension__") == 0 || runtime.strcmp(text, "__extension") == 0)
             return is_type_start(p, pos + 1);
         if (runtime.strcmp(text, "__attribute__") == 0 || runtime.strcmp(text, "__attribute") == 0) {
@@ -1097,6 +1112,13 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
             advance(p);
         }
         else if (peek(p)->kind == TK_IDENT
+                 && (runtime.strcmp(peek(p)->text, "__thread") == 0
+                     || runtime.strcmp(peek(p)->text, "_Thread_local") == 0
+                     || runtime.strcmp(peek(p)->text, "thread_local") == 0)) {
+            g_parsed_tls = 1;
+            advance(p);
+        }
+        else if (peek(p)->kind == TK_IDENT
                  && (runtime.strcmp(peek(p)->text, "register") == 0
                      || runtime.strcmp(peek(p)->text, "auto") == 0)) {
             advance(p);
@@ -1104,8 +1126,267 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
         else break;
     }
 }
+static void parser_push_local(Parser *p, const char *name, Type ty) {
+    if (!name || !name[0]) return;
+    if (p->locals.len >= p->locals.cap) {
+        size_t nc = p->locals.cap ? p->locals.cap * 2 : 16;
+        p->locals.data = runtime.realloc(p->locals.data, nc * sizeof(ParserLocal));
+        if (!p->locals.data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        p->locals.cap = nc;
+    }
+    ParserLocal *l = &p->locals.data[p->locals.len++];
+    l->name = xstrdup(name);
+    l->type = type_clone(ty);
+    l->scope_depth = p->scope_depth;
+}
+static void parser_pop_scope(Parser *p, int target_depth) {
+    while (p->locals.len > 0 && p->locals.data[p->locals.len - 1].scope_depth > target_depth) {
+        p->locals.len--;
+        runtime.free(p->locals.data[p->locals.len].name);
+        type_free(&p->locals.data[p->locals.len].type);
+    }
+    p->scope_depth = target_depth;
+}
+static Type eval_expr_type(Parser *p, const Expr *e);
+static Type eval_binary_type(Parser *p, Type a, Type b) {
+    (void)p;
+    int a_cplx = (a.kind == TY_STRUCT && a.tag && runtime.strncmp(a.tag, "__complex_", 10) == 0);
+    int b_cplx = (b.kind == TY_STRUCT && b.tag && runtime.strncmp(b.tag, "__complex_", 10) == 0);
+    if (a_cplx || b_cplx) {
+        if (a_cplx && b_cplx) {
+            return type_clone(type_size(a) >= type_size(b) ? a : b);
+        }
+        Type cty = a_cplx ? a : b;
+        Type non_cplx = a_cplx ? b : a;
+        if (non_cplx.kind == TY_FLOAT && non_cplx.width > (type_size(cty) / 2)) {
+            char tag[64];
+            runtime.snprintf(tag, sizeof(tag), "__complex_%s", non_cplx.width == 16 ? "ldouble" : (non_cplx.width == 8 ? "double" : "float"));
+            return type_make_struct(tag, non_cplx.width * 2);
+        }
+        return type_clone(cty);
+    }
+    if (a.kind == TY_FLOAT && b.kind == TY_FLOAT) {
+        return type_clone(a.width >= b.width ? a : b);
+    }
+    if (a.kind == TY_FLOAT) return type_clone(a);
+    if (b.kind == TY_FLOAT) return type_clone(b);
+    long long w_a = a.width < 4 ? 4 : a.width;
+    long long w_b = b.width < 4 ? 4 : b.width;
+    int u_a = (a.width < 4) ? 0 : a.is_unsigned;
+    int u_b = (b.width < 4) ? 0 : b.is_unsigned;
+    if (w_a > w_b) return type_make_int(w_a, u_a);
+    if (w_b > w_a) return type_make_int(w_b, u_b);
+    return type_make_int(w_a, u_a || u_b);
+}
+static Type eval_expr_type(Parser *p, const Expr *e) {
+    if (!e) return type_default_int();
+    switch (e->kind) {
+    case EX_INT_LIT:
+        if (e->type.kind != TY_VOID && e->type.width > 0)
+            return type_clone(e->type);
+        return type_default_int();
+    case EX_FLOAT_LIT:
+        if (e->type.kind != TY_VOID && e->type.width > 0)
+            return type_clone(e->type);
+        return type_make_float(8);
+    case EX_STR:
+        return type_make_ptr(type_make_int(1, 0));
+    case EX_VAR: {
+        const char *vname = e->u.var.name;
+        if (!vname) return type_default_int();
+        for (size_t i = p->locals.len; i > 0; i--) {
+            if (runtime.strcmp(p->locals.data[i - 1].name, vname) == 0) {
+                return type_clone(p->locals.data[i - 1].type);
+            }
+        }
+        for (size_t i = p->prepend.len; i > 0; i--) {
+            if (p->prepend.data[i - 1].kind == ST_DECL &&
+                runtime.strcmp(p->prepend.data[i - 1].u.decl.name, vname) == 0) {
+                return type_clone(p->prepend.data[i - 1].u.decl.type);
+            }
+        }
+        if (p->tu) {
+            for (size_t i = p->tu->globals.len; i > 0; i--) {
+                if (p->tu->globals.data[i - 1].kind == ST_DECL &&
+                    runtime.strcmp(p->tu->globals.data[i - 1].u.decl.name, vname) == 0) {
+                    return type_clone(p->tu->globals.data[i - 1].u.decl.type);
+                }
+            }
+            for (size_t f = 0; f < p->tu->functions.len; f++) {
+                const FunctionDecl *fn = &p->tu->functions.data[f];
+                if (runtime.strcmp(fn->name, vname) == 0) {
+                    Type *ptys[16];
+                    int n = (int)fn->params.len;
+                    if (n > 16) n = 16;
+                    for (int j = 0; j < n; j++)
+                        ptys[j] = &fn->params.data[j].type;
+                    return type_make_func_var(fn->ret_type, n ? ptys : ((void*)0),
+                                              n, fn->is_variadic);
+                }
+            }
+            if (enum_registry_find_constant(&p->tu->enums, vname)) {
+                return type_default_int();
+            }
+        }
+        return type_default_int();
+    }
+    case EX_ASSIGN:
+        return eval_expr_type(p, e->u.assign.lvalue);
+    case EX_COMPOUND_ASSIGN:
+        return eval_expr_type(p, e->u.comp.lvalue);
+    case EX_INC_DEC:
+        return eval_expr_type(p, e->u.incdec.operand);
+    case EX_COMMA:
+        return eval_expr_type(p, e->u.comma.rhs);
+    case EX_ADDR: {
+        Type sub = eval_expr_type(p, e->u.addr.operand);
+        Type res = type_make_ptr(sub);
+        type_free(&sub);
+        return res;
+    }
+    case EX_DEREF: {
+        Type sub = eval_expr_type(p, e->u.deref.operand);
+        Type res = type_pointee_or_elem(sub);
+        type_free(&sub);
+        return res;
+    }
+    case EX_INDEX: {
+        Type aty = eval_expr_type(p, e->u.idx.array);
+        Type ity = eval_expr_type(p, e->u.idx.index);
+        Type res;
+        if (type_is_ptr_or_array(aty)) {
+            res = type_pointee_or_elem(aty);
+        } else if (type_is_ptr_or_array(ity)) {
+            res = type_pointee_or_elem(ity);
+        } else {
+            res = type_default_int();
+        }
+        type_free(&aty);
+        type_free(&ity);
+        return res;
+    }
+    case EX_MEMBER: {
+        Type obj = eval_expr_type(p, e->u.member.obj);
+        Type res = type_default_int();
+        if (obj.kind == TY_STRUCT && obj.tag && p->tu) {
+            const StructDef *sd = struct_registry_find(&p->tu->structs, obj.tag);
+            if (sd) {
+                long long moff = 0;
+                const StructMember *m = struct_lookup_member(&p->tu->structs, sd, e->u.member.name, &moff);
+                if (m) {
+                    type_free(&res);
+                    res = type_clone(m->type);
+                }
+            }
+        }
+        type_free(&obj);
+        return res;
+    }
+    case EX_CAST:
+        return type_clone(e->u.cast.target);
+    case EX_COMPOUND_LITERAL:
+        return type_clone(e->u.compound.target_type);
+    case EX_SIZEOF_TYPE:
+    case EX_SIZEOF_EXPR:
+    case EX_ALIGNOF_TYPE:
+    case EX_ALIGNOF_EXPR:
+        return type_make_int(8, 1);
+    case EX_LABEL_ADDR:
+        return type_make_ptr(type_make_void());
+    case EX_CALL: {
+        if (e->u.call.callee && e->u.call.callee->kind == EX_VAR && e->u.call.callee->u.var.name) {
+            const char *name = e->u.call.callee->u.var.name;
+            if (runtime.strcmp(name, "__builtin_expect") == 0 && e->u.call.args.len > 0) {
+                return eval_expr_type(p, e->u.call.args.data[0]);
+            }
+            if (runtime.strcmp(name, "va_arg") == 0) {
+                return type_clone(e->va_arg_type);
+            }
+        }
+        Type fty = eval_expr_type(p, e->u.call.callee);
+        Type res = type_default_int();
+        if (fty.kind == TY_FUNC && fty.func_ret) {
+            type_free(&res);
+            res = type_clone(*fty.func_ret);
+        } else if (fty.kind == TY_PTR && fty.pointee && fty.pointee->kind == TY_FUNC && fty.pointee->func_ret) {
+            type_free(&res);
+            res = type_clone(*fty.pointee->func_ret);
+        }
+        type_free(&fty);
+        return res;
+    }
+    case EX_TERNARY: {
+        Type t1 = eval_expr_type(p, e->u.tern.then);
+        Type t2 = eval_expr_type(p, e->u.tern.else_);
+        if (t1.kind == TY_VOID || t2.kind == TY_VOID) {
+            type_free(&t1); type_free(&t2);
+            return type_make_void();
+        }
+        if (t1.kind == TY_STRUCT || t1.kind == TY_PTR || t1.kind == TY_ARRAY) {
+            type_free(&t2);
+            return t1;
+        }
+        if (t2.kind == TY_STRUCT || t2.kind == TY_PTR || t2.kind == TY_ARRAY) {
+            type_free(&t1);
+            return t2;
+        }
+        Type res = eval_binary_type(p, t1, t2);
+        type_free(&t1); type_free(&t2);
+        return res;
+    }
+    case EX_BINOP: {
+        if (e->u.bin.op == BOP_EQ || e->u.bin.op == BOP_NE ||
+            e->u.bin.op == BOP_LT || e->u.bin.op == BOP_LE ||
+            e->u.bin.op == BOP_GT || e->u.bin.op == BOP_GE ||
+            e->u.bin.op == BOP_AND || e->u.bin.op == BOP_OR) {
+            return type_default_int();
+        }
+        Type l = eval_expr_type(p, e->u.bin.l);
+        Type r = eval_expr_type(p, e->u.bin.r);
+        if (type_is_ptr_or_array(l) && !type_is_ptr_or_array(r)) {
+            type_free(&r);
+            return l;
+        }
+        if (!type_is_ptr_or_array(l) && type_is_ptr_or_array(r)) {
+            type_free(&l);
+            return r;
+        }
+        if (type_is_ptr_or_array(l) && type_is_ptr_or_array(r)) {
+            type_free(&l); type_free(&r);
+            return type_make_int(8, 0);
+        }
+        Type res = eval_binary_type(p, l, r);
+        type_free(&l); type_free(&r);
+        return res;
+    }
+    case EX_UNARY: {
+        if (e->u.un.op == UOP_NOT) return type_default_int();
+        Type op = eval_expr_type(p, e->u.un.operand);
+        if (op.kind == TY_INT && op.width < 4) {
+            type_free(&op);
+            return type_default_int();
+        }
+        return op;
+    }
+    case EX_STMT_EXPR: {
+        Type res = type_make_void();
+        if (e->u.stmt_expr.stmts && e->u.stmt_expr.stmts->len > 0) {
+            Stmt *last = &e->u.stmt_expr.stmts->data[e->u.stmt_expr.stmts->len - 1];
+            if (last->kind == ST_EXPR && last->u.expr) {
+                type_free(&res);
+                res = eval_expr_type(p, last->u.expr);
+            }
+        }
+        return res;
+    }
+    default:
+        return type_default_int();
+    }
+}
 static Type finish_specifiers(Type t, int is_const, int is_volatile, int is_restrict, int is_complex, int vec_size, Parser *p) {
-    t.is_const = is_const; t.is_volatile = is_volatile; t.is_restrict = is_restrict;
+    if (is_const) t.is_const = 1;
+    if (is_volatile) t.is_volatile = 1;
+    if (is_restrict) t.is_restrict = 1;
     if (is_complex) t = get_or_create_complex_type(p, t);
     if (g_parsed_mode_size > 0) {
         if (t.kind == TY_INT || t.kind == TY_FLOAT) t.width = g_parsed_mode_size;
@@ -1126,41 +1407,9 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
         if (is_type_start(p, p->pos)) {
             t = parse_type_abstract(p);
         } else {
-            const Token *tok = peek(p);
-            Type found = type_default_int();
-            if (tok->kind == TK_IDENT) {
-                const EnumConstant *ec = enum_registry_find_constant(&p->tu->enums, tok->text);
-                if (ec) {
-                    found = type_default_int();
-                } else {
-                    int got = 0;
-                    for (size_t g = 0; g < p->tu->globals.len; g++) {
-                        if (p->tu->globals.data[g].kind == ST_DECL &&
-                            runtime.strcmp(p->tu->globals.data[g].u.decl.name, tok->text) == 0) {
-                            found = type_clone(p->tu->globals.data[g].u.decl.type);
-                            got = 1;
-                            break;
-                        }
-                    }
-                    if (!got) {
-                        for (size_t f = 0; f < p->tu->functions.len; f++) {
-                            const FunctionDecl *fn = &p->tu->functions.data[f];
-                            if (runtime.strcmp(fn->name, tok->text) != 0) continue;
-                            Type *ptys[16];
-                            int n = (int)fn->params.len;
-                            if (n > 16) n = 16;
-                            for (int i = 0; i < n; i++)
-                                ptys[i] = &fn->params.data[i].type;
-                            found = type_make_func_var(fn->ret_type, n ? ptys : ((void*)0),
-                                                       n, fn->is_variadic);
-                            break;
-                        }
-                    }
-                }
-            }
             Expr *e = parse_expr(p);
+            t = eval_expr_type(p, e);
             expr_free(e);
-            t = found;
         }
         expect_kind(p, TK_RPAREN, "')'");
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
@@ -2914,7 +3163,10 @@ int is_unsigned;
             advance(p);
             StmtArray stmts;
             stmt_array_init(&stmts);
+            int saved_scope = p->scope_depth;
+            p->scope_depth++;
             parse_stmt_list(p, &stmts);
+            parser_pop_scope(p, saved_scope);
             expect_kind(p, TK_RBRACE, "'}'");
             expect_kind(p, TK_RPAREN, "')'");
             Expr *e = expr_new_stmt_expr(&stmts, loc);
@@ -3186,7 +3438,10 @@ static int is_function_declaration_lookahead(Parser *p) {
             }
         } else if (tk == TK_IDENT
                    && (runtime.strcmp(peek(p)->text, "register") == 0
-                       || runtime.strcmp(peek(p)->text, "auto") == 0)) {
+                       || runtime.strcmp(peek(p)->text, "auto") == 0
+                       || runtime.strcmp(peek(p)->text, "__thread") == 0
+                       || runtime.strcmp(peek(p)->text, "_Thread_local") == 0
+                       || runtime.strcmp(peek(p)->text, "thread_local") == 0)) {
             advance(p);
         } else if (tk == TK_IDENT
                    && find_typedef_with_fallback(p, peek(p)->text)) {
@@ -3434,6 +3689,11 @@ static Stmt parse_stmt(Parser *p) {
             return parse_typedef_stmt(p);
         }
         if (is_function_definition_lookahead(p)) {
+            if (p->cur_fn_name) {
+                SourceLoc loc = peek(p)->loc;
+                die_at(loc.file, loc.line, loc.col,
+                       "Nested functions are not supported in FakeCC");
+            }
             FunctionDecl fn = parse_function_decl(p);
             if (p->tu->functions.len >= p->tu->functions.cap) {
                 size_t new_cap = p->tu->functions.cap ? p->tu->functions.cap * 2 : 4;
@@ -3451,6 +3711,7 @@ static Stmt parse_stmt(Parser *p) {
         }
         SourceLoc decl_loc = peek(p)->loc;
         int storage_class = 0;
+        g_parsed_tls = 0;
         for (;;) {
             if (peek(p)->kind == TK_KW_STATIC) {
                 storage_class = 1;
@@ -3461,6 +3722,12 @@ static Stmt parse_stmt(Parser *p) {
             } else if (peek(p)->kind == TK_IDENT
                        && (runtime.strcmp(peek(p)->text, "register") == 0
                            || runtime.strcmp(peek(p)->text, "auto") == 0)) {
+                advance(p);
+            } else if (peek(p)->kind == TK_IDENT
+                       && (runtime.strcmp(peek(p)->text, "__thread") == 0
+                           || runtime.strcmp(peek(p)->text, "_Thread_local") == 0
+                           || runtime.strcmp(peek(p)->text, "thread_local") == 0)) {
+                g_parsed_tls = 1;
                 advance(p);
             } else break;
         }
@@ -3476,6 +3743,12 @@ static Stmt parse_stmt(Parser *p) {
             } else if (peek(p)->kind == TK_IDENT
                        && (runtime.strcmp(peek(p)->text, "register") == 0
                            || runtime.strcmp(peek(p)->text, "auto") == 0)) {
+                advance(p);
+            } else if (peek(p)->kind == TK_IDENT
+                       && (runtime.strcmp(peek(p)->text, "__thread") == 0
+                           || runtime.strcmp(peek(p)->text, "_Thread_local") == 0
+                           || runtime.strcmp(peek(p)->text, "thread_local") == 0)) {
+                g_parsed_tls = 1;
                 advance(p);
             } else break;
         }
@@ -3502,6 +3775,7 @@ static Stmt parse_stmt(Parser *p) {
                 decl_name = xstrdup(name->text);
                 advance(p);
             }
+            parser_push_local(p, decl_name, ty);
             Stmt s;
             runtime.memset(&s, 0, sizeof(s));
             s.kind = ST_DECL;
@@ -3509,6 +3783,7 @@ static Stmt parse_stmt(Parser *p) {
             s.u.decl.name = decl_name;
             s.u.decl.type = ty;
             s.u.decl.storage_class = storage_class;
+            s.u.decl.is_tls = g_parsed_tls;
             while (parse_attribute(p, &s.u.decl.align, ((void*)0), ((void*)0), ((void*)0),
                                    &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {
@@ -3621,6 +3896,8 @@ static Stmt parse_stmt(Parser *p) {
         const Token *kw = peek(p);
         advance(p);
         expect_kind(p, TK_LPAREN, "'('");
+        int saved_scope = p->scope_depth;
+        p->scope_depth++;
         Stmt *init_ptr = ((void*)0);
         if (peek(p)->kind != TK_SEMICOLON) {
             Stmt is = parse_stmt(p);
@@ -3649,6 +3926,7 @@ static Stmt parse_stmt(Parser *p) {
         if (peek(p)->kind != TK_RPAREN) step = parse_expr(p);
         expect_kind(p, TK_RPAREN, "')'");
         Stmt body = parse_stmt(p);
+        parser_pop_scope(p, saved_scope);
         Stmt *body_ptr = stmt_alloc();
         *body_ptr = body;
         Stmt s;
@@ -3707,7 +3985,10 @@ static Stmt parse_stmt(Parser *p) {
         s.kind = ST_BLOCK;
         s.loc = lb->loc;
         stmt_array_init(&s.u.block);
+        int saved_scope = p->scope_depth;
+        p->scope_depth++;
         parse_stmt_list(p, &s.u.block);
+        parser_pop_scope(p, saved_scope);
         expect_kind(p, TK_RBRACE, "'}'");
         return s;
     }
@@ -4585,7 +4866,15 @@ static FunctionDecl parse_function_decl(Parser *p) {
     size_t saved_td = p->typedef_mark;
     p->cur_fn_name = fn.name;
     p->typedef_mark = p->tu->typedefs.len;
+    int saved_scope = p->scope_depth;
+    p->scope_depth++;
+    for (size_t i = 0; i < fn.params.len; i++) {
+        if (fn.params.data[i].name && fn.params.data[i].name[0]) {
+            parser_push_local(p, fn.params.data[i].name, fn.params.data[i].type);
+        }
+    }
     parse_stmt_list(p, &fn.body);
+    parser_pop_scope(p, saved_scope);
     typedef_registry_truncate(&p->tu->typedefs, p->typedef_mark);
     p->cur_fn_name = saved_fn;
     p->typedef_mark = saved_td;
@@ -4631,6 +4920,10 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
     p.save_fn_params = 0;
     p.has_last_fn_params = 0;
     param_array_init(&p.last_fn_params);
+    p.locals.data = ((void*)0);
+    p.locals.len = 0;
+    p.locals.cap = 0;
+    p.scope_depth = 0;
     g_parser_tu = tu;
     if (peek(&p)->kind != TK_KW_PACKAGE) {
         const Token *t = peek(&p);
@@ -4770,6 +5063,8 @@ void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx
         stmt_array_push(&tu->globals, p.prepend.data[i]);
     p.prepend.len = 0;
     stmt_array_free(&p.prepend);
+    parser_pop_scope(&p, -1);
+    runtime.free(p.locals.data);
     g_parser_tu = ((void*)0);
 }
 void parse(const TokenArray *tokens, TranslationUnit *tu) {

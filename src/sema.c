@@ -533,6 +533,21 @@ static Type usual_arith_conv(Type a, Type b) {
     int prec_a = a.bitfield_width > 0 ? a.bitfield_width : a.width * 8;
     int prec_b = b.bitfield_width > 0 ? b.bitfield_width : b.width * 8;
     int prec = prec_a > prec_b ? prec_a : prec_b;
+    int a_cplx = (a.kind == TY_STRUCT && a.tag && strncmp(a.tag, "__complex_", 10) == 0);
+    int b_cplx = (b.kind == TY_STRUCT && b.tag && strncmp(b.tag, "__complex_", 10) == 0);
+    if (a_cplx || b_cplx) {
+        if (a_cplx && b_cplx) {
+            return type_clone(type_size(a) >= type_size(b) ? a : b);
+        }
+        Type cty = a_cplx ? a : b;
+        Type non_cplx = a_cplx ? b : a;
+        if (non_cplx.kind == TY_FLOAT && non_cplx.width > (type_size(cty) / 2)) {
+            char tag[64];
+            snprintf(tag, sizeof(tag), "__complex_%s", non_cplx.width == 16 ? "ldouble" : (non_cplx.width == 8 ? "double" : "float"));
+            return type_make_struct(tag, non_cplx.width * 2);
+        }
+        return type_clone(cty);
+    }
     Type res;
     /* Float dominates: if either operand is float, the result is float.
      * double wins over float (higher width). */
@@ -659,8 +674,10 @@ static Type check_ternary_expr(Expr *e) {
     int e_is_null_const = (et.kind == TY_INT && et.width == 4
                            && e->u.tern.else_->kind == EX_INT_LIT
                            && e->u.tern.else_->u.int_val == 0);
-    int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT);
-    int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT);
+    int tt_cplx = (tt.kind == TY_STRUCT && tt.tag && strncmp(tt.tag, "__complex_", 10) == 0);
+    int et_cplx = (et.kind == TY_STRUCT && et.tag && strncmp(et.tag, "__complex_", 10) == 0);
+    int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT || tt_cplx);
+    int et_arith = (et.kind == TY_INT || et.kind == TY_FLOAT || et_cplx);
     Type res;
     if (tt.kind == TY_VOID || et.kind == TY_VOID) {
         res = type_make_void();
@@ -822,7 +839,8 @@ static Type check_expr_inner(Expr *e) {
             set_type(e, ot);
             return type_clone(e->type);
         }
-        if (e->u.un.op == UOP_BITNOT && ot.kind == TY_STRUCT && ot.tag && strncmp(ot.tag, "__complex_", 10) == 0) {
+        if ((e->u.un.op == UOP_BITNOT || e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS) &&
+            ot.kind == TY_STRUCT && ot.tag && strncmp(ot.tag, "__complex_", 10) == 0) {
             set_type(e, ot);
             return type_clone(e->type);
         }

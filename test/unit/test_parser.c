@@ -286,11 +286,15 @@ static void test_nested_function(void) {
     }
     close(p[1]);
     char buf[4096];
-    ssize_t n = read(p[0], buf, sizeof(buf) - 1);
+    size_t total = 0;
+    ssize_t n;
+    while ((n = read(p[0], buf + total, sizeof(buf) - 1 - total)) > 0) {
+        total += (size_t)n;
+    }
     close(p[0]);
     int status = 0;
     waitpid(pid, &status, 0);
-    if (n > 0) buf[n] = '\0'; else buf[0] = '\0';
+    buf[total] = '\0';
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 1);  /* rejected */
     T_ASSERT(strstr(buf, "Nested functions are not supported") != NULL);
 }
@@ -306,6 +310,32 @@ static void test_stmt_expr(void) {
     T_ASSERT_EQ_INT((int)s0->u.decl.init->kind, (int)EX_STMT_EXPR);
     T_ASSERT(s0->u.decl.init->u.stmt_expr.stmts != NULL);
     T_ASSERT_EQ_INT((int)s0->u.decl.init->u.stmt_expr.stmts->len, 2);
+    tu_free(&tu);
+}
+
+static void test_typeof_expr(void) {
+    TranslationUnit tu = lex_parse(
+        "package main; struct S { double val; }; "
+        "int main() { "
+        "  struct S s; "
+        "  typeof(s.val) d = 3.14; "
+        "  double arr[5]; "
+        "  typeof(arr[0]) *p = &d; "
+        "  typeof(1 + 2.0) res = *p + d; "
+        "  return 0; "
+        "}");
+    T_ASSERT_EQ_INT((int)tu.functions.len, 1);
+    T_ASSERT_EQ_INT((int)tu.functions.data[0].body.len, 6);
+    /* Check s.val typeof produced double */
+    Stmt *s1 = &tu.functions.data[0].body.data[1];
+    T_ASSERT_EQ_INT((int)s1->kind, (int)ST_DECL);
+    T_ASSERT_EQ_INT((int)s1->u.decl.type.kind, (int)TY_FLOAT);
+    T_ASSERT_EQ_INT((int)s1->u.decl.type.width, 8);
+    /* Check arr[0] typeof produced double* */
+    Stmt *s3 = &tu.functions.data[0].body.data[3];
+    T_ASSERT_EQ_INT((int)s3->kind, (int)ST_DECL);
+    T_ASSERT_EQ_INT((int)s3->u.decl.type.kind, (int)TY_PTR);
+    T_ASSERT_EQ_INT((int)s3->u.decl.type.pointee->kind, (int)TY_FLOAT);
     tu_free(&tu);
 }
 
@@ -332,5 +362,6 @@ int main(void) {
     test_decl_with_init();
     test_nested_function();
     test_stmt_expr();
+    test_typeof_expr();
     return t_finalize();
 }
