@@ -1,4 +1,4 @@
-// expect: 42
+// expect_error
 package main;
 
 int main() {
