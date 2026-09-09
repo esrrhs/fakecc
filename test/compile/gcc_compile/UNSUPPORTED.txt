@@ -7,8 +7,8 @@
 # implicit function declarations, no bare `return;` in a non-void function,
 # no `return expr;` in a void function, and non-void `main` must return a
 # value (C99 would treat falling off `main` as `return 0`; GCC compile tests
-# use -std=gnu89 / -fpermissive for the rest). Original sources stay in
-# test/e2e/cases/gcc_torture/compile/.
+# use -std=gnu89 / -fpermissive for the rest). Original sources were in
+# test/e2e/gcc.c-torture/compile/ (deleted).
 #
 # Total: 335
 #

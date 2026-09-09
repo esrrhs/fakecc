@@ -52,12 +52,10 @@ test/
 │   ├── run_multi_e2e.sh    # 多文件编译与静态链接测试驱动脚本
 │   ├── run_shlib_e2e.sh    # 动态共享库（.so）链接测试驱动脚本
 │   ├── run_gdb_e2e.sh      # 真实 GDB 断点与变量追踪测试驱动脚本
-│   └── gcc.c-torture/      # GCC 16.2.0 C-Torture 原始测试套件（参考镜像）
 └── compile/                # 编译器健壮性仅编译测试套件（Compile-Only Suite）
     ├── gcc_compile/          # 已支持的编译健壮性用例
     │   ├── *.c                 # 已支持的编译健壮性用例
     │   ├── UNSUPPORTED.txt     # 仍待支持：崩溃 / 超时 / 编译拒绝
-    │   ├── SKIPPED.txt         # 移植循环明确跳过（嵌套函数 / GNU VLS / va_arg_pack / 无预处理器等）
     │   └── run_compile.sh      # 健壮性编译驱动脚本（fakecc -c）
 ```
 
@@ -124,5 +122,5 @@ bash test/e2e/run_gdb_e2e.sh ./build/fakecc
 ./build/fakecc test/e2e/cases/gcc_torture/execute/gcc_torture_20000112_1.c -o /tmp/test && /tmp/test
 
 # 5. 运行 2,003 个 compile 健壮性编译测试
-bash test/compile/run_compile.sh ./build/fakecc -O0
+bash test/compile/gcc_compile/run_compile.sh ./build/fakecc -O0
 ```

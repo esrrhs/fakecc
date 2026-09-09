@@ -85,5 +85,6 @@ bootstrap_test
 all_defines.txt
 calltest
 test_*
+!test/e2e/cases/aggregates/test_retmem_temp.c
 
 Testing/
