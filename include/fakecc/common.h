@@ -5,9 +5,10 @@
 
 /* Maximum number of parameters a single function may declare.  The SysV AMD64
  * ABI passes the first 6 (integer) / 8 (SSE) args in registers and the rest on
- * the stack, so there is no hard hardware limit — this is a compiler cap that
- * keeps the codegen stack arrays bounded.  Raised from 16 to 1024 to compile
- * GCC torture tests like 900313-1.c (32 args). */
+ * the stack, so there is no hard hardware limit — this is a compiler cap.
+ * Raised from 16 to 1024 to compile GCC torture tests like 900313-1.c (32 args).
+ * Call-argument storage on IR_CALL is heap-allocated (see IR_CALL_MAX_ARGS);
+ * do not embed [MAX_PARAMS]-sized arrays in hot IR/codegen structs. */
 #define MAX_PARAMS 1024
 
 /* noreturn attribute for compilers that don't recognize C11 <stdnoreturn.h> */

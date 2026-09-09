@@ -268,7 +268,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[1024];
+    IRValue *call_args;
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -276,7 +276,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[1024];
+    unsigned char *call_arg_on_stack;
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {

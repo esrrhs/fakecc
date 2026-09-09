@@ -136,8 +136,11 @@ void ir_module_init(IRModule *m) {
 void ir_module_free(IRModule *m) {
     for (size_t i = 0; i < m->functions.len; i++) {
         free(m->functions.data[i].name);
-        for (size_t j = 0; j < m->functions.data[i].insts.len; j++)
+        for (size_t j = 0; j < m->functions.data[i].insts.len; j++) {
             free(m->functions.data[i].insts.data[j].call_name);
+            free(m->functions.data[i].insts.data[j].call_args);
+            free(m->functions.data[i].insts.data[j].call_arg_on_stack);
+        }
         free(m->functions.data[i].insts.data);
         free(m->functions.data[i].value_width);
         free(m->functions.data[i].value_is_unsigned);
@@ -253,6 +256,26 @@ static void ir_inst_array_push(IRInstArray *a, IRInst inst) {
         a->cap = new_cap;
     }
     a->data[a->len++] = inst;
+}
+
+
+/* Allocate heap arg arrays for an IR_CALL.  Safe for nargs==0 (leaves NULL). */
+static void ir_call_reserve_args(IRInst *inst, int nargs) {
+    inst->call_nargs = nargs;
+    inst->call_args = NULL;
+    inst->call_arg_on_stack = NULL;
+    if (nargs <= 0) return;
+    if (nargs > IR_CALL_MAX_ARGS) {
+        fprintf(stderr, "fakecc: internal error: call with %d args (max %d)\n",
+                nargs, IR_CALL_MAX_ARGS);
+        exit(1);
+    }
+    inst->call_args = malloc((size_t)nargs * sizeof(IRValue));
+    inst->call_arg_on_stack = calloc((size_t)nargs, sizeof(unsigned char));
+    if (!inst->call_args || !inst->call_arg_on_stack) {
+        fprintf(stderr, "fakecc: OOM\n");
+        exit(1);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -757,8 +780,8 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         inst.loc = loc;
         inst.call_name = xstrdup(hook_name);
         inst.call_callee = -1;
+        ir_call_reserve_args(&inst, 1);
         inst.call_args[0] = addr;
-        inst.call_nargs = 1;
         ir_inst_array_push(&fn->insts, inst);
     } else if (width > 0) {
         snprintf(hook_name, sizeof(hook_name), "__asan_%sN", is_write ? "store" : "load");
@@ -774,9 +797,9 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         inst.loc = loc;
         inst.call_name = xstrdup(hook_name);
         inst.call_callee = -1;
+        ir_call_reserve_args(&inst, 2);
         inst.call_args[0] = addr;
         inst.call_args[1] = sz_val;
-        inst.call_nargs = 2;
         ir_inst_array_push(&fn->insts, inst);
     }
 }
@@ -799,14 +822,16 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     inst.imm = imm;
     inst.loc = loc;
     inst.call_name = NULL;
+    inst.call_args = NULL;
+    inst.call_arg_on_stack = NULL;
     inst.call_nargs = 0;
+    inst.call_callee = -1;
     inst.width = width;
     inst.is_unsigned = is_unsigned;
     inst.alloca_bytes = 0;
     inst.float_imm = 0;
     inst.is_float = 0;
     inst.force_stack = 0;
-    memset(inst.call_arg_on_stack, 0, sizeof(inst.call_arg_on_stack));
     ir_inst_array_push(&fn->insts, inst);
     if (dst >= 0) set_value_type(fn, dst, width ? width : 4, is_unsigned);
 }
@@ -829,9 +854,9 @@ static void emit_profile_call(IRFunction *fn, const char *hook_name, const Funct
     inst.loc = loc;
     inst.call_name = xstrdup(hook_name);
     inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
     inst.call_args[0] = fn_addr;
     inst.call_args[1] = ret_addr;
-    inst.call_nargs = 2;
     ir_inst_array_push(&fn->insts, inst);
 }
 
@@ -981,10 +1006,10 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
         inst.loc = loc;
         inst.call_name = xstrdup("memcpy");
         inst.call_callee = -1;
+        ir_call_reserve_args(&inst, 3);
         inst.call_args[0] = dst;
         inst.call_args[1] = src;
         inst.call_args[2] = sz_val;
-        inst.call_nargs = 3;
         ir_inst_array_push(&fn->insts, inst);
         return;
     }
@@ -1188,9 +1213,9 @@ static IRValue emit_i128_to_float(IRFunction *fn, IRValue addr, int is_unsigned,
     inst.loc = loc;
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
     inst.call_args[0] = lo;
     inst.call_args[1] = hi;
-    inst.call_nargs = 2;
     ir_inst_array_push(&fn->insts, inst);
     return dst;
 }
@@ -1218,10 +1243,10 @@ static IRValue emit_float_to_i128(IRFunction *fn, IRValue x, int is_unsigned,
     inst.loc = loc;
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 3);
     inst.call_args[0] = x;
     inst.call_args[1] = lop;
     inst.call_args[2] = hip;
-    inst.call_nargs = 3;
     ir_inst_array_push(&fn->insts, inst);
     IRValue dst = i128_alloc(fn, loc);
     IRValue lo = new_value(fn);
@@ -1546,6 +1571,7 @@ static void i128_divmod(IRFunction *fn, IRValue qdst, IRValue rdst,
     inst.loc = loc;
     inst.call_name = xstrdup("__fakecc_udivmodti4");
     inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 8);
     inst.call_args[0] = nlo;
     inst.call_args[1] = nhi;
     inst.call_args[2] = dlo;
@@ -1554,7 +1580,6 @@ static void i128_divmod(IRFunction *fn, IRValue qdst, IRValue rdst,
     inst.call_args[5] = qhi_p;
     inst.call_args[6] = rlo_p;
     inst.call_args[7] = rhi_p;
-    inst.call_nargs = 8;
     ir_inst_array_push(&fn->insts, inst);
     IRValue qlo = new_value(fn);
     emit_inst_w(fn, IR_LOAD_PTR, qlo, qlo_p, -1, 0, 8, 1, loc);
@@ -2432,7 +2457,7 @@ static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
     inst.loc = loc;
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
-    inst.call_nargs = nargs;
+    ir_call_reserve_args(&inst, nargs);
     for (int i = 0; i < nargs; i++)
         inst.call_args[i] = args[i];
     ir_inst_array_push(&fn->insts, inst);
@@ -2512,7 +2537,7 @@ static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
     inst.loc = loc;
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
-    inst.call_nargs = nargs;
+    ir_call_reserve_args(&inst, nargs);
     for (int i = 0; i < nargs; i++)
         inst.call_args[i] = args[i];
     ir_inst_array_push(&fn->insts, inst);
@@ -5279,7 +5304,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 inst.loc = e->loc;
                 inst.call_name = xstrdup("__builtin_apply");
                 inst.call_callee = -1;
-                inst.call_nargs = 3;
+                ir_call_reserve_args(&inst, 3);
                 inst.call_args[0] = fptr;
                 inst.call_args[1] = ablk;
                 inst.call_args[2] = asz;
@@ -5299,7 +5324,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 inst.loc = e->loc;
                 inst.call_name = xstrdup("__builtin_return");
                 inst.call_callee = -1;
-                inst.call_nargs = 1;
+                ir_call_reserve_args(&inst, 1);
                 inst.call_args[0] = rp;
                 ir_inst_array_push(&fn->insts, inst);
                 return -1;
@@ -5417,9 +5442,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 inst.loc = e->loc;
                 inst.call_name = xstrdup(is_start ? "va_start" : is_end ? "va_end" : "va_arg");
                 inst.call_callee = -1;
-                inst.call_nargs = (last >= 0) ? 2 : 1;
+                /* Reserve 2 slots up front: va_arg(struct) needs a second
+                 * slot for the destination address even when there is no
+                 * "last named param" operand. */
+                ir_call_reserve_args(&inst, 2);
                 inst.call_args[0] = ap;
                 inst.call_args[1] = last;
+                if (last < 0)
+                    inst.call_nargs = 1;
                 if (is_arg) {
                     if (e->va_arg_type.kind == TY_STRUCT) {
                         int sz = type_size(e->va_arg_type);
@@ -5543,10 +5573,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 return emit_float_const(fn, w, bits, e->loc);
             }
         }
-        IRValue arg_vals[IR_CALL_MAX_ARGS];
-        unsigned char arg_on_stack[IR_CALL_MAX_ARGS];
+        IRValue *arg_vals = malloc(IR_CALL_MAX_ARGS * sizeof(IRValue));
+        unsigned char *arg_on_stack = malloc(IR_CALL_MAX_ARGS);
+        if (!arg_vals || !arg_on_stack) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         int nargs = 0;
-        memset(arg_on_stack, 0, sizeof(arg_on_stack));
+        memset(arg_on_stack, 0, IR_CALL_MAX_ARGS);
         /* Reserve a slot if the return needs a hidden sret pointer. */
         int is_void_pre = (e->type.kind == TY_VOID);
         int is_ret_i128_pre = !is_void_pre && type_is_i128(e->type);
@@ -5772,7 +5803,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             /* Indirect call: lower the callee expression to an SSA value. */
             inst.call_callee = lower_expr(fn, st, e->u.call.callee);
         }
-        inst.call_nargs = total_nargs;
+        ir_call_reserve_args(&inst, total_nargs);
         if (ret_in_mem) {
             inst.call_args[0] = sret_addr;
             inst.call_arg_on_stack[0] = 0;
@@ -5805,6 +5836,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue ebs[2] = { ret_lo, ret_hi };
             store_agg_regs(fn, slot_addr, type_size(e->type), ret_nreg,
                            ret_cls, ebs, e->loc);
+            free(arg_vals);
+            free(arg_on_stack);
             return slot_addr;
         }
         inst.width = ret_in_mem ? 8
@@ -5818,6 +5851,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         } else if (ret_in_mem) {
             set_value_type(fn, v, 8, 1);
         }
+        free(arg_vals);
+        free(arg_on_stack);
         return v;
     }
     case EX_ADDR: {

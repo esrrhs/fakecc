@@ -4324,9 +4324,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
 
-    char *kr_names[MAX_PARAMS];
+    char **kr_names = NULL;
     int nkr = 0;
-    (void)kr_names;
+    int kr_cap = 0;
     if (!is_grouped_fn) {
         expect_kind(p, TK_LPAREN, "'('");
 
@@ -4395,6 +4395,15 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 die_at(id->loc.file, id->loc.line, id->loc.col,
                        "more than %d parameters not supported", MAX_PARAMS);
             }
+            if (nkr >= kr_cap) {
+                int nc = kr_cap ? kr_cap * 2 : 8;
+                if (nc > MAX_PARAMS) nc = MAX_PARAMS;
+                if (nc <= nkr) nc = nkr + 1;
+                char **nbuf = realloc(kr_names, (size_t)nc * sizeof(char *));
+                if (!nbuf) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                kr_names = nbuf;
+                kr_cap = nc;
+            }
             kr_names[nkr++] = xstrdup(id->text);
             advance(p);
             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
@@ -4408,8 +4417,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
 
     /* K&R declarations between `)` and `{`: `f(a, b) int a; char *b; {`. */
     if (nkr > 0) {
-        Type kr_ty[MAX_PARAMS];
-        int kr_set[MAX_PARAMS];
+        Type *kr_ty = malloc((size_t)nkr * sizeof(Type));
+        int *kr_set = malloc((size_t)nkr * sizeof(int));
+        if (!kr_ty || !kr_set) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         for (int i = 0; i < nkr; i++) {
             kr_ty[i] = type_default_int();
             kr_set[i] = 0;
@@ -4467,6 +4477,11 @@ static FunctionDecl parse_function_decl(Parser *p) {
             param_array_push(&fn.params, kr_names[i], kr_ty[i], fn.loc);
             free(kr_names[i]);
         }
+        free(kr_ty);
+        free(kr_set);
+        free(kr_names);
+        kr_names = NULL;
+        nkr = 0;
     }
     }
 
@@ -4573,12 +4588,12 @@ static FunctionDecl parse_function_decl(Parser *p) {
                     } else if (peek(p)->kind == TK_ELLIPSIS) {
                         advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
                     } else if (peek(p)->kind != TK_RPAREN) {
+                        /* K&R identifier list on a comma-declarator: parse and
+                         * discard names (params stay unprototyped / empty). */
                         extra_fn.is_unprototyped = 1;
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= MAX_PARAMS) break;
-                            kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
                             break;
@@ -4658,12 +4673,12 @@ static FunctionDecl parse_function_decl(Parser *p) {
                     } else if (peek(p)->kind == TK_ELLIPSIS) {
                         advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
                     } else if (peek(p)->kind != TK_RPAREN) {
+                        /* K&R identifier list on a comma-declarator: parse and
+                         * discard names (params stay unprototyped / empty). */
                         extra_fn.is_unprototyped = 1;
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= MAX_PARAMS) break;
-                            kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
                             break;
@@ -4729,12 +4744,12 @@ static FunctionDecl parse_function_decl(Parser *p) {
                     } else if (peek(p)->kind == TK_ELLIPSIS) {
                         advance(p); extra_fn.is_variadic = 1; extra_fn.is_unprototyped = 1;
                     } else if (peek(p)->kind != TK_RPAREN) {
+                        /* K&R identifier list on a comma-declarator: parse and
+                         * discard names (params stay unprototyped / empty). */
                         extra_fn.is_unprototyped = 1;
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= MAX_PARAMS) break;
-                            kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
                             break;

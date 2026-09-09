@@ -2138,9 +2138,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
         /* Parser caps params at MAX_PARAMS (common.h). */
         if (nparams > MAX_PARAMS) nparams = MAX_PARAMS;
-        int arrive_reg[MAX_PARAMS];
-        int arrive_is_xmm[MAX_PARAMS];
-        int stack_off[MAX_PARAMS];
+        int *arrive_reg = NULL;
+        int *arrive_is_xmm = NULL;
+        int *stack_off = NULL;
+        if (nparams > 0) {
+            arrive_reg = malloc((size_t)nparams * sizeof(int));
+            arrive_is_xmm = malloc((size_t)nparams * sizeof(int));
+            stack_off = malloc((size_t)nparams * sizeof(int));
+            if (!arrive_reg || !arrive_is_xmm || !stack_off) {
+                fprintf(stderr, "fakecc: OOM\n");
+                exit(1);
+            }
+        }
         int gp_reg_idx = 0, xmm_reg_idx = 0, stack_arg_idx = 0;
         for (int p = 0; p < nparams; p++) {
             const IRInst *pi = &fn->insts.data[p];
@@ -3423,13 +3432,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 /* call_nargs is bounded by IR_CALL_MAX_ARGS (ir.h:81); clamp as
                  * a guard so a raised cap can't overflow these stack arrays. */
                 if (nargs > IR_CALL_MAX_ARGS) nargs = IR_CALL_MAX_ARGS;
-                int target_reg[IR_CALL_MAX_ARGS];   /* native reg code, -1=stack */
-                int target_is_xmm[IR_CALL_MAX_ARGS];
+                int *target_reg = NULL;
+                int *target_is_xmm = NULL;
+                if (nargs > 0) {
+                    target_reg = malloc((size_t)nargs * sizeof(int));
+                    target_is_xmm = malloc((size_t)nargs * sizeof(int));
+                    if (!target_reg || !target_is_xmm) {
+                        fprintf(stderr, "fakecc: OOM\n");
+                        exit(1);
+                    }
+                }
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
                     int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
-                    int force_stack = inst->call_arg_on_stack[k] || is_ld;
+                    int force_stack = (inst->call_arg_on_stack && inst->call_arg_on_stack[k]) || is_ld;
                     if (force_stack) {
                         /* MEMORY-class eightbyte or long double: stack only. */
                         target_reg[k] = -1;
@@ -3723,6 +3740,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         }
                     }
                 }
+                free(target_reg);
+                free(target_is_xmm);
                 break;
             }
 
@@ -4324,6 +4343,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(label_off);
         free(alloca_off);
         free(ld_off);
+        free(arrive_reg);
+        free(arrive_is_xmm);
+        free(stack_off);
 
         size_t fn_size = out->text.len - start_offset;
         uint8_t binding = fn->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;

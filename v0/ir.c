@@ -114,7 +114,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[1024];
+    IRValue *call_args;
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -122,7 +122,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[1024];
+    unsigned char *call_arg_on_stack;
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -897,8 +897,11 @@ void ir_module_init(IRModule *m) {
 void ir_module_free(IRModule *m) {
     for (size_t i = 0; i < m->functions.len; i++) {
         runtime.free(m->functions.data[i].name);
-        for (size_t j = 0; j < m->functions.data[i].insts.len; j++)
+        for (size_t j = 0; j < m->functions.data[i].insts.len; j++) {
             runtime.free(m->functions.data[i].insts.data[j].call_name);
+            runtime.free(m->functions.data[i].insts.data[j].call_args);
+            runtime.free(m->functions.data[i].insts.data[j].call_arg_on_stack);
+        }
         runtime.free(m->functions.data[i].insts.data);
         runtime.free(m->functions.data[i].value_width);
         runtime.free(m->functions.data[i].value_is_unsigned);
@@ -1001,6 +1004,23 @@ static void ir_inst_array_push(IRInstArray *a, IRInst inst) {
         a->cap = new_cap;
     }
     a->data[a->len++] = inst;
+}
+static void ir_call_reserve_args(IRInst *inst, int nargs) {
+    inst->call_nargs = nargs;
+    inst->call_args = ((void*)0);
+    inst->call_arg_on_stack = ((void*)0);
+    if (nargs <= 0) return;
+    if (nargs > 1024) {
+        runtime.fprintf(runtime.stderr, "fakecc: internal error: call with %d args (max %d)\n",
+                nargs, 1024);
+        runtime.exit(1);
+    }
+    inst->call_args = runtime.malloc((size_t)nargs * sizeof(IRValue));
+    inst->call_arg_on_stack = runtime.calloc((size_t)nargs, sizeof(unsigned char));
+    if (!inst->call_args || !inst->call_arg_on_stack) {
+        runtime.fprintf(runtime.stderr, "fakecc: OOM\n");
+        runtime.exit(1);
+    }
 }
 static void ir_func_array_push(IRFunctionArray *a, IRFunction fn) {
     fn.ra = ((void*)0);
@@ -1448,8 +1468,8 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         inst.loc = loc;
         inst.call_name = xstrdup(hook_name);
         inst.call_callee = -1;
+        ir_call_reserve_args(&inst, 1);
         inst.call_args[0] = addr;
-        inst.call_nargs = 1;
         ir_inst_array_push(&fn->insts, inst);
     } else if (width > 0) {
         runtime.snprintf(hook_name, sizeof(hook_name), "__asan_%sN", is_write ? "store" : "load");
@@ -1465,9 +1485,9 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         inst.loc = loc;
         inst.call_name = xstrdup(hook_name);
         inst.call_callee = -1;
+        ir_call_reserve_args(&inst, 2);
         inst.call_args[0] = addr;
         inst.call_args[1] = sz_val;
-        inst.call_nargs = 2;
         ir_inst_array_push(&fn->insts, inst);
     }
 }
@@ -1488,14 +1508,16 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     inst.imm = imm;
     inst.loc = loc;
     inst.call_name = ((void*)0);
+    inst.call_args = ((void*)0);
+    inst.call_arg_on_stack = ((void*)0);
     inst.call_nargs = 0;
+    inst.call_callee = -1;
     inst.width = width;
     inst.is_unsigned = is_unsigned;
     inst.alloca_bytes = 0;
     inst.float_imm = 0;
     inst.is_float = 0;
     inst.force_stack = 0;
-    runtime.memset(inst.call_arg_on_stack, 0, sizeof(inst.call_arg_on_stack));
     ir_inst_array_push(&fn->insts, inst);
     if (dst >= 0) set_value_type(fn, dst, width ? width : 4, is_unsigned);
 }
@@ -1515,9 +1537,9 @@ static void emit_profile_call(IRFunction *fn, const char *hook_name, const Funct
     inst.loc = loc;
     inst.call_name = xstrdup(hook_name);
     inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
     inst.call_args[0] = fn_addr;
     inst.call_args[1] = ret_addr;
-    inst.call_nargs = 2;
     ir_inst_array_push(&fn->insts, inst);
 }
 static void emit_inst_f(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRValue b,
@@ -1622,10 +1644,10 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
         inst.loc = loc;
         inst.call_name = xstrdup("memcpy");
         inst.call_callee = -1;
+        ir_call_reserve_args(&inst, 3);
         inst.call_args[0] = dst;
         inst.call_args[1] = src;
         inst.call_args[2] = sz_val;
-        inst.call_nargs = 3;
         ir_inst_array_push(&fn->insts, inst);
         return;
     }
@@ -1808,9 +1830,9 @@ IRValue hi;
     inst.loc = loc;
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
     inst.call_args[0] = lo;
     inst.call_args[1] = hi;
-    inst.call_nargs = 2;
     ir_inst_array_push(&fn->insts, inst);
     return dst;
 }
@@ -1837,10 +1859,10 @@ static IRValue emit_float_to_i128(IRFunction *fn, IRValue x, int is_unsigned,
     inst.loc = loc;
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 3);
     inst.call_args[0] = x;
     inst.call_args[1] = lop;
     inst.call_args[2] = hip;
-    inst.call_nargs = 3;
     ir_inst_array_push(&fn->insts, inst);
     IRValue dst = i128_alloc(fn, loc);
     IRValue lo = new_value(fn);
@@ -2166,6 +2188,7 @@ IRValue dhi;
     inst.loc = loc;
     inst.call_name = xstrdup("__fakecc_udivmodti4");
     inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 8);
     inst.call_args[0] = nlo;
     inst.call_args[1] = nhi;
     inst.call_args[2] = dlo;
@@ -2174,7 +2197,6 @@ IRValue dhi;
     inst.call_args[5] = qhi_p;
     inst.call_args[6] = rlo_p;
     inst.call_args[7] = rhi_p;
-    inst.call_nargs = 8;
     ir_inst_array_push(&fn->insts, inst);
     IRValue qlo = new_value(fn);
     emit_inst_w(fn, IR_LOAD_PTR, qlo, qlo_p, -1, 0, 8, 1, loc);
@@ -2976,7 +2998,7 @@ static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
     inst.loc = loc;
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
-    inst.call_nargs = nargs;
+    ir_call_reserve_args(&inst, nargs);
     for (int i = 0; i < nargs; i++)
         inst.call_args[i] = args[i];
     ir_inst_array_push(&fn->insts, inst);
@@ -3054,7 +3076,7 @@ static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
     inst.loc = loc;
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
-    inst.call_nargs = nargs;
+    ir_call_reserve_args(&inst, nargs);
     for (int i = 0; i < nargs; i++)
         inst.call_args[i] = args[i];
     ir_inst_array_push(&fn->insts, inst);
@@ -5571,7 +5593,7 @@ IRValue hi;
                 inst.loc = e->loc;
                 inst.call_name = xstrdup("__builtin_apply");
                 inst.call_callee = -1;
-                inst.call_nargs = 3;
+                ir_call_reserve_args(&inst, 3);
                 inst.call_args[0] = fptr;
                 inst.call_args[1] = ablk;
                 inst.call_args[2] = asz;
@@ -5591,7 +5613,7 @@ IRValue hi;
                 inst.loc = e->loc;
                 inst.call_name = xstrdup("__builtin_return");
                 inst.call_callee = -1;
-                inst.call_nargs = 1;
+                ir_call_reserve_args(&inst, 1);
                 inst.call_args[0] = rp;
                 ir_inst_array_push(&fn->insts, inst);
                 return -1;
@@ -5701,9 +5723,11 @@ IRValue hi;
                 inst.loc = e->loc;
                 inst.call_name = xstrdup(is_start ? "va_start" : is_end ? "va_end" : "va_arg");
                 inst.call_callee = -1;
-                inst.call_nargs = (last >= 0) ? 2 : 1;
+                ir_call_reserve_args(&inst, 2);
                 inst.call_args[0] = ap;
                 inst.call_args[1] = last;
+                if (last < 0)
+                    inst.call_nargs = 1;
                 if (is_arg) {
                     if (e->va_arg_type.kind == TY_STRUCT) {
                         int sz = type_size(e->va_arg_type);
@@ -5827,10 +5851,11 @@ IRValue hi;
                 return emit_float_const(fn, w, bits, e->loc);
             }
         }
-        IRValue arg_vals[1024];
-        unsigned char arg_on_stack[1024];
+        IRValue *arg_vals = runtime.malloc(1024 * sizeof(IRValue));
+        unsigned char *arg_on_stack = runtime.malloc(1024);
+        if (!arg_vals || !arg_on_stack) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         int nargs = 0;
-        runtime.memset(arg_on_stack, 0, sizeof(arg_on_stack));
+        runtime.memset(arg_on_stack, 0, 1024);
         int is_void_pre = (e->type.kind == TY_VOID);
         int is_ret_i128_pre = !is_void_pre && type_is_i128(e->type);
         int is_ret_struct_pre = (!is_void_pre && (e->type.kind == TY_STRUCT || e->type.is_vector || is_ret_i128_pre));
@@ -6018,7 +6043,7 @@ IRValue hi;
         } else {
             inst.call_callee = lower_expr(fn, st, e->u.call.callee);
         }
-        inst.call_nargs = total_nargs;
+        ir_call_reserve_args(&inst, total_nargs);
         if (ret_in_mem) {
             inst.call_args[0] = sret_addr;
             inst.call_arg_on_stack[0] = 0;
@@ -6046,6 +6071,8 @@ IRValue hi;
             IRValue ebs[2] = { ret_lo, ret_hi };
             store_agg_regs(fn, slot_addr, type_size(e->type), ret_nreg,
                            ret_cls, ebs, e->loc);
+            runtime.free(arg_vals);
+            runtime.free(arg_on_stack);
             return slot_addr;
         }
         inst.width = ret_in_mem ? 8
@@ -6059,6 +6086,8 @@ IRValue hi;
         } else if (ret_in_mem) {
             set_value_type(fn, v, 8, 1);
         }
+        runtime.free(arg_vals);
+        runtime.free(arg_on_stack);
         return v;
     }
     case EX_ADDR: {

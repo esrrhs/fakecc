@@ -268,7 +268,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[1024];
+    IRValue *call_args;
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -276,7 +276,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[1024];
+    unsigned char *call_arg_on_stack;
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -2531,9 +2531,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             else break;
         }
         if (nparams > 1024) nparams = 1024;
-        int arrive_reg[1024];
-        int arrive_is_xmm[1024];
-        int stack_off[1024];
+        int *arrive_reg = ((void*)0);
+        int *arrive_is_xmm = ((void*)0);
+        int *stack_off = ((void*)0);
+        if (nparams > 0) {
+            arrive_reg = runtime.malloc((size_t)nparams * sizeof(int));
+            arrive_is_xmm = runtime.malloc((size_t)nparams * sizeof(int));
+            stack_off = runtime.malloc((size_t)nparams * sizeof(int));
+            if (!arrive_reg || !arrive_is_xmm || !stack_off) {
+                runtime.fprintf(runtime.stderr, "fakecc: OOM\n");
+                runtime.exit(1);
+            }
+        }
         int gp_reg_idx = 0, xmm_reg_idx = 0, stack_arg_idx = 0;
         for (int p = 0; p < nparams; p++) {
             const IRInst *pi = &fn->insts.data[p];
@@ -3549,13 +3558,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 int nargs = inst->call_nargs;
                 if (nargs > 1024) nargs = 1024;
-                int target_reg[1024];
-                int target_is_xmm[1024];
+                int *target_reg = ((void*)0);
+                int *target_is_xmm = ((void*)0);
+                if (nargs > 0) {
+                    target_reg = runtime.malloc((size_t)nargs * sizeof(int));
+                    target_is_xmm = runtime.malloc((size_t)nargs * sizeof(int));
+                    if (!target_reg || !target_is_xmm) {
+                        runtime.fprintf(runtime.stderr, "fakecc: OOM\n");
+                        runtime.exit(1);
+                    }
+                }
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
                     int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
-                    int force_stack = inst->call_arg_on_stack[k] || is_ld;
+                    int force_stack = (inst->call_arg_on_stack && inst->call_arg_on_stack[k]) || is_ld;
                     if (force_stack) {
                         target_reg[k] = -1;
                         target_is_xmm[k] = 0;
@@ -3799,6 +3816,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         }
                     }
                 }
+                runtime.free(target_reg);
+                runtime.free(target_is_xmm);
                 break;
             }
             case IR_RETURN: {
@@ -4283,6 +4302,9 @@ int dreg;
         runtime.free(label_off);
         runtime.free(alloca_off);
         runtime.free(ld_off);
+        runtime.free(arrive_reg);
+        runtime.free(arrive_is_xmm);
+        runtime.free(stack_off);
         size_t fn_size = out->text.len - start_offset;
         uint8_t binding = fn->is_static ? 0 : 1 ;
         emit_module_add_symbol(out, fn->name, binding, 2 ,

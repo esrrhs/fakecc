@@ -4458,9 +4458,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.align = 0;
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
-    char *kr_names[1024];
+    char **kr_names = ((void*)0);
     int nkr = 0;
-    (void)kr_names;
+    int kr_cap = 0;
     if (!is_grouped_fn) {
         expect_kind(p, TK_LPAREN, "'('");
     if (peek(p)->kind == TK_KW_VOID
@@ -4521,6 +4521,15 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 die_at(id->loc.file, id->loc.line, id->loc.col,
                        "more than %d parameters not supported", 1024);
             }
+            if (nkr >= kr_cap) {
+                int nc = kr_cap ? kr_cap * 2 : 8;
+                if (nc > 1024) nc = 1024;
+                if (nc <= nkr) nc = nkr + 1;
+                char **nbuf = runtime.realloc(kr_names, (size_t)nc * sizeof(char *));
+                if (!nbuf) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                kr_names = nbuf;
+                kr_cap = nc;
+            }
             kr_names[nkr++] = xstrdup(id->text);
             advance(p);
             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
@@ -4531,8 +4540,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
     }
     expect_kind(p, TK_RPAREN, "')'");
     if (nkr > 0) {
-        Type kr_ty[1024];
-        int kr_set[1024];
+        Type *kr_ty = runtime.malloc((size_t)nkr * sizeof(Type));
+        int *kr_set = runtime.malloc((size_t)nkr * sizeof(int));
+        if (!kr_ty || !kr_set) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         for (int i = 0; i < nkr; i++) {
             kr_ty[i] = type_default_int();
             kr_set[i] = 0;
@@ -4590,6 +4600,11 @@ static FunctionDecl parse_function_decl(Parser *p) {
             param_array_push(&fn.params, kr_names[i], kr_ty[i], fn.loc);
             runtime.free(kr_names[i]);
         }
+        runtime.free(kr_ty);
+        runtime.free(kr_set);
+        runtime.free(kr_names);
+        kr_names = ((void*)0);
+        nkr = 0;
     }
     }
     while (parse_attribute(p, &fn.align, ((void*)0), ((void*)0), ((void*)0), &fn.alias_target)) {}
@@ -4685,8 +4700,6 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 1024) break;
-                            kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
                             break;
@@ -4767,8 +4780,6 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 1024) break;
-                            kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
                             break;
@@ -4837,8 +4848,6 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 1024) break;
-                            kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
                             break;
