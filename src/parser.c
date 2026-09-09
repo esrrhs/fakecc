@@ -640,13 +640,14 @@ static Type eval_expr_type(Parser *p, const Expr *e) {
             for (size_t f = 0; f < p->tu->functions.len; f++) {
                 const FunctionDecl *fn = &p->tu->functions.data[f];
                 if (strcmp(fn->name, vname) == 0) {
-                    Type *ptys[16];
+                    Type **ptys = malloc(fn->params.len * sizeof(Type *));
+                    if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                     int n = (int)fn->params.len;
-                    if (n > 16) n = 16;
                     for (int j = 0; j < n; j++)
                         ptys[j] = &fn->params.data[j].type;
-                    return type_make_func_var(fn->ret_type, n ? ptys : NULL,
-                                              n, fn->is_variadic);
+                    Type res = type_make_func_var(fn->ret_type, n ? ptys : NULL, n, fn->is_variadic);
+                    free(ptys);
+                    return res;
                 }
             }
             if (enum_registry_find_constant(&p->tu->enums, vname)) {
@@ -1452,9 +1453,9 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
             }
             break;
         }
-        if (params.len > 16) {
+        if (params.len > MAX_PARAMS) {
             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
-                   "more than 16 parameters not supported");
+                   "more than %d parameters not supported", MAX_PARAMS);
         }
     }
     return params;
@@ -4320,7 +4321,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
 
-    char *kr_names[16];
+    char *kr_names[MAX_PARAMS];
     int nkr = 0;
     (void)kr_names;
     if (!is_grouped_fn) {
@@ -4369,9 +4370,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
             }
             break;
         }
-        if (fn.params.len > 16) {
+        if (fn.params.len > MAX_PARAMS) {
             die_at(fn.loc.file, fn.loc.line, fn.loc.col,
-                   "more than 16 parameters not supported");
+                   "more than %d parameters not supported", MAX_PARAMS);
         }
     } else if (peek(p)->kind == TK_ELLIPSIS) {
         /* Old-style varargs with no named parameters: `f(...)`. */
@@ -4387,9 +4388,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 die_at(id->loc.file, id->loc.line, id->loc.col,
                        "expected parameter name but got '%s'", id->text);
             }
-            if (nkr >= 16) {
+            if (nkr >= MAX_PARAMS) {
                 die_at(id->loc.file, id->loc.line, id->loc.col,
-                       "more than 16 parameters not supported");
+                       "more than %d parameters not supported", MAX_PARAMS);
             }
             kr_names[nkr++] = xstrdup(id->text);
             advance(p);
@@ -4404,8 +4405,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
 
     /* K&R declarations between `)` and `{`: `f(a, b) int a; char *b; {`. */
     if (nkr > 0) {
-        Type kr_ty[16];
-        int kr_set[16];
+        Type kr_ty[MAX_PARAMS];
+        int kr_set[MAX_PARAMS];
         for (int i = 0; i < nkr; i++) {
             kr_ty[i] = type_default_int();
             kr_set[i] = 0;
@@ -4573,7 +4574,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 16) break;
+                            if (nkr >= MAX_PARAMS) break;
                             kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
@@ -4658,7 +4659,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 16) break;
+                            if (nkr >= MAX_PARAMS) break;
                             kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
@@ -4729,7 +4730,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 16) break;
+                            if (nkr >= MAX_PARAMS) break;
                             kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }

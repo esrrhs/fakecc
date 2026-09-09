@@ -2136,12 +2136,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (fn->insts.data[j].op == IR_PARAM) nparams++;
             else break;
         }
-        /* Parser caps params at 16 (parser.c:611); 64 is a 4x guard so a
+        /* Parser caps params at 1024 (parser.c:611); 1024 is a 4x guard so a
          * future relaxation can't silently overflow these stack arrays. */
-        if (nparams > 64) nparams = 64;
-        int arrive_reg[64];
-        int arrive_is_xmm[64];
-        int stack_off[64];
+        if (nparams > 256) nparams = 256;
+        int arrive_reg[256];
+        int arrive_is_xmm[256];
+        int stack_off[256];
         int gp_reg_idx = 0, xmm_reg_idx = 0, stack_arg_idx = 0;
         for (int p = 0; p < nparams; p++) {
             const IRInst *pi = &fn->insts.data[p];

@@ -71,8 +71,9 @@ void pkg_ctx_free(PkgContext *ctx) {
         for (size_t j = 0; j < p->nfuncs; j++) {
             free(p->funcs[j].name);
             type_free(&p->funcs[j].ret_type);
-            for (int k = 0; k < p->funcs[j].arity && k < 16; k++)
+            for (int k = 0; k < p->funcs[j].arity; k++)
                 type_free(&p->funcs[j].param_types[k]);
+            free(p->funcs[j].param_types);
         }
         free(p->funcs);
         for (size_t j = 0; j < p->nglobals; j++) {
@@ -107,8 +108,18 @@ Package *pkg_find(const PkgContext *ctx, const char *name) {
 }
 
 const PkgFuncExport *pkg_find_func(const Package *pkg, const char *name) {
-    for (size_t i = 0; i < pkg->nfuncs; i++)
-        if (strcmp(pkg->funcs[i].name, name) == 0) return &pkg->funcs[i];
+    for (size_t i = 0; i < pkg->nfuncs; i++) {
+        if (strcmp(pkg->funcs[i].name, name) == 0) {
+            if (pkg->funcs[i].arity > 0 && !pkg->funcs[i].param_types) {
+                pkg->funcs[i].param_types = malloc(pkg->funcs[i].arity * sizeof(Type));
+                if (!pkg->funcs[i].param_types) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                pkg->funcs[i].param_cap = pkg->funcs[i].arity;
+                for (int k = 0; k < pkg->funcs[i].arity; k++)
+                    pkg->funcs[i].param_types[k] = type_default_int();
+            }
+            return &pkg->funcs[i];
+        }
+    }
     return NULL;
 }
 
@@ -364,8 +375,13 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         e->is_extern = fn->is_extern;
         e->loc = fn->loc;
         e->tu = tu;
-        for (int k = 0; k < e->arity && k < 16; k++)
-            e->param_types[k] = type_clone(fn->params.data[k].type);
+        if (e->arity > 0) {
+            e->param_types = malloc(e->arity * sizeof(Type));
+            if (!e->param_types) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            e->param_cap = e->arity;
+            for (int k = 0; k < e->arity; k++)
+                e->param_types[k] = type_clone(fn->params.data[k].type);
+        }
     }
 
     for (size_t i = 0; i < tu->globals.len; i++) {
