@@ -108,18 +108,8 @@ Package *pkg_find(const PkgContext *ctx, const char *name) {
 }
 
 const PkgFuncExport *pkg_find_func(const Package *pkg, const char *name) {
-    for (size_t i = 0; i < pkg->nfuncs; i++) {
-        if (strcmp(pkg->funcs[i].name, name) == 0) {
-            if (pkg->funcs[i].arity > 0 && !pkg->funcs[i].param_types) {
-                pkg->funcs[i].param_types = malloc(pkg->funcs[i].arity * sizeof(Type));
-                if (!pkg->funcs[i].param_types) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-                pkg->funcs[i].param_cap = pkg->funcs[i].arity;
-                for (int k = 0; k < pkg->funcs[i].arity; k++)
-                    pkg->funcs[i].param_types[k] = type_default_int();
-            }
-            return &pkg->funcs[i];
-        }
-    }
+    for (size_t i = 0; i < pkg->nfuncs; i++)
+        if (strcmp(pkg->funcs[i].name, name) == 0) return &pkg->funcs[i];
     return NULL;
 }
 

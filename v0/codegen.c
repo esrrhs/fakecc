@@ -268,7 +268,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[64];
+    IRValue call_args[1024];
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -276,7 +276,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[64];
+    unsigned char call_arg_on_stack[1024];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -2530,10 +2530,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (fn->insts.data[j].op == IR_PARAM) nparams++;
             else break;
         }
-        if (nparams > 64) nparams = 64;
-        int arrive_reg[64];
-        int arrive_is_xmm[64];
-        int stack_off[64];
+        if (nparams > 1024) nparams = 1024;
+        int arrive_reg[1024];
+        int arrive_is_xmm[1024];
+        int stack_off[1024];
         int gp_reg_idx = 0, xmm_reg_idx = 0, stack_arg_idx = 0;
         for (int p = 0; p < nparams; p++) {
             const IRInst *pi = &fn->insts.data[p];
@@ -3548,9 +3548,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 int nargs = inst->call_nargs;
-                if (nargs > 64) nargs = 64;
-                int target_reg[64];
-                int target_is_xmm[64];
+                if (nargs > 1024) nargs = 1024;
+                int target_reg[1024];
+                int target_is_xmm[1024];
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);

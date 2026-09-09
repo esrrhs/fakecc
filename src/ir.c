@@ -9092,8 +9092,14 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * param 0.  Register-class struct returns need no hidden param.
          * Struct formals ≤16 bytes expand into 1–2 register PARAMs; larger
          * (MEMORY) formals expand into stack-only eightbyte PARAMs. */
-        IRValue param_ebs[64][2];
-        int param_nreg[64]; /* >0 reg ebs; 0 MEMORY (by stack copy); -1 scalar */
+        size_t nparams = fd->params.len;
+        IRValue (*param_ebs)[2] = NULL;
+        int *param_nreg = NULL;
+        if (nparams > 0) {
+            param_ebs = malloc(nparams * sizeof(*param_ebs));
+            param_nreg = malloc(nparams * sizeof(*param_nreg));
+            if (!param_ebs || !param_nreg) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        }
         int next_pidx = 0;
         if (irfn.ret_is_struct && irfn.ret_reg_n == 0) {
             irfn.sret_value = new_value(&irfn);
@@ -9238,6 +9244,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 ir_add_dbg_var(&irfn, pname, ploc, IR_DBG_PARAM, pty, slot, pidx);
             }
         }
+        free(param_ebs);
+        free(param_nreg);
 
         /* C99 §6.7.5.3p21: evaluate parameter VLA dimensions on function entry. */
         for (size_t p = 0; p < fd->params.len; p++) {

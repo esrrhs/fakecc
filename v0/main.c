@@ -268,7 +268,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[64];
+    IRValue call_args[1024];
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -276,7 +276,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[64];
+    unsigned char call_arg_on_stack[1024];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -964,7 +964,8 @@ typedef struct PkgContext PkgContext;
 struct PkgFuncExport {
     char *name;
     Type ret_type;
-    Type param_types[16];
+    Type *param_types;
+    int param_cap;
     int arity;
     int is_variadic;
     int is_extern;

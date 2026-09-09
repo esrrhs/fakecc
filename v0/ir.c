@@ -114,7 +114,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[64];
+    IRValue call_args[1024];
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -122,7 +122,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[64];
+    unsigned char call_arg_on_stack[1024];
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -3106,13 +3106,13 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
     const char *chk = is_v ? "__vsnprintf_chk" : "__snprintf_chk";
     IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
     IRValue nval = lower_expr(fn, st, e->u.call.args.data[1]);
-    IRValue args[64];
+    IRValue args[1024];
     int nargs = 0;
     args[nargs++] = dst;
     args[nargs++] = nval;
     if (fold_plain) {
         for (int i = 4; i < (int)e->u.call.args.len; i++) {
-            if (nargs >= 64) {
+            if (nargs >= 1024) {
                 runtime.fprintf(runtime.stderr, "fakecc: too many snprintf_chk arguments\n");
                 runtime.exit(1);
             }
@@ -3130,7 +3130,7 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
     }
     args[nargs++] = szv;
     for (int i = 4; i < (int)e->u.call.args.len; i++) {
-        if (nargs >= 64) {
+        if (nargs >= 1024) {
             runtime.fprintf(runtime.stderr, "fakecc: too many snprintf_chk arguments\n");
             runtime.exit(1);
         }
@@ -3335,12 +3335,12 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
             fold_plain = 1;
     }
     IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
-    IRValue args[64];
+    IRValue args[1024];
     int nargs = 0;
     args[nargs++] = dst;
     if (fold_plain) {
         for (int i = 3; i < (int)e->u.call.args.len; i++) {
-            if (nargs >= 64) {
+            if (nargs >= 1024) {
                 runtime.fprintf(runtime.stderr, "fakecc: too many sprintf_chk arguments\n");
                 runtime.exit(1);
             }
@@ -3358,7 +3358,7 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
     }
     args[nargs++] = szv;
     for (int i = 3; i < (int)e->u.call.args.len; i++) {
-        if (nargs >= 64) {
+        if (nargs >= 1024) {
             runtime.fprintf(runtime.stderr, "fakecc: too many sprintf_chk arguments\n");
             runtime.exit(1);
         }
@@ -5827,8 +5827,8 @@ IRValue hi;
                 return emit_float_const(fn, w, bits, e->loc);
             }
         }
-        IRValue arg_vals[64];
-        unsigned char arg_on_stack[64];
+        IRValue arg_vals[1024];
+        unsigned char arg_on_stack[1024];
         int nargs = 0;
         runtime.memset(arg_on_stack, 0, sizeof(arg_on_stack));
         int is_void_pre = (e->type.kind == TY_VOID);
@@ -5844,7 +5844,7 @@ IRValue hi;
             ret_nreg_pre = sysv_classify_agg(e->type, ret_cls_pre);
         }
         int ret_in_mem_pre = is_ret_struct_pre && ret_nreg_pre == 0;
-        int arg_limit = 64 - (ret_in_mem_pre ? 1 : 0);
+        int arg_limit = 1024 - (ret_in_mem_pre ? 1 : 0);
         int call_used_gp = ret_in_mem_pre ? 1 : 0;
         int call_used_xmm = 0;
         for (int i = 0; i < (int)e->u.call.args.len; i++) {
@@ -5878,7 +5878,7 @@ IRValue hi;
                     for (int k = 0; k < nreg; k++) {
                         if (nargs >= arg_limit) {
                             runtime.fprintf(runtime.stderr, "fakecc: too many call arguments (max %d)\n",
-                                    64);
+                                    1024);
                             runtime.exit(1);
                         }
                         arg_vals[nargs] = ebs[k];
@@ -5895,7 +5895,7 @@ IRValue hi;
                 emit_struct_copy(fn, tmp_addr, av, asz, e->loc);
                 if (nargs >= arg_limit) {
                     runtime.fprintf(runtime.stderr, "fakecc: too many call arguments (max %d)\n",
-                            64);
+                            1024);
                     runtime.exit(1);
                 }
                 arg_vals[nargs] = tmp_addr;
@@ -5906,7 +5906,7 @@ IRValue hi;
             }
             if (nargs >= arg_limit) {
                 runtime.fprintf(runtime.stderr, "fakecc: too many call arguments (max %d)\n",
-                        64);
+                        1024);
                 runtime.exit(1);
             }
             arg_vals[nargs] = av;
@@ -8926,8 +8926,14 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         g_ir_cur_fd = fd;
         IRSymTable st;
         irsymtable_init(&st);
-        IRValue param_ebs[64][2];
-        int param_nreg[64];
+        size_t nparams = fd->params.len;
+        IRValue (*param_ebs)[2] = ((void*)0);
+        int *param_nreg = ((void*)0);
+        if (nparams > 0) {
+            param_ebs = runtime.malloc(nparams * sizeof(*param_ebs));
+            param_nreg = runtime.malloc(nparams * sizeof(*param_nreg));
+            if (!param_ebs || !param_nreg) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        }
         int next_pidx = 0;
         if (irfn.ret_is_struct && irfn.ret_reg_n == 0) {
             irfn.sret_value = new_value(&irfn);
@@ -9049,6 +9055,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 ir_add_dbg_var(&irfn, pname, ploc, IR_DBG_PARAM, pty, slot, pidx);
             }
         }
+        runtime.free(param_ebs);
+        runtime.free(param_nreg);
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
             if (pty.vla_dim) {

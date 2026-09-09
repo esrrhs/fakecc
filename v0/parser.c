@@ -593,7 +593,8 @@ typedef struct PkgContext PkgContext;
 struct PkgFuncExport {
     char *name;
     Type ret_type;
-    Type param_types[16];
+    Type *param_types;
+    int param_cap;
     int arity;
     int is_variadic;
     int is_extern;
@@ -1215,13 +1216,17 @@ static Type eval_expr_type(Parser *p, const Expr *e) {
             for (size_t f = 0; f < p->tu->functions.len; f++) {
                 const FunctionDecl *fn = &p->tu->functions.data[f];
                 if (runtime.strcmp(fn->name, vname) == 0) {
-                    Type *ptys[16];
                     int n = (int)fn->params.len;
-                    if (n > 16) n = 16;
-                    for (int j = 0; j < n; j++)
-                        ptys[j] = &fn->params.data[j].type;
-                    return type_make_func_var(fn->ret_type, n ? ptys : ((void*)0),
-                                              n, fn->is_variadic);
+                    Type **ptys = ((void*)0);
+                    if (n > 0) {
+                        ptys = runtime.malloc(n * sizeof(Type *));
+                        if (!ptys) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                        for (int j = 0; j < n; j++)
+                            ptys[j] = &fn->params.data[j].type;
+                    }
+                    Type res = type_make_func_var(fn->ret_type, ptys, n, fn->is_variadic);
+                    runtime.free(ptys);
+                    return res;
                 }
             }
             if (enum_registry_find_constant(&p->tu->enums, vname)) {
@@ -1932,9 +1937,9 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
             }
             break;
         }
-        if (params.len > 16) {
+        if (params.len > 1024) {
             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
-                   "more than 16 parameters not supported");
+                   "more than %d parameters not supported", 1024);
         }
     }
     return params;
@@ -4453,7 +4458,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.align = 0;
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
-    char *kr_names[16];
+    char *kr_names[1024];
     int nkr = 0;
     (void)kr_names;
     if (!is_grouped_fn) {
@@ -4496,9 +4501,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
             }
             break;
         }
-        if (fn.params.len > 16) {
+        if (fn.params.len > 1024) {
             die_at(fn.loc.file, fn.loc.line, fn.loc.col,
-                   "more than 16 parameters not supported");
+                   "more than %d parameters not supported", 1024);
         }
     } else if (peek(p)->kind == TK_ELLIPSIS) {
         advance(p);
@@ -4512,9 +4517,9 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 die_at(id->loc.file, id->loc.line, id->loc.col,
                        "expected parameter name but got '%s'", id->text);
             }
-            if (nkr >= 16) {
+            if (nkr >= 1024) {
                 die_at(id->loc.file, id->loc.line, id->loc.col,
-                       "more than 16 parameters not supported");
+                       "more than %d parameters not supported", 1024);
             }
             kr_names[nkr++] = xstrdup(id->text);
             advance(p);
@@ -4526,8 +4531,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
     }
     expect_kind(p, TK_RPAREN, "')'");
     if (nkr > 0) {
-        Type kr_ty[16];
-        int kr_set[16];
+        Type kr_ty[1024];
+        int kr_set[1024];
         for (int i = 0; i < nkr; i++) {
             kr_ty[i] = type_default_int();
             kr_set[i] = 0;
@@ -4680,7 +4685,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 16) break;
+                            if (nkr >= 1024) break;
                             kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
@@ -4762,7 +4767,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 16) break;
+                            if (nkr >= 1024) break;
                             kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }
@@ -4832,7 +4837,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                         for (;;) {
                             const Token *id = peek(p);
                             if (id->kind != TK_IDENT) break;
-                            if (nkr >= 16) break;
+                            if (nkr >= 1024) break;
                             kr_names[nkr++] = xstrdup(id->text);
                             advance(p);
                             if (peek(p)->kind == TK_COMMA) { advance(p); continue; }

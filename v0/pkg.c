@@ -589,7 +589,8 @@ typedef struct PkgContext PkgContext;
 struct PkgFuncExport {
     char *name;
     Type ret_type;
-    Type param_types[16];
+    Type *param_types;
+    int param_cap;
     int arity;
     int is_variadic;
     int is_extern;
@@ -683,8 +684,9 @@ void pkg_ctx_free(PkgContext *ctx) {
         for (size_t j = 0; j < p->nfuncs; j++) {
             runtime.free(p->funcs[j].name);
             type_free(&p->funcs[j].ret_type);
-            for (int k = 0; k < p->funcs[j].arity && k < 16; k++)
+            for (int k = 0; k < p->funcs[j].arity; k++)
                 type_free(&p->funcs[j].param_types[k]);
+            runtime.free(p->funcs[j].param_types);
         }
         runtime.free(p->funcs);
         for (size_t j = 0; j < p->nglobals; j++) {
@@ -936,8 +938,13 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         e->is_extern = fn->is_extern;
         e->loc = fn->loc;
         e->tu = tu;
-        for (int k = 0; k < e->arity && k < 16; k++)
-            e->param_types[k] = type_clone(fn->params.data[k].type);
+        if (e->arity > 0) {
+            e->param_types = runtime.malloc(e->arity * sizeof(Type));
+            if (!e->param_types) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            e->param_cap = e->arity;
+            for (int k = 0; k < e->arity; k++)
+                e->param_types[k] = type_clone(fn->params.data[k].type);
+        }
     }
     for (size_t i = 0; i < tu->globals.len; i++) {
         Stmt *s = &tu->globals.data[i];

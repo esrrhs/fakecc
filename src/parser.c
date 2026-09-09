@@ -640,12 +640,15 @@ static Type eval_expr_type(Parser *p, const Expr *e) {
             for (size_t f = 0; f < p->tu->functions.len; f++) {
                 const FunctionDecl *fn = &p->tu->functions.data[f];
                 if (strcmp(fn->name, vname) == 0) {
-                    Type **ptys = malloc(fn->params.len * sizeof(Type *));
-                    if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                     int n = (int)fn->params.len;
-                    for (int j = 0; j < n; j++)
-                        ptys[j] = &fn->params.data[j].type;
-                    Type res = type_make_func_var(fn->ret_type, n ? ptys : NULL, n, fn->is_variadic);
+                    Type **ptys = NULL;
+                    if (n > 0) {
+                        ptys = malloc(n * sizeof(Type *));
+                        if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                        for (int j = 0; j < n; j++)
+                            ptys[j] = &fn->params.data[j].type;
+                    }
+                    Type res = type_make_func_var(fn->ret_type, ptys, n, fn->is_variadic);
                     free(ptys);
                     return res;
                 }
