@@ -38,7 +38,7 @@ test/
 │   │   ├── functions/      # 函数调用、变参（stdarg）与 SysV ABI 传参
 │   │   ├── chars_strings/  # 字符与字符串字面量
 │   │   ├── runtime/        # 内置独立 libc 库功能（stdio/stdlib/string/ctype）
-│   │   ├── torture/        # GCC C-Torture 经典测试套件
+│   │   ├── gcc_torture/        # GCC C-Torture 经典测试套件
 │   │   │   ├── execute/    # GCC Torture 1,653 个执行测试
 │   │   │   │   └── ieee/   # GCC 69 个 IEEE 浮点规范测试
 │   │   │   ├── builtins/   # GCC 30 个标准库 Builtin 函数测试
@@ -54,10 +54,11 @@ test/
 │   ├── run_gdb_e2e.sh      # 真实 GDB 断点与变量追踪测试驱动脚本
 │   └── gcc.c-torture/      # GCC 16.2.0 C-Torture 原始测试套件（参考镜像）
 └── compile/                # 编译器健壮性仅编译测试套件（Compile-Only Suite）
-    ├── *.c                 # 已支持的编译健壮性用例
-    ├── UNSUPPORTED.txt     # 仍待支持：崩溃 / 超时 / 编译拒绝
-    ├── SKIPPED.txt         # 移植循环明确跳过（嵌套函数 / GNU VLS / va_arg_pack / 无预处理器等）
-    └── run_compile.sh      # 健壮性编译驱动脚本（fakecc -c）
+    ├── gcc_compile/          # 已支持的编译健壮性用例
+    │   ├── *.c                 # 已支持的编译健壮性用例
+    │   ├── UNSUPPORTED.txt     # 仍待支持：崩溃 / 超时 / 编译拒绝
+    │   ├── SKIPPED.txt         # 移植循环明确跳过（嵌套函数 / GNU VLS / va_arg_pack / 无预处理器等）
+    │   └── run_compile.sh      # 健壮性编译驱动脚本（fakecc -c）
 ```
 
 ---
@@ -90,7 +91,7 @@ test/
 * **判定机制**：驱动真实的 GDB 调试器加载 `-g` 编译的二进制，依据代码中的 `// BRK` 标记下断点并打出变量值，校验 DWARF 符号与位置列表（Location Lists）正确性。
 
 ### ⑦ 编译器健壮性仅编译测试 (`test/compile/run_compile.sh`)
-* **测试范围**：`test/compile/*.c`（2,003 个 GCC 历史复杂压力用例）。
+* **测试范围**：`test/compile/gcc_compile/*.c`（2,003 个 GCC 历史复杂压力用例）。
 * **判定机制**：对每个用例执行 `fakecc -c $file -o /tmp/xxx.o`，验证 FakeCC 前端与优化 Pass 在面对极其怪异/极端的代码边界时**不会发生崩溃（Crash / 段错误 / ICE）或死循环超时**。
 
 ---
@@ -120,7 +121,7 @@ bash test/e2e/run_shlib_e2e.sh ./build/fakecc -O0
 bash test/e2e/run_gdb_e2e.sh ./build/fakecc
 
 # 4. 运行单文件手动测试
-./build/fakecc test/e2e/cases/torture/execute/gcc_torture_20000112_1.c -o /tmp/test && /tmp/test
+./build/fakecc test/e2e/cases/gcc_torture/execute/gcc_torture_20000112_1.c -o /tmp/test && /tmp/test
 
 # 5. 运行 2,003 个 compile 健壮性编译测试
 bash test/compile/run_compile.sh ./build/fakecc -O0

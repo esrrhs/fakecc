@@ -97,7 +97,7 @@ foreach(lvl O0 O1)
 
     # Compile-only robustness suite (2,003 GCC edge-case tests).
     add_test(NAME compile_${lvl}
-             COMMAND bash ${CMAKE_SOURCE_DIR}/test/compile/run_compile.sh $<TARGET_FILE:fakecc> -${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/compile/gcc_compile/run_compile.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endforeach()
 
