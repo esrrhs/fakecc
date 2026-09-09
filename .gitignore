@@ -1,90 +1,33 @@
-# Prerequisites
-*.d
+# CMake / CTest
+/build/
+/Testing/
 
-# Build directory
-build/
-
-# Object files
+# Compile / link leftovers
 *.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-# DejaGnu drivers inside the vendored GCC c-torture reference
-!test/e2e/gcc.c-torture/**/*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
+*.d
 *.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
 *.so
 *.so.*
-*.dylib
-
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
-
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
-
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
-
-# debug information files
-*.dwo
-
-# Core dumps, logs & errors
-vgcore.*
-*.log
 *.err
+*.log
+vgcore.*
 
-# Build directories & plan documents
-build*/
-*_plan.md
-plan_*.md
+# Python
+__pycache__/
 
-# Generated test manifest (difftest now runs all cases, no curated list needed)
-test/e2e/difftest_manifest.txt
+# Bootstrap binaries (v0/*.c is tracked source)
+/v0/*.o
+/v0/*.err
+/v0/bootstrap_fakecc
+/v0/fakecc-1
+/v0/fakecc-2
+/v0/test_min_build
 
-# Stage 1 bootstrap build products (binaries — sources committed, these are reproducible)
-v0/*.o
-v0/*.err
-v0/bootstrap_fakecc
-v0/fakecc-1
-v0/fakecc-2
-v0/test_min_build
-v0/__pycache__/
-*.o
-bootstrap_test
-all_defines.txt
-calltest
-test_*
-!test/e2e/cases/aggregates/test_retmem_temp.c
+# Ad-hoc binaries and dumps at the repo root
+/test_*
+/bootstrap_test
+/calltest
+/all_defines.txt
 
-Testing/
+# Leftover generated list; difftest now scans test/e2e/cases/
+/test/e2e/difftest_manifest.txt

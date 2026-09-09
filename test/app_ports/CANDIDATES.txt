@@ -1,0 +1,64 @@
+# MultiSource C projects from llvm-test-suite (C only; C++/ObjC dropped).
+# Upstream: https://github.com/llvm/llvm-test-suite
+# Pin:     2b51e7a7aa2653960774eb0251fc896d79e8cc2d
+#
+# These are NOT vendored. Port by hand into test/app_ports/<name>/ when
+# FakeCC is ready for a real multi-file program (package, no preprocessor).
+# Columns: path  .c-count  notes
+
+# --- Applications ---
+MultiSource/Applications/aha                 2    AHA bitwise benchmark
+MultiSource/Applications/Burg               22    bottom-up rewrite system generator
+MultiSource/Applications/ClamAV            103    antivirus engine (large; zlib in-tree)
+MultiSource/Applications/d                  12    D language compiler snapshot
+MultiSource/Applications/JM                 86    H.264 reference codec
+MultiSource/Applications/lemon               2    LALR parser generator (small, good first port)
+MultiSource/Applications/lua                32    Lua 5.x interpreter
+MultiSource/Applications/obsequi            13    combinatorial search
+MultiSource/Applications/oggenc              1    Ogg Vorbis encoder (one huge .c)
+MultiSource/Applications/sgefa               4    Gaussian elimination
+MultiSource/Applications/SIBsim4             4    pairwise sequence alignment
+MultiSource/Applications/siod                5    Scheme interpreter
+MultiSource/Applications/SPASS              51    automated theorem prover
+MultiSource/Applications/spiff              16    file differ
+MultiSource/Applications/sqlite3             2    SQLite amalgamation (huge)
+MultiSource/Applications/treecc             19    tree compiler-compiler
+MultiSource/Applications/viterbi             4    Viterbi decoder
+MultiSource/Applications/ALAC               16    leftover C from mixed C++ ALAC (incomplete)
+
+# --- Benchmarks ---
+MultiSource/Benchmarks/7zip/C               37    7-Zip C codec library (C++ UI dropped)
+MultiSource/Benchmarks/ASCI_Purple          53    SMG2000
+MultiSource/Benchmarks/ASC_Sequoia          17    IRSmk / CrystalMk
+MultiSource/Benchmarks/BitBench              4    bit-manipulation kernels
+MultiSource/Benchmarks/DOE-ProxyApps-C      73    XSBench, RSBench, miniAMR, SimpleMOC, Pathfinder
+MultiSource/Benchmarks/Fhourstones           4    Connect-4 solver
+MultiSource/Benchmarks/Fhourstones-3.1       1    Connect-4 solver v3.1
+MultiSource/Benchmarks/FreeBench            16    four small C benchmarks
+MultiSource/Benchmarks/llubenchmark          1    locality benchmark
+MultiSource/Benchmarks/mafft                29    multiple sequence alignment
+MultiSource/Benchmarks/MallocBench         219    gs / cfrac / espresso / p2c / perl (large)
+MultiSource/Benchmarks/McCat                37    McCat suite
+MultiSource/Benchmarks/mediabench          120    jpeg / mpeg2 / gsm / g721 / adpcm
+MultiSource/Benchmarks/MiBench             211    embedded benchmark suite
+MultiSource/Benchmarks/nbench                5    BYTE UNIX benchmark
+MultiSource/Benchmarks/NPB-serial            7    NAS parallel benchmarks (serial)
+MultiSource/Benchmarks/Olden                36    pointer-intensive kernels
+MultiSource/Benchmarks/OptimizerEval         6    optimizer microbenchmarks
+MultiSource/Benchmarks/Prolangs-C          284    compiler / CAD / unix-tbl (largest C set)
+MultiSource/Benchmarks/Ptrdist              24    pointer-distance kernels
+MultiSource/Benchmarks/Rodinia               9    GPU-style C kernels
+MultiSource/Benchmarks/SciMark2-C           10    SciMark 2.0
+MultiSource/Benchmarks/sim                   1    DNA sequence similarity
+MultiSource/Benchmarks/Trimaran             10    enc-3des / enc-md5 / netbench
+MultiSource/Benchmarks/TSVC                 72    vectorization suite (TSVC)
+MultiSource/Benchmarks/VersaBench           50    bmm / dbms / 8b10b / beamformer / ecbdes
+
+# --- Small MultiSource tests ---
+MultiSource/UnitTests/Float                  2    FP rounding
+MultiSource/UnitTests/Mips                   4    Mips16-oriented (not x86)
+MultiSource/Examples/MultipleResults         1    example
+MultiSource/Examples/Noisy                   1    example
+
+# Suggested first ports (small, real programs, little ISA):
+#   lemon, aha, BitBench, llubenchmark, Fhourstones-3.1, sim

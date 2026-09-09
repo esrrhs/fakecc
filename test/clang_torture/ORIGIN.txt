@@ -1,0 +1,18 @@
+Single-file C originals from LLVM Test Suite (llvm-test-suite).
+Upstream: https://github.com/llvm/llvm-test-suite
+Pinned: 2b51e7a7aa2653960774eb0251fc896d79e8cc2d (main, 2026-09-09)
+
+Reference copy only — NOT part of fakecc's e2e / compile / CTest suites.
+Port into test/e2e/cases/ (execute) or test/compile/ the same way
+gcc.c-torture was harvested.
+
+Kept: SingleSource C tests (.c, headers, .reference_output).
+Dropped: C++ / ObjC / EH, gcc-c-torture (already harvested from GCC),
+and all MultiSource trees (see test/app_ports/CANDIDATES.txt).
+
+Layout:
+  UnitTests/     - self-contained C unit tests
+  Benchmarks/    - single-file C benchmarks
+  Regression/C/  - LLVM C regression tests (no gcc-c-torture)
+
+License: Apache-2.0 WITH LLVM-exception (see LICENSE.TXT).

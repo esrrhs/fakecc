@@ -52,11 +52,20 @@ test/
 │   ├── run_multi_e2e.sh    # 多文件编译与静态链接测试驱动脚本
 │   ├── run_shlib_e2e.sh    # 动态共享库（.so）链接测试驱动脚本
 │   ├── run_gdb_e2e.sh      # 真实 GDB 断点与变量追踪测试驱动脚本
-└── compile/                # 编译器健壮性仅编译测试套件（Compile-Only Suite）
-    ├── gcc_compile/          # 已支持的编译健壮性用例
-    │   ├── *.c                 # 已支持的编译健壮性用例
-    │   ├── UNSUPPORTED.txt     # 仍待支持：崩溃 / 超时 / 编译拒绝
-    │   └── run_compile.sh      # 健壮性编译驱动脚本（fakecc -c）
+├── compile/                # 编译器健壮性仅编译测试套件（Compile-Only Suite）
+│   ├── gcc_compile/          # 已支持的编译健壮性用例
+│   │   ├── *.c                 # 已支持的编译健壮性用例
+│   │   ├── UNSUPPORTED.txt     # 仍待支持：崩溃 / 超时 / 编译拒绝
+│   │   └── run_compile.sh      # 健壮性编译驱动脚本（fakecc -c）
+├── clang_torture/          # LLVM Test Suite 单文件 C 原文（移植参考，不参与 CI）
+│   ├── LICENSE.TXT             # Apache-2.0 WITH LLVM-exception
+│   ├── ORIGIN.txt
+│   ├── UnitTests/              # 自包含 C unit tests
+│   ├── Benchmarks/             # 单文件 C benchmarks
+│   └── Regression/C/           # LLVM C regression（不含 gcc-c-torture）
+└── app_ports/              # 第三方软件手工移植（多文件 C 程序）
+    ├── README.md
+    └── CANDIDATES.txt          # llvm-test-suite MultiSource C 工程清单（不进仓原文）
 ```
 
 ---
@@ -91,6 +100,14 @@ test/
 ### ⑦ 编译器健壮性仅编译测试 (`test/compile/run_compile.sh`)
 * **测试范围**：`test/compile/gcc_compile/*.c`（2,003 个 GCC 历史复杂压力用例）。
 * **判定机制**：对每个用例执行 `fakecc -c $file -o /tmp/xxx.o`，验证 FakeCC 前端与优化 Pass 在面对极其怪异/极端的代码边界时**不会发生崩溃（Crash / 段错误 / ICE）或死循环超时**。
+
+### ⑧ LLVM 单文件 C 原文（`test/clang_torture/`）
+* **用途**：对照 `gcc.c-torture` 的 execute / compile 收获方式，把 LLVM Test Suite 的单文件 C 移植进 FakeCC；**不参与 CI / CTest**。
+* **范围**：见 `ORIGIN.txt`。`UnitTests/`、`Benchmarks/`、`Regression/C/`（不含 gcc-c-torture）。
+
+### ⑨ 第三方软件手工移植（`test/app_ports/`）
+* **用途**：把真实多文件 C 程序改成 FakeCC package 形态后在此回归；**未接入前不参与 CI**。
+* **候选**：`CANDIDATES.txt` 列出 llvm-test-suite MultiSource 的 C 工程（原文不进仓）。
 
 ---
 
