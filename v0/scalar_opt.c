@@ -114,7 +114,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[64];
+    IRValue *call_args;
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -122,7 +122,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[64];
+    unsigned char *call_arg_on_stack;
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -1056,7 +1056,7 @@ void scalar_renumber(IRFunction *fn) {
         if (inst->op == IR_CALL) {
             if (inst->call_callee >= max_vid) max_vid = inst->call_callee + 1;
             for (int k = 0; k < inst->call_nargs; k++) {
-                if (k < 64 && inst->call_args[k] >= max_vid)
+                if (k < 1024 && inst->call_args[k] >= max_vid)
                     max_vid = inst->call_args[k] + 1;
             }
         }
@@ -1079,7 +1079,7 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->call_callee >= 0 && inst->call_callee < max_vid && map[inst->call_callee] == -1)
                 map[inst->call_callee] = next++;
             for (int k = 0; k < inst->call_nargs; k++) {
-                if (k >= 64) break;
+                if (k >= 1024) break;
                 int v = inst->call_args[k];
                 if (v >= 0 && v < max_vid && map[v] == -1)
                     map[v] = next++;
@@ -1100,7 +1100,7 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->call_callee >= 0 && inst->call_callee < max_vid)
                 inst->call_callee = map[inst->call_callee];
             for (int k = 0; k < inst->call_nargs; k++) {
-                if (k >= 64) break;
+                if (k >= 1024) break;
                 int v = inst->call_args[k];
                 if (v >= 0 && v < max_vid) inst->call_args[k] = map[v];
             }

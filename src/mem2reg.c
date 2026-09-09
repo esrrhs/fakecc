@@ -169,6 +169,8 @@ static void make_dbg_value(IRInst *inst, int var, IRValue val) {
     inst->b = -1;
     inst->imm = var;
     inst->call_name = NULL;
+    inst->call_args = NULL;
+    inst->call_arg_on_stack = NULL;
     inst->call_nargs = 0;
 }
 
@@ -235,6 +237,8 @@ void mem2reg_writeback(
                         copy.imm = 0;
                         copy.loc = phi->loc;
                         copy.call_name = NULL;
+                        copy.call_args = NULL;
+                        copy.call_arg_on_stack = NULL;
                         copy.call_nargs = 0;
                         copy.width = (phi->dst < fn->value_meta_cap && fn->value_width) ? fn->value_width[phi->dst] : 8;
                         copy.is_unsigned = (phi->dst < fn->value_meta_cap && fn->value_is_unsigned) ? fn->value_is_unsigned[phi->dst] : 0;

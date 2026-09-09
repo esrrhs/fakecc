@@ -2,6 +2,7 @@
 #define FAKECC_PKG_H
 
 #include "fakecc/ast.h"
+#include <stddef.h>
 #include "fakecc/common.h"
 
 /* Package loader: directory-per-package, Go-style `import name;`.
@@ -16,7 +17,8 @@ typedef struct PkgContext PkgContext;
 typedef struct {
     char *name;
     Type ret_type;          /* cloned */
-    Type param_types[16];   /* cloned; unused slots zeroed */
+    Type *param_types;       /* cloned; dynamically allocated */
+    int param_cap;         /* capacity of param_types array */
     int arity;
     int is_variadic;
     int is_extern;          /* declaration-only */

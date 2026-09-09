@@ -97,8 +97,11 @@ typedef enum {
 
 /* Maximum arguments to IR_CALL.  SysV packs small aggregates into 1–2
  * register args and MEMORY-class aggregates into one stack eightbyte per
- * 8 bytes of payload, so a single large struct can consume many slots. */
-#define IR_CALL_MAX_ARGS 64
+ * 8 bytes of payload, so a single large struct can consume many slots.
+ * Kept in sync with MAX_PARAMS (common.h).  Args are heap-allocated on the
+ * IR_CALL itself — do NOT embed [IR_CALL_MAX_ARGS] in IRInst (that made every
+ * instruction ~5KB and ballooned compile time across the whole suite). */
+#define IR_CALL_MAX_ARGS 1024
 
 typedef struct {
     IROpcode op;
@@ -108,7 +111,8 @@ typedef struct {
     SourceLoc loc;
     /* IR_CALL only: callee name + argument SSA values.  NULL for other ops. */
     char    *call_name;
-    IRValue  call_args[IR_CALL_MAX_ARGS];
+    /* IR_CALL only: heap array of length call_nargs (NULL if call_nargs==0). */
+    IRValue *call_args;
     int      call_nargs;
     /* IR_CALL only: for indirect calls, the SSA value holding the function
      * pointer (lowered from the callee expression).  -1 for named calls. */
@@ -128,8 +132,8 @@ typedef struct {
      * assign a GP/XMM register even if one is free).  For IR_CALL, see also
      * call_arg_on_stack[]. */
     int      force_stack;
-    /* IR_CALL only: per-arg force_stack (MEMORY-class aggregate eightbytes). */
-    unsigned char call_arg_on_stack[IR_CALL_MAX_ARGS];
+    /* IR_CALL only: per-arg force_stack; heap array length call_nargs, or NULL. */
+    unsigned char *call_arg_on_stack;
     /* Slice 7b/c: for IR_ALLOCA only. Total bytes reserved on the stack when
      * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
      * mem2reg promotes get 0 here (they never reach codegen anyway). */

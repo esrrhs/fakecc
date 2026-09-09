@@ -114,7 +114,7 @@ struct IRInst {
     int64_t imm;
     SourceLoc loc;
     char *call_name;
-    IRValue call_args[64];
+    IRValue *call_args;
     int call_nargs;
     IRValue call_callee;
     int width;
@@ -122,7 +122,7 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
-    unsigned char call_arg_on_stack[64];
+    unsigned char *call_arg_on_stack;
     int alloca_bytes;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
@@ -974,6 +974,8 @@ static void make_dbg_value(IRInst *inst, int var, IRValue val) {
     inst->b = -1;
     inst->imm = var;
     inst->call_name = ((void*)0);
+    inst->call_args = ((void*)0);
+    inst->call_arg_on_stack = ((void*)0);
     inst->call_nargs = 0;
 }
 void mem2reg_writeback(
@@ -1024,6 +1026,8 @@ void mem2reg_writeback(
                         copy.imm = 0;
                         copy.loc = phi->loc;
                         copy.call_name = ((void*)0);
+                        copy.call_args = ((void*)0);
+                        copy.call_arg_on_stack = ((void*)0);
                         copy.call_nargs = 0;
                         copy.width = (phi->dst < fn->value_meta_cap && fn->value_width) ? fn->value_width[phi->dst] : 8;
                         copy.is_unsigned = (phi->dst < fn->value_meta_cap && fn->value_is_unsigned) ? fn->value_is_unsigned[phi->dst] : 0;

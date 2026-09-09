@@ -54,7 +54,8 @@ typedef struct {
     int is_unprototyped;
     int is_external;   /* 1 = declared `extern`, no definition in this TU */
     Type ret_type;
-    Type param_types[16];
+    Type *param_types;
+    int param_cap; // capacity of param_types array
     SourceLoc loc;
 } FunSig;
 
@@ -69,7 +70,21 @@ typedef struct {
 static FunTable g_sema_ft;
 
 static void ftab_init(FunTable *t) { t->data = NULL; t->len = 0; t->cap = 0; }
-static void ftab_free(FunTable *t) { free(t->data); t->data = NULL; t->len = 0; t->cap = 0; }
+static void ftab_free(FunTable *t) {
+    if (t->data) {
+        for (size_t i = 0; i < t->len; i++) {
+            if (t->data[i].param_types) {
+                for (int k = 0; k < t->data[i].arity; k++)
+                    type_free(&t->data[i].param_types[k]);
+                free(t->data[i].param_types);
+            }
+        }
+        free(t->data);
+        t->data = NULL;
+    }
+    t->len = 0;
+    t->cap = 0;
+}
 
 static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     if (t->len >= t->cap) {
@@ -85,8 +100,15 @@ static void ftab_push(FunTable *t, const FunctionDecl *fn) {
     s->is_external = fn->is_extern;
     s->ret_type = fn->ret_type;
     s->loc = fn->loc;
-    for (int i = 0; i < s->arity && i < 16; i++)
-        s->param_types[i] = fn->params.data[i].type;
+    s->param_types = NULL;
+    s->param_cap = 0;
+    if (s->arity > 0) {
+        s->param_types = malloc(s->arity * sizeof(Type));
+        if (!s->param_types) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        s->param_cap = s->arity;
+        for (int i = 0; i < s->arity; i++)
+            s->param_types[i] = type_clone(fn->params.data[i].type);
+    }
 }
 
 static const FunSig *ftab_find(const FunTable *t, const char *name) {
@@ -127,8 +149,15 @@ static void ftab_push_export(FunTable *t, const PkgFuncExport *ex) {
     s->is_external = 1;
     s->ret_type = ex->ret_type;
     s->loc = ex->loc;
-    for (int i = 0; i < s->arity && i < 16; i++)
-        s->param_types[i] = ex->param_types[i];
+    s->param_types = NULL;
+    s->param_cap = 0;
+    if (s->arity > 0) {
+        s->param_types = malloc(s->arity * sizeof(Type));
+        if (!s->param_types) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        s->param_cap = s->arity;
+        for (int i = 0; i < s->arity; i++)
+            s->param_types[i] = type_clone(ex->param_types[i]);
+    }
 }
 
 /* Ensure an extern FunctionDecl exists so ir.c's g_ir_tu scan treats calls
@@ -150,7 +179,7 @@ static void tu_ensure_extern_func(TranslationUnit *tu, const PkgFuncExport *ex) 
     fn->name = xstrdup(ex->name);
     fn->ret_type = type_clone(ex->ret_type);
     param_array_init(&fn->params);
-    for (int i = 0; i < ex->arity && i < 16; i++)
+    for (int i = 0; i < ex->arity; i++)
         param_array_push(&fn->params, "", type_clone(ex->param_types[i]),
                          ex->loc);
     fn->loc = ex->loc;
@@ -633,13 +662,24 @@ static void ftab_import_pkg(TranslationUnit *tu, Package *pkg) {
 static void ftab_fill_extern(const FunSig *ex, const FunctionDecl *fn) {
     size_t idx = (size_t)(ex - g_sema_ft.data);
     g_sema_ft.data[idx].is_external = 0;
-    g_sema_ft.data[idx].arity = (int)fn->params.len;
     g_sema_ft.data[idx].is_variadic = fn->is_variadic;
     g_sema_ft.data[idx].is_unprototyped = fn->is_unprototyped;
     g_sema_ft.data[idx].ret_type = fn->ret_type;
     g_sema_ft.data[idx].loc = fn->loc;
-    for (int k = 0; k < g_sema_ft.data[idx].arity && k < 16; k++)
-        g_sema_ft.data[idx].param_types[k] = fn->params.data[k].type;
+    int new_arity = (int)fn->params.len;
+    if (g_sema_ft.data[idx].param_types) {
+        for (int k = 0; k < g_sema_ft.data[idx].arity; k++)
+            type_free(&g_sema_ft.data[idx].param_types[k]);
+    }
+    if (new_arity > g_sema_ft.data[idx].param_cap) {
+        free(g_sema_ft.data[idx].param_types);
+        g_sema_ft.data[idx].param_types = malloc(new_arity * sizeof(Type));
+        if (!g_sema_ft.data[idx].param_types) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        g_sema_ft.data[idx].param_cap = new_arity;
+    }
+    g_sema_ft.data[idx].arity = new_arity;
+    for (int k = 0; k < new_arity; k++)
+        g_sema_ft.data[idx].param_types[k] = type_clone(fn->params.data[k].type);
 }
 
 /* Must stay tiny: Stage 0 miscompiles pointer stores inside huge frames. */

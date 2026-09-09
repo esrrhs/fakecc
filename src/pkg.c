@@ -71,8 +71,9 @@ void pkg_ctx_free(PkgContext *ctx) {
         for (size_t j = 0; j < p->nfuncs; j++) {
             free(p->funcs[j].name);
             type_free(&p->funcs[j].ret_type);
-            for (int k = 0; k < p->funcs[j].arity && k < 16; k++)
+            for (int k = 0; k < p->funcs[j].arity; k++)
                 type_free(&p->funcs[j].param_types[k]);
+            free(p->funcs[j].param_types);
         }
         free(p->funcs);
         for (size_t j = 0; j < p->nglobals; j++) {
@@ -364,8 +365,13 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         e->is_extern = fn->is_extern;
         e->loc = fn->loc;
         e->tu = tu;
-        for (int k = 0; k < e->arity && k < 16; k++)
-            e->param_types[k] = type_clone(fn->params.data[k].type);
+        if (e->arity > 0) {
+            e->param_types = malloc(e->arity * sizeof(Type));
+            if (!e->param_types) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            e->param_cap = e->arity;
+            for (int k = 0; k < e->arity; k++)
+                e->param_types[k] = type_clone(fn->params.data[k].type);
+        }
     }
 
     for (size_t i = 0; i < tu->globals.len; i++) {
