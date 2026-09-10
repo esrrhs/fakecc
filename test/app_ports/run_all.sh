@@ -3,10 +3,11 @@
 #
 # Each port lives in test/app_ports/<name>/ and must provide:
 #   tests/run.sh   — builds + runs that port's test; exits non-zero on failure.
-# It may optionally accept a fakecc path as its first argument.
+# It may optionally accept a fakecc path as its first argument and an optimization flag as second.
 #
-# Usage: run_all.sh [path-to-fakecc]
+# Usage: run_all.sh [path-to-fakecc] [OPT]
 #   path-to-fakecc   compiler binary to use (default: ./build/fakecc)
+#   OPT              optimization flag to pass to fakecc (default: -O1)
 #
 # The runner aggregates the PASS/FAIL of every port and exits non-zero if any
 # of them failed, so it can be wired into CI as a single step.
@@ -15,6 +16,7 @@ set -uo pipefail
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$( cd "${SCRIPT_DIR}/../.." &> /dev/null && pwd )"
 FAKECC="${1:-${PROJECT_ROOT}/build/fakecc}"
+OPT="${2:--O1}"
 
 if [ ! -x "${FAKECC}" ]; then
     echo "run_app_ports: fakecc not found at ${FAKECC}"
@@ -33,7 +35,7 @@ for port in "${SCRIPT_DIR}"/*/; do
 
     PORT_COUNT=$(( PORT_COUNT + 1 ))
     echo "=== app port: ${name} ==="
-    if bash "$run_script" "${FAKECC}"; then
+    if bash "$run_script" "${FAKECC}" "${OPT}"; then
         :
     else
         echo "FAIL app port: ${name}"

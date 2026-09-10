@@ -70,6 +70,16 @@ add_executable(test_pkg unit/test_pkg.c)
 target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
 add_test(NAME test_pkg COMMAND test_pkg)
 
+# --- app_ports tests ---
+# Each application port runs once per optimization level to cover both the
+# -O0 (scalars in memory) and -O1 (SSA) compiler paths.
+foreach(lvl O0 O1)
+    add_test(NAME app_ports_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/app_ports/run_all.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endforeach()
+
+
 # --- e2e tests ---
 #
 # Each suite runs once per optimization level.  -O0 keeps scalars in memory and

@@ -81,9 +81,9 @@ jobs:
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
 
-      # -O2 only speeds Stage 0 (gcc-built fakecc compiling v0/*.c).  It does
-      # not change fakecc-1's codegen, so the fixed-point comparison is the
-      # same as an unoptimized Stage 0.
+      - # -O2 only speeds Stage 0 (gcc-built fakecc compiling v0/*.c).  It does
+        # not change fakecc-1's codegen, so the fixed-point comparison is the
+        # same as an unoptimized Stage 0.
       - name: Build stage 0
         run: |
           cmake -S . -B build -DCMAKE_C_FLAGS="-O2"
@@ -106,7 +106,7 @@ jobs:
 
   # A fixed point alone does not prove correctness — a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
-  # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are
+  # with the self-hosted binary.  -O0 and -O1 differ in whether scalars in whether scalars are
   # promoted out of memory, so they stay separate matrix legs.
   bootstrap-suite:
     name: bootstrap · ${{ matrix.label }}
@@ -166,7 +166,8 @@ jobs:
               bash test/e2e/run_gdb_e2e.sh v0/fakecc-1
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O0
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O1
-              bash test/app_ports/run_all.sh v0/fakecc-1
+              bash test/app_ports/run_all.sh v0/fakecc-1 -O0
+              bash test/app_ports/run_all.sh v0/fakecc-1 -O1
               ;;
             *)
               echo "unknown suite: $SUITE" >&2

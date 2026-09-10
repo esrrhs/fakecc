@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build and run the genann FakeCC port test.
-# Usage: run.sh [path-to-fakecc]   (defaults to ./build/fakecc)
+# Usage: run.sh [path-to-fakecc] [OPT]
+#   path-to-fakecc   compiler binary to use (default: ./build/fakecc)
+#   OPT              optimization flag to pass to fakecc (default: -O1)
 set -u
 
 # Directory of this script.
@@ -10,6 +12,7 @@ PROJECT_ROOT="$( cd "${SCRIPT_DIR}/../../../.." &> /dev/null && pwd )"
 
 # fakecc binary: $1, else the local build tree, else the self-hosted stage-2.
 FAKECC="${1:-${PROJECT_ROOT}/build/fakecc}"
+OPT="${2:--O1}"
 if [ ! -x "${FAKECC}" ]; then
     echo "FAIL genann: fakecc not found at ${FAKECC}"
     exit 1
@@ -20,7 +23,7 @@ TEST_SRC="${SCRIPT_DIR}/test_genann.c"
 OUTPUT="${SCRIPT_DIR}/test_genann.bin"
 
 # genann links against -lc -lm (rand/exp/tanh come from the system libc).
-if ! "${FAKECC}" "${GEN_ANN_SRC}" "${TEST_SRC}" -o "${OUTPUT}" -lc -lm; then
+if ! "${FAKECC}" "${OPT}" "${GEN_ANN_SRC}" "${TEST_SRC}" -o "${OUTPUT}" -lc -lm; then
     echo "FAIL genann: compilation failed"
     exit 1
 fi
