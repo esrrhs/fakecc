@@ -81,10 +81,11 @@ v0/fakecc-2
 v0/test_min_build
 v0/__pycache__/
 *.o
+*.bin
 bootstrap_test
 all_defines.txt
 calltest
-test_*
+/test_*
 !test/e2e/cases/aggregates/test_retmem_temp.c
 
 Testing/
