@@ -10,9 +10,6 @@ extern double sin(double x);
 extern double fabs(double x);
 extern int rand(void);
 extern void srand(unsigned int seed);
-extern runtime.FILE *fopen(const char *path, const char *mode);
-extern int fclose(runtime.FILE *stream);
-extern int remove(const char *path);
 
 /* Minimal test helpers (exit-code only; mirrors genann's minctest.h). */
 static int lfails = 0;
@@ -311,6 +308,7 @@ int main(void) {
         if (!first) {
             runtime.printf("FAIL: persist: failed to init ann\n");
             runtime.fclose(out);
+            runtime.remove("persist.txt");
             return 1;
         }
         genann.genann_write(first, out);
@@ -320,6 +318,7 @@ int main(void) {
         if (!in) {
             runtime.printf("FAIL: persist: failed to open file for reading\n");
             genann.genann_free(first);
+            runtime.remove("persist.txt");
             return 1;
         }
         genann.genann *second = genann.genann_read(in);
@@ -327,6 +326,7 @@ int main(void) {
         if (!second) {
             runtime.printf("FAIL: persist: failed to read ann\n");
             genann.genann_free(first);
+            runtime.remove("persist.txt");
             return 1;
         }
 
@@ -338,6 +338,7 @@ int main(void) {
             runtime.printf("FAIL: persist: structural mismatch after persist\n");
             genann.genann_free(first);
             genann.genann_free(second);
+            runtime.remove("persist.txt");
             return 1;
         }
         int i;
@@ -354,7 +355,63 @@ int main(void) {
         genann.genann_free(second);
         runtime.remove("persist.txt");
     }
+// Test 10: Tanh activation function
+{
+    double i = -20;
+    const double max = 20;
+    const double d = 0.001;
+    while (i < max) {
+        double val = genann.genann_act_tanh(0, i);
+        double expected = tanh(i);
+        if (fabs(val - expected) > 0.000001) {
+            runtime.printf("FAIL: tanh: mismatch at i=%f, got %f, expected %f\n", i, val, expected);
+            return 1;
+        }
+        i += d;
+    }
+}
 
+// Test 11: Relu activation function
+{
+    double i = -20;
+    const double max = 20;
+    const double d = 0.001;
+    while (i < max) {
+        double val = genann.genann_act_relu(0, i);
+        double expected = (i > 0) ? i : 0;
+        if (fabs(val - expected) > 0.000001) {
+            runtime.printf("FAIL: relu: mismatch at i=%f, got %f, expected %f\n", i, val, expected);
+            return 1;
+        }
+        i += d;
+    }
+}
+// Test 12: Train constant function with tanh activation
+{
+    genann.genann *ann = genann.genann_init(1, 1, 2, 1);
+    if (!ann) {
+        runtime.printf("FAIL: train_const_tanh: failed to init ann\n");
+        return 1;
+    }
+    genann.genann_randomize(ann);
+    ann->activation_hidden = genann.genann_act_tanh;
+    ann->activation_output = genann.genann_act_linear;
+    double input[3][1] = {{0.0}, {1.0}, {-1.0}};
+    double target[3] = {0.5, 0.5, 0.5};
+    int i, j;
+    for (i = 0; i < 2000; ++i)
+        for (j = 0; j < 3; ++j)
+            genann.genann_train(ann, input[j], target + j, 0.1);
+    for (i = 0; i < 3; ++i) {
+        double out = *genann.genann_run(ann, input[i]);
+        if (fabs(out - 0.5) > 0.05) {
+            runtime.printf("FAIL: train_const_tanh: expected 0.5 for input %f, got %f\n", input[i][0], out);
+            genann.genann_free(ann);
+            return 1;
+        }
+    }
+    genann.genann_free(ann);
+}
 // All tests passed
     return lfails != 0;
 }
