@@ -173,6 +173,16 @@ static double genann_act_derivative(genann_actfun act, double y) {
     return y * (1.0 - y);
 }
 
+/* Sets weights randomly. Called by init. */
+void genann_randomize(genann *ann) {
+    int i;
+    for (i = 0; i < ann->total_weights; ++i) {
+        double r = ((double)rand()) / RAND_MAX;
+        /* Sets weights from -0.5 to 0.5. */
+        ann->weight[i] = r - 0.5;
+    }
+}
+
 /* Creates and returns a new ann. */
 genann *genann_init(int inputs, int hidden_layers, int hidden, int outputs) {
     if (hidden_layers < 0) return 0;
