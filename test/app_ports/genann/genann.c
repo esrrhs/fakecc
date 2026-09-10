@@ -291,7 +291,7 @@ double const *genann_run(genann const *ann, double const *inputs) {
             for (k = 0; k < ann->inputs; ++k) {
                 sum += *w++ * i[k];
             }
-            *o++ = genann_act_output(ann, sum);
+            *o++ = ann->activation_output(ann, sum);
         }
 
         return ret;
@@ -303,7 +303,7 @@ double const *genann_run(genann const *ann, double const *inputs) {
         for (k = 0; k < ann->inputs; ++k) {
             sum += *w++ * i[k];
         }
-        *o++ = genann_act_hidden(ann, sum);
+        *o++ = ann->activation_hidden(ann, sum);
     }
 
     i += ann->inputs;
@@ -315,7 +315,7 @@ double const *genann_run(genann const *ann, double const *inputs) {
             for (k = 0; k < ann->hidden; ++k) {
                 sum += *w++ * i[k];
             }
-            *o++ = genann_act_hidden(ann, sum);
+            *o++ = ann->activation_hidden(ann, sum);
         }
 
         i += ann->hidden;
@@ -329,7 +329,7 @@ double const *genann_run(genann const *ann, double const *inputs) {
         for (k = 0; k < ann->hidden; ++k) {
             sum += *w++ * i[k];
         }
-        *o++ = genann_act_output(ann, sum);
+        *o++ = ann->activation_output(ann, sum);
     }
 
     /* Sanity check that we used all weights and wrote all outputs. */
