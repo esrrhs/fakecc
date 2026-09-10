@@ -234,6 +234,7 @@ genann *genann_init(int inputs, int hidden_layers, int hidden, int outputs) {
 genann *genann_read(runtime.FILE *in) {
     int inputs, hidden_layers, hidden, outputs;
     int rc;
+    char token[64];
 
     runtime.errno = 0;
     rc = runtime.fscanf(in, "%d %d %d %d", &inputs, &hidden_layers, &hidden, &outputs);
@@ -248,13 +249,13 @@ genann *genann_read(runtime.FILE *in) {
     int i;
     for (i = 0; i < ann->total_weights; ++i) {
         runtime.errno = 0;
-        rc = runtime.fscanf(in, " %le", ann->weight + i);
+        rc = runtime.fscanf(in, " %63s", token);
         if (rc < 1 || runtime.errno != 0) {
             runtime.perror("fscanf");
             genann_free(ann);
-
             return 0;
         }
+        ann->weight[i] = runtime.strtod(token, NULL);
     }
 
     return ann;

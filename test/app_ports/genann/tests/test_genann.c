@@ -10,6 +10,9 @@ extern double sin(double x);
 extern double fabs(double x);
 extern int rand(void);
 extern void srand(unsigned int seed);
+extern runtime.FILE *fopen(const char *path, const char *mode);
+extern int fclose(runtime.FILE *stream);
+extern int remove(const char *path);
 
 /* Minimal test helpers (exit-code only; mirrors genann's minctest.h). */
 static int lfails = 0;
@@ -297,6 +300,61 @@ int main(void) {
         }
     }
 
-    // All tests passed
+    // Test 9: Persist (similar to genann's persist() test)
+    {
+        runtime.FILE *out = runtime.fopen("persist.txt", "w");
+        if (!out) {
+            runtime.printf("FAIL: persist: failed to open file for writing\n");
+            return 1;
+        }
+        genann.genann *first = genann.genann_init(10, 2, 5, 2);
+        if (!first) {
+            runtime.printf("FAIL: persist: failed to init ann\n");
+            runtime.fclose(out);
+            return 1;
+        }
+        genann.genann_write(first, out);
+        runtime.fclose(out);
+
+        runtime.FILE *in = runtime.fopen("persist.txt", "r");
+        if (!in) {
+            runtime.printf("FAIL: persist: failed to open file for reading\n");
+            genann.genann_free(first);
+            return 1;
+        }
+        genann.genann *second = genann.genann_read(in);
+        runtime.fclose(in);
+        if (!second) {
+            runtime.printf("FAIL: persist: failed to read ann\n");
+            genann.genann_free(first);
+            return 1;
+        }
+
+        if (first->inputs != second->inputs ||
+            first->hidden_layers != second->hidden_layers ||
+            first->hidden != second->hidden ||
+            first->outputs != second->outputs ||
+            first->total_weights != second->total_weights) {
+            runtime.printf("FAIL: persist: structural mismatch after persist\n");
+            genann.genann_free(first);
+            genann.genann_free(second);
+            return 1;
+        }
+        int i;
+        for (i = 0; i < first->total_weights; ++i) {
+            if (fabs(first->weight[i] - second->weight[i]) > 0.000001) {
+                runtime.printf("FAIL: persist: weight mismatch at index %d\n", i);
+                genann.genann_free(first);
+                genann.genann_free(second);
+                runtime.remove("persist.txt");
+                return 1;
+            }
+        }
+        genann.genann_free(first);
+        genann.genann_free(second);
+        runtime.remove("persist.txt");
+    }
+
+// All tests passed
     return lfails != 0;
 }
