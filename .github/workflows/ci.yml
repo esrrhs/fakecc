@@ -166,6 +166,8 @@ jobs:
               bash test/e2e/run_gdb_e2e.sh v0/fakecc-1
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O0
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O1
+              bash test/app_ports/run_all.sh v0/fakecc-1 -O0
+              bash test/app_ports/run_all.sh v0/fakecc-1 -O1
               ;;
             *)
               echo "unknown suite: $SUITE" >&2
