@@ -43,6 +43,11 @@ for port in "${SCRIPT_DIR}"/*/; do
     fi
 done
 
+if [ "$PORT_COUNT" -eq 0 ]; then
+    echo "app_ports: no ports found"
+    exit 1
+fi
+
 echo ""
 echo "app_ports: ran ${PORT_COUNT} port(s)"
 if [ "${FAIL}" = "0" ]; then

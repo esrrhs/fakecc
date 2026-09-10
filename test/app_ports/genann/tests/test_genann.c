@@ -4,9 +4,9 @@ package main;
 import genann;
 import runtime;
 
-extern double exp(double x);
+
 extern double tanh(double x);
-extern double sin(double x);
+
 extern double fabs(double x);
 extern int rand(void);
 extern void srand(unsigned int seed);
@@ -19,12 +19,7 @@ static void lequal(long long a, long long b) {
         runtime.printf("assertion failed: %lld != %lld\n", a, b);
     }
 }
-static void lfequal(double a, double b) {
-    if (fabs(a - b) > 0.001) {
-        ++lfails;
-        runtime.printf("assertion failed: %f != %f\n", a, b);
-    }
-}
+
 
 int main(void) {
     srand(100); // Repeatable seed
@@ -356,7 +351,7 @@ int main(void) {
         runtime.remove("/tmp/genann_persist.txt");
     }
 // Test 10: Train to copy first input with relu hidden activation
-{
+    {
     genann.genann *ann = genann.genann_init(2, 1, 2, 1);
     if (!ann) {
         runtime.printf("FAIL: train_copy_first_relu: failed to init ann\n");
@@ -385,7 +380,7 @@ int main(void) {
     genann.genann_free(ann);
 }
 // Test 11: Train constant function with tanh activation
-{
+    {
     genann.genann *ann = genann.genann_init(1, 1, 2, 1);
     if (!ann) {
         runtime.printf("FAIL: train_const_tanh: failed to init ann\n");
