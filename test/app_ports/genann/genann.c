@@ -3,7 +3,7 @@
  * FakeCC port
  *
  * Copyright (c) 2015-2018 Lewis Van Winkle
- * Adapted for FakeCC by [porter]
+ * Adapted for FakeCC by FakeCC contributors
  *
  * http://CodePlea.com
  *
@@ -248,6 +248,7 @@ genann *genann_read(runtime.FILE *in) {
 
     int i;
     for (i = 0; i < ann->total_weights; ++i) {
+        char *end;
         runtime.errno = 0;
         rc = runtime.fscanf(in, " %63s", token);
         if (rc < 1 || runtime.errno != 0) {
@@ -255,7 +256,15 @@ genann *genann_read(runtime.FILE *in) {
             genann_free(ann);
             return 0;
         }
-        ann->weight[i] = runtime.strtod(token, NULL);
+        /* FakeCC runtime lacks fscanf %le; parse the token with strtod and
+         * require the entire token to be a valid floating-point number. */
+        runtime.errno = 0;
+        ann->weight[i] = runtime.strtod(token, &end);
+        if (end == token || *end != '\0' || runtime.errno != 0) {
+            runtime.perror("strtod");
+            genann_free(ann);
+            return 0;
+        }
     }
 
     return ann;

@@ -82,8 +82,8 @@ jobs:
         run: bash tools/ci_install_host_gcc.sh
 
       # -O2 only speeds Stage 0 (gcc-built fakecc compiling v0/*.c).  It does
-        # not change fakecc-1's codegen, so the fixed-point comparison is the
-        # same as an unoptimized Stage 0.
+      # not change fakecc-1's codegen, so the fixed-point comparison is the
+      # same as an unoptimized Stage 0.
       - name: Build stage 0
         run: |
           cmake -S . -B build -DCMAKE_C_FLAGS="-O2"
@@ -106,7 +106,7 @@ jobs:
 
   # A fixed point alone does not prove correctness — a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
-  # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are promoted out of memory
+  # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are
   # promoted out of memory, so they stay separate matrix legs.
   bootstrap-suite:
     name: bootstrap · ${{ matrix.label }}

@@ -4,9 +4,6 @@ package main;
 import genann;
 import runtime;
 
-
-extern double tanh(double x);
-
 extern double fabs(double x);
 extern int rand(void);
 extern void srand(unsigned int seed);
@@ -350,61 +347,65 @@ int main(void) {
         genann.genann_free(second);
         runtime.remove("/tmp/genann_persist.txt");
     }
-// Test 10: Train to copy first input with relu hidden activation
+
+    // Test 10: Train to copy first input with relu hidden activation
     {
-    genann.genann *ann = genann.genann_init(2, 1, 2, 1);
-    if (!ann) {
-        runtime.printf("FAIL: train_copy_first_relu: failed to init ann\n");
-        return 1;
-    }
-    genann.genann_randomize(ann);
-    ann->activation_hidden = genann.genann_act_relu;
-    ann->activation_output = genann.genann_act_linear;
-    double input[4][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
-    double target[4] = {0, 0, 1, 1};
-    int i, j;
-    for (i = 0; i < 5000; ++i)
-        for (j = 0; j < 4; ++j)
-            genann.genann_train(ann, input[j], target + j, 0.5);
-    for (i = 0; i < 4; i++) {
-        double out = *genann.genann_run(ann, input[i]);
-        int expected = (int)target[i];
-        // Allow small error due to approximation
-        if (fabs(out - expected) > 0.1) {
-            runtime.printf("FAIL: train_copy_first_relu: expected %f for input [%d,%d], got %f\n",
-                           expected, (int)input[i][0], (int)input[i][1], out);
-            genann.genann_free(ann);
+        genann.genann *ann = genann.genann_init(2, 1, 2, 1);
+        if (!ann) {
+            runtime.printf("FAIL: train_copy_first_relu: failed to init ann\n");
             return 1;
         }
+        genann.genann_randomize(ann);
+        ann->activation_hidden = genann.genann_act_relu;
+        ann->activation_output = genann.genann_act_linear;
+        double input[4][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
+        double target[4] = {0, 0, 1, 1};
+        int i, j;
+        for (i = 0; i < 5000; ++i)
+            for (j = 0; j < 4; ++j)
+                genann.genann_train(ann, input[j], target + j, 0.5);
+        for (i = 0; i < 4; i++) {
+            double out = *genann.genann_run(ann, input[i]);
+            int expected = (int)target[i];
+            // Allow small error due to approximation
+            if (fabs(out - expected) > 0.1) {
+                runtime.printf("FAIL: train_copy_first_relu: expected %f for input [%d,%d], got %f\n",
+                               expected, (int)input[i][0], (int)input[i][1], out);
+                genann.genann_free(ann);
+                return 1;
+            }
+        }
+        genann.genann_free(ann);
     }
-    genann.genann_free(ann);
-}
-// Test 11: Train constant function with tanh activation
+
+    // Test 11: Train constant function with tanh activation
     {
-    genann.genann *ann = genann.genann_init(1, 1, 2, 1);
-    if (!ann) {
-        runtime.printf("FAIL: train_const_tanh: failed to init ann\n");
-        return 1;
-    }
-    genann.genann_randomize(ann);
-    ann->activation_hidden = genann.genann_act_tanh;
-    ann->activation_output = genann.genann_act_linear;
-    double input[3][1] = {{0.0}, {1.0}, {-1.0}};
-    double target[3] = {0.5, 0.5, 0.5};
-    int i, j;
-    for (i = 0; i < 2000; ++i)
-        for (j = 0; j < 3; ++j)
-            genann.genann_train(ann, input[j], target + j, 0.1);
-    for (i = 0; i < 3; ++i) {
-        double out = *genann.genann_run(ann, input[i]);
-        if (fabs(out - 0.5) > 0.05) {
-            runtime.printf("FAIL: train_const_tanh: expected 0.5 for input %f, got %f\n", input[i][0], out);
-            genann.genann_free(ann);
+        genann.genann *ann = genann.genann_init(1, 1, 2, 1);
+        if (!ann) {
+            runtime.printf("FAIL: train_const_tanh: failed to init ann\n");
             return 1;
         }
+        genann.genann_randomize(ann);
+        ann->activation_hidden = genann.genann_act_tanh;
+        ann->activation_output = genann.genann_act_linear;
+        double input[3][1] = {{0.0}, {1.0}, {-1.0}};
+        double target[3] = {0.5, 0.5, 0.5};
+        int i, j;
+        for (i = 0; i < 2000; ++i)
+            for (j = 0; j < 3; ++j)
+                genann.genann_train(ann, input[j], target + j, 0.1);
+        for (i = 0; i < 3; ++i) {
+            double out = *genann.genann_run(ann, input[i]);
+            if (fabs(out - 0.5) > 0.05) {
+                runtime.printf("FAIL: train_const_tanh: expected 0.5 for input %f, got %f\n", input[i][0], out);
+                genann.genann_free(ann);
+                return 1;
+            }
+        }
+        genann.genann_free(ann);
     }
-    genann.genann_free(ann);
-}
-// All tests passed
+
+    // All tests passed
     return lfails != 0;
 }
+
