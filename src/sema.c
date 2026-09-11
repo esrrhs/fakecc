@@ -662,6 +662,43 @@ static void apply_default_arg_promotions(Expr **argp) {
     *argp = cast;
 }
 
+/* Non-variadic calls must pass exactly nparams arguments.  Empty-parens
+ * `foo()` is unprototyped in the grammar, but FakeCC still treats it as
+ * taking zero arguments — extra or missing args are errors. */
+static void check_call_arity(SourceLoc loc, const char *name,
+                             int nparams, int is_variadic, size_t nargs) {
+    if (is_variadic) {
+        if ((int)nargs < nparams) {
+            die_at(loc.file, loc.line, loc.col,
+                   "function '%s' takes at least %d argument%s but %zu given",
+                   name, nparams, nparams == 1 ? "" : "s", nargs);
+        }
+        return;
+    }
+    if ((int)nargs != nparams) {
+        die_at(loc.file, loc.line, loc.col,
+               "function '%s' takes %d argument%s but %zu given",
+               name, nparams, nparams == 1 ? "" : "s", nargs);
+    }
+}
+
+static void check_fnptr_arity(SourceLoc loc, int nparams, int is_variadic,
+                              size_t nargs) {
+    if (is_variadic) {
+        if ((int)nargs < nparams) {
+            die_at(loc.file, loc.line, loc.col,
+                   "function pointer expects at least %d argument%s but %zu given",
+                   nparams, nparams == 1 ? "" : "s", nargs);
+        }
+        return;
+    }
+    if ((int)nargs != nparams) {
+        die_at(loc.file, loc.line, loc.col,
+               "function pointer expects %d argument%s but %zu given",
+               nparams, nparams == 1 ? "" : "s", nargs);
+    }
+}
+
 static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
     if (!argp || !*argp || !ptype) return;
     Expr *arg = *argp;
@@ -1169,6 +1206,11 @@ static Type check_expr_inner(Expr *e) {
                 num_params = 1;
             }
             Type fn = type_make_func(ret, num_params > 0 ? (Type * const *)params : NULL, num_params);
+            /* Builtins without a recorded prototype (memcpy, snprintf_chk, …)
+             * used to look like `T (*)()`.  Mark them variadic so the strict
+             * function-pointer arity check does not reject real builtin calls. */
+            if (num_params == 0)
+                fn.func_is_variadic = 1;
             Type fp = type_make_ptr(fn);
             type_free(&fn);
             for (int i = 0; i < num_params; i++) type_free(params[i]);
@@ -1567,19 +1609,9 @@ static Type check_expr_inner(Expr *e) {
                 && !(local_fn_sym->type.func_is_unprototyped && sig && !sig->is_unprototyped)) {
                 const Type *fty = &local_fn_sym->type;
                 type_free(&callee_ty);
-                if (fty->func_is_variadic) {
-                    if ((int)e->u.call.args.len < fty->func_nparams) {
-                        die_at(e->loc.file, e->loc.line, e->loc.col,
-                               "function '%s' takes at least %d argument%s but %zu given",
-                               e->u.call.callee->u.var.name, fty->func_nparams,
-                               fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
-                    }
-                } else if ((int)e->u.call.args.len != fty->func_nparams && fty->func_nparams > 0) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "function '%s' takes %d argument%s but %zu given",
-                           e->u.call.callee->u.var.name, fty->func_nparams,
-                           fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
-                }
+                check_call_arity(e->loc, e->u.call.callee->u.var.name,
+                                 fty->func_nparams, fty->func_is_variadic,
+                                 e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
@@ -1597,21 +1629,9 @@ static Type check_expr_inner(Expr *e) {
             }
             if (sig) {
                 type_free(&callee_ty);
-                if (sig->is_variadic || sig->is_unprototyped) {
-                    /* Variadic, or K&R unprototyped `foo()`: extra args are
-                     * allowed.  Unprototyped still requires no *minimum*. */
-                    if (!sig->is_unprototyped && (int)e->u.call.args.len < sig->arity) {
-                        die_at(e->loc.file, e->loc.line, e->loc.col,
-                               "function '%s' takes at least %d argument%s but %zu given",
-                               e->u.call.callee->u.var.name, sig->arity,
-                               sig->arity == 1 ? "" : "s", e->u.call.args.len);
-                    }
-                } else if ((int)e->u.call.args.len != sig->arity) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "function '%s' takes %d argument%s but %zu given",
-                           e->u.call.callee->u.var.name, sig->arity,
-                           sig->arity == 1 ? "" : "s", e->u.call.args.len);
-                }
+                check_call_arity(e->loc, e->u.call.callee->u.var.name,
+                                 sig->arity, sig->is_variadic,
+                                 e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
@@ -1639,21 +1659,9 @@ static Type check_expr_inner(Expr *e) {
                 const Type *fty = (extern_sym->type.kind == TY_FUNC)
                                   ? &extern_sym->type : extern_sym->type.pointee;
                 type_free(&callee_ty);
-                if (fty->func_is_variadic) {
-                    if ((int)e->u.call.args.len < fty->func_nparams) {
-                        die_at(e->loc.file, e->loc.line, e->loc.col,
-                               "function '%s' takes at least %d argument%s but %zu given",
-                               e->u.call.callee->u.var.name, fty->func_nparams,
-                               fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
-                    }
-                } else if ((int)e->u.call.args.len != fty->func_nparams
-                           && fty->func_nparams > 0
-                           && !fty->func_is_unprototyped) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "function '%s' takes %d argument%s but %zu given",
-                           e->u.call.callee->u.var.name, fty->func_nparams,
-                           fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
-                }
+                check_call_arity(e->loc, e->u.call.callee->u.var.name,
+                                 fty->func_nparams, fty->func_is_variadic,
+                                 e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
@@ -1685,21 +1693,10 @@ static Type check_expr_inner(Expr *e) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "call to non-function (callee type must be a function or function pointer)");
         }
-        if (fn_ty.func_params != NULL) {
-            if (fn_ty.func_is_variadic) {
-                if ((int)e->u.call.args.len < fn_ty.func_nparams) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "function pointer expects at least %d argument%s but %zu given",
-                           fn_ty.func_nparams,
-                           fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
-                }
-            } else if ((int)e->u.call.args.len != fn_ty.func_nparams) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "function pointer expects %d argument%s but %zu given",
-                       fn_ty.func_nparams,
-                       fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
-            }
-        }
+        /* Empty-parens `T (*)()` is unprototyped in the grammar but FakeCC
+         * treats it as taking zero arguments, same as a named `T foo()`. */
+        check_fnptr_arity(e->loc, fn_ty.func_nparams, fn_ty.func_is_variadic,
+                          e->u.call.args.len);
         for (size_t i = 0; i < e->u.call.args.len; i++) {
             Type at = check_expr_inner(e->u.call.args.data[i]);
             type_free(&at);

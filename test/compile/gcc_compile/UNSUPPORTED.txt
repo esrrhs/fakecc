@@ -10,7 +10,7 @@
 # use -std=gnu89 / -fpermissive for the rest). Original sources were in
 # test/e2e/gcc.c-torture/compile/ (deleted).
 #
-# Total: 335
+# Total: 348
 #
 
 # GNU nested functions / trampolines (24)
@@ -389,16 +389,32 @@ dll.c
 # C23 enum with fixed underlying type (0)
 # `enum e : bool { X };` — supported (C23 fixed underlying types).
 
-# K&R C / language extensions and compiler limits (7)
-# K&R implicit int (20101216-1.c, pr81360.c), unprototyped call argument count
-# mismatch (pr47428.c, pr71109.c), bitfield width expression in parentheses
-# (20060202-1.c), typedef shadowed by local variable (921109-1.c), and
-# non-va_list passed to va_start (921203-2.c).
+# K&R C / language extensions and compiler limits (20)
+# K&R implicit int (20101216-1.c, pr81360.c), typedef shadowed by a local
+# variable (921109-1.c), non-va_list passed to va_start (921203-2.c), and
+# calls whose argument count does not match the declaration/definition
+# (FakeCC requires an exact count even for empty-parens `foo()`, K&R
+# identifier lists, and unprototyped `T (*)()` pointers; GCC -std=gnu89
+# / -fpermissive does not).
+# Parenthesized bitfield width (20060202-1.c) is now supported.
 
-20060202-1.c
 20101216-1.c
+900313-1.c
+921011-2.c
 921109-1.c
 921203-2.c
+930411-1.c
+931013-1.c
+990801-1.c
+call.c
+callind.c
+pass.c
+pr100241-1.c
+pr106101.c
+pr113616.c
 pr47428.c
 pr71109.c
 pr81360.c
+pr83051-2.c
+pr97576.c
+uuarg.c

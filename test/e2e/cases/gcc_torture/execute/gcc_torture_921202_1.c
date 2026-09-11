@@ -56,7 +56,7 @@ main ()
   for (;;)
     {
       size = VLEN;
-      mpn_random2 (s1, size);
+      mpn_random2 ();
 
       for (i = 0; i < 1; i++)
 	;
@@ -64,11 +64,11 @@ main ()
       dy[size] = 0x12345678;
 
       for (i = 0; i < 1; i++)
-	cyy = mpn_mul_1 (dy, s1, size);
+	cyy = mpn_mul_1 ();
 
-      if (cyx != cyy || mpn_cmp (dx, dy, size + 1) != 0 || dx[size] != 0x12345678)
+      if (cyx != cyy || mpn_cmp () != 0 || dx[size] != 0x12345678)
 	{
-	  foo ("", 8, cyy); mpn_print (dy, size);
+	  foo (); mpn_print ();
 	}
       exxit();
     }

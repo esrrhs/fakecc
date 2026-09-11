@@ -62,7 +62,7 @@ unsigned int foo()
 int main(void)
 {
   t.p = 8;
-  if (foo (t) != 8)
+  if (foo () != 8)
     abort ();
   return 0;
 }
