@@ -669,6 +669,7 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
 /* Normalize a (possibly designated) initializer list (designator validation,
  * array-length inference, expansion to positional with zero-fill). */
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested);
+static void overlay_init_list(Type *target, Expr *dst, Expr *src, SourceLoc loc);
 
 static SymTable *g_check_st;
 
@@ -732,14 +733,17 @@ static Type check_ternary_expr(Expr *e) {
     if (et.kind == TY_ARRAY) {
         Type d = type_decay(et); type_free(&et); et = d;
     }
-    int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
-                           && ((e->u.tern.then && e->u.tern.then->kind == EX_INT_LIT
-                                && e->u.tern.then->u.int_val == 0)
-                               || (!e->u.tern.then && e->u.tern.cond->kind == EX_INT_LIT
-                                   && e->u.tern.cond->u.int_val == 0)));
-    int e_is_null_const = (et.kind == TY_INT && et.width == 4
-                           && e->u.tern.else_->kind == EX_INT_LIT
-                           && e->u.tern.else_->u.int_val == 0);
+    int t_is_null_const = 0;
+    int e_is_null_const = 0;
+    {
+        long long nv = 0;
+        Expr *th_npc = e->u.tern.then ? e->u.tern.then : e->u.tern.cond;
+        if (tt.kind == TY_INT && th_npc && fold_const_int(th_npc, &nv) && nv == 0)
+            t_is_null_const = 1;
+        if (et.kind == TY_INT && e->u.tern.else_
+            && fold_const_int(e->u.tern.else_, &nv) && nv == 0)
+            e_is_null_const = 1;
+    }
     int tt_cplx = (tt.kind == TY_STRUCT && tt.tag && strncmp(tt.tag, "__complex_", 10) == 0);
     int et_cplx = (et.kind == TY_STRUCT && et.tag && strncmp(et.tag, "__complex_", 10) == 0);
     int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT || tt_cplx);
@@ -750,7 +754,13 @@ static Type check_ternary_expr(Expr *e) {
     } else if (tt_arith && et_arith) {
         res = usual_arith_conv(tt, et);
     } else if (tt.kind == TY_PTR && et.kind == TY_PTR) {
-        res = type_clone(tt);
+        /* C99 6.5.15: if either pointer is void *, the result is void *. */
+        int tvoid = tt.pointee && tt.pointee->kind == TY_VOID;
+        int evoid = et.pointee && et.pointee->kind == TY_VOID;
+        if (evoid && !tvoid)
+            res = type_clone(et);
+        else
+            res = type_clone(tt);
     } else if (tt.kind == TY_PTR && e_is_null_const) {
         res = type_clone(tt);
     } else if (et.kind == TY_PTR && t_is_null_const) {
@@ -1498,13 +1508,19 @@ static Type check_expr_inner(Expr *e) {
         /* Direct call: callee is `EX_VAR` naming a known function. */
         if (e->u.call.callee->kind == EX_VAR) {
             const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
-            /* If a local variable (including a function pointer parameter) has
-             * this name, it shadows any same-named function — do NOT fall
-             * through to the function-table lookup.  GCC accepts
-             * `void f(int(*f)()) { f(); }` (parameter `f` wins). */
-            int have_local = (local_fn_sym != NULL);
+            /* If a local *variable* (including a function pointer parameter)
+             * has this name, it shadows any same-named function.  A block-scope
+             * `extern` / unprototyped function *declaration* does not: C
+             * composite types prefer an existing prototype in the same TU
+             * (`float fx(float);` then `float fx();` still calls as prototyped). */
+            int local_is_fn_decl = local_fn_sym && local_fn_sym->type.kind == TY_FUNC;
+            int local_is_fnptr = local_fn_sym && local_fn_sym->type.kind == TY_PTR
+                                 && local_fn_sym->type.pointee
+                                 && local_fn_sym->type.pointee->kind == TY_FUNC;
+            int have_local = local_is_fnptr || (local_is_fn_decl && !local_fn_sym->type.func_is_unprototyped);
             const FunSig *sig = have_local ? NULL : ftab_lookup(e->u.call.callee->u.var.name);
-            if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC) {
+            if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC
+                && !(local_fn_sym->type.func_is_unprototyped && sig && !sig->is_unprototyped)) {
                 const Type *fty = &local_fn_sym->type;
                 type_free(&callee_ty);
                 if (fty->func_is_variadic) {
@@ -1523,10 +1539,13 @@ static Type check_expr_inner(Expr *e) {
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if (fty->func_params && (int)i < fty->func_nparams)
+                    if (fty->func_params && (int)i < fty->func_nparams
+                        && !fty->func_is_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &fty->func_params[i]);
                     else if (fty->func_is_variadic && (int)i >= fty->func_nparams)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
+                    else if (fty->func_is_unprototyped || !fty->func_params)
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 set_type(e, type_clone(*fty->func_ret));
@@ -1552,7 +1571,7 @@ static Type check_expr_inner(Expr *e) {
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if ((int)i < sig->arity)
+                    if ((int)i < sig->arity && !sig->is_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &sig->param_types[i]);
                     else if (sig->is_variadic)
@@ -1583,7 +1602,9 @@ static Type check_expr_inner(Expr *e) {
                                e->u.call.callee->u.var.name, fty->func_nparams,
                                fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
                     }
-                } else if ((int)e->u.call.args.len != fty->func_nparams) {
+                } else if ((int)e->u.call.args.len != fty->func_nparams
+                           && fty->func_nparams > 0
+                           && !fty->func_is_unprototyped) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "function '%s' takes %d argument%s but %zu given",
                            e->u.call.callee->u.var.name, fty->func_nparams,
@@ -1592,10 +1613,13 @@ static Type check_expr_inner(Expr *e) {
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if (fty->func_params && (int)i < fty->func_nparams)
+                    if (fty->func_params && (int)i < fty->func_nparams
+                        && !fty->func_is_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &fty->func_params[i]);
                     else if (fty->func_is_variadic && (int)i >= fty->func_nparams)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
+                    else if (fty->func_is_unprototyped || !fty->func_params)
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 Type ret = fty->func_ret ? *fty->func_ret : type_make_void();
@@ -1808,10 +1832,16 @@ static Type check_expr_inner(Expr *e) {
         return type_clone(e->type);
     }
     case EX_COMMA: {
-        /* a, b: evaluate a (discard result), result is b. */
+        /* a, b: evaluate a (discard result), result is b after lvalue
+         * conversion (array-to-pointer and function-to-pointer decay). */
         Type lt = check_expr_inner(e->u.comma.lhs);
         type_free(&lt);
         Type rt = check_expr_inner(e->u.comma.rhs);
+        if (rt.kind == TY_ARRAY) {
+            Type d = type_decay(rt); type_free(&rt); rt = d;
+        } else if (rt.kind == TY_FUNC) {
+            Type d = type_make_ptr(rt); type_free(&rt); rt = d;
+        }
         set_type(e, rt);
         return type_clone(e->type);
     }
@@ -2057,6 +2087,133 @@ static int init_elem_may_be_aggregate(const Expr *e) {
  * designators resolve too.  C99 designated-initializer semantics: a designator
  * sets the current position, and subsequent positional elements continue from
  * the slot after it (`[1]=10, 20` → a[1]=10, a[2]=20). */
+/* Top-level member index that owns `name`, walking unnamed nested
+ * struct/union members the same way as struct_lookup_member.  Named nested
+ * structs do not export their fields.  Returns -1 if not found. */
+static int designator_member_index(const StructDef *sd, const char *name) {
+    if (!sd || !name) return -1;
+    for (int j = 0; j < sd->num_members; j++) {
+        const StructMember *m = &sd->members[j];
+        if (m->name && m->name[0] && strcmp(m->name, name) == 0)
+            return j;
+        if ((!m->name || !m->name[0]) && m->type.kind == TY_STRUCT
+            && m->type.tag && g_sema_structs) {
+            const StructDef *nested =
+                struct_registry_find_c(g_sema_structs, m->type.tag);
+            if (nested && designator_member_index(nested, name) >= 0)
+                return j;
+        }
+    }
+    return -1;
+}
+
+static int designator_is_direct_member(const StructDef *sd, int idx,
+                                       const char *name) {
+    if (!sd || !name || idx < 0 || idx >= sd->num_members) return 0;
+    const char *mn = sd->members[idx].name;
+    return mn && mn[0] && strcmp(mn, name) == 0;
+}
+
+/* Wrap `elem` as `{ .name = elem }` so a designator that named a field of an
+ * anonymous nested struct/union can be applied to that nested type. */
+static Expr *wrap_anon_designator(const char *name, Expr *elem, SourceLoc loc) {
+    Expr **els = malloc(sizeof(Expr *));
+    if (!els) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    els[0] = elem;
+    Expr *list = expr_new_init_list(els, 1, loc);
+    list->u.init_list.desig_kind[0] = 1;
+    list->u.init_list.desig_index[0] = -1;
+    list->u.init_list.desig_member[0] = xstrdup(name);
+    return list;
+}
+
+static int init_list_slot_pos(const Type *target, const StructDef *sd,
+                              const Expr *list, int i, int *cursor,
+                              int *member_idx_out, int N) {
+    int pos;
+    int member_idx = 0;
+    if (list->u.init_list.desig_kind[i] == 0) {
+        pos = list->u.init_list.desig_index[i];
+        member_idx = pos;
+        if (sd && sd->is_union) pos = 0;
+    } else if (list->u.init_list.desig_kind[i] == 1) {
+        const char *name = list->u.init_list.desig_member[i];
+        pos = designator_member_index(sd, name);
+        member_idx = pos;
+        if (sd && sd->is_union) pos = 0;
+    } else {
+        if (sd && !sd->is_union) {
+            while (*cursor < sd->num_members
+                   && (sd->members[*cursor].name == NULL
+                       || sd->members[*cursor].name[0] == '\0')
+                   && sd->members[*cursor].bit_width >= 0) {
+                (*cursor)++;
+            }
+        }
+        pos = *cursor;
+        member_idx = (sd && sd->is_union) ? 0 : pos;
+    }
+    if (member_idx_out) *member_idx_out = member_idx;
+    (void)target;
+    (void)N;
+    return pos;
+}
+
+/* Overlay `src` onto an already-expanded positional `dst` so a later nested
+ * designator (`.i.b = 7` after `.i = {1,2}`) updates only the named subobject. */
+static void overlay_init_list(Type *target, Expr *dst, Expr *src, SourceLoc loc) {
+    if (!dst || !src || dst->kind != EX_INIT_LIST || src->kind != EX_INIT_LIST)
+        return;
+    int n = src->u.init_list.num_elements;
+    int N = dst->u.init_list.num_elements;
+    const StructDef *sd = NULL;
+    if (target->kind == TY_STRUCT)
+        sd = struct_registry_find_c(g_sema_structs, target->tag);
+    int cursor = 0;
+    for (int i = 0; i < n; i++) {
+        int member_idx = 0;
+        int pos = init_list_slot_pos(target, sd, src, i, &cursor, &member_idx, N);
+        if (pos < 0 || pos >= N) continue;
+        Expr *elem = src->u.init_list.elements[i];
+        src->u.init_list.elements[i] = NULL;
+        if (src->u.init_list.desig_kind[i] == 1 && sd && member_idx >= 0) {
+            const char *nm = src->u.init_list.desig_member[i];
+            if (nm && !designator_is_direct_member(sd, member_idx, nm))
+                elem = wrap_anon_designator(nm, elem, loc);
+        }
+        Type *slot_type = NULL;
+        if (target->kind == TY_ARRAY || target->is_vector) slot_type = target->elem_type;
+        else if (target->kind == TY_STRUCT && sd && member_idx >= 0
+                 && member_idx < sd->num_members)
+            slot_type = &sd->members[member_idx].type;
+        if (elem && elem->kind == EX_INIT_LIST && slot_type
+            && dst->u.init_list.elements[pos]->kind == EX_INIT_LIST) {
+            Type sub = type_clone(*slot_type);
+            overlay_init_list(&sub, dst->u.init_list.elements[pos], elem, loc);
+            type_free(&sub);
+            expr_free(elem);
+        } else if (elem && elem->kind == EX_INIT_LIST && slot_type) {
+            Type sub = type_clone(*slot_type);
+            normalize_init_list(&sub, elem, loc, 1);
+            type_free(&sub);
+            expr_free(dst->u.init_list.elements[pos]);
+            dst->u.init_list.elements[pos] = elem;
+        } else {
+            expr_free(dst->u.init_list.elements[pos]);
+            dst->u.init_list.elements[pos] = elem;
+        }
+        cursor = pos + 1;
+        if (sd && !sd->is_union) {
+            while (cursor < sd->num_members
+                   && (sd->members[cursor].name == NULL
+                       || sd->members[cursor].name[0] == '\0')
+                   && sd->members[cursor].bit_width >= 0) {
+                cursor++;
+            }
+        }
+    }
+}
+
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested) {
     int n = list->u.init_list.num_elements;
     /* 1. Infer array length for an empty `[]` declarator. */
@@ -2078,6 +2235,13 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             if (list->u.init_list.desig_kind[i] == 0
                 && list->u.init_list.desig_index[i] + 1 > len)
                 len = list->u.init_list.desig_index[i] + 1;
+        if (n == 1 && list->u.init_list.elements[0]
+            && list->u.init_list.elements[0]->kind == EX_STR
+            && target->elem_type && target->elem_type->kind == TY_INT
+            && target->elem_type->width == 1) {
+            int sl = list->u.init_list.elements[0]->u.str.len + 1;
+            if (sl > len) len = sl;
+        }
         target->length = len;
     }
     /* Determine the output slot count */
@@ -2096,6 +2260,14 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         if (target->is_vector) N = target->length;
         else N = 1;
         break;  /* scalar: `int x = {5}` */
+    }
+    /* C99 6.7.8p14: `char s[] = { "hi" }` / `char s[4] = { "hi" }` copies
+     * the string into the array.  Leave the list as a single EX_STR. */
+    if (target->kind == TY_ARRAY && target->elem_type
+        && target->elem_type->kind == TY_INT && target->elem_type->width == 1
+        && n == 1 && list->u.init_list.elements[0]
+        && list->u.init_list.elements[0]->kind == EX_STR) {
+        return;
     }
     /* 2. Validate designators. */
     for (int i = 0; i < n; i++) {
@@ -2128,6 +2300,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         out[i] = expr_new_int(0, loc);
 
     int cursor = 0;
+    int last_union_member_idx = 0;
     for (int i = 0; i < n; i++) {
         int pos;
         int member_idx = 0;
@@ -2137,9 +2310,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             if (sd && sd->is_union) pos = 0;
         } else if (list->u.init_list.desig_kind[i] == 1) {
             const char *name = list->u.init_list.desig_member[i];
-            pos = -1;
-            for (int j = 0; j < (sd ? sd->num_members : 0); j++)
-                if (strcmp(sd->members[j].name, name) == 0) { pos = j; break; }
+            pos = designator_member_index(sd, name);
             if (pos < 0)
                 die_at(loc.file, loc.line, loc.col,
                        "struct '%s' has no member named '%s'",
@@ -2162,6 +2333,11 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             continue;
         }
         Expr *elem = list->u.init_list.elements[i];
+        if (list->u.init_list.desig_kind[i] == 1 && sd && member_idx >= 0) {
+            const char *nm = list->u.init_list.desig_member[i];
+            if (nm && !designator_is_direct_member(sd, member_idx, nm))
+                elem = wrap_anon_designator(nm, elem, loc);
+        }
 
         /* Reject initialization of flexible array member in a nested context (e.g. within an array).
          * GCC: "initialization of flexible array member in a nested context".
@@ -2208,20 +2384,40 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
          * types carry explicit lengths and need no propagation (clone to avoid
          * mutating the shared struct definition). */
         if (elem->kind == EX_INIT_LIST) {
-            if (target->kind == TY_ARRAY || target->is_vector)
-                normalize_init_list(target->elem_type, elem, elem->loc, 1);
-            else if (sd && member_idx < sd->num_members) {
-                Type sub_type = type_clone(sd->members[member_idx].type);
-                normalize_init_list(&sub_type, elem, elem->loc, 1);
-                type_free(&sub_type);
+            int overlaid = 0;
+            if (out[pos]->kind == EX_INIT_LIST) {
+                if (target->kind == TY_ARRAY || target->is_vector) {
+                    overlay_init_list(target->elem_type, out[pos], elem, elem->loc);
+                    expr_free(elem);
+                    overlaid = 1;
+                } else if (sd && member_idx < sd->num_members) {
+                    Type sub_type = type_clone(sd->members[member_idx].type);
+                    overlay_init_list(&sub_type, out[pos], elem, elem->loc);
+                    type_free(&sub_type);
+                    expr_free(elem);
+                    overlaid = 1;
+                }
             }
+            if (!overlaid) {
+                if (target->kind == TY_ARRAY || target->is_vector)
+                    normalize_init_list(target->elem_type, elem, elem->loc, 1);
+                else if (sd && member_idx < sd->num_members) {
+                    Type sub_type = type_clone(sd->members[member_idx].type);
+                    normalize_init_list(&sub_type, elem, elem->loc, 1);
+                    type_free(&sub_type);
+                }
+                expr_free(out[pos]);
+                out[pos] = elem;
+            }
+        } else {
+            expr_free(out[pos]); /* drop the gap-fill zero (or previous element) */
+            out[pos] = elem;
         }
-        expr_free(out[pos]); /* drop the gap-fill zero (or previous element) */
-        out[pos] = elem;
         /* C99 6.7.8p17: after a designator the next current object is the one
          * following the designated slot, so the cursor always advances to
          * pos+1 (for positional inits pos == cursor, so this is just +1). */
         cursor = pos + 1;
+        last_union_member_idx = member_idx;
         if (sd && !sd->is_union) {
             while (cursor < sd->num_members
                    && (sd->members[cursor].name == NULL
@@ -2231,7 +2427,26 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             }
         }
     }
-    /* Consume the now-obsolete desig arrays and the old element buffer. */
+    /* Consume the now-obsolete desig arrays and the old element buffer.
+     * Unions keep a single slot but must remember which member was named
+     * (pack_init / lower_init_list look up desig_member). */
+    int keep_union_desig = (sd && sd->is_union);
+    char *union_member_name = NULL;
+    int union_desig_kind = 1;
+    int union_desig_index = 0;
+    if (keep_union_desig) {
+        if (last_union_member_idx < 0 || last_union_member_idx >= sd->num_members)
+            last_union_member_idx = 0;
+        const char *mn = sd->members[last_union_member_idx].name;
+        if (mn && mn[0]) {
+            union_member_name = xstrdup(mn);
+            union_desig_kind = 1;
+            union_desig_index = 0;
+        } else {
+            union_desig_kind = 0;
+            union_desig_index = last_union_member_idx;
+        }
+    }
     for (int i = 0; i < n; i++)
         free(list->u.init_list.desig_member[i]);
     free(list->u.init_list.desig_kind);
@@ -2240,9 +2455,23 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     free(list->u.init_list.elements);
     list->u.init_list.elements = out;
     list->u.init_list.num_elements = N;
-    list->u.init_list.desig_kind = NULL;
-    list->u.init_list.desig_index = NULL;
-    list->u.init_list.desig_member = NULL;
+    if (keep_union_desig) {
+        list->u.init_list.desig_kind = malloc(sizeof(int));
+        list->u.init_list.desig_index = malloc(sizeof(int));
+        list->u.init_list.desig_member = calloc(1, sizeof(char *));
+        if (!list->u.init_list.desig_kind || !list->u.init_list.desig_index
+            || !list->u.init_list.desig_member) {
+            fprintf(stderr, "fakecc: OOM\n");
+            exit(1);
+        }
+        list->u.init_list.desig_kind[0] = union_desig_kind;
+        list->u.init_list.desig_index[0] = union_desig_index;
+        list->u.init_list.desig_member[0] = union_member_name;
+    } else {
+        list->u.init_list.desig_kind = NULL;
+        list->u.init_list.desig_index = NULL;
+        list->u.init_list.desig_member = NULL;
+    }
 }
 
 /* Validate an initializer list's shape against the target type: element count
@@ -2644,6 +2873,17 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                 if (!s->u.decl.init && prev->u.decl.storage_class == 2
                     && s->u.decl.storage_class != 2)
                     prev->u.decl.storage_class = s->u.decl.storage_class;
+                /* C99 composite type: complete a tentative incomplete array. */
+                if (prev->u.decl.type.kind == TY_ARRAY
+                    && s->u.decl.type.kind == TY_ARRAY) {
+                    if (prev->u.decl.type.length <= 0 && s->u.decl.type.length > 0)
+                        prev->u.decl.type.length = s->u.decl.type.length;
+                    else if (s->u.decl.type.length <= 0 && prev->u.decl.type.length > 0)
+                        s->u.decl.type.length = prev->u.decl.type.length;
+                    if (prev->u.decl.type.length > 0)
+                        symtable_push(&globals, prev->u.decl.name, prev->u.decl.type,
+                                      prev->loc, prev->u.decl.align);
+                }
                 if (!prev->u.decl.init && s->u.decl.init) {
                     prev->u.decl.init = s->u.decl.init;
                     prev->u.decl.type = s->u.decl.type;
@@ -2728,6 +2968,8 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                        "global initializer must be a constant");
             Type dt = check_expr_inner(s->u.decl.init);
             type_free(&dt);
+            if (s->u.decl.init->kind != EX_INIT_LIST)
+                coerce_arg_to_param(&s->u.decl.init, &s->u.decl.type);
         }
     }
 

@@ -36,6 +36,7 @@ struct Type {
     Type *func_params; /* TY_FUNC only: malloc'd array of param types (nparams long) */
     int   func_nparams;/* TY_FUNC only */
     int   func_is_variadic; /* TY_FUNC only: non-zero if variadic */
+    int   func_is_unprototyped; /* TY_FUNC only: 1 = empty identifier list `foo()` */
     int   enum_id;     /* TY_INT only: non-zero unique ID for enum types */
     int   bitfield_width; /* 0 = not a bit-field; else width in bits (promotions) */
     int   is_vector;   /* 1 = GCC vector extension (__attribute__((vector_size(N)))) */
@@ -45,7 +46,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
     t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_bool(void) {
@@ -58,14 +60,16 @@ static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
     t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
     t.bitfield_width = 0; t.is_vector = 0; return t;
 }
 
@@ -77,6 +81,9 @@ void type_free(Type *t);
  * width for structs (which is stashed at parse-time via layout). */
 long long  type_size(Type t);
 long long  type_align(Type t); /* natural alignment of a type */
+int type_is_complex_ldouble(Type t); /* `_Complex long double` (X87 pair) */
+int type_is_empty_struct(Type t);    /* GNU empty struct/union, size 0 */
+int type_needs_stack_align16(Type t); /* long double / __int128 / align≥16 */
 
 /* SysV AMD64 aggregate classification for ≤16-byte structs/unions.
  * Returns the number of eightbytes passed/returned in registers (1 or 2),
@@ -419,13 +426,13 @@ typedef struct {
      * via type_make_struct().  struct_def_finish() updates its width so that
      * clones made while the struct was still incomplete see the final size. */
     Type *canonical_type;
-    /* Bitfield layout state (valid while members are being added).  A run of
-     * adjacent bitfields of the same `type` packs into one "unit"; the unit
-     * size is the smallest of {1,2,4,8} bytes holding all its bits.  A
-     * non-bitfield member (or a type/width change) closes the current unit. */
-    long long bf_unit_type;   /* width (bytes) of the current open bitfield unit */
-    int   bf_unit_used;   /* bits used in the current open unit */
-    long long bf_unit_offset; /* byte offset of the current open unit */
+    /* Bitfield layout state (valid while members are being added).
+     * `bf_unit_type != 0` means a bitfield run is open; the next free bit is
+     * `bf_unit_offset * 8 + bf_unit_used`.  Adjacent bitfields pack by bit
+     * position (GCC/SysV), including mixed declared types and packed structs. */
+    long long bf_unit_type;   /* non-zero = open bitfield run */
+    int   bf_unit_used;   /* bit remainder 0..7 of the next free bit */
+    long long bf_unit_offset; /* byte of the next free bit */
 } StructDef;
 
 typedef struct {

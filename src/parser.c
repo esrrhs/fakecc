@@ -1399,7 +1399,7 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
     expect_kind(p, TK_RBRACE, "'}'");
 }
 
-static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
+static Type make_func_type(Type ret, ParamArray *params, int is_variadic, int is_unproto) {
     /* Build a shallow array of pointers into the ParamArray's owned types.
      * type_make_func_var deep-clones them, so the originals stay owned by the
      * ParamArray and are freed by param_array_free below. */
@@ -1411,6 +1411,7 @@ static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
             ptys[i] = &params->data[i].type;
     }
     Type t = type_make_func_var(ret, ptys, (int)params->len, is_variadic);
+    t.func_is_unprototyped = is_unproto;
     free(ptys);
     param_array_free(params);
     return t;
@@ -1418,14 +1419,15 @@ static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
 
 /* Parse a parameter list: (void) means empty, else type declarator pairs.
  * Returns the collected params.  Tolerates a trailing comma. */
-static ParamArray parse_param_list(Parser *p, int *is_variadic) {
+static ParamArray parse_param_list(Parser *p, int *is_variadic, int *is_unproto) {
     if (is_variadic) *is_variadic = 0;
+    if (is_unproto) *is_unproto = 0;
     ParamArray params;
     param_array_init(&params);
     if (peek(p)->kind == TK_KW_VOID
         && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
         advance(p);  /* consume `void` */
-        return params;  /* empty */
+        return params;  /* empty prototyped */
     }
     if (peek(p)->kind != TK_RPAREN) {
         for (;;) {
@@ -1470,6 +1472,8 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                    "more than %d parameters not supported", MAX_PARAMS);
         }
+    } else if (is_unproto) {
+        *is_unproto = 1;  /* empty `()` — unprototyped */
     }
     return params;
 }
@@ -1624,10 +1628,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
-                outer_t = make_func_type(ret, &params, is_var);
+                outer_t = make_func_type(ret, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -1679,8 +1683,8 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
                 if (p->save_fn_params) {
                     param_array_init(&p->last_fn_params);
@@ -1692,7 +1696,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                     }
                     p->has_last_fn_params = 1;
                 }
-                t = make_func_type(t, &params, is_var);
+                t = make_func_type(t, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -1724,10 +1728,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(t, &params, is_var);
+                t = make_func_type(t, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -2223,9 +2227,10 @@ static Expr *parse_unary(Parser *p) {
         return expr_new_int(is_const ? 1 : 0, loc);
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_choose_expr") == 0) {
-        /* __builtin_choose_expr(const_expr, expr1, expr2): if const_expr is a
-         * compile-time constant, return expr1, else expr2.  Unlike the ternary
-         * operator, the unselected branch is discarded at compile time.
+        /* __builtin_choose_expr(const_expr, expr1, expr2): const_expr must be
+         * an integer constant expression.  Nonzero selects expr1, zero selects
+         * expr2.  Unlike the ternary operator, the unselected branch is
+         * discarded at compile time.
          * Use parse_assign (not parse_expr) so commas separate arguments
          * instead of being parsed as the comma operator. */
         advance(p);
@@ -2237,9 +2242,15 @@ static Expr *parse_unary(Parser *p) {
         Expr *else_ = parse_assign(p);
         expect_kind(p, TK_RPAREN, "')'");
         long long v;
-        int is_const = fold_const_int(cond, &v) || (cond->kind == EX_STR) || (cond->kind == EX_FLOAT_LIT);
+        /* fold_const_int also folds float literals (truncated); those are not
+         * integer constant expressions and GCC rejects them here. */
+        if (cond->kind == EX_FLOAT_LIT || cond->kind == EX_STR
+            || !fold_const_int(cond, &v)) {
+            die_at(cond->loc.file, cond->loc.line, cond->loc.col,
+                   "first argument to '__builtin_choose_expr' not a constant");
+        }
         expr_free(cond);
-        if (is_const) {
+        if (v != 0) {
             expr_free(else_);
             return then;
         } else {

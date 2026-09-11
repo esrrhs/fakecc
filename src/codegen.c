@@ -1494,6 +1494,13 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             if (num_gp > 0) patch_rel32(b, jae_gp, ov_off);
             if (num_fp > 0) patch_rel32(b, jae_fp, ov_off);
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            if (inst->align16) {
+                emit_add_imm32(b, REG_R11, 15);
+                emit_rex_wrb(b, 1, 0, REG_R11);
+                emit_byte(b, 0x83);
+                emit_modrm(b, 3, 4, REG_R11 & 7); /* and $~15, %r11 */
+                emit_byte(b, 0xF0);
+            }
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
@@ -1529,6 +1536,10 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             /* Small MEMORY-class struct: SysV passes eightbytes on the
              * overflow stack.  Copy n8 qwords from overflow_arg_area. */
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            if (inst->align16) {
+                emit_add_imm32(b, REG_R11, 15);
+                emit_and_imm32(b, REG_R11, (int32_t)-16);
+            }
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
@@ -2164,7 +2175,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             value_is_float_class(fn, pi->dst));
             int force_stack = pi->force_stack || is_ld;
             if (force_stack) {
-                /* long double or MEMORY-class eightbyte: stack only. */
+                /* long double or MEMORY-class eightbyte: stack only.
+                 * 16-byte aligned types (ld / __int128) skip a slot when the
+                 * current overflow index is odd (rbp+16 is 16-aligned). */
+                if ((is_ld || pi->align16) && (stack_arg_idx & 1))
+                    stack_arg_idx++;
                 arrive_reg[p] = -1;
                 arrive_is_xmm[p] = 0;
                 stack_off[p] = 16 + 8 * stack_arg_idx;
@@ -3448,15 +3463,32 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                 }
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
+                int *arg_slot = NULL;
+                int *arg_nslots = NULL;
+                if (nargs > 0) {
+                    arg_slot = malloc((size_t)nargs * sizeof(int));
+                    arg_nslots = malloc((size_t)nargs * sizeof(int));
+                    if (!arg_slot || !arg_nslots) {
+                        fprintf(stderr, "fakecc: OOM\n");
+                        exit(1);
+                    }
+                }
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
                     int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
-                    int force_stack = (inst->call_arg_on_stack && inst->call_arg_on_stack[k]) || is_ld;
+                    int on_stack = (inst->call_arg_on_stack && inst->call_arg_on_stack[k]);
+                    int force_stack = on_stack || is_ld;
+                    int a16 = is_ld || (on_stack && (inst->call_arg_on_stack[k] & 2));
+                    arg_slot[k] = -1;
+                    arg_nslots[k] = 0;
                     if (force_stack) {
-                        /* MEMORY-class eightbyte or long double: stack only. */
+                        int nslots = is_ld ? 2 : 1;
+                        if (a16 && (n_stack & 1)) n_stack++;
                         target_reg[k] = -1;
                         target_is_xmm[k] = 0;
-                        n_stack += is_ld ? 2 : 1;
+                        arg_slot[k] = n_stack;
+                        arg_nslots[k] = nslots;
+                        n_stack += nslots;
                     } else if (is_float) {
                         if (n_xmm < 8) {
                             target_reg[k] = n_xmm; /* XMM0..7 */
@@ -3465,6 +3497,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         } else {
                             target_reg[k] = -1;
                             target_is_xmm[k] = 0;
+                            arg_slot[k] = n_stack;
+                            arg_nslots[k] = 1;
                             n_stack++;
                         }
                     } else {
@@ -3474,6 +3508,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         } else {
                             target_reg[k] = -1;
                             target_is_xmm[k] = 0;
+                            arg_slot[k] = n_stack;
+                            arg_nslots[k] = 1;
                             n_stack++;
                         }
                     }
@@ -3484,29 +3520,47 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int need_pad = (n_stack & 1);
                 if (need_pad) emit_sub_rsp_imm32(&out->text, 8);
 
-                /* Push stack-passed args right-to-left (highest index first)
-                 * so they end up at [rsp+8], [rsp+16], ... in order. */
-                for (int k = nargs - 1; k >= 0; k--) {
-                    if (target_reg[k] >= 0) continue; /* reg-passed */
-                    if (value_is_ld(fn, inst->call_args[k])) {
-                        /* long double: 16-byte stack slot.  fldt its home slot,
-                         * alloc 16 bytes, fstpt [rsp].  Clobbers RCX. */
-                        emit_ld_load(&out->text, inst->call_args[k], ld_off);
+                /* Push stack-passed args right-to-left, inserting 8-byte
+                 * holes so 16-aligned types sit on 16-byte boundaries. */
+                for (int slot = n_stack - 1; slot >= 0; ) {
+                    int found = -1;
+                    for (int k = 0; k < nargs; k++) {
+                        if (target_reg[k] >= 0) continue;
+                        if (arg_slot[k] <= slot
+                            && slot < arg_slot[k] + arg_nslots[k]) {
+                            found = k;
+                            break;
+                        }
+                    }
+                    if (found < 0) {
+                        emit_sub_rsp_imm32(&out->text, 8);
+                        slot--;
+                        continue;
+                    }
+                    if (slot != arg_slot[found] + arg_nslots[found] - 1) {
+                        emit_sub_rsp_imm32(&out->text, 8);
+                        slot--;
+                        continue;
+                    }
+                    if (value_is_ld(fn, inst->call_args[found])) {
+                        emit_ld_load(&out->text, inst->call_args[found], ld_off);
                         emit_sub_rsp_imm32(&out->text, 16);
                         emit_x87_fstpt_rsp(&out->text);
-                    } else if (value_is_float_class(fn, inst->call_args[k])) {
-                        /* float/double past XMM0-7 (or in a MEMORY eightbyte):
-                         * it lives in the XMM file, so it has to be fetched
-                         * from there even though it travels on the stack. */
-                        ensure_reg_xmm(&out->text, inst->call_args[k],
+                        slot -= 2;
+                    } else if (value_is_float_class(fn, inst->call_args[found])) {
+                        ensure_reg_xmm(&out->text, inst->call_args[found],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
                         emit_sub_rsp_imm32(&out->text, 8);
                         emit_sse_store_rsp(&out->text, XMM_SCRATCH0);
+                        slot--;
                     } else {
-                        ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
+                        ensure_reg(&out->text, inst->call_args[found], REG_RAX, ra);
                         emit_push_r(&out->text, REG_RAX);
+                        slot--;
                     }
                 }
+                free(arg_slot);
+                free(arg_nslots);
 
                 /* Reg-arg dance: push all reg-arg values in reverse order,
                  * then load them into their targets in forward order.  Saving
@@ -3687,6 +3741,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
                 if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);
 
+                if (inst->x87_pair && inst->a >= 0) {
+                    /* `_Complex long double` comes back in st0 (real) / st1
+                     * (imag).  Store into the caller-provided 32-byte slot. */
+                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                    emit_x87_fstptRCX(&out->text);
+                    emit_add_imm32(&out->text, REG_RCX, 16);
+                    emit_x87_fstptRCX(&out->text);
+                } else {
+
                 /* Multi-eightbyte aggregate return: SysV assigns INTEGER
                  * eightbytes to RAX then RDX and SSE eightbytes to XMM0
                  * then XMM1, independently.  Save hi first so capturing lo
@@ -3757,6 +3820,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         }
                     }
                 }
+                } /* !x87_pair */
                 free(target_reg);
                 free(target_is_xmm);
                 break;
@@ -3766,7 +3830,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 /* Void function: bare `return;` — no value in a.
                  * SysV multi-eightbyte returns: INTEGER eightbytes go to
                  * RAX then RDX; SSE eightbytes go to XMM0 then XMM1. */
-                if (inst->a != -1 && inst->b != -1) {
+                if (inst->x87_pair && inst->a >= 0) {
+                    /* `_Complex long double`: st0=real, st1=imag.  Load imag
+                     * first so the subsequent fldt of real leaves that order. */
+                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                    emit_add_imm32(&out->text, REG_RCX, 16);
+                    emit_x87_fldtRCX(&out->text);
+                    emit_add_imm32(&out->text, REG_RCX, -16);
+                    emit_x87_fldtRCX(&out->text);
+                } else if (inst->a != -1 && inst->b != -1) {
                     int a_f = value_is_float_class(fn, inst->a);
                     int b_f = value_is_float_class(fn, inst->b);
                     if (!a_f && !b_f) {
