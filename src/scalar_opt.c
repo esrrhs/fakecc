@@ -89,7 +89,9 @@ static int64_t trunc_to_width(int64_t v, int width, int is_unsigned) {
  * it has no side effects.  Side-effectful: RETURN, STORE, BR, CBR, LABEL,
  * ALLOCA (mem2reg-invariant marker, preserved as no-op codegen), CALL
  * (may have arbitrary side effects). */
-static int has_side_effect(IROpcode op) {
+static int inst_has_side_effect(const IRInst *inst) {
+    if (inst->is_volatile) return 1;
+    IROpcode op = inst->op;
     return op == IR_RETURN || op == IR_STORE || op == IR_STORE_PTR ||
            op == IR_BR || op == IR_CBR || op == IR_LABEL ||
            op == IR_ALLOCA || op == IR_CALL || op == IR_PARAM ||
@@ -227,7 +229,7 @@ int scalar_dce(IRFunction *fn) {
     int changed = 0;
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
-        if (!has_side_effect(inst->op) && inst->dst >= 0 &&
+        if (!inst_has_side_effect(inst) && inst->dst >= 0 &&
             inst->dst < fn->next_value_id && !used[inst->dst]) {
             changed = 1;
             continue;

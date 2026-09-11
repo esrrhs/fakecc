@@ -1235,15 +1235,25 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
             }
             int bit_width = -1;
             if (peek(p)->kind == TK_COLON) {
-                /* Bitfield `name : N;` or unnamed `: 0`. */
+                /* Bitfield `name : N;` or unnamed `: 0`.  Width is a constant
+                 * expression (integer literal, enum constant, sizeof, …). */
                 advance(p);
-                const Token *w = peek(p);
-                if (w->kind != TK_INT_LITERAL) {
-                    die_at(w->loc.file, w->loc.line, w->loc.col,
-                           "expected bitfield width but got '%s'", w->text);
+                const Token *wtok = peek(p);
+                Expr *we = parse_ternary(p);
+                long long wval = 0;
+                if (fold_const_int(we, &wval)) {
+                    bit_width = (int)wval;
+                } else if (we->kind == EX_VAR) {
+                    const EnumConstant *ec =
+                        enum_registry_find_constant(&p->tu->enums, we->u.var.name);
+                    if (ec) bit_width = (int)ec->value;
                 }
-                bit_width = int_literal_value(w->text);
-                advance(p);
+                expr_free(we);
+                if (bit_width < 0) {
+                    die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
+                           "expected constant bitfield width but got '%s'",
+                           wtok->text);
+                }
             }
             struct_def_push_member_aligned(sd, mname, mty, bit_width, align);
             free(mname);
@@ -3603,10 +3613,10 @@ static Stmt parse_stmt(Parser *p) {
                 advance(p);
                 /* GCC allows `extern int x = 0;` — it acts as a definition
                  * (not just a declaration) when an initializer is present.
-                 * Treat it as a regular definition (clear the extern flag). */
-                if (storage_class == 2) {
-                    storage_class = 0;
-                }
+                 * Clear extern on this declarator only; later names in
+                 * `extern int a = 1, b;` must stay extern. */
+                if (s.u.decl.storage_class == 2)
+                    s.u.decl.storage_class = 0;
                 if (peek(p)->kind == TK_LBRACE) {
                     s.u.decl.init = parse_init_list(p);
                 } else {

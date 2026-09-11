@@ -138,6 +138,8 @@ typedef struct {
      * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
      * mem2reg promotes get 0 here (they never reach codegen anyway). */
     int      alloca_bytes;
+    /* IR_LOAD / IR_LOAD_PTR: the access is volatile and must not be DCE'd. */
+    int      is_volatile;
 } IRInst;
 
 /* ------------------------------------------------------------------ */

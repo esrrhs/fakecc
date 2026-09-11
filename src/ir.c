@@ -832,8 +832,14 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     inst.float_imm = 0;
     inst.is_float = 0;
     inst.force_stack = 0;
+    inst.is_volatile = 0;
     ir_inst_array_push(&fn->insts, inst);
     if (dst >= 0) set_value_type(fn, dst, width ? width : 4, is_unsigned);
+}
+
+static void mark_last_volatile(IRFunction *fn, int vol) {
+    if (vol && fn->insts.len)
+        fn->insts.data[fn->insts.len - 1].is_volatile = 1;
 }
 
 static void emit_profile_call(IRFunction *fn, const char *hook_name, const FunctionDecl *fd, SourceLoc loc) {
@@ -1027,10 +1033,10 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
 }
 
 /* Load the SysV register eightbytes of an aggregate at `addr` into SSA
- * values.  `n`/`cls` come from sysv_classify_agg.  Each eightbyte becomes a
- * width-8 INTEGER or float SSA value (zero-extended from a shorter chunk). */
+ * values.  `n`/`cls` come from sysv_classify_agg (or MEMORY expansion).
+ * `cls` may be NULL (all INTEGER).  `out` must have room for `n` values. */
 static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
-                          const SysVRegClass cls[2], IRValue out[2],
+                          const SysVRegClass *cls, IRValue *out,
                           SourceLoc loc) {
     for (int i = 0; i < n; i++) {
         int off = i * 8;
@@ -1040,7 +1046,7 @@ static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
         int remain_n = remain;
         int off_b = 0;
         IRValue v = -1;
-        int is_sse = (cls[i] == SYSV_CLS_SSE);
+        int is_sse = (cls && cls[i] == SYSV_CLS_SSE);
         while (remain_n > 0) {
             int chunk = remain_n >= 8 ? 8 : remain_n >= 4 ? 4 : remain_n >= 2 ? 2 : 1;
             IRValue a = emit_add_const(fn, addr, off + off_b, loc);
@@ -1077,7 +1083,7 @@ static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
 
 /* Store register eightbytes into an aggregate at `addr`. */
 static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
-                           const SysVRegClass cls[2], const IRValue vals[2],
+                           const SysVRegClass *cls, const IRValue *vals,
                            SourceLoc loc) {
     (void)cls;
     for (int i = 0; i < n; i++) {
@@ -3181,6 +3187,21 @@ static IRValue scale_rhs(IRFunction *fn, IRValue rhs, int is_ptr, Type lv_ty,
     return coerce(fn, rhs, rw, ru, lw, lu, loc);
 }
 
+/* Materialize a compound literal's storage and return its address.
+ * Used both as an lvalue (`&(int){42}`, `(struct S){}.x`) and as the
+ * backing object whose scalar rvalue is then loaded. */
+static IRValue lower_compound_literal_addr(IRFunction *fn, IRSymTable *st,
+                                           const Expr *e) {
+    Type target = e->u.compound.target_type;
+    int total = type_size(target);
+    if (total <= 0) total = 8;
+    IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
+    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    emit_zero_bytes(fn, addr, total, e->loc);
+    lower_init_list(fn, st, addr, &target, e->u.compound.init, e->loc);
+    return addr;
+}
+
 /* Compute the address of an lvalue expression (EX_VAR/EX_DEREF/EX_INDEX/EX_MEMBER).
  * Returns a pointer-typed SSA value. */
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
@@ -3236,9 +3257,8 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
     }
     case EX_COMPOUND_LITERAL:
         /* A compound literal yields an lvalue: its address is the base for `&`
-         * or member access (e.g. `(struct S){1,2}.x`).  Lowering the literal
-         * materializes the storage; the result is the object's address. */
-        return lower_expr(fn, st, e);
+         * or member access (e.g. `(struct S){1,2}.x`). */
+        return lower_compound_literal_addr(fn, st, e);
     default: break;
     }
     return -1;
@@ -4566,6 +4586,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                         entry->width, entry->is_unsigned, e->loc);
+            mark_last_volatile(fn, entry->ty.is_volatile || e->type.is_volatile);
             if (entry->ty.kind == TY_FLOAT) set_value_float(fn, v, 1);
             return v;
         }
@@ -4582,12 +4603,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue v = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                         entry->width, entry->is_unsigned, e->loc);
+            mark_last_volatile(fn, entry->ty.is_volatile || e->type.is_volatile);
             if (entry->ty.kind == TY_FLOAT) set_value_float(fn, v, 1);
             return v;
         }
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD, v, entry->slot, -1, 0,
                     e->type.width, e->type.is_unsigned, e->loc);
+        mark_last_volatile(fn, entry->ty.is_volatile || e->type.is_volatile);
         return v;
     }
     case EX_ASSIGN: {
@@ -5613,56 +5636,48 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 } else {
                     nreg = sysv_classify_agg(arg->type, cls);
                 }
-                if (nreg > 0) {
-                    int need_gp = 0, need_fp = 0;
+                int is_memory = (nreg == 0);
+                if (is_memory) {
+                    /* SysV MEMORY class: pass (size+7)/8 INTEGER eightbytes
+                     * on the stack, never in registers. */
+                    if (asz < 0) asz = 0;
+                    nreg = (asz + 7) / 8;
+                    if (nreg < 1) nreg = 1;
+                }
+                int need_gp = 0, need_fp = 0;
+                if (!is_memory) {
                     for (int k = 0; k < nreg; k++) {
                         if (cls[k] == SYSV_CLS_SSE) need_fp++;
                         else need_gp++;
                     }
-                    int fits_in_regs = (call_used_gp + need_gp <= 6 && call_used_xmm + need_fp <= 8);
-                    if (fits_in_regs) {
-                        call_used_gp += need_gp;
-                        call_used_xmm += need_fp;
-                    }
-                    IRValue ebs[2];
-                    load_agg_regs(fn, av, asz, nreg, cls, ebs, e->loc);
-                    for (int k = 0; k < nreg; k++) {
-                        if (nargs >= arg_limit) {
-                            fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
-                                    IR_CALL_MAX_ARGS);
-                            exit(1);
-                        }
-                        arg_vals[nargs] = ebs[k];
-                        arg_on_stack[nargs] = !fits_in_regs;
-                        nargs++;
-                    }
-                    continue;
                 }
-                /* MEMORY: pass a pointer to a stack-allocated copy.  Instead
-                 * of expanding into per-eightbyte args (which blows
-                 * IR_CALL_MAX_ARGS on large structs), the caller copies the
-                 * struct bytes into a temporary alloca and passes its address
-                 * as a single pointer arg; the callee copies from that pointer
-                 * into its local slot.  Internally consistent (both sides are
-                 * fakecc-compiled) though not identical to GCC/SysV's inline
-                 * stack copy. */
-                /* Pin the temp slot (alloca_bytes > 0) even for size-0
-                 * types (empty unions): codegen's IR_ADDR requires it. */
-                int copy_sz = asz;
-                if (copy_sz < 1) copy_sz = 1;
-                IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
-                IRValue tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1, 8, 1,
-                                              e->loc);
-                emit_struct_copy(fn, tmp_addr, av, asz, e->loc);
-                if (nargs >= arg_limit) {
-                    fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
-                            IR_CALL_MAX_ARGS);
-                    exit(1);
+                int fits_in_regs = !is_memory
+                    && (call_used_gp + need_gp <= 6 && call_used_xmm + need_fp <= 8);
+                if (fits_in_regs) {
+                    call_used_gp += need_gp;
+                    call_used_xmm += need_fp;
                 }
-                arg_vals[nargs] = tmp_addr;
-                arg_on_stack[nargs] = 0;
-                if (call_used_gp < 6) call_used_gp++;
-                nargs++;
+                SysVRegClass *acls = malloc((size_t)nreg * sizeof(SysVRegClass));
+                IRValue *ebs = malloc((size_t)nreg * sizeof(IRValue));
+                if (!acls || !ebs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                if (is_memory) {
+                    for (int k = 0; k < nreg; k++) acls[k] = SYSV_CLS_INTEGER;
+                } else {
+                    for (int k = 0; k < nreg; k++) acls[k] = cls[k];
+                }
+                load_agg_regs(fn, av, asz, nreg, acls, ebs, e->loc);
+                for (int k = 0; k < nreg; k++) {
+                    if (nargs >= arg_limit) {
+                        fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                                IR_CALL_MAX_ARGS);
+                        exit(1);
+                    }
+                    arg_vals[nargs] = ebs[k];
+                    arg_on_stack[nargs] = !fits_in_regs;
+                    nargs++;
+                }
+                free(acls);
+                free(ebs);
                 continue;
             }
             if (nargs >= arg_limit) {
@@ -5889,6 +5904,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int u = e->type.is_unsigned;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, ptr, -1, 0, w, u, e->loc);
+        mark_last_volatile(fn, e->type.is_volatile);
         if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
@@ -5907,6 +5923,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (e->type.kind == TY_STRUCT || e->type.is_vector || type_is_i128(e->type)) return addr;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        mark_last_volatile(fn, e->type.is_volatile);
         if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
@@ -5929,6 +5946,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int u = is_bf ? 1 : e->type.is_unsigned;  /* bitfields read as unsigned unit */
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        mark_last_volatile(fn, e->type.is_volatile);
         if (!is_bf && is_be && (w == 2 || w == 4 || w == 8)
             && e->type.kind != TY_STRUCT && e->type.kind != TY_ARRAY)
             v = emit_bswap_val(fn, v, w, e->loc);
@@ -6542,19 +6560,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     }
     case EX_COMPOUND_LITERAL: {
         /* (Type){ ... }: materialize stack storage, initialize it, and return a
-         * pointer to it (aggregates) or the loaded scalar value (scalars).  The
-         * sema pass has already inferred any unspecified array length, so
-         * type_size(target) is authoritative. */
+         * pointer to it (aggregates) or the loaded scalar value (scalars). */
         Type target = e->u.compound.target_type;
-        int total = type_size(target);
-        if (total <= 0) total = 8;
-        IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
-        IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-        emit_zero_bytes(fn, addr, total, e->loc);
-        lower_init_list(fn, st, addr, &target, e->u.compound.init, e->loc);
+        IRValue addr = lower_compound_literal_addr(fn, st, e);
         if (target.kind == TY_ARRAY || target.kind == TY_STRUCT || target.is_vector)
-            return addr;    /* aggregate value is its byte address, like struct/array vars */
-        /* Scalar: load the value back so the literal behaves as an rvalue. */
+            return addr;
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0,
                     target.width ? target.width : 4, target.is_unsigned, e->loc);
@@ -7082,6 +7092,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         if (dty.kind == TY_FLOAT || dty.is_vector)
             pinned = 1;
         if (dty.kind == TY_INT && dty.width == 16)
+            pinned = 1;
+        if (dty.is_volatile)
             pinned = 1;
         IRValue v;
         if (pinned) {
@@ -8623,10 +8635,18 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         return;
     }
     if (e->kind == EX_CAST) {
-        /* `(T)expr` — the cast itself is a no-op at the bit level for the
-         * cases we accept (e.g. `(int*)0`); pack the operand. */
-        pack_init(ir, ty, e->u.cast.operand, bytes, sz, ctx, loc, g);
-        return;
+        /* Folded casts (truncation, sign-extend) fall through to the integer
+         * packers below.  Non-constant casts (pointer decay of a global, …)
+         * pack the operand. */
+        long long dummy;
+        unsigned long long lo, hi;
+        int folded = (ty->kind == TY_INT && ty->width == 16)
+                     ? fold_const_int128(e, &lo, &hi)
+                     : fold_const_int(e, &dummy);
+        if (!folded) {
+            pack_init(ir, ty, e->u.cast.operand, bytes, sz, ctx, loc, g);
+            return;
+        }
     }
     if (ty->kind == TY_FLOAT) {
         /* Float slots must be packed as the target's binary format, not as the
@@ -9128,11 +9148,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * Struct formals ≤16 bytes expand into 1–2 register PARAMs; larger
          * (MEMORY) formals expand into stack-only eightbyte PARAMs. */
         size_t nparams = fd->params.len;
-        IRValue (*param_ebs)[2] = NULL;
+        IRValue **param_ebs = NULL;
         int *param_nreg = NULL;
         if (nparams > 0) {
-            param_ebs = malloc(nparams * sizeof(*param_ebs));
-            param_nreg = malloc(nparams * sizeof(*param_nreg));
+            param_ebs = calloc(nparams, sizeof(*param_ebs));
+            param_nreg = calloc(nparams, sizeof(*param_nreg));
             if (!param_ebs || !param_nreg) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         }
         int next_pidx = 0;
@@ -9156,47 +9176,48 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 } else {
                     nreg = sysv_classify_agg(pty, cls);
                 }
-                if (nreg > 0) {
-                    int need_gp = 0, need_fp = 0;
+                int is_memory = (nreg == 0);
+                if (is_memory) {
+                    int total = type_size(pty);
+                    if (total < 0) total = 0;
+                    nreg = (total + 7) / 8;
+                    if (nreg < 1) nreg = 1;
+                }
+                int need_gp = 0, need_fp = 0;
+                if (!is_memory) {
                     for (int k = 0; k < nreg; k++) {
                         if (cls[k] == SYSV_CLS_SSE) need_fp++;
                         else need_gp++;
                     }
-                    /* SysV: an aggregate is passed entirely in registers or
-                     * entirely on the stack.  If it does not fit in the
-                     * remaining GP/XMM slots, force every eightbyte onto
-                     * the stack so the callee matches the caller. */
-                    int fits = (used_gp + need_gp <= 6 && used_xmm + need_fp <= 8);
-                    if (fits) {
-                        used_gp += need_gp;
-                        used_xmm += need_fp;
-                    }
-                    param_nreg[p] = nreg;
-                    for (int k = 0; k < nreg; k++) {
-                        param_ebs[p][k] = new_value(&irfn);
-                        int is_sse = (cls[k] == SYSV_CLS_SSE);
-                        emit_inst_w(&irfn, IR_PARAM, param_ebs[p][k], -1, -1,
-                                    next_pidx++, 8, 1, ploc);
-                        if (!fits)
-                            irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
-                        if (is_sse)
-                            set_value_float(&irfn, param_ebs[p][k], 1);
-                    }
-                } else {
-                    /* MEMORY: arrive as a single pointer to a stack copy.
-                     * The caller copied the struct bytes into a temporary
-                     * alloca and passes its address; the callee copies from
-                     * that pointer into the local slot. */
-                    param_nreg[p] = -1; /* scalar (pointer) */
-                    param_ebs[p][0] = new_value(&irfn);
-                    emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
+                }
+                /* SysV: an aggregate is passed entirely in registers or
+                 * entirely on the stack.  MEMORY-class and register-class
+                 * that do not fit go on the stack. */
+                int fits = !is_memory
+                    && (used_gp + need_gp <= 6 && used_xmm + need_fp <= 8);
+                if (fits) {
+                    used_gp += need_gp;
+                    used_xmm += need_fp;
+                }
+                param_nreg[p] = nreg;
+                param_ebs[p] = malloc((size_t)nreg * sizeof(IRValue));
+                if (!param_ebs[p]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                for (int k = 0; k < nreg; k++) {
+                    param_ebs[p][k] = new_value(&irfn);
+                    int is_sse = !is_memory && (cls[k] == SYSV_CLS_SSE);
+                    emit_inst_w(&irfn, IR_PARAM, param_ebs[p][k], -1, -1,
                                 next_pidx++, 8, 1, ploc);
-                    if (used_gp < 6) used_gp++;
+                    if (!fits)
+                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
+                    if (is_sse)
+                        set_value_float(&irfn, param_ebs[p][k], 1);
                 }
             } else {
                 param_nreg[p] = -1;
                 int pw = (pty.kind == TY_PTR) ? 8 : (pty.width ? pty.width : 4);
                 int pu = (pty.kind == TY_PTR) ? 1 : pty.is_unsigned;
+                param_ebs[p] = malloc(sizeof(IRValue));
+                if (!param_ebs[p]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                 param_ebs[p][0] = new_value(&irfn);
                 emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
                             next_pidx++, pw, pu, ploc);
@@ -9226,6 +9247,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
              * renamed into the GP file and reloaded as an integer. */
             if (pty.kind == TY_FLOAT)
                 pinned = 1;
+            if (pty.is_volatile)
+                pinned = 1;
             /* Struct formals are always pinned (live in a stack slot). */
             if (pty.kind == TY_STRUCT || pty.is_vector || type_is_i128(pty))
                 pinned = 1;
@@ -9239,19 +9262,27 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 slot = emit_alloca(&irfn, total, 8, 1, ploc);
                 IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1, ploc);
                 if (param_nreg[p] > 0) {
-                    SysVRegClass cls[2];
+                    int n = param_nreg[p];
+                    SysVRegClass *cls = malloc((size_t)n * sizeof(SysVRegClass));
+                    if (!cls) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                     if (type_is_i128(pty)) {
                         cls[0] = SYSV_CLS_INTEGER;
                         cls[1] = SYSV_CLS_INTEGER;
                     } else {
-                        sysv_classify_agg(pty, cls);
+                        SysVRegClass small[2];
+                        int nr = sysv_classify_agg(pty, small);
+                        if (nr > 0) {
+                            for (int k = 0; k < n; k++)
+                                cls[k] = (k < nr) ? small[k] : SYSV_CLS_INTEGER;
+                        } else {
+                            for (int k = 0; k < n; k++)
+                                cls[k] = SYSV_CLS_INTEGER;
+                        }
                     }
-                    store_agg_regs(&irfn, addr, total, param_nreg[p], cls,
+                    store_agg_regs(&irfn, addr, total, n, cls,
                                    param_ebs[p], ploc);
+                    free(cls);
                 } else {
-                    /* MEMORY: the incoming arg is a pointer to a stack copy
-                     * of the struct bytes.  Copy from that pointer into the
-                     * local slot. */
                     emit_struct_copy(&irfn, addr, param_ebs[p][0], total, ploc);
                 }
             } else if (pinned) {
@@ -9273,13 +9304,15 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 if (irfn.ret_is_struct && irfn.ret_reg_n == 0) pidx = 1;
                 for (size_t q = 0; q < p; q++) {
                     if (param_nreg[q] > 0) pidx += param_nreg[q];
-                    else if (param_nreg[q] == 0) pidx += 1; /* MEMORY: 1 slot */
                     else pidx += 1;
                 }
                 ir_add_dbg_var(&irfn, pname, ploc, IR_DBG_PARAM, pty, slot, pidx);
             }
         }
-        free(param_ebs);
+        if (param_ebs) {
+            for (size_t p = 0; p < nparams; p++) free(param_ebs[p]);
+            free(param_ebs);
+        }
         free(param_nreg);
 
         /* C99 §6.7.5.3p21: evaluate parameter VLA dimensions on function entry. */

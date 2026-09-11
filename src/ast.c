@@ -546,6 +546,12 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
         int fc = sysv_field_class(m->type);
         if (m->bit_width > 0) fc = SV_INT;
         if (fc == SV_MEM) return 0;
+        /* SysV: an eightbyte with an unaligned field is MEMORY.  Packed
+         * structs commonly place e.g. `int` at offset 1. */
+        if (m->bit_width <= 0) {
+            long long ma = type_align(m->type);
+            if (ma > 1 && (m->offset % ma) != 0) return 0;
+        }
         for (int eb = 0; eb < 2; eb++) {
             int lo = eb * 8, hi = lo + 8;
             if (end <= lo || start >= hi) continue;
@@ -1581,8 +1587,34 @@ int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long 
         return 1;
     }
     if (e->kind == EX_CAST) {
-        /* Fold through int casts; for int128→int128 casts just pass through. */
-        return fold_const_int128(e->u.cast.operand, lo, hi);
+        Type t = e->u.cast.target;
+        unsigned long long vlo, vhi;
+        if (!fold_const_int128(e->u.cast.operand, &vlo, &vhi)) return 0;
+        if (t.kind == TY_INT) {
+            int w = t.width ? (int)t.width : 4;
+            if (t.is_bool) {
+                vlo = (vlo != 0 || vhi != 0) ? 1ULL : 0ULL;
+                vhi = 0;
+            } else if (w < 16) {
+                int bits = w * 8;
+                unsigned long long mask = (w >= 8) ? ~0ULL : ((1ULL << bits) - 1ULL);
+                vlo &= mask;
+                if (w < 8) {
+                    if (!t.is_unsigned && (vlo & (1ULL << (bits - 1)))) {
+                        vlo |= ~mask;
+                        vhi = ~0ULL;
+                    } else {
+                        vhi = 0;
+                    }
+                } else {
+                    /* width 8: low 64 bits; sign-extend into hi if signed. */
+                    vhi = (!t.is_unsigned && (vlo >> 63)) ? ~0ULL : 0ULL;
+                }
+            }
+        }
+        *lo = vlo;
+        *hi = vhi;
+        return 1;
     }
     if (e->kind == EX_UNARY) {
         unsigned long long vlo, vhi;
@@ -1619,10 +1651,25 @@ int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long 
         }
         case BOP_SHR: {
             unsigned long long n = rlo;
-            if (n >= 128) { *lo = 0; *hi = 0; return 1; }
-            if (n >= 64) { *lo = lhi >> (n - 64); *hi = 0; return 1; }
-            *hi = lhi >> n;
+            int arith = (e->type.kind == TY_INT && !e->type.is_unsigned)
+                     || (e->u.bin.l->type.kind == TY_INT && !e->u.bin.l->type.is_unsigned);
+            if (n == 0) { *lo = llo; *hi = lhi; return 1; }
+            if (n >= 128) {
+                if (arith && (lhi >> 63)) { *lo = ~0ULL; *hi = ~0ULL; }
+                else { *lo = 0; *hi = 0; }
+                return 1;
+            }
+            if (n >= 64) {
+                unsigned long long shifted = arith
+                    ? (unsigned long long)((long long)lhi >> (int)(n - 64))
+                    : (lhi >> (n - 64));
+                *lo = shifted;
+                *hi = (arith && (lhi >> 63)) ? ~0ULL : 0ULL;
+                return 1;
+            }
             *lo = (llo >> n) | (lhi << (64 - n));
+            *hi = arith ? (unsigned long long)((long long)lhi >> (int)n)
+                        : (lhi >> n);
             return 1;
         }
         case BOP_BITAND: *lo = llo & rlo; *hi = lhi & rhi; return 1;
@@ -1654,9 +1701,35 @@ int fold_const_int(const Expr *e, long long *out) {
         return 1;
     }
     if (e->kind == EX_CAST) {
-        /* Fold through integer casts (e.g. `(int)`); pointer casts are not
-         * integer constants, so require the operand to fold to an int. */
-        return fold_const_int(e->u.cast.operand, out);
+        /* Apply the cast's target representation (truncation / sign-extend).
+         * Pointer casts of integer constants keep the operand value. */
+        Type t = e->u.cast.target;
+        long long v;
+        if (!fold_const_int(e->u.cast.operand, &v)) return 0;
+        if (t.kind == TY_INT) {
+            if (t.is_bool) {
+                *out = v != 0 ? 1 : 0;
+                return 1;
+            }
+            int w = t.width ? (int)t.width : 4;
+            if (w >= 8) {
+                *out = v;
+                return 1;
+            }
+            int bits = w * 8;
+            unsigned long long mask = (1ULL << bits) - 1ULL;
+            unsigned long long u = (unsigned long long)v & mask;
+            if (t.is_unsigned) {
+                *out = (long long)u;
+            } else if (u & (1ULL << (bits - 1))) {
+                *out = (long long)(u | ~mask);
+            } else {
+                *out = (long long)u;
+            }
+            return 1;
+        }
+        *out = v;
+        return 1;
     }
     if (e->kind == EX_UNARY) {
         long long v;
@@ -1694,7 +1767,11 @@ int fold_const_int(const Expr *e, long long *out) {
         }
     }
     if (e->kind == EX_SIZEOF_TYPE) {
-        *out = type_size(e->u.sizeof_t.target);
+        Type t = e->u.sizeof_t.target;
+        if (type_is_vla(t)) return 0;
+        long long sz = type_size(t);
+        if (sz < 0) return 0;
+        *out = sz;
         return 1;
     }
     if (e->kind == EX_SIZEOF_EXPR) {
