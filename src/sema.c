@@ -617,6 +617,32 @@ static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
  * proper SEXT/ZEXT/TRUNC.  Only scalar arithmetic types are converted: pointers
  * are already 8 bytes, and structs/unions/arrays travel by reference in
  * fakecc's ABI and must not be reinterpreted here. */
+/* Default argument promotions (C11 6.5.2.2p6): float→double, integer
+ * promotions.  Applied to variadic extra args and to every argument of an
+ * unprototyped call. */
+static void apply_default_arg_promotions(Expr **argp) {
+    if (!argp || !*argp) return;
+    Expr *arg = *argp;
+    Type t = arg->type;
+    Type target;
+    int need = 0;
+    if (t.kind == TY_FLOAT && t.width == 4) {
+        target = type_make_float(8);
+        need = 1;
+    } else if (t.kind == TY_INT && (t.width < 4 || t.bitfield_width > 0)) {
+        Type p = integer_promote(t);
+        if (p.kind != t.kind || p.width != t.width || p.is_unsigned != t.is_unsigned) {
+            target = p;
+            need = 1;
+        }
+    }
+    if (!need) return;
+    Expr *cast = expr_new_cast(target, arg, arg->loc);
+    set_type(cast, type_clone(target));
+    type_free(&target);
+    *argp = cast;
+}
+
 static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
     if (!argp || !*argp || !ptype) return;
     Expr *arg = *argp;
@@ -1481,7 +1507,14 @@ static Type check_expr_inner(Expr *e) {
             if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC) {
                 const Type *fty = &local_fn_sym->type;
                 type_free(&callee_ty);
-                if ((int)e->u.call.args.len != fty->func_nparams && fty->func_nparams > 0) {
+                if (fty->func_is_variadic) {
+                    if ((int)e->u.call.args.len < fty->func_nparams) {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "function '%s' takes at least %d argument%s but %zu given",
+                               e->u.call.callee->u.var.name, fty->func_nparams,
+                               fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
+                    }
+                } else if ((int)e->u.call.args.len != fty->func_nparams && fty->func_nparams > 0) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "function '%s' takes %d argument%s but %zu given",
                            e->u.call.callee->u.var.name, fty->func_nparams,
@@ -1493,6 +1526,8 @@ static Type check_expr_inner(Expr *e) {
                     if (fty->func_params && (int)i < fty->func_nparams)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &fty->func_params[i]);
+                    else if (fty->func_is_variadic && (int)i >= fty->func_nparams)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 set_type(e, type_clone(*fty->func_ret));
                 return type_clone(e->type);
@@ -1520,6 +1555,10 @@ static Type check_expr_inner(Expr *e) {
                     if ((int)i < sig->arity)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &sig->param_types[i]);
+                    else if (sig->is_variadic)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
+                    else if (sig->is_unprototyped)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 set_type(e, type_clone(sig->ret_type));
                 return type_clone(e->type);
@@ -1537,7 +1576,14 @@ static Type check_expr_inner(Expr *e) {
                 const Type *fty = (extern_sym->type.kind == TY_FUNC)
                                   ? &extern_sym->type : extern_sym->type.pointee;
                 type_free(&callee_ty);
-                if ((int)e->u.call.args.len != fty->func_nparams) {
+                if (fty->func_is_variadic) {
+                    if ((int)e->u.call.args.len < fty->func_nparams) {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "function '%s' takes at least %d argument%s but %zu given",
+                               e->u.call.callee->u.var.name, fty->func_nparams,
+                               fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
+                    }
+                } else if ((int)e->u.call.args.len != fty->func_nparams) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "function '%s' takes %d argument%s but %zu given",
                            e->u.call.callee->u.var.name, fty->func_nparams,
@@ -1549,6 +1595,8 @@ static Type check_expr_inner(Expr *e) {
                     if (fty->func_params && (int)i < fty->func_nparams)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &fty->func_params[i]);
+                    else if (fty->func_is_variadic && (int)i >= fty->func_nparams)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 Type ret = fty->func_ret ? *fty->func_ret : type_make_void();
                 set_type(e, ret);
@@ -1590,6 +1638,10 @@ static Type check_expr_inner(Expr *e) {
             if (fn_ty.func_params && (int)i < fn_ty.func_nparams)
                 coerce_arg_to_param(&e->u.call.args.data[i],
                                     &fn_ty.func_params[i]);
+            else if (fn_ty.func_is_variadic && (int)i >= fn_ty.func_nparams)
+                apply_default_arg_promotions(&e->u.call.args.data[i]);
+            else if (!fn_ty.func_params)
+                apply_default_arg_promotions(&e->u.call.args.data[i]);
         }
         set_type(e, type_clone(*fn_ty.func_ret));
         type_free(&fn_ty);
@@ -2570,6 +2622,28 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                     die_at(s->loc.file, s->loc.line, s->loc.col,
                            "redefinition of global '%s'", s->u.decl.name);
                 }
+                /* C99 6.2.2: a file-scope `static` after a non-static
+                 * declaration (or the reverse, except `extern` restating
+                 * internal linkage) is a constraint violation. */
+                {
+                    int prev_sc = prev->u.decl.storage_class;
+                    int new_sc = s->u.decl.storage_class;
+                    if (new_sc == 1 && prev_sc != 1) {
+                        die_at(s->loc.file, s->loc.line, s->loc.col,
+                               "static declaration of '%s' follows non-static declaration",
+                               s->u.decl.name);
+                    }
+                    if (prev_sc == 1 && new_sc == 0) {
+                        die_at(s->loc.file, s->loc.line, s->loc.col,
+                               "non-static declaration of '%s' follows static declaration",
+                               s->u.decl.name);
+                    }
+                }
+                /* `extern int x; int x;` — the tentative definition gives the
+                 * object storage.  Keep the first Stmt and drop the duplicate. */
+                if (!s->u.decl.init && prev->u.decl.storage_class == 2
+                    && s->u.decl.storage_class != 2)
+                    prev->u.decl.storage_class = s->u.decl.storage_class;
                 if (!prev->u.decl.init && s->u.decl.init) {
                     prev->u.decl.init = s->u.decl.init;
                     prev->u.decl.type = s->u.decl.type;

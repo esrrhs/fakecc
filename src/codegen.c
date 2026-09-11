@@ -1378,10 +1378,12 @@ static void emit_builtin_return(Buffer *b, const IRInst *inst, const RAResult *r
 
 /* Implement `va_start(ap, last)`: fill the four va_list fields.  The initial
  * offsets (gp_offset, fp_offset, overflow_arg_off) are passed in; they are
- * computed once per function from its named-arg layout.  reg_save_area is the
- * save-area base = rsp (constant after the prologue). */
+ * computed once per function from its named-arg layout.  reg_save_area is
+ * the 176-byte save area at the bottom of the frame, addressed as
+ * [rbp + reg_save_rbp_off] so it stays valid after IR_DYN_ALLOCA moves rsp. */
 static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
-                          int gp_offset, int fp_offset, int overflow_off) {
+                          int gp_offset, int fp_offset, int overflow_off,
+                          int reg_save_rbp_off) {
     int ap = inst->call_args[0];
     ensure_reg(b, ap, REG_RAX, ra);
     int ap_reg = REG_RAX;
@@ -1394,8 +1396,8 @@ static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
     /* overflow_arg_area @8 = rbp + first stack-passed arg offset (8-byte ptr) */
     emit_lea_rbp(b, REG_RCX, overflow_off);
     emit_store_base_off(b, ap_reg, REG_RCX, VA_OV_OFF);
-    /* reg_save_area @16 = rsp (save area base, 8-byte ptr) */
-    emit_mov_rr(b, REG_RCX, REG_RSP);
+    /* reg_save_area @16 = bottom of frame (8-byte ptr) */
+    emit_lea_rbp(b, REG_RCX, reg_save_rbp_off);
     emit_store_base_off(b, ap_reg, REG_RCX, VA_REG_OFF);
 }
 
@@ -1499,37 +1501,40 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             emit_add_imm32(b, REG_R11, ov_step);
             emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
             patch_rel32(b, jmp_end, b->len);
-        } else {
-            /* MEMORY-class struct: the caller allocates a tmp copy and passes
-             * its address as one GP register argument (new pointer-passing ABI).
-             *
-             * Step 1: load the pointer from [reg_save_area + gp_offset] if
-             * gp_offset < 48; otherwise from overflow_arg_area.
-             * Step 2: advance gp_offset by 8 (or overflow by 8).
-             * Step 3: dereference the pointer and copy n8 qwords to dst. */
+        } else if (nbytes > 128) {
+            /* Huge MEMORY struct: caller passed a pointer in one GP slot.
+             * Load that pointer from the save/overflow area, then copy n8
+             * qwords from the pointed-to object. */
             emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
             emit_cmp_imm32(b, REG_RCX, 48);
             size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
-            /* Register path: load pointer from [reg_save_area + gp_offset] */
-            emit_load_base_off(b, REG_RDX, ap_reg, VA_REG_OFF); /* rdx = save_area */
-            emit_add_rr(b, REG_RDX, REG_RCX);                   /* rdx = save_area+gp_offset */
-            emit_load_base_off(b, REG_RDX, REG_RDX, 0);         /* rdx = ptr to struct */
+            emit_load_base_off(b, REG_RDX, ap_reg, VA_REG_OFF);
+            emit_add_rr(b, REG_RDX, REG_RCX);
+            emit_load_base_off(b, REG_RDX, REG_RDX, 0);
             emit_add_imm32(b, REG_RCX, 8);
             emit_store_base_off32(b, ap_reg, REG_RCX, VA_GP_OFF);
             size_t jmp_end = emit_jmp_rel32(b);
-            /* Overflow path: load pointer from [overflow_arg_area] */
             size_t ov_off = b->len;
             patch_rel32(b, jae_ov, ov_off);
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
-            emit_load_base_off(b, REG_RDX, REG_R11, 0); /* rdx = ptr to struct */
+            emit_load_base_off(b, REG_RDX, REG_R11, 0);
             emit_add_imm32(b, REG_R11, 8);
             emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
-            /* End: dereference ptr (in RDX) and copy n8 qwords to dst (RSI). */
             patch_rel32(b, jmp_end, b->len);
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_R11, REG_RDX, i * 8);
                 emit_store_base_off(b, REG_RSI, REG_R11, i * 8);
             }
+        } else {
+            /* Small MEMORY-class struct: SysV passes eightbytes on the
+             * overflow stack.  Copy n8 qwords from overflow_arg_area. */
+            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            }
+            emit_add_imm32(b, REG_R11, ov_step);
+            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
         }
         if (dst >= 0) {
             if (ra && dst < ra->num_values && ra->reg[dst] >= 0
@@ -2067,9 +2072,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         if (!ra && stack_size == 0) stack_size = 8 * fn->next_value_id;
         if (stack_size % 16 != 0) stack_size += 16 - (stack_size % 16);
 
-        /* Bottom-of-frame extras, addressed from rsp after `sub $stack_size`.
-         * Variadic save area stays at rsp+0 so va_start's reg_save_area=rsp
-         * is unchanged.  apply_args/result follow it. */
+        /* Variadic save area stays at the bottom of the frame (rsp after
+         * `sub $stack_size`) so va_start can recover it as [rbp - frame_down]
+         * even if a later VLA moves rsp.  apply_args/result follow it. */
         int apply_args_rsp_off = -1, apply_result_rsp_off = -1, apply_saved_sp_rsp_off = -1;
         int bottom_extra = 0;
         if (fn->is_variadic) bottom_extra = 176;
@@ -3411,7 +3416,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * was passed as call_args[0].  Dispatch by name. */
                 if (inst->call_name && strcmp(inst->call_name, "va_start") == 0) {
                     emit_va_start(&out->text, inst, ra, va_gp_offset,
-                                  va_fp_offset, va_overflow_off);
+                                  va_fp_offset, va_overflow_off, -frame_down);
                     break;
                 }
                 if (inst->call_name && strcmp(inst->call_name, "va_end") == 0) {
@@ -3682,14 +3687,26 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
                 if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);
 
-                /* Multi-eightbyte aggregate return: save hi (RDX/XMM1) first
-                 * so capturing lo into a home that aliases RDX/XMM1 is safe. */
+                /* Multi-eightbyte aggregate return: SysV assigns INTEGER
+                 * eightbytes to RAX then RDX and SSE eightbytes to XMM0
+                 * then XMM1, independently.  Save hi first so capturing lo
+                 * cannot clobber it. */
+                int ret_lo_f = (inst->dst >= 0) && value_is_float_class(fn, inst->dst);
+                int ret_hi_f = (inst->b >= 0) && value_is_float_class(fn, inst->b);
+                int hi_src_gp = -1, hi_src_xmm = -1;
                 if (inst->b >= 0) {
-                    if (value_is_float_class(fn, inst->b)) {
+                    if (ret_lo_f && ret_hi_f) hi_src_xmm = 1;      /* XMM1 */
+                    else if (!ret_lo_f && ret_hi_f) hi_src_xmm = 0; /* XMM0 */
+                    else if (ret_lo_f && !ret_hi_f) hi_src_gp = REG_RAX;
+                    else hi_src_gp = REG_RDX;
+                }
+
+                if (inst->b >= 0) {
+                    if (hi_src_xmm >= 0) {
                         emit_sub_rsp_imm32(&out->text, 8);
-                        emit_sse_store_rsp(&out->text, 1); /* XMM1 */
+                        emit_sse_store_rsp(&out->text, hi_src_xmm);
                     } else {
-                        emit_push_r(&out->text, REG_RDX);
+                        emit_push_r(&out->text, hi_src_gp);
                     }
                 }
 
@@ -3716,7 +3733,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
 
                 if (inst->b >= 0) {
-                    if (value_is_float_class(fn, inst->b)) {
+                    if (hi_src_xmm >= 0) {
                         int br = (ra_xmm && inst->b < ra_xmm->num_values)
                                  ? ra_xmm->reg[inst->b] : -1;
                         if (br >= 0) {
@@ -3747,7 +3764,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
             case IR_RETURN: {
                 /* Void function: bare `return;` — no value in a.
-                 * SysV multi-eightbyte returns: a → RAX/XMM0, b → RDX/XMM1. */
+                 * SysV multi-eightbyte returns: INTEGER eightbytes go to
+                 * RAX then RDX; SSE eightbytes go to XMM0 then XMM1. */
                 if (inst->a != -1 && inst->b != -1) {
                     int a_f = value_is_float_class(fn, inst->a);
                     int b_f = value_is_float_class(fn, inst->b);
@@ -3766,14 +3784,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (XMM_SCRATCH0 != 1)
                             emit_sse_mov_rr(&out->text, 1, XMM_SCRATCH0);
                     } else if (a_f) {
-                        /* lo SSE, hi INTEGER — independent files. */
-                        ensure_reg(&out->text, inst->b, REG_RDX, ra);
+                        /* lo SSE, hi INTEGER — hi is the first INTEGER (RAX). */
+                        ensure_reg(&out->text, inst->b, REG_RAX, ra);
                         ensure_reg_xmm(&out->text, inst->a, 0, ra_xmm,
                                        gp_spill_area);
                     } else {
-                        /* lo INTEGER, hi SSE. */
-                        ensure_reg_xmm(&out->text, inst->b, 1, ra_xmm,
-                                       gp_spill_area); /* XMM1 */
+                        /* lo INTEGER, hi SSE — hi is the first SSE (XMM0). */
+                        ensure_reg_xmm(&out->text, inst->b, 0, ra_xmm,
+                                       gp_spill_area); /* XMM0 */
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                     }
                 } else if (inst->a != -1) {

@@ -88,6 +88,11 @@ typedef enum {
     SYSV_CLS_SSE     = 2
 } SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+/* MEMORY-class passing: 0 = expand into stack eightbytes (SysV);
+ * 1 = pass a pointer to a copy.  Pointer is used for `__va_list_tag`
+ * (matches libc/GCC array decay) and for aggregates larger than 128 bytes
+ * so lowering does not explode into thousands of IR args. */
+int sysv_memory_pass_as_pointer(Type t);
 
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
