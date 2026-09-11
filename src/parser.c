@@ -380,6 +380,17 @@ static const Type *find_typedef_with_fallback(Parser *p, const char *name) {
     return resolve_pkg_typedef(p, p->tu->package.name, name);
 }
 
+/* GNU decimal floating types (ISO/IEC TR 24732).  Lowered as binary
+ * float of the same width so local arithmetic/compare work; BID/DPD
+ * encoding is not preserved. */
+static int decimal_float_width(const char *text) {
+    if (!text) return 0;
+    if (strcmp(text, "_Decimal32") == 0) return 4;
+    if (strcmp(text, "_Decimal64") == 0) return 8;
+    if (strcmp(text, "_Decimal128") == 0) return 16;
+    return 0;
+}
+
 /* Recognize a type at position `pos` (keywords, typedefs, pkg.Type). */
 static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
@@ -445,6 +456,8 @@ static int is_type_start(const Parser *p, size_t pos) {
             return 0;
         }
         if (strcmp(text, "__int128") == 0 || strcmp(text, "__int128_t") == 0 || strcmp(text, "__uint128_t") == 0)
+            return 1;
+        if (decimal_float_width(text))
             return 1;
         if (strcmp(text, "typeof") == 0 || strcmp(text, "__typeof__") == 0 || strcmp(text, "__typeof") == 0)
             return 1;
@@ -589,6 +602,11 @@ static Type eval_binary_type(Parser *p, Type a, Type b) {
         return type_clone(cty);
     }
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT) {
+        if (a.is_decimal || b.is_decimal) {
+            if (a.is_decimal && b.is_decimal)
+                return type_clone(a.width >= b.width ? a : b);
+            return type_clone(a.is_decimal ? a : b);
+        }
         return type_clone(a.width >= b.width ? a : b);
     }
     if (a.kind == TY_FLOAT) return type_clone(a);
@@ -993,6 +1011,16 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_float(16);
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+    }
+    /* GNU decimal floating types: _Decimal32/64/128. */
+    if (peek(p)->kind == TK_IDENT) {
+        int dw = decimal_float_width(peek(p)->text);
+        if (dw) {
+            advance(p);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
+            Type t = type_make_decimal(dw);
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+        }
     }
     /* enum Tag — treated as int for the type system (or C23 fixed underlying). */
     if (peek(p)->kind == TK_KW_ENUM) {
@@ -2412,12 +2440,40 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
 /* Decode a char-literal token's text (e.g. "'A'" or "'\\n'") to its int value.
  * Caller guarantees text starts and ends with a single quote. */
 /* Classify a TK_FLOAT_LITERAL's suffix into a width: f/F -> float (4),
- * l/L -> long double (16), otherwise double (8).  The numeric value is left
+ * l/L -> long double (16), df/DF -> _Decimal32 (4), dd/DD -> _Decimal64 (8),
+ * dl/DL -> _Decimal128 (16), otherwise double (8).  The numeric value is left
  * in the AST's source text and parsed at IR time (strtold preserves the
  * 80-bit precision a double cannot hold). */
-static void float_literal_width(const char *text, int *out_width) {
+static void float_literal_width(const char *text, int *out_width, int *out_decimal) {
     size_t len = strlen(text);
     *out_width = 8;  /* default: double */
+    if (out_decimal) *out_decimal = 0;
+    while (len > 0) {
+        char last = text[len - 1];
+        if (last == 'i' || last == 'I' || last == 'j' || last == 'J') {
+            len--;
+            continue;
+        }
+        break;
+    }
+    if (len >= 2) {
+        char a = text[len - 2], b = text[len - 1];
+        if ((a == 'd' || a == 'D') && (b == 'f' || b == 'F')) {
+            *out_width = 4;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+        if ((a == 'd' || a == 'D') && (b == 'd' || b == 'D')) {
+            *out_width = 8;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+        if ((a == 'd' || a == 'D') && (b == 'l' || b == 'L')) {
+            *out_width = 16;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+    }
     if (len > 0) {
         char last = text[len - 1];
         if (last == 'f' || last == 'F')
@@ -2753,8 +2809,10 @@ static Expr *parse_primary(Parser *p) {
             return parse_postfix(p, e);
         }
         int width = 8;
-        float_literal_width(t->text, &width); /* classify width (4/8/16) */
+        int is_dec = 0;
+        float_literal_width(t->text, &width, &is_dec);
         Expr *e = expr_new_float_lit(t->text, width, t->loc);
+        if (is_dec) e->type.is_decimal = 1;
         advance(p);
         return e;  /* float literal is a primary — no postfix needed */
     }
@@ -3241,7 +3299,8 @@ static int is_function_declaration_lookahead(Parser *p) {
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "__int128") == 0
                        || strcmp(peek(p)->text, "__int128_t") == 0
-                       || strcmp(peek(p)->text, "__uint128_t") == 0)) {
+                       || strcmp(peek(p)->text, "__uint128_t") == 0
+                       || decimal_float_width(peek(p)->text))) {
             advance(p);
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "typeof") == 0
@@ -3350,7 +3409,8 @@ static int is_function_definition_lookahead(Parser *p) {
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "__int128") == 0
                        || strcmp(peek(p)->text, "__int128_t") == 0
-                       || strcmp(peek(p)->text, "__uint128_t") == 0)) {
+                       || strcmp(peek(p)->text, "__uint128_t") == 0
+                       || decimal_float_width(peek(p)->text))) {
             advance(p);
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "typeof") == 0

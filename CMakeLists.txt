@@ -17,6 +17,7 @@ add_library(fakecc_core
     src/common.c
     src/lexer.c
     src/ast.c
+    src/dfp.c
     src/parser.c
     src/sema.c
     src/ir.c

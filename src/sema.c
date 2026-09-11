@@ -578,9 +578,22 @@ static Type usual_arith_conv(Type a, Type b) {
         return type_clone(cty);
     }
     Type res;
-    /* Float dominates: if either operand is float, the result is float.
-     * double wins over float (higher width). */
-    if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
+    /* Decimal float is a separate type domain (GNU): it does not mix with
+     * binary float.  Among decimals the wider format wins; an integer is
+     * converted to the decimal operand's type. */
+    if (a.is_decimal || b.is_decimal) {
+        if (a.is_decimal && b.is_decimal)
+            res = a.width >= b.width ? a : b;
+        else if (a.is_decimal && b.kind != TY_FLOAT)
+            res = a;
+        else if (b.is_decimal && a.kind != TY_FLOAT)
+            res = b;
+        else {
+            /* Mixed decimal + binary float: keep the decimal type so later
+             * sema on the operator can diagnose. */
+            res = a.is_decimal ? a : b;
+        }
+    } else if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
         res = type_rank(a) >= type_rank(b) ? a : b;
     else if (a.kind == TY_FLOAT) res = a;
     else if (b.kind == TY_FLOAT) res = b;
@@ -623,10 +636,16 @@ static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
 static void apply_default_arg_promotions(Expr **argp) {
     if (!argp || !*argp) return;
     Expr *arg = *argp;
+    if (arg->kind == EX_CALL && arg->u.call.callee && arg->u.call.callee->kind == EX_VAR) {
+        const char *n = arg->u.call.callee->u.var.name;
+        if (n && (strcmp(n, "__builtin_va_arg_pack") == 0
+                  || strcmp(n, "__builtin_va_arg_pack_len") == 0))
+            return;
+    }
     Type t = arg->type;
     Type target;
     int need = 0;
-    if (t.kind == TY_FLOAT && t.width == 4) {
+    if (t.kind == TY_FLOAT && t.width == 4 && !t.is_decimal) {
         target = type_make_float(8);
         need = 1;
     } else if (t.kind == TY_INT && (t.width < 4 || t.bitfield_width > 0)) {
@@ -657,7 +676,8 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
         if (at->tag && ptype->tag && strcmp(at->tag, ptype->tag) == 0)
             return;
     } else if (at->kind == ptype->kind && at->width == ptype->width
-        && at->is_unsigned == ptype->is_unsigned && at_cplx == pt_cplx) {
+        && at->is_unsigned == ptype->is_unsigned && at_cplx == pt_cplx
+        && at->is_decimal == ptype->is_decimal) {
         return;
     }
     Type target = type_clone(*ptype);
@@ -791,7 +811,10 @@ static Type check_expr_inner(Expr *e) {
         return type_clone(e->type);
     case EX_FLOAT_LIT:
         /* Width was stashed in e->type by the parser (4 = float, 8 = double). */
-        set_type(e, type_make_float(e->type.width ? e->type.width : 8));
+        if (e->type.is_decimal)
+            set_type(e, type_make_decimal(e->type.width ? e->type.width : 8));
+        else
+            set_type(e, type_make_float(e->type.width ? e->type.width : 8));
         return type_clone(e->type);
     case EX_BINOP: {
         Type lt = check_expr_inner(e->u.bin.l);
@@ -827,6 +850,10 @@ static Type check_expr_inner(Expr *e) {
                        op == BOP_AND ? "&&" : "||");
             res = type_make_int(4, 0);
         } else if (op >= BOP_EQ && op <= BOP_GE) {
+            if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
+                (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "cannot mix operands of decimal floating and other floating types");
             /* Comparison operators: warn on distinct pointer types (GCC -Wcompare-distinct-pointer-types). */
             if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
                 int func_cmp = (lt.pointee && lt.pointee->kind == TY_FUNC) ||
@@ -900,6 +927,10 @@ static Type check_expr_inner(Expr *e) {
                        "left operand of '%s' must be arithmetic",
                        op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
                        : op == BOP_MUL ? "*" : "/");
+            if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
+                (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "cannot mix operands of decimal floating and other floating types");
             res = usual_arith_conv(lt, rt);
         }
         type_free(&lt); type_free(&rt);
@@ -1104,6 +1135,8 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_int(4, 1);
             else if (strcmp(bname, "__builtin_ulabs") == 0 || strcmp(bname, "__builtin_ullabs") == 0 || strcmp(bname, "__builtin_umaxabs") == 0)
                 ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_va_arg_pack") == 0 || strcmp(bname, "__builtin_va_arg_pack_len") == 0)
+                ret = type_default_int();
             Type p0, p1;
             Type *params[2];
             int num_params = 0;
@@ -1411,6 +1444,17 @@ static Type check_expr_inner(Expr *e) {
             Type at = check_expr_inner(e->u.call.args.data[0]);
             type_free(&at);
             set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__builtin_va_arg_pack") == 0) {
+            /* Placeholder expanded during always-inline lowering. */
+            set_type(e, type_default_int());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__builtin_va_arg_pack_len") == 0) {
+            set_type(e, type_default_int());
             return type_clone(e->type);
         }
         /* Recognize the va_start / va_arg / va_end builtins BEFORE the callee
@@ -1822,13 +1866,7 @@ static Type check_expr_inner(Expr *e) {
         type_free(&ot);
         /* Result type is the operand type (before increment). For both prefix
          * and postfix, e->type is the same as the operand's declared type. */
-        Type res;
-        if (op->type.kind == TY_PTR)
-            res = type_clone(op->type);
-        else
-            res = type_make_int(op->type.width ? op->type.width : 4,
-                                op->type.is_unsigned);
-        set_type(e, res);
+        set_type(e, type_clone(op->type));
         return type_clone(e->type);
     }
     case EX_COMMA: {

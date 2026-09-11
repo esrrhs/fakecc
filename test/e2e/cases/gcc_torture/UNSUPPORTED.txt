@@ -48,11 +48,3 @@ pr71494.c
 pr41935.c
 pr82210.c
 
-
-# _Decimal64 not supported by fakecc.
-pr80692.c
-
-# __builtin_va_arg_pack not supported by fakecc.
-va-arg-pack-1.c
-
-

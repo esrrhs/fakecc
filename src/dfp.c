@@ -1,0 +1,535 @@
+#include "fakecc/dfp.h"
+
+#include <ctype.h>
+#include <string.h>
+
+typedef unsigned __int128 u128;
+
+enum { DFP_FINITE = 0, DFP_INF = 1, DFP_NAN = 2 };
+
+typedef struct {
+    int cls;
+    int sign;
+    int exp;
+    u128 coeff;
+} Dfp;
+
+static u128 p10(int n) {
+    static const unsigned long long small[20] = {
+        1ULL, 10ULL, 100ULL, 1000ULL, 10000ULL, 100000ULL, 1000000ULL,
+        10000000ULL, 100000000ULL, 1000000000ULL, 10000000000ULL,
+        100000000000ULL, 1000000000000ULL, 10000000000000ULL,
+        100000000000000ULL, 1000000000000000ULL, 10000000000000000ULL,
+        100000000000000000ULL, 1000000000000000000ULL, 10000000000000000000ULL
+    };
+    if (n <= 0) return 1;
+    if (n < 20) return (u128)small[n];
+    u128 r = (u128)small[19];
+    int i = 19;
+    while (i < n) {
+        r = r * 10;
+        i++;
+    }
+    return r;
+}
+
+static int dfp_p(int w) { return w == 4 ? 7 : (w == 16 ? 34 : 16); }
+static int dfp_bias(int w) { return w == 4 ? 101 : (w == 16 ? 6176 : 398); }
+static int dfp_emax(int w) { return w == 4 ? 96 : (w == 16 ? 6144 : 384); }
+static int dfp_emin(int w) { return w == 4 ? -95 : (w == 16 ? -6143 : -383); }
+
+static int ndigits(u128 c) {
+    if (c == 0) return 1;
+    int n = 1;
+    u128 t = 10;
+    while (c >= t) {
+        n++;
+        if (n >= 40) break;
+        t = t * 10;
+    }
+    return n;
+}
+
+static void dfp_quantize(Dfp *x, int width) {
+    int p = dfp_p(width);
+    int emax = dfp_emax(width);
+    int emin = dfp_emin(width);
+    int etiny = emin - (p - 1);
+    if (x->cls != DFP_FINITE) return;
+    if (x->coeff == 0) {
+        x->exp = 0;
+        return;
+    }
+    while (x->coeff >= p10(p) || x->exp < etiny) {
+        if (x->exp >= emax && x->coeff >= p10(p)) {
+            x->cls = DFP_INF;
+            x->coeff = 0;
+            x->exp = 0;
+            return;
+        }
+        u128 q = x->coeff / 10;
+        u128 r = x->coeff % 10;
+        if (r > 5 || (r == 5 && (q & 1)))
+            q = q + 1;
+        x->coeff = q;
+        x->exp++;
+        if (x->coeff == 0) {
+            x->exp = 0;
+            return;
+        }
+    }
+    while (x->coeff > 0 && x->coeff % 10 == 0 && x->exp < emax) {
+        /* Prefer a canonical short coefficient when it does not change
+         * the value, but keep at least the preferred exponent range.
+         * Literals already quantized: skip stripping trailing zeros
+         * except when overflow from rounding produced extra tens. */
+        break;
+    }
+    if (x->exp > emax) {
+        x->cls = DFP_INF;
+        x->coeff = 0;
+        x->exp = 0;
+    }
+}
+
+static void dfp_encode(const Dfp *x, int width,
+                       unsigned long long *lo, unsigned long long *hi) {
+    *lo = 0;
+    *hi = 0;
+    if (width == 4) {
+        unsigned int bits = 0;
+        if (x->sign) bits |= 0x80000000u;
+        if (x->cls == DFP_NAN) {
+            bits |= 0x7c000000u;
+        } else if (x->cls == DFP_INF) {
+            bits |= 0x78000000u;
+        } else {
+            int be = x->exp + dfp_bias(4);
+            u128 c = x->coeff;
+            if (c < ((u128)1 << 23)) {
+                bits |= ((unsigned int)be << 23) | (unsigned int)c;
+            } else {
+                bits |= 0x60000000u
+                      | ((unsigned int)be << 21)
+                      | ((unsigned int)c & 0x1fffffu);
+            }
+        }
+        *lo = bits;
+        return;
+    }
+    if (width != 16) {
+        unsigned long long bits = 0;
+        if (x->sign) bits |= 0x8000000000000000ULL;
+        if (x->cls == DFP_NAN) {
+            bits |= 0x7c00000000000000ULL;
+        } else if (x->cls == DFP_INF) {
+            bits |= 0x7800000000000000ULL;
+        } else {
+            int be = x->exp + dfp_bias(8);
+            u128 c = x->coeff;
+            if (c < ((u128)1 << 53)) {
+                bits |= ((unsigned long long)be << 53) | (unsigned long long)c;
+            } else {
+                bits |= 0x6000000000000000ULL
+                      | ((unsigned long long)be << 51)
+                      | ((unsigned long long)c & 0x0007ffffffffffffULL);
+            }
+        }
+        *lo = bits;
+        return;
+    }
+    unsigned long long h = 0, l = 0;
+    if (x->sign) h |= 0x8000000000000000ULL;
+    if (x->cls == DFP_NAN) {
+        h |= 0x7c00000000000000ULL;
+    } else if (x->cls == DFP_INF) {
+        h |= 0x7800000000000000ULL;
+    } else {
+        int be = x->exp + dfp_bias(16);
+        u128 c = x->coeff;
+        u128 thresh = (u128)1 << 113;
+        if (c < thresh) {
+            h |= ((unsigned long long)be << 49)
+               | (unsigned long long)(c >> 64);
+            l = (unsigned long long)c;
+        } else {
+            u128 c2 = c - thresh;
+            h |= 0x6000000000000000ULL
+               | ((unsigned long long)be << 47)
+               | (unsigned long long)(c2 >> 64);
+            l = (unsigned long long)c2;
+        }
+    }
+    *hi = h;
+    *lo = l;
+}
+
+static int dfp_decode(int width, unsigned long long lo, unsigned long long hi, Dfp *x) {
+    memset(x, 0, sizeof(*x));
+    if (width == 4) {
+        unsigned int bits = (unsigned int)lo;
+        x->sign = (bits >> 31) & 1;
+        if ((bits & 0x7c000000u) == 0x7c000000u) { x->cls = DFP_NAN; return 1; }
+        if ((bits & 0x78000000u) == 0x78000000u) { x->cls = DFP_INF; return 1; }
+        x->cls = DFP_FINITE;
+        if ((bits & 0x60000000u) == 0x60000000u) {
+            x->exp = (int)((bits >> 21) & 0xff) - dfp_bias(4);
+            x->coeff = (u128)((bits & 0x1fffffu) | 0x800000u);
+        } else {
+            x->exp = (int)((bits >> 23) & 0xff) - dfp_bias(4);
+            x->coeff = (u128)(bits & 0x7fffffu);
+        }
+        return 1;
+    }
+    if (width != 16) {
+        unsigned long long bits = lo;
+        x->sign = (int)(bits >> 63);
+        if ((bits & 0x7c00000000000000ULL) == 0x7c00000000000000ULL) {
+            x->cls = DFP_NAN; return 1;
+        }
+        if ((bits & 0x7800000000000000ULL) == 0x7800000000000000ULL) {
+            x->cls = DFP_INF; return 1;
+        }
+        x->cls = DFP_FINITE;
+        if ((bits & 0x6000000000000000ULL) == 0x6000000000000000ULL) {
+            x->exp = (int)((bits >> 51) & 0x3ff) - dfp_bias(8);
+            x->coeff = (u128)((bits & 0x0007ffffffffffffULL) | 0x0020000000000000ULL);
+        } else {
+            x->exp = (int)((bits >> 53) & 0x3ff) - dfp_bias(8);
+            x->coeff = (u128)(bits & 0x001fffffffffffffULL);
+        }
+        return 1;
+    }
+    x->sign = (int)(hi >> 63);
+    if ((hi & 0x7c00000000000000ULL) == 0x7c00000000000000ULL) {
+        x->cls = DFP_NAN; return 1;
+    }
+    if ((hi & 0x7800000000000000ULL) == 0x7800000000000000ULL) {
+        x->cls = DFP_INF; return 1;
+    }
+    x->cls = DFP_FINITE;
+    if ((hi & 0x6000000000000000ULL) == 0x6000000000000000ULL) {
+        x->exp = (int)((hi >> 47) & 0x3fff) - dfp_bias(16);
+        u128 c = ((u128)(hi & 0x00007fffffffffffULL) << 64) | lo;
+        x->coeff = c + ((u128)1 << 113);
+    } else {
+        x->exp = (int)((hi >> 49) & 0x3fff) - dfp_bias(16);
+        x->coeff = ((u128)(hi & 0x0001ffffffffffffULL) << 64) | lo;
+    }
+    return 1;
+}
+
+static Dfp dfp_add_finite(Dfp a, Dfp b, int width) {
+    Dfp r;
+    memset(&r, 0, sizeof(r));
+    r.cls = DFP_FINITE;
+    if (a.coeff == 0) return b;
+    if (b.coeff == 0) return a;
+    if (a.exp < b.exp) {
+        Dfp t = a; a = b; b = t;
+    }
+    int shift = a.exp - b.exp;
+    int p = dfp_p(width);
+    if (shift > p + 3) {
+        /* b is a rounding digit at most. */
+        if (b.coeff != 0 && a.sign == b.sign) {
+            /* sticky: round up if adding tiny same-sign */
+        }
+        return a;
+    }
+    u128 bc = b.coeff;
+    u128 sticky = 0;
+    int i = 0;
+    while (i < shift) {
+        sticky = sticky | (bc % 10);
+        bc = bc / 10;
+        i++;
+    }
+    r.exp = a.exp;
+    if (a.sign == b.sign) {
+        r.sign = a.sign;
+        r.coeff = a.coeff + bc;
+        if (sticky && (r.coeff & 1))
+            r.coeff = r.coeff + 1;
+    } else {
+        if (a.coeff > bc || (a.coeff == bc && sticky == 0)) {
+            r.sign = a.sign;
+            r.coeff = a.coeff - bc;
+            if (sticky && r.coeff > 0)
+                r.coeff = r.coeff - 1;
+        } else if (a.coeff == bc && sticky == 0) {
+            r.sign = 0;
+            r.coeff = 0;
+            r.exp = 0;
+        } else {
+            r.sign = b.sign;
+            r.coeff = bc - a.coeff;
+        }
+    }
+    dfp_quantize(&r, width);
+    return r;
+}
+
+static Dfp dfp_mul_finite(Dfp a, Dfp b, int width) {
+    Dfp r;
+    memset(&r, 0, sizeof(r));
+    r.cls = DFP_FINITE;
+    r.sign = a.sign ^ b.sign;
+    if (a.coeff == 0 || b.coeff == 0) {
+        r.coeff = 0;
+        r.exp = 0;
+        r.sign = a.sign ^ b.sign;
+        return r;
+    }
+    r.exp = a.exp + b.exp;
+    r.coeff = a.coeff * b.coeff;
+    dfp_quantize(&r, width);
+    return r;
+}
+
+static Dfp dfp_div_finite(Dfp a, Dfp b, int width) {
+    Dfp r;
+    memset(&r, 0, sizeof(r));
+    r.sign = a.sign ^ b.sign;
+    if (b.coeff == 0) {
+        r.cls = (a.coeff == 0) ? DFP_NAN : DFP_INF;
+        return r;
+    }
+    if (a.coeff == 0) {
+        r.cls = DFP_FINITE;
+        r.coeff = 0;
+        r.exp = 0;
+        return r;
+    }
+    r.cls = DFP_FINITE;
+    int p = dfp_p(width);
+    /* a * 10^k / b with extra digits for rounding. */
+    int k = p + 4 - ndigits(a.coeff) + ndigits(b.coeff);
+    if (k < p + 2) k = p + 2;
+    u128 num = a.coeff * p10(k);
+    u128 q = num / b.coeff;
+    u128 rem = num % b.coeff;
+    if (rem * 2 > b.coeff || (rem * 2 == b.coeff && (q & 1)))
+        q = q + 1;
+    r.coeff = q;
+    r.exp = a.exp - b.exp - k;
+    dfp_quantize(&r, width);
+    return r;
+}
+
+static Dfp dfp_binop_val(int op, Dfp a, Dfp b, int width) {
+    Dfp r;
+    memset(&r, 0, sizeof(r));
+    if (op == DFP_SUB) {
+        b.sign = !b.sign;
+        op = DFP_ADD;
+    }
+    if (a.cls == DFP_NAN || b.cls == DFP_NAN) {
+        r.cls = DFP_NAN;
+        r.sign = a.cls == DFP_NAN ? a.sign : b.sign;
+        return r;
+    }
+    if (op == DFP_ADD) {
+        if (a.cls == DFP_INF && b.cls == DFP_INF && a.sign != b.sign) {
+            r.cls = DFP_NAN;
+            return r;
+        }
+        if (a.cls == DFP_INF) return a;
+        if (b.cls == DFP_INF) return b;
+        return dfp_add_finite(a, b, width);
+    }
+    if (op == DFP_MUL) {
+        if ((a.cls == DFP_INF && b.cls == DFP_FINITE && b.coeff == 0) ||
+            (b.cls == DFP_INF && a.cls == DFP_FINITE && a.coeff == 0)) {
+            r.cls = DFP_NAN;
+            return r;
+        }
+        r.sign = a.sign ^ b.sign;
+        if (a.cls == DFP_INF || b.cls == DFP_INF) {
+            r.cls = DFP_INF;
+            return r;
+        }
+        return dfp_mul_finite(a, b, width);
+    }
+    if (op == DFP_DIV) {
+        if (a.cls == DFP_INF && b.cls == DFP_INF) {
+            r.cls = DFP_NAN;
+            return r;
+        }
+        r.sign = a.sign ^ b.sign;
+        if (a.cls == DFP_INF) {
+            r.cls = DFP_INF;
+            return r;
+        }
+        if (b.cls == DFP_INF) {
+            r.cls = DFP_FINITE;
+            r.coeff = 0;
+            r.exp = 0;
+            return r;
+        }
+        return dfp_div_finite(a, b, width);
+    }
+    r.cls = DFP_NAN;
+    return r;
+}
+
+int dfp_from_str(const char *text, int width,
+                 unsigned long long *lo, unsigned long long *hi) {
+    Dfp x;
+    memset(&x, 0, sizeof(x));
+    if (!text || !lo || !hi) return 0;
+    *lo = 0;
+    *hi = 0;
+    if (width != 4 && width != 8 && width != 16) width = 8;
+    const char *s = text;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '+' || *s == '-') {
+        if (*s == '-') x.sign = 1;
+        s++;
+    }
+    if ((s[0] == 'i' || s[0] == 'I') && (s[1] == 'n' || s[1] == 'N')) {
+        x.cls = DFP_INF;
+        dfp_encode(&x, width, lo, hi);
+        return 1;
+    }
+    if ((s[0] == 'n' || s[0] == 'N') && (s[1] == 'a' || s[1] == 'A')) {
+        x.cls = DFP_NAN;
+        dfp_encode(&x, width, lo, hi);
+        return 1;
+    }
+    x.cls = DFP_FINITE;
+    u128 coeff = 0;
+    int nd = 0;
+    int frac = 0;
+    int saw_dot = 0;
+    int saw_digit = 0;
+    while (*s) {
+        if (*s >= '0' && *s <= '9') {
+            if (nd < 40)
+                coeff = coeff * 10 + (u128)(*s - '0');
+            nd++;
+            if (saw_dot) frac++;
+            saw_digit = 1;
+            s++;
+        } else if (*s == '.' && !saw_dot) {
+            saw_dot = 1;
+            s++;
+        } else break;
+    }
+    int exp_part = 0;
+    int exp_sign = 1;
+    if (*s == 'e' || *s == 'E') {
+        s++;
+        if (*s == '+' || *s == '-') {
+            if (*s == '-') exp_sign = -1;
+            s++;
+        }
+        while (*s >= '0' && *s <= '9') {
+            exp_part = exp_part * 10 + (*s - '0');
+            s++;
+        }
+        exp_part *= exp_sign;
+    }
+    if (!saw_digit) {
+        coeff = 0;
+        nd = 1;
+    }
+    x.coeff = coeff;
+    x.exp = exp_part - frac;
+    dfp_quantize(&x, width);
+    dfp_encode(&x, width, lo, hi);
+    return 1;
+}
+
+void dfp_neg_bits(int width, unsigned long long *lo, unsigned long long *hi) {
+    if (width == 4) {
+        *lo ^= 0x80000000ULL;
+        *hi = 0;
+    } else if (width == 16) {
+        *hi ^= 0x8000000000000000ULL;
+    } else {
+        *lo ^= 0x8000000000000000ULL;
+        *hi = 0;
+    }
+}
+
+int dfp_binop_bits(int op, int width,
+                   unsigned long long alo, unsigned long long ahi,
+                   unsigned long long blo, unsigned long long bhi,
+                   unsigned long long *lo, unsigned long long *hi) {
+    Dfp a, b, r;
+    dfp_decode(width, alo, ahi, &a);
+    dfp_decode(width, blo, bhi, &b);
+    r = dfp_binop_val(op, a, b, width);
+    dfp_encode(&r, width, lo, hi);
+    return 1;
+}
+
+int dfp_cmp_bits(int width,
+                 unsigned long long alo, unsigned long long ahi,
+                 unsigned long long blo, unsigned long long bhi) {
+    Dfp a, b;
+    dfp_decode(width, alo, ahi, &a);
+    dfp_decode(width, blo, bhi, &b);
+    if (a.cls == DFP_NAN || b.cls == DFP_NAN) return 2; /* unordered */
+    if (a.cls == DFP_INF || b.cls == DFP_INF) {
+        if (a.cls == DFP_INF && b.cls == DFP_INF) {
+            if (a.sign == b.sign) return 0;
+            return a.sign ? -1 : 1;
+        }
+        if (a.cls == DFP_INF) return a.sign ? -1 : 1;
+        return b.sign ? 1 : -1;
+    }
+    if (a.coeff == 0 && b.coeff == 0) return 0;
+    if (a.coeff == 0) return b.sign ? 1 : -1;
+    if (b.coeff == 0) return a.sign ? -1 : 1;
+    if (a.sign != b.sign) return a.sign ? -1 : 1;
+    /* Align exponents. */
+    Dfp x = a, y = b;
+    if (x.exp < y.exp) {
+        int s = y.exp - x.exp;
+        if (s > 80) return a.sign ? 1 : -1;
+        y.coeff = y.coeff * p10(s);
+        y.exp = x.exp;
+    } else if (y.exp < x.exp) {
+        int s = x.exp - y.exp;
+        if (s > 80) return a.sign ? -1 : 1;
+        x.coeff = x.coeff * p10(s);
+        x.exp = y.exp;
+    }
+    int mag;
+    if (x.coeff < y.coeff) mag = -1;
+    else if (x.coeff > y.coeff) mag = 1;
+    else mag = 0;
+    return a.sign ? -mag : mag;
+}
+
+int dfp_from_int(unsigned long long val, unsigned long long val_hi,
+                 int is_unsigned, int width,
+                 unsigned long long *lo, unsigned long long *hi) {
+    Dfp x;
+    memset(&x, 0, sizeof(x));
+    x.cls = DFP_FINITE;
+    if (!is_unsigned && (val_hi >> 63)) {
+        x.sign = 1;
+        /* two's complement negate */
+        u128 v = ((u128)val_hi << 64) | val;
+        v = -v;
+        x.coeff = v;
+    } else {
+        x.coeff = ((u128)val_hi << 64) | val;
+    }
+    x.exp = 0;
+    dfp_quantize(&x, width);
+    dfp_encode(&x, width, lo, hi);
+    return 1;
+}
+
+int dfp_convert_width(int src_w, unsigned long long slo, unsigned long long shi,
+                      int dst_w, unsigned long long *dlo, unsigned long long *dhi) {
+    Dfp x;
+    dfp_decode(src_w, slo, shi, &x);
+    dfp_quantize(&x, dst_w);
+    dfp_encode(&x, dst_w, dlo, dhi);
+    return 1;
+}

@@ -1,7 +1,7 @@
 # Compile cases skipped by the harvest loop (not copied into test/compile/).
 #
-# Policy matches test/e2e/cases/gcc_torture/UNSUPPORTED.txt: GNU nested functions,
-# GNU variable-length structures, _Decimal*/DFP, and __builtin_va_arg_pack.
+# Policy matches test/e2e/cases/gcc_torture/UNSUPPORTED.txt: GNU nested functions
+# and GNU variable-length structures.
 # Also skipped: cases that require a C preprocessor (FakeCC has none; do not
 # strip directives just to make a test compile). FakeCC follows C99: no
 # implicit function declarations, no bare `return;` in a non-void function,
