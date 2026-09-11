@@ -1,9 +1,9 @@
 /* Minimal FILE stdio over Linux syscalls — FakeCC dialect. */
 package runtime;
 
-static FILE _rt_stdin = { 0, 0, 0, 0, 0, 1024, 0, 0 };
-static FILE _rt_stdout = { 1, 1, 0, 0, 0, 1024, 0, 0 };
-static FILE _rt_stderr = { 2, 1, 0, 0, 0, 1024, 0, 0 };
+static FILE _rt_stdin = { 0, 0, 0, 0, 0, 1024, 0 };
+static FILE _rt_stdout = { 1, 1, 0, 0, 0, 1024, 0 };
+static FILE _rt_stderr = { 2, 1, 0, 0, 0, 1024, 0 };
 FILE *stdin = &_rt_stdin;
 FILE *stdout = &_rt_stdout;
 FILE *stderr = &_rt_stderr;
@@ -175,8 +175,7 @@ FILE *freopen(const char *path, const char *mode, FILE *stream) {
     stream->fd = (int)fd;
     stream->writable = writable;
     stream->buf_len = 0;
-    stream->has_ungot = 0;
-    stream->ungot = 0;
+    stream->nunget = 0;
     stream->eof = 0;
     stream->err = 0;
     return stream;
@@ -193,6 +192,7 @@ int fclose(FILE *f) {
 int fseek(FILE *f, long off, int whence) {
     stdio_init();
     fflush(f);
+    f->nunget = 0;
     long r = __syscall(8, (long)f->fd, off, (long)whence);
     if (r < 0) {
         f->err = 1;
@@ -261,9 +261,9 @@ void perror(const char *s) {
 
 int fgetc(FILE *f) {
     stdio_init();
-    if (f->has_ungot) {
-        f->has_ungot = 0;
-        return f->ungot;
+    if (f->nunget > 0) {
+        f->nunget = f->nunget - 1;
+        return f->ungot[f->nunget];
     }
     unsigned char ch = 0;
     long n = __syscall(0, (long)f->fd, (long)&ch, 1);
@@ -277,9 +277,9 @@ int fgetc(FILE *f) {
 
 int ungetc(int c, FILE *f) {
     stdio_init();
-    if (c < 0 || f->has_ungot) return -1;
-    f->has_ungot = 1;
-    f->ungot = c;
+    if (c < 0 || f->nunget >= 16) return -1;
+    f->ungot[f->nunget] = c;
+    f->nunget = f->nunget + 1;
     f->eof = 0;
     return c;
 }
@@ -305,15 +305,9 @@ static int scan_digit(int ch, int base) {
  * (fakecc sizeof(FILE) does not include char buf[1024], so a local FILE
  * overlaps the va_list). */
 static const char *scan_str;
-static int scan_str_has;
-static int scan_str_ungot;
 
 static int scan_getc(FILE *f) {
     if (scan_str) {
-        if (scan_str_has) {
-            scan_str_has = 0;
-            return scan_str_ungot;
-        }
         unsigned char c = (unsigned char)*scan_str;
         if (c == 0) return -1;
         scan_str = scan_str + 1;
@@ -323,13 +317,190 @@ static int scan_getc(FILE *f) {
 }
 
 static void scan_ungetc(int c, FILE *f) {
+    if (c < 0) return;
     if (scan_str) {
-        if (c < 0 || scan_str_has) return;
-        scan_str_has = 1;
-        scan_str_ungot = c;
+        scan_str = scan_str - 1;
         return;
     }
-    if (c >= 0) ungetc(c, f);
+    ungetc(c, f);
+}
+
+static int scan_letter_eq(int ch, char lo) {
+    if (ch >= 'A' && ch <= 'Z') ch = ch + ('a' - 'A');
+    return ch == (int)lo;
+}
+
+static int scan_take_ch(FILE *f, int *ch, int *used, int *nread, int maxw,
+                        char *buf, int *blen, int cap) {
+    if (*ch < 0 || *used >= maxw || *blen >= cap - 1) return 0;
+    buf[*blen] = (char)(*ch);
+    *blen = *blen + 1;
+    *used = *used + 1;
+    *nread = *nread + 1;
+    *ch = scan_getc(f);
+    return 1;
+}
+
+/* Put lookahead and buf[mark..) back, then reload lookahead. */
+static void scan_rewind_to(FILE *f, int *ch, int *used, int *nread,
+                           char *buf, int *blen, int mark) {
+    if (*ch >= 0) scan_ungetc(*ch, f);
+    while (*blen > mark) {
+        *blen = *blen - 1;
+        scan_ungetc((unsigned char)buf[*blen], f);
+        *used = *used - 1;
+        *nread = *nread - 1;
+    }
+    *ch = scan_getc(f);
+}
+
+/* Collect a strtod-style subject sequence.  Returns 1 and fills buf on
+ * success; on failure restores the first unmatched character to *ch. */
+static int scan_collect_fp(FILE *f, int *chp, int *nreadp, int maxw,
+                           char *buf, int cap) {
+    int ch = *chp;
+    int nread = *nreadp;
+    int used = 0;
+    int blen = 0;
+    int any = 0;
+    int mark;
+
+    if (ch == '+' || ch == '-') {
+        if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap))
+            goto fail;
+    }
+
+    if (scan_letter_eq(ch, 'i')) {
+        mark = blen;
+        if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) goto fail;
+        if (!scan_letter_eq(ch, 'n')
+            || !scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+            scan_rewind_to(f, &ch, &used, &nread, buf, &blen, mark);
+            goto fail;
+        }
+        if (!scan_letter_eq(ch, 'f')
+            || !scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+            scan_rewind_to(f, &ch, &used, &nread, buf, &blen, mark);
+            goto fail;
+        }
+        if (scan_letter_eq(ch, 'i')) {
+            int m2 = blen;
+            if (scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)
+                && scan_letter_eq(ch, 'n')
+                && scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)
+                && scan_letter_eq(ch, 'i')
+                && scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)
+                && scan_letter_eq(ch, 't')
+                && scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)
+                && scan_letter_eq(ch, 'y')
+                && scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+                /* infinity */
+            } else {
+                scan_rewind_to(f, &ch, &used, &nread, buf, &blen, m2);
+            }
+        }
+        any = 1;
+        goto done;
+    }
+
+    if (scan_letter_eq(ch, 'n')) {
+        mark = blen;
+        if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) goto fail;
+        if (!scan_letter_eq(ch, 'a')
+            || !scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+            scan_rewind_to(f, &ch, &used, &nread, buf, &blen, mark);
+            goto fail;
+        }
+        if (!scan_letter_eq(ch, 'n')
+            || !scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+            scan_rewind_to(f, &ch, &used, &nread, buf, &blen, mark);
+            goto fail;
+        }
+        any = 1;
+        goto done;
+    }
+
+    if (ch == '0') {
+        if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) goto fail;
+        any = 1;
+        if (ch == 'x' || ch == 'X') {
+            int hex_any = 0;
+            mark = blen;
+            if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) goto done;
+            while (scan_digit(ch, 16) >= 0) {
+                hex_any = 1;
+                if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) break;
+            }
+            if (ch == '.') {
+                if (scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+                    while (scan_digit(ch, 16) >= 0) {
+                        hex_any = 1;
+                        if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) break;
+                    }
+                }
+            }
+            if (!hex_any) {
+                scan_rewind_to(f, &ch, &used, &nread, buf, &blen, mark);
+                goto done;
+            }
+            if (ch == 'p' || ch == 'P') {
+                int pmark = blen;
+                if (scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+                    if (ch == '+' || ch == '-')
+                        scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap);
+                    if (ch >= '0' && ch <= '9') {
+                        while (ch >= '0' && ch <= '9') {
+                            if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) break;
+                        }
+                    } else {
+                        scan_rewind_to(f, &ch, &used, &nread, buf, &blen, pmark);
+                    }
+                }
+            }
+            goto done;
+        }
+    }
+
+    while (ch >= '0' && ch <= '9') {
+        any = 1;
+        if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) break;
+    }
+    if (ch == '.') {
+        if (scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+            while (ch >= '0' && ch <= '9') {
+                any = 1;
+                if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) break;
+            }
+        }
+    }
+    if (!any) goto fail;
+    if (ch == 'e' || ch == 'E') {
+        int emark = blen;
+        if (scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) {
+            if (ch == '+' || ch == '-')
+                scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap);
+            if (ch >= '0' && ch <= '9') {
+                while (ch >= '0' && ch <= '9') {
+                    if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap)) break;
+                }
+            } else {
+                scan_rewind_to(f, &ch, &used, &nread, buf, &blen, emark);
+            }
+        }
+    }
+
+done:
+    if (!any) goto fail;
+    buf[blen] = '\0';
+    *chp = ch;
+    *nreadp = nread;
+    return 1;
+
+fail:
+    scan_rewind_to(f, &ch, &used, &nread, buf, &blen, 0);
+    *chp = ch;
+    *nreadp = nread;
+    return 0;
 }
 
 int vfscanf(FILE *f, const char *fmt, va_list ap) {
@@ -374,7 +545,7 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
             width = width * 10 + (*fmt - '0');
             fmt++;
         }
-        int hh = 0, h = 0, lmod = 0, ll = 0;
+        int hh = 0, h = 0, lmod = 0, ll = 0, Lmod = 0;
         int more = 1;
         while (more) {
             if (*fmt == 'h') {
@@ -389,6 +560,7 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
                 lmod = 1;
                 fmt++;
             } else if (*fmt == 'L') {
+                Lmod = 1;
                 fmt++;
             } else {
                 more = 0;
@@ -460,6 +632,47 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
             }
             if (len == 0) break;
             if (!suppress) {
+                matched++;
+            }
+            continue;
+        }
+
+        if (spec == 'e' || spec == 'E' || spec == 'f' || spec == 'F'
+            || spec == 'g' || spec == 'G' || spec == 'a' || spec == 'A') {
+            while (ch >= 0 && is_space_ch(ch)) {
+                nread = nread + 1;
+                ch = scan_getc(f);
+            }
+            if (ch < 0) { input_fail = 1; break; }
+            char fbuf[512];
+            if (!scan_collect_fp(f, &ch, &nread, maxw, fbuf, 512)) {
+                if (ch < 0) input_fail = 1;
+                break;
+            }
+            char *endp = fbuf;
+            if (fbuf[0] == '+' || fbuf[0] == '-') endp = fbuf + 1;
+            long double fval;
+            if (scan_letter_eq((unsigned char)*endp, 'i')) {
+                fval = 1.0L / 0.0L;
+                if (fbuf[0] == '-') fval = -fval;
+            } else if (scan_letter_eq((unsigned char)*endp, 'n')) {
+                fval = 0.0L / 0.0L;
+            } else {
+                char *end = 0;
+                fval = strtold(fbuf, &end);
+                if (end == fbuf) break;
+            }
+            if (!suppress) {
+                if (Lmod || ll) {
+                    long double *p = va_arg(ap, long double *);
+                    *p = fval;
+                } else if (lmod) {
+                    double *p = va_arg(ap, double *);
+                    *p = (double)fval;
+                } else {
+                    float *p = va_arg(ap, float *);
+                    *p = (float)fval;
+                }
                 matched++;
             }
             continue;
@@ -570,20 +783,16 @@ int sscanf(const char *s, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     scan_str = s;
-    scan_str_has = 0;
     int r = vfscanf(stdin, fmt, ap);
     scan_str = 0;
-    scan_str_has = 0;
     va_end(ap);
     return r;
 }
 
 int vsscanf(const char *s, const char *fmt, va_list ap) {
     scan_str = s;
-    scan_str_has = 0;
     int r = vfscanf(stdin, fmt, ap);
     scan_str = 0;
-    scan_str_has = 0;
     return r;
 }
 
@@ -591,10 +800,8 @@ int __isoc99_sscanf(const char *s, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     scan_str = s;
-    scan_str_has = 0;
     int r = vfscanf(stdin, fmt, ap);
     scan_str = 0;
-    scan_str_has = 0;
     va_end(ap);
     return r;
 }
