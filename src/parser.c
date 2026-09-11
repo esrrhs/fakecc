@@ -330,6 +330,31 @@ static int tu_has_import(const TranslationUnit *tu, const char *name) {
     return 0;
 }
 
+/* True if `name` is a local or file-scope value, so it shadows an import. */
+static int parser_name_is_bound(Parser *p, const char *name) {
+    for (size_t i = p->locals.len; i > 0; i--)
+        if (strcmp(p->locals.data[i - 1].name, name) == 0) return 1;
+    for (size_t i = p->prepend.len; i > 0; i--)
+        if (p->prepend.data[i - 1].kind == ST_DECL
+            && strcmp(p->prepend.data[i - 1].u.decl.name, name) == 0)
+            return 1;
+    if (p->tu) {
+        for (size_t i = p->tu->globals.len; i > 0; i--)
+            if (p->tu->globals.data[i - 1].kind == ST_DECL
+                && strcmp(p->tu->globals.data[i - 1].u.decl.name, name) == 0)
+                return 1;
+    }
+    return 0;
+}
+
+static const EnumConstant *find_imported_enum_const(Parser *p, const char *pkg_name,
+                                                   const char *name) {
+    if (!p->pkg_ctx) return NULL;
+    Package *pkg = pkg_find(p->pkg_ctx, pkg_name);
+    if (!pkg) return NULL;
+    return pkg_find_enum_const(pkg, name);
+}
+
 /* Resolve a typedef from an imported package or (for unqualified names) from
  * the current package's already-parsed sibling files / export table.
  * Ensures any referenced StructDef is cloned into the local TU; does NOT
@@ -2369,6 +2394,19 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
                        "expected member name after '.'");
             }
             advance(p);
+            /* `pkg.CONST` — fold imported enum constants to integer literals
+             * so they work in array sizes, case labels, and static inits. */
+            if (lhs->kind == EX_VAR && lhs->u.var.pkg == NULL
+                && tu_has_import(p->tu, lhs->u.var.name)
+                && !parser_name_is_bound(p, lhs->u.var.name)) {
+                const EnumConstant *ec =
+                    find_imported_enum_const(p, lhs->u.var.name, mn->text);
+                if (ec) {
+                    expr_free(lhs);
+                    lhs = expr_new_int(ec->value, loc);
+                    continue;
+                }
+            }
             lhs = expr_new_member(lhs, mn->text, loc);
             continue;
         }
@@ -3942,7 +3980,9 @@ static Stmt parse_stmt(Parser *p) {
         long long value = 0;
         long long high_value = 0;
         int is_range = 0;
-        if (cv->kind == TK_IDENT) {
+        if (cv->kind == TK_IDENT
+            && p->pos + 1 < p->tokens->len
+            && p->tokens->data[p->pos + 1].kind != TK_DOT) {
             value = case_constant_value(p, cv->text);
             advance(p);
         } else {
@@ -3957,7 +3997,9 @@ static Stmt parse_stmt(Parser *p) {
         if (peek(p)->kind == TK_ELLIPSIS) {
             advance(p); /* consume "..." */
             const Token *hv = peek(p);
-            if (hv->kind == TK_IDENT) {
+            if (hv->kind == TK_IDENT
+                && p->pos + 1 < p->tokens->len
+                && p->tokens->data[p->pos + 1].kind != TK_DOT) {
                 high_value = case_constant_value(p, hv->text);
                 advance(p);
             } else {

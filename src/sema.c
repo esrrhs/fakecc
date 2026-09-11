@@ -1016,6 +1016,18 @@ static Type check_expr_inner(Expr *e) {
             const PkgFuncExport *pf = NULL;
             const PkgGlobalExport *pg = NULL;
             if (!pkg_resolve_sym(e->u.var.pkg, e->u.var.name, &pf, &pg)) {
+                Package *pkg = pkg_find(g_sema_pkg, e->u.var.pkg);
+                const EnumConstant *ec = pkg
+                    ? pkg_find_enum_const(pkg, e->u.var.name) : NULL;
+                if (ec) {
+                    free(e->u.var.name);
+                    free(e->u.var.pkg);
+                    e->kind = EX_INT_LIT;
+                    e->u.int_val = ec->value;
+                    e->int_hi = 0;
+                    set_type(e, type_default_int());
+                    return type_clone(e->type);
+                }
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "package '%s' has no exported symbol '%s'",
                        e->u.var.pkg, e->u.var.name);
