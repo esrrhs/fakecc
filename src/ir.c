@@ -285,7 +285,7 @@ static void ir_call_reserve_args(IRInst *inst, int nargs) {
                 nargs, IR_CALL_MAX_ARGS);
         exit(1);
     }
-    inst->call_args = malloc((size_t)nargs * sizeof(IRValue));
+    inst->call_args = calloc((size_t)nargs, sizeof(IRValue));
     inst->call_arg_on_stack = calloc((size_t)nargs, sizeof(unsigned char));
     if (!inst->call_args || !inst->call_arg_on_stack) {
         fprintf(stderr, "fakecc: OOM\n");
@@ -836,6 +836,7 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
         }
     }
     IRInst inst;
+    memset(&inst, 0, sizeof(inst));
     inst.op = op;
     inst.dst = dst;
     inst.a = a;
@@ -10119,6 +10120,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     /* Publish module + reset string counter for lower_expr's use. */
     g_ir_module = ir;
     g_str_counter = 0;
+    g_flt_counter = 0;
     g_ir_structs = &tu->structs;
     g_ir_tu = tu;
     g_ir_pin_locals = pin_locals;

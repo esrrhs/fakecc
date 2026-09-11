@@ -1065,7 +1065,7 @@ static void ir_call_reserve_args(IRInst *inst, int nargs) {
                 nargs, 1024);
         runtime.exit(1);
     }
-    inst->call_args = runtime.malloc((size_t)nargs * sizeof(IRValue));
+    inst->call_args = runtime.calloc((size_t)nargs, sizeof(IRValue));
     inst->call_arg_on_stack = runtime.calloc((size_t)nargs, sizeof(unsigned char));
     if (!inst->call_args || !inst->call_arg_on_stack) {
         runtime.fprintf(runtime.stderr, "fakecc: OOM\n");
@@ -1555,6 +1555,7 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
         }
     }
     IRInst inst;
+    runtime.memset(&inst, 0, sizeof(inst));
     inst.op = op;
     inst.dst = dst;
     inst.a = a;
@@ -9976,6 +9977,7 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
 void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
     g_ir_module = ir;
     g_str_counter = 0;
+    g_flt_counter = 0;
     g_ir_structs = &tu->structs;
     g_ir_tu = tu;
     g_ir_pin_locals = pin_locals;

@@ -68,7 +68,11 @@ void buffer_appendf(Buffer *b, const char *fmt, ...) {
 /* ------------------------------------------------------------------ */
 
 void *xmalloc(size_t n) {
-    void *p = malloc(n);
+    /* Zero-fill: stage1's mmap allocator returns recycled dirty chunks, and
+     * any unread field then makes register allocation (and bootstrap) depend
+     * on ASLR.  gcc-built fakecc must see the same zeros. */
+    if (n == 0) n = 1;
+    void *p = calloc(1, n);
     if (!p) {
         fprintf(stderr, "fakecc: out of memory\n");
         exit(1);

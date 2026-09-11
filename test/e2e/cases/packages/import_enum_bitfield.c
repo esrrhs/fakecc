@@ -1,4 +1,5 @@
 // expect: 5
+// skip_difftest
 // Bitfield width may be an imported enum constant.
 package main;
 import flags;

@@ -1435,16 +1435,17 @@ void typedef_registry_truncate(TypedefRegistry *r, size_t len) {
         type_free(&r->data[r->len].type);
     }
 }
-Expr *expr_new_int(long long v, SourceLoc loc) {
+static Expr *expr_alloc(ExprKind k, SourceLoc loc) {
     Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) {
-        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
-        runtime.exit(1);
-    }
+    if (!e) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     runtime.memset(e, 0, sizeof(Expr));
-    e->kind = EX_INT_LIT;
+    e->kind = k;
     e->loc = loc;
     e->type = type_default_int();
+    return e;
+}
+Expr *expr_new_int(long long v, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_INT_LIT, loc);
     e->u.int_val = v;
     return e;
 }
@@ -1461,44 +1462,20 @@ Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
     return e;
 }
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc) {
-    Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) {
-        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
-        runtime.exit(1);
-    }
-    e->kind = EX_BINOP;
-    e->loc = loc;
-    e->type = type_default_int();
-    runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_BINOP, loc);
     e->u.bin.op = op;
     e->u.bin.l = l;
     e->u.bin.r = r;
     return e;
 }
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc) {
-    Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) {
-        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
-        runtime.exit(1);
-    }
-    e->kind = EX_UNARY;
-    e->loc = loc;
-    e->type = type_default_int();
-    runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_UNARY, loc);
     e->u.un.op = op;
     e->u.un.operand = operand;
     return e;
 }
 Expr *expr_new_var(const char *name, SourceLoc loc) {
-    Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) {
-        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
-        runtime.exit(1);
-    }
-    e->kind = EX_VAR;
-    e->loc = loc;
-    e->type = type_default_int();
-    runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_VAR, loc);
     e->u.var.name = xstrdup(name);
     e->u.var.pkg = ((void*)0);
     return e;
@@ -1509,29 +1486,13 @@ Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc) {
     return e;
 }
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
-    Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) {
-        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
-        runtime.exit(1);
-    }
-    e->kind = EX_ASSIGN;
-    e->loc = loc;
-    e->type = type_default_int();
-    runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_ASSIGN, loc);
     e->u.assign.lvalue = lvalue;
     e->u.assign.rvalue = rvalue;
     return e;
 }
 Expr *expr_new_call(Expr *callee, SourceLoc loc) {
-    Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) {
-        runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
-        runtime.exit(1);
-    }
-    e->kind = EX_CALL;
-    e->loc = loc;
-    e->type = type_default_int();
-    runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_CALL, loc);
     e->u.call.callee = callee;
     e->u.call.args.data = ((void*)0);
     e->u.call.args.len = 0;
@@ -1544,11 +1505,7 @@ void expr_call_set_callee(Expr *e, Expr *callee) {
     e->u.call.callee = callee;
 }
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
-    Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
-    e->kind = EX_STR;
-    e->loc = loc;
-    e->type = type_default_int();
+    Expr *e = expr_alloc(EX_STR, loc);
     e->u.str.bytes = runtime.malloc(len + 1);
     if (!e->u.str.bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     runtime.memcpy(e->u.str.bytes, bytes, len);
@@ -1556,7 +1513,6 @@ Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
     e->u.str.len = len;
     return e;
 }
-static Expr *expr_alloc(ExprKind k, SourceLoc loc);
 Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc) {
     Expr *e = expr_alloc(EX_FLOAT_LIT, loc);
     e->u.float_text = xstrdup(text);
@@ -1571,13 +1527,6 @@ void expr_call_push_arg(Expr *e, Expr *arg) {
         if (!a->data) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
     }
     a->data[a->len++] = arg;
-}
-static Expr *expr_alloc(ExprKind k, SourceLoc loc) {
-    Expr *e = runtime.malloc(sizeof(Expr));
-    if (!e) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
-    e->kind = k; e->loc = loc; e->type = type_default_int();
-    runtime.memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
-    return e;
 }
 Expr *expr_new_addr(Expr *operand, SourceLoc loc) {
     Expr *e = expr_alloc(EX_ADDR, loc); e->u.addr.operand = operand; return e;
@@ -1917,6 +1866,7 @@ Stmt *stmt_alloc(void) {
         runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
     }
+    runtime.memset(s, 0, sizeof(Stmt));
     return s;
 }
 void stmt_free_ptr(Stmt *s) {
@@ -2447,6 +2397,7 @@ Expr *expr_clone(const Expr *e) {
     if (!e) return ((void*)0);
     Expr *r = runtime.malloc(sizeof(Expr));
     if (!r) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    runtime.memset(r, 0, sizeof(Expr));
     *r = *e;
     r->type = type_clone(e->type);
     r->va_arg_type = type_clone(e->va_arg_type);

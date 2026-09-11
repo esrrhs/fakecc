@@ -24,81 +24,130 @@ int dfp_from_int(unsigned long long val, unsigned long long val_hi,
 int dfp_convert_width(int src_w, unsigned long long slo, unsigned long long shi,
                       int dst_w, unsigned long long *dlo, unsigned long long *dhi);
 enum { DFP_ADD = 0, DFP_SUB = 1, DFP_MUL = 2, DFP_DIV = 3 };
-typedef unsigned __int128 u128;
 enum { DFP_FINITE = 0, DFP_INF = 1, DFP_NAN = 2 };
 struct Dfp {
     int cls;
     int sign;
     int exp;
-    u128 coeff;
+    unsigned long long c_lo;
+    unsigned long long c_hi;
 };typedef struct Dfp Dfp;
-static u128 p10(int n) {
-    static const unsigned long long small[20] = {
-        1ULL, 10ULL, 100ULL, 1000ULL, 10000ULL, 100000ULL, 1000000ULL,
-        10000000ULL, 100000000ULL, 1000000000ULL, 10000000000ULL,
-        100000000000ULL, 1000000000000ULL, 10000000000000ULL,
-        100000000000000ULL, 1000000000000000ULL, 10000000000000000ULL,
-        100000000000000000ULL, 1000000000000000000ULL, 10000000000000000000ULL
-    };
-    if (n <= 0) return 1;
-    if (n < 20) return (u128)small[n];
-    u128 r = (u128)small[19];
-    int i = 19;
-    while (i < n) {
-        r = r * 10;
-        i++;
-    }
-    return r;
+static void u128_add(unsigned long long *lo, unsigned long long *hi,
+                     unsigned long long blo, unsigned long long bhi) {
+    unsigned long long nlo = *lo + blo;
+    unsigned long long c = (nlo < *lo) ? 1ULL : 0ULL;
+    *lo = nlo;
+    *hi = *hi + bhi + c;
+}
+static void u128_sub(unsigned long long *lo, unsigned long long *hi,
+                     unsigned long long blo, unsigned long long bhi) {
+    unsigned long long br = (*lo < blo) ? 1ULL : 0ULL;
+    *lo = *lo - blo;
+    *hi = *hi - bhi - br;
+}
+static int u128_ge(unsigned long long alo, unsigned long long ahi,
+                   unsigned long long blo, unsigned long long bhi) {
+    if (ahi != bhi) return ahi > bhi;
+    return alo >= blo;
+}
+static void mul64(unsigned long long a, unsigned long long b,
+                  unsigned long long *lo, unsigned long long *hi) {
+    unsigned long long a0 = a & 0xffffffffULL;
+    unsigned long long a1 = a >> 32;
+    unsigned long long b0 = b & 0xffffffffULL;
+    unsigned long long b1 = b >> 32;
+    unsigned long long p0 = a0 * b0;
+    unsigned long long p1 = a0 * b1;
+    unsigned long long p2 = a1 * b0;
+    unsigned long long p3 = a1 * b1;
+    unsigned long long mid = (p0 >> 32) + (p1 & 0xffffffffULL) + (p2 & 0xffffffffULL);
+    *lo = (p0 & 0xffffffffULL) | (mid << 32);
+    *hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+}
+static void u128_mul_u64(unsigned long long *lo, unsigned long long *hi,
+                         unsigned long long m) {
+unsigned long long p0l;
+unsigned long long p0h;
+unsigned long long p1l;
+unsigned long long p1h;
+    mul64(*lo, m, &p0l, &p0h);
+    mul64(*hi, m, &p1l, &p1h);
+    *lo = p0l;
+    *hi = p0h + p1l;
+    (void)p1h;
+}
+static void u128_div10(unsigned long long *lo, unsigned long long *hi,
+                       unsigned long long *rem) {
+    unsigned int w0 = (unsigned int)(*lo);
+    unsigned int w1 = (unsigned int)(*lo >> 32);
+    unsigned int w2 = (unsigned int)(*hi);
+    unsigned int w3 = (unsigned int)(*hi >> 32);
+    unsigned long long r = 0;
+    unsigned long long cur;
+unsigned int q3;
+unsigned int q2;
+unsigned int q1;
+unsigned int q0;
+    cur = (r << 32) | w3; q3 = (unsigned int)(cur / 10ULL); r = cur % 10ULL;
+    cur = (r << 32) | w2; q2 = (unsigned int)(cur / 10ULL); r = cur % 10ULL;
+    cur = (r << 32) | w1; q1 = (unsigned int)(cur / 10ULL); r = cur % 10ULL;
+    cur = (r << 32) | w0; q0 = (unsigned int)(cur / 10ULL); r = cur % 10ULL;
+    *lo = ((unsigned long long)q1 << 32) | q0;
+    *hi = ((unsigned long long)q3 << 32) | q2;
+    *rem = r;
 }
 static int dfp_p(int w) { return w == 4 ? 7 : (w == 16 ? 34 : 16); }
 static int dfp_bias(int w) { return w == 4 ? 101 : (w == 16 ? 6176 : 398); }
 static int dfp_emax(int w) { return w == 4 ? 96 : (w == 16 ? 6144 : 384); }
 static int dfp_emin(int w) { return w == 4 ? -95 : (w == 16 ? -6143 : -383); }
-static int ndigits(u128 c) {
-    if (c == 0) return 1;
+static int dfp_ndigits(unsigned long long lo, unsigned long long hi) {
+    if (lo == 0 && hi == 0) return 1;
     int n = 1;
-    u128 t = 10;
-    while (c >= t) {
+    unsigned long long tlo = 10;
+    unsigned long long thi = 0;
+    while (u128_ge(lo, hi, tlo, thi)) {
         n++;
-        if (n >= 40) break;
-        t = t * 10;
+        if (n >= 40) return n;
+        u128_mul_u64(&tlo, &thi, 10ULL);
+        if (thi > 0x0fffffffffffffffULL && tlo > 0) return n + 1;
     }
     return n;
+}
+static void dfp_zero(Dfp *x) {
+    runtime.memset(x, 0, sizeof(*x));
 }
 static void dfp_quantize(Dfp *x, int width) {
     int p = dfp_p(width);
     int emax = dfp_emax(width);
     int emin = dfp_emin(width);
     int etiny = emin - (p - 1);
+    unsigned long long rem;
     if (x->cls != DFP_FINITE) return;
-    if (x->coeff == 0) {
+    if (x->c_lo == 0 && x->c_hi == 0) {
         x->exp = 0;
         return;
     }
-    while (x->coeff >= p10(p) || x->exp < etiny) {
-        if (x->exp >= emax && x->coeff >= p10(p)) {
+    while (dfp_ndigits(x->c_lo, x->c_hi) > p || x->exp < etiny) {
+        if (x->exp >= emax && dfp_ndigits(x->c_lo, x->c_hi) > p) {
             x->cls = DFP_INF;
-            x->coeff = 0;
+            x->c_lo = 0;
+            x->c_hi = 0;
             x->exp = 0;
             return;
         }
-        u128 q = x->coeff / 10;
-        u128 r = x->coeff % 10;
-        if (r > 5 || (r == 5 && (q & 1)))
-            q = q + 1;
-        x->coeff = q;
+        u128_div10(&x->c_lo, &x->c_hi, &rem);
+        if (rem > 5ULL || (rem == 5ULL && (x->c_lo & 1ULL)))
+            u128_add(&x->c_lo, &x->c_hi, 1ULL, 0ULL);
         x->exp++;
-        if (x->coeff == 0) {
+        if (x->c_lo == 0 && x->c_hi == 0) {
             x->exp = 0;
             return;
         }
-    }
-    while (x->coeff > 0 && x->coeff % 10 == 0 && x->exp < emax) {
-        break;
     }
     if (x->exp > emax) {
         x->cls = DFP_INF;
-        x->coeff = 0;
+        x->c_lo = 0;
+        x->c_hi = 0;
         x->exp = 0;
     }
 }
@@ -109,20 +158,15 @@ static void dfp_encode(const Dfp *x, int width,
     if (width == 4) {
         unsigned int bits = 0;
         if (x->sign) bits |= 0x80000000u;
-        if (x->cls == DFP_NAN) {
-            bits |= 0x7c000000u;
-        } else if (x->cls == DFP_INF) {
-            bits |= 0x78000000u;
-        } else {
+        if (x->cls == DFP_NAN) bits |= 0x7c000000u;
+        else if (x->cls == DFP_INF) bits |= 0x78000000u;
+        else {
             int be = x->exp + dfp_bias(4);
-            u128 c = x->coeff;
-            if (c < ((u128)1 << 23)) {
-                bits |= ((unsigned int)be << 23) | (unsigned int)c;
-            } else {
-                bits |= 0x60000000u
-                      | ((unsigned int)be << 21)
-                      | ((unsigned int)c & 0x1fffffu);
-            }
+            unsigned int c = (unsigned int)x->c_lo;
+            if (c < (1u << 23))
+                bits |= ((unsigned int)be << 23) | c;
+            else
+                bits |= 0x60000000u | ((unsigned int)be << 21) | (c & 0x1fffffu);
         }
         *lo = bits;
         return;
@@ -130,146 +174,142 @@ static void dfp_encode(const Dfp *x, int width,
     if (width != 16) {
         unsigned long long bits = 0;
         if (x->sign) bits |= 0x8000000000000000ULL;
-        if (x->cls == DFP_NAN) {
-            bits |= 0x7c00000000000000ULL;
-        } else if (x->cls == DFP_INF) {
-            bits |= 0x7800000000000000ULL;
-        } else {
+        if (x->cls == DFP_NAN) bits |= 0x7c00000000000000ULL;
+        else if (x->cls == DFP_INF) bits |= 0x7800000000000000ULL;
+        else {
             int be = x->exp + dfp_bias(8);
-            u128 c = x->coeff;
-            if (c < ((u128)1 << 53)) {
-                bits |= ((unsigned long long)be << 53) | (unsigned long long)c;
-            } else {
+            unsigned long long c = x->c_lo;
+            if (c < (1ULL << 53))
+                bits |= ((unsigned long long)be << 53) | c;
+            else
                 bits |= 0x6000000000000000ULL
                       | ((unsigned long long)be << 51)
-                      | ((unsigned long long)c & 0x0007ffffffffffffULL);
-            }
+                      | (c & 0x0007ffffffffffffULL);
         }
         *lo = bits;
         return;
     }
-    unsigned long long h = 0, l = 0;
-    if (x->sign) h |= 0x8000000000000000ULL;
-    if (x->cls == DFP_NAN) {
-        h |= 0x7c00000000000000ULL;
-    } else if (x->cls == DFP_INF) {
-        h |= 0x7800000000000000ULL;
-    } else {
+    if (x->sign) *hi |= 0x8000000000000000ULL;
+    if (x->cls == DFP_NAN) *hi |= 0x7c00000000000000ULL;
+    else if (x->cls == DFP_INF) *hi |= 0x7800000000000000ULL;
+    else {
         int be = x->exp + dfp_bias(16);
-        u128 c = x->coeff;
-        u128 thresh = (u128)1 << 113;
-        if (c < thresh) {
-            h |= ((unsigned long long)be << 49)
-               | (unsigned long long)(c >> 64);
-            l = (unsigned long long)c;
+        unsigned long long th = 0x0002000000000000ULL;
+        if (x->c_hi < th) {
+            *hi |= ((unsigned long long)be << 49) | x->c_hi;
+            *lo = x->c_lo;
         } else {
-            u128 c2 = c - thresh;
-            h |= 0x6000000000000000ULL
-               | ((unsigned long long)be << 47)
-               | (unsigned long long)(c2 >> 64);
-            l = (unsigned long long)c2;
+            unsigned long long clo = x->c_lo;
+            unsigned long long chi = x->c_hi;
+            u128_sub(&clo, &chi, 0ULL, th);
+            *hi |= 0x6000000000000000ULL
+                 | ((unsigned long long)be << 47)
+                 | (chi & 0x00007fffffffffffULL);
+            *lo = clo;
         }
     }
-    *hi = h;
-    *lo = l;
 }
-static int dfp_decode(int width, unsigned long long lo, unsigned long long hi, Dfp *x) {
-    runtime.memset(x, 0, sizeof(*x));
+static void dfp_decode(int width, unsigned long long lo, unsigned long long hi, Dfp *x) {
+    dfp_zero(x);
     if (width == 4) {
         unsigned int bits = (unsigned int)lo;
         x->sign = (bits >> 31) & 1;
-        if ((bits & 0x7c000000u) == 0x7c000000u) { x->cls = DFP_NAN; return 1; }
-        if ((bits & 0x78000000u) == 0x78000000u) { x->cls = DFP_INF; return 1; }
+        if ((bits & 0x7c000000u) == 0x7c000000u) { x->cls = DFP_NAN; return; }
+        if ((bits & 0x78000000u) == 0x78000000u) { x->cls = DFP_INF; return; }
         x->cls = DFP_FINITE;
         if ((bits & 0x60000000u) == 0x60000000u) {
             x->exp = (int)((bits >> 21) & 0xff) - dfp_bias(4);
-            x->coeff = (u128)((bits & 0x1fffffu) | 0x800000u);
+            x->c_lo = (unsigned long long)((bits & 0x1fffffu) | 0x800000u);
         } else {
             x->exp = (int)((bits >> 23) & 0xff) - dfp_bias(4);
-            x->coeff = (u128)(bits & 0x7fffffu);
+            x->c_lo = (unsigned long long)(bits & 0x7fffffu);
         }
-        return 1;
+        return;
     }
     if (width != 16) {
-        unsigned long long bits = lo;
-        x->sign = (int)(bits >> 63);
-        if ((bits & 0x7c00000000000000ULL) == 0x7c00000000000000ULL) {
-            x->cls = DFP_NAN; return 1;
+        x->sign = (int)(lo >> 63);
+        if ((lo & 0x7c00000000000000ULL) == 0x7c00000000000000ULL) {
+            x->cls = DFP_NAN; return;
         }
-        if ((bits & 0x7800000000000000ULL) == 0x7800000000000000ULL) {
-            x->cls = DFP_INF; return 1;
+        if ((lo & 0x7800000000000000ULL) == 0x7800000000000000ULL) {
+            x->cls = DFP_INF; return;
         }
         x->cls = DFP_FINITE;
-        if ((bits & 0x6000000000000000ULL) == 0x6000000000000000ULL) {
-            x->exp = (int)((bits >> 51) & 0x3ff) - dfp_bias(8);
-            x->coeff = (u128)((bits & 0x0007ffffffffffffULL) | 0x0020000000000000ULL);
+        if ((lo & 0x6000000000000000ULL) == 0x6000000000000000ULL) {
+            x->exp = (int)((lo >> 51) & 0x3ff) - dfp_bias(8);
+            x->c_lo = (lo & 0x0007ffffffffffffULL) | 0x0020000000000000ULL;
         } else {
-            x->exp = (int)((bits >> 53) & 0x3ff) - dfp_bias(8);
-            x->coeff = (u128)(bits & 0x001fffffffffffffULL);
+            x->exp = (int)((lo >> 53) & 0x3ff) - dfp_bias(8);
+            x->c_lo = lo & 0x001fffffffffffffULL;
         }
-        return 1;
+        return;
     }
     x->sign = (int)(hi >> 63);
     if ((hi & 0x7c00000000000000ULL) == 0x7c00000000000000ULL) {
-        x->cls = DFP_NAN; return 1;
+        x->cls = DFP_NAN; return;
     }
     if ((hi & 0x7800000000000000ULL) == 0x7800000000000000ULL) {
-        x->cls = DFP_INF; return 1;
+        x->cls = DFP_INF; return;
     }
     x->cls = DFP_FINITE;
     if ((hi & 0x6000000000000000ULL) == 0x6000000000000000ULL) {
         x->exp = (int)((hi >> 47) & 0x3fff) - dfp_bias(16);
-        u128 c = ((u128)(hi & 0x00007fffffffffffULL) << 64) | lo;
-        x->coeff = c + ((u128)1 << 113);
+        x->c_lo = lo;
+        x->c_hi = (hi & 0x00007fffffffffffULL) | 0x0002000000000000ULL;
     } else {
         x->exp = (int)((hi >> 49) & 0x3fff) - dfp_bias(16);
-        x->coeff = ((u128)(hi & 0x0001ffffffffffffULL) << 64) | lo;
+        x->c_lo = lo;
+        x->c_hi = hi & 0x0001ffffffffffffULL;
     }
-    return 1;
+}
+static void dfp_shift10(Dfp *x, int n) {
+    int i = 0;
+    if (n <= 0) return;
+    while (i < n) {
+        u128_mul_u64(&x->c_lo, &x->c_hi, 10ULL);
+        i++;
+    }
 }
 static Dfp dfp_add_finite(Dfp a, Dfp b, int width) {
     Dfp r;
-    runtime.memset(&r, 0, sizeof(r));
+    dfp_zero(&r);
     r.cls = DFP_FINITE;
-    if (a.coeff == 0) return b;
-    if (b.coeff == 0) return a;
+    if (a.c_lo == 0 && a.c_hi == 0) return b;
+    if (b.c_lo == 0 && b.c_hi == 0) return a;
     if (a.exp < b.exp) {
         Dfp t = a; a = b; b = t;
     }
     int shift = a.exp - b.exp;
     int p = dfp_p(width);
-    if (shift > p + 3) {
-        if (b.coeff != 0 && a.sign == b.sign) {
-        }
-        return a;
-    }
-    u128 bc = b.coeff;
-    u128 sticky = 0;
+    if (shift > p + 3) return a;
+    unsigned long long rem = 0;
+    unsigned long long sticky = 0;
     int i = 0;
     while (i < shift) {
-        sticky = sticky | (bc % 10);
-        bc = bc / 10;
+        u128_div10(&b.c_lo, &b.c_hi, &rem);
+        if (rem) sticky = 1;
         i++;
     }
     r.exp = a.exp;
     if (a.sign == b.sign) {
         r.sign = a.sign;
-        r.coeff = a.coeff + bc;
-        if (sticky && (r.coeff & 1))
-            r.coeff = r.coeff + 1;
+        r.c_lo = a.c_lo;
+        r.c_hi = a.c_hi;
+        u128_add(&r.c_lo, &r.c_hi, b.c_lo, b.c_hi);
     } else {
-        if (a.coeff > bc || (a.coeff == bc && sticky == 0)) {
+        if (u128_ge(a.c_lo, a.c_hi, b.c_lo, b.c_hi)) {
             r.sign = a.sign;
-            r.coeff = a.coeff - bc;
-            if (sticky && r.coeff > 0)
-                r.coeff = r.coeff - 1;
-        } else if (a.coeff == bc && sticky == 0) {
-            r.sign = 0;
-            r.coeff = 0;
-            r.exp = 0;
+            r.c_lo = a.c_lo;
+            r.c_hi = a.c_hi;
+            u128_sub(&r.c_lo, &r.c_hi, b.c_lo, b.c_hi);
+            if (sticky && (r.c_lo != 0 || r.c_hi != 0))
+                u128_sub(&r.c_lo, &r.c_hi, 1ULL, 0ULL);
+            if (r.c_lo == 0 && r.c_hi == 0) r.sign = 0;
         } else {
             r.sign = b.sign;
-            r.coeff = bc - a.coeff;
+            r.c_lo = b.c_lo;
+            r.c_hi = b.c_hi;
+            u128_sub(&r.c_lo, &r.c_hi, a.c_lo, a.c_hi);
         }
     }
     dfp_quantize(&r, width);
@@ -277,51 +317,80 @@ static Dfp dfp_add_finite(Dfp a, Dfp b, int width) {
 }
 static Dfp dfp_mul_finite(Dfp a, Dfp b, int width) {
     Dfp r;
-    runtime.memset(&r, 0, sizeof(r));
+    dfp_zero(&r);
     r.cls = DFP_FINITE;
     r.sign = a.sign ^ b.sign;
-    if (a.coeff == 0 || b.coeff == 0) {
-        r.coeff = 0;
+    r.exp = a.exp + b.exp;
+    if ((a.c_lo == 0 && a.c_hi == 0) || (b.c_lo == 0 && b.c_hi == 0)) {
         r.exp = 0;
         r.sign = a.sign ^ b.sign;
         return r;
     }
-    r.exp = a.exp + b.exp;
-    r.coeff = a.coeff * b.coeff;
+unsigned long long p00l;
+unsigned long long p00h;
+unsigned long long p01l;
+unsigned long long p01h;
+unsigned long long p10l;
+unsigned long long p10h;
+    mul64(a.c_lo, b.c_lo, &p00l, &p00h);
+    mul64(a.c_lo, b.c_hi, &p01l, &p01h);
+    mul64(a.c_hi, b.c_lo, &p10l, &p10h);
+    r.c_lo = p00l;
+    r.c_hi = p00h;
+    u128_add(&r.c_hi, &p01h, p01l, 0ULL);
+    u128_add(&r.c_hi, &p10h, p10l, 0ULL);
+    (void)p01h;
+    (void)p10h;
     dfp_quantize(&r, width);
     return r;
 }
 static Dfp dfp_div_finite(Dfp a, Dfp b, int width) {
     Dfp r;
-    runtime.memset(&r, 0, sizeof(r));
+    dfp_zero(&r);
     r.sign = a.sign ^ b.sign;
-    if (b.coeff == 0) {
-        r.cls = (a.coeff == 0) ? DFP_NAN : DFP_INF;
+    if (b.c_lo == 0 && b.c_hi == 0) {
+        r.cls = (a.c_lo == 0 && a.c_hi == 0) ? DFP_NAN : DFP_INF;
         return r;
     }
-    if (a.coeff == 0) {
+    if (a.c_lo == 0 && a.c_hi == 0) {
         r.cls = DFP_FINITE;
-        r.coeff = 0;
-        r.exp = 0;
         return r;
     }
     r.cls = DFP_FINITE;
     int p = dfp_p(width);
-    int k = p + 4 - ndigits(a.coeff) + ndigits(b.coeff);
+    int k = p + 4 - dfp_ndigits(a.c_lo, a.c_hi) + dfp_ndigits(b.c_lo, b.c_hi);
     if (k < p + 2) k = p + 2;
-    u128 num = a.coeff * p10(k);
-    u128 q = num / b.coeff;
-    u128 rem = num % b.coeff;
-    if (rem * 2 > b.coeff || (rem * 2 == b.coeff && (q & 1)))
-        q = q + 1;
-    r.coeff = q;
+    Dfp num = a;
+    dfp_shift10(&num, k);
+    unsigned long long qlo = 0, qhi = 0, rlo = 0, rhi = 0;
+    int bit = 127;
+    while (bit >= 0) {
+        rhi = (rhi << 1) | (rlo >> 63);
+        rlo = rlo << 1;
+        unsigned long long nb;
+        if (bit >= 64) nb = (num.c_hi >> (bit - 64)) & 1ULL;
+        else nb = (num.c_lo >> bit) & 1ULL;
+        rlo = rlo | nb;
+        if (u128_ge(rlo, rhi, b.c_lo, b.c_hi)) {
+            u128_sub(&rlo, &rhi, b.c_lo, b.c_hi);
+            if (bit >= 64) qhi = qhi | (1ULL << (bit - 64));
+            else qlo = qlo | (1ULL << bit);
+        }
+        bit--;
+    }
+    if (rlo != 0 || rhi != 0) {
+        if ((qlo & 1ULL) == 0)
+            u128_add(&qlo, &qhi, 1ULL, 0ULL);
+    }
+    r.c_lo = qlo;
+    r.c_hi = qhi;
     r.exp = a.exp - b.exp - k;
     dfp_quantize(&r, width);
     return r;
 }
 static Dfp dfp_binop_val(int op, Dfp a, Dfp b, int width) {
     Dfp r;
-    runtime.memset(&r, 0, sizeof(r));
+    dfp_zero(&r);
     if (op == DFP_SUB) {
         b.sign = !b.sign;
         op = DFP_ADD;
@@ -341,8 +410,8 @@ static Dfp dfp_binop_val(int op, Dfp a, Dfp b, int width) {
         return dfp_add_finite(a, b, width);
     }
     if (op == DFP_MUL) {
-        if ((a.cls == DFP_INF && b.cls == DFP_FINITE && b.coeff == 0) ||
-            (b.cls == DFP_INF && a.cls == DFP_FINITE && a.coeff == 0)) {
+        if ((a.cls == DFP_INF && b.cls == DFP_FINITE && b.c_lo == 0 && b.c_hi == 0) ||
+            (b.cls == DFP_INF && a.cls == DFP_FINITE && a.c_lo == 0 && a.c_hi == 0)) {
             r.cls = DFP_NAN;
             return r;
         }
@@ -365,8 +434,6 @@ static Dfp dfp_binop_val(int op, Dfp a, Dfp b, int width) {
         }
         if (b.cls == DFP_INF) {
             r.cls = DFP_FINITE;
-            r.coeff = 0;
-            r.exp = 0;
             return r;
         }
         return dfp_div_finite(a, b, width);
@@ -377,7 +444,7 @@ static Dfp dfp_binop_val(int op, Dfp a, Dfp b, int width) {
 int dfp_from_str(const char *text, int width,
                  unsigned long long *lo, unsigned long long *hi) {
     Dfp x;
-    runtime.memset(&x, 0, sizeof(x));
+    dfp_zero(&x);
     if (!text || !lo || !hi) return 0;
     *lo = 0;
     *hi = 0;
@@ -399,15 +466,17 @@ int dfp_from_str(const char *text, int width,
         return 1;
     }
     x.cls = DFP_FINITE;
-    u128 coeff = 0;
+    unsigned long long clo = 0, chi = 0;
     int nd = 0;
     int frac = 0;
     int saw_dot = 0;
     int saw_digit = 0;
     while (*s) {
         if (*s >= '0' && *s <= '9') {
-            if (nd < 40)
-                coeff = coeff * 10 + (u128)(*s - '0');
+            if (nd < 40) {
+                u128_mul_u64(&clo, &chi, 10ULL);
+                u128_add(&clo, &chi, (unsigned long long)(*s - '0'), 0ULL);
+            }
             nd++;
             if (saw_dot) frac++;
             saw_digit = 1;
@@ -432,10 +501,11 @@ int dfp_from_str(const char *text, int width,
         exp_part *= exp_sign;
     }
     if (!saw_digit) {
-        coeff = 0;
-        nd = 1;
+        clo = 0;
+        chi = 0;
     }
-    x.coeff = coeff;
+    x.c_lo = clo;
+    x.c_hi = chi;
     x.exp = exp_part - frac;
     dfp_quantize(&x, width);
     dfp_encode(&x, width, lo, hi);
@@ -481,25 +551,23 @@ Dfp b;
         if (a.cls == DFP_INF) return a.sign ? -1 : 1;
         return b.sign ? 1 : -1;
     }
-    if (a.coeff == 0 && b.coeff == 0) return 0;
-    if (a.coeff == 0) return b.sign ? 1 : -1;
-    if (b.coeff == 0) return a.sign ? -1 : 1;
+    if (a.c_lo == 0 && a.c_hi == 0 && b.c_lo == 0 && b.c_hi == 0) return 0;
+    if (a.c_lo == 0 && a.c_hi == 0) return b.sign ? 1 : -1;
+    if (b.c_lo == 0 && b.c_hi == 0) return a.sign ? -1 : 1;
     if (a.sign != b.sign) return a.sign ? -1 : 1;
     Dfp x = a, y = b;
     if (x.exp < y.exp) {
         int s = y.exp - x.exp;
-        if (s > 80) return a.sign ? 1 : -1;
-        y.coeff = y.coeff * p10(s);
-        y.exp = x.exp;
+        if (s > 40) return a.sign ? 1 : -1;
+        dfp_shift10(&y, s);
     } else if (y.exp < x.exp) {
         int s = x.exp - y.exp;
-        if (s > 80) return a.sign ? -1 : 1;
-        x.coeff = x.coeff * p10(s);
-        x.exp = y.exp;
+        if (s > 40) return a.sign ? -1 : 1;
+        dfp_shift10(&x, s);
     }
     int mag;
-    if (x.coeff < y.coeff) mag = -1;
-    else if (x.coeff > y.coeff) mag = 1;
+    if (x.c_hi < y.c_hi || (x.c_hi == y.c_hi && x.c_lo < y.c_lo)) mag = -1;
+    else if (x.c_hi > y.c_hi || (x.c_hi == y.c_hi && x.c_lo > y.c_lo)) mag = 1;
     else mag = 0;
     return a.sign ? -mag : mag;
 }
@@ -507,15 +575,18 @@ int dfp_from_int(unsigned long long val, unsigned long long val_hi,
                  int is_unsigned, int width,
                  unsigned long long *lo, unsigned long long *hi) {
     Dfp x;
-    runtime.memset(&x, 0, sizeof(x));
+    dfp_zero(&x);
     x.cls = DFP_FINITE;
     if (!is_unsigned && (val_hi >> 63)) {
         x.sign = 1;
-        u128 v = ((u128)val_hi << 64) | val;
-        v = -v;
-        x.coeff = v;
+        unsigned long long nlo = ~val;
+        unsigned long long nhi = ~val_hi;
+        u128_add(&nlo, &nhi, 1ULL, 0ULL);
+        x.c_lo = nlo;
+        x.c_hi = nhi;
     } else {
-        x.coeff = ((u128)val_hi << 64) | val;
+        x.c_lo = val;
+        x.c_hi = val_hi;
     }
     x.exp = 0;
     dfp_quantize(&x, width);

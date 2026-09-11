@@ -1043,16 +1043,12 @@ void mem2reg_writeback(
                 for (size_t ai = 0; ai < phi->num_args; ai++) {
                     if (phi->args[ai].pred == (int)bi) {
                         IRInst copy;
+                        runtime.memset(&copy, 0, sizeof(copy));
                         copy.op = IR_COPY;
                         copy.dst = phi->dst;
                         copy.a = phi->args[ai].val;
                         copy.b = -1;
-                        copy.imm = 0;
                         copy.loc = phi->loc;
-                        copy.call_name = ((void*)0);
-                        copy.call_args = ((void*)0);
-                        copy.call_arg_on_stack = ((void*)0);
-                        copy.call_nargs = 0;
                         copy.width = (phi->dst < fn->value_meta_cap && fn->value_width) ? fn->value_width[phi->dst] : 8;
                         copy.is_unsigned = (phi->dst < fn->value_meta_cap && fn->value_is_unsigned) ? fn->value_is_unsigned[phi->dst] : 0;
                         copy.is_float = (phi->dst < fn->value_meta_cap && fn->value_is_float) ? fn->value_is_float[phi->dst] : 0;
@@ -1220,13 +1216,11 @@ static void mem2reg_ensure_value_meta(IRFunction *fn, int v) {
     while (new_cap <= v) new_cap *= 2;
     fn->value_width = xrealloc(fn->value_width, new_cap * sizeof(int));
     fn->value_is_unsigned = xrealloc(fn->value_is_unsigned, new_cap * sizeof(int));
-    if (fn->value_is_float) {
-        fn->value_is_float = xrealloc(fn->value_is_float, new_cap * sizeof(int));
-        for (int i = old_cap; i < new_cap; i++) fn->value_is_float[i] = 0;
-    }
+    fn->value_is_float = xrealloc(fn->value_is_float, new_cap * sizeof(int));
     for (int i = old_cap; i < new_cap; i++) {
         fn->value_width[i] = 4;
         fn->value_is_unsigned[i] = 0;
+        fn->value_is_float[i] = 0;
     }
     fn->value_meta_cap = new_cap;
 }

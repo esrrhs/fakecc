@@ -1159,7 +1159,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
             if (inst->op == IR_CALL) {
-                for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], over; _w && ((over = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
+                for (int over = 0; over < (&live)->nv; over++) if (bs_test((&live), over)) {
                     if ((int)over != inst->dst && (int)over != inst->b &&
                         value_in_class(fn, (int)over, float_class))
                         forbid_mask[over] |= cls->caller_saved;
@@ -1199,7 +1199,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             inst->op == IR_DBG_VALUE) continue;
             if (inst->dst >= 0 && inst->dst < nv &&
                 value_in_class(fn, inst->dst, float_class)) {
-                for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], other; _w && ((other = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
+                for (int other = 0; other < (&live)->nv; other++) if (bs_test((&live), other)) {
                     if (!value_in_class(fn, (int)other, float_class))
                         continue;
                     if ((int)other != inst->dst) {
@@ -1211,7 +1211,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             }
             if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class)) {
-                for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], other; _w && ((other = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
+                for (int other = 0; other < (&live)->nv; other++) if (bs_test((&live), other)) {
                     if (!value_in_class(fn, (int)other, float_class))
                         continue;
                     if ((int)other != inst->b)

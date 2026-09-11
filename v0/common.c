@@ -80,7 +80,8 @@ void buffer_appendf(Buffer *b, const char *fmt, ...) {
     va_end(ap);
 }
 void *xmalloc(size_t n) {
-    void *p = runtime.malloc(n);
+    if (n == 0) n = 1;
+    void *p = runtime.calloc(1, n);
     if (!p) {
         runtime.fprintf(runtime.stderr, "fakecc: out of memory\n");
         runtime.exit(1);
