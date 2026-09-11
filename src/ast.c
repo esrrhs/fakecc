@@ -571,6 +571,13 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     return n;
 }
 
+int sysv_memory_pass_as_pointer(Type t) {
+    if (t.kind == TY_STRUCT && t.tag && strcmp(t.tag, "__va_list_tag") == 0)
+        return 1;
+    int sz = type_size(t);
+    return sz > 128;
+}
+
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width) {
     struct_def_push_member_aligned(sd, name, ty, bit_width, 0);
 }

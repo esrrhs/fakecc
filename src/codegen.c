@@ -1501,10 +1501,33 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             emit_add_imm32(b, REG_R11, ov_step);
             emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
             patch_rel32(b, jmp_end, b->len);
+        } else if (nbytes > 128) {
+            /* Huge MEMORY struct: caller passed a pointer in one GP slot.
+             * Load that pointer from the save/overflow area, then copy n8
+             * qwords from the pointed-to object. */
+            emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
+            emit_cmp_imm32(b, REG_RCX, 48);
+            size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
+            emit_load_base_off(b, REG_RDX, ap_reg, VA_REG_OFF);
+            emit_add_rr(b, REG_RDX, REG_RCX);
+            emit_load_base_off(b, REG_RDX, REG_RDX, 0);
+            emit_add_imm32(b, REG_RCX, 8);
+            emit_store_base_off32(b, ap_reg, REG_RCX, VA_GP_OFF);
+            size_t jmp_end = emit_jmp_rel32(b);
+            size_t ov_off = b->len;
+            patch_rel32(b, jae_ov, ov_off);
+            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            emit_load_base_off(b, REG_RDX, REG_R11, 0);
+            emit_add_imm32(b, REG_R11, 8);
+            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            patch_rel32(b, jmp_end, b->len);
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_R11, REG_RDX, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_R11, i * 8);
+            }
         } else {
-            /* MEMORY-class struct: SysV passes eightbytes on the overflow
-             * stack, never in registers.  Copy n8 qwords from
-             * overflow_arg_area and advance it. */
+            /* Small MEMORY-class struct: SysV passes eightbytes on the
+             * overflow stack.  Copy n8 qwords from overflow_arg_area. */
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_RDX, REG_R11, i * 8);

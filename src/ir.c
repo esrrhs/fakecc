@@ -5637,6 +5637,27 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     nreg = sysv_classify_agg(arg->type, cls);
                 }
                 int is_memory = (nreg == 0);
+                if (is_memory && sysv_memory_pass_as_pointer(arg->type)) {
+                    /* Huge MEMORY / va_list: pass a pointer to a stack copy.
+                     * Matches libc's va_list pointer and avoids exploding IR
+                     * on 100KB+ by-value structs. */
+                    int copy_sz = asz;
+                    if (copy_sz < 1) copy_sz = 1;
+                    IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
+                    IRValue tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1, 8, 1,
+                                                  e->loc);
+                    emit_struct_copy(fn, tmp_addr, av, asz, e->loc);
+                    if (nargs >= arg_limit) {
+                        fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                                IR_CALL_MAX_ARGS);
+                        exit(1);
+                    }
+                    arg_vals[nargs] = tmp_addr;
+                    arg_on_stack[nargs] = 0;
+                    if (call_used_gp < 6) call_used_gp++;
+                    nargs++;
+                    continue;
+                }
                 if (is_memory) {
                     /* SysV MEMORY class: pass (size+7)/8 INTEGER eightbytes
                      * on the stack, never in registers. */
@@ -9177,12 +9198,29 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     nreg = sysv_classify_agg(pty, cls);
                 }
                 int is_memory = (nreg == 0);
-                if (is_memory) {
+                if (is_memory && sysv_memory_pass_as_pointer(pty)) {
+                    param_nreg[p] = -1;
+                    param_ebs[p] = malloc(sizeof(IRValue));
+                    if (!param_ebs[p]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                    param_ebs[p][0] = new_value(&irfn);
+                    emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
+                                next_pidx++, 8, 1, ploc);
+                    if (used_gp < 6) used_gp++;
+                } else if (is_memory) {
                     int total = type_size(pty);
                     if (total < 0) total = 0;
                     nreg = (total + 7) / 8;
                     if (nreg < 1) nreg = 1;
-                }
+                    param_nreg[p] = nreg;
+                    param_ebs[p] = malloc((size_t)nreg * sizeof(IRValue));
+                    if (!param_ebs[p]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                    for (int k = 0; k < nreg; k++) {
+                        param_ebs[p][k] = new_value(&irfn);
+                        emit_inst_w(&irfn, IR_PARAM, param_ebs[p][k], -1, -1,
+                                    next_pidx++, 8, 1, ploc);
+                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
+                    }
+                } else {
                 int need_gp = 0, need_fp = 0;
                 if (!is_memory) {
                     for (int k = 0; k < nreg; k++) {
@@ -9211,6 +9249,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                         irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
                     if (is_sse)
                         set_value_float(&irfn, param_ebs[p][k], 1);
+                }
                 }
             } else {
                 param_nreg[p] = -1;
