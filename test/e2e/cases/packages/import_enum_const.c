@@ -1,5 +1,4 @@
 // expect: 0
-// skip_difftest
 // Qualified `pkg.CONST` resolves imported enum constants (anonymous and
 // tagged) in expressions, static initializers, array bounds, local enums,
 // calls, and case / case-range labels.

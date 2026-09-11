@@ -23,7 +23,7 @@ fi
 # `import flags;` still leaves `flags.CONST` which it cannot parse.
 files=()
 for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
-    if grep -qE '^//[[:space:]]*(expect_error|skip_difftest)' "$f"; then
+    if grep -qE '^//[[:space:]]*expect_error' "$f"; then
         continue
     fi
     if grep '^import[[:space:]]' "$f" | grep -vqE '^import[[:space:]]+runtime;'; then

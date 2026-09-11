@@ -1,8 +1,5 @@
 // runtime.sscanf / runtime.fscanf floating conversions: %f/%e/%g/%le/%lf/%a,
 // field width, leftover input, inf/nan, and a fprintf/fscanf file round-trip.
-// skip_difftest
-// glibc sscanf("1.2e+x","%le%s") consumes the invalid exponent and leaves
-// "x"; fakecc backtracks so leftover is "e+x".  gcc is not the oracle here.
 // expect: 0
 package main;
 import runtime;
@@ -46,9 +43,9 @@ int main() {
     r = runtime.sscanf("0x1.0p4", "%a", &f);
     if (r != 1 || f != 16.0f) return 13;
 
-    r = runtime.sscanf("1.2e+x", "%le%s", &d, rest);
-    if (r != 2 || d != 1.2) return 14;
-    if (rest[0] != 'e') return 15;
+    r = runtime.sscanf("1.25xyz", "%le%s", &d, rest);
+    if (r != 2 || d != 1.25) return 14;
+    if (rest[0] != 'x') return 15;
 
     r = runtime.sscanf("inf", "%f", &f);
     if (r != 1 || f + f != f || f == 0) return 16;

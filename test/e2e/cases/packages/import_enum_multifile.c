@@ -1,5 +1,4 @@
 // expect: 0
-// skip_difftest
 // One `import flags` sees enum constants from every file in the package.
 package main;
 import flags;

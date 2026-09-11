@@ -1,5 +1,4 @@
 // expect: 0
-// skip_difftest
 // A local of the same name as an imported package shadows `pkg.CONST`,
 // so this is struct member access, not the imported enum value 1.
 package main;
