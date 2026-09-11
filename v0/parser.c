@@ -165,16 +165,19 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int func_is_variadic;
+    int func_is_unprototyped;
     int enum_id;
     int bitfield_width;
     int is_vector;
+    unsigned is_decimal : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -186,25 +189,42 @@ static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+}
+static inline Type type_make_decimal(long long width) {
+    Type t = type_make_float(width);
+    t.is_decimal = 1;
+    return t;
+}
+static inline int type_is_decimal(Type t) {
+    return t.kind == TY_FLOAT && t.is_decimal && !t.is_vector;
+}
+static inline int type_is_decimal128(Type t) {
+    return type_is_decimal(t) && t.width == 16;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
 long long type_size(Type t);
 long long type_align(Type t);
+int type_is_complex_ldouble(Type t);
+int type_is_empty_struct(Type t);
+int type_needs_stack_align16(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -941,6 +961,28 @@ static int tu_has_import(const TranslationUnit *tu, const char *name) {
         if (runtime.strcmp(tu->imports.data[i].name, name) == 0) return 1;
     return 0;
 }
+static int parser_name_is_bound(Parser *p, const char *name) {
+    for (size_t i = p->locals.len; i > 0; i--)
+        if (runtime.strcmp(p->locals.data[i - 1].name, name) == 0) return 1;
+    for (size_t i = p->prepend.len; i > 0; i--)
+        if (p->prepend.data[i - 1].kind == ST_DECL
+            && runtime.strcmp(p->prepend.data[i - 1].u.decl.name, name) == 0)
+            return 1;
+    if (p->tu) {
+        for (size_t i = p->tu->globals.len; i > 0; i--)
+            if (p->tu->globals.data[i - 1].kind == ST_DECL
+                && runtime.strcmp(p->tu->globals.data[i - 1].u.decl.name, name) == 0)
+                return 1;
+    }
+    return 0;
+}
+static const EnumConstant *find_imported_enum_const(Parser *p, const char *pkg_name,
+                                                   const char *name) {
+    if (!p->pkg_ctx) return ((void*)0);
+    Package *pkg = pkg_find(p->pkg_ctx, pkg_name);
+    if (!pkg) return ((void*)0);
+    return pkg_find_enum_const(pkg, name);
+}
 static const Type *resolve_pkg_typedef(Parser *p, const char *pkg_name,
                                        const char *type_name) {
     if (!p->pkg_ctx) return ((void*)0);
@@ -980,6 +1022,13 @@ static const Type *find_typedef_with_fallback(Parser *p, const char *name) {
     if (t) return t;
     if (!p->pkg_ctx || !p->tu->package.name) return ((void*)0);
     return resolve_pkg_typedef(p, p->tu->package.name, name);
+}
+static int decimal_float_width(const char *text) {
+    if (!text) return 0;
+    if (runtime.strcmp(text, "_Decimal32") == 0) return 4;
+    if (runtime.strcmp(text, "_Decimal64") == 0) return 8;
+    if (runtime.strcmp(text, "_Decimal128") == 0) return 16;
+    return 0;
 }
 static int is_type_start(const Parser *p, size_t pos) {
     TokenKind k = p->tokens->data[pos].kind;
@@ -1039,6 +1088,8 @@ static int is_type_start(const Parser *p, size_t pos) {
             return 0;
         }
         if (runtime.strcmp(text, "__int128") == 0 || runtime.strcmp(text, "__int128_t") == 0 || runtime.strcmp(text, "__uint128_t") == 0)
+            return 1;
+        if (decimal_float_width(text))
             return 1;
         if (runtime.strcmp(text, "typeof") == 0 || runtime.strcmp(text, "__typeof__") == 0 || runtime.strcmp(text, "__typeof") == 0)
             return 1;
@@ -1167,6 +1218,11 @@ static Type eval_binary_type(Parser *p, Type a, Type b) {
         return type_clone(cty);
     }
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT) {
+        if (a.is_decimal || b.is_decimal) {
+            if (a.is_decimal && b.is_decimal)
+                return type_clone(a.width >= b.width ? a : b);
+            return type_clone(a.is_decimal ? a : b);
+        }
         return type_clone(a.width >= b.width ? a : b);
     }
     if (a.kind == TY_FLOAT) return type_clone(a);
@@ -1543,6 +1599,15 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
         Type t = type_make_float(16);
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
+    if (peek(p)->kind == TK_IDENT) {
+        int dw = decimal_float_width(peek(p)->text);
+        if (dw) {
+            advance(p);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
+            Type t = type_make_decimal(dw);
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+        }
+    }
     if (peek(p)->kind == TK_KW_ENUM) {
         advance(p);
         const Token *tag = ((void*)0);
@@ -1738,13 +1803,22 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
             int bit_width = -1;
             if (peek(p)->kind == TK_COLON) {
                 advance(p);
-                const Token *w = peek(p);
-                if (w->kind != TK_INT_LITERAL) {
-                    die_at(w->loc.file, w->loc.line, w->loc.col,
-                           "expected bitfield width but got '%s'", w->text);
+                const Token *wtok = peek(p);
+                Expr *we = parse_ternary(p);
+                long long wval = 0;
+                if (fold_const_int(we, &wval)) {
+                    bit_width = (int)wval;
+                } else if (we->kind == EX_VAR) {
+                    const EnumConstant *ec =
+                        enum_registry_find_constant(&p->tu->enums, we->u.var.name);
+                    if (ec) bit_width = (int)ec->value;
                 }
-                bit_width = int_literal_value(w->text);
-                advance(p);
+                expr_free(we);
+                if (bit_width < 0) {
+                    die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
+                           "expected constant bitfield width but got '%s'",
+                           wtok->text);
+                }
             }
             struct_def_push_member_aligned(sd, mname, mty, bit_width, align);
             runtime.free(mname);
@@ -1877,7 +1951,7 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
     }
     expect_kind(p, TK_RBRACE, "'}'");
 }
-static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
+static Type make_func_type(Type ret, ParamArray *params, int is_variadic, int is_unproto) {
     Type **ptys = ((void*)0);
     if (params->len > 0) {
         ptys = runtime.malloc(params->len * sizeof(Type *));
@@ -1886,12 +1960,14 @@ static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
             ptys[i] = &params->data[i].type;
     }
     Type t = type_make_func_var(ret, ptys, (int)params->len, is_variadic);
+    t.func_is_unprototyped = is_unproto;
     runtime.free(ptys);
     param_array_free(params);
     return t;
 }
-static ParamArray parse_param_list(Parser *p, int *is_variadic) {
+static ParamArray parse_param_list(Parser *p, int *is_variadic, int *is_unproto) {
     if (is_variadic) *is_variadic = 0;
+    if (is_unproto) *is_unproto = 0;
     ParamArray params;
     param_array_init(&params);
     if (peek(p)->kind == TK_KW_VOID
@@ -1941,6 +2017,8 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                    "more than %d parameters not supported", 1024);
         }
+    } else if (is_unproto) {
+        *is_unproto = 1;
     }
     return params;
 }
@@ -2063,10 +2141,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
-                outer_t = make_func_type(ret, &params, is_var);
+                outer_t = make_func_type(ret, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -2112,8 +2190,8 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
                 if (p->save_fn_params) {
                     param_array_init(&p->last_fn_params);
@@ -2125,7 +2203,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                     }
                     p->has_last_fn_params = 1;
                 }
-                t = make_func_type(t, &params, is_var);
+                t = make_func_type(t, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -2156,10 +2234,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(t, &params, is_var);
+                t = make_func_type(t, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -2577,9 +2655,13 @@ static Expr *parse_unary(Parser *p) {
         Expr *else_ = parse_assign(p);
         expect_kind(p, TK_RPAREN, "')'");
         long long v;
-        int is_const = fold_const_int(cond, &v) || (cond->kind == EX_STR) || (cond->kind == EX_FLOAT_LIT);
+        if (cond->kind == EX_FLOAT_LIT || cond->kind == EX_STR
+            || !fold_const_int(cond, &v)) {
+            die_at(cond->loc.file, cond->loc.line, cond->loc.col,
+                   "first argument to '__builtin_choose_expr' not a constant");
+        }
         expr_free(cond);
-        if (is_const) {
+        if (v != 0) {
             expr_free(else_);
             return then;
         } else {
@@ -2667,6 +2749,17 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
                        "expected member name after '.'");
             }
             advance(p);
+            if (lhs->kind == EX_VAR && lhs->u.var.pkg == ((void*)0)
+                && tu_has_import(p->tu, lhs->u.var.name)
+                && !parser_name_is_bound(p, lhs->u.var.name)) {
+                const EnumConstant *ec =
+                    find_imported_enum_const(p, lhs->u.var.name, mn->text);
+                if (ec) {
+                    expr_free(lhs);
+                    lhs = expr_new_int(ec->value, loc);
+                    continue;
+                }
+            }
             lhs = expr_new_member(lhs, mn->text, loc);
             continue;
         }
@@ -2721,9 +2814,36 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
     }
     return lhs;
 }
-static void float_literal_width(const char *text, int *out_width) {
+static void float_literal_width(const char *text, int *out_width, int *out_decimal) {
     size_t len = runtime.strlen(text);
     *out_width = 8;
+    if (out_decimal) *out_decimal = 0;
+    while (len > 0) {
+        char last = text[len - 1];
+        if (last == 'i' || last == 'I' || last == 'j' || last == 'J') {
+            len--;
+            continue;
+        }
+        break;
+    }
+    if (len >= 2) {
+        char a = text[len - 2], b = text[len - 1];
+        if ((a == 'd' || a == 'D') && (b == 'f' || b == 'F')) {
+            *out_width = 4;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+        if ((a == 'd' || a == 'D') && (b == 'd' || b == 'D')) {
+            *out_width = 8;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+        if ((a == 'd' || a == 'D') && (b == 'l' || b == 'L')) {
+            *out_width = 16;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+    }
     if (len > 0) {
         char last = text[len - 1];
         if (last == 'f' || last == 'F')
@@ -3003,8 +3123,10 @@ int is_unsigned;
             return parse_postfix(p, e);
         }
         int width = 8;
-        float_literal_width(t->text, &width);
+        int is_dec = 0;
+        float_literal_width(t->text, &width, &is_dec);
         Expr *e = expr_new_float_lit(t->text, width, t->loc);
+        if (is_dec) e->type.is_decimal = 1;
         advance(p);
         return e;
     }
@@ -3454,7 +3576,8 @@ static int is_function_declaration_lookahead(Parser *p) {
         } else if (tk == TK_IDENT
                    && (runtime.strcmp(peek(p)->text, "__int128") == 0
                        || runtime.strcmp(peek(p)->text, "__int128_t") == 0
-                       || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
+                       || runtime.strcmp(peek(p)->text, "__uint128_t") == 0
+                       || decimal_float_width(peek(p)->text))) {
             advance(p);
         } else if (tk == TK_IDENT
                    && (runtime.strcmp(peek(p)->text, "typeof") == 0
@@ -3560,7 +3683,8 @@ static int is_function_definition_lookahead(Parser *p) {
         } else if (tk == TK_IDENT
                    && (runtime.strcmp(peek(p)->text, "__int128") == 0
                        || runtime.strcmp(peek(p)->text, "__int128_t") == 0
-                       || runtime.strcmp(peek(p)->text, "__uint128_t") == 0)) {
+                       || runtime.strcmp(peek(p)->text, "__uint128_t") == 0
+                       || decimal_float_width(peek(p)->text))) {
             advance(p);
         } else if (tk == TK_IDENT
                    && (runtime.strcmp(peek(p)->text, "typeof") == 0
@@ -3793,9 +3917,8 @@ static Stmt parse_stmt(Parser *p) {
                                    &s.u.decl.alias_target)) {}
             if (peek(p)->kind == TK_ASSIGN) {
                 advance(p);
-                if (storage_class == 2) {
-                    storage_class = 0;
-                }
+                if (s.u.decl.storage_class == 2)
+                    s.u.decl.storage_class = 0;
                 if (peek(p)->kind == TK_LBRACE) {
                     s.u.decl.init = parse_init_list(p);
                 } else {
@@ -4025,7 +4148,9 @@ static Stmt parse_stmt(Parser *p) {
         long long value = 0;
         long long high_value = 0;
         int is_range = 0;
-        if (cv->kind == TK_IDENT) {
+        if (cv->kind == TK_IDENT
+            && p->pos + 1 < p->tokens->len
+            && p->tokens->data[p->pos + 1].kind != TK_DOT) {
             value = case_constant_value(p, cv->text);
             advance(p);
         } else {
@@ -4040,7 +4165,9 @@ static Stmt parse_stmt(Parser *p) {
         if (peek(p)->kind == TK_ELLIPSIS) {
             advance(p);
             const Token *hv = peek(p);
-            if (hv->kind == TK_IDENT) {
+            if (hv->kind == TK_IDENT
+                && p->pos + 1 < p->tokens->len
+                && p->tokens->data[p->pos + 1].kind != TK_DOT) {
                 high_value = case_constant_value(p, hv->text);
                 advance(p);
             } else {

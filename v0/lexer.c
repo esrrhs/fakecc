@@ -480,6 +480,13 @@ lex_loop_head:
                     if (sc == 'f' || sc == 'F' || sc == 'i' || sc == 'I' || sc == 'j' || sc == 'J')
                         is_float = 1;
                     pos++; col++;
+                } else if ((sc == 'd' || sc == 'D')) {
+                    char n = source[pos + 1];
+                    if (n == 'f' || n == 'F' || n == 'd' || n == 'D' ||
+                        n == 'l' || n == 'L') {
+                        is_float = 1;
+                        pos += 2; col += 2;
+                    } else break;
                 } else break;
             }
             size_t len = pos - start;
@@ -513,6 +520,12 @@ lex_loop_head:
                 if (sc == 'f' || sc == 'F' || sc == 'l' || sc == 'L' ||
                     sc == 'i' || sc == 'I' || sc == 'j' || sc == 'J') {
                     pos++; col++;
+                } else if ((sc == 'd' || sc == 'D')) {
+                    char n = source[pos + 1];
+                    if (n == 'f' || n == 'F' || n == 'd' || n == 'D' ||
+                        n == 'l' || n == 'L') {
+                        pos += 2; col += 2;
+                    } else break;
                 } else break;
             }
             size_t len = pos - start;

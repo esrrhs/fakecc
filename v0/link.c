@@ -783,6 +783,28 @@ Buffer tdata;
             if (!resolved)
                 reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
+        for (size_t r = 0; r < m->num_data_relocs; r++) {
+            size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+            if (sinfo[gsi].defined) continue;
+            if (reloc_ext_idx[gsi] >= 0) continue;
+            const char *nm = m->syms[m->data_relocs[r].sym].name
+                             ? m->syms[m->data_relocs[r].sym].name : "";
+            int resolved = 0;
+            for (size_t mi = 0; mi < n && !resolved; mi++) {
+                EmitModule *om = mods[mi];
+                for (size_t mj = 0; mj < om->num_syms; mj++) {
+                    size_t ogsi = mod_sym_base[mi] + mj;
+                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
+                        && om->syms[mj].name
+                        && runtime.strcmp(om->syms[mj].name, nm) == 0) {
+                        resolved = 1;
+                        break;
+                    }
+                }
+            }
+            if (!resolved)
+                reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
+        }
     }
     char **data_ext_list = ((void*)0);
     int num_data_ext = 0;
@@ -1168,7 +1190,15 @@ Buffer dynamic;
                     S = global_addr;
                 } else {
                     int eidx = reloc_ext_idx[gsi];
-                    S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
+                    if (eidx < 0) {
+                        const char *nm = m->syms[rel->sym].name
+                                         ? m->syms[rel->sym].name : "";
+                        runtime.fprintf(runtime.stderr,
+                                "fakecc: data reloc against undefined '%s' "
+                                "has no PLT slot\n", nm);
+                        runtime.exit(1);
+                    }
+                    S = code_vaddr + plt_entry_off[eidx];
                 }
             }
             uint64_t value = S + rel->addend;

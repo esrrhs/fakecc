@@ -276,8 +276,11 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
+    int align16;
+    int x87_pair;
     unsigned char *call_arg_on_stack;
     int alloca_bytes;
+    int is_volatile;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -338,6 +341,7 @@ struct IRFunction {
     int ret_reg_n;
     int ret_reg_cls[2];
     int ret_is_bool;
+    int ret_is_complex_ld;
     int is_variadic;
     int is_static;
     int has_dyn_alloca;
@@ -529,16 +533,19 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int func_is_variadic;
+    int func_is_unprototyped;
     int enum_id;
     int bitfield_width;
     int is_vector;
+    unsigned is_decimal : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -550,25 +557,42 @@ static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+}
+static inline Type type_make_decimal(long long width) {
+    Type t = type_make_float(width);
+    t.is_decimal = 1;
+    return t;
+}
+static inline int type_is_decimal(Type t) {
+    return t.kind == TY_FLOAT && t.is_decimal && !t.is_vector;
+}
+static inline int type_is_decimal128(Type t) {
+    return type_is_decimal(t) && t.width == 16;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
 long long type_size(Type t);
 long long type_align(Type t);
+int type_is_complex_ldouble(Type t);
+int type_is_empty_struct(Type t);
+int type_needs_stack_align16(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -1947,7 +1971,8 @@ static void emit_builtin_return(Buffer *b, const IRInst *inst, const RAResult *r
     emit_epilogue(b, stack_size, cs_used, has_dyn_alloca);
 }
 static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
-                          int gp_offset, int fp_offset, int overflow_off) {
+                          int gp_offset, int fp_offset, int overflow_off,
+                          int reg_save_rbp_off) {
     int ap = inst->call_args[0];
     ensure_reg(b, ap, REG_RAX, ra);
     int ap_reg = REG_RAX;
@@ -1957,7 +1982,7 @@ static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
     emit_store_base_off32(b, ap_reg, REG_RCX, 4);
     emit_lea_rbp(b, REG_RCX, overflow_off);
     emit_store_base_off(b, ap_reg, REG_RCX, 8);
-    emit_mov_rr(b, REG_RCX, REG_RSP);
+    emit_lea_rbp(b, REG_RCX, reg_save_rbp_off);
     emit_store_base_off(b, ap_reg, REG_RCX, 16);
 }
 static void emit_load_gp_viabase(Buffer *b, int dst, int base, int index) {
@@ -2029,6 +2054,13 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             if (num_gp > 0) patch_rel32(b, jae_gp, ov_off);
             if (num_fp > 0) patch_rel32(b, jae_fp, ov_off);
             emit_load_base_off(b, REG_R11, ap_reg, 8);
+            if (inst->align16) {
+                emit_add_imm32(b, REG_R11, 15);
+                emit_rex_wrb(b, 1, 0, REG_R11);
+                emit_byte(b, 0x83);
+                emit_modrm(b, 3, 4, REG_R11 & 7);
+                emit_byte(b, 0xF0);
+            }
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
@@ -2036,7 +2068,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             emit_add_imm32(b, REG_R11, ov_step);
             emit_store_base_off(b, ap_reg, REG_R11, 8);
             patch_rel32(b, jmp_end, b->len);
-        } else {
+        } else if (nbytes > 128) {
             emit_load_base_off32(b, REG_RCX, ap_reg, 0);
             emit_cmp_imm32(b, REG_RCX, 48);
             size_t jae_ov = emit_jcc_rel32(b, 0x83);
@@ -2057,6 +2089,18 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                 emit_load_base_off(b, REG_R11, REG_RDX, i * 8);
                 emit_store_base_off(b, REG_RSI, REG_R11, i * 8);
             }
+        } else {
+            emit_load_base_off(b, REG_R11, ap_reg, 8);
+            if (inst->align16) {
+                emit_add_imm32(b, REG_R11, 15);
+                emit_and_imm32(b, REG_R11, (int32_t)-16);
+            }
+            for (int i = 0; i < n8; i++) {
+                emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
+                emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
+            }
+            emit_add_imm32(b, REG_R11, ov_step);
+            emit_store_base_off(b, ap_reg, REG_R11, 8);
         }
         if (dst >= 0) {
             if (ra && dst < ra->num_values && ra->reg[dst] >= 0
@@ -2552,6 +2596,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             value_is_float_class(fn, pi->dst));
             int force_stack = pi->force_stack || is_ld;
             if (force_stack) {
+                if ((is_ld || pi->align16) && (stack_arg_idx & 1))
+                    stack_arg_idx++;
                 arrive_reg[p] = -1;
                 arrive_is_xmm[p] = 0;
                 stack_off[p] = 16 + 8 * stack_arg_idx;
@@ -3546,7 +3592,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 if (inst->call_name && runtime.strcmp(inst->call_name, "va_start") == 0) {
                     emit_va_start(&out->text, inst, ra, va_gp_offset,
-                                  va_fp_offset, va_overflow_off);
+                                  va_fp_offset, va_overflow_off, -frame_down);
                     break;
                 }
                 if (inst->call_name && runtime.strcmp(inst->call_name, "va_end") == 0) {
@@ -3569,14 +3615,32 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                 }
                 int n_gp = 0, n_xmm = 0, n_stack = 0;
+                int *arg_slot = ((void*)0);
+                int *arg_nslots = ((void*)0);
+                if (nargs > 0) {
+                    arg_slot = runtime.malloc((size_t)nargs * sizeof(int));
+                    arg_nslots = runtime.malloc((size_t)nargs * sizeof(int));
+                    if (!arg_slot || !arg_nslots) {
+                        runtime.fprintf(runtime.stderr, "fakecc: OOM\n");
+                        runtime.exit(1);
+                    }
+                }
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
                     int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
-                    int force_stack = (inst->call_arg_on_stack && inst->call_arg_on_stack[k]) || is_ld;
+                    int on_stack = (inst->call_arg_on_stack && inst->call_arg_on_stack[k]);
+                    int force_stack = on_stack || is_ld;
+                    int a16 = is_ld || (on_stack && (inst->call_arg_on_stack[k] & 2));
+                    arg_slot[k] = -1;
+                    arg_nslots[k] = 0;
                     if (force_stack) {
+                        int nslots = is_ld ? 2 : 1;
+                        if (a16 && (n_stack & 1)) n_stack++;
                         target_reg[k] = -1;
                         target_is_xmm[k] = 0;
-                        n_stack += is_ld ? 2 : 1;
+                        arg_slot[k] = n_stack;
+                        arg_nslots[k] = nslots;
+                        n_stack += nslots;
                     } else if (is_float) {
                         if (n_xmm < 8) {
                             target_reg[k] = n_xmm;
@@ -3585,6 +3649,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         } else {
                             target_reg[k] = -1;
                             target_is_xmm[k] = 0;
+                            arg_slot[k] = n_stack;
+                            arg_nslots[k] = 1;
                             n_stack++;
                         }
                     } else {
@@ -3594,28 +3660,53 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         } else {
                             target_reg[k] = -1;
                             target_is_xmm[k] = 0;
+                            arg_slot[k] = n_stack;
+                            arg_nslots[k] = 1;
                             n_stack++;
                         }
                     }
                 }
                 int need_pad = (n_stack & 1);
                 if (need_pad) emit_sub_rsp_imm32(&out->text, 8);
-                for (int k = nargs - 1; k >= 0; k--) {
-                    if (target_reg[k] >= 0) continue;
-                    if (value_is_ld(fn, inst->call_args[k])) {
-                        emit_ld_load(&out->text, inst->call_args[k], ld_off);
+                for (int slot = n_stack - 1; slot >= 0; ) {
+                    int found = -1;
+                    for (int k = 0; k < nargs; k++) {
+                        if (target_reg[k] >= 0) continue;
+                        if (arg_slot[k] <= slot
+                            && slot < arg_slot[k] + arg_nslots[k]) {
+                            found = k;
+                            break;
+                        }
+                    }
+                    if (found < 0) {
+                        emit_sub_rsp_imm32(&out->text, 8);
+                        slot--;
+                        continue;
+                    }
+                    if (slot != arg_slot[found] + arg_nslots[found] - 1) {
+                        emit_sub_rsp_imm32(&out->text, 8);
+                        slot--;
+                        continue;
+                    }
+                    if (value_is_ld(fn, inst->call_args[found])) {
+                        emit_ld_load(&out->text, inst->call_args[found], ld_off);
                         emit_sub_rsp_imm32(&out->text, 16);
                         emit_x87_fstpt_rsp(&out->text);
-                    } else if (value_is_float_class(fn, inst->call_args[k])) {
-                        ensure_reg_xmm(&out->text, inst->call_args[k],
+                        slot -= 2;
+                    } else if (value_is_float_class(fn, inst->call_args[found])) {
+                        ensure_reg_xmm(&out->text, inst->call_args[found],
                                        14, ra_xmm, gp_spill_area);
                         emit_sub_rsp_imm32(&out->text, 8);
                         emit_sse_store_rsp(&out->text, 14);
+                        slot--;
                     } else {
-                        ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
+                        ensure_reg(&out->text, inst->call_args[found], REG_RAX, ra);
                         emit_push_r(&out->text, REG_RAX);
+                        slot--;
                     }
                 }
+                runtime.free(arg_slot);
+                runtime.free(arg_nslots);
                 for (int k = nargs - 1; k >= 0; k--) {
                     if (target_reg[k] < 0) continue;
                     if (target_is_xmm[k]) {
@@ -3768,12 +3859,27 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
                 if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);
+                if (inst->x87_pair && inst->a >= 0) {
+                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                    emit_x87_fstptRCX(&out->text);
+                    emit_add_imm32(&out->text, REG_RCX, 16);
+                    emit_x87_fstptRCX(&out->text);
+                } else {
+                int ret_lo_f = (inst->dst >= 0) && value_is_float_class(fn, inst->dst);
+                int ret_hi_f = (inst->b >= 0) && value_is_float_class(fn, inst->b);
+                int hi_src_gp = -1, hi_src_xmm = -1;
                 if (inst->b >= 0) {
-                    if (value_is_float_class(fn, inst->b)) {
+                    if (ret_lo_f && ret_hi_f) hi_src_xmm = 1;
+                    else if (!ret_lo_f && ret_hi_f) hi_src_xmm = 0;
+                    else if (ret_lo_f && !ret_hi_f) hi_src_gp = REG_RAX;
+                    else hi_src_gp = REG_RDX;
+                }
+                if (inst->b >= 0) {
+                    if (hi_src_xmm >= 0) {
                         emit_sub_rsp_imm32(&out->text, 8);
-                        emit_sse_store_rsp(&out->text, 1);
+                        emit_sse_store_rsp(&out->text, hi_src_xmm);
                     } else {
-                        emit_push_r(&out->text, REG_RDX);
+                        emit_push_r(&out->text, hi_src_gp);
                     }
                 }
                 if (inst->dst >= 0 && value_is_ld(fn, inst->dst)) {
@@ -3792,7 +3898,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                 }
                 if (inst->b >= 0) {
-                    if (value_is_float_class(fn, inst->b)) {
+                    if (hi_src_xmm >= 0) {
                         int br = (ra_xmm && inst->b < ra_xmm->num_values)
                                  ? ra_xmm->reg[inst->b] : -1;
                         if (br >= 0) {
@@ -3816,12 +3922,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         }
                     }
                 }
+                }
                 runtime.free(target_reg);
                 runtime.free(target_is_xmm);
                 break;
             }
             case IR_RETURN: {
-                if (inst->a != -1 && inst->b != -1) {
+                if (inst->x87_pair && inst->a >= 0) {
+                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                    emit_add_imm32(&out->text, REG_RCX, 16);
+                    emit_x87_fldtRCX(&out->text);
+                    emit_add_imm32(&out->text, REG_RCX, -16);
+                    emit_x87_fldtRCX(&out->text);
+                } else if (inst->a != -1 && inst->b != -1) {
                     int a_f = value_is_float_class(fn, inst->a);
                     int b_f = value_is_float_class(fn, inst->b);
                     if (!a_f && !b_f) {
@@ -3837,11 +3950,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (14 != 1)
                             emit_sse_mov_rr(&out->text, 1, 14);
                     } else if (a_f) {
-                        ensure_reg(&out->text, inst->b, REG_RDX, ra);
+                        ensure_reg(&out->text, inst->b, REG_RAX, ra);
                         ensure_reg_xmm(&out->text, inst->a, 0, ra_xmm,
                                        gp_spill_area);
                     } else {
-                        ensure_reg_xmm(&out->text, inst->b, 1, ra_xmm,
+                        ensure_reg_xmm(&out->text, inst->b, 0, ra_xmm,
                                        gp_spill_area);
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                     }

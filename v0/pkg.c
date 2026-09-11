@@ -165,16 +165,19 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int func_is_variadic;
+    int func_is_unprototyped;
     int enum_id;
     int bitfield_width;
     int is_vector;
+    unsigned is_decimal : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -186,25 +189,42 @@ static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+}
+static inline Type type_make_decimal(long long width) {
+    Type t = type_make_float(width);
+    t.is_decimal = 1;
+    return t;
+}
+static inline int type_is_decimal(Type t) {
+    return t.kind == TY_FLOAT && t.is_decimal && !t.is_vector;
+}
+static inline int type_is_decimal128(Type t) {
+    return type_is_decimal(t) && t.width == 16;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
 long long type_size(Type t);
 long long type_align(Type t);
+int type_is_complex_ldouble(Type t);
+int type_is_empty_struct(Type t);
+int type_needs_stack_align16(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -743,7 +763,7 @@ const char *pkg_suggest_export(const PkgContext *ctx, const char *name) {
     for (size_t i = 0; i < ctx->npkgs; i++) {
         Package *p = ctx->pkgs[i];
         if (pkg_find_func(p, name) || pkg_find_global(p, name)
-            || pkg_find_typedef(p, name))
+            || pkg_find_typedef(p, name) || pkg_find_enum_const(p, name))
             return p->name;
     }
     return ((void*)0);
@@ -974,10 +994,20 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         if (!struct_registry_find(&pkg->structs, sd->tag))
             pkg_clone_struct_into(&pkg->structs, sd);
     }
+    EnumDef *anon_bucket = enum_registry_find(&pkg->enums, "__pkg_anon");
     for (size_t i = 0; i < tu->enums.len; i++) {
         EnumDef *ed = &tu->enums.data[i];
-        if (!ed->tag) continue;
-        if (ed->tag && runtime.strncmp(ed->tag, "__anon_", 7) == 0) continue;
+        int is_anon = !ed->tag || runtime.strncmp(ed->tag, "__anon_", 7) == 0;
+        if (is_anon) {
+            if (!anon_bucket)
+                anon_bucket = enum_registry_add(&pkg->enums, "__pkg_anon", ed->loc);
+            for (int c = 0; c < ed->num_constants; c++) {
+                if (!pkg_find_enum_const(pkg, ed->constants[c].name))
+                    enum_def_push_constant(anon_bucket, ed->constants[c].name, 1,
+                                           ed->constants[c].value, ed->loc);
+            }
+            continue;
+        }
         if (!enum_registry_find(&pkg->enums, ed->tag)) {
             EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
             ne->has_underlying_type = ed->has_underlying_type;

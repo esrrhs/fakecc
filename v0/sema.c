@@ -165,16 +165,19 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int func_is_variadic;
+    int func_is_unprototyped;
     int enum_id;
     int bitfield_width;
     int is_vector;
+    unsigned is_decimal : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -186,25 +189,42 @@ static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+}
+static inline Type type_make_decimal(long long width) {
+    Type t = type_make_float(width);
+    t.is_decimal = 1;
+    return t;
+}
+static inline int type_is_decimal(Type t) {
+    return t.kind == TY_FLOAT && t.is_decimal && !t.is_vector;
+}
+static inline int type_is_decimal128(Type t) {
+    return type_is_decimal(t) && t.width == 16;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
 long long type_size(Type t);
 long long type_align(Type t);
+int type_is_complex_ldouble(Type t);
+int type_is_empty_struct(Type t);
+int type_needs_stack_align16(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -1133,7 +1153,17 @@ static Type usual_arith_conv(Type a, Type b) {
         return type_clone(cty);
     }
     Type res;
-    if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
+    if (a.is_decimal || b.is_decimal) {
+        if (a.is_decimal && b.is_decimal)
+            res = a.width >= b.width ? a : b;
+        else if (a.is_decimal && b.kind != TY_FLOAT)
+            res = a;
+        else if (b.is_decimal && a.kind != TY_FLOAT)
+            res = b;
+        else {
+            res = a.is_decimal ? a : b;
+        }
+    } else if (a.kind == TY_FLOAT && b.kind == TY_FLOAT)
         res = type_rank(a) >= type_rank(b) ? a : b;
     else if (a.kind == TY_FLOAT) res = a;
     else if (b.kind == TY_FLOAT) res = b;
@@ -1153,6 +1183,66 @@ static Type usual_arith_conv(Type a, Type b) {
     return type_clone(res);
 }
 static void set_type(Expr *e, Type t) { expr_set_type(e, t); }
+static void apply_default_arg_promotions(Expr **argp) {
+    if (!argp || !*argp) return;
+    Expr *arg = *argp;
+    if (arg->kind == EX_CALL && arg->u.call.callee && arg->u.call.callee->kind == EX_VAR) {
+        const char *n = arg->u.call.callee->u.var.name;
+        if (n && (runtime.strcmp(n, "__builtin_va_arg_pack") == 0
+                  || runtime.strcmp(n, "__builtin_va_arg_pack_len") == 0))
+            return;
+    }
+    Type t = arg->type;
+    Type target;
+    int need = 0;
+    if (t.kind == TY_FLOAT && t.width == 4 && !t.is_decimal) {
+        target = type_make_float(8);
+        need = 1;
+    } else if (t.kind == TY_INT && (t.width < 4 || t.bitfield_width > 0)) {
+        Type p = integer_promote(t);
+        if (p.kind != t.kind || p.width != t.width || p.is_unsigned != t.is_unsigned) {
+            target = p;
+            need = 1;
+        }
+    }
+    if (!need) return;
+    Expr *cast = expr_new_cast(target, arg, arg->loc);
+    set_type(cast, type_clone(target));
+    type_free(&target);
+    *argp = cast;
+}
+static void check_call_arity(SourceLoc loc, const char *name,
+                             int nparams, int is_variadic, size_t nargs) {
+    if (is_variadic) {
+        if ((int)nargs < nparams) {
+            die_at(loc.file, loc.line, loc.col,
+                   "function '%s' takes at least %d argument%s but %zu given",
+                   name, nparams, nparams == 1 ? "" : "s", nargs);
+        }
+        return;
+    }
+    if ((int)nargs != nparams) {
+        die_at(loc.file, loc.line, loc.col,
+               "function '%s' takes %d argument%s but %zu given",
+               name, nparams, nparams == 1 ? "" : "s", nargs);
+    }
+}
+static void check_fnptr_arity(SourceLoc loc, int nparams, int is_variadic,
+                              size_t nargs) {
+    if (is_variadic) {
+        if ((int)nargs < nparams) {
+            die_at(loc.file, loc.line, loc.col,
+                   "function pointer expects at least %d argument%s but %zu given",
+                   nparams, nparams == 1 ? "" : "s", nargs);
+        }
+        return;
+    }
+    if ((int)nargs != nparams) {
+        die_at(loc.file, loc.line, loc.col,
+               "function pointer expects %d argument%s but %zu given",
+               nparams, nparams == 1 ? "" : "s", nargs);
+    }
+}
 static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
     if (!argp || !*argp || !ptype) return;
     Expr *arg = *argp;
@@ -1166,7 +1256,8 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
         if (at->tag && ptype->tag && runtime.strcmp(at->tag, ptype->tag) == 0)
             return;
     } else if (at->kind == ptype->kind && at->width == ptype->width
-        && at->is_unsigned == ptype->is_unsigned && at_cplx == pt_cplx) {
+        && at->is_unsigned == ptype->is_unsigned && at_cplx == pt_cplx
+        && at->is_decimal == ptype->is_decimal) {
         return;
     }
     Type target = type_clone(*ptype);
@@ -1175,6 +1266,7 @@ static void coerce_arg_to_param(Expr **argp, const Type *ptype) {
     *argp = cast;
 }
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested);
+static void overlay_init_list(Type *target, Expr *dst, Expr *src, SourceLoc loc);
 static SymTable *g_check_st;
 static void ftab_cur_init(void) { ftab_init(&g_sema_ft); }
 static void ftab_cur_free(void) { ftab_free(&g_sema_ft); }
@@ -1228,14 +1320,17 @@ static Type check_ternary_expr(Expr *e) {
     if (et.kind == TY_ARRAY) {
         Type d = type_decay(et); type_free(&et); et = d;
     }
-    int t_is_null_const = (tt.kind == TY_INT && tt.width == 4
-                           && ((e->u.tern.then && e->u.tern.then->kind == EX_INT_LIT
-                                && e->u.tern.then->u.int_val == 0)
-                               || (!e->u.tern.then && e->u.tern.cond->kind == EX_INT_LIT
-                                   && e->u.tern.cond->u.int_val == 0)));
-    int e_is_null_const = (et.kind == TY_INT && et.width == 4
-                           && e->u.tern.else_->kind == EX_INT_LIT
-                           && e->u.tern.else_->u.int_val == 0);
+    int t_is_null_const = 0;
+    int e_is_null_const = 0;
+    {
+        long long nv = 0;
+        Expr *th_npc = e->u.tern.then ? e->u.tern.then : e->u.tern.cond;
+        if (tt.kind == TY_INT && th_npc && fold_const_int(th_npc, &nv) && nv == 0)
+            t_is_null_const = 1;
+        if (et.kind == TY_INT && e->u.tern.else_
+            && fold_const_int(e->u.tern.else_, &nv) && nv == 0)
+            e_is_null_const = 1;
+    }
     int tt_cplx = (tt.kind == TY_STRUCT && tt.tag && runtime.strncmp(tt.tag, "__complex_", 10) == 0);
     int et_cplx = (et.kind == TY_STRUCT && et.tag && runtime.strncmp(et.tag, "__complex_", 10) == 0);
     int tt_arith = (tt.kind == TY_INT || tt.kind == TY_FLOAT || tt_cplx);
@@ -1246,7 +1341,12 @@ static Type check_ternary_expr(Expr *e) {
     } else if (tt_arith && et_arith) {
         res = usual_arith_conv(tt, et);
     } else if (tt.kind == TY_PTR && et.kind == TY_PTR) {
-        res = type_clone(tt);
+        int tvoid = tt.pointee && tt.pointee->kind == TY_VOID;
+        int evoid = et.pointee && et.pointee->kind == TY_VOID;
+        if (evoid && !tvoid)
+            res = type_clone(et);
+        else
+            res = type_clone(tt);
     } else if (tt.kind == TY_PTR && e_is_null_const) {
         res = type_clone(tt);
     } else if (et.kind == TY_PTR && t_is_null_const) {
@@ -1272,7 +1372,10 @@ static Type check_expr_inner(Expr *e) {
                                   e->type.is_unsigned));
         return type_clone(e->type);
     case EX_FLOAT_LIT:
-        set_type(e, type_make_float(e->type.width ? e->type.width : 8));
+        if (e->type.is_decimal)
+            set_type(e, type_make_decimal(e->type.width ? e->type.width : 8));
+        else
+            set_type(e, type_make_float(e->type.width ? e->type.width : 8));
         return type_clone(e->type);
     case EX_BINOP: {
         Type lt = check_expr_inner(e->u.bin.l);
@@ -1305,6 +1408,10 @@ static Type check_expr_inner(Expr *e) {
                        op == BOP_AND ? "&&" : "||");
             res = type_make_int(4, 0);
         } else if (op >= BOP_EQ && op <= BOP_GE) {
+            if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
+                (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "cannot mix operands of decimal floating and other floating types");
             if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
                 int func_cmp = (lt.pointee && lt.pointee->kind == TY_FUNC) ||
                                (rt.pointee && rt.pointee->kind == TY_FUNC);
@@ -1371,6 +1478,10 @@ static Type check_expr_inner(Expr *e) {
                        "left operand of '%s' must be arithmetic",
                        op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
                        : op == BOP_MUL ? "*" : "/");
+            if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
+                (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "cannot mix operands of decimal floating and other floating types");
             res = usual_arith_conv(lt, rt);
         }
         type_free(&lt); type_free(&rt);
@@ -1416,6 +1527,18 @@ static Type check_expr_inner(Expr *e) {
             const PkgFuncExport *pf = ((void*)0);
             const PkgGlobalExport *pg = ((void*)0);
             if (!pkg_resolve_sym(e->u.var.pkg, e->u.var.name, &pf, &pg)) {
+                Package *pkg = pkg_find(g_sema_pkg, e->u.var.pkg);
+                const EnumConstant *ec = pkg
+                    ? pkg_find_enum_const(pkg, e->u.var.name) : ((void*)0);
+                if (ec) {
+                    runtime.free(e->u.var.name);
+                    runtime.free(e->u.var.pkg);
+                    e->kind = EX_INT_LIT;
+                    e->u.int_val = ec->value;
+                    e->int_hi = 0;
+                    set_type(e, type_default_int());
+                    return type_clone(e->type);
+                }
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "package '%s' has no exported symbol '%s'",
                        e->u.var.pkg, e->u.var.name);
@@ -1568,6 +1691,8 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_int(4, 1);
             else if (runtime.strcmp(bname, "__builtin_ulabs") == 0 || runtime.strcmp(bname, "__builtin_ullabs") == 0 || runtime.strcmp(bname, "__builtin_umaxabs") == 0)
                 ret = type_make_int(8, 1);
+            else if (runtime.strcmp(bname, "__builtin_va_arg_pack") == 0 || runtime.strcmp(bname, "__builtin_va_arg_pack_len") == 0)
+                ret = type_default_int();
 Type p0;
 Type p1;
             Type *params[2];
@@ -1601,6 +1726,8 @@ Type p1;
                 num_params = 1;
             }
             Type fn = type_make_func(ret, num_params > 0 ? (Type * *)params : ((void*)0), num_params);
+            if (num_params == 0)
+                fn.func_is_variadic = 1;
             Type fp = type_make_ptr(fn);
             type_free(&fn);
             for (int i = 0; i < num_params; i++) type_free(params[i]);
@@ -1857,6 +1984,16 @@ Type p1;
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR
+            && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_arg_pack") == 0) {
+            set_type(e, type_default_int());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_arg_pack_len") == 0) {
+            set_type(e, type_default_int());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
             && (runtime.strcmp(e->u.call.callee->u.var.name, "va_start") == 0 ||
                 runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_va_start") == 0 ||
                 runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_c23_va_start") == 0)) {
@@ -1939,48 +2076,49 @@ Type p1;
         Type callee_ty = check_expr_inner(e->u.call.callee);
         if (e->u.call.callee->kind == EX_VAR) {
             const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
-            int have_local = (local_fn_sym != ((void*)0));
+            int local_is_fn_decl = local_fn_sym && local_fn_sym->type.kind == TY_FUNC;
+            int local_is_fnptr = local_fn_sym && local_fn_sym->type.kind == TY_PTR
+                                 && local_fn_sym->type.pointee
+                                 && local_fn_sym->type.pointee->kind == TY_FUNC;
+            int have_local = local_is_fnptr || (local_is_fn_decl && !local_fn_sym->type.func_is_unprototyped);
             const FunSig *sig = have_local ? ((void*)0) : ftab_lookup(e->u.call.callee->u.var.name);
-            if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC) {
+            if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC
+                && !(local_fn_sym->type.func_is_unprototyped && sig && !sig->is_unprototyped)) {
                 const Type *fty = &local_fn_sym->type;
                 type_free(&callee_ty);
-                if ((int)e->u.call.args.len != fty->func_nparams && fty->func_nparams > 0) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "function '%s' takes %d argument%s but %zu given",
-                           e->u.call.callee->u.var.name, fty->func_nparams,
-                           fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
-                }
+                check_call_arity(e->loc, e->u.call.callee->u.var.name,
+                                 fty->func_nparams, fty->func_is_variadic,
+                                 e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if (fty->func_params && (int)i < fty->func_nparams)
+                    if (fty->func_params && (int)i < fty->func_nparams
+                        && !fty->func_is_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &fty->func_params[i]);
+                    else if (fty->func_is_variadic && (int)i >= fty->func_nparams)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
+                    else if (fty->func_is_unprototyped || !fty->func_params)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 set_type(e, type_clone(*fty->func_ret));
                 return type_clone(e->type);
             }
             if (sig) {
                 type_free(&callee_ty);
-                if (sig->is_variadic || sig->is_unprototyped) {
-                    if (!sig->is_unprototyped && (int)e->u.call.args.len < sig->arity) {
-                        die_at(e->loc.file, e->loc.line, e->loc.col,
-                               "function '%s' takes at least %d argument%s but %zu given",
-                               e->u.call.callee->u.var.name, sig->arity,
-                               sig->arity == 1 ? "" : "s", e->u.call.args.len);
-                    }
-                } else if ((int)e->u.call.args.len != sig->arity) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "function '%s' takes %d argument%s but %zu given",
-                           e->u.call.callee->u.var.name, sig->arity,
-                           sig->arity == 1 ? "" : "s", e->u.call.args.len);
-                }
+                check_call_arity(e->loc, e->u.call.callee->u.var.name,
+                                 sig->arity, sig->is_variadic,
+                                 e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if ((int)i < sig->arity)
+                    if ((int)i < sig->arity && !sig->is_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &sig->param_types[i]);
+                    else if (sig->is_variadic)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
+                    else if (sig->is_unprototyped)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 set_type(e, type_clone(sig->ret_type));
                 return type_clone(e->type);
@@ -1993,18 +2131,20 @@ Type p1;
                 const Type *fty = (extern_sym->type.kind == TY_FUNC)
                                   ? &extern_sym->type : extern_sym->type.pointee;
                 type_free(&callee_ty);
-                if ((int)e->u.call.args.len != fty->func_nparams) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "function '%s' takes %d argument%s but %zu given",
-                           e->u.call.callee->u.var.name, fty->func_nparams,
-                           fty->func_nparams == 1 ? "" : "s", e->u.call.args.len);
-                }
+                check_call_arity(e->loc, e->u.call.callee->u.var.name,
+                                 fty->func_nparams, fty->func_is_variadic,
+                                 e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if (fty->func_params && (int)i < fty->func_nparams)
+                    if (fty->func_params && (int)i < fty->func_nparams
+                        && !fty->func_is_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
                                             &fty->func_params[i]);
+                    else if (fty->func_is_variadic && (int)i >= fty->func_nparams)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
+                    else if (fty->func_is_unprototyped || !fty->func_params)
+                        apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 Type ret = fty->func_ret ? *fty->func_ret : type_make_void();
                 set_type(e, ret);
@@ -2022,27 +2162,18 @@ Type p1;
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "call to non-function (callee type must be a function or function pointer)");
         }
-        if (fn_ty.func_params != ((void*)0)) {
-            if (fn_ty.func_is_variadic) {
-                if ((int)e->u.call.args.len < fn_ty.func_nparams) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "function pointer expects at least %d argument%s but %zu given",
-                           fn_ty.func_nparams,
-                           fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
-                }
-            } else if ((int)e->u.call.args.len != fn_ty.func_nparams) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "function pointer expects %d argument%s but %zu given",
-                       fn_ty.func_nparams,
-                       fn_ty.func_nparams == 1 ? "" : "s", e->u.call.args.len);
-            }
-        }
+        check_fnptr_arity(e->loc, fn_ty.func_nparams, fn_ty.func_is_variadic,
+                          e->u.call.args.len);
         for (size_t i = 0; i < e->u.call.args.len; i++) {
             Type at = check_expr_inner(e->u.call.args.data[i]);
             type_free(&at);
             if (fn_ty.func_params && (int)i < fn_ty.func_nparams)
                 coerce_arg_to_param(&e->u.call.args.data[i],
                                     &fn_ty.func_params[i]);
+            else if (fn_ty.func_is_variadic && (int)i >= fn_ty.func_nparams)
+                apply_default_arg_promotions(&e->u.call.args.data[i]);
+            else if (!fn_ty.func_params)
+                apply_default_arg_promotions(&e->u.call.args.data[i]);
         }
         set_type(e, type_clone(*fn_ty.func_ret));
         type_free(&fn_ty);
@@ -2176,19 +2307,18 @@ Type p1;
                    "operand of '%s' must be arithmetic or pointer",
                    e->u.incdec.is_inc ? "++" : "--");
         type_free(&ot);
-        Type res;
-        if (op->type.kind == TY_PTR)
-            res = type_clone(op->type);
-        else
-            res = type_make_int(op->type.width ? op->type.width : 4,
-                                op->type.is_unsigned);
-        set_type(e, res);
+        set_type(e, type_clone(op->type));
         return type_clone(e->type);
     }
     case EX_COMMA: {
         Type lt = check_expr_inner(e->u.comma.lhs);
         type_free(&lt);
         Type rt = check_expr_inner(e->u.comma.rhs);
+        if (rt.kind == TY_ARRAY) {
+            Type d = type_decay(rt); type_free(&rt); rt = d;
+        } else if (rt.kind == TY_FUNC) {
+            Type d = type_make_ptr(rt); type_free(&rt); rt = d;
+        }
         set_type(e, rt);
         return type_clone(e->type);
     }
@@ -2384,6 +2514,121 @@ static int init_elem_may_be_aggregate(const Expr *e) {
         return 0;
     }
 }
+static int designator_member_index(const StructDef *sd, const char *name) {
+    if (!sd || !name) return -1;
+    for (int j = 0; j < sd->num_members; j++) {
+        const StructMember *m = &sd->members[j];
+        if (m->name && m->name[0] && runtime.strcmp(m->name, name) == 0)
+            return j;
+        if ((!m->name || !m->name[0]) && m->type.kind == TY_STRUCT
+            && m->type.tag && g_sema_structs) {
+            const StructDef *nested =
+                struct_registry_find_c(g_sema_structs, m->type.tag);
+            if (nested && designator_member_index(nested, name) >= 0)
+                return j;
+        }
+    }
+    return -1;
+}
+static int designator_is_direct_member(const StructDef *sd, int idx,
+                                       const char *name) {
+    if (!sd || !name || idx < 0 || idx >= sd->num_members) return 0;
+    const char *mn = sd->members[idx].name;
+    return mn && mn[0] && runtime.strcmp(mn, name) == 0;
+}
+static Expr *wrap_anon_designator(const char *name, Expr *elem, SourceLoc loc) {
+    Expr **els = runtime.malloc(sizeof(Expr *));
+    if (!els) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    els[0] = elem;
+    Expr *list = expr_new_init_list(els, 1, loc);
+    list->u.init_list.desig_kind[0] = 1;
+    list->u.init_list.desig_index[0] = -1;
+    list->u.init_list.desig_member[0] = xstrdup(name);
+    return list;
+}
+static int init_list_slot_pos(const Type *target, const StructDef *sd,
+                              const Expr *list, int i, int *cursor,
+                              int *member_idx_out, int N) {
+    int pos;
+    int member_idx = 0;
+    if (list->u.init_list.desig_kind[i] == 0) {
+        pos = list->u.init_list.desig_index[i];
+        member_idx = pos;
+        if (sd && sd->is_union) pos = 0;
+    } else if (list->u.init_list.desig_kind[i] == 1) {
+        const char *name = list->u.init_list.desig_member[i];
+        pos = designator_member_index(sd, name);
+        member_idx = pos;
+        if (sd && sd->is_union) pos = 0;
+    } else {
+        if (sd && !sd->is_union) {
+            while (*cursor < sd->num_members
+                   && (sd->members[*cursor].name == ((void*)0)
+                       || sd->members[*cursor].name[0] == '\0')
+                   && sd->members[*cursor].bit_width >= 0) {
+                (*cursor)++;
+            }
+        }
+        pos = *cursor;
+        member_idx = (sd && sd->is_union) ? 0 : pos;
+    }
+    if (member_idx_out) *member_idx_out = member_idx;
+    (void)target;
+    (void)N;
+    return pos;
+}
+static void overlay_init_list(Type *target, Expr *dst, Expr *src, SourceLoc loc) {
+    if (!dst || !src || dst->kind != EX_INIT_LIST || src->kind != EX_INIT_LIST)
+        return;
+    int n = src->u.init_list.num_elements;
+    int N = dst->u.init_list.num_elements;
+    const StructDef *sd = ((void*)0);
+    if (target->kind == TY_STRUCT)
+        sd = struct_registry_find_c(g_sema_structs, target->tag);
+    int cursor = 0;
+    for (int i = 0; i < n; i++) {
+        int member_idx = 0;
+        int pos = init_list_slot_pos(target, sd, src, i, &cursor, &member_idx, N);
+        if (pos < 0 || pos >= N) continue;
+        Expr *elem = src->u.init_list.elements[i];
+        src->u.init_list.elements[i] = ((void*)0);
+        if (src->u.init_list.desig_kind[i] == 1 && sd && member_idx >= 0) {
+            const char *nm = src->u.init_list.desig_member[i];
+            if (nm && !designator_is_direct_member(sd, member_idx, nm))
+                elem = wrap_anon_designator(nm, elem, loc);
+        }
+        Type *slot_type = ((void*)0);
+        if (target->kind == TY_ARRAY || target->is_vector) slot_type = target->elem_type;
+        else if (target->kind == TY_STRUCT && sd && member_idx >= 0
+                 && member_idx < sd->num_members)
+            slot_type = &sd->members[member_idx].type;
+        if (elem && elem->kind == EX_INIT_LIST && slot_type
+            && dst->u.init_list.elements[pos]->kind == EX_INIT_LIST) {
+            Type sub = type_clone(*slot_type);
+            overlay_init_list(&sub, dst->u.init_list.elements[pos], elem, loc);
+            type_free(&sub);
+            expr_free(elem);
+        } else if (elem && elem->kind == EX_INIT_LIST && slot_type) {
+            Type sub = type_clone(*slot_type);
+            normalize_init_list(&sub, elem, loc, 1);
+            type_free(&sub);
+            expr_free(dst->u.init_list.elements[pos]);
+            dst->u.init_list.elements[pos] = elem;
+        } else {
+            expr_free(dst->u.init_list.elements[pos]);
+            dst->u.init_list.elements[pos] = elem;
+        }
+        cursor = pos + 1;
+        if (sd && !sd->is_union) {
+            while (cursor < sd->num_members
+                   && (sd->members[cursor].name == ((void*)0)
+                       || sd->members[cursor].name[0] == '\0')
+                   && sd->members[cursor].bit_width >= 0) {
+                cursor++;
+            }
+        }
+    }
+}
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested) {
     int n = list->u.init_list.num_elements;
     if (target->kind == TY_ARRAY && target->length == 0) {
@@ -2402,6 +2647,13 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             if (list->u.init_list.desig_kind[i] == 0
                 && list->u.init_list.desig_index[i] + 1 > len)
                 len = list->u.init_list.desig_index[i] + 1;
+        if (n == 1 && list->u.init_list.elements[0]
+            && list->u.init_list.elements[0]->kind == EX_STR
+            && target->elem_type && target->elem_type->kind == TY_INT
+            && target->elem_type->width == 1) {
+            int sl = list->u.init_list.elements[0]->u.str.len + 1;
+            if (sl > len) len = sl;
+        }
         target->length = len;
     }
     int N;
@@ -2419,6 +2671,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         if (target->is_vector) N = target->length;
         else N = 1;
         break;
+    }
+    if (target->kind == TY_ARRAY && target->elem_type
+        && target->elem_type->kind == TY_INT && target->elem_type->width == 1
+        && n == 1 && list->u.init_list.elements[0]
+        && list->u.init_list.elements[0]->kind == EX_STR) {
+        return;
     }
     for (int i = 0; i < n; i++) {
         int kind = list->u.init_list.desig_kind[i];
@@ -2447,6 +2705,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     for (int i = 0; i < N; i++)
         out[i] = expr_new_int(0, loc);
     int cursor = 0;
+    int last_union_member_idx = 0;
     for (int i = 0; i < n; i++) {
         int pos;
         int member_idx = 0;
@@ -2456,9 +2715,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             if (sd && sd->is_union) pos = 0;
         } else if (list->u.init_list.desig_kind[i] == 1) {
             const char *name = list->u.init_list.desig_member[i];
-            pos = -1;
-            for (int j = 0; j < (sd ? sd->num_members : 0); j++)
-                if (runtime.strcmp(sd->members[j].name, name) == 0) { pos = j; break; }
+            pos = designator_member_index(sd, name);
             if (pos < 0)
                 die_at(loc.file, loc.line, loc.col,
                        "struct '%s' has no member named '%s'",
@@ -2481,6 +2738,11 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             continue;
         }
         Expr *elem = list->u.init_list.elements[i];
+        if (list->u.init_list.desig_kind[i] == 1 && sd && member_idx >= 0) {
+            const char *nm = list->u.init_list.desig_member[i];
+            if (nm && !designator_is_direct_member(sd, member_idx, nm))
+                elem = wrap_anon_designator(nm, elem, loc);
+        }
         if (is_nested && target->kind == TY_STRUCT && sd && member_idx == sd->num_members - 1) {
             const Type *mtype = &sd->members[member_idx].type;
             if (mtype->kind == TY_ARRAY && mtype->length == 0 && mtype->elem_type) {
@@ -2511,17 +2773,37 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             i += take - 1;
         }
         if (elem->kind == EX_INIT_LIST) {
-            if (target->kind == TY_ARRAY || target->is_vector)
-                normalize_init_list(target->elem_type, elem, elem->loc, 1);
-            else if (sd && member_idx < sd->num_members) {
-                Type sub_type = type_clone(sd->members[member_idx].type);
-                normalize_init_list(&sub_type, elem, elem->loc, 1);
-                type_free(&sub_type);
+            int overlaid = 0;
+            if (out[pos]->kind == EX_INIT_LIST) {
+                if (target->kind == TY_ARRAY || target->is_vector) {
+                    overlay_init_list(target->elem_type, out[pos], elem, elem->loc);
+                    expr_free(elem);
+                    overlaid = 1;
+                } else if (sd && member_idx < sd->num_members) {
+                    Type sub_type = type_clone(sd->members[member_idx].type);
+                    overlay_init_list(&sub_type, out[pos], elem, elem->loc);
+                    type_free(&sub_type);
+                    expr_free(elem);
+                    overlaid = 1;
+                }
             }
+            if (!overlaid) {
+                if (target->kind == TY_ARRAY || target->is_vector)
+                    normalize_init_list(target->elem_type, elem, elem->loc, 1);
+                else if (sd && member_idx < sd->num_members) {
+                    Type sub_type = type_clone(sd->members[member_idx].type);
+                    normalize_init_list(&sub_type, elem, elem->loc, 1);
+                    type_free(&sub_type);
+                }
+                expr_free(out[pos]);
+                out[pos] = elem;
+            }
+        } else {
+            expr_free(out[pos]);
+            out[pos] = elem;
         }
-        expr_free(out[pos]);
-        out[pos] = elem;
         cursor = pos + 1;
+        last_union_member_idx = member_idx;
         if (sd && !sd->is_union) {
             while (cursor < sd->num_members
                    && (sd->members[cursor].name == ((void*)0)
@@ -2529,6 +2811,23 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
                    && sd->members[cursor].bit_width >= 0) {
                 cursor++;
             }
+        }
+    }
+    int keep_union_desig = (sd && sd->is_union);
+    char *union_member_name = ((void*)0);
+    int union_desig_kind = 1;
+    int union_desig_index = 0;
+    if (keep_union_desig) {
+        if (last_union_member_idx < 0 || last_union_member_idx >= sd->num_members)
+            last_union_member_idx = 0;
+        const char *mn = sd->members[last_union_member_idx].name;
+        if (mn && mn[0]) {
+            union_member_name = xstrdup(mn);
+            union_desig_kind = 1;
+            union_desig_index = 0;
+        } else {
+            union_desig_kind = 0;
+            union_desig_index = last_union_member_idx;
         }
     }
     for (int i = 0; i < n; i++)
@@ -2539,9 +2838,23 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     runtime.free(list->u.init_list.elements);
     list->u.init_list.elements = out;
     list->u.init_list.num_elements = N;
-    list->u.init_list.desig_kind = ((void*)0);
-    list->u.init_list.desig_index = ((void*)0);
-    list->u.init_list.desig_member = ((void*)0);
+    if (keep_union_desig) {
+        list->u.init_list.desig_kind = runtime.malloc(sizeof(int));
+        list->u.init_list.desig_index = runtime.malloc(sizeof(int));
+        list->u.init_list.desig_member = runtime.calloc(1, sizeof(char *));
+        if (!list->u.init_list.desig_kind || !list->u.init_list.desig_index
+            || !list->u.init_list.desig_member) {
+            runtime.fprintf(runtime.stderr, "fakecc: OOM\n");
+            runtime.exit(1);
+        }
+        list->u.init_list.desig_kind[0] = union_desig_kind;
+        list->u.init_list.desig_index[0] = union_desig_index;
+        list->u.init_list.desig_member[0] = union_member_name;
+    } else {
+        list->u.init_list.desig_kind = ((void*)0);
+        list->u.init_list.desig_index = ((void*)0);
+        list->u.init_list.desig_member = ((void*)0);
+    }
 }
 static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) {
     int n = list->u.init_list.num_elements;
@@ -2859,6 +3172,33 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                     die_at(s->loc.file, s->loc.line, s->loc.col,
                            "redefinition of global '%s'", s->u.decl.name);
                 }
+                {
+                    int prev_sc = prev->u.decl.storage_class;
+                    int new_sc = s->u.decl.storage_class;
+                    if (new_sc == 1 && prev_sc != 1) {
+                        die_at(s->loc.file, s->loc.line, s->loc.col,
+                               "static declaration of '%s' follows non-static declaration",
+                               s->u.decl.name);
+                    }
+                    if (prev_sc == 1 && new_sc == 0) {
+                        die_at(s->loc.file, s->loc.line, s->loc.col,
+                               "non-static declaration of '%s' follows static declaration",
+                               s->u.decl.name);
+                    }
+                }
+                if (!s->u.decl.init && prev->u.decl.storage_class == 2
+                    && s->u.decl.storage_class != 2)
+                    prev->u.decl.storage_class = s->u.decl.storage_class;
+                if (prev->u.decl.type.kind == TY_ARRAY
+                    && s->u.decl.type.kind == TY_ARRAY) {
+                    if (prev->u.decl.type.length <= 0 && s->u.decl.type.length > 0)
+                        prev->u.decl.type.length = s->u.decl.type.length;
+                    else if (s->u.decl.type.length <= 0 && prev->u.decl.type.length > 0)
+                        s->u.decl.type.length = prev->u.decl.type.length;
+                    if (prev->u.decl.type.length > 0)
+                        symtable_push(&globals, prev->u.decl.name, prev->u.decl.type,
+                                      prev->loc, prev->u.decl.align);
+                }
                 if (!prev->u.decl.init && s->u.decl.init) {
                     prev->u.decl.init = s->u.decl.init;
                     prev->u.decl.type = s->u.decl.type;
@@ -2932,6 +3272,8 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                        "global initializer must be a constant");
             Type dt = check_expr_inner(s->u.decl.init);
             type_free(&dt);
+            if (s->u.decl.init->kind != EX_INIT_LIST)
+                coerce_arg_to_param(&s->u.decl.init, &s->u.decl.type);
         }
     }
     for (size_t i = 0; i < tu->functions.len; i++) {
