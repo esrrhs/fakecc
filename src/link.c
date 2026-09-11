@@ -748,6 +748,32 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             if (!resolved)
                 reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
+        /* .data R_X86_64_64 fixups also reference symbols.  A file-scope
+         * initializer like `static double (*fp)(double) = asin;` never emits a
+         * text reloc, so without this scan the pointer is patched to PLT0 /
+         * the ELF entry stub and calling it re-enters `_start`. */
+        for (size_t r = 0; r < m->num_data_relocs; r++) {
+            size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+            if (sinfo[gsi].defined) continue;
+            if (reloc_ext_idx[gsi] >= 0) continue;
+            const char *nm = m->syms[m->data_relocs[r].sym].name
+                             ? m->syms[m->data_relocs[r].sym].name : "";
+            int resolved = 0;
+            for (size_t mi = 0; mi < n && !resolved; mi++) {
+                EmitModule *om = mods[mi];
+                for (size_t mj = 0; mj < om->num_syms; mj++) {
+                    size_t ogsi = mod_sym_base[mi] + mj;
+                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
+                        && om->syms[mj].name
+                        && strcmp(om->syms[mj].name, nm) == 0) {
+                        resolved = 1;
+                        break;
+                    }
+                }
+            }
+            if (!resolved)
+                reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
+        }
     }
 
     /* ---- Data GOT slot assignment for external variables (GOTPCREL) ----
@@ -1213,9 +1239,18 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 if (global_addr != (size_t)-1) {
                     S = global_addr;
                 } else {
-                    /* Truly external → PLT (should not happen for data fixups). */
+                    /* Truly external function address in .data → that
+                     * function's PLT stub (a stable, callable address). */
                     int eidx = reloc_ext_idx[gsi];
-                    S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
+                    if (eidx < 0) {
+                        const char *nm = m->syms[rel->sym].name
+                                         ? m->syms[rel->sym].name : "";
+                        fprintf(stderr,
+                                "fakecc: data reloc against undefined '%s' "
+                                "has no PLT slot\n", nm);
+                        exit(1);
+                    }
+                    S = code_vaddr + plt_entry_off[eidx];
                 }
             }
             /* R_X86_64_64: absolute 64-bit, value = S + A. */
