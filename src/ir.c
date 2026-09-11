@@ -3467,6 +3467,21 @@ static IRValue lower_fortify_strncat_chk_call(IRFunction *fn, IRSymTable *st,
 
 
 static void emit_zero_bytes(IRFunction *fn, IRValue base, int total, SourceLoc loc) {
+    /* Large objects: one memset is O(1) IR.  Unrolling a 32KB zero-init
+     * (gcc.c-torture 20151204.c) produces tens of thousands of stores and
+     * times out register allocation on an unoptimized host compiler. */
+    if (total > STRUCT_COPY_MEMCPY_THRESHOLD) {
+        IRValue z = new_value(fn);
+        emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 4, 0, loc);
+        IRValue sz_val = new_value(fn);
+        emit_inst_w(fn, IR_CONST, sz_val, -1, -1, (int64_t)total, 8, 1, loc);
+        IRValue args[3];
+        args[0] = base;
+        args[1] = z;
+        args[2] = sz_val;
+        emit_runtime_call_void(fn, "memset", args, 3, loc);
+        return;
+    }
     int off = 0;
     while (off + 8 <= total) {
         IRValue poff = new_value(fn);
@@ -9476,6 +9491,9 @@ static char *materialize_compound_literal(const IRModule *ir, const Expr *e)
 static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                       char *bytes, int sz, const char *ctx, SourceLoc loc,
                       IRGlobal *g) {
+    /* Implicit zero from a sparse array init list.  The destination was
+     * calloc'd, so a missing element is already the right bit pattern. */
+    if (!e) return;
     if (e->kind == EX_VAR && strcmp(e->u.var.name, "NULL") == 0) {
         memset(bytes, 0, sz);
         return;
@@ -9531,6 +9549,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                     elem_idx = e->u.init_list.desig_index[i];
                     cur_idx = elem_idx + 1;
                 }
+                if (!e->u.init_list.elements[i]) continue;
                 if (elem_idx * esz < sz) {
                     pack_init(ir, ty->elem_type, e->u.init_list.elements[i],
                               bytes + elem_idx * esz, esz, ctx, loc, g);
@@ -9554,6 +9573,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                     elem_idx = e->u.init_list.desig_index[i];
                     cur_idx = elem_idx + 1;
                 }
+                if (!e->u.init_list.elements[i]) continue;
                 int off = elem_idx * esz;
                 if (esz <= 0 || off < 0 || off >= sz) continue;
                 int nsz = esz;
@@ -9931,6 +9951,12 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
  * the pointer value to the object; each element is stored at base+offset. */
 static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                             const Type *ty, const Expr *e, SourceLoc loc) {
+    /* Sparse array holes (NULL) and integer 0 are already the object's
+     * background from emit_zero_bytes.  Do not emit a store per gap. */
+    if (!e) return;
+    if (e->kind == EX_INT_LIT && e->u.int_val == 0 && e->int_hi == 0
+        && e->type.kind != TY_FLOAT && !e->type.is_decimal)
+        return;
     if (e->kind == EX_INIT_LIST) {
         int n = e->u.init_list.num_elements;
         if (ty->is_vector && ty->elem_type) {
@@ -9942,6 +9968,7 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                     elem_idx = e->u.init_list.desig_index[i];
                     cur_idx = elem_idx + 1;
                 }
+                if (!e->u.init_list.elements[i]) continue;
                 IRValue off = new_value(fn);
                 emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)elem_idx * esz, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
@@ -9966,6 +9993,7 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                     elem_idx = e->u.init_list.desig_index[i];
                     cur_idx = elem_idx + 1;
                 }
+                if (!e->u.init_list.elements[i]) continue;
                 IRValue off = new_value(fn);
                 emit_inst_w(fn, IR_CONST, off, -1, -1, (int64_t)elem_idx * esz, 8, 1, loc);
                 IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
@@ -10069,13 +10097,15 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         int n = e->u.str.len;
         if (n > total) n = total;
         int eu = ty->elem_type->is_unsigned;
-        for (int i = 0; i < total; i++) {
+        /* Remainder is already emit_zero_bytes'd, including the trailing NUL
+         * when the string is shorter than the array. */
+        for (int i = 0; i < n; i++) {
             IRValue off = new_value(fn);
             emit_inst_w(fn, IR_CONST, off, -1, -1, i, 8, 1, loc);
             IRValue ptr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, loc);
             IRValue cv = new_value(fn);
             emit_inst_w(fn, IR_CONST, cv, -1, -1,
-                        i < n ? (unsigned char)e->u.str.bytes[i] : 0, 1, eu, loc);
+                        (unsigned char)e->u.str.bytes[i], 1, eu, loc);
             emit_inst_w(fn, IR_STORE_PTR, -1, ptr, cv, 0, 1, eu, loc);
         }
         return;
@@ -10163,7 +10193,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     const Type *mt = &sd->members[mi].type;
                     int msz = type_size(*mt);
                     const Expr *el = s->u.decl.init->u.init_list.elements[mi];
-                    if (msz == 0 && mt->kind == TY_ARRAY && mt->elem_type) {
+                    if (el && msz == 0 && mt->kind == TY_ARRAY && mt->elem_type) {
                         if (el->kind == EX_STR)
                             msz = el->u.str.len + 1;
                         else if (el->kind == EX_INIT_LIST)

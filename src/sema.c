@@ -2233,10 +2233,11 @@ static void overlay_init_list(Type *target, Expr *dst, Expr *src, SourceLoc loc)
         else if (target->kind == TY_STRUCT && sd && member_idx >= 0
                  && member_idx < sd->num_members)
             slot_type = &sd->members[member_idx].type;
+        Expr *dst_el = dst->u.init_list.elements[pos];
         if (elem && elem->kind == EX_INIT_LIST && slot_type
-            && dst->u.init_list.elements[pos]->kind == EX_INIT_LIST) {
+            && dst_el && dst_el->kind == EX_INIT_LIST) {
             Type sub = type_clone(*slot_type);
-            overlay_init_list(&sub, dst->u.init_list.elements[pos], elem, loc);
+            overlay_init_list(&sub, dst_el, elem, loc);
             type_free(&sub);
             expr_free(elem);
         } else if (elem && elem->kind == EX_INIT_LIST && slot_type) {
@@ -2340,11 +2341,21 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             }
         }
     }
-    /* 3. Build the dense array of N initialized elements. */
-    Expr **out = malloc(N * sizeof(Expr *));
+    /* 3. Build the dense array of N initialized elements.
+     *
+     * Arrays/vectors leave unmentioned slots as NULL rather than synthesizing
+     * an integer 0 for every gap.  `char buf[32753] = "A"` would otherwise
+     * allocate ~32k AST nodes and, after lowering, tens of thousands of
+     * stores — enough to time out an unoptimized host compiler.  Implicit
+     * zeros are the object's background (emit_zero_bytes / pack_init calloc).
+     * Structs still materialize a 0 per member: N is small and overlay /
+     * pack_init index members by position. */
+    Expr **out = calloc((size_t)N, sizeof(Expr *));
     if (!out) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-    for (int i = 0; i < N; i++)
-        out[i] = expr_new_int(0, loc);
+    if (target->kind != TY_ARRAY && !target->is_vector) {
+        for (int i = 0; i < N; i++)
+            out[i] = expr_new_int(0, loc);
+    }
 
     int cursor = 0;
     int last_union_member_idx = 0;
@@ -2432,7 +2443,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
          * mutating the shared struct definition). */
         if (elem->kind == EX_INIT_LIST) {
             int overlaid = 0;
-            if (out[pos]->kind == EX_INIT_LIST) {
+            if (out[pos] && out[pos]->kind == EX_INIT_LIST) {
                 if (target->kind == TY_ARRAY || target->is_vector) {
                     overlay_init_list(target->elem_type, out[pos], elem, elem->loc);
                     expr_free(elem);
@@ -2534,7 +2545,7 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
                    target.length, n);
         for (int i = 0; i < n; i++) {
             const Expr *elem = list->u.init_list.elements[i];
-            if (elem->kind == EX_INIT_LIST && target.elem_type)
+            if (elem && elem->kind == EX_INIT_LIST && target.elem_type)
                 check_init_list_shape(*target.elem_type, elem, elem->loc);
         }
         return;
@@ -2547,7 +2558,7 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
                    target.length, n);
         for (int i = 0; i < n; i++) {
             const Expr *elem = list->u.init_list.elements[i];
-            if (elem->kind == EX_INIT_LIST && target.elem_type)
+            if (elem && elem->kind == EX_INIT_LIST && target.elem_type)
                 check_init_list_shape(*target.elem_type, elem, elem->loc);
         }
         break;
@@ -2562,7 +2573,7 @@ static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) 
                    target.tag, sd->num_members, n);
         for (int i = 0; i < n; i++) {
             const Expr *elem = list->u.init_list.elements[i];
-            if (elem->kind == EX_INIT_LIST && i < sd->num_members)
+            if (elem && elem->kind == EX_INIT_LIST && i < sd->num_members)
                 check_init_list_shape(sd->members[i].type, elem, elem->loc);
         }
         break;
