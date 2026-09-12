@@ -272,10 +272,11 @@ static void bs_copy(BitSet *dst, const BitSet *src) {
     memcpy(dst->w, src->w, (size_t)dst->num_words * sizeof(uint64_t));
 }
 
-/* Iterate set bits: for each set bit, invoke fn(v). */
-#define BS_FOREACH(bs, v)  \
-    for (int _wi = 0; _wi < (bs)->num_words; _wi++) \
-        for (uint64_t _w = (bs)->w[_wi], v; _w && ((v = _wi * 64 + __builtin_ctzll(_w)), 1); _w &= _w - 1)
+/* Iterate set bits in increasing vertex id.  A ctzll scan is equivalent
+ * when ctzll is correct, but stage1's __fakecc_ctzll helper has disagreed
+ * with gcc's builtin on large graphs and scrambled register coloring. */
+#define BS_FOREACH(bs, v) \
+    for (int v = 0; v < (bs)->nv; v++) if (bs_test((bs), v))
 
 /* Compute per-block use[b] and def[b] sets.
  *

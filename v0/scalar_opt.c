@@ -122,8 +122,11 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
+    int align16;
+    int x87_pair;
     unsigned char *call_arg_on_stack;
     int alloca_bytes;
+    int is_volatile;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -184,6 +187,7 @@ struct IRFunction {
     int ret_reg_n;
     int ret_reg_cls[2];
     int ret_is_bool;
+    int ret_is_complex_ld;
     int is_variadic;
     int is_static;
     int has_dyn_alloca;
@@ -375,16 +379,19 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int func_is_variadic;
+    int func_is_unprototyped;
     int enum_id;
     int bitfield_width;
     int is_vector;
+    unsigned is_decimal : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -396,25 +403,42 @@ static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+}
+static inline Type type_make_decimal(long long width) {
+    Type t = type_make_float(width);
+    t.is_decimal = 1;
+    return t;
+}
+static inline int type_is_decimal(Type t) {
+    return t.kind == TY_FLOAT && t.is_decimal && !t.is_vector;
+}
+static inline int type_is_decimal128(Type t) {
+    return type_is_decimal(t) && t.width == 16;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
 long long type_size(Type t);
 long long type_align(Type t);
+int type_is_complex_ldouble(Type t);
+int type_is_empty_struct(Type t);
+int type_needs_stack_align16(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -862,7 +886,9 @@ static int64_t trunc_to_width(int64_t v, int width, int is_unsigned) {
     uint64_t sign = (mask >> 1) + 1;
     return (u & sign) ? (int64_t)(u | ~mask) : (int64_t)u;
 }
-static int has_side_effect(IROpcode op) {
+static int inst_has_side_effect(const IRInst *inst) {
+    if (inst->is_volatile) return 1;
+    IROpcode op = inst->op;
     return op == IR_RETURN || op == IR_STORE || op == IR_STORE_PTR ||
            op == IR_BR || op == IR_CBR || op == IR_LABEL ||
            op == IR_ALLOCA || op == IR_CALL || op == IR_PARAM ||
@@ -980,7 +1006,7 @@ int scalar_dce(IRFunction *fn) {
     int changed = 0;
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
-        if (!has_side_effect(inst->op) && inst->dst >= 0 &&
+        if (!inst_has_side_effect(inst) && inst->dst >= 0 &&
             inst->dst < fn->next_value_id && !used[inst->dst]) {
             changed = 1;
             continue;

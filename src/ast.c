@@ -137,6 +137,33 @@ long long type_size(Type t) {
     return 0;
 }
 
+int type_is_complex_ldouble(Type t) {
+    return t.kind == TY_STRUCT && t.tag
+        && strcmp(t.tag, "__complex_ldouble") == 0;
+}
+
+int type_is_empty_struct(Type t) {
+    /* GNU `struct E {}` (no members, size 0) consumes no argument slots.
+     * A size-0 type that still has members — e.g. `struct { char x[0]; }` —
+     * is passed as a dummy eightbyte so va_arg walks stay in sync. */
+    if (t.kind != TY_STRUCT) return 0;
+    const StructRegistry *reg = get_ir_structs();
+    if (!reg) reg = get_sema_structs();
+    if (!reg) reg = get_parser_structs();
+    if (t.tag && reg) {
+        const StructDef *sd = struct_registry_find_c(reg, t.tag);
+        if (sd) return sd->num_members == 0;
+    }
+    return type_size(t) <= 0;
+}
+
+int type_needs_stack_align16(Type t) {
+    if (t.kind == TY_FLOAT && t.width == 16 && !t.is_vector) return 1;
+    if (t.kind == TY_INT && t.width == 16 && !t.is_vector) return 1;
+    if (type_is_complex_ldouble(t)) return 1;
+    return type_align(t) >= 16;
+}
+
 Type type_make_vector(Type elem, long long vec_size) {
     Type t = elem;
     t.is_vector = 1;
@@ -153,8 +180,9 @@ Type type_make_ptr(Type pointee) {
     Type t; t.kind = TY_PTR; t.width = 8; t.is_unsigned = 1;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
     t.pointee = malloc(sizeof(Type));
     if (!t.pointee) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.pointee = type_clone(pointee);
@@ -217,8 +245,9 @@ Type type_make_array(Type elem, long long length) {
     t.is_const = elem.is_const; t.is_volatile = elem.is_volatile; t.is_restrict = elem.is_restrict;
     t.is_bool = 0; t.length = length; t.vla_dim = NULL;
     t.pointee = NULL; t.tag = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.elem_type = type_clone(elem);
@@ -235,8 +264,9 @@ Type type_make_struct(const char *tag, long long size) {
     Type t; t.kind = TY_STRUCT; t.width = size; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL;
-    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0;
+    t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
     t.tag = xstrdup(tag);
     return t;
 }
@@ -244,8 +274,9 @@ Type type_make_struct(const char *tag, long long size) {
 Type type_make_func_var(Type ret, Type * const *params, int nparams, int is_variadic) {
     Type t; t.kind = TY_FUNC; t.width = 0; t.is_unsigned = 0; t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
     t.func_is_variadic = is_variadic;
+    t.func_is_unprototyped = 0;
     t.func_ret = malloc(sizeof(Type));
     if (!t.func_ret) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.func_ret = type_clone(ret);
@@ -309,7 +340,7 @@ int type_same_typedef(Type a, Type b) {
         if (a.enum_id != b.enum_id) return 0;
         return a.width == b.width && a.is_unsigned == b.is_unsigned;
     case TY_FLOAT:
-        return a.width == b.width;
+        return a.width == b.width && a.is_decimal == b.is_decimal;
     case TY_PTR:
         if (!a.pointee || !b.pointee) return a.pointee == b.pointee;
         return type_same_typedef(*a.pointee, *b.pointee);
@@ -473,26 +504,112 @@ static int sysv_field_class(Type t) {
     switch (t.kind) {
     case TY_INT:
     case TY_PTR:
-    case TY_ARRAY:   /* decays; treated as pointer-sized when nested oddly */
         return SV_INT;
     case TY_FLOAT:
-        if (t.width == 16) return SV_MEM; /* long double / X87 → MEMORY */
+        if (t.width == 16 && !t.is_vector) return SV_MEM; /* long double / X87 → MEMORY */
         return SV_SSE;
-    case TY_STRUCT: {
-        /* Recursively classify a nested struct/union: merge the class of
-         * each of its eightbytes.  This matches GCC/SysV, which classifies
-         * aggregates member-by-member regardless of nesting depth. */
-        SysVRegClass cls[2];
-        int n = sysv_classify_agg(t, cls);
-        if (n == 0) return SV_MEM;
-        int c = SV_NO;
-        for (int i = 0; i < n; i++)
-            c = sysv_merge(c, cls[i] == SYSV_CLS_SSE ? SV_SSE : SV_INT);
-        return c;
-    }
     default:
         return SV_MEM;
     }
+}
+
+/* Paint type `t` starting at byte `offset` onto the parent object's
+ * eightbyte classes.  Nested structs and arrays are walked member-by-member
+ * (SysV AMD64) so a `{double; long}` inner struct stays SSE+INTEGER rather
+ * than collapsing to INTEGER,INTEGER.  Returns 1 if the whole object must
+ * use the MEMORY class. */
+static int sysv_paint(Type t, int offset, int eight[2]) {
+    if (t.is_vector) {
+        /* SysV: 8- and 16-byte vectors (int or float) are SSE class.
+         * GCC passes `vector_size(8)` integer vectors in XMM0, not GP. */
+        int fc = SV_SSE;
+        int end = offset + (int)t.width;
+        for (int eb = 0; eb < 2; eb++) {
+            int lo = eb * 8, hi = lo + 8;
+            if (end <= lo || offset >= hi) continue;
+            eight[eb] = sysv_merge(eight[eb], fc);
+            if (eight[eb] == SV_MEM) return 1;
+        }
+        return 0;
+    }
+    if (t.kind == TY_ARRAY && t.elem_type && t.length > 0) {
+        int esz = type_size(*t.elem_type);
+        if (esz <= 0) return 0;
+        for (long long i = 0; i < t.length; i++) {
+            int eoff = offset + (int)(i * esz);
+            if (eoff >= 16) break;
+            if (sysv_paint(*t.elem_type, eoff, eight)) return 1;
+        }
+        return 0;
+    }
+    if (t.kind == TY_STRUCT && t.tag) {
+        const StructRegistry *reg = get_ir_structs();
+        const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : NULL;
+        if (!sd) {
+            int sz = type_size(t);
+            int end = offset + (sz > 0 ? sz : 0);
+            for (int eb = 0; eb < 2; eb++) {
+                int lo = eb * 8, hi = lo + 8;
+                if (end <= lo || offset >= hi) continue;
+                eight[eb] = sysv_merge(eight[eb], SV_INT);
+            }
+            return 0;
+        }
+        for (int mi = 0; mi < sd->num_members; mi++) {
+            const StructMember *m = &sd->members[mi];
+            int moff = offset + m->offset;
+            int msz = m->bit_width > 0
+                      ? (m->bit_width <= 8 ? 1 : m->bit_width <= 16 ? 2
+                         : m->bit_width <= 32 ? 4 : 8)
+                      : type_size(m->type);
+            if (msz <= 0 && m->bit_width <= 0) {
+                if (m->type.kind == TY_ARRAY || m->type.kind == TY_STRUCT
+                    || m->type.is_vector) {
+                    if (sysv_paint(m->type, moff, eight)) return 1;
+                }
+                continue;
+            }
+            if (m->bit_width <= 0) {
+                long long ma = type_align(m->type);
+                if (ma > 1 && (m->offset % ma) != 0) return 1;
+            }
+            if (m->bit_width > 0) {
+                int end = moff + msz;
+                for (int eb = 0; eb < 2; eb++) {
+                    int lo = eb * 8, hi = lo + 8;
+                    if (end <= lo || moff >= hi) continue;
+                    eight[eb] = sysv_merge(eight[eb], SV_INT);
+                    if (eight[eb] == SV_MEM) return 1;
+                }
+            } else if (m->type.kind == TY_ARRAY || m->type.kind == TY_STRUCT
+                       || m->type.is_vector) {
+                if (sysv_paint(m->type, moff, eight)) return 1;
+            } else {
+                int fc = sysv_field_class(m->type);
+                if (fc == SV_MEM) return 1;
+                int end = moff + msz;
+                for (int eb = 0; eb < 2; eb++) {
+                    int lo = eb * 8, hi = lo + 8;
+                    if (end <= lo || moff >= hi) continue;
+                    eight[eb] = sysv_merge(eight[eb], fc);
+                    if (eight[eb] == SV_MEM) return 1;
+                }
+            }
+        }
+        return 0;
+    }
+    int fc = sysv_field_class(t);
+    if (fc == SV_MEM) return 1;
+    int sz = type_size(t);
+    if (sz <= 0) sz = (int)t.width;
+    int end = offset + sz;
+    for (int eb = 0; eb < 2; eb++) {
+        int lo = eb * 8, hi = lo + 8;
+        if (end <= lo || offset >= hi) continue;
+        eight[eb] = sysv_merge(eight[eb], fc);
+        if (eight[eb] == SV_MEM) return 1;
+    }
+    return 0;
 }
 
 int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
@@ -505,11 +622,11 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
             return 2;
         }
         if (t.width == 8) {
-            cls[0] = SYSV_CLS_INTEGER;
+            cls[0] = SYSV_CLS_SSE;
             return 1;
         }
         if (t.width <= 4) {
-            cls[0] = SYSV_CLS_INTEGER;
+            cls[0] = (t.kind == TY_FLOAT) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
             return 1;
         }
         return 0;
@@ -518,47 +635,16 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     int sz = type_size(t);
     if (sz <= 0 || sz > 16) return 0;
     const StructRegistry *reg = get_ir_structs();
-    /* During sema there may be no IR registry; fall back to size-only for
-     * incomplete classification — treat as MEMORY to stay safe. */
     const StructDef *sd = NULL;
     if (reg) sd = struct_registry_find_c(reg, t.tag);
     if (!sd) {
-        /* Size-only fallback used before ir_generate: ≤8 → 1 INTEGER,
-         * ≤16 → 2 INTEGER, which matches all-integer structs (the common
-         * case).  Floats/X87 are rare in early checks; ir_generate always
-         * has the registry and re-classifies for real lowering. */
         int n = (sz + 7) / 8;
         cls[0] = SYSV_CLS_INTEGER;
         if (n > 1) cls[1] = SYSV_CLS_INTEGER;
         return n;
     }
     int eight[2] = { SV_NO, SV_NO };
-    for (int mi = 0; mi < sd->num_members; mi++) {
-        const StructMember *m = &sd->members[mi];
-        int msz = m->bit_width > 0
-                  ? (m->bit_width <= 8 ? 1 : m->bit_width <= 16 ? 2
-                     : m->bit_width <= 32 ? 4 : 8)
-                  : type_size(m->type);
-        if (msz <= 0) continue;
-        /* Bitfields share a storage unit starting at m->offset. */
-        int start = m->offset;
-        int end = start + msz;
-        int fc = sysv_field_class(m->type);
-        if (m->bit_width > 0) fc = SV_INT;
-        if (fc == SV_MEM) return 0;
-        /* SysV: an eightbyte with an unaligned field is MEMORY.  Packed
-         * structs commonly place e.g. `int` at offset 1. */
-        if (m->bit_width <= 0) {
-            long long ma = type_align(m->type);
-            if (ma > 1 && (m->offset % ma) != 0) return 0;
-        }
-        for (int eb = 0; eb < 2; eb++) {
-            int lo = eb * 8, hi = lo + 8;
-            if (end <= lo || start >= hi) continue;
-            eight[eb] = sysv_merge(eight[eb], fc);
-            if (eight[eb] == SV_MEM) return 0;
-        }
-    }
+    if (sysv_paint(t, 0, eight)) return 0;
     int n = (sz + 7) / 8;
     if (n < 1) n = 1;
     if (n > 2) return 0;
@@ -567,7 +653,6 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
         if (c == SV_MEM) return 0;
         cls[i] = (c == SV_SSE) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
     }
-    /* Post-merger: >2 eightbytes already rejected; X87 already → MEM. */
     return n;
 }
 
@@ -576,6 +661,16 @@ int sysv_memory_pass_as_pointer(Type t) {
         return 1;
     int sz = type_size(t);
     return sz > 128;
+}
+
+static void close_bitfield_run(StructDef *sd) {
+    if (!sd || sd->bf_unit_type == 0) return;
+    long long next_bit = sd->bf_unit_offset * 8 + sd->bf_unit_used;
+    long long bytes = (next_bit + 7) / 8;
+    if (bytes > sd->size) sd->size = bytes;
+    sd->bf_unit_type = 0;
+    sd->bf_unit_used = 0;
+    sd->bf_unit_offset = 0;
 }
 
 void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width) {
@@ -599,13 +694,10 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
         /* Union members all start at offset 0; total size is the max. */
         off = 0;
     } else if (bit_width >= 0 && ty.kind == TY_INT) {
-        /* Zero-width bit-field: close the current unit and align the next
+        /* Zero-width bit-field: close the current run and align the next
          * allocation unit.  Unnamed `: 0` is not a real member. */
         if (bit_width == 0) {
-            if (sd->bf_unit_used > 0)
-                sd->size = sd->bf_unit_offset + sd->bf_unit_type;
-            sd->bf_unit_type = 0;
-            sd->bf_unit_used = 0;
+            close_bitfield_run(sd);
             sd->size = align_up(sd->size, a > 0 ? a : 1);
             sd->members[sd->num_members].name = xstrdup(name ? name : "");
             sd->members[sd->num_members].type = type_clone(ty);
@@ -615,45 +707,57 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
             sd->num_members++;
             return;
         }
-        /* Bitfield packing: a run of adjacent `unsigned/int : N` bitfields of
-         * the same byte-width unit packs into one storage unit.  The unit
-         * size is the smallest of {1,2,4,8} bytes that holds all its bits
-         * (we use the declared type width, e.g. unsigned → 4 bytes). */
-        long long unit_bits = sz * 8;
-        if (sd->bf_unit_type == sz && sd->bf_unit_used + bit_width <= unit_bits) {
-            /* Fits in the current open unit. */
-            off = sd->bf_unit_offset;
-        } else {
-            /* Close any open unit and start a new one.  Track the raw byte
-              * end of the closed unit; defer alignment padding to
-              * struct_def_finish() so a following member can still pack into
-              * any trailing gap. */
-            if (sd->bf_unit_used > 0)
-                sd->size = sd->bf_unit_offset + sd->bf_unit_type;
-            sd->bf_unit_type = sz;
-            sd->bf_unit_used = 0;
-            sd->bf_unit_offset = align_up(sd->size, a);
-            off = sd->bf_unit_offset;
+        /* GCC/SysV: pack adjacent bitfields by bit position.  A field of
+         * declared type T must sit in one T-sized, T-aligned cell unless
+         * the struct is packed (then bits concatenate with no padding). */
+        long long unit = sz > 0 ? sz : 4;
+        long long unit_bits = unit * 8;
+        long long start_bit = (sd->bf_unit_type != 0)
+            ? (sd->bf_unit_offset * 8 + sd->bf_unit_used)
+            : (sd->size * 8);
+        if (!sd->is_packed) {
+            long long in_unit = start_bit % unit_bits;
+            if (in_unit + bit_width > unit_bits)
+                start_bit += unit_bits - in_unit;
+            long long align_bits = (a > 0 ? a : 1) * 8;
+            long long unit_start = start_bit - (start_bit % unit_bits);
+            if (align_bits > 0 && (unit_start % align_bits) != 0) {
+                start_bit = ((start_bit + align_bits - 1) / align_bits) * align_bits;
+                in_unit = start_bit % unit_bits;
+                if (in_unit + bit_width > unit_bits)
+                    start_bit += unit_bits - in_unit;
+            }
         }
-        sd->members[sd->num_members].bit_offset = sd->bf_unit_used;
-        sd->bf_unit_used += bit_width;
-        sd->members[sd->num_members].offset = off;
+        long long container;
+        int bit_off;
+        if (sd->is_packed) {
+            /* Packed: bits concatenate.  The containing cell starts at the
+             * first byte of the field so a later load of T (or a widened
+             * 8-byte load if T cannot cover bit_offset+width) can extract it. */
+            container = start_bit / 8;
+            bit_off = (int)(start_bit % 8);
+        } else {
+            container = (start_bit / unit_bits) * unit;
+            bit_off = (int)(start_bit - container * 8);
+        }
+        long long end_bit = start_bit + bit_width;
+        long long end_bytes = (end_bit + 7) / 8;
+        if (end_bytes > sd->size) sd->size = end_bytes;
+        sd->bf_unit_type = 1;
+        sd->bf_unit_offset = end_bit / 8;
+        sd->bf_unit_used = (int)(end_bit % 8);
+        sd->members[sd->num_members].bit_offset = bit_off;
+        sd->members[sd->num_members].offset = container;
         sd->members[sd->num_members].bit_width = bit_width;
-        /* Advance logical struct size to cover this unit if it extends past. */
-        long long unit_end = sd->bf_unit_offset + sz;
-        if (unit_end > sd->size) sd->size = unit_end;
         sd->members[sd->num_members].name = xstrdup(name);
         sd->members[sd->num_members].type = type_clone(ty);
         sd->num_members++;
         return;
     } else {
-        /* Normal (non-bitfield) member: close any open bitfield unit first.
-         * Track the raw byte end of the closed unit; alignment padding is
-         * deferred to struct_def_finish() so trailing members can pack. */
-        if (sd->bf_unit_used > 0) {
-            sd->size = sd->bf_unit_offset + sd->bf_unit_type;
-            sd->bf_unit_type = 0; sd->bf_unit_used = 0;
-        }
+        /* Normal (non-bitfield) member: close any open bitfield run first.
+         * Alignment padding is deferred to struct_def_finish() so trailing
+         * members can pack into leftover bytes of a bitfield unit. */
+        close_bitfield_run(sd);
         off = align_up(sd->size, a);
     }
     sd->members[sd->num_members].name = xstrdup(name);
@@ -871,16 +975,18 @@ void typedef_registry_truncate(TypedefRegistry *r, size_t len) {
 /* Expr constructors & destructor                                       */
 /* ------------------------------------------------------------------ */
 
-Expr *expr_new_int(long long v, SourceLoc loc) {
+static Expr *expr_alloc(ExprKind k, SourceLoc loc) {
     Expr *e = malloc(sizeof(Expr));
-    if (!e) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
+    if (!e) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     memset(e, 0, sizeof(Expr));
-    e->kind = EX_INT_LIT;
+    e->kind = k;
     e->loc = loc;
     e->type = type_default_int();
+    return e;
+}
+
+Expr *expr_new_int(long long v, SourceLoc loc) {
+    Expr *e = expr_alloc(EX_INT_LIT, loc);
     e->u.int_val = v;
     return e;
 }
@@ -900,15 +1006,7 @@ Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
 }
 
 Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc) {
-    Expr *e = malloc(sizeof(Expr));
-    if (!e) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    e->kind = EX_BINOP;
-    e->loc = loc;
-    e->type = type_default_int();
-    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_BINOP, loc);
     e->u.bin.op = op;
     e->u.bin.l = l;
     e->u.bin.r = r;
@@ -916,30 +1014,14 @@ Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc) {
 }
 
 Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc) {
-    Expr *e = malloc(sizeof(Expr));
-    if (!e) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    e->kind = EX_UNARY;
-    e->loc = loc;
-    e->type = type_default_int();
-    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_UNARY, loc);
     e->u.un.op = op;
     e->u.un.operand = operand;
     return e;
 }
 
 Expr *expr_new_var(const char *name, SourceLoc loc) {
-    Expr *e = malloc(sizeof(Expr));
-    if (!e) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    e->kind = EX_VAR;
-    e->loc = loc;
-    e->type = type_default_int();
-    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_VAR, loc);
     e->u.var.name = xstrdup(name);
     e->u.var.pkg = NULL;
     return e;
@@ -952,30 +1034,14 @@ Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc) {
 }
 
 Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc) {
-    Expr *e = malloc(sizeof(Expr));
-    if (!e) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    e->kind = EX_ASSIGN;
-    e->loc = loc;
-    e->type = type_default_int();
-    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_ASSIGN, loc);
     e->u.assign.lvalue = lvalue;
     e->u.assign.rvalue = rvalue;
     return e;
 }
 
 Expr *expr_new_call(Expr *callee, SourceLoc loc) {
-    Expr *e = malloc(sizeof(Expr));
-    if (!e) {
-        fprintf(stderr, "fakecc: out of memory\n");
-        exit(1);
-    }
-    e->kind = EX_CALL;
-    e->loc = loc;
-    e->type = type_default_int();
-    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
+    Expr *e = expr_alloc(EX_CALL, loc);
     e->u.call.callee = callee;   /* takes ownership */
     e->u.call.args.data = NULL;
     e->u.call.args.len = 0;
@@ -990,12 +1056,8 @@ void expr_call_set_callee(Expr *e, Expr *callee) {
 }
 
 Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
-    Expr *e = malloc(sizeof(Expr));
-    if (!e) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-    e->kind = EX_STR;
-    e->loc = loc;
+    Expr *e = expr_alloc(EX_STR, loc);
     /* type is set by sema: char[len+1] initially, decays to char* on use */
-    e->type = type_default_int();
     e->u.str.bytes = malloc(len + 1);
     if (!e->u.str.bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     memcpy(e->u.str.bytes, bytes, len);
@@ -1003,8 +1065,6 @@ Expr *expr_new_str(const char *bytes, int len, SourceLoc loc) {
     e->u.str.len = len;
     return e;
 }
-
-static Expr *expr_alloc(ExprKind k, SourceLoc loc);  /* forward */
 
 Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc) {
     Expr *e = expr_alloc(EX_FLOAT_LIT, loc);
@@ -1022,14 +1082,6 @@ void expr_call_push_arg(Expr *e, Expr *arg) {
         if (!a->data) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
     }
     a->data[a->len++] = arg;
-}
-
-static Expr *expr_alloc(ExprKind k, SourceLoc loc) {
-    Expr *e = malloc(sizeof(Expr));
-    if (!e) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-    e->kind = k; e->loc = loc; e->type = type_default_int();
-    memset(&e->va_arg_type, 0, sizeof(e->va_arg_type));
-    return e;
 }
 
 Expr *expr_new_addr(Expr *operand, SourceLoc loc) {
@@ -1382,6 +1434,7 @@ Stmt *stmt_alloc(void) {
         fprintf(stderr, "fakecc: out of memory\n");
         exit(1);
     }
+    memset(s, 0, sizeof(Stmt));
     return s;
 }
 
@@ -1688,8 +1741,82 @@ int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long 
     return 0;
 }
 
+/* Integer-promote a type for UAC: rank below int becomes signed int. */
+static void fold_int_promote(int *width, int *is_unsigned) {
+    if (*width < 4) { *width = 4; *is_unsigned = 0; }
+    if (*width <= 0) *width = 4;
+}
+
+static unsigned long long fold_width_mask(int width) {
+    if (width >= 8) return ~0ULL;
+    if (width <= 0) width = 4;
+    return (1ULL << (width * 8)) - 1ULL;
+}
+
+static long long fold_trunc_int(long long v, int width, int is_unsigned) {
+    if (width >= 8) return v;
+    unsigned long long mask = fold_width_mask(width);
+    unsigned long long u = (unsigned long long)v & mask;
+    if (is_unsigned) return (long long)u;
+    int bits = width * 8;
+    if (u & (1ULL << (bits - 1)))
+        return (long long)(u | ~mask);
+    return (long long)u;
+}
+
+/* Usual arithmetic conversions on two integer operands: 1 if the common
+ * type is unsigned. */
+static int fold_uac_unsigned(const Expr *l, const Expr *r) {
+    int lw = (l && l->type.kind == TY_INT && l->type.width) ? (int)l->type.width : 4;
+    int rw = (r && r->type.kind == TY_INT && r->type.width) ? (int)r->type.width : 4;
+    int lu = (l && l->type.kind == TY_INT) ? l->type.is_unsigned : 0;
+    int ru = (r && r->type.kind == TY_INT) ? r->type.is_unsigned : 0;
+    fold_int_promote(&lw, &lu);
+    fold_int_promote(&rw, &ru);
+    if (lu == ru) return lu;
+    if (lu && lw >= rw) return 1;
+    if (ru && rw >= lw) return 1;
+    if (!lu && lw > rw) return 0;
+    if (!ru && rw > lw) return 0;
+    return 1;
+}
+
+static int fold_binop_unsigned(const Expr *e) {
+    BinOp op = e->u.bin.op;
+    if (op == BOP_SHL || op == BOP_SHR) {
+        const Expr *l = e->u.bin.l;
+        if (l && l->type.kind == TY_INT) return l->type.is_unsigned;
+        return e->type.kind == TY_INT && e->type.is_unsigned;
+    }
+    if (op >= BOP_EQ && op <= BOP_GE)
+        return fold_uac_unsigned(e->u.bin.l, e->u.bin.r);
+    return e->type.kind == TY_INT && e->type.is_unsigned;
+}
+
+static int fold_binop_width(const Expr *e) {
+    if (e->u.bin.op >= BOP_EQ && e->u.bin.op <= BOP_GE) {
+        int lw = (e->u.bin.l && e->u.bin.l->type.width) ? (int)e->u.bin.l->type.width : 4;
+        int rw = (e->u.bin.r && e->u.bin.r->type.width) ? (int)e->u.bin.r->type.width : 4;
+        int lu = e->u.bin.l ? e->u.bin.l->type.is_unsigned : 0;
+        int ru = e->u.bin.r ? e->u.bin.r->type.is_unsigned : 0;
+        fold_int_promote(&lw, &lu);
+        fold_int_promote(&rw, &ru);
+        return lw >= rw ? lw : rw;
+    }
+    if (e->type.kind == TY_INT && e->type.width)
+        return (int)e->type.width;
+    if (e->u.bin.l && e->u.bin.l->type.kind == TY_INT && e->u.bin.l->type.width)
+        return (int)e->u.bin.l->type.width;
+    return 4;
+}
+
 int fold_const_int(const Expr *e, long long *out) {
     if (!e) return 0;
+    if (e->kind == EX_FLOAT_LIT && e->u.float_text) {
+        /* Integer conversion of a floating constant: truncate toward zero. */
+        *out = (long long)strtold(e->u.float_text, NULL);
+        return 1;
+    }
     if (e->kind == EX_INT_LIT) {
         /* int128 literals cannot be folded to a single long long: the high
          * half would be lost.  Return 0 so the expression is evaluated at
@@ -1753,25 +1880,85 @@ int fold_const_int(const Expr *e, long long *out) {
         long long l, r;
         if (!fold_const_int(e->u.bin.l, &l)) return 0;
         if (!fold_const_int(e->u.bin.r, &r)) return 0;
-        switch (e->u.bin.op) {
-        case BOP_ADD: *out = l + r; return 1;
-        case BOP_SUB: *out = l - r; return 1;
-        case BOP_MUL: *out = l * r; return 1;
-        case BOP_DIV: if (r == 0) { *out = 0; return 1; } *out = l / r; return 1;
-        case BOP_MOD: if (r == 0) { *out = 0; return 1; } *out = l % r; return 1;
-        case BOP_BITAND: *out = l & r; return 1;
-        case BOP_BITOR:  *out = l | r; return 1;
-        case BOP_BITXOR: *out = l ^ r; return 1;
-        case BOP_SHL:    *out = l << r; return 1;
-        case BOP_SHR:    *out = l >> r; return 1;
-        case BOP_EQ:     *out = (l == r) ? 1 : 0; return 1;
-        case BOP_NE:     *out = (l != r) ? 1 : 0; return 1;
-        case BOP_LT:     *out = (l < r) ? 1 : 0; return 1;
-        case BOP_LE:     *out = (l <= r) ? 1 : 0; return 1;
-        case BOP_GT:     *out = (l > r) ? 1 : 0; return 1;
-        case BOP_GE:     *out = (l >= r) ? 1 : 0; return 1;
-        default: return 0;  /* BOP_AND/BOP_OR (logical) */
+        int is_u = fold_binop_unsigned(e);
+        int w = fold_binop_width(e);
+        if (w <= 0) w = 4;
+        if (e->u.bin.op != BOP_AND && e->u.bin.op != BOP_OR
+            && e->u.bin.op != BOP_SHL && e->u.bin.op != BOP_SHR
+            && e->u.bin.op != BOP_ADD && e->u.bin.op != BOP_SUB
+            && e->u.bin.op != BOP_MUL) {
+            l = fold_trunc_int(l, w, is_u);
+            r = fold_trunc_int(r, w, is_u);
+        } else if (e->u.bin.op == BOP_SHL || e->u.bin.op == BOP_SHR) {
+            int lw = (e->u.bin.l && e->u.bin.l->type.width)
+                     ? (int)e->u.bin.l->type.width : w;
+            int lu = (e->u.bin.l && e->u.bin.l->type.kind == TY_INT)
+                     ? e->u.bin.l->type.is_unsigned : is_u;
+            fold_int_promote(&lw, &lu);
+            l = fold_trunc_int(l, lw, lu);
+            w = lw;
+            is_u = lu;
         }
+        unsigned long long ul = (unsigned long long)l;
+        unsigned long long ur = (unsigned long long)r;
+        if (w < 8) {
+            unsigned long long mask = fold_width_mask(w);
+            ul &= mask;
+            ur &= mask;
+        }
+        long long res;
+        int trunc_result = 1;
+        switch (e->u.bin.op) {
+        case BOP_ADD:
+            res = is_u ? (long long)(ul + ur) : l + r;
+            /* Signed ADD/SUB/MUL of constants keep the full 64-bit value so
+             * parse-time folds (when e->type is still default int) do not
+             * truncate `1L << 62` to 32 bits before a later subtract. */
+            if (!is_u) trunc_result = 0;
+            break;
+        case BOP_SUB:
+            res = is_u ? (long long)(ul - ur) : l - r;
+            if (!is_u) trunc_result = 0;
+            break;
+        case BOP_MUL:
+            res = is_u ? (long long)(ul * ur) : l * r;
+            if (!is_u) trunc_result = 0;
+            break;
+        case BOP_DIV:
+            if (r == 0) { *out = 0; return 1; }
+            res = is_u ? (ur ? (long long)(ul / ur) : 0) : l / r;
+            break;
+        case BOP_MOD:
+            if (r == 0) { *out = 0; return 1; }
+            res = is_u ? (ur ? (long long)(ul % ur) : 0) : l % r;
+            break;
+        case BOP_BITAND: res = (long long)(ul & ur); break;
+        case BOP_BITOR:  res = (long long)(ul | ur); break;
+        case BOP_BITXOR: res = (long long)(ul ^ ur); break;
+        case BOP_SHL:    res = is_u ? (long long)(ul << (r & 63)) : (l << r); break;
+        case BOP_SHR:
+            if (is_u) res = (long long)(ul >> (r & 63));
+            else res = l >> r;
+            break;
+        case BOP_EQ:     res = is_u ? (ul == ur) : (l == r); break;
+        case BOP_NE:     res = is_u ? (ul != ur) : (l != r); break;
+        case BOP_LT:     res = is_u ? (ul < ur)  : (l < r);  break;
+        case BOP_LE:     res = is_u ? (ul <= ur) : (l <= r); break;
+        case BOP_GT:     res = is_u ? (ul > ur)  : (l > r);  break;
+        case BOP_GE:     res = is_u ? (ul >= ur) : (l >= r); break;
+        case BOP_AND:    res = (l && r) ? 1 : 0; break;
+        case BOP_OR:     res = (l || r) ? 1 : 0; break;
+        default: return 0;
+        }
+        if (e->u.bin.op >= BOP_EQ && e->u.bin.op <= BOP_GE)
+            *out = res ? 1 : 0;
+        else if (e->u.bin.op == BOP_AND || e->u.bin.op == BOP_OR)
+            *out = res ? 1 : 0;
+        else if (trunc_result)
+            *out = fold_trunc_int(res, w, is_u);
+        else
+            *out = res;
+        return 1;
     }
     if (e->kind == EX_SIZEOF_TYPE) {
         Type t = e->u.sizeof_t.target;
@@ -1829,6 +2016,7 @@ Expr *expr_clone(const Expr *e) {
     if (!e) return NULL;
     Expr *r = malloc(sizeof(Expr));
     if (!r) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    memset(r, 0, sizeof(Expr));
     *r = *e;
     r->type = type_clone(e->type);
     r->va_arg_type = type_clone(e->va_arg_type);

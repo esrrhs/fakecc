@@ -627,16 +627,36 @@ int emit_obj_read(const char *path, EmitModule *m) {
     uint64_t shstr_off = rd_u64(shstr_sh + 24);
     const char *shstr = (const char *)buf + shstr_off;
     int symtab_idx = -1, rela_text_idx = -1, rela_data_idx = -1, strtab_idx = -1;
-    int text_idx = -1, rodata_idx = -1, data_idx = -1, bss_idx = -1;
+    int text_idx = -1, data_idx = -1, bss_idx = -1;
     int tdata_idx = -1, tbss_idx = -1;
     int fakecc_dbg_idx = -1;
+    int *ro_idx = ((void*)0);
+    size_t *ro_off = ((void*)0);
+    int n_ro = 0, cap_ro = 0;
+    size_t total_ro = 0;
     for (int s = 0; s < shnum; s++) {
         const unsigned char *sh = buf + shoff + (size_t)s * shentsize;
         uint32_t name_idx = rd_u32(sh);
         const char *sname = shstr + name_idx;
         uint32_t type = rd_u32(sh + 4);
         if (runtime.strcmp(sname, ".text") == 0 && type == 1) text_idx = s;
-        else if (runtime.strcmp(sname, ".rodata") == 0 && type == 1) rodata_idx = s;
+        else if (runtime.strncmp(sname, ".rodata", 7) == 0 && type == 1) {
+            uint64_t sz = rd_u64(sh + 32);
+            uint64_t align = rd_u64(sh + 48);
+            if (align < 1) align = 1;
+            size_t pad = (size_t)((align - (total_ro % (size_t)align)) % (size_t)align);
+            total_ro += pad;
+            if (n_ro >= cap_ro) {
+                cap_ro = cap_ro ? cap_ro * 2 : 4;
+                ro_idx = runtime.realloc(ro_idx, (size_t)cap_ro * sizeof(int));
+                ro_off = runtime.realloc(ro_off, (size_t)cap_ro * sizeof(size_t));
+                if (!ro_idx || !ro_off) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            }
+            ro_idx[n_ro] = s;
+            ro_off[n_ro] = total_ro;
+            n_ro++;
+            total_ro += (size_t)sz;
+        }
         else if (runtime.strcmp(sname, ".data") == 0 && type == 1) data_idx = s;
         else if (runtime.strcmp(sname, ".bss") == 0 && type == 8) bss_idx = s;
         else if (runtime.strcmp(sname, ".tdata") == 0 && type == 1) tdata_idx = s;
@@ -660,10 +680,17 @@ int emit_obj_read(const char *path, EmitModule *m) {
         uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
         m->text.data = runtime.malloc(sz); runtime.memcpy(m->text.data, buf + off, sz); m->text.len = sz; m->text.cap = sz;
     }
-    if (rodata_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)rodata_idx * shentsize;
-        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        m->rodata.data = runtime.malloc(sz); runtime.memcpy(m->rodata.data, buf + off, sz); m->rodata.len = sz; m->rodata.cap = sz;
+    if (n_ro > 0) {
+        m->rodata.data = runtime.malloc(total_ro ? total_ro : 1);
+        if (!m->rodata.data) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        runtime.memset(m->rodata.data, 0, total_ro);
+        m->rodata.len = total_ro;
+        m->rodata.cap = total_ro;
+        for (int i = 0; i < n_ro; i++) {
+            const unsigned char *sh = buf + shoff + (size_t)ro_idx[i] * shentsize;
+            uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+            if (sz > 0) runtime.memcpy(m->rodata.data + ro_off[i], buf + off, (size_t)sz);
+        }
     }
     if (data_idx >= 0) {
         const unsigned char *sh = buf + shoff + (size_t)data_idx * shentsize;
@@ -704,16 +731,27 @@ int emit_obj_read(const char *path, EmitModule *m) {
                 name = (const char *)strtab_data + name_idx;
             }
             uint16_t mapped_shndx = shndx;
-            if (shndx == text_idx) mapped_shndx = 1;
-            else if (shndx == rodata_idx) mapped_shndx = 2;
-            else if (shndx == data_idx) mapped_shndx = 3;
-            else if (shndx == bss_idx) mapped_shndx = 4;
-            else if (shndx == tdata_idx) mapped_shndx = 5;
-            else if (shndx == tbss_idx) mapped_shndx = 6;
-            else if (shndx == 0) mapped_shndx = 0;
+            size_t mapped_value = (size_t)value;
+            int ro_hit = 0;
+            for (int ri = 0; ri < n_ro; ri++) {
+                if (shndx == ro_idx[ri]) {
+                    mapped_shndx = 2;
+                    mapped_value = (size_t)value + ro_off[ri];
+                    ro_hit = 1;
+                    break;
+                }
+            }
+            if (!ro_hit) {
+                if (shndx == text_idx) mapped_shndx = 1;
+                else if (shndx == data_idx) mapped_shndx = 3;
+                else if (shndx == bss_idx) mapped_shndx = 4;
+                else if (shndx == tdata_idx) mapped_shndx = 5;
+                else if (shndx == tbss_idx) mapped_shndx = 6;
+                else if (shndx == 0) mapped_shndx = 0;
+            }
             emit_module_add_symbol(m, name,
                                    (uint8_t)(info >> 4), (uint8_t)(info & 0xf),
-                                   mapped_shndx, (size_t)value, (size_t)size);
+                                   mapped_shndx, mapped_value, (size_t)size);
         }
     }
     if (rela_text_idx >= 0) {
@@ -756,6 +794,8 @@ int emit_obj_read(const char *path, EmitModule *m) {
                     path);
         }
     }
+    runtime.free(ro_idx);
+    runtime.free(ro_off);
     runtime.free(buf);
     return 0;
 }

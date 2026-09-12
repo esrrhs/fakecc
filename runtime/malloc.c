@@ -98,6 +98,9 @@ void *malloc(size_t n) {
     c->user_size = orig_n;
     void *ret = (char *)c + sizeof(struct chunk);
     __asan_unpoison_memory_region(ret, n);
+    /* Recycled freelist chunks keep previous contents.  Zero so a self-hosted
+     * compiler's unread fields do not depend on ASLR / allocation reuse. */
+    memset(ret, 0, n);
     return ret;
 }
 

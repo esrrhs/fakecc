@@ -132,7 +132,14 @@ typedef struct {
      * assign a GP/XMM register even if one is free).  For IR_CALL, see also
      * call_arg_on_stack[]. */
     int      force_stack;
-    /* IR_CALL only: per-arg force_stack; heap array length call_nargs, or NULL. */
+    /* IR_PARAM / IR_CALL: this stack eightbyte is 16-byte aligned (SysV
+     * long double / __int128 / over-aligned MEMORY).  call_arg_on_stack
+     * bit 1 also records this for IR_CALL args. */
+    int      align16;
+    /* IR_CALL / IR_RETURN: `_Complex long double` travels in st0/st1. */
+    int      x87_pair;
+    /* IR_CALL only: per-arg force_stack; heap array length call_nargs, or NULL.
+     * Bit 0 = stack, bit 1 = 16-byte align the stack slot. */
     unsigned char *call_arg_on_stack;
     /* Slice 7b/c: for IR_ALLOCA only. Total bytes reserved on the stack when
      * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
@@ -231,6 +238,8 @@ typedef struct {
     int   ret_reg_cls[2];
     /* 1 if the function returns _Bool (normalize the value to 0/1). */
     int   ret_is_bool;
+    /* 1 if the function returns `_Complex long double` in st0/st1. */
+    int   ret_is_complex_ld;
     /* Variadic: 1 if the function was defined with a `...` tail.  The prologue
      * emits a register-save area and the va_* builtins read/write it. */
     int   is_variadic;

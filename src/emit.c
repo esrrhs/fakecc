@@ -577,18 +577,41 @@ int emit_obj_read(const char *path, EmitModule *m) {
     const char *shstr = (const char *)buf + shstr_off;
 
     /* Map section index → section id (SECT_TEXT etc.) by name, and find
-     * symtab + rela.text indices. */
+     * symtab + rela.text indices.  All SHT_PROGBITS sections named `.rodata*`
+     * (`.rodata`, `.rodata.cst8`, `.rodata.str1.1`, …) are concatenated into
+     * m->rodata so GCC objects that park float constants in `.rodata.cst8`
+     * resolve their R_X86_64_PC32 relocs. */
     int symtab_idx = -1, rela_text_idx = -1, rela_data_idx = -1, strtab_idx = -1;
-    int text_idx = -1, rodata_idx = -1, data_idx = -1, bss_idx = -1;
+    int text_idx = -1, data_idx = -1, bss_idx = -1;
     int tdata_idx = -1, tbss_idx = -1;
     int fakecc_dbg_idx = -1;
+    int *ro_idx = NULL;
+    size_t *ro_off = NULL;
+    int n_ro = 0, cap_ro = 0;
+    size_t total_ro = 0;
     for (int s = 0; s < shnum; s++) {
         const unsigned char *sh = buf + shoff + (size_t)s * shentsize;
         uint32_t name_idx = rd_u32(sh);
         const char *sname = shstr + name_idx;
         uint32_t type = rd_u32(sh + 4);
         if (strcmp(sname, ".text") == 0 && type == SHT_PROGBITS) text_idx = s;
-        else if (strcmp(sname, ".rodata") == 0 && type == SHT_PROGBITS) rodata_idx = s;
+        else if (strncmp(sname, ".rodata", 7) == 0 && type == SHT_PROGBITS) {
+            uint64_t sz = rd_u64(sh + 32);
+            uint64_t align = rd_u64(sh + 48);
+            if (align < 1) align = 1;
+            size_t pad = (size_t)((align - (total_ro % (size_t)align)) % (size_t)align);
+            total_ro += pad;
+            if (n_ro >= cap_ro) {
+                cap_ro = cap_ro ? cap_ro * 2 : 4;
+                ro_idx = realloc(ro_idx, (size_t)cap_ro * sizeof(int));
+                ro_off = realloc(ro_off, (size_t)cap_ro * sizeof(size_t));
+                if (!ro_idx || !ro_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
+            ro_idx[n_ro] = s;
+            ro_off[n_ro] = total_ro;
+            n_ro++;
+            total_ro += (size_t)sz;
+        }
         else if (strcmp(sname, ".data") == 0 && type == SHT_PROGBITS) data_idx = s;
         else if (strcmp(sname, ".bss") == 0 && type == SHT_NOBITS) bss_idx = s;
         else if (strcmp(sname, ".tdata") == 0 && type == SHT_PROGBITS) tdata_idx = s;
@@ -616,10 +639,17 @@ int emit_obj_read(const char *path, EmitModule *m) {
         uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
         m->text.data = malloc(sz); memcpy(m->text.data, buf + off, sz); m->text.len = sz; m->text.cap = sz;
     }
-    if (rodata_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)rodata_idx * shentsize;
-        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        m->rodata.data = malloc(sz); memcpy(m->rodata.data, buf + off, sz); m->rodata.len = sz; m->rodata.cap = sz;
+    if (n_ro > 0) {
+        m->rodata.data = malloc(total_ro ? total_ro : 1);
+        if (!m->rodata.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        memset(m->rodata.data, 0, total_ro);
+        m->rodata.len = total_ro;
+        m->rodata.cap = total_ro;
+        for (int i = 0; i < n_ro; i++) {
+            const unsigned char *sh = buf + shoff + (size_t)ro_idx[i] * shentsize;
+            uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+            if (sz > 0) memcpy(m->rodata.data + ro_off[i], buf + off, (size_t)sz);
+        }
     }
     if (data_idx >= 0) {
         const unsigned char *sh = buf + shoff + (size_t)data_idx * shentsize;
@@ -662,16 +692,27 @@ int emit_obj_read(const char *path, EmitModule *m) {
                 name = (const char *)strtab_data + name_idx;
             }
             uint16_t mapped_shndx = shndx;
-            if (shndx == text_idx) mapped_shndx = SECT_TEXT;
-            else if (shndx == rodata_idx) mapped_shndx = SECT_RODATA;
-            else if (shndx == data_idx) mapped_shndx = SECT_DATA;
-            else if (shndx == bss_idx) mapped_shndx = SECT_BSS;
-            else if (shndx == tdata_idx) mapped_shndx = SECT_TDATA;
-            else if (shndx == tbss_idx) mapped_shndx = SECT_TBSS;
-            else if (shndx == 0) mapped_shndx = SECT_UNDEF;
+            size_t mapped_value = (size_t)value;
+            int ro_hit = 0;
+            for (int ri = 0; ri < n_ro; ri++) {
+                if (shndx == ro_idx[ri]) {
+                    mapped_shndx = SECT_RODATA;
+                    mapped_value = (size_t)value + ro_off[ri];
+                    ro_hit = 1;
+                    break;
+                }
+            }
+            if (!ro_hit) {
+                if (shndx == text_idx) mapped_shndx = SECT_TEXT;
+                else if (shndx == data_idx) mapped_shndx = SECT_DATA;
+                else if (shndx == bss_idx) mapped_shndx = SECT_BSS;
+                else if (shndx == tdata_idx) mapped_shndx = SECT_TDATA;
+                else if (shndx == tbss_idx) mapped_shndx = SECT_TBSS;
+                else if (shndx == 0) mapped_shndx = SECT_UNDEF;
+            }
             emit_module_add_symbol(m, name,
                                    (uint8_t)(info >> 4), (uint8_t)(info & 0xf),
-                                   mapped_shndx, (size_t)value, (size_t)size);
+                                   mapped_shndx, mapped_value, (size_t)size);
         }
     }
 
@@ -719,6 +760,8 @@ int emit_obj_read(const char *path, EmitModule *m) {
         }
     }
 
+    free(ro_idx);
+    free(ro_off);
     free(buf);
     return 0;
 }

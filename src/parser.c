@@ -330,6 +330,31 @@ static int tu_has_import(const TranslationUnit *tu, const char *name) {
     return 0;
 }
 
+/* True if `name` is a local or file-scope value, so it shadows an import. */
+static int parser_name_is_bound(Parser *p, const char *name) {
+    for (size_t i = p->locals.len; i > 0; i--)
+        if (strcmp(p->locals.data[i - 1].name, name) == 0) return 1;
+    for (size_t i = p->prepend.len; i > 0; i--)
+        if (p->prepend.data[i - 1].kind == ST_DECL
+            && strcmp(p->prepend.data[i - 1].u.decl.name, name) == 0)
+            return 1;
+    if (p->tu) {
+        for (size_t i = p->tu->globals.len; i > 0; i--)
+            if (p->tu->globals.data[i - 1].kind == ST_DECL
+                && strcmp(p->tu->globals.data[i - 1].u.decl.name, name) == 0)
+                return 1;
+    }
+    return 0;
+}
+
+static const EnumConstant *find_imported_enum_const(Parser *p, const char *pkg_name,
+                                                   const char *name) {
+    if (!p->pkg_ctx) return NULL;
+    Package *pkg = pkg_find(p->pkg_ctx, pkg_name);
+    if (!pkg) return NULL;
+    return pkg_find_enum_const(pkg, name);
+}
+
 /* Resolve a typedef from an imported package or (for unqualified names) from
  * the current package's already-parsed sibling files / export table.
  * Ensures any referenced StructDef is cloned into the local TU; does NOT
@@ -378,6 +403,17 @@ static const Type *find_typedef_with_fallback(Parser *p, const char *name) {
     if (t) return t;
     if (!p->pkg_ctx || !p->tu->package.name) return NULL;
     return resolve_pkg_typedef(p, p->tu->package.name, name);
+}
+
+/* GNU decimal floating types (ISO/IEC TR 24732).  Lowered as binary
+ * float of the same width so local arithmetic/compare work; BID/DPD
+ * encoding is not preserved. */
+static int decimal_float_width(const char *text) {
+    if (!text) return 0;
+    if (strcmp(text, "_Decimal32") == 0) return 4;
+    if (strcmp(text, "_Decimal64") == 0) return 8;
+    if (strcmp(text, "_Decimal128") == 0) return 16;
+    return 0;
 }
 
 /* Recognize a type at position `pos` (keywords, typedefs, pkg.Type). */
@@ -445,6 +481,8 @@ static int is_type_start(const Parser *p, size_t pos) {
             return 0;
         }
         if (strcmp(text, "__int128") == 0 || strcmp(text, "__int128_t") == 0 || strcmp(text, "__uint128_t") == 0)
+            return 1;
+        if (decimal_float_width(text))
             return 1;
         if (strcmp(text, "typeof") == 0 || strcmp(text, "__typeof__") == 0 || strcmp(text, "__typeof") == 0)
             return 1;
@@ -589,6 +627,11 @@ static Type eval_binary_type(Parser *p, Type a, Type b) {
         return type_clone(cty);
     }
     if (a.kind == TY_FLOAT && b.kind == TY_FLOAT) {
+        if (a.is_decimal || b.is_decimal) {
+            if (a.is_decimal && b.is_decimal)
+                return type_clone(a.width >= b.width ? a : b);
+            return type_clone(a.is_decimal ? a : b);
+        }
         return type_clone(a.width >= b.width ? a : b);
     }
     if (a.kind == TY_FLOAT) return type_clone(a);
@@ -993,6 +1036,16 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
         Type t = type_make_float(16);
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+    }
+    /* GNU decimal floating types: _Decimal32/64/128. */
+    if (peek(p)->kind == TK_IDENT) {
+        int dw = decimal_float_width(peek(p)->text);
+        if (dw) {
+            advance(p);
+            parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
+            Type t = type_make_decimal(dw);
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+        }
     }
     /* enum Tag — treated as int for the type system (or C23 fixed underlying). */
     if (peek(p)->kind == TK_KW_ENUM) {
@@ -1399,7 +1452,7 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
     expect_kind(p, TK_RBRACE, "'}'");
 }
 
-static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
+static Type make_func_type(Type ret, ParamArray *params, int is_variadic, int is_unproto) {
     /* Build a shallow array of pointers into the ParamArray's owned types.
      * type_make_func_var deep-clones them, so the originals stay owned by the
      * ParamArray and are freed by param_array_free below. */
@@ -1411,6 +1464,7 @@ static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
             ptys[i] = &params->data[i].type;
     }
     Type t = type_make_func_var(ret, ptys, (int)params->len, is_variadic);
+    t.func_is_unprototyped = is_unproto;
     free(ptys);
     param_array_free(params);
     return t;
@@ -1418,14 +1472,15 @@ static Type make_func_type(Type ret, ParamArray *params, int is_variadic) {
 
 /* Parse a parameter list: (void) means empty, else type declarator pairs.
  * Returns the collected params.  Tolerates a trailing comma. */
-static ParamArray parse_param_list(Parser *p, int *is_variadic) {
+static ParamArray parse_param_list(Parser *p, int *is_variadic, int *is_unproto) {
     if (is_variadic) *is_variadic = 0;
+    if (is_unproto) *is_unproto = 0;
     ParamArray params;
     param_array_init(&params);
     if (peek(p)->kind == TK_KW_VOID
         && p->tokens->data[p->pos + 1].kind == TK_RPAREN) {
         advance(p);  /* consume `void` */
-        return params;  /* empty */
+        return params;  /* empty prototyped */
     }
     if (peek(p)->kind != TK_RPAREN) {
         for (;;) {
@@ -1470,6 +1525,8 @@ static ParamArray parse_param_list(Parser *p, int *is_variadic) {
             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                    "more than %d parameters not supported", MAX_PARAMS);
         }
+    } else if (is_unproto) {
+        *is_unproto = 1;  /* empty `()` — unprototyped */
     }
     return params;
 }
@@ -1624,10 +1681,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
-                outer_t = make_func_type(ret, &params, is_var);
+                outer_t = make_func_type(ret, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -1679,8 +1736,8 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
                 if (p->save_fn_params) {
                     param_array_init(&p->last_fn_params);
@@ -1692,7 +1749,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                     }
                     p->has_last_fn_params = 1;
                 }
-                t = make_func_type(t, &params, is_var);
+                t = make_func_type(t, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -1724,10 +1781,10 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
                 ndims++;
             } else {
                 advance(p);
-                int is_var = 0;
-                ParamArray params = parse_param_list(p, &is_var);
+                int is_var = 0, is_unproto = 0;
+                ParamArray params = parse_param_list(p, &is_var, &is_unproto);
                 expect_kind(p, TK_RPAREN, "')'");
-                t = make_func_type(t, &params, is_var);
+                t = make_func_type(t, &params, is_var, is_unproto);
                 break;
             }
         }
@@ -2223,9 +2280,10 @@ static Expr *parse_unary(Parser *p) {
         return expr_new_int(is_const ? 1 : 0, loc);
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_choose_expr") == 0) {
-        /* __builtin_choose_expr(const_expr, expr1, expr2): if const_expr is a
-         * compile-time constant, return expr1, else expr2.  Unlike the ternary
-         * operator, the unselected branch is discarded at compile time.
+        /* __builtin_choose_expr(const_expr, expr1, expr2): const_expr must be
+         * an integer constant expression.  Nonzero selects expr1, zero selects
+         * expr2.  Unlike the ternary operator, the unselected branch is
+         * discarded at compile time.
          * Use parse_assign (not parse_expr) so commas separate arguments
          * instead of being parsed as the comma operator. */
         advance(p);
@@ -2237,9 +2295,15 @@ static Expr *parse_unary(Parser *p) {
         Expr *else_ = parse_assign(p);
         expect_kind(p, TK_RPAREN, "')'");
         long long v;
-        int is_const = fold_const_int(cond, &v) || (cond->kind == EX_STR) || (cond->kind == EX_FLOAT_LIT);
+        /* fold_const_int also folds float literals (truncated); those are not
+         * integer constant expressions and GCC rejects them here. */
+        if (cond->kind == EX_FLOAT_LIT || cond->kind == EX_STR
+            || !fold_const_int(cond, &v)) {
+            die_at(cond->loc.file, cond->loc.line, cond->loc.col,
+                   "first argument to '__builtin_choose_expr' not a constant");
+        }
         expr_free(cond);
-        if (is_const) {
+        if (v != 0) {
             expr_free(else_);
             return then;
         } else {
@@ -2330,6 +2394,19 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
                        "expected member name after '.'");
             }
             advance(p);
+            /* `pkg.CONST` — fold imported enum constants to integer literals
+             * so they work in array sizes, case labels, and static inits. */
+            if (lhs->kind == EX_VAR && lhs->u.var.pkg == NULL
+                && tu_has_import(p->tu, lhs->u.var.name)
+                && !parser_name_is_bound(p, lhs->u.var.name)) {
+                const EnumConstant *ec =
+                    find_imported_enum_const(p, lhs->u.var.name, mn->text);
+                if (ec) {
+                    expr_free(lhs);
+                    lhs = expr_new_int(ec->value, loc);
+                    continue;
+                }
+            }
             lhs = expr_new_member(lhs, mn->text, loc);
             continue;
         }
@@ -2401,12 +2478,40 @@ static Expr *parse_postfix(Parser *p, Expr *lhs) {
 /* Decode a char-literal token's text (e.g. "'A'" or "'\\n'") to its int value.
  * Caller guarantees text starts and ends with a single quote. */
 /* Classify a TK_FLOAT_LITERAL's suffix into a width: f/F -> float (4),
- * l/L -> long double (16), otherwise double (8).  The numeric value is left
+ * l/L -> long double (16), df/DF -> _Decimal32 (4), dd/DD -> _Decimal64 (8),
+ * dl/DL -> _Decimal128 (16), otherwise double (8).  The numeric value is left
  * in the AST's source text and parsed at IR time (strtold preserves the
  * 80-bit precision a double cannot hold). */
-static void float_literal_width(const char *text, int *out_width) {
+static void float_literal_width(const char *text, int *out_width, int *out_decimal) {
     size_t len = strlen(text);
     *out_width = 8;  /* default: double */
+    if (out_decimal) *out_decimal = 0;
+    while (len > 0) {
+        char last = text[len - 1];
+        if (last == 'i' || last == 'I' || last == 'j' || last == 'J') {
+            len--;
+            continue;
+        }
+        break;
+    }
+    if (len >= 2) {
+        char a = text[len - 2], b = text[len - 1];
+        if ((a == 'd' || a == 'D') && (b == 'f' || b == 'F')) {
+            *out_width = 4;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+        if ((a == 'd' || a == 'D') && (b == 'd' || b == 'D')) {
+            *out_width = 8;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+        if ((a == 'd' || a == 'D') && (b == 'l' || b == 'L')) {
+            *out_width = 16;
+            if (out_decimal) *out_decimal = 1;
+            return;
+        }
+    }
     if (len > 0) {
         char last = text[len - 1];
         if (last == 'f' || last == 'F')
@@ -2742,8 +2847,10 @@ static Expr *parse_primary(Parser *p) {
             return parse_postfix(p, e);
         }
         int width = 8;
-        float_literal_width(t->text, &width); /* classify width (4/8/16) */
+        int is_dec = 0;
+        float_literal_width(t->text, &width, &is_dec);
         Expr *e = expr_new_float_lit(t->text, width, t->loc);
+        if (is_dec) e->type.is_decimal = 1;
         advance(p);
         return e;  /* float literal is a primary — no postfix needed */
     }
@@ -3230,7 +3337,8 @@ static int is_function_declaration_lookahead(Parser *p) {
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "__int128") == 0
                        || strcmp(peek(p)->text, "__int128_t") == 0
-                       || strcmp(peek(p)->text, "__uint128_t") == 0)) {
+                       || strcmp(peek(p)->text, "__uint128_t") == 0
+                       || decimal_float_width(peek(p)->text))) {
             advance(p);
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "typeof") == 0
@@ -3339,7 +3447,8 @@ static int is_function_definition_lookahead(Parser *p) {
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "__int128") == 0
                        || strcmp(peek(p)->text, "__int128_t") == 0
-                       || strcmp(peek(p)->text, "__uint128_t") == 0)) {
+                       || strcmp(peek(p)->text, "__uint128_t") == 0
+                       || decimal_float_width(peek(p)->text))) {
             advance(p);
         } else if (tk == TK_IDENT
                    && (strcmp(peek(p)->text, "typeof") == 0
@@ -3871,7 +3980,9 @@ static Stmt parse_stmt(Parser *p) {
         long long value = 0;
         long long high_value = 0;
         int is_range = 0;
-        if (cv->kind == TK_IDENT) {
+        if (cv->kind == TK_IDENT
+            && p->pos + 1 < p->tokens->len
+            && p->tokens->data[p->pos + 1].kind != TK_DOT) {
             value = case_constant_value(p, cv->text);
             advance(p);
         } else {
@@ -3886,7 +3997,9 @@ static Stmt parse_stmt(Parser *p) {
         if (peek(p)->kind == TK_ELLIPSIS) {
             advance(p); /* consume "..." */
             const Token *hv = peek(p);
-            if (hv->kind == TK_IDENT) {
+            if (hv->kind == TK_IDENT
+                && p->pos + 1 < p->tokens->len
+                && p->tokens->data[p->pos + 1].kind != TK_DOT) {
                 high_value = case_constant_value(p, hv->text);
                 advance(p);
             } else {

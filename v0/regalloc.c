@@ -122,8 +122,11 @@ struct IRInst {
     int64_t float_imm;
     int is_float;
     int force_stack;
+    int align16;
+    int x87_pair;
     unsigned char *call_arg_on_stack;
     int alloca_bytes;
+    int is_volatile;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -184,6 +187,7 @@ struct IRFunction {
     int ret_reg_n;
     int ret_reg_cls[2];
     int ret_is_bool;
+    int ret_is_complex_ld;
     int is_variadic;
     int is_static;
     int has_dyn_alloca;
@@ -375,16 +379,19 @@ struct Type {
     Type *func_params;
     int func_nparams;
     int func_is_variadic;
+    int func_is_unprototyped;
     int enum_id;
     int bitfield_width;
     int is_vector;
+    unsigned is_decimal : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -396,25 +403,42 @@ static inline Type type_make_float(long long width) {
     Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+}
+static inline Type type_make_decimal(long long width) {
+    Type t = type_make_float(width);
+    t.is_decimal = 1;
+    return t;
+}
+static inline int type_is_decimal(Type t) {
+    return t.kind == TY_FLOAT && t.is_decimal && !t.is_vector;
+}
+static inline int type_is_decimal128(Type t) {
+    return type_is_decimal(t) && t.width == 16;
 }
 static inline Type type_make_void(void) {
     Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
-    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; return t;
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
 long long type_size(Type t);
 long long type_align(Type t);
+int type_is_complex_ldouble(Type t);
+int type_is_empty_struct(Type t);
+int type_needs_stack_align16(Type t);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -1135,7 +1159,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
             if (inst->op == IR_CALL) {
-                for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], over; _w && ((over = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
+                for (int over = 0; over < (&live)->nv; over++) if (bs_test((&live), over)) {
                     if ((int)over != inst->dst && (int)over != inst->b &&
                         value_in_class(fn, (int)over, float_class))
                         forbid_mask[over] |= cls->caller_saved;
@@ -1175,7 +1199,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             inst->op == IR_DBG_VALUE) continue;
             if (inst->dst >= 0 && inst->dst < nv &&
                 value_in_class(fn, inst->dst, float_class)) {
-                for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], other; _w && ((other = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
+                for (int other = 0; other < (&live)->nv; other++) if (bs_test((&live), other)) {
                     if (!value_in_class(fn, (int)other, float_class))
                         continue;
                     if ((int)other != inst->dst) {
@@ -1187,7 +1211,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             }
             if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class)) {
-                for (int _wi = 0; _wi < (&live)->num_words; _wi++) for (uint64_t _w = (&live)->w[_wi], other; _w && ((other = _wi * 64 + __fakecc_ctzll(_w)), 1); _w &= _w - 1) {
+                for (int other = 0; other < (&live)->nv; other++) if (bs_test((&live), other)) {
                     if (!value_in_class(fn, (int)other, float_class))
                         continue;
                     if ((int)other != inst->b)

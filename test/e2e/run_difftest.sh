@@ -18,10 +18,15 @@ if [ ! -x "$FAKECC" ]; then
 fi
 # Collect every .c case except the gdb/debug suite (which uses gdb
 # breakpoints, not exit codes) and the expect_error cases (rejected
-# by design, gcc would accept them).
+# by design, gcc would accept them).  Also skip files that import a
+# package other than `runtime`: gcc has no package system, and stripping
+# `import flags;` still leaves `flags.CONST` which it cannot parse.
 files=()
 for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
-    if grep -qE '^//[[:space:]]*(expect_error|skip_difftest)' "$f"; then
+    if grep -qE '^//[[:space:]]*expect_error' "$f"; then
+        continue
+    fi
+    if grep '^import[[:space:]]' "$f" | grep -vqE '^import[[:space:]]+runtime;'; then
         continue
     fi
     files+=("$f")

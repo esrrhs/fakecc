@@ -46,7 +46,8 @@ struct Package {
     PkgGlobalExport *globals;
     size_t nglobals;
     /* Aggregated type registries: clones of non-private typedefs/structs/enums
-     * from every file. Used for qualified type names (runtime.FILE) and for
+     * from every file. Used for qualified type names (runtime.FILE), qualified
+     * enum constants (`pkg.TE_FUNCTION0`, including anonymous enums), and
      * same-package unqualified fallback. */
     TypedefRegistry typedefs;
     StructRegistry structs;

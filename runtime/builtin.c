@@ -14,8 +14,8 @@ struct FILE {
     int err;
     int buf_len;
     int buf_cap;
-    int has_ungot;
-    int ungot;
+    int nunget;
+    int ungot[16];
     char buf[1024];
 };
 typedef struct FILE FILE;

@@ -139,7 +139,7 @@ const char *pkg_suggest_export(const PkgContext *ctx, const char *name) {
     for (size_t i = 0; i < ctx->npkgs; i++) {
         Package *p = ctx->pkgs[i];
         if (pkg_find_func(p, name) || pkg_find_global(p, name)
-            || pkg_find_typedef(p, name))
+            || pkg_find_typedef(p, name) || pkg_find_enum_const(p, name))
             return p->name;
     }
     return NULL;
@@ -405,10 +405,24 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         if (!struct_registry_find(&pkg->structs, sd->tag))
             pkg_clone_struct_into(&pkg->structs, sd);
     }
+    /* Tagged enums keep their tag so `enum pkg.Tag` / `pkg_find_enum` work.
+     * Anonymous enums (`enum { A = 1 }`, stored as `__anon_N`) still export
+     * their constants — `pkg.A` looks them up by name, not tag.  Two files
+     * both using `__anon_0` must not drop the second file's constants. */
+    EnumDef *anon_bucket = enum_registry_find(&pkg->enums, "__pkg_anon");
     for (size_t i = 0; i < tu->enums.len; i++) {
         EnumDef *ed = &tu->enums.data[i];
-        if (!ed->tag) continue;
-        if (ed->tag && strncmp(ed->tag, "__anon_", 7) == 0) continue;
+        int is_anon = !ed->tag || strncmp(ed->tag, "__anon_", 7) == 0;
+        if (is_anon) {
+            if (!anon_bucket)
+                anon_bucket = enum_registry_add(&pkg->enums, "__pkg_anon", ed->loc);
+            for (int c = 0; c < ed->num_constants; c++) {
+                if (!pkg_find_enum_const(pkg, ed->constants[c].name))
+                    enum_def_push_constant(anon_bucket, ed->constants[c].name, 1,
+                                           ed->constants[c].value, ed->loc);
+            }
+            continue;
+        }
         if (!enum_registry_find(&pkg->enums, ed->tag)) {
             EnumDef *ne = enum_registry_add(&pkg->enums, ed->tag, ed->loc);
             ne->has_underlying_type = ed->has_underlying_type;
