@@ -119,7 +119,8 @@ int scalar_constfold(IRFunction *fn) {
         case IR_BOR:
         case IR_BXOR:
         case IR_SHL:
-        case IR_SHR: {
+        case IR_SHR:
+        case IR_ROL: {
             int lf, rf;
             int64_t lv, rv;
             const_cache_lookup(&cc, inst->a, &lf, &lv);
@@ -135,7 +136,7 @@ int scalar_constfold(IRFunction *fn) {
             int64_t ls = trunc_to_width(lv, w, uns), rs = trunc_to_width(rv, w, uns);
             /* Avoid UB in constant folding: shift by negative or >= width,
              * and division/modulo by zero. */
-            if (inst->op == IR_SHL || inst->op == IR_SHR) {
+            if (inst->op == IR_SHL || inst->op == IR_SHR || inst->op == IR_ROL) {
                 if (rs < 0 || rs >= w * 8) continue;
             }
             int64_t result;
@@ -158,6 +159,12 @@ int scalar_constfold(IRFunction *fn) {
             case IR_BXOR: result = (int64_t)(lu ^ ru); break;
             case IR_SHL:  result = (int64_t)(lu << rs); break;
             case IR_SHR:  result = uns ? (int64_t)(lu >> rs) : (ls >> rs); break;
+            case IR_ROL: {
+                unsigned bits = (unsigned)(w * 8);
+                unsigned sh = bits ? ((unsigned)rs % bits) : 0;
+                result = sh ? (int64_t)((lu << sh) | (lu >> (bits - sh))) : (int64_t)lu;
+                break;
+            }
             default: continue;
             }
             inst->op = IR_CONST;

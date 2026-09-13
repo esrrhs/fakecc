@@ -217,3 +217,12 @@ test/e2e/
 ```
 
 这些用例同时被单文件 e2e 套件当普通用例跑（它们都有 `// expect:`），并且每个都额外比对加 `-g` 与不加 `-g` 的 `.text` 是否逐字节相同。
+
+## Benchmark
+
+独立目录 `bench/`，不进 CTest，也不挂 CI 功能回归。同一份程序分别用 fakecc 和 gcc 编译，比较**生成二进制**的运行时间。
+
+```bash
+bash bench/run_bench.sh ./build/fakecc
+bash v0/stage2_check.sh && bash bench/run_bench.sh v0/fakecc-1
+```
