@@ -29,6 +29,7 @@ typedef enum {
     IR_BNOT,        /* dst = ~a    (bitwise NOT) */
     IR_SHL,         /* dst = a << b (left shift) */
     IR_SHR,         /* dst = a >> b (arithmetic if signed, logical if unsigned) */
+    IR_ROL,         /* dst = rotate_left(a, b); width is the rotate size in bytes */
     IR_EQ,          /* dst = (a == b) ? 1 : 0 */
     IR_NE,          /* dst = (a != b) ? 1 : 0 */
     IR_FADD,        /* dst = a + b (float; width 4=float 8=double) */

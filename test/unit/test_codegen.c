@@ -82,9 +82,10 @@ static void test_prologue_present(void) {
     T_ASSERT((unsigned char)em.text.data[1] == 0x48);
     T_ASSERT((unsigned char)em.text.data[2] == 0x89);
     T_ASSERT((unsigned char)em.text.data[3] == 0xe5);
-    /* sub $N, %rsp = 48 81 EC ... (at least 7 bytes for prologue+sub) */
+    /* sub $N, %rsp = 48 83 EC ib (imm8) or 48 81 EC id (imm32) */
     T_ASSERT((unsigned char)em.text.data[4] == 0x48);
-    T_ASSERT((unsigned char)em.text.data[5] == 0x81);
+    T_ASSERT((unsigned char)em.text.data[5] == 0x83
+             || (unsigned char)em.text.data[5] == 0x81);
     T_ASSERT((unsigned char)em.text.data[6] == 0xEC);
     emit_module_free(&em);
 }
