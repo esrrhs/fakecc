@@ -4,6 +4,7 @@
 #include "fakecc/emit.h"
 #include "fakecc/ir.h"
 #include "fakecc/lexer.h"
+#include "fakecc/opt.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
 #include "fakecc/token.h"
@@ -36,6 +37,33 @@ static EmitModule compile_to_code(const char *src) {
     IRModule ir;
     ir_module_init(&ir);
     ir_generate(&tu, &ir, 0);
+
+    EmitModule em;
+    emit_module_init(&em);
+    codegen(&ir, &em, 0);
+
+    ir_module_free(&ir);
+    token_array_free(&arr);
+    tu_free(&tu);
+
+    return em;
+}
+
+/* Full -O0 pipeline: pin locals, RA, then isel. */
+static EmitModule compile_o0(const char *src) {
+    TokenArray arr;
+    token_array_init(&arr);
+    lex(src, "test.c", &arr);
+
+    TranslationUnit tu;
+    tu_init(&tu);
+    parse(&arr, &tu);
+    sema_check(&tu, 1);
+
+    IRModule ir;
+    ir_module_init(&ir);
+    ir_generate(&tu, &ir, 1);
+    opt(&ir, 0, 0);
 
     EmitModule em;
     emit_module_init(&em);
@@ -148,6 +176,39 @@ static void test_bitfield_codegen(void) {
     emit_module_free(&em);
 }
 
+static int text_has_sib(const EmitModule *em, unsigned char sib) {
+    /* ModRM.rm == 4 means a SIB byte follows. */
+    for (size_t i = 1; i < em->text.len; i++) {
+        unsigned char modrm = (unsigned char)em->text.data[i - 1];
+        if ((modrm & 7) == 4 && (unsigned char)em->text.data[i] == sib)
+            return 1;
+    }
+    return 0;
+}
+
+/* g[i] at -O0 should be movl (%rax,%rcx), not lea+add+indirect. */
+static void test_sib_global_index(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "int g[8];"
+        "int idx(int i) { return g[i]; }"
+        "int main() { return idx(3); }");
+    /* [rax+rcx] SIB is 0x08; swapped [rcx+rax] is 0x01. */
+    T_ASSERT(text_has_sib(&em, 0x08) || text_has_sib(&em, 0x01));
+    emit_module_free(&em);
+}
+
+/* a[i] of a pinned local should be [rbp+rcx+off] (SIB base=rbp index=rcx). */
+static void test_sib_local_index(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "int f(int i) { int a[8]; a[0] = 1; a[i] = 2; return a[i]; }"
+        "int main() { return f(1); }");
+    /* SIB index=rcx (1), base=rbp (5) → 0x0D. */
+    T_ASSERT(text_has_sib(&em, 0x0D));
+    emit_module_free(&em);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -160,5 +221,7 @@ int main(void) {
     test_if_codegen_has_main();
     test_multi_function_symbols();
     test_bitfield_codegen();
+    test_sib_global_index();
+    test_sib_local_index();
     return t_finalize();
 }

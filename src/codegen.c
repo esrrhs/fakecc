@@ -1040,6 +1040,77 @@ static void emit_load_via_ptr(Buffer *b, int dst, int ptr, int width, int is_uns
     }
 }
 
+/* SIB [base+index] (+ optional disp).  r13/rbp (rm=5) always take a disp. */
+static void emit_modrm_sib_disp(Buffer *b, int reg_field, int base, int index, int off) {
+    int rm_b = base & 7;
+    int mod;
+    if (off == 0 && rm_b != 5) mod = 0;
+    else if (off >= -128 && off <= 127) mod = 1;
+    else mod = 2;
+    emit_modrm(b, mod, reg_field, 4);
+    emit_byte(b, (uint8_t)(((index & 7) << 3) | rm_b));
+    if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+    else if (mod == 2) emit_int32(b, off);
+}
+
+static void emit_load_sib(Buffer *b, int dst, int base, int index, int off,
+                          int width, int is_unsigned) {
+    switch (width) {
+    case 1:
+        emit_rex_if(b, 1, dst, index, base);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
+        emit_modrm_sib_disp(b, dst, base, index, off);
+        break;
+    case 2:
+        emit_rex_if(b, 1, dst, index, base);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
+        emit_modrm_sib_disp(b, dst, base, index, off);
+        break;
+    case 4:
+        emit_rex_if(b, 0, dst, index, base);
+        emit_byte(b, 0x8B);
+        emit_modrm_sib_disp(b, dst, base, index, off);
+        break;
+    case 8:
+    default:
+        emit_rex_if(b, 1, dst, index, base);
+        emit_byte(b, 0x8B);
+        emit_modrm_sib_disp(b, dst, base, index, off);
+        break;
+    }
+}
+
+static void emit_store_sib(Buffer *b, int base, int index, int off, int src, int width) {
+    switch (width) {
+    case 1: {
+        uint8_t rex = 0x40 | ((src & 8) >> 1) | ((index & 8) >> 2) | ((base & 8) >> 3);
+        emit_byte(b, rex);
+        emit_byte(b, 0x88);
+        emit_modrm_sib_disp(b, src, base, index, off);
+        break;
+    }
+    case 2:
+        emit_byte(b, 0x66);
+        emit_rex_if(b, 0, src, index, base);
+        emit_byte(b, 0x89);
+        emit_modrm_sib_disp(b, src, base, index, off);
+        break;
+    case 4:
+        emit_rex_if(b, 0, src, index, base);
+        emit_byte(b, 0x89);
+        emit_modrm_sib_disp(b, src, base, index, off);
+        break;
+    case 8:
+    default:
+        emit_rex_if(b, 1, src, index, base);
+        emit_byte(b, 0x89);
+        emit_modrm_sib_disp(b, src, base, index, off);
+        break;
+    }
+}
+
 /* movsx reg64, reg_small — sign-extend a register's low `src_w` bytes. */
 static void emit_movsx_rr(Buffer *b, int dst, int src, int src_w) {
     if (src_w == 4) {
@@ -2276,6 +2347,75 @@ static int imm_fits_i32(int64_t imm) {
     return imm == (int64_t)(int32_t)imm;
 }
 
+static int is_gaddr_def(const IRFunction *fn, const int *def, IRValue v) {
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    int op = fn->insts.data[def[v]].op;
+    return op == IR_GADDR || op == IR_GADDR_TLS;
+}
+
+/* True if v is a non-address integer offset: peel COPY/SEXT/ZEXT, then
+ * reject CONST (those GEPs stay as add+const) and address-producing ops. */
+static int isel_ok_index(const IRFunction *fn, const int *def, IRValue v) {
+    int depth = 0;
+    while (v >= 0 && v < fn->next_value_id && def[v] >= 0 && depth++ < 8) {
+        int op = fn->insts.data[def[v]].op;
+        if (op == IR_COPY || op == IR_SEXT || op == IR_ZEXT) {
+            v = fn->insts.data[def[v]].a;
+            continue;
+        }
+        return op != IR_CONST && op != IR_ADDR && op != IR_GADDR
+            && op != IR_GADDR_TLS && op != IR_FADDR;
+    }
+    return 0;
+}
+
+/* ADD of GADDR and an integer offset → [base+index]. */
+static int fold_sib_add(const IRFunction *fn, const int *def, IRValue v,
+                        IRValue *base, IRValue *index) {
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op != IR_ADD) return 0;
+    int64_t imm;
+    if (ssa_const_imm(fn, def, d->a, &imm) || ssa_const_imm(fn, def, d->b, &imm))
+        return 0;
+    if (is_gaddr_def(fn, def, d->a) && isel_ok_index(fn, def, d->b)) {
+        *base = d->a;
+        *index = d->b;
+        return 1;
+    }
+    if (is_gaddr_def(fn, def, d->b) && isel_ok_index(fn, def, d->a)) {
+        *base = d->b;
+        *index = d->a;
+        return 1;
+    }
+    return 0;
+}
+
+/* ADD of a pinned alloca address and an integer offset → [rbp+off+index]. */
+static int fold_rbp_index(const IRFunction *fn, const int *def, const int *alloca_off,
+                          IRValue v, int *off, IRValue *index) {
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op != IR_ADD) return 0;
+    int64_t imm;
+    int base_off;
+    if (!ssa_const_imm(fn, def, d->b, &imm)
+        && isel_ok_index(fn, def, d->b)
+        && fold_ptr_off(fn, def, alloca_off, d->a, &base_off, 0)) {
+        *off = base_off;
+        *index = d->b;
+        return 1;
+    }
+    if (!ssa_const_imm(fn, def, d->a, &imm)
+        && isel_ok_index(fn, def, d->a)
+        && fold_ptr_off(fn, def, alloca_off, d->b, &base_off, 0)) {
+        *off = base_off;
+        *index = d->a;
+        return 1;
+    }
+    return 0;
+}
+
 /* Operand of inst can be encoded as an immediate (gcc -O0 does this). */
 static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
                          const int *def) {
@@ -2337,13 +2477,49 @@ static char *codegen_needed_regs(const IRFunction *fn, const int *def,
         const IRInst *inst = &fn->insts.data[i];
         int dummy;
         if (inst->op == IR_LOAD_PTR) {
-            if (!fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
-                mark_ssa_needed(needed, nv, inst->a);
+            IRValue bv, iv;
+            int off;
+            if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
+                continue;
+            if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
+                && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                    || inst->width == 8)) {
+                if (fold_rbp_index(fn, def, alloca_off, inst->a, &off, &iv)) {
+                    mark_ssa_needed(needed, nv, iv);
+                    continue;
+                }
+                if (fold_sib_add(fn, def, inst->a, &bv, &iv)) {
+                    mark_ssa_needed(needed, nv, bv);
+                    mark_ssa_needed(needed, nv, iv);
+                    continue;
+                }
+            }
+            mark_ssa_needed(needed, nv, inst->a);
             continue;
         }
         if (inst->op == IR_STORE_PTR) {
-            if (!fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
-                mark_ssa_needed(needed, nv, inst->a);
+            IRValue bv, iv;
+            int off;
+            if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0)) {
+                mark_ssa_needed(needed, nv, inst->b);
+                continue;
+            }
+            if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
+                && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                    || inst->width == 8)) {
+                if (fold_rbp_index(fn, def, alloca_off, inst->a, &off, &iv)) {
+                    mark_ssa_needed(needed, nv, iv);
+                    mark_ssa_needed(needed, nv, inst->b);
+                    continue;
+                }
+                if (fold_sib_add(fn, def, inst->a, &bv, &iv)) {
+                    mark_ssa_needed(needed, nv, bv);
+                    mark_ssa_needed(needed, nv, iv);
+                    mark_ssa_needed(needed, nv, inst->b);
+                    continue;
+                }
+            }
+            mark_ssa_needed(needed, nv, inst->a);
             mark_ssa_needed(needed, nv, inst->b);
             continue;
         }
@@ -2890,6 +3066,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (skip_body[j]) continue;
             {
                 int fold_off = 0;
+                IRValue dummy_b = -1, dummy_idx = -1;
                 /* Skip pure values that never need a register: folded
                  * [rbp+off] addresses and immediates encoded in ALU.  Do
                  * not skip COPY: mem2reg pointer selects are copies. */
@@ -2900,7 +3077,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (inst->op == IR_CONST && !inst->is_float && !value_is_ld(fn, inst->dst))
                         continue;
                     if (inst->op == IR_ADD
-                        && fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0))
+                        && (fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0)
+                            || fold_rbp_index(fn, ssa_def, alloca_off, inst->dst, &fold_off, &dummy_idx)
+                            || fold_sib_add(fn, ssa_def, inst->dst, &dummy_b, &dummy_idx)))
                         continue;
                 }
             }
@@ -3431,20 +3610,29 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 /* dst = *ptr.  ptr = inst->a. */
                 int ptr_off = 0;
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
-                if (!folded)
+                IRValue sib_base = -1, sib_idx = -1, rbp_idx = -1;
+                int rbp_i_off = 0;
+                int use_rbp_i = 0, use_sib = 0;
+                if (!folded && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
+                    && inst->a >= 0 && inst->a < fn->next_value_id && !needed[inst->a]
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    use_rbp_i = fold_rbp_index(fn, ssa_def, alloca_off, inst->a,
+                                               &rbp_i_off, &rbp_idx);
+                    if (!use_rbp_i)
+                        use_sib = fold_sib_add(fn, ssa_def, inst->a, &sib_base, &sib_idx);
+                }
+                if (!folded && !use_rbp_i && !use_sib)
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->dst)) {
-                    /* long double load: fldt [ptr] → st0; fstpt to dst's slot.
-                     * ld values are slot-backed (no XMM/GP register). */
                     if (folded)
                         emit_x87_fldt_disp(&out->text, REG_RBP, ptr_off);
                     else {
                         emit_byte(&out->text, 0xDB);
-                        emit_modrm(&out->text, 0, 5, REG_RCX & 7); /* fldt [rcx] */
+                        emit_modrm(&out->text, 0, 5, REG_RCX & 7);
                     }
                     emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (value_is_float_class(fn, inst->dst)) {
-                    /* Float load: movsd/movss xmm, [ptr]. */
                     int is_float = (inst->width == 4);
                     int dst_xmm = dr >= 0 ? dr : XMM_SCRATCH0;
                     if (folded)
@@ -3459,7 +3647,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (folded)
                         emit_load_disp(&out->text, dst_gp, REG_RBP, ptr_off,
                                        inst->width, inst->is_unsigned);
-                    else
+                    else if (use_rbp_i) {
+                        ensure_reg(&out->text, rbp_idx, REG_RCX, ra);
+                        emit_load_sib(&out->text, dst_gp, REG_RBP, REG_RCX, rbp_i_off,
+                                      inst->width, inst->is_unsigned);
+                    } else if (use_sib) {
+                        ensure_reg(&out->text, sib_base, REG_RAX, ra);
+                        ensure_reg(&out->text, sib_idx, REG_RCX, ra);
+                        emit_load_sib(&out->text, dst_gp, REG_RAX, REG_RCX, 0,
+                                      inst->width, inst->is_unsigned);
+                    } else
                         emit_load_via_ptr(&out->text, dst_gp, REG_RCX,
                                           inst->width, inst->is_unsigned);
                     if (dr < 0)
@@ -3469,25 +3666,32 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_STORE_PTR: {
-                /* *ptr = val.  ptr = inst->a, val = inst->b. */
                 int ptr_off = 0;
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
-                if (!folded)
+                IRValue sib_base = -1, sib_idx = -1, rbp_idx = -1;
+                int rbp_i_off = 0;
+                int use_rbp_i = 0, use_sib = 0;
+                if (!folded && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
+                    && inst->a >= 0 && inst->a < fn->next_value_id && !needed[inst->a]
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    use_rbp_i = fold_rbp_index(fn, ssa_def, alloca_off, inst->a,
+                                               &rbp_i_off, &rbp_idx);
+                    if (!use_rbp_i)
+                        use_sib = fold_sib_add(fn, ssa_def, inst->a, &sib_base, &sib_idx);
+                }
+                if (!folded && !use_rbp_i && !use_sib)
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->b)) {
-                    /* long double store: fldt val's slot → st0; fstpt [ptr].
-                     * emit_ld_load clobbers RCX, so reload the pointer into it
-                     * after the value is in st0. */
-                    emit_ld_load(&out->text, inst->b, ld_off); /* clobbers RCX */
+                    emit_ld_load(&out->text, inst->b, ld_off);
                     if (folded)
                         emit_x87_fstpt_disp(&out->text, REG_RBP, ptr_off);
                     else {
-                        ensure_reg(&out->text, inst->a, REG_RCX, ra); /* ptr → RCX */
+                        ensure_reg(&out->text, inst->a, REG_RCX, ra);
                         emit_byte(&out->text, 0xDB);
-                        emit_modrm(&out->text, 0, 7, REG_RCX & 7); /* fstpt [rcx] */
+                        emit_modrm(&out->text, 0, 7, REG_RCX & 7);
                     }
                 } else if (value_is_float_class(fn, inst->b)) {
-                    /* Float store: movsd/movss [ptr], xmm. */
                     int is_float = (inst->width == 4);
                     ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm,
                                    gp_spill_area);
@@ -3497,6 +3701,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     else
                         emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0,
                                                is_float);
+                } else if (use_rbp_i) {
+                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    ensure_reg(&out->text, rbp_idx, REG_RCX, ra);
+                    emit_store_sib(&out->text, REG_RBP, REG_RCX, rbp_i_off,
+                                   REG_RAX, inst->width);
+                } else if (use_sib) {
+                    ensure_reg(&out->text, inst->b, REG_RDX, ra);
+                    ensure_reg(&out->text, sib_base, REG_RAX, ra);
+                    ensure_reg(&out->text, sib_idx, REG_RCX, ra);
+                    emit_store_sib(&out->text, REG_RAX, REG_RCX, 0, REG_RDX,
+                                   inst->width);
                 } else {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     if (folded)
