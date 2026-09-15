@@ -121,9 +121,10 @@ FakeCC 源码树自带纯 C / FakeCC 实现的独立 runtime（位于 `runtime/`
 | `printf.c` | `printf`, `fprintf`, `sprintf`, `snprintf`, `vprintf`, `vfprintf`, `vsnprintf` |
 | `stdlib.c` | `exit`, `abort`, `strtol`, `strtoul`, `qsort`, `getenv`, `abs` |
 
-- **与宿主系统互操作**：
-  - 使用 `-nostdlib` 可禁用内置 runtime；
-  - 搭配 `-lc` / `-lm` 可与系统 glibc / libm 等标准共享库无缝链接互操作。
+- **与宿主系统标准库及 GCC 编译产物互操作**：
+  - **直接链接 GCC 编译的目标文件（`.o`）**：FakeCC 内置链接器支持直接解析并链接 GCC/Clang 生成的标准 ELF 可重定位目标文件（`.o`），自动完成代码段/数据段符号重定位，完全遵循 SysV AMD64 ABI（结构体传参、返回值、对齐与调用约定）。
+  - **由 GCC 链接 FakeCC 编译的目标文件**：使用 `fakecc -c file.c -o file.o` 生成标准 ELF64 目标文件，可直接被 `gcc` 或 `ld` 链接使用。
+  - **共享库链接**：支持 `-nostdlib`、`-LDIR`、`-lLIB` 与 `-l:SONAME`，可链接系统 Glibc、Libm 或其他自定义 `.so` 动态库。
 
 ---
 
@@ -170,6 +171,14 @@ cmake --build build --parallel
 
 # 可选：不用内置 runtime，改链接系统 libc
 ./build/fakecc hello.c -nostdlib -lc -o /tmp/hello_libc
+
+# 与 GCC 混合编译：FakeCC 直接链接 GCC 生成的 .o 目标文件
+gcc -c -O2 helper.c -o /tmp/helper.o
+./build/fakecc main.c /tmp/helper.o -o /tmp/mixed_app
+
+# 反向兼容：GCC 直接链接 FakeCC 编译的 .o 目标文件 (-c)
+./build/fakecc -c module.c -o /tmp/module.o
+gcc main.c /tmp/module.o -o /tmp/mixed_app
 ```
 
 ---
