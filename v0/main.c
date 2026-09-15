@@ -192,7 +192,7 @@ int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
-               int want_debug);
+               int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
 typedef int IRValue;
 enum IROpcode {
@@ -209,6 +209,7 @@ enum IROpcode {
     IR_BNOT,
     IR_SHL,
     IR_SHR,
+    IR_ROL,
     IR_EQ,
     IR_NE,
     IR_FADD,
@@ -1106,9 +1107,10 @@ static void module_free(EmitModule *m) {
 }
 static void usage(void) {
     runtime.fprintf(runtime.stderr,
-            "usage: fakecc [-c] [-g] [-O0|-O1] [-nostdlib] [-nodefaultlibs]\n"
+            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
+            "  -shared         produce a shared object (.so) library\n"
             "  -g              emit DWARF debug info (line numbers, variables);\n"
             "                  independent of -O, never changes generated code\n"
             "  -O0             keep locals in memory (skip SSA promotion)\n"
@@ -1278,6 +1280,7 @@ static void add_pkg_env_paths(PkgContext *ctx) {
 }
 int main(int argc, char **argv) {
     int compile_only = 0;
+    int is_shared = 0;
     int nodefaultlibs = 0;
     int nostdlib = 0;
     int want_debug = 0;
@@ -1292,6 +1295,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (runtime.strcmp(argv[i], "-c") == 0) {
             compile_only = 1;
+        } else if (runtime.strcmp(argv[i], "-shared") == 0) {
+            is_shared = 1;
         } else if (runtime.strcmp(argv[i], "-nodefaultlibs") == 0) {
             nodefaultlibs = 1;
         } else if (runtime.strcmp(argv[i], "-finstrument-functions") == 0) {
@@ -1383,6 +1388,9 @@ int main(int argc, char **argv) {
         pkg_ctx_free(&pkg);
         return 0;
     }
+    if (is_shared && !nostdlib) {
+        nostdlib = 1;
+    }
     require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
     int nrt = 0;
     if (!nostdlib) {
@@ -1470,7 +1478,8 @@ int main(int argc, char **argv) {
     }
     emit_link(mod_ptrs, (size_t)nmods, output_path,
               (const char **)needed, (size_t)num_needed, nodefaultlibs,
-              (const char **)lib_paths, (size_t)num_lib_paths, want_debug);
+              (const char **)lib_paths, (size_t)num_lib_paths, want_debug,
+              is_shared);
     for (int i = 0; i < nmods; i++) module_free(&mods[i]);
     runtime.free(mod_ptrs);
     runtime.free(mods);

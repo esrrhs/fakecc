@@ -124,7 +124,7 @@ FakeCC 源码树自带纯 C / FakeCC 实现的独立 runtime（位于 `runtime/`
 - **与宿主系统标准库及 GCC 编译产物互操作**：
   - **直接链接 GCC 编译的目标文件（`.o`）**：FakeCC 内置链接器支持直接解析并链接 GCC/Clang 生成的标准 ELF 可重定位目标文件（`.o`），自动完成代码段/数据段符号重定位，完全遵循 SysV AMD64 ABI（结构体传参、返回值、对齐与调用约定）。
   - **由 GCC 链接 FakeCC 编译的目标文件**：使用 `fakecc -c file.c -o file.o` 生成标准 ELF64 目标文件，可直接被 `gcc` 或 `ld` 链接使用。
-  - **共享库链接**：支持 `-nostdlib`、`-LDIR`、`-lLIB` 与 `-l:SONAME`，可链接系统 Glibc、Libm 或其他自定义 `.so` 动态库。
+  - **共享库**：FakeCC 既能 *生成* 共享库（`fakecc -shared … -o libfoo.so`），也能 *链接* 共享库（`-LDIR -lLIB`、`-l:SONAME` 或直接传入 `.so` 路径）。互操作覆盖 fakecc↔fakecc、gcc←fakecc `.so`、以及 fakecc←gcc `.so`。
 
 ---
 
@@ -180,11 +180,16 @@ gcc -c -O2 helper.c -o /tmp/helper.o
 ./build/fakecc -c module.c -o /tmp/module.o
 gcc main.c /tmp/module.o -o /tmp/mixed_app
 
+# FakeCC 生成共享库，再分别由 FakeCC / GCC 加载：
+./build/fakecc -shared math.c -o /tmp/libmath.so
+./build/fakecc app.c -L/tmp -lmath -o /tmp/app_fcc
+gcc app.c -L/tmp -lmath -Wl,-rpath,/tmp -o /tmp/app_gcc
+
 # 链接 GCC 编译的动态共享库 (.so)：
 # 支持 -LDIR、-lNAME、-l:SONAME 以及直接传入 /path/to/lib.so 路径（自动生成 DT_NEEDED 与 DT_RUNPATH）
-gcc -shared -fPIC -o /tmp/libmath.so math.c
-./build/fakecc app.c -L/tmp -lmath -o /tmp/app_with_so
-./build/fakecc app.c /tmp/libmath.so -o /tmp/app_with_so
+gcc -shared -fPIC -o /tmp/libmath_gcc.so math.c
+./build/fakecc app.c -L/tmp -lmath_gcc -o /tmp/app_with_so
+./build/fakecc app.c /tmp/libmath_gcc.so -o /tmp/app_with_so
 ```
 
 ---

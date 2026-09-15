@@ -2042,6 +2042,16 @@ int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long 
         *hi = (e->type.width == 16) ? e->int_hi : ((e->u.int_val < 0) ? ~0ULL : 0ULL);
         return 1;
     }
+    if (e->kind == EX_VAR && runtime.strcmp(e->u.var.name, "__CHAR_BIT__") == 0) {
+        *lo = 8;
+        *hi = 0;
+        return 1;
+    }
+    if (e->kind == EX_VAR && runtime.strcmp(e->u.var.name, "__INT_MAX__") == 0) {
+        *lo = 0x7fffffff;
+        *hi = 0;
+        return 1;
+    }
     if (e->kind == EX_CAST) {
         Type t = e->u.cast.target;
 unsigned long long vlo;
@@ -2080,6 +2090,7 @@ unsigned long long vhi;
         case UOP_NEG: *lo = 0ULL - vlo; *hi = 0ULL - vhi - (vlo != 0ULL ? 1ULL : 0ULL); return 1;
         case UOP_POS: *lo = vlo; *hi = vhi; return 1;
         case UOP_BITNOT: *lo = ~vlo; *hi = ~vhi; return 1;
+        case UOP_NOT: *lo = (vlo == 0ULL && vhi == 0ULL) ? 1ULL : 0ULL; *hi = 0ULL; return 1;
         default: return 0;
         }
     }
@@ -2103,6 +2114,7 @@ unsigned long long rhi;
         }
         case BOP_SHL: {
             unsigned long long n = rlo;
+            if (n == 0) { *lo = llo; *hi = lhi; return 1; }
             if (n >= 128) { *lo = 0; *hi = 0; return 1; }
             if (n >= 64) { *lo = 0; *hi = llo << (n - 64); return 1; }
             *lo = llo << n;

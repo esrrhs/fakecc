@@ -63,7 +63,7 @@ static void compile_and_link_at(const char *src, const char *path,
     EmitModule em;
     compile_module(src, opt_level, want_debug, &em);
     EmitModule *mods[1] = { &em };
-    emit_link(mods, 1, path, NULL, 0, 0, NULL, 0, want_debug);
+    emit_link(mods, 1, path, NULL, 0, 0, NULL, 0, want_debug, 0);
     emit_module_free(&em);
 }
 
@@ -265,7 +265,7 @@ static void test_obj_dbg_roundtrip(void) {
     T_ASSERT_EQ_INT((int)want_ranges, (int)s2->num_ranges);
 
     EmitModule *mods[1] = { &got };
-    emit_link(mods, 1, epath, NULL, 0, 0, NULL, 0, 1);
+    emit_link(mods, 1, epath, NULL, 0, 0, NULL, 0, 1, 0);
     T_ASSERT(elf_has_section(epath, ".debug_line"));
     T_ASSERT(elf_has_section(epath, ".debug_loc"));
     emit_module_free(&got);
@@ -642,7 +642,7 @@ static void test_link_rebases_loclists(void) {
 
     const char *path = "/tmp/fakecc_test_debug_rebase";
     EmitModule *mods[2] = { &a, &b };
-    emit_link(mods, 2, path, NULL, 0, 0, NULL, 0, 1);
+    emit_link(mods, 2, path, NULL, 0, 0, NULL, 0, 1, 0);
 
     /* After linking, `main` sits past `helper`, so the section must contain a
      * range reaching beyond the first module's code — which only happens if

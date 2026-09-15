@@ -192,7 +192,7 @@ int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
-               int want_debug);
+               int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
 typedef int IRValue;
 enum IROpcode {
@@ -209,6 +209,7 @@ enum IROpcode {
     IR_BNOT,
     IR_SHL,
     IR_SHR,
+    IR_ROL,
     IR_EQ,
     IR_NE,
     IR_FADD,
@@ -1090,16 +1091,6 @@ static void emit_mov_imm64(Buffer *b, int dst_reg, int64_t imm) {
     for (int i = 0; i < 8; i++)
         emit_byte(b, (uint8_t)(imm >> (i * 8)));
 }
-static void emit_neg_r(Buffer *b, int dst_reg) {
-    emit_rex_wrb(b, 1, 0, dst_reg);
-    emit_byte(b, 0xF7);
-    emit_modrm(b, 3, 3, dst_reg);
-}
-static void emit_not_r(Buffer *b, int dst_reg) {
-    emit_rex_wrb(b, 1, 0, dst_reg);
-    emit_byte(b, 0xF7);
-    emit_modrm(b, 3, 2, dst_reg);
-}
 static void emit_and_rr(Buffer *b, int dst, int src) {
     emit_rex_wrb(b, 1, src, dst);
     emit_byte(b, 0x21);
@@ -1115,31 +1106,118 @@ static void emit_bitxor_rr(Buffer *b, int dst, int src) {
     emit_byte(b, 0x31);
     emit_modrm(b, 3, src, dst);
 }
-static void emit_shl_rcx(Buffer *b, int dst) {
-    emit_rex_wrb(b, 1, 0, dst);
-    emit_byte(b, 0xD3);
-    emit_modrm(b, 3, 4, dst);
+static void emit_rex_if(Buffer *b, int w, int r_reg, int index, int rm_reg) {
+    int R = (r_reg >> 3) & 1;
+    int X = (index >> 3) & 1;
+    int B = (rm_reg >> 3) & 1;
+    if (w || R || X || B)
+        emit_byte(b, (uint8_t)(0x40 | (w << 3) | (R << 2) | (X << 1) | B));
 }
-static void emit_shr_rcx(Buffer *b, int dst) {
-    emit_rex_wrb(b, 1, 0, dst);
+static int alu_w64(int width) { return width >= 8 ? 1 : 0; }
+static void emit_rol_rcx(Buffer *b, int dst, int width) {
+    if (width == 1) {
+        uint8_t rex = 0x40 | ((dst & 8) >> 3);
+        emit_byte(b, rex);
+        emit_byte(b, 0xD2);
+        emit_modrm(b, 3, 0, dst);
+        return;
+    }
+    if (width == 2) emit_byte(b, 0x66);
+    int w64 = alu_w64(width);
+    emit_rex_if(b, w64, 0, 0, dst);
     emit_byte(b, 0xD3);
-    emit_modrm(b, 3, 5, dst);
+    emit_modrm(b, 3, 0, dst);
 }
-static void emit_sar_rcx(Buffer *b, int dst) {
-    emit_rex_wrb(b, 1, 0, dst);
+static void emit_arith_rr_w(Buffer *b, uint8_t op, int dst, int src, int width) {
+    emit_rex_if(b, alu_w64(width), src, 0, dst);
+    emit_byte(b, op);
+    emit_modrm(b, 3, src, dst);
+}
+static void emit_arith_imm_w(Buffer *b, int ext, int dst, int32_t imm, int width) {
+    emit_rex_if(b, alu_w64(width), 0, 0, dst);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_modrm(b, 3, ext, dst);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_modrm(b, 3, ext, dst);
+        emit_int32(b, imm);
+    }
+}
+static void emit_imul_rr_w(Buffer *b, int dst, int src, int width) {
+    emit_rex_if(b, alu_w64(width), dst, 0, src);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0xAF);
+    emit_modrm(b, 3, dst, src);
+}
+static void emit_imul_imm_w(Buffer *b, int dst, int32_t imm, int width) {
+    emit_rex_if(b, alu_w64(width), dst, 0, dst);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x6B);
+        emit_modrm(b, 3, dst, dst);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x69);
+        emit_modrm(b, 3, dst, dst);
+        emit_int32(b, imm);
+    }
+}
+static void emit_unary_f7_w(Buffer *b, int ext, int dst, int width) {
+    emit_rex_if(b, alu_w64(width), 0, 0, dst);
+    emit_byte(b, 0xF7);
+    emit_modrm(b, 3, ext, dst);
+}
+static void emit_shift_cl_w(Buffer *b, int ext, int dst, int width) {
+    emit_rex_if(b, alu_w64(width), 0, 0, dst);
     emit_byte(b, 0xD3);
-    emit_modrm(b, 3, 7, dst);
+    emit_modrm(b, 3, ext, dst);
+}
+static void emit_shift_imm_w(Buffer *b, int ext, int dst, int imm, int width) {
+    emit_rex_if(b, alu_w64(width), 0, 0, dst);
+    int mask = alu_w64(width) ? 63 : 31;
+    imm &= mask;
+    if (imm == 1) {
+        emit_byte(b, 0xD1);
+        emit_modrm(b, 3, ext, dst);
+    } else {
+        emit_byte(b, 0xC1);
+        emit_modrm(b, 3, ext, dst);
+        emit_byte(b, (uint8_t)imm);
+    }
+}
+static void emit_cmp_rr_w(Buffer *b, int dst, int src, int width) {
+    emit_rex_if(b, alu_w64(width), src, 0, dst);
+    emit_byte(b, 0x39);
+    emit_modrm(b, 3, src, dst);
+}
+static void emit_cmp_imm_w(Buffer *b, int dst, int32_t imm, int width) {
+    emit_rex_if(b, alu_w64(width), 0, 0, dst);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_modrm(b, 3, 7, dst);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_modrm(b, 3, 7, dst);
+        emit_int32(b, imm);
+    }
+}
+static void emit_test_r_w(Buffer *b, int r, int width) {
+    emit_rex_if(b, alu_w64(width), r, 0, r);
+    emit_byte(b, 0x85);
+    emit_modrm(b, 3, r, r);
+}
+static void emit_mov_imm32(Buffer *b, int dst, int32_t imm) {
+    emit_rex_if(b, 0, 0, 0, dst);
+    emit_byte(b, (uint8_t)(0xB8 + (dst & 7)));
+    emit_int32(b, imm);
 }
 static void emit_cqto(Buffer *b) { emit_rex_w(b); emit_byte(b, 0x99); }
 static void emit_idiv_rcx(Buffer *b) {
     emit_rex_w(b);
     emit_byte(b, 0xF7);
     emit_byte(b, 0xF9);
-}
-static void emit_cmp_rr(Buffer *b, int dst, int src) {
-    emit_rex_wrb(b, 1, src, dst);
-    emit_byte(b, 0x39);
-    emit_modrm(b, 3, src, dst);
 }
 static void emit_cmp_imm32(Buffer *b, int reg, int32_t imm) {
     emit_rex_wrb(b, 1, 0, reg);
@@ -1369,15 +1447,27 @@ static void emit_pop_r(Buffer *b, int r) {
 }
 static void emit_sub_rsp_imm32(Buffer *b, int32_t imm) {
     emit_rex_w(b);
-    emit_byte(b, 0x81);
-    emit_byte(b, 0xEC);
-    emit_int32(b, imm);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_byte(b, 0xEC);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_byte(b, 0xEC);
+        emit_int32(b, imm);
+    }
 }
 static void emit_add_rsp_imm32(Buffer *b, int32_t imm) {
     emit_rex_w(b);
-    emit_byte(b, 0x81);
-    emit_byte(b, 0xC4);
-    emit_int32(b, imm);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_byte(b, 0xC4);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_byte(b, 0xC4);
+        emit_int32(b, imm);
+    }
 }
 static size_t emit_call_rel32(Buffer *b) {
     emit_byte(b, 0xE8);
@@ -1571,6 +1661,95 @@ static void emit_store_via_ptr(Buffer *b, int ptr, int src, int width) {
         break;
     }
 }
+static void emit_modrm_disp(Buffer *b, int reg_field, int base, int off) {
+    int rm = base & 7;
+    int mod = (off >= -128 && off <= 127) ? 1 : 2;
+    if (rm == 4) {
+        emit_modrm(b, mod, reg_field & 7, 4);
+        emit_byte(b, 0x24);
+    } else {
+        emit_modrm(b, mod, reg_field & 7, rm);
+    }
+    if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+    else emit_int32(b, off);
+}
+static void emit_load_disp(Buffer *b, int dst, int base, int off, int width, int is_unsigned) {
+    switch (width) {
+    case 1:
+        emit_rex_wrb(b, 1, dst, base);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
+        emit_modrm_disp(b, dst, base, off);
+        break;
+    case 2:
+        emit_rex_wrb(b, 1, dst, base);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
+        emit_modrm_disp(b, dst, base, off);
+        break;
+    case 4:
+        emit_rex_if(b, 0, dst, 0, base);
+        emit_byte(b, 0x8B);
+        emit_modrm_disp(b, dst, base, off);
+        break;
+    case 8:
+    default:
+        emit_rex_wrb(b, 1, dst, base);
+        emit_byte(b, 0x8B);
+        emit_modrm_disp(b, dst, base, off);
+        break;
+    }
+}
+static void emit_store_disp(Buffer *b, int base, int src, int off, int width) {
+    switch (width) {
+    case 1: {
+        uint8_t rex = 0x40 | ((src & 8) >> 1) | ((base & 8) >> 3);
+        emit_byte(b, rex);
+        emit_byte(b, 0x88);
+        emit_modrm_disp(b, src, base, off);
+        break;
+    }
+    case 2:
+        emit_byte(b, 0x66);
+        emit_rex_wrb(b, 0, src, base);
+        emit_byte(b, 0x89);
+        emit_modrm_disp(b, src, base, off);
+        break;
+    case 4:
+        if (src >= 8 || base >= 8) emit_rex_wrb(b, 0, src, base);
+        emit_byte(b, 0x89);
+        emit_modrm_disp(b, src, base, off);
+        break;
+    case 8:
+    default:
+        emit_rex_wrb(b, 1, src, base);
+        emit_byte(b, 0x89);
+        emit_modrm_disp(b, src, base, off);
+        break;
+    }
+}
+static void emit_sse_load_disp(Buffer *b, int dst, int base, int off, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_wrb(b, 0, dst, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm_disp(b, dst, base, off);
+}
+static void emit_sse_store_disp(Buffer *b, int base, int src, int off, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_wrb(b, 0, src, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    emit_modrm_disp(b, src, base, off);
+}
+static void emit_x87_fldt_disp(Buffer *b, int base, int off) {
+    emit_byte(b, 0xDB);
+    emit_modrm_disp(b, 5, base, off);
+}
+static void emit_x87_fstpt_disp(Buffer *b, int base, int off) {
+    emit_byte(b, 0xDB);
+    emit_modrm_disp(b, 7, base, off);
+}
 static void emit_load_via_ptr(Buffer *b, int dst, int ptr, int width, int is_unsigned) {
     switch (width) {
     case 1:
@@ -1586,13 +1765,8 @@ static void emit_load_via_ptr(Buffer *b, int dst, int ptr, int width, int is_uns
         emit_modrm_indirect(b, dst, ptr);
         break;
     case 4:
-        if (is_unsigned) {
-            if (dst >= 8 || ptr >= 8) emit_rex_wrb(b, 0, dst, ptr);
-            emit_byte(b, 0x8B);
-        } else {
-            emit_rex_wrb(b, 1, dst, ptr);
-            emit_byte(b, 0x63);
-        }
+        emit_rex_if(b, 0, dst, 0, ptr);
+        emit_byte(b, 0x8B);
         emit_modrm_indirect(b, dst, ptr);
         break;
     case 8:
@@ -1600,6 +1774,73 @@ static void emit_load_via_ptr(Buffer *b, int dst, int ptr, int width, int is_uns
         emit_rex_wrb(b, 1, dst, ptr);
         emit_byte(b, 0x8B);
         emit_modrm_indirect(b, dst, ptr);
+        break;
+    }
+}
+static void emit_modrm_sib_disp(Buffer *b, int reg_field, int base, int index, int off) {
+    int rm_b = base & 7;
+    int mod;
+    if (off == 0 && rm_b != 5) mod = 0;
+    else if (off >= -128 && off <= 127) mod = 1;
+    else mod = 2;
+    emit_modrm(b, mod, reg_field, 4);
+    emit_byte(b, (uint8_t)(((index & 7) << 3) | rm_b));
+    if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
+    else if (mod == 2) emit_int32(b, off);
+}
+static void emit_load_sib(Buffer *b, int dst, int base, int index, int off,
+                          int width, int is_unsigned) {
+    switch (width) {
+    case 1:
+        emit_rex_if(b, 1, dst, index, base);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
+        emit_modrm_sib_disp(b, dst, base, index, off);
+        break;
+    case 2:
+        emit_rex_if(b, 1, dst, index, base);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
+        emit_modrm_sib_disp(b, dst, base, index, off);
+        break;
+    case 4:
+        emit_rex_if(b, 0, dst, index, base);
+        emit_byte(b, 0x8B);
+        emit_modrm_sib_disp(b, dst, base, index, off);
+        break;
+    case 8:
+    default:
+        emit_rex_if(b, 1, dst, index, base);
+        emit_byte(b, 0x8B);
+        emit_modrm_sib_disp(b, dst, base, index, off);
+        break;
+    }
+}
+static void emit_store_sib(Buffer *b, int base, int index, int off, int src, int width) {
+    switch (width) {
+    case 1: {
+        uint8_t rex = 0x40 | ((src & 8) >> 1) | ((index & 8) >> 2) | ((base & 8) >> 3);
+        emit_byte(b, rex);
+        emit_byte(b, 0x88);
+        emit_modrm_sib_disp(b, src, base, index, off);
+        break;
+    }
+    case 2:
+        emit_byte(b, 0x66);
+        emit_rex_if(b, 0, src, index, base);
+        emit_byte(b, 0x89);
+        emit_modrm_sib_disp(b, src, base, index, off);
+        break;
+    case 4:
+        emit_rex_if(b, 0, src, index, base);
+        emit_byte(b, 0x89);
+        emit_modrm_sib_disp(b, src, base, index, off);
+        break;
+    case 8:
+    default:
+        emit_rex_if(b, 1, src, index, base);
+        emit_byte(b, 0x89);
+        emit_modrm_sib_disp(b, src, base, index, off);
         break;
     }
 }
@@ -1647,6 +1888,10 @@ static void mask_to_width(Buffer *b, int reg, int width, int is_unsigned) {
         emit_movzx_rr(b, reg, reg, width);
     else
         emit_movsx_rr(b, reg, reg, width);
+}
+static void mask_after_alu(Buffer *b, int reg, int width, int is_unsigned) {
+    if (width >= 4 || width <= 0) return;
+    mask_to_width(b, reg, width, is_unsigned);
 }
 static int old_slot(int v) { return -(8 * (v + 1)); }
 static void old_load(Buffer *b, int v, int reg) {
@@ -1715,6 +1960,89 @@ static void spill_if_needed(Buffer *b, int v, int src_reg, const RAResult *ra) {
     if (ra->reg[v] >= 0 && ra->reg[v] < 16) return;
     emit_store_spill(b, src_reg, spill_offset(ra->spill_slot[v]));
 }
+static int gp_home(const RAResult *ra, IRValue v) {
+    if (!ra || v < 0 || v >= ra->num_values) return -1;
+    int r = ra->reg[v];
+    return (r >= 0 && r < 16) ? r : -1;
+}
+static int pick_alu_acc(int dr, int avoid) {
+    if (dr >= 0 && dr != REG_RCX && dr != avoid)
+        return dr;
+    if (avoid == REG_RAX) return REG_RDX;
+    return REG_RAX;
+}
+static void finish_gp_dst(Buffer *b, int acc, int dr, int dst, const RAResult *ra,
+                          int width, int is_unsigned) {
+    mask_after_alu(b, acc, width, is_unsigned);
+    if (dr >= 0 && dr != acc) emit_mov_rr(b, dr, acc);
+    spill_if_needed(b, dst, dr >= 0 ? dr : acc, ra);
+}
+static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_t *imm);
+static int imm_fits_i32(int64_t imm);
+static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
+                       const int *def, const RAResult *ra, int dr, int is_mul) {
+    int width = inst->width > 0 ? inst->width : 8;
+    int64_t imm_a = 0, imm_b = 0;
+    int fb = ssa_const_imm(fn, def, inst->b, &imm_b) && imm_fits_i32(imm_b);
+    int fa = !is_mul && inst->op != IR_SUB &&
+             ssa_const_imm(fn, def, inst->a, &imm_a) && imm_fits_i32(imm_a);
+    if (is_mul)
+        fa = ssa_const_imm(fn, def, inst->a, &imm_a) && imm_fits_i32(imm_a);
+    int acc;
+    uint8_t rr_op = 0x01;
+    int imm_ext = 0;
+    if (!is_mul) {
+        if (inst->op == IR_SUB) { rr_op = 0x29; imm_ext = 5; }
+        else if (inst->op == IR_BAND) { rr_op = 0x21; imm_ext = 4; }
+        else if (inst->op == IR_BOR) { rr_op = 0x09; imm_ext = 1; }
+        else if (inst->op == IR_BXOR) { rr_op = 0x31; imm_ext = 6; }
+    }
+    if (fb) {
+        acc = pick_alu_acc(dr, -1);
+        ensure_reg(b, inst->a, acc, ra);
+        if (is_mul) emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
+        else emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_b, width);
+    } else if (fa) {
+        acc = pick_alu_acc(dr, -1);
+        ensure_reg(b, inst->b, acc, ra);
+        if (is_mul) emit_imul_imm_w(b, acc, (int32_t)imm_a, width);
+        else emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_a, width);
+    } else {
+        int bhome = gp_home(ra, inst->b);
+        acc = pick_alu_acc(dr, bhome);
+        ensure_reg(b, inst->a, acc, ra);
+        ensure_reg(b, inst->b, REG_RCX, ra);
+        if (is_mul) emit_imul_rr_w(b, acc, REG_RCX, width);
+        else emit_arith_rr_w(b, rr_op, acc, REG_RCX, width);
+    }
+    finish_gp_dst(b, acc, dr, inst->dst, ra, width, inst->is_unsigned);
+}
+static void isel_shift(Buffer *b, const IRInst *inst, const IRFunction *fn,
+                       const int *def, const RAResult *ra, int dr, int ext) {
+    int width = inst->width > 0 ? inst->width : 8;
+    int64_t imm = 0;
+    int acc;
+    if (ssa_const_imm(fn, def, inst->b, &imm) && imm >= 0 && imm < 64) {
+        acc = pick_alu_acc(dr, -1);
+        ensure_reg(b, inst->a, acc, ra);
+        emit_shift_imm_w(b, ext, acc, (int)imm, width);
+    } else {
+        int ahome = gp_home(ra, inst->a);
+        acc = pick_alu_acc(dr, REG_RCX);
+        if (ahome == REG_RCX) {
+            ensure_reg(b, inst->a, acc, ra);
+            ensure_reg(b, inst->b, REG_RCX, ra);
+        } else {
+            ensure_reg(b, inst->b, REG_RCX, ra);
+            ensure_reg(b, inst->a, acc, ra);
+        }
+        if (ext == 0)
+            emit_rol_rcx(b, acc, width);
+        else
+            emit_shift_cl_w(b, ext, acc, width);
+    }
+    finish_gp_dst(b, acc, dr, inst->dst, ra, width, inst->is_unsigned);
+}
 static int spill_offset_xmm(int slot, int gp_spill_area) {
     return -(gp_spill_area + 8 * (slot + 1 + curr_cs_count));
 }
@@ -1746,12 +2074,6 @@ static void emit_float_const(Buffer *b, int xmm_dst, int64_t bits) {
     for (int i = 0; i < 8; i++)
         emit_byte(b, (uint8_t)(bits >> (i * 8)));
     emit_movq_xmm_gp(b, xmm_dst, REG_RAX);
-}
-static void emit_cmp_produce(Buffer *b, int a_reg, int b_reg, int dst_reg,
-                             uint8_t cc_opcode) {
-    emit_xor_rr(b, dst_reg);
-    emit_cmp_rr(b, a_reg, b_reg);
-    emit_setcc_r(b, cc_opcode, dst_reg);
 }
 static uint8_t ir_cmp_to_setcc(int ir_op, int is_unsigned) {
     if (!is_unsigned) {
@@ -2419,6 +2741,232 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int h
     emit_byte(b, 0x5D);
     emit_byte(b, 0xC3);
 }
+static int *codegen_build_defs(const IRFunction *fn) {
+    int nv = fn->next_value_id;
+    int *def = xmalloc((size_t)(nv > 0 ? nv : 1) * sizeof(int));
+    for (int i = 0; i < nv; i++) def[i] = -1;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        int d = fn->insts.data[i].dst;
+        if (d >= 0 && d < nv) def[d] = (int)i;
+    }
+    return def;
+}
+static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_off,
+                        IRValue v, int *out_off, int depth) {
+    if (depth > 8 || v < 0 || v >= fn->next_value_id || !def || !alloca_off) return 0;
+    int di = def[v];
+    if (di < 0) return 0;
+    const IRInst *d = &fn->insts.data[di];
+    if (d->op == IR_ADDR && d->a >= 0 && d->a < fn->next_value_id && alloca_off[d->a] != 0) {
+        *out_off = alloca_off[d->a];
+        return 1;
+    }
+    if (d->op == IR_ADD) {
+        int base_off = 0;
+        if (d->b >= 0 && d->b < fn->next_value_id && def[d->b] >= 0) {
+            const IRInst *imm = &fn->insts.data[def[d->b]];
+            if (imm->op == IR_CONST && !imm->is_float
+                && fold_ptr_off(fn, def, alloca_off, d->a, &base_off, depth + 1)) {
+                *out_off = base_off + (int)imm->imm;
+                return 1;
+            }
+        }
+        if (d->a >= 0 && d->a < fn->next_value_id && def[d->a] >= 0) {
+            const IRInst *imm = &fn->insts.data[def[d->a]];
+            if (imm->op == IR_CONST && !imm->is_float
+                && fold_ptr_off(fn, def, alloca_off, d->b, &base_off, depth + 1)) {
+                *out_off = base_off + (int)imm->imm;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_t *imm) {
+    if (!fn || !def || v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op != IR_CONST || d->is_float) return 0;
+    *imm = d->imm;
+    return 1;
+}
+static int imm_fits_i32(int64_t imm) {
+    return imm == (int64_t)(int32_t)imm;
+}
+static int is_gaddr_def(const IRFunction *fn, const int *def, IRValue v) {
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    int op = fn->insts.data[def[v]].op;
+    return op == IR_GADDR || op == IR_GADDR_TLS;
+}
+static int isel_ok_index(const IRFunction *fn, const int *def, IRValue v) {
+    int depth = 0;
+    while (v >= 0 && v < fn->next_value_id && def[v] >= 0 && depth++ < 8) {
+        int op = fn->insts.data[def[v]].op;
+        if (op == IR_COPY || op == IR_SEXT || op == IR_ZEXT) {
+            v = fn->insts.data[def[v]].a;
+            continue;
+        }
+        return op != IR_CONST && op != IR_ADDR && op != IR_GADDR
+            && op != IR_GADDR_TLS && op != IR_FADDR;
+    }
+    return 0;
+}
+static int fold_sib_add(const IRFunction *fn, const int *def, IRValue v,
+                        IRValue *base, IRValue *index) {
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op != IR_ADD) return 0;
+    int64_t imm;
+    if (ssa_const_imm(fn, def, d->a, &imm) || ssa_const_imm(fn, def, d->b, &imm))
+        return 0;
+    if (is_gaddr_def(fn, def, d->a) && isel_ok_index(fn, def, d->b)) {
+        *base = d->a;
+        *index = d->b;
+        return 1;
+    }
+    if (is_gaddr_def(fn, def, d->b) && isel_ok_index(fn, def, d->a)) {
+        *base = d->b;
+        *index = d->a;
+        return 1;
+    }
+    return 0;
+}
+static int fold_rbp_index(const IRFunction *fn, const int *def, const int *alloca_off,
+                          IRValue v, int *off, IRValue *index) {
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op != IR_ADD) return 0;
+    int64_t imm;
+    int base_off;
+    if (!ssa_const_imm(fn, def, d->b, &imm)
+        && isel_ok_index(fn, def, d->b)
+        && fold_ptr_off(fn, def, alloca_off, d->a, &base_off, 0)) {
+        *off = base_off;
+        *index = d->b;
+        return 1;
+    }
+    if (!ssa_const_imm(fn, def, d->a, &imm)
+        && isel_ok_index(fn, def, d->a)
+        && fold_ptr_off(fn, def, alloca_off, d->b, &base_off, 0)) {
+        *off = base_off;
+        *index = d->a;
+        return 1;
+    }
+    return 0;
+}
+static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
+                         const int *def) {
+    IRValue v = which ? inst->b : inst->a;
+    int64_t imm;
+    if (!ssa_const_imm(fn, def, v, &imm) || !imm_fits_i32(imm)) return 0;
+    switch (inst->op) {
+    case IR_ADD:
+    case IR_BAND:
+    case IR_BOR:
+    case IR_BXOR:
+    case IR_MUL:
+        return 1;
+    case IR_SUB:
+        return which == 1;
+    case IR_SHL:
+    case IR_SHR:
+    case IR_ROL:
+        return which == 1 && imm >= 0 && imm < 64;
+    case IR_EQ:
+    case IR_NE:
+    case IR_LT:
+    case IR_LE:
+    case IR_GT:
+    case IR_GE:
+        return which == 1;
+    default:
+        return 0;
+    }
+}
+static void mark_ssa_needed(char *needed, int nv, IRValue v) {
+    if (v >= 0 && v < nv) needed[v] = 1;
+}
+static void mark_inst_uses_needed(const IRInst *inst, char *needed, int nv) {
+    if (inst->op == IR_LABEL || inst->op == IR_BR || inst->op == IR_DBG_VALUE) return;
+    if (inst->op == IR_ADDR) return;
+    mark_ssa_needed(needed, nv, inst->a);
+    if (inst->op != IR_CBR && inst->op != IR_CALL)
+        mark_ssa_needed(needed, nv, inst->b);
+    if (inst->op == IR_CALL) {
+        if (inst->call_callee >= 0) mark_ssa_needed(needed, nv, inst->call_callee);
+        for (int k = 0; k < inst->call_nargs; k++)
+            mark_ssa_needed(needed, nv, inst->call_args[k]);
+    }
+}
+static char *codegen_needed_regs(const IRFunction *fn, const int *def,
+                                 const int *alloca_off, const char *skip_body) {
+    int nv = fn->next_value_id;
+    char *needed = xmalloc((size_t)(nv > 0 ? nv : 1));
+    runtime.memset(needed, 0, (size_t)(nv > 0 ? nv : 1));
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        if (skip_body && skip_body[i]) continue;
+        const IRInst *inst = &fn->insts.data[i];
+        int dummy;
+        if (inst->op == IR_LOAD_PTR) {
+IRValue bv;
+IRValue iv;
+            int off;
+            if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
+                continue;
+            if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
+                && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                    || inst->width == 8)) {
+                if (fold_rbp_index(fn, def, alloca_off, inst->a, &off, &iv)) {
+                    mark_ssa_needed(needed, nv, iv);
+                    continue;
+                }
+                if (fold_sib_add(fn, def, inst->a, &bv, &iv)) {
+                    mark_ssa_needed(needed, nv, bv);
+                    mark_ssa_needed(needed, nv, iv);
+                    continue;
+                }
+            }
+            mark_ssa_needed(needed, nv, inst->a);
+            continue;
+        }
+        if (inst->op == IR_STORE_PTR) {
+IRValue bv;
+IRValue iv;
+            int off;
+            if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0)) {
+                mark_ssa_needed(needed, nv, inst->b);
+                continue;
+            }
+            if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
+                && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                    || inst->width == 8)) {
+                if (fold_rbp_index(fn, def, alloca_off, inst->a, &off, &iv)) {
+                    mark_ssa_needed(needed, nv, iv);
+                    mark_ssa_needed(needed, nv, inst->b);
+                    continue;
+                }
+                if (fold_sib_add(fn, def, inst->a, &bv, &iv)) {
+                    mark_ssa_needed(needed, nv, bv);
+                    mark_ssa_needed(needed, nv, iv);
+                    mark_ssa_needed(needed, nv, inst->b);
+                    continue;
+                }
+            }
+            mark_ssa_needed(needed, nv, inst->a);
+            mark_ssa_needed(needed, nv, inst->b);
+            continue;
+        }
+        if (alu_folds_imm(inst, 1, fn, def)) {
+            mark_ssa_needed(needed, nv, inst->a);
+            continue;
+        }
+        if (alu_folds_imm(inst, 0, fn, def)) {
+            mark_ssa_needed(needed, nv, inst->b);
+            continue;
+        }
+        mark_inst_uses_needed(inst, needed, nv);
+    }
+    return needed;
+}
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     size_t *global_off = ((void*)0);
     if (ir->globals.len > 0) {
@@ -2625,6 +3173,61 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
             }
         }
+        int *ssa_def = codegen_build_defs(fn);
+        char *skip_body = xmalloc(fn->insts.len ? fn->insts.len : 1);
+        runtime.memset(skip_body, 0, fn->insts.len ? fn->insts.len : 1);
+        int *param_home_off = ((void*)0);
+        if (nparams > 0) {
+            param_home_off = xmalloc((size_t)nparams * sizeof(int));
+            runtime.memset(param_home_off, 0, (size_t)nparams * sizeof(int));
+        }
+        for (int p = 0; p < nparams; p++) {
+            const IRInst *pi = &fn->insts.data[p];
+            IRValue v = pi->dst;
+            if (v < 0 || value_is_ld(fn, v)) continue;
+            int store_i = -1, nstore = 0, other = 0;
+            for (size_t j = 0; j < fn->insts.len; j++) {
+                const IRInst *in = &fn->insts.data[j];
+                if (in->op == IR_DBG_VALUE || in->op == IR_PARAM ||
+                    in->op == IR_LABEL || in->op == IR_BR)
+                    continue;
+                if (in->op == IR_STORE_PTR && in->b == v) {
+                    nstore++;
+                    store_i = (int)j;
+                    continue;
+                }
+                if (in->a == v) { other = 1; break; }
+                if (in->op != IR_CBR && in->op != IR_CALL && in->b == v) {
+                    other = 1;
+                    break;
+                }
+                if (in->op == IR_CALL) {
+                    if (in->call_callee == v) { other = 1; break; }
+                    for (int k = 0; k < in->call_nargs; k++) {
+                        if (in->call_args[k] == v) { other = 1; break; }
+                    }
+                    if (other) break;
+                }
+            }
+            if (other || nstore != 1 || store_i < 0) continue;
+            const IRInst *st = &fn->insts.data[store_i];
+            IRValue ptr = st->a;
+            if (ptr < 0 || ptr >= fn->next_value_id || ssa_def[ptr] < 0) continue;
+            const IRInst *ad = &fn->insts.data[ssa_def[ptr]];
+            if (ad->op != IR_ADDR) continue;
+            int slot = ad->a;
+            if (slot < 0 || slot >= fn->next_value_id || ssa_def[slot] < 0) continue;
+            const IRInst *al = &fn->insts.data[ssa_def[slot]];
+            if (al->op != IR_ALLOCA) continue;
+            int store_w = st->width ? st->width : 4;
+            int param_w = pi->width ? pi->width : 4;
+            if (al->alloca_bytes != store_w || store_w != param_w) continue;
+            int off = alloca_off[slot];
+            if (off == 0) continue;
+            param_home_off[p] = off;
+            skip_body[store_i] = 1;
+        }
+        char *needed = codegen_needed_regs(fn, ssa_def, alloca_off, skip_body);
         int va_gp_offset = 0, va_fp_offset = 0, va_overflow_off = 16;
         if (fn->is_variadic) {
             va_gp_offset = 8 * gp_reg_idx;
@@ -2650,7 +3253,33 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
         if (fn->needs_apply_args)
             emit_fill_apply_args(&out->text, apply_args_rsp_off);
+        for (int p = 0; p < nparams; p++) {
+            if (!param_home_off || param_home_off[p] == 0) continue;
+            const IRInst *pi = &fn->insts.data[p];
+            int w = pi->width ? pi->width : 4;
+            int is_float = value_is_float_class(fn, pi->dst);
+            if (arrive_reg[p] < 0) {
+                if (is_float) {
+                    emit_sse_load_disp(&out->text, 14, REG_RBP,
+                                       stack_off[p], w == 4);
+                    emit_sse_store_disp(&out->text, REG_RBP, 14,
+                                        param_home_off[p], w == 4);
+                } else {
+                    emit_load_disp(&out->text, REG_RAX, REG_RBP, stack_off[p],
+                                   w, pi->is_unsigned);
+                    emit_store_disp(&out->text, REG_RBP, REG_RAX,
+                                    param_home_off[p], w);
+                }
+            } else if (arrive_is_xmm[p]) {
+                emit_sse_store_disp(&out->text, REG_RBP, arrive_reg[p],
+                                    param_home_off[p], w == 4);
+            } else {
+                emit_store_disp(&out->text, REG_RBP, arrive_reg[p],
+                                param_home_off[p], w);
+            }
+        }
         for (int p = nparams - 1; p >= 0; p--) {
+            if (param_home_off && param_home_off[p] != 0) continue;
             if (arrive_reg[p] < 0) continue;
             if (arrive_is_xmm[p]) {
                 emit_sub_rsp_imm32(&out->text, 8);
@@ -2660,6 +3289,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
         }
         for (int p = 0; p < nparams; p++) {
+            if (param_home_off && param_home_off[p] != 0) continue;
             const IRInst *pi = &fn->insts.data[p];
             int is_ld = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
                          value_is_ld(fn, pi->dst));
@@ -2741,6 +3371,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 continue;
             }
+            if (skip_body[j]) continue;
+            {
+                int fold_off = 0;
+                IRValue dummy_b = -1, dummy_idx = -1;
+                if (inst->dst >= 0 && inst->dst < fn->next_value_id && !needed[inst->dst]) {
+                    if (inst->op == IR_ADDR
+                        && fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0))
+                        continue;
+                    if (inst->op == IR_CONST && !inst->is_float && !value_is_ld(fn, inst->dst))
+                        continue;
+                    if (inst->op == IR_ADD
+                        && (fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0)
+                            || fold_rbp_index(fn, ssa_def, alloca_off, inst->dst, &fold_off, &dummy_idx)
+                            || fold_sib_add(fn, ssa_def, inst->dst, &dummy_b, &dummy_idx)))
+                        continue;
+                }
+            }
             if (want_debug && inst->loc.file && inst->loc.line > 0 &&
                 inst->op != IR_PARAM && inst->op != IR_ALLOCA) {
                 if (!prologue_end_found && inst->loc.line != fn->loc.line) {
@@ -2777,64 +3424,57 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                             ra_xmm, gp_spill_area);
                     }
                 } else if (dr >= 0) {
-                    emit_mov_imm64(&out->text, dr, inst->imm);
+                    if (inst->width > 0 && inst->width <= 4)
+                        emit_mov_imm32(&out->text, dr, (int32_t)inst->imm);
+                    else
+                        emit_mov_imm64(&out->text, dr, inst->imm);
                 } else {
-                    emit_mov_imm64(&out->text, REG_RAX, inst->imm);
+                    if (inst->width > 0 && inst->width <= 4)
+                        emit_mov_imm32(&out->text, REG_RAX, (int32_t)inst->imm);
+                    else
+                        emit_mov_imm64(&out->text, REG_RAX, inst->imm);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
-            case IR_ADD: {
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                ensure_reg(&out->text, inst->b, REG_RCX, ra);
-                emit_add_rr(&out->text, REG_RAX, REG_RCX);
-                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
+            case IR_ADD:
+            case IR_SUB:
+            case IR_BAND:
+            case IR_BOR:
+            case IR_BXOR:
+                isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 0);
                 break;
-            }
-            case IR_SUB: {
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                ensure_reg(&out->text, inst->b, REG_RCX, ra);
-                emit_sub_rr(&out->text, REG_RAX, REG_RCX);
-                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
+            case IR_MUL:
+                isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 1);
                 break;
-            }
-            case IR_MUL: {
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                ensure_reg(&out->text, inst->b, REG_RCX, ra);
-                emit_imul_rr(&out->text, REG_RAX, REG_RCX);
-                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
-                break;
-            }
             case IR_DIV:
             case IR_MOD: {
+                int width = inst->width > 0 ? inst->width : 8;
+                int w64 = alu_w64(width);
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 if (inst->is_unsigned) {
                     emit_xor_rr(&out->text, REG_RDX);
-                    emit_rex_w(&out->text);
+                    emit_rex_if(&out->text, w64, 0, 0, REG_RCX);
                     emit_byte(&out->text, 0xF7);
-                    emit_byte(&out->text, 0xF1);
-                } else {
+                    emit_modrm(&out->text, 3, 6, REG_RCX);
+                } else if (w64) {
                     emit_cqto(&out->text);
                     emit_idiv_rcx(&out->text);
+                } else {
+                    emit_byte(&out->text, 0x99);
+                    emit_rex_if(&out->text, 0, 0, 0, REG_RCX);
+                    emit_byte(&out->text, 0xF7);
+                    emit_modrm(&out->text, 3, 7, REG_RCX);
                 }
                 if (inst->op == IR_DIV) {
-                    mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
+                    mask_after_alu(&out->text, REG_RAX, width, inst->is_unsigned);
                     if (dr >= 0 && dr != REG_RAX)
                         emit_mov_rr(&out->text, dr, REG_RAX);
                     spill_if_needed(&out->text, inst->dst,
                                     dr >= 0 ? dr : REG_RAX, ra);
                 } else {
-                    mask_to_width(&out->text, REG_RDX, inst->width, inst->is_unsigned);
+                    mask_after_alu(&out->text, REG_RDX, width, inst->is_unsigned);
                     if (dr >= 0 && dr != REG_RDX)
                         emit_mov_rr(&out->text, dr, REG_RDX);
                     spill_if_needed(&out->text, inst->dst,
@@ -2843,70 +3483,60 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
             case IR_NEG: {
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                emit_neg_r(&out->text, REG_RAX);
-                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
+                int width = inst->width > 0 ? inst->width : 8;
+                int acc = pick_alu_acc(dr, -1);
+                ensure_reg(&out->text, inst->a, acc, ra);
+                emit_unary_f7_w(&out->text, 3, acc, width);
+                finish_gp_dst(&out->text, acc, dr, inst->dst, ra, width,
+                              inst->is_unsigned);
                 break;
             }
             case IR_BNOT: {
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                emit_not_r(&out->text, REG_RAX);
-                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
-                break;
-            }
-            case IR_BAND:
-            case IR_BOR:
-            case IR_BXOR: {
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                ensure_reg(&out->text, inst->b, REG_RCX, ra);
-                if (inst->op == IR_BAND)
-                    emit_and_rr(&out->text, REG_RAX, REG_RCX);
-                else if (inst->op == IR_BOR)
-                    emit_or_rr(&out->text, REG_RAX, REG_RCX);
-                else
-                    emit_bitxor_rr(&out->text, REG_RAX, REG_RCX);
-                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
+                int width = inst->width > 0 ? inst->width : 8;
+                int acc = pick_alu_acc(dr, -1);
+                ensure_reg(&out->text, inst->a, acc, ra);
+                emit_unary_f7_w(&out->text, 2, acc, width);
+                finish_gp_dst(&out->text, acc, dr, inst->dst, ra, width,
+                              inst->is_unsigned);
                 break;
             }
             case IR_SHL:
-            case IR_SHR: {
-                ensure_reg(&out->text, inst->b, REG_RCX, ra);
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                if (inst->op == IR_SHL)
-                    emit_shl_rcx(&out->text, REG_RAX);
-                else if (inst->is_unsigned)
-                    emit_shr_rcx(&out->text, REG_RAX);
-                else
-                    emit_sar_rcx(&out->text, REG_RAX);
-                mask_to_width(&out->text, REG_RAX, inst->width, inst->is_unsigned);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
+                isel_shift(&out->text, inst, fn, ssa_def, ra, dr, 4);
                 break;
-            }
+            case IR_SHR:
+                isel_shift(&out->text, inst, fn, ssa_def, ra, dr,
+                           inst->is_unsigned ? 5 : 7);
+                break;
+            case IR_ROL:
+                isel_shift(&out->text, inst, fn, ssa_def, ra, dr, 0);
+                break;
             case IR_EQ:
             case IR_NE:
             case IR_LT:
             case IR_LE:
             case IR_GT:
             case IR_GE: {
+                int width = inst->width > 0 ? inst->width : 8;
+                int64_t imm = 0;
+                int fb = ssa_const_imm(fn, ssa_def, inst->b, &imm) && imm_fits_i32(imm);
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                if (!fb)
+                    ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 uint8_t cc = ir_cmp_to_setcc(inst->op, inst->is_unsigned);
-                emit_cmp_produce(&out->text, REG_RAX, REG_RCX, REG_RDX, cc);
+                int cc_dst = (dr >= 0 && dr != REG_RAX && dr != REG_RCX)
+                             ? dr : REG_RDX;
+                emit_xor_rr(&out->text, cc_dst);
+                if (fb && imm == 0)
+                    emit_test_r_w(&out->text, REG_RAX, width);
+                else if (fb)
+                    emit_cmp_imm_w(&out->text, REG_RAX, (int32_t)imm, width);
+                else
+                    emit_cmp_rr_w(&out->text, REG_RAX, REG_RCX, width);
+                emit_setcc_r(&out->text, cc, cc_dst);
                 if (dr >= 0) {
-                    if (dr != REG_RDX) emit_mov_rr(&out->text, dr, REG_RDX);
+                    if (dr != cc_dst) emit_mov_rr(&out->text, dr, cc_dst);
                 } else {
-                    spill_if_needed(&out->text, inst->dst, REG_RDX, ra);
+                    spill_if_needed(&out->text, inst->dst, cc_dst, ra);
                 }
                 break;
             }
@@ -3170,44 +3800,116 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
             case IR_LOAD_PTR: {
-                ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                int ptr_off = 0;
+                int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
+                IRValue sib_base = -1, sib_idx = -1, rbp_idx = -1;
+                int rbp_i_off = 0;
+                int use_rbp_i = 0, use_sib = 0;
+                if (!folded && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
+                    && inst->a >= 0 && inst->a < fn->next_value_id && !needed[inst->a]
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    use_rbp_i = fold_rbp_index(fn, ssa_def, alloca_off, inst->a,
+                                               &rbp_i_off, &rbp_idx);
+                    if (!use_rbp_i)
+                        use_sib = fold_sib_add(fn, ssa_def, inst->a, &sib_base, &sib_idx);
+                }
+                if (!folded && !use_rbp_i && !use_sib)
+                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->dst)) {
-                    emit_byte(&out->text, 0xDB);
-                    emit_modrm(&out->text, 0, 5, REG_RCX & 7);
+                    if (folded)
+                        emit_x87_fldt_disp(&out->text, REG_RBP, ptr_off);
+                    else {
+                        emit_byte(&out->text, 0xDB);
+                        emit_modrm(&out->text, 0, 5, REG_RCX & 7);
+                    }
                     emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (value_is_float_class(fn, inst->dst)) {
                     int is_float = (inst->width == 4);
-                    emit_sse_load_via_ptr(&out->text,
-                                          dr >= 0 ? dr : 14,
-                                          REG_RCX, is_float);
+                    int dst_xmm = dr >= 0 ? dr : 14;
+                    if (folded)
+                        emit_sse_load_disp(&out->text, dst_xmm, REG_RBP, ptr_off, is_float);
+                    else
+                        emit_sse_load_via_ptr(&out->text, dst_xmm, REG_RCX, is_float);
                     if (dr < 0)
                         spill_if_needed_xmm(&out->text, inst->dst, 14,
                                             ra_xmm, gp_spill_area);
                 } else {
-                    emit_load_via_ptr(&out->text,
-                                      dr >= 0 ? dr : REG_RAX,
-                                      REG_RCX, inst->width, inst->is_unsigned);
+                    int dst_gp = dr >= 0 ? dr : REG_RAX;
+                    if (folded)
+                        emit_load_disp(&out->text, dst_gp, REG_RBP, ptr_off,
+                                       inst->width, inst->is_unsigned);
+                    else if (use_rbp_i) {
+                        ensure_reg(&out->text, rbp_idx, REG_RCX, ra);
+                        emit_load_sib(&out->text, dst_gp, REG_RBP, REG_RCX, rbp_i_off,
+                                      inst->width, inst->is_unsigned);
+                    } else if (use_sib) {
+                        ensure_reg(&out->text, sib_base, REG_RAX, ra);
+                        ensure_reg(&out->text, sib_idx, REG_RCX, ra);
+                        emit_load_sib(&out->text, dst_gp, REG_RAX, REG_RCX, 0,
+                                      inst->width, inst->is_unsigned);
+                    } else
+                        emit_load_via_ptr(&out->text, dst_gp, REG_RCX,
+                                          inst->width, inst->is_unsigned);
                     if (dr < 0)
                         spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
             case IR_STORE_PTR: {
-                ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                int ptr_off = 0;
+                int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
+                IRValue sib_base = -1, sib_idx = -1, rbp_idx = -1;
+                int rbp_i_off = 0;
+                int use_rbp_i = 0, use_sib = 0;
+                if (!folded && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
+                    && inst->a >= 0 && inst->a < fn->next_value_id && !needed[inst->a]
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    use_rbp_i = fold_rbp_index(fn, ssa_def, alloca_off, inst->a,
+                                               &rbp_i_off, &rbp_idx);
+                    if (!use_rbp_i)
+                        use_sib = fold_sib_add(fn, ssa_def, inst->a, &sib_base, &sib_idx);
+                }
+                if (!folded && !use_rbp_i && !use_sib)
+                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->b)) {
                     emit_ld_load(&out->text, inst->b, ld_off);
-                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
-                    emit_byte(&out->text, 0xDB);
-                    emit_modrm(&out->text, 0, 7, REG_RCX & 7);
+                    if (folded)
+                        emit_x87_fstpt_disp(&out->text, REG_RBP, ptr_off);
+                    else {
+                        ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                        emit_byte(&out->text, 0xDB);
+                        emit_modrm(&out->text, 0, 7, REG_RCX & 7);
+                    }
                 } else if (value_is_float_class(fn, inst->b)) {
                     int is_float = (inst->width == 4);
                     ensure_reg_xmm(&out->text, inst->b, 14, ra_xmm,
                                    gp_spill_area);
-                    emit_sse_store_via_ptr(&out->text, REG_RCX, 14,
-                                           is_float);
+                    if (folded)
+                        emit_sse_store_disp(&out->text, REG_RBP, 14,
+                                            ptr_off, is_float);
+                    else
+                        emit_sse_store_via_ptr(&out->text, REG_RCX, 14,
+                                               is_float);
+                } else if (use_rbp_i) {
+                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    ensure_reg(&out->text, rbp_idx, REG_RCX, ra);
+                    emit_store_sib(&out->text, REG_RBP, REG_RCX, rbp_i_off,
+                                   REG_RAX, inst->width);
+                } else if (use_sib) {
+                    ensure_reg(&out->text, inst->b, REG_RDX, ra);
+                    ensure_reg(&out->text, sib_base, REG_RAX, ra);
+                    ensure_reg(&out->text, sib_idx, REG_RCX, ra);
+                    emit_store_sib(&out->text, REG_RAX, REG_RCX, 0, REG_RDX,
+                                   inst->width);
                 } else {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
-                    emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, inst->width);
+                    if (folded)
+                        emit_store_disp(&out->text, REG_RBP, REG_RAX, ptr_off,
+                                        inst->width);
+                    else
+                        emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, inst->width);
                 }
                 break;
             }
@@ -3707,6 +4409,47 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 runtime.free(arg_slot);
                 runtime.free(arg_nslots);
+                int arg_conflict = (inst->call_name == ((void*)0));
+                if (!arg_conflict) {
+                    char tgt_gp[16], tgt_xmm[16];
+                    runtime.memset(tgt_gp, 0, sizeof(tgt_gp));
+                    runtime.memset(tgt_xmm, 0, sizeof(tgt_xmm));
+                    for (int k = 0; k < nargs; k++) {
+                        if (target_reg[k] < 0) continue;
+                        int t = target_reg[k];
+                        if (t >= 0 && t < 16) {
+                            if (target_is_xmm[k]) tgt_xmm[t] = 1;
+                            else tgt_gp[t] = 1;
+                        }
+                    }
+                    for (int k = 0; k < nargs && !arg_conflict; k++) {
+                        if (target_reg[k] < 0) continue;
+                        if (target_is_xmm[k]) {
+                            int h = -1;
+                            if (ra_xmm && inst->call_args[k] >= 0
+                                && inst->call_args[k] < ra_xmm->num_values)
+                                h = ra_xmm->reg[inst->call_args[k]];
+                            if (h >= 0 && h < 16 && tgt_xmm[h]
+                                && h != target_reg[k])
+                                arg_conflict = 1;
+                        } else {
+                            int h = gp_home(ra, inst->call_args[k]);
+                            if (h >= 0 && tgt_gp[h] && h != target_reg[k])
+                                arg_conflict = 1;
+                        }
+                    }
+                }
+                if (!arg_conflict) {
+                    for (int k = 0; k < nargs; k++) {
+                        if (target_reg[k] < 0) continue;
+                        if (target_is_xmm[k])
+                            ensure_reg_xmm(&out->text, inst->call_args[k],
+                                           target_reg[k], ra_xmm, gp_spill_area);
+                        else
+                            ensure_reg(&out->text, inst->call_args[k],
+                                       target_reg[k], ra);
+                    }
+                } else {
                 for (int k = nargs - 1; k >= 0; k--) {
                     if (target_reg[k] < 0) continue;
                     if (target_is_xmm[k]) {
@@ -3734,6 +4477,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     } else {
                         emit_pop_r(&out->text, target_reg[k]);
                     }
+                }
                 }
                 emit_byte(&out->text, 0xB0 | REG_RAX);
                 emit_byte(&out->text, (uint8_t)n_xmm);
@@ -4418,6 +5162,10 @@ int dreg;
         runtime.free(arrive_reg);
         runtime.free(arrive_is_xmm);
         runtime.free(stack_off);
+        runtime.free(ssa_def);
+        runtime.free(skip_body);
+        runtime.free(param_home_off);
+        runtime.free(needed);
         size_t fn_size = out->text.len - start_offset;
         uint8_t binding = fn->is_static ? 0 : 1 ;
         emit_module_add_symbol(out, fn->name, binding, 2 ,

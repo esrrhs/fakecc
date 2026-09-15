@@ -55,6 +55,7 @@ enum IROpcode {
     IR_BNOT,
     IR_SHL,
     IR_SHR,
+    IR_ROL,
     IR_EQ,
     IR_NE,
     IR_FADD,
@@ -916,6 +917,79 @@ static int value_in_class(const IRFunction *fn, int v, int float_class) {
     if (float_class) return value_is_xmm_float(fn, v);
     return !value_is_float_class(fn, v);
 }
+static int *ra_build_defs(const IRFunction *fn) {
+    int nv = fn->next_value_id;
+    int *def = xmalloc((size_t)(nv > 0 ? nv : 1) * sizeof(int));
+    for (int i = 0; i < (nv > 0 ? nv : 1); i++) def[i] = -1;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        int d = fn->insts.data[i].dst;
+        if (d >= 0 && d < nv) def[d] = (int)i;
+    }
+    return def;
+}
+static int def_op_is(const IRFunction *fn, const int *def, IRValue v, IROpcode op) {
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    return fn->insts.data[def[v]].op == op;
+}
+static int ra_is_stack_base(const IRFunction *fn, const int *def, IRValue v, int depth) {
+    if (depth > 8 || v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op == IR_ADDR) return 1;
+    if (d->op != IR_ADD) return 0;
+    if (def_op_is(fn, def, d->b, IR_CONST))
+        return ra_is_stack_base(fn, def, d->a, depth + 1);
+    if (def_op_is(fn, def, d->a, IR_CONST))
+        return ra_is_stack_base(fn, def, d->b, depth + 1);
+    return 0;
+}
+static int ra_is_gaddr(const IRFunction *fn, const int *def, IRValue v) {
+    return def_op_is(fn, def, v, IR_GADDR) || def_op_is(fn, def, v, IR_GADDR_TLS);
+}
+static int ra_ok_index(const IRFunction *fn, const int *def, IRValue v) {
+    int depth = 0;
+    while (v >= 0 && v < fn->next_value_id && def[v] >= 0 && depth++ < 8) {
+        int op = fn->insts.data[def[v]].op;
+        if (op == IR_COPY || op == IR_SEXT || op == IR_ZEXT) {
+            v = fn->insts.data[def[v]].a;
+            continue;
+        }
+        return op != IR_CONST && op != IR_ADDR && op != IR_GADDR
+            && op != IR_GADDR_TLS && op != IR_FADDR;
+    }
+    return 0;
+}
+static int addr_fold_extras(const IRFunction *fn, const int *def, IRValue ptr,
+                            int width, IRValue extra[2]) {
+    int n = 0;
+    if (width != 1 && width != 2 && width != 4 && width != 8) return 0;
+    if (!def || ptr < 0 || ptr >= fn->next_value_id || def[ptr] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[ptr]];
+    if (d->op != IR_ADD) return 0;
+    int a_const = def_op_is(fn, def, d->a, IR_CONST);
+    int b_const = def_op_is(fn, def, d->b, IR_CONST);
+    int a_stack = ra_is_stack_base(fn, def, d->a, 0);
+    int b_stack = ra_is_stack_base(fn, def, d->b, 0);
+    if ((a_stack && b_const) || (b_stack && a_const)) return 0;
+    if (a_stack && !b_const && ra_ok_index(fn, def, d->b)) {
+        extra[n++] = d->b;
+        return n;
+    }
+    if (b_stack && !a_const && ra_ok_index(fn, def, d->a)) {
+        extra[n++] = d->a;
+        return n;
+    }
+    if (ra_is_gaddr(fn, def, d->a) && !b_const && ra_ok_index(fn, def, d->b)) {
+        extra[n++] = d->a;
+        extra[n++] = d->b;
+        return n;
+    }
+    if (ra_is_gaddr(fn, def, d->b) && !a_const && ra_ok_index(fn, def, d->a)) {
+        extra[n++] = d->b;
+        extra[n++] = d->a;
+        return n;
+    }
+    return 0;
+}
 struct LiveInfo {
     int def_point;
     int *use_points;
@@ -968,6 +1042,20 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
                 if (av >= 0 && av < nv) liv_add_use(&liv[av], (int)i);
             }
         }
+    }
+    {
+        int *def = ra_build_defs(fn);
+        for (size_t i = 0; i < fn->insts.len; i++) {
+            const IRInst *inst = &fn->insts.data[i];
+            if (inst->op != IR_LOAD_PTR && inst->op != IR_STORE_PTR) continue;
+            IRValue extra[2];
+            int n = addr_fold_extras(fn, def, inst->a, inst->width, extra);
+            for (int k = 0; k < n; k++) {
+                if (extra[k] >= 0 && extra[k] < nv)
+                    liv_add_use(&liv[extra[k]], (int)i);
+            }
+        }
+        runtime.free(def);
     }
     for (int v = 0; v < nv; v++) {
         if (liv[v].num_uses == 0) {
@@ -1063,7 +1151,7 @@ static void bs_copy(BitSet *dst, const BitSet *src) {
     runtime.memcpy(dst->w, src->w, (size_t)dst->num_words * sizeof(uint64_t));
 }
 static void compute_use_def(const IRFunction *fn, const CFG *cfg,
-                            BitSet *use_b, BitSet *def_b) {
+                            const int *def, BitSet *use_b, BitSet *def_b) {
     for (size_t bi = 0; bi < cfg->num; bi++) {
         bs_clear(&use_b[bi]);
         bs_clear(&def_b[bi]);
@@ -1087,6 +1175,18 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                     if (av >= 0 && av < use_b[bi].nv &&
                         !bs_test(&def_b[bi], av))
                         bs_set(&use_b[bi], av);
+                }
+            }
+            if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
+                IRValue extra[2];
+                int w = inst->width;
+                if (w == 1 || w == 2 || w == 4 || w == 8) {
+                    int n = addr_fold_extras(fn, def, inst->a, inst->width, extra);
+                    for (int k = 0; k < n; k++) {
+                        IRValue v = extra[k];
+                        if (v >= 0 && v < use_b[bi].nv && !bs_test(&def_b[bi], v))
+                            bs_set(&use_b[bi], v);
+                    }
                 }
             }
             if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
@@ -1137,6 +1237,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                                     const RegClass *cls) {
     ig_init(g, nv);
     for (int v = 0; v < nv; v++) forbid_mask[v] = 0;
+    int *ssa_def = ra_build_defs(fn);
     BitSet *use_b = xmalloc(cfg->num * sizeof(BitSet));
     BitSet *def_b = xmalloc(cfg->num * sizeof(BitSet));
     BitSet *in_b = xmalloc(cfg->num * sizeof(BitSet));
@@ -1147,7 +1248,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         bs_init(&in_b[bi], nv);
         bs_init(&out_b[bi], nv);
     }
-    compute_use_def(fn, cfg, use_b, def_b);
+    compute_use_def(fn, cfg, ssa_def, use_b, def_b);
     compute_live_in_out(cfg, use_b, def_b, in_b, out_b);
     BitSet live;
     bs_init(&live, nv);
@@ -1186,6 +1287,15 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                     if (av >= 0 && av < nv &&
                         value_in_class(fn, av, float_class))
                         bs_set(&live, av);
+                }
+            }
+            if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
+                IRValue extra[2];
+                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
+                for (int k = 0; k < n; k++) {
+                    IRValue v = extra[k];
+                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class))
+                        bs_set(&live, v);
                 }
             }
         }
@@ -1234,6 +1344,15 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                         bs_set(&live, av);
                 }
             }
+            if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
+                IRValue extra[2];
+                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
+                for (int k = 0; k < n; k++) {
+                    IRValue v = extra[k];
+                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class))
+                        bs_set(&live, v);
+                }
+            }
         }
     }
     bs_free(&live);
@@ -1244,6 +1363,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         bs_free(&out_b[bi]);
     }
     runtime.free(use_b); runtime.free(def_b); runtime.free(in_b); runtime.free(out_b);
+    runtime.free(ssa_def);
 }
 static int *compute_mcs_order(const InterfGraph *g) {
     int n = g->n;

@@ -209,4 +209,89 @@ else
     fail "-nostdlib missing-sym: no binary and no error"
 fi
 
+# 7) fakecc can produce a shared library (-shared), and the three interop
+#    directions all work:
+#      fakecc exe  + fakecc .so
+#      gcc    exe  + fakecc .so
+#      fakecc exe  + gcc    .so  (already covered above; re-check with -shared)
+cat > "$TMP/lib.c" <<'EOF'
+package main;
+int add(int a, int b) { return a + b; }
+int mul(int a, int b) { return a * b; }
+EOF
+cat > "$TMP/lib_gcc.c" <<'EOF'
+int add(int a, int b) { return a + b; }
+int mul(int a, int b) { return a * b; }
+EOF
+cat > "$TMP/use.c" <<'EOF'
+package main;
+extern int add(int a, int b);
+extern int mul(int a, int b);
+int main(void) { return add(20, 22) + mul(0, 0); }
+EOF
+cat > "$TMP/use_gcc.c" <<'EOF'
+extern int add(int a, int b);
+extern int mul(int a, int b);
+int main(void) { return add(20, 22) + mul(0, 0); }
+EOF
+
+rm -f "$TMP/libfcc.so" "$TMP/libgcc.so" "$TMP/p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA -shared "$TMP/lib.c" -o "$TMP/libfcc.so" 2>"$TMP/err" \
+    || { fail "fakecc -shared compile: $(head -1 "$TMP/err")"; }
+if [ -f "$TMP/libfcc.so" ]; then
+    if LANG=C readelf -h "$TMP/libfcc.so" 2>/dev/null | grep -q 'DYN'; then
+        pass "fakecc -shared produces ET_DYN"
+    else
+        fail "fakecc -shared not ET_DYN"
+    fi
+    if has_needed "$TMP/libfcc.so" "libc.so.6"; then
+        fail "fakecc -shared should not DT_NEEDED libc by default"
+    else
+        pass "fakecc -shared omits libc.so.6"
+    fi
+    if LANG=C readelf -d "$TMP/libfcc.so" 2>/dev/null | grep '(SONAME)' | grep -F '[libfcc.so]' >/dev/null; then
+        pass "fakecc -shared DT_SONAME"
+    else
+        fail "fakecc -shared missing DT_SONAME libfcc.so"
+    fi
+    if LANG=C readelf -sW "$TMP/libfcc.so" 2>/dev/null | grep -E 'GLOBAL.*\<add\>' >/dev/null \
+       && LANG=C readelf -sW "$TMP/libfcc.so" 2>/dev/null | grep -E 'GLOBAL.*\<mul\>' >/dev/null; then
+        pass "fakecc -shared exports add/mul"
+    else
+        fail "fakecc -shared missing exported symbols"
+    fi
+fi
+
+# 7a) fakecc exe loads fakecc .so
+rm -f "$TMP/p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/use.c" -L"$TMP" -lfcc -o "$TMP/p" 2>"$TMP/err" \
+    || { fail "fakecc←fakecc.so compile: $(head -1 "$TMP/err")"; }
+if [ -x "$TMP/p" ]; then
+    got=0
+    env -u LD_LIBRARY_PATH timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
+    if [ "$got" = "42" ]; then pass "fakecc exe ← fakecc .so"; else fail "fakecc exe ← fakecc .so (exit $got)"; fi
+fi
+
+# 7b) gcc exe loads fakecc .so
+rm -f "$TMP/p"
+if gcc $CC_EXTRA "$TMP/use_gcc.c" -L"$TMP" -lfcc -Wl,-rpath,"$TMP" -o "$TMP/p" 2>"$TMP/err"; then
+    got=0
+    timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
+    if [ "$got" = "42" ]; then pass "gcc exe ← fakecc .so"; else fail "gcc exe ← fakecc .so (exit $got)"; fi
+else
+    fail "gcc←fakecc.so compile: $(head -1 "$TMP/err")"
+fi
+
+# 7c) fakecc exe loads gcc .so (explicit -shared counterpart of test 3)
+gcc -shared -fPIC -Wl,-soname,libaddg.so -o "$TMP/libaddg.so" "$TMP/lib_gcc.c" \
+    || { echo "FAIL could not build libaddg.so with gcc"; exit 1; }
+rm -f "$TMP/p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/use.c" -L"$TMP" -laddg -o "$TMP/p" 2>"$TMP/err" \
+    || { fail "fakecc←gcc.so compile: $(head -1 "$TMP/err")"; }
+if [ -x "$TMP/p" ]; then
+    got=0
+    env -u LD_LIBRARY_PATH timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
+    if [ "$got" = "42" ]; then pass "fakecc exe ← gcc .so"; else fail "fakecc exe ← gcc .so (exit $got)"; fi
+fi
+
 exit $FAIL
