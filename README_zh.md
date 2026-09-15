@@ -179,6 +179,12 @@ gcc -c -O2 helper.c -o /tmp/helper.o
 # 反向兼容：GCC 直接链接 FakeCC 编译的 .o 目标文件 (-c)
 ./build/fakecc -c module.c -o /tmp/module.o
 gcc main.c /tmp/module.o -o /tmp/mixed_app
+
+# 链接 GCC 编译的动态共享库 (.so)：
+# 支持 -LDIR、-lNAME、-l:SONAME 以及直接传入 /path/to/lib.so 路径（自动生成 DT_NEEDED 与 DT_RUNPATH）
+gcc -shared -fPIC -o /tmp/libmath.so math.c
+./build/fakecc app.c -L/tmp -lmath -o /tmp/app_with_so
+./build/fakecc app.c /tmp/libmath.so -o /tmp/app_with_so
 ```
 
 ---
