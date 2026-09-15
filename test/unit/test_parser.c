@@ -339,6 +339,23 @@ static void test_typeof_expr(void) {
     tu_free(&tu);
 }
 
+static void test_wide_string_escapes(void) {
+    TranslationUnit tu = lex_parse(
+        "package main; int main() { void *p = L\"\\x41\\101\"; return 0; }");
+    T_ASSERT_EQ_INT((int)tu.functions.len, 1);
+    Stmt *s0 = &tu.functions.data[0].body.data[0];
+    T_ASSERT_EQ_INT((int)s0->kind, (int)ST_DECL);
+    T_ASSERT(s0->u.decl.init != NULL);
+    T_ASSERT_EQ_INT((int)s0->u.decl.init->kind, (int)EX_COMPOUND_LITERAL);
+    Expr *init_list = s0->u.decl.init->u.compound.init;
+    T_ASSERT_EQ_INT((int)init_list->kind, (int)EX_INIT_LIST);
+    T_ASSERT_EQ_INT(init_list->u.init_list.num_elements, 3); /* 'A', 'A', '\0' */
+    T_ASSERT_EQ_INT(init_list->u.init_list.elements[0]->u.int_val, 0x41);
+    T_ASSERT_EQ_INT(init_list->u.init_list.elements[1]->u.int_val, 0x41);
+    T_ASSERT_EQ_INT(init_list->u.init_list.elements[2]->u.int_val, 0);
+    tu_free(&tu);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -363,5 +380,6 @@ int main(void) {
     test_nested_function();
     test_stmt_expr();
     test_typeof_expr();
+    test_wide_string_escapes();
     return t_finalize();
 }

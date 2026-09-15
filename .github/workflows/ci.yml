@@ -84,10 +84,17 @@ jobs:
       # -O2 only speeds Stage 0 (gcc-built fakecc compiling v0/*.c).  It does
       # not change fakecc-1's codegen, so the fixed-point comparison is the
       # same as an unoptimized Stage 0.
+      # Force CC=gcc so we pick up the GCC 16 installed above (PATH via
+      # GITHUB_PATH).  Without this, cmake finds /usr/bin/cc → GCC 13, which
+      # has miscompiled Stage 0 at -O2 after the -shared linker work and
+      # broken the fixed point.
       - name: Build stage 0
         run: |
           cmake -S . -B build -DCMAKE_C_FLAGS="-O2"
           cmake --build build --parallel
+        env:
+          CC: gcc
+          CXX: g++
 
       # Stage 0 compiles and links fakecc; that fakecc compiles and links
       # fakecc again.  Both stages must produce byte-identical binaries,

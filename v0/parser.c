@@ -3153,8 +3153,33 @@ int is_unsigned;
                 int ch;
                 if (src[i] == '\\' && i + 1 < slen) {
                     i++;
-                    ch = simple_escape_value((unsigned char)src[i]);
-                    i++;
+                    if (src[i] == 'x' || src[i] == 'X') {
+                        int val = 0;
+                        while (i + 1 < slen && runtime.isxdigit((unsigned char)src[i + 1])) {
+                            i++;
+                            char h = src[i];
+                            int d = (h >= '0' && h <= '9') ? h - '0'
+                                  : (h >= 'a' && h <= 'f') ? h - 'a' + 10
+                                  : h - 'A' + 10;
+                            val = val * 16 + d;
+                        }
+                        ch = val;
+                        i++;
+                    } else if (src[i] >= '0' && src[i] <= '7') {
+                        int val = src[i] - '0';
+                        int n = 1;
+                        while (n < 3 && i + 1 < slen
+                               && src[i + 1] >= '0' && src[i + 1] <= '7') {
+                            i++;
+                            val = val * 8 + (src[i] - '0');
+                            n++;
+                        }
+                        ch = val;
+                        i++;
+                    } else {
+                        ch = simple_escape_value((unsigned char)src[i]);
+                        i++;
+                    }
                 } else {
                     const unsigned char *s = (const unsigned char *)src + i;
                     if (s[0] < 0x80) {

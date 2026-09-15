@@ -55,6 +55,7 @@ enum IROpcode {
     IR_BNOT,
     IR_SHL,
     IR_SHR,
+    IR_ROL,
     IR_EQ,
     IR_NE,
     IR_FADD,
@@ -4968,6 +4969,112 @@ static IRValue lower_va_arg_pack_inline(IRFunction *fn, IRSymTable *st, const Ex
     st->len = mark;
     return result;
 }
+static int expr_repeatable(const Expr *e) {
+    if (!e) return 0;
+    switch (e->kind) {
+    case EX_INT_LIT:
+    case EX_VAR:
+        return 1;
+    case EX_CAST:
+        return expr_repeatable(e->u.cast.operand);
+    case EX_UNARY:
+        return e->u.un.op == UOP_POS && expr_repeatable(e->u.un.operand);
+    case EX_DEREF:
+        return expr_repeatable(e->u.deref.operand);
+    case EX_ADDR:
+        return expr_repeatable(e->u.addr.operand);
+    case EX_MEMBER:
+        return expr_repeatable(e->u.member.obj);
+    case EX_INDEX:
+        return expr_repeatable(e->u.idx.array) && expr_repeatable(e->u.idx.index);
+    case EX_BINOP:
+        if (e->u.bin.op == BOP_ADD || e->u.bin.op == BOP_SUB)
+            return expr_repeatable(e->u.bin.l) && expr_repeatable(e->u.bin.r);
+        return 0;
+    default:
+        return 0;
+    }
+}
+static int expr_equiv(const Expr *a, const Expr *b) {
+    if (!a || !b) return 0;
+    while (a->kind == EX_CAST) a = a->u.cast.operand;
+    while (b->kind == EX_CAST) b = b->u.cast.operand;
+    if (a->kind != b->kind) return 0;
+    switch (a->kind) {
+    case EX_INT_LIT:
+        return a->u.int_val == b->u.int_val && a->int_hi == b->int_hi;
+    case EX_VAR: {
+        const char *an = a->u.var.name ? a->u.var.name : "";
+        const char *bn = b->u.var.name ? b->u.var.name : "";
+        if (runtime.strcmp(an, bn) != 0) return 0;
+        if (!a->u.var.pkg && !b->u.var.pkg) return 1;
+        if (a->u.var.pkg && b->u.var.pkg) return runtime.strcmp(a->u.var.pkg, b->u.var.pkg) == 0;
+        return 0;
+    }
+    case EX_UNARY:
+        return a->u.un.op == b->u.un.op && expr_equiv(a->u.un.operand, b->u.un.operand);
+    case EX_DEREF:
+        return expr_equiv(a->u.deref.operand, b->u.deref.operand);
+    case EX_ADDR:
+        return expr_equiv(a->u.addr.operand, b->u.addr.operand);
+    case EX_MEMBER: {
+        const char *an = a->u.member.name ? a->u.member.name : "";
+        const char *bn = b->u.member.name ? b->u.member.name : "";
+        return runtime.strcmp(an, bn) == 0 && expr_equiv(a->u.member.obj, b->u.member.obj);
+    }
+    case EX_INDEX:
+        return expr_equiv(a->u.idx.array, b->u.idx.array)
+            && expr_equiv(a->u.idx.index, b->u.idx.index);
+    case EX_BINOP:
+        return a->u.bin.op == b->u.bin.op
+            && expr_equiv(a->u.bin.l, b->u.bin.l)
+            && expr_equiv(a->u.bin.r, b->u.bin.r);
+    default:
+        return 0;
+    }
+}
+static int expr_is_bits_minus(const Expr *e, const Expr *amt, int bits) {
+    if (!e || e->kind != EX_BINOP || e->u.bin.op != BOP_SUB) return 0;
+    long long c;
+    if (!fold_const_int(e->u.bin.l, &c) || c != bits) return 0;
+    return expr_equiv(e->u.bin.r, amt);
+}
+static int amounts_complement(const Expr *shl_n, const Expr *shr_n, int bits) {
+    if (expr_is_bits_minus(shr_n, shl_n, bits)) return 1;
+    if (expr_is_bits_minus(shl_n, shr_n, bits)) return 1;
+long long a;
+long long b;
+    if (fold_const_int(shl_n, &a) && fold_const_int(shr_n, &b))
+        return (a + b == bits) || (a + b == 0);
+    return 0;
+}
+static IRValue try_lower_rotate(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    if (!e || e->kind != EX_BINOP || e->u.bin.op != BOP_BITOR) return -1;
+    if (e->type.kind == TY_FLOAT || e->type.is_vector) return -1;
+    if (!e->type.is_unsigned) return -1;
+    int op_w = e->type.width ? e->type.width : 4;
+    if (op_w != 1 && op_w != 2 && op_w != 4 && op_w != 8) return -1;
+    int bits = op_w * 8;
+    const Expr *shl = ((void*)0), *shr = ((void*)0);
+    if (e->u.bin.l->kind == EX_BINOP && e->u.bin.l->u.bin.op == BOP_SHL) shl = e->u.bin.l;
+    if (e->u.bin.l->kind == EX_BINOP && e->u.bin.l->u.bin.op == BOP_SHR) shr = e->u.bin.l;
+    if (e->u.bin.r->kind == EX_BINOP && e->u.bin.r->u.bin.op == BOP_SHL) shl = e->u.bin.r;
+    if (e->u.bin.r->kind == EX_BINOP && e->u.bin.r->u.bin.op == BOP_SHR) shr = e->u.bin.r;
+    if (!shl || !shr) return -1;
+    if (!shr->type.is_unsigned) return -1;
+    if (!expr_equiv(shl->u.bin.l, shr->u.bin.l)) return -1;
+    if (!expr_repeatable(shl->u.bin.l)) return -1;
+    if (!expr_repeatable(shl->u.bin.r) && !expr_repeatable(shr->u.bin.r)) return -1;
+    if (!amounts_complement(shl->u.bin.r, shr->u.bin.r, bits)) return -1;
+    if (!expr_repeatable(shl->u.bin.r)) return -1;
+    IRValue x = lower_expr(fn, st, shl->u.bin.l);
+    IRValue n = lower_expr(fn, st, shl->u.bin.r);
+    int xw = get_value_width(fn, x), xu = get_value_is_unsigned(fn, x);
+    int nw = get_value_width(fn, n), nu = get_value_is_unsigned(fn, n);
+    x = coerce(fn, x, xw, xu, op_w, 1, e->loc);
+    n = coerce(fn, n, nw, nu, op_w, 1, e->loc);
+    return emit_bin_w(fn, IR_ROL, x, n, op_w, 1, e->loc);
+}
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     switch (e->kind) {
     case EX_INT_LIT: {
@@ -5331,6 +5438,10 @@ IRValue hi;
             IRValue off = emit_bin_w(fn, IR_MUL, iv8, esv, 8, 1, e->loc);
             IROpcode op = (bop == BOP_ADD) ? IR_ADD : IR_SUB;
             return emit_bin_w(fn, op, pv, off, 8, 1, e->loc);
+        }
+        if (bop == BOP_BITOR) {
+            IRValue rotated = try_lower_rotate(fn, st, e);
+            if (rotated >= 0) return rotated;
         }
         IRValue l = lower_expr(fn, st, e->u.bin.l);
         IRValue r = lower_expr(fn, st, e->u.bin.r);

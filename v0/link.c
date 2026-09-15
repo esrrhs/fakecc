@@ -192,7 +192,7 @@ int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
-               int want_debug);
+               int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
@@ -233,7 +233,7 @@ static void buf_bytes(Buffer *b, const char *d, size_t n) { buffer_append(b, d, 
 static void buf_u16(Buffer *b, uint16_t v) { buffer_append(b, (const char *)&v, 2); }
 static void buf_u32(Buffer *b, uint32_t v) { buffer_append(b, (const char *)&v, 4); }
 static void buf_u64(Buffer *b, uint64_t v) { buffer_append(b, (const char *)&v, 8); }
-static void write_ehdr(Buffer *b, uint64_t entry, uint64_t phoff,
+static void write_ehdr(Buffer *b, uint16_t e_type, uint64_t entry, uint64_t phoff,
                        uint16_t phnum) {
     buffer_append(b, "\x7f" "ELF", 4);
     char ident[12];
@@ -243,7 +243,7 @@ static void write_ehdr(Buffer *b, uint64_t entry, uint64_t phoff,
     ident[2] = 1;
     ident[3] = 0;
     buffer_append(b, ident, 12);
-    buf_u16(b, 2);
+    buf_u16(b, e_type);
     buf_u16(b, 62);
     buf_u32(b, 1);
     buf_u64(b, entry);
@@ -312,6 +312,7 @@ struct SectionLayout {
     size_t bss_size;
     size_t start_size;
     int have_tls;
+    int is_shared;
     uint64_t tls_vaddr;
     size_t tls_file_offset;
     size_t tls_filesize;
@@ -379,9 +380,11 @@ Buffer debug_frame;
         }
     }
     uint32_t first_global = (uint32_t)(symtab.len / 24);
-    uint32_t start_name = append_string(&strtab, "_start");
-    write_sym(&symtab, start_name, 1, 2, 1,
-              entry, lay->start_size);
+    if (!lay->is_shared) {
+        uint32_t start_name = append_string(&strtab, "_start");
+        write_sym(&symtab, start_name, 1, 2, 1,
+                  entry, lay->start_size);
+    }
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -704,7 +707,7 @@ static void needed_add(char ***needed, int *num, const char *soname) {
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed_in, size_t num_needed_in, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
-               int want_debug) {
+               int want_debug, int is_shared) {
 Buffer text;
 Buffer rodata;
 Buffer data;
@@ -841,12 +844,51 @@ Buffer tdata;
         data_got_external[j] = !found;
         if (!found) num_true_data_ext++;
     }
-    int need_dynamic = (num_ext > 0 || num_true_data_ext > 0);
+    int need_dynamic = is_shared || (num_ext > 0 || num_true_data_ext > 0);
     char **needed = ((void*)0);
     int num_needed = 0;
     for (size_t i = 0; i < num_needed_in; i++)
         needed_add(&needed, &num_needed, needed_in[i]);
     (void)nodefaultlibs;
+    char *soname = ((void*)0);
+    if (is_shared && path) {
+        const char *base = runtime.strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (base[0]) soname = xstrdup(base);
+    }
+    struct {
+        const char *name;
+        size_t gsi;
+        uint8_t type;
+        uint16_t shndx;
+        size_t size;
+    } *exports = ((void*)0);
+    int num_exports = 0;
+    if (is_shared) {
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t j = 0; j < m->num_syms; j++) {
+                size_t gsi = mod_sym_base[i] + j;
+                const EmitSymbol *sym = &m->syms[j];
+                if (!sinfo[gsi].defined) continue;
+                if (sinfo[gsi].binding != 1) continue;
+                if (!sym->name || sym->type == 3) continue;
+                int dup = 0;
+                for (int e = 0; e < num_exports; e++) {
+                    if (runtime.strcmp(exports[e].name, sym->name) == 0) { dup = 1; break; }
+                }
+                if (dup) continue;
+                exports = runtime.realloc(exports, ((size_t)num_exports + 1) * sizeof(*exports));
+                if (!exports) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                exports[num_exports].name = sym->name;
+                exports[num_exports].gsi = gsi;
+                exports[num_exports].type = sym->type ? sym->type : 2;
+                exports[num_exports].shndx = sym->shndx;
+                exports[num_exports].size = sym->size;
+                num_exports++;
+            }
+        }
+    }
     char *runpath = ((void*)0);
     if (need_dynamic && num_lib_paths > 0) {
         size_t len = 1;
@@ -868,7 +910,7 @@ Buffer tdata;
     for (int i = 0; i < num_needed; i++) {
         if (runtime.strcmp(needed[i], "libc.so.6") == 0) { have_libc = 1; break; }
     }
-    if (need_dynamic && have_libc)
+    if (need_dynamic && have_libc && !is_shared)
         exit_ext_idx = ext_find_or_add(&ext_list, &num_ext, "exit");
     size_t *plt_entry_off = num_ext ? xcalloc(num_ext, sizeof(size_t)) : ((void*)0);
     size_t *plt_got_fixup = num_ext ? xcalloc(num_ext, sizeof(size_t)) : ((void*)0);
@@ -887,16 +929,24 @@ Buffer rela_dyn;
 Buffer dynamic;
     buffer_init(&dynstr); buffer_init(&dynsym); buffer_init(&hash);
     buffer_init(&rela_plt); buffer_init(&rela_dyn); buffer_init(&dynamic);
-    size_t interp_len = need_dynamic ? sizeof(INTERP_PATH) : 0;
-    int num_dynsym_ext = num_ext + num_true_data_ext;
+    size_t interp_len = (need_dynamic && !is_shared) ? sizeof(INTERP_PATH) : 0;
+    int num_dynsym_ext = num_ext + num_true_data_ext + num_exports;
     size_t needed_str_bytes = 0;
+    size_t soname_str_bytes = 0;
+    size_t soname_dynstr_off = 0;
     size_t runpath_str_bytes = 0;
     size_t runpath_dynstr_off = 0;
+    int num_relative = is_shared ? 1 : 0;
     if (need_dynamic) {
         buf_u8(&dynstr, 0);
         for (int i = 0; i < num_needed; i++) {
             buf_bytes(&dynstr, needed[i], runtime.strlen(needed[i]) + 1);
             needed_str_bytes += runtime.strlen(needed[i]) + 1;
+        }
+        if (soname) {
+            soname_dynstr_off = dynstr.len;
+            buf_bytes(&dynstr, soname, runtime.strlen(soname) + 1);
+            soname_str_bytes = runtime.strlen(soname) + 1;
         }
         if (runpath) {
             runpath_dynstr_off = dynstr.len;
@@ -909,14 +959,24 @@ Buffer dynamic;
             if (!data_got_external[j]) continue;
             buf_bytes(&dynstr, data_ext_list[j], runtime.strlen(data_ext_list[j]) + 1);
         }
+        for (int e = 0; e < num_exports; e++)
+            buf_bytes(&dynstr, exports[e].name, runtime.strlen(exports[e].name) + 1);
         buf_pad(&dynsym, 24);
-        for (int k = 0; k < num_dynsym_ext; k++) {
+        for (int k = 0; k < num_ext + num_true_data_ext; k++) {
             buf_u32(&dynsym, 0);
             buf_u8(&dynsym, 1 << 4);
             buf_u8(&dynsym, 0);
             buf_u16(&dynsym, 0);
             buf_u64(&dynsym, 0);
             buf_u64(&dynsym, 0);
+        }
+        for (int e = 0; e < num_exports; e++) {
+            buf_u32(&dynsym, 0);
+            buf_u8(&dynsym, (uint8_t)((1 << 4) | (exports[e].type & 0xf)));
+            buf_u8(&dynsym, 0);
+            buf_u16(&dynsym, exports[e].shndx);
+            buf_u64(&dynsym, 0);
+            buf_u64(&dynsym, exports[e].size);
         }
         size_t nsyms = 1 + (size_t)num_dynsym_ext;
         size_t nbucket = (nsyms < 2) ? 1 : 3;
@@ -929,11 +989,15 @@ Buffer dynamic;
                 if (idx < num_ext) nm = ext_list[idx];
                 else {
                     int want = idx - num_ext;
-                    int seen = 0;
-                    for (int j = 0; j < num_data_ext; j++) {
-                        if (!data_got_external[j]) continue;
-                        if (seen == want) { nm = data_ext_list[j]; break; }
-                        seen++;
+                    if (want < num_true_data_ext) {
+                        int seen = 0;
+                        for (int j = 0; j < num_data_ext; j++) {
+                            if (!data_got_external[j]) continue;
+                            if (seen == want) { nm = data_ext_list[j]; break; }
+                            seen++;
+                        }
+                    } else {
+                        nm = exports[want - num_true_data_ext].name;
                     }
                 }
             }
@@ -961,27 +1025,40 @@ Buffer dynamic;
                 dyn_sym_i++;
             }
         }
+        for (int r = 0; r < num_relative; r++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, 8);
+            buf_u64(&rela_dyn, 0);
+        }
     }
     int have_tls = (tdata.len > 0 || tbss_size > 0);
     int init_tls_in_start = have_tls && !need_dynamic;
-    size_t start_size = init_tls_in_start ? (22 + 25 + (tdata.len > 0 ? 27 : 0)) : 22;
-    uint16_t phnum_max = have_tls ? 5 : 4;
+    size_t start_size = 0;
+    if (!is_shared)
+        start_size = init_tls_in_start ? (22 + 25 + (tdata.len > 0 ? 27 : 0)) : 22;
+    uint16_t phnum_max;
+    if (is_shared)
+        phnum_max = have_tls ? 4 : 3;
+    else
+        phnum_max = have_tls ? 5 : 4;
     size_t hdr_size = 64 + 56 * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
     size_t dynamic_size = 0;
     if (need_dynamic) {
-        dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0)
-                                + (num_true_data_ext > 0 ? 3 : 0)) * 16;
+        int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0);
+        dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0) + (soname ? 1 : 0)
+                                + (have_rela_dyn ? 3 : 0)) * 16;
     }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
-        + rela_plt.len + rela_dyn.len + dynamic_size;
-    size_t rx_content_len = start_size + text.len + rodata.len + dyn_sections_len;
+        + rela_plt.len + rela_dyn.len;
+    size_t dyn_in_rx = is_shared ? 0 : dynamic_size;
+    size_t rx_content_len = start_size + text.len + rodata.len + dyn_sections_len + dyn_in_rx;
     size_t rx_filesz = hdr_size + rx_content_len;
     size_t data_file_offset = rx_filesz;
     if (data_file_offset & (0x1000 - 1))
         data_file_offset = (data_file_offset + 0x1000 - 1) & ~(size_t)(0x1000 - 1);
-    uint64_t base = 0x400000;
+    uint64_t base = is_shared ? 0 : 0x400000;
     uint64_t data_vaddr = base + data_file_offset;
     size_t got_data_off = data.len;
     while (got_data_off & 7) got_data_off++;
@@ -991,7 +1068,13 @@ Buffer dynamic;
         : (num_data_ext > 0 ? (size_t)(3 + num_data_ext) * 8 : 0);
     size_t got_end_off = layout_got_bytes
         ? got_data_off + layout_got_bytes : data.len;
-    size_t tdata_data_off = got_end_off;
+    size_t dynamic_data_off = got_end_off;
+    if (is_shared && need_dynamic) {
+        while (dynamic_data_off & 7) dynamic_data_off++;
+    }
+    size_t dynamic_rw_end = (is_shared && need_dynamic)
+        ? dynamic_data_off + dynamic_size : got_end_off;
+    size_t tdata_data_off = dynamic_rw_end;
     if (have_tls) while (tdata_data_off & 7) tdata_data_off++;
     uint64_t tls_vaddr = data_vaddr + tdata_data_off;
     size_t tls_file_offset_base = data_file_offset + tdata_data_off;
@@ -1222,27 +1305,29 @@ Buffer dynamic;
     uint64_t main_addr = 0;
     uint64_t exit_static_addr = 0;
     int found_main = 0;
-    for (size_t i = 0; i < n; i++) {
-        EmitModule *m = mods[i];
-        for (size_t j = 0; j < m->num_syms; j++) {
-            const EmitSymbol *sym = &m->syms[j];
-            if (!sym->name || sym->shndx != 1 || sym->binding != 1)
-                continue;
-            if (runtime.strcmp(sym->name, "main") == 0) {
-                main_addr = code_vaddr + mod_text_off[i] + sym->value;
-                found_main = 1;
+    if (!is_shared) {
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t j = 0; j < m->num_syms; j++) {
+                const EmitSymbol *sym = &m->syms[j];
+                if (!sym->name || sym->shndx != 1 || sym->binding != 1)
+                    continue;
+                if (runtime.strcmp(sym->name, "main") == 0) {
+                    main_addr = code_vaddr + mod_text_off[i] + sym->value;
+                    found_main = 1;
+                }
+                if (runtime.strcmp(sym->name, "exit") == 0)
+                    exit_static_addr = code_vaddr + mod_text_off[i] + sym->value;
             }
-            if (runtime.strcmp(sym->name, "exit") == 0)
-                exit_static_addr = code_vaddr + mod_text_off[i] + sym->value;
         }
-    }
-    if (!found_main) {
-        runtime.fprintf(runtime.stderr, "fakecc: no 'main' function found\n");
-        runtime.exit(1);
+        if (!found_main) {
+            runtime.fprintf(runtime.stderr, "fakecc: no 'main' function found\n");
+            runtime.exit(1);
+        }
     }
     if (need_dynamic) {
         {
-            size_t acc = 1 + needed_str_bytes + runpath_str_bytes;
+            size_t acc = 1 + needed_str_bytes + soname_str_bytes + runpath_str_bytes;
             int k = 0;
             for (int i = 0; i < num_ext; i++, k++) {
                 uint32_t noff = (uint32_t)acc;
@@ -1255,6 +1340,14 @@ Buffer dynamic;
                 runtime.memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
                 acc += runtime.strlen(data_ext_list[j]) + 1;
                 k++;
+            }
+            for (int e = 0; e < num_exports; e++, k++) {
+                uint32_t noff = (uint32_t)acc;
+                size_t ent = 24 + (size_t)k * 24;
+                runtime.memcpy(dynsym.data + ent, &noff, 4);
+                uint64_t val = sym_addr[exports[e].gsi];
+                runtime.memcpy(dynsym.data + ent + 8, &val, 8);
+                acc += runtime.strlen(exports[e].name) + 1;
             }
         }
         for (int i = 0; i < num_ext; i++) {
@@ -1269,6 +1362,16 @@ Buffer dynamic;
                 runtime.memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
                 rdj++;
             }
+            if (num_relative > 0) {
+                uint64_t dyn_vaddr = is_shared
+                    ? (data_vaddr + dynamic_data_off)
+                    : (base + hdr_size + start_size + text.len + rodata.len + interp_len
+                       + dynstr.len + dynsym.len + hash.len + rela_plt.len + rela_dyn.len);
+                uint64_t roff = got_vaddr;
+                size_t ent = (size_t)rdj * 24;
+                runtime.memcpy(rela_dyn.data + ent, &roff, 8);
+                runtime.memcpy(rela_dyn.data + ent + 16, &dyn_vaddr, 8);
+            }
         }
         size_t rx_base_vaddr = base + hdr_size;
         size_t dynstr_off = start_size + text.len + rodata.len + interp_len;
@@ -1276,7 +1379,12 @@ Buffer dynamic;
         size_t hash_off = dynsym_off + dynsym.len;
         size_t rela_plt_off = hash_off + hash.len;
         size_t rela_dyn_off = rela_plt_off + rela_plt.len;
-        size_t dynamic_off = rela_dyn_off + rela_dyn.len;
+        size_t dynamic_file_off = is_shared
+            ? (data_file_offset + dynamic_data_off)
+            : (hdr_size + rela_dyn_off + rela_dyn.len);
+        uint64_t dynamic_vaddr = is_shared
+            ? (data_vaddr + dynamic_data_off)
+            : (rx_base_vaddr + rela_dyn_off + rela_dyn.len);
         uint64_t dynstr_vaddr = rx_base_vaddr + dynstr_off;
         {
             size_t off = 1;
@@ -1285,6 +1393,10 @@ Buffer dynamic;
                 buf_u64(&dynamic, off);
                 off += runtime.strlen(needed[i]) + 1;
             }
+        }
+        if (soname) {
+            buf_u64(&dynamic, 14);
+            buf_u64(&dynamic, soname_dynstr_off);
         }
         if (runpath) {
             buf_u64(&dynamic, 29);
@@ -1299,7 +1411,7 @@ Buffer dynamic;
         buf_u64(&dynamic, 2); buf_u64(&dynamic, rela_plt.len);
         buf_u64(&dynamic, 20); buf_u64(&dynamic, 7);
         buf_u64(&dynamic, 23); buf_u64(&dynamic, rx_base_vaddr + rela_plt_off);
-        if (num_true_data_ext > 0) {
+        if (rela_dyn.len > 0) {
             buf_u64(&dynamic, 7); buf_u64(&dynamic, rx_base_vaddr + rela_dyn_off);
             buf_u64(&dynamic, 8); buf_u64(&dynamic, rela_dyn.len);
             buf_u64(&dynamic, 9); buf_u64(&dynamic, 24);
@@ -1307,27 +1419,31 @@ Buffer dynamic;
         buf_u64(&dynamic, 0); buf_u64(&dynamic, 0);
         Buffer rx;
         buffer_init(&rx);
-        uint64_t exit_call = 0;
-        if (exit_ext_idx >= 0)
-            exit_call = code_vaddr + plt_entry_off[exit_ext_idx];
-        else if (exit_static_addr)
-            exit_call = exit_static_addr;
-        gen_start(&rx, base + start_offset, main_addr, exit_call,
-                  init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
+        if (!is_shared) {
+            uint64_t exit_call = 0;
+            if (exit_ext_idx >= 0)
+                exit_call = code_vaddr + plt_entry_off[exit_ext_idx];
+            else if (exit_static_addr)
+                exit_call = exit_static_addr;
+            gen_start(&rx, base + start_offset, main_addr, exit_call,
+                      init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
+        }
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t interp_off = rx.len;
-        buf_bytes(&rx, INTERP_PATH, interp_len);
+        if (interp_len)
+            buf_bytes(&rx, INTERP_PATH, interp_len);
         buf_bytes(&rx, dynstr.data, dynstr.len);
         buf_bytes(&rx, dynsym.data, dynsym.len);
         buf_bytes(&rx, hash.data, hash.len);
         buf_bytes(&rx, rela_plt.data, rela_plt.len);
         buf_bytes(&rx, rela_dyn.data, rela_dyn.len);
-        buf_bytes(&rx, dynamic.data, dynamic.len);
-        uint64_t entry = base + start_offset;
+        if (!is_shared)
+            buf_bytes(&rx, dynamic.data, dynamic.len);
+        uint64_t entry = is_shared ? 0 : (base + start_offset);
         Buffer got;
         buffer_init(&got);
-        buf_u64(&got, rx_base_vaddr + dynamic_off);
+        buf_u64(&got, dynamic_vaddr);
         buf_u64(&got, 0);
         buf_u64(&got, 0);
         for (int i = 0; i < num_ext; i++)
@@ -1336,15 +1452,21 @@ Buffer dynamic;
             buf_u64(&got, data_got_external[j] ? 0 : data_got_addr[j]);
         Buffer elf;
         buffer_init(&elf);
-        uint16_t phnum = have_tls ? 5 : 4;
-        write_ehdr(&elf, entry, 64, phnum);
+        uint16_t phnum;
+        if (is_shared)
+            phnum = have_tls ? 4 : 3;
+        else
+            phnum = have_tls ? 5 : 4;
+        write_ehdr(&elf, is_shared ? 3 : 2, entry, 64, phnum);
         write_phdr(&elf, 1, 4 | 1, 0, base, rx_filesz, rx_filesz, 0x1000);
         write_phdr(&elf, 1, 4 | 2, data_file_offset, data_vaddr,
                    rw_filesz,
                    rw_filesz + bss_size, 0x1000);
-        write_phdr(&elf, 3, 4, hdr_size + interp_off, rx_base_vaddr + interp_off,
-                   interp_len, interp_len, 1);
-        write_phdr(&elf, 2, 4, hdr_size + dynamic_off, rx_base_vaddr + dynamic_off,
+        if (!is_shared) {
+            write_phdr(&elf, 3, 4, hdr_size + interp_off, rx_base_vaddr + interp_off,
+                       interp_len, interp_len, 1);
+        }
+        write_phdr(&elf, 2, 4 | 2, dynamic_file_off, dynamic_vaddr,
                    dynamic.len, dynamic.len, 8);
         if (have_tls) {
             write_phdr(&elf, 7, 4, tls_file_offset_base, tls_vaddr,
@@ -1355,6 +1477,10 @@ Buffer dynamic;
         buf_bytes(&elf, data.data, data.len);
         while (elf.len < data_file_offset + got_data_off) buf_u8(&elf, 0);
         buf_bytes(&elf, got.data, got.len);
+        if (is_shared) {
+            while (elf.len < dynamic_file_off) buf_u8(&elf, 0);
+            buf_bytes(&elf, dynamic.data, dynamic.len);
+        }
         if (have_tls) {
             while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
             buf_bytes(&elf, tdata.data, tdata.len);
@@ -1371,6 +1497,7 @@ Buffer dynamic;
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
         lay.have_tls = have_tls;
+        lay.is_shared = is_shared;
         lay.start_size = start_size;
         lay.tls_vaddr = tls_vaddr;
         lay.tls_file_offset = tls_file_offset_base;
@@ -1382,7 +1509,7 @@ Buffer dynamic;
         lay.hash_off = hdr_size + hash_off;
         lay.rela_plt_off = hdr_size + rela_plt_off;
         lay.rela_dyn_off = hdr_size + rela_dyn_off;
-        lay.dynamic_off = hdr_size + dynamic_off;
+        lay.dynamic_off = dynamic_file_off;
         lay.dynstr_size = dynstr.len;
         lay.dynsym_size = dynsym.len;
         lay.hash_size = hash.len;
@@ -1394,14 +1521,14 @@ Buffer dynamic;
         lay.hash_vaddr = rx_base_vaddr + hash_off;
         lay.rela_plt_vaddr = rx_base_vaddr + rela_plt_off;
         lay.rela_dyn_vaddr = rx_base_vaddr + rela_dyn_off;
-        lay.dynamic_vaddr = rx_base_vaddr + dynamic_off;
+        lay.dynamic_vaddr = dynamic_vaddr;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
         FILE *f = runtime.fopen(path, "wb");
         if (!f) { runtime.fprintf(runtime.stderr, "fakecc: cannot write '%s'\n", path); runtime.exit(1); }
         runtime.fwrite(elf.data, 1, elf.len, f);
         runtime.fclose(f);
-        runtime.chmod(path, 0755);
+        runtime.chmod(path, is_shared ? 0644 : 0755);
         buffer_free(&rx); buffer_free(&got); buffer_free(&elf);
     } else {
         uint64_t entry = base + start_offset;
@@ -1427,7 +1554,7 @@ Buffer dynamic;
         int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0 || (have_tls && tdata.len > 0));
         uint16_t phnum = has_rw ? 2 : 1;
         if (have_tls) phnum++;
-        write_ehdr(&elf, entry, 64, phnum);
+        write_ehdr(&elf, 2, entry, 64, phnum);
         write_phdr(&elf, 1, 4 | 1, 0, base,
                    rx_filesz, rx_filesz, 0x1000);
         if (has_rw) {
@@ -1464,6 +1591,7 @@ Buffer dynamic;
         lay.bss_file_offset = bss_file_offset;
         lay.bss_size = bss_size;
         lay.have_tls = have_tls;
+        lay.is_shared = 0;
         lay.start_size = start_size;
         lay.tls_vaddr = tls_vaddr;
         lay.tls_file_offset = tls_file_offset_base;
@@ -1488,6 +1616,8 @@ Buffer dynamic;
     for (int i = 0; i < num_needed; i++) runtime.free(needed[i]);
     runtime.free(needed);
     runtime.free(runpath);
+    runtime.free(soname);
+    runtime.free(exports);
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
     buffer_free(&tdata);
     runtime.free(mod_text_off); runtime.free(mod_rodata_off); runtime.free(mod_data_off); runtime.free(mod_bss_off);

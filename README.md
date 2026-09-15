@@ -6,23 +6,25 @@
 ![Self-hosting](https://img.shields.io/badge/self--hosting-yes-brightgreen.svg)
 ![Freestanding](https://img.shields.io/badge/default-zero--dep-brightgreen.svg)
 
-一门类 C 的系统级编程语言——**完整支持 C99 标准及主流 GCC 语言扩展**，保留 C 语言高效直接的底层执行模型与内存布局，**彻底摒弃 C 语言的预处理器宏（`#define`）与文本头文件（`#include`），转而采用类似 Go 语言的现代 Package 模块体系**，自带轻量零依赖 runtime。
+[中文说明 (Chinese Documentation)](README_zh.md)
 
-- **已完全自举**：fakecc 能编译自身源码，两级自举生成产物逐字节完全一致（Fixed Point）；
-- **默认零依赖**：用户程序与自举产物默认不链接系统 libc，直接生成静态独立 ELF64 可执行文件；
-- **高严苛测试覆盖**：忠实移植了 GCC 官方 **`gcc.c-torture/execute` 960+ 个完整执行用例**，全量 1680+ E2E 测试在 `-O0` 和 `-O1` 下 100% 全部通过。
+A C-family systems programming language and optimizing self-hosting compiler that **fully supports the C99 standard and mainstream GCC language extensions**. It preserves C's direct, low-level execution model and predictable memory layout, while **completely eliminating the preprocessor (`#define`) and textual headers (`#include`) in favor of a modern, Go-inspired package module system** with a built-in, zero-dependency freestanding runtime.
+
+- **Fully Self-Hosting**: FakeCC compiles its own source code; two-stage bootstrap produces a byte-identical fixed point (`v0/fakecc-1` == `v0/fakecc-2`).
+- **Zero Dependencies by Default**: User binaries and bootstrap artifacts link no system libc by default, producing standalone static ELF64 executables directly via its built-in ELF generator and linker.
+- **Battle-Tested Test Coverage**: Faithfully ported from official GCC test suites, featuring **1,650+ GCC C-Torture execute tests**, 1,650+ compiler robustness tests, and real-world C projects (genann, tinyexpr, tiny-AES-c, tiny-regex-c, tiny-bignum-c) with 100% pass rates under both `-O0` and `-O1`.
 
 ---
 
-## 核心设计与语言特性
+## Key Design & Language Features
 
-### 1. 现代 Package 模块系统（替代宏与头文件）
+### 1. Modern Package Module System (Replacing Preprocessor & Headers)
 
-传统 C 语言依赖预处理器进行文本级拼接（`#include`）与宏展开（`#define`），极易引发命名污染、符号冲突以及编译膨胀。FakeCC 彻底移除了预处理器，改用现代模块系统：
+Traditional C relies on textual substitution (`#include`) and macro expansion (`#define`), which easily causes namespace pollution, symbol collisions, and slow compilation. FakeCC completely eliminates the preprocessor and introduces a structured package system:
 
-- **文件声明包名**：每个源文件顶部通过 `package pkg_name;` 声明所属包；
-- **同包自动互见**：同一个 package 目录下的所有源文件自动共享 typedef、struct、enum 和全局声明，无需维护头文件；
-- **包间导入**：跨包调用使用 `import other_pkg;`，在代码中通过限定名访问：
+- **Package Declarations**: Each source file begins with `package pkg_name;`.
+- **Automatic Same-Package Visibility**: All source files within the same package directory automatically share `typedef`, `struct`, `union`, `enum`, and global declarations without header files.
+- **Inter-Package Imports**: Cross-package symbols are accessed via `import other_pkg;` using qualified names:
   ```c
   package main;
   import runtime;
@@ -32,197 +34,198 @@
       return 0;
   }
   ```
-- **包级作用域**：`static` 声明将符号限制在当前包内，外部不可见；非 static 符号导出供其他包使用。
+- **Package-Level Scope**: `static` declarations restrict symbols to the package; non-static declarations are exported to importing packages.
 
 ---
 
-### 2. 完整 C99 核心语言支持
+### 2. Full C99 Core Language Support
 
-FakeCC 完整实现了 C99 标准规范的核心语法与语义特性：
+FakeCC provides full implementation of the core C99 specification:
 
-- **基础类型系统**：
-  - 整型：`char` / `short` / `int` / `long` / `long long`（及其 `unsigned` 变体）、`_Bool`、`__int128`
-  - 浮点：`float`、`double`（SSE 浮点指令）、`long double`（80 位扩展精度 x87 FPU）
-  - 复数类型：`_Complex float`、`_Complex double`、`_Complex long double`
-  - 派生类型：多级指针、定长数组、多维数组、`struct`、`union`、`enum`、函数指针
-  - 类型修饰符：`const`、`volatile`、`restrict`、`inline`
-- **C99 进阶特性**：
-  - **变长数组（VLA）**：支持运行时动态长度数组分配与多维 VLA（如 `int arr[n][m]`），支持在循环与复杂控制流中跨作用域自动回收栈空间；
-  - **复合字面量（Compound Literals）**：如 `(struct Point){ .x = 1, .y = 2 }` 或 `(int[]){ 1, 2, 3 }`；
-  - **指定初始化器（Designated Initializers）**：结构体成员指定初始化 `{.field = val}`、数组下标指定初始化 `{[3] = val}` 以及嵌套初始化；
-  - **灵活数组成员（Flexible Array Members）**：结构体末尾的 `type array[]` 柔性数组；
-  - **声明位置自由**：支持在代码块任意位置声明局部变量，以及 `for (int i = 0; i < n; i++)` 循环头局部变量声明。
-- **表达式与控制流**：
-  - 完整运算符优先级与隐式类型提升/转换规则（Integer Promotion、Arithmetic Conversions）；
-  - `if` / `else`、`switch`（支持多 case/default 与任意跨作用域跳转）、`while`、`do-while`、`for`、`goto`、`break`、`continue`、`return`。
-
----
-
-### 3. 主流 GCC 扩展支持
-
-为了无缝运行底层系统级代码与复杂的开源测试集，FakeCC 深入支持了主流的 GCC 编译器扩展：
-
-- **语句表达式（Statement Expressions）**：`({ int x = f(); x * 2; })` 允许在表达式内嵌入代码块并返回值；
-- **计算跳转（Computed Gotos）**：支持取标签地址 `&&label` 与间接跳转 `goto *expr;`，支持静态标签跳转表；
-- **GCC 属性系统（`__attribute__`）**：
-  - 对齐与打包：`aligned(N)`、`packed`
-  - 别名与重命名：`alias("target")`、`__asm__("symbol")`
-  - 向量类型：`vector_size(N)`
-  - 字节序调整：`scalar_storage_order("big-endian" / "little-endian")`
-  - 函数剖析控制：`no_instrument_function`
-  - 机器模式：`mode(QI/HI/SI/DI/TI/word/byte)`
-- **SIMD 向量扩展**：支持 `__attribute__((vector_size(N)))` 定义的向量类型，支持按元素向量加减乘除、位运算、按元素比较生成全 1/全 0 掩码以及向量初始化；
-- **初始化扩展**：数组范围指定初始化器（如 `[0 ... 9] = 1`）；
-- **函数级性能剖析**：支持 `-finstrument-functions` 编译选项，在非 `no_instrument_function` 函数的出入口自动注入 `__cyg_profile_func_enter` 与 `__cyg_profile_func_exit` 钩子调用；
-- **丰富的内置函数（GCC Builtins）**：
-  - 控制流与优化提示：`__builtin_expect`, `__builtin_unreachable`, `__builtin_constant_p`, `__builtin_trap`
-  - 位运算指令：`__builtin_clz/clzl/clzll`, `__builtin_ctz/ctzl/ctzll`, `__builtin_popcount/popcountll`, `__builtin_ffs/ffsll`, `__builtin_bswap16/32/64`
-  - 溢出安全算术：`__builtin_add_overflow`, `__builtin_sub_overflow`, `__builtin_mul_overflow`（支持 8/16/32/64 位有符号与无符号全类型及 `_p` 变体）
-  - 栈与执行上下文：`__builtin_frame_address`, `__builtin_return_address`, `__builtin_stack_save`, `__builtin_stack_restore`, `__builtin_setjmp`, `__builtin_longjmp`, `__builtin_alloca`
-  - 内存与标准运算：`__builtin_memcpy`, `__builtin_memset`, `__builtin_memcmp`, `__builtin_abs`, `__builtin_labs`, `__builtin_llabs`, `__builtin_copysign` 等。
+- **Type System**:
+  - Integers: `char`, `short`, `int`, `long`, `long long` (signed/unsigned), `_Bool`, `__int128`
+  - Floating Point: `float`, `double` (SSE), `long double` (80-bit extended-precision x87 FPU)
+  - Complex Numbers: `_Complex float`, `_Complex double`, `_Complex long double`
+  - Derived Types: Multilevel pointers, arrays, multidimensional arrays, `struct`, `union`, `enum`, function pointers
+  - Type Qualifiers: `const`, `volatile`, `restrict`, `inline`
+- **Advanced C99 Features**:
+  - **Variable Length Arrays (VLA)**: Dynamic runtime allocation, multidimensional VLAs (e.g. `int arr[n][m]`), and automatic stack deallocation across loop scopes and complex control flow.
+  - **Compound Literals**: e.g., `(struct Point){ .x = 1, .y = 2 }` or `(int[]){ 1, 2, 3 }`.
+  - **Designated Initializers**: Member designators `{.field = val}`, array index designators `{[3] = val}`, and nested initializers.
+  - **Flexible Array Members**: `type array[]` at the end of structures.
+  - **Flexible Declarations**: Local declarations anywhere in blocks, and `for (int i = 0; i < n; i++)` loop initializers.
+- **Expressions & Control Flow**:
+  - Complete operator precedence and integer promotions / usual arithmetic conversions.
+  - `if` / `else`, `switch` (supporting sparse cases, dense jump tables, ranges `low ... high`, and cross-scope jumps), `while`, `do-while`, `for`, `goto`, `break`, `continue`, `return`.
 
 ---
 
-## 编译器架构
+### 3. Mainstream GCC Language Extensions
+
+To seamlessly compile low-level systems software and open-source packages, FakeCC implements major GCC extensions:
+
+- **Statement Expressions**: `({ int x = f(); x * 2; })` embedding statement blocks inside expressions.
+- **Computed Gotos**: Label address-of `&&label` and indirect dispatch `goto *expr;` with jump tables.
+- **`typeof(...)`**: Type queries for expressions and types.
+- **Attribute System (`__attribute__`)**:
+  - Alignment and packing: `aligned(N)`, `packed`
+  - Aliasing and renaming: `alias("target")`, `__asm__("symbol")`
+  - Vector types: `vector_size(N)`
+  - Endianness: `scalar_storage_order("big-endian" / "little-endian")`
+  - Function profiling: `no_instrument_function`
+  - Machine modes: `mode(QI/HI/SI/DI/TI/word/byte)`
+- **SIMD Vector Operations**: Vector arithmetic (`+`, `-`, `*`, `/`), bitwise operations, element-wise comparisons yielding mask vectors, and vector initialization.
+- **Designated Array Ranges**: Range initializers like `[0 ... 9] = 1`.
+- **Function Profiling (`-finstrument-functions`)**: Injects `__cyg_profile_func_enter` / `__cyg_profile_func_exit` hooks on entry and exit.
+- **Extensive GCC Builtins**:
+  - Control flow: `__builtin_expect`, `__builtin_unreachable`, `__builtin_constant_p`, `__builtin_trap`
+  - Bitwise instructions: `__builtin_clz*`, `__builtin_ctz*`, `__builtin_popcount*`, `__builtin_ffs*`, `__builtin_bswap16/32/64`
+  - Overflow-checked arithmetic: `__builtin_add_overflow`, `__builtin_sub_overflow`, `__builtin_mul_overflow` (8/16/32/64-bit signed/unsigned)
+  - Stack and context: `__builtin_frame_address`, `__builtin_return_address`, `__builtin_stack_save`, `__builtin_stack_restore`, `__builtin_setjmp`, `__builtin_longjmp`, `__builtin_alloca`, `__builtin_va_arg_pack`
+  - Memory & Math: `__builtin_memcpy`, `__builtin_memset`, `__builtin_memcmp`, `__builtin_abs`, `__builtin_labs`, `__builtin_llabs`, `__builtin_copysign`, `__builtin_inf*`, `__builtin_nan*`, etc.
+
+---
+
+## Compiler Architecture
 
 ```
-源码 (.c) → Lexer → Tokens → Parser → AST → Sema → SSA IR → 中端优化 (Opt) → Codegen (x86-64) → 内嵌链接器 → ELF64 可执行文件
+Source (.c) → Lexer → Tokens → Parser → AST → Sema → SSA IR → Optimizer (Opt) → Codegen (x86-64) → Embedded Linker → ELF64 Binary
 ```
 
-- **前端（Frontend）**：
-  - 手写递归下降解析器，直接构建 AST；
-  - 语义分析（Sema）负责类型检查、隐式转换插入、常量折叠与作用域符号表解析；
-  - AST 降级为中端统一三地址 SSA IR。
-- **中端（Middle-end）**：
-  - **控制流图（CFG）与支配树（Dominator Tree）**；
-  - **mem2reg**：基于支配前沿（Dominance Frontiers）自动插入 φ 函数，将栈上的局部标量变量提升至 SSA 寄存器；
-  - **标量优化**：常量折叠（Constant Folding）、代数化简、无效代码消除（DCE）、窥孔优化（Peephole）；
-  - **寄存器分配**：基于图着色 / 线性扫描的 SysV AMD64 寄存器分配器（支持 GP 与 XMM 寄存器分配、溢出处理与调用约定保存）。
-- **后端与链接器（Backend & Linker）**：
-  - 原生 x86-64 机器码生成器（不依赖外部 GNU `as`）；
-  - 内嵌 ELF64 文件生成器与静态/动态链接器（不依赖 GNU `ld`），直接写出可执行 ELF。
+- **Frontend**:
+  - Handcrafted recursive descent parser building an explicit AST.
+  - Semantic analysis (Sema) for type checking, implicit conversions, constant folding, and scoped symbol tables.
+  - AST lowering to intermediate three-address SSA IR.
+- **Middle-end**:
+  - **Control Flow Graph (CFG) & Dominator Tree**: Computes dominance frontiers and loop structures.
+  - **mem2reg**: Inserts φ (phi) functions and promotes memory alloca variables into SSA registers.
+  - **Scalar Optimizations**: Constant propagation and folding, algebraic simplifications, dead code elimination (DCE), and peephole rewrites.
+  - **Register Allocator**: Graph coloring and linear scan allocator conforming to SysV AMD64 ABI (handling GP and XMM registers, spills, and calling convention preservation).
+- **Backend & Linker**:
+  - Native x86-64 instruction emitter (no external assembler `as` required).
+  - Built-in ELF64 object/executable generator and static/dynamic linker (no external `ld` required).
 
 ---
 
-## 零依赖 Runtime（`runtime/`）
+## Zero-Dependency Runtime (`runtime/`)
 
-FakeCC 源码树自带纯 C / FakeCC 实现的独立 runtime（位于 `runtime/` 目录），默认编译时自动将其静态编译并链接入最终二进制中。
+FakeCC includes a standalone runtime written in pure C/FakeCC located in `runtime/`. It is automatically compiled and linked into final binaries by default.
 
-| 模块 | 包含的核心能力 |
+| Module | Core Capabilities |
 |---|---|
-| `builtin.c` | 基础类型定义（`size_t`, `ssize_t`, `FILE`, `va_list`） |
-| `string.c` | `memcpy`, `memmove`, `memset`, `memcmp`, `strlen`, `strcpy`, `strcmp`, `strchr` 等 |
-| `ctype.c` | `isdigit`, `isalpha`, `isspace`, `toupper`, `tolower` 等 |
-| `malloc.c` | 基于 Linux `mmap` 系统调用的独立内存分配器：`malloc`, `free`, `calloc`, `realloc` |
-| `stdio.c` | `stdin`/`stdout`/`stderr` 标准流、用户态 I/O 缓冲区、`fopen`, `fclose`, `fread`, `fwrite`, `fputs` 等 |
+| `builtin.c` | Basic types (`size_t`, `ssize_t`, `FILE`, `va_list`) |
+| `string.c` | `memcpy`, `memmove`, `memset`, `memcmp`, `strlen`, `strcpy`, `strcmp`, `strchr`, etc. |
+| `ctype.c` | `isdigit`, `isalpha`, `isspace`, `toupper`, `tolower`, etc. |
+| `malloc.c` | Standalone allocator on Linux `mmap` syscall: `malloc`, `free`, `calloc`, `realloc` |
+| `stdio.c` | `stdin`/`stdout`/`stderr` streams, buffered I/O, `fopen`, `fclose`, `fread`, `fwrite`, `fputs`, etc. |
 | `printf.c` | `printf`, `fprintf`, `sprintf`, `snprintf`, `vprintf`, `vfprintf`, `vsnprintf` |
 | `stdlib.c` | `exit`, `abort`, `strtol`, `strtoul`, `qsort`, `getenv`, `abs` |
 
-- **与宿主系统互操作**：
-  - 使用 `-nostdlib` 可禁用内置 runtime；
-  - 搭配 `-lc` / `-lm` 可与系统 glibc / libm 等标准共享库无缝链接互操作。
+- **Interoperability with System Libs & GCC Object Files**:
+  - **Linking GCC Object Files (`.o`)**: FakeCC's built-in linker can directly parse and link standard ELF relocatable object files (`.o`) generated by GCC/Clang, resolving text/data relocations and conforming to the SysV AMD64 ABI (structure passing/returns, alignment, calling conventions).
+  - **Consuming FakeCC Object Files with GCC**: `fakecc -c file.c -o file.o` produces standard ELF64 relocatable object files that can be directly passed to `gcc` or `ld`.
+  - **Shared Libraries**: FakeCC can both *produce* shared objects (`fakecc -shared … -o libfoo.so`) and *consume* them (`-LDIR -lLIB`, `-l:SONAME`, or a direct `.so` path). Interop covers fakecc↔fakecc, gcc←fakecc `.so`, and fakecc←gcc `.so`.
 
 ---
 
-## 自举流程
+## Bootstrap & Self-Hosting
 
-FakeCC 的自举验证机制保证了编译器自身的逻辑自洽性与稳定性：
+FakeCC's self-hosting verification ensures compiler correctness and reproducibility:
 
 ```
-[ Stage 0 ] gcc 编译 src/*.c                  → build/fakecc
+[ Stage 0 ] Host GCC compiles src/*.c                 → build/fakecc
      ↓
-[ Stage 1 ] build/fakecc 编译 v0/*.c + runtime → v0/fakecc-1
+[ Stage 1 ] build/fakecc compiles v0/*.c + runtime    → v0/fakecc-1
      ↓
-[ Stage 2 ] v0/fakecc-1 再次编译 v0/*.c + runtime → v0/fakecc-2
+[ Stage 2 ] v0/fakecc-1 recompiles v0/*.c + runtime   → v0/fakecc-2
      ↓
-[ 验证 ]   比对 v0/fakecc-1 与 v0/fakecc-2（逐字节 100% 完全一致）
+[ Verify  ] Compare v0/fakecc-1 and v0/fakecc-2 (100% byte-identical fixed point)
 ```
 
-运行自举检查：
+Run bootstrap verification:
 ```bash
-v0/stage2_check.sh
+bash v0/stage2_check.sh
 ```
 
 ---
 
-## 构建
+## Building
 
 ```bash
 cmake -S . -B build
 cmake --build build --parallel
 ```
 
-## 运行
+## Usage
 
 ```bash
+# Compile and run a basic program
 ./build/fakecc examples/return42.c -o /tmp/a.out
 /tmp/a.out; echo $?    # 42
 
-# 带 DWARF，可用 gdb 按行调试（不影响优化，也不影响生成的指令）
+# Emit DWARF debug information for GDB source-level stepping
 ./build/fakecc -g examples/return42.c -o /tmp/a.out
 
-# 变量全部留在栈上，调试体验最直白（代价是更慢）
+# Keep locals in memory (-O0)
 ./build/fakecc -O0 -g examples/return42.c -o /tmp/a.out
 
-# 可选：不用 rt，改链系统 libc
+# Optional: link against system glibc instead of builtin runtime
 ./build/fakecc hello.c -nostdlib -lc -o /tmp/hello_libc
+
+# Mixed compilation with GCC: FakeCC links GCC object files (.o)
+gcc -c -O2 helper.c -o /tmp/helper.o
+./build/fakecc main.c /tmp/helper.o -o /tmp/mixed_app
+
+# Conversely, GCC can link object files generated by FakeCC (-c)
+./build/fakecc -c module.c -o /tmp/module.o
+gcc main.c /tmp/module.o -o /tmp/mixed_app
+
+# Produce a shared library with FakeCC, then load it from FakeCC or GCC:
+./build/fakecc -shared math.c -o /tmp/libmath.so
+./build/fakecc app.c -L/tmp -lmath -o /tmp/app_fcc
+gcc app.c -L/tmp -lmath -Wl,-rpath,/tmp -o /tmp/app_gcc
+
+# Linking dynamic shared libraries (.so) built by GCC:
+# Supports -LDIR, -lNAME, -l:SONAME, and direct /path/to/lib.so (generates DT_NEEDED & DT_RUNPATH)
+gcc -shared -fPIC -o /tmp/libmath_gcc.so math.c
+./build/fakecc app.c -L/tmp -lmath_gcc -o /tmp/app_with_so
+./build/fakecc app.c /tmp/libmath_gcc.so -o /tmp/app_with_so
 ```
 
-## 测试
+---
+
+## Testing
+
+FakeCC maintains a comprehensive testing pipeline:
 
 ```bash
 ctest --test-dir build --output-on-failure
-# 单元测试 + 四类 e2e（单文件 / 多文件 / 共享库 -l / gcc difftest）各跑 -O0 -O1 两轮
-# 外加 gdb 调试信息套件（内部自己跑两级）
-
-bash v0/stage2_check.sh                        # 自举不动点
-bash test/e2e/run_e2e.sh v0/fakecc-1 -O0       # 再用自举产物验证一遍
-bash test/e2e/run_e2e.sh v0/fakecc-1 -O1
-bash test/e2e/run_gdb_e2e.sh v0/fakecc-1       # 需要 gdb
 ```
 
-每个 e2e 套件都跑 `-O0` 和 `-O1` 两轮，因为两级走的是很不一样的路径：`-O0` 让标量留在内存里，`-O1` 把它们提升成 SSA 再做寄存器分配，一级通过说明不了另一级。这一点不是理论顾虑——分级跑起来第一次就抓出了一个只在 `-O1` 出错的实参传递 bug（宽字面量传给较窄的无符号形参时被符号扩展，现已在 sema 于调用处按形参类型插入隐式转换修复，回归用例 `types/param_narrow_unsigned.c`）。小结构体按值传参/返回已按 SysV AMD64 分类（≤16 走寄存器，更大走栈），多文件套件含与 gcc `.o` 的互操作用例。
+CTest automatically runs 29 test suites across `-O0` and `-O1`:
+- **Unit Tests (16 suites)**: Lexer, parser, sema, IR, CFG, domtree, phi, renaming, mem2reg, opt, regalloc, codegen, emit, link, debug, and package system.
+- **E2E Test Suites (2,600+ cases)**: Arithmetic, control flow, types, aggregates, pointers, functions, strings, runtime, SysV ABI, and GCC C-Torture execute suite.
+- **Real-world App Ports**: Independent compilation and verification of `genann`, `tinyaes`, `tinybn`, `tinyexpr`, and `tinyregex`.
+- **GCC Differential Testing (`difftest`)**: Exact output and exit code comparisons against host GCC.
+- **Multi-File & Shared Library Interop**: Linking multiple object files, packages, and `.so` dynamic libraries.
+- **Compiler Robustness Suite (`gcc_compile`)**: 1,650+ complex torture compile-only cases.
+- **GDB Debugger Suite**: Verifies DWARF line numbers and variable inspection using interactive GDB scripts.
 
-用例按语言特性分目录，加用例就是往对应目录里丢文件，runner 递归发现：
-
-```
-test/e2e/
-├── run_e2e.sh / run_multi_e2e.sh / run_difftest.sh / run_shlib_e2e.sh / run_gdb_e2e.sh
-├── difftest_manifest.txt        # difftest 取用的用例清单（category/name.c）
-└── cases/
-    ├── basics/        return / 变量 / 字面量
-    ├── operators/     算术、位运算、比较、逻辑、三元、自增自减、复合赋值、强制转换
-    ├── control_flow/  if / while / for / do-while / switch / goto / 嵌套循环
-    ├── types/         整型宽度与符号、typedef、enum、sizeof / alignof、const / volatile
-    ├── floats/        float / double / long double
-    ├── aggregates/    数组、struct、union、位域、指定初始化、复合字面量
-    ├── pointers/      指针、多级指针、函数指针
-    ├── functions/     调用与递归、多参数、变参、argc/argv
-    ├── chars_strings/ 字符、转义、字符串
-    ├── linkage/       global / static / extern
-    ├── runtime/       libc 动态链接、裸系统调用
-    ├── codegen/       寄存器分配与窄类型高位的回归用例
-    ├── errors/        必须被拒绝并给出诊断的程序
-    └── debug/         `-g` 的 gdb 用例（见下）
-```
-
-`cases/debug/` 里的用例由 `run_gdb_e2e.sh` 驱动真实 gdb，用注解声明期望，断点用 `// BRK` 标记所在行而不写死行号：
-
-```c
-// expect: 42                  程序自身退出码
-// gdb: break {brk}            gdb 命令，按顺序执行
-// gdb_expect: a = 40          输出必须匹配的正则
-// gdb_reject: optimized out   输出不允许出现的正则
-// gdb_expect_O0: n = 1        只在某一优化级别检查
-```
-
-这些用例同时被单文件 e2e 套件当普通用例跑（它们都有 `// expect:`），并且每个都额外比对加 `-g` 与不加 `-g` 的 `.text` 是否逐字节相同。
+---
 
 ## Benchmark
 
-独立目录 `bench/`，不进 CTest，也不挂 CI 功能回归。同一份程序分别用 fakecc 和 gcc 编译，比较**生成二进制**的运行时间。
+A dedicated benchmark suite resides in `bench/` (comparing binary runtime performance against GCC `-O0`, `-O1`, `-O2`):
 
 ```bash
 bash bench/run_bench.sh ./build/fakecc
 bash v0/stage2_check.sh && bash bench/run_bench.sh v0/fakecc-1
 ```
+
+Includes `nbody` (floating-point computation), `sieve` (array and bit operations), `matmul` (nested loops and integer memory access), and `chacha` (ARX cryptographic primitives).
+
+---
+
+## License
+
+FakeCC is open source under the [MIT License](LICENSE).

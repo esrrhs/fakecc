@@ -192,7 +192,7 @@ int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
-               int want_debug);
+               int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,

@@ -55,6 +55,7 @@ enum IROpcode {
     IR_BNOT,
     IR_SHL,
     IR_SHR,
+    IR_ROL,
     IR_EQ,
     IR_NE,
     IR_FADD,

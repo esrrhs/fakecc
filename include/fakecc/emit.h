@@ -240,10 +240,13 @@ void emit_obj(const EmitModule *m, const char *path);
 /* Read a relocatable object file into an EmitModule.  Returns 0 on success. */
 int  emit_obj_read(const char *path, EmitModule *m);
 
-/* Link one or more object modules into an executable.
+#define ET_DYN             3
+
+/* Link one or more object modules into an executable or shared library.
  *
- * If any module references undefined symbols, a dynamically-linked executable
- * with a PLT/GOT is produced; otherwise a static executable.
+ * If any module references undefined symbols, or if `is_shared` is true,
+ * a dynamically-linked ELF (or ET_DYN shared library) with a PLT/GOT is produced;
+ * otherwise a static executable.
  *
  * `needed` / `num_needed` are DT_NEEDED sonames (e.g. "libc.so.6", "libfoo.so"),
  * typically derived from `-l` flags.  Defaults never auto-add libc — the driver
@@ -258,10 +261,10 @@ int  emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
-               int want_debug);
+               int want_debug, int is_shared);
 
 /* Legacy entry point — compile a single TU directly into an executable.
- * Equivalent to emit_link(&m, 1, path, NULL, 0, 0, NULL, 0, 0). */
+ * Equivalent to emit_link(&m, 1, path, NULL, 0, 0, NULL, 0, 0, 0). */
 void emit_elf(const EmitModule *m, const char *path);
 
 /* ELF relocation type constants. */
