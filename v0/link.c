@@ -1593,6 +1593,11 @@ Buffer dynamic;
         lay.have_tls = have_tls;
         lay.is_shared = 0;
         lay.start_size = start_size;
+        lay.tls_vaddr = tls_vaddr;
+        lay.tls_file_offset = tls_file_offset_base;
+        lay.tls_filesize = tls_filesize;
+        lay.tls_memsize = tls_memsize;
+        lay.have_dynamic = 0;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
         FILE *f = runtime.fopen(path, "wb");
