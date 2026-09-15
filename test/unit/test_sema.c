@@ -127,6 +127,19 @@ static void test_valid_bitfield(void) {
         "int main() { struct F f; f.a = 1; f.b = 2; return f.a + f.b; }"));
 }
 
+static void test_int128_const_ops(void) {
+    /* Test int128 << 0 doesn't corrupt high bits and !0 folds correctly */
+    T_ASSERT(fork_ok(
+        "package main; "
+        "int main() { "
+        "  static __int128 a = (__int128)0x100000000ULL << 0; "
+        "  static __int128 b = !(__int128)0; "
+        "  static __int128 c = !(__int128)5; "
+        "  static __int128 d = __CHAR_BIT__; "
+        "  return 0; "
+        "}"));
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -146,5 +159,6 @@ int main(void) {
     test_goto_undef();
     test_valid_struct();
     test_valid_bitfield();
+    test_int128_const_ops();
     return t_finalize();
 }
