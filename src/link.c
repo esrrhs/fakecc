@@ -1571,6 +1571,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 size_t ent = 24 + (size_t)k * 24;
                 memcpy(dynsym.data + ent, &noff, 4);
                 uint64_t val = sym_addr[exports[e].gsi];
+                /* STT_TLS st_value is the offset from the start of this
+                 * object's TLS template, not a load virtual address. */
+                if (exports[e].type == 6 /* STT_TLS */
+                    || exports[e].shndx == SECT_TDATA
+                    || exports[e].shndx == SECT_TBSS)
+                    val = val - tls_vaddr;
                 memcpy(dynsym.data + ent + 8, &val, 8);
                 acc += strlen(exports[e].name) + 1;
             }

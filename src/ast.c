@@ -559,6 +559,8 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
         }
         for (int mi = 0; mi < sd->num_members; mi++) {
             const StructMember *m = &sd->members[mi];
+            /* Zero-width `: 0` only forces alignment; it is not an ABI object. */
+            if (m->bit_width == 0) continue;
             int moff = offset + m->offset;
             int msz = m->bit_width > 0
                       ? (m->bit_width <= 8 ? 1 : m->bit_width <= 16 ? 2

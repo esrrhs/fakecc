@@ -61,8 +61,9 @@ long double copysignl(long double x, long double y) {
 
 double floor(double x) {
     if (x != x) return x;
+    if (x == 0.0) return x; /* preserve ±0 */
     if (x >= 9223372036854775807.0 || x <= -9223372036854775807.0) return x;
-    if (x >= 0.0) return (double)(long long)x;
+    if (x > 0.0) return (double)(long long)x;
     long long i = (long long)x;
     if ((double)i == x) return (double)i;
     return (double)(i - 1);
@@ -76,12 +77,15 @@ double ceil(double x) {
 }
 
 double sqrt(double x) {
+    if (x != x) return x;
     if (x < 0.0) {
         union { double d; unsigned long long u; } nanv;
         nanv.u = 0x7ff8000000000000ULL;
         return nanv.d;
     }
-    if (x == 0.0) return 0.0;
+    /* +Inf stays +Inf; ±0 keeps its sign (Annex F). */
+    if (x > 1.7976931348623157e308) return x;
+    if (x == 0.0) return x;
     double g = x;
     int n = 0;
     while (n < 40) {
@@ -437,11 +441,13 @@ static long double strtofp_body(const char *s, char **end) {
 
     long double mant = 0.0L;
     int any = 0;
-    int ndig = 0;   /* digits folded into mant; 19 exceeds the mantissa */
+    int ndig = 0;   /* digits folded into mant; 80-bit ld is exact to 2^64 */
     int dexp = 0;   /* power of ten still to apply to mant */
     while (isdigit((unsigned char)*s)) {
         any = 1;
-        if (ndig < 19) {
+        /* Cap at 21 digits (not 19): 2^64 is 20 digits and must stay exact.
+         * Extra digits beyond that become a power of ten, like rounding zeros. */
+        if (ndig < 21) {
             mant = mant * 10.0L + (long double)(*s - '0');
             ndig = ndig + 1;
         } else {
@@ -453,7 +459,7 @@ static long double strtofp_body(const char *s, char **end) {
         s = s + 1;
         while (isdigit((unsigned char)*s)) {
             any = 1;
-            if (ndig < 19) {
+            if (ndig < 21) {
                 mant = mant * 10.0L + (long double)(*s - '0');
                 ndig = ndig + 1;
                 dexp = dexp - 1;
