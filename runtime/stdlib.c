@@ -3,8 +3,7 @@ package runtime;
 
 void exit(int code) {
     __rt_stdio_init();
-    fflush(stdout);
-    fflush(stderr);
+    fflush(0);
     __syscall(231, (long)code);
 }
 
@@ -57,7 +56,12 @@ double ceil(double x) {
 }
 
 double sqrt(double x) {
-    if (x <= 0.0) return 0.0;
+    if (x < 0.0) {
+        union { double d; unsigned long long u; } nanv;
+        nanv.u = 0x7ff8000000000000ULL;
+        return nanv.d;
+    }
+    if (x == 0.0) return 0.0;
     double g = x;
     int n = 0;
     while (n < 40) {
@@ -280,6 +284,50 @@ static long double strtofp_body(const char *s, char **end) {
     else if (*s == '-') {
         neg = 1;
         s = s + 1;
+    }
+
+    /* INF / INFINITY / NAN (C99).  Case-insensitive. */
+    {
+        char c0 = s[0], c1 = s[1], c2 = s[2];
+        if (c0 >= 'A' && c0 <= 'Z') c0 = (char)(c0 - 'A' + 'a');
+        if (c1 >= 'A' && c1 <= 'Z') c1 = (char)(c1 - 'A' + 'a');
+        if (c2 >= 'A' && c2 <= 'Z') c2 = (char)(c2 - 'A' + 'a');
+        if (c0 == 'i' && c1 == 'n' && c2 == 'f') {
+            s = s + 3;
+            /* optional "inity" */
+            char w0 = s[0], w1 = s[1], w2 = s[2], w3 = s[3], w4 = s[4];
+            if (w0 >= 'A' && w0 <= 'Z') w0 = (char)(w0 - 'A' + 'a');
+            if (w1 >= 'A' && w1 <= 'Z') w1 = (char)(w1 - 'A' + 'a');
+            if (w2 >= 'A' && w2 <= 'Z') w2 = (char)(w2 - 'A' + 'a');
+            if (w3 >= 'A' && w3 <= 'Z') w3 = (char)(w3 - 'A' + 'a');
+            if (w4 >= 'A' && w4 <= 'Z') w4 = (char)(w4 - 'A' + 'a');
+            if (w0 == 'i' && w1 == 'n' && w2 == 'i' && w3 == 't' && w4 == 'y')
+                s = s + 5;
+            if (end) *end = (char *)s;
+            union { long double ld; unsigned long long u[2]; } infv;
+            infv.u[0] = 0;
+            infv.u[1] = 0;
+            infv.ld = 0.0L;
+            /* 80-bit +inf: exponent all-ones, mantissa 1<<63 */
+            infv.u[0] = 0x8000000000000000ULL;
+            infv.u[1] = 0x7fff;
+            if (neg) infv.u[1] = infv.u[1] | 0x8000;
+            return infv.ld;
+        }
+        if (c0 == 'n' && c1 == 'a' && c2 == 'n') {
+            s = s + 3;
+            if (*s == '(') {
+                s = s + 1;
+                while (*s && *s != ')') s = s + 1;
+                if (*s == ')') s = s + 1;
+            }
+            if (end) *end = (char *)s;
+            union { long double ld; unsigned long long u[2]; } nanv;
+            nanv.u[0] = 0xc000000000000000ULL;
+            nanv.u[1] = 0x7fff;
+            if (neg) nanv.u[1] = nanv.u[1] | 0x8000;
+            return nanv.ld;
+        }
     }
 
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {

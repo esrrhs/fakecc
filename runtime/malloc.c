@@ -5,13 +5,14 @@ struct chunk {
     size_t size;
     size_t user_size;
     struct chunk *next_free;
+    size_t pad; /* 32-byte header so the user pointer is 16-byte aligned */
 };
 
 static struct chunk *freelist_head;
 
-static size_t align8(size_t n) {
-    if (n > ((size_t)-8)) return (size_t)-8;
-    return (n + 7) & ~((size_t)7);
+static size_t align16(size_t n) {
+    if (n > ((size_t)-16)) return (size_t)-16;
+    return (n + 15) & ~((size_t)15);
 }
 
 static void *map_anon(size_t n) {
@@ -63,7 +64,7 @@ static int already_free(struct chunk *c) {
 void *malloc(size_t n) {
     size_t orig_n = n;
     if (n == 0) n = 1;
-    n = align8(n);
+    n = align16(n);
     if (freelist_head == 0) heap_grow(n);
     struct chunk **prev = &freelist_head;
     struct chunk *c = freelist_head;
@@ -83,7 +84,7 @@ void *malloc(size_t n) {
         }
         if (c == 0) return 0;
     }
-    if (c->size >= n + sizeof(struct chunk) + 8) {
+    if (c->size >= n + sizeof(struct chunk) + 16) {
         char *base = (char *)c;
         struct chunk *rest = (struct chunk *)(base + sizeof(struct chunk) + n);
         rest->size = c->size - n - sizeof(struct chunk);

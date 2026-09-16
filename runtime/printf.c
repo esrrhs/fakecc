@@ -150,12 +150,22 @@ static int round_digits(char *digits, int ndig, int *exp10, int k, int min_exp) 
     return ndig;
 }
 
+static int ob_put(char *out, int *n, int cap, char c) {
+    if (*n >= cap) return 0;
+    out[*n] = c;
+    *n = *n + 1;
+    return 1;
+}
+
 /* Format `a` (non-negative, finite) as %f with `prec` digits after the point.
  * Returns the length written to out. */
 static int fmt_fixed(char *out, long double a, int prec) {
     char digits[40];
     int ndig;
     int e10;
+    int cap = 500;
+    if (prec > 64) prec = 64;
+    if (prec < 0) prec = 0;
     if (a == 0.0L) { digits[0] = '0'; ndig = 1; e10 = -prec; }
     else {
         ndig = decimal_digits(a, digits, &e10);
@@ -166,24 +176,24 @@ static int fmt_fixed(char *out, long double a, int prec) {
     int frac_have = (e10 < 0) ? -e10 : 0;   /* digits sitting after the point */
     int int_have = ndig - frac_have;        /* digits sitting before it */
     if (int_have <= 0) {
-        out[n] = '0'; n = n + 1;
+        ob_put(out, &n, cap, '0');
     } else {
         int i = 0;
-        while (i < int_have) { out[n] = digits[i]; n = n + 1; i = i + 1; }
+        while (i < int_have) { ob_put(out, &n, cap, digits[i]); i = i + 1; }
         int z = 0;
-        while (z < e10) { out[n] = '0'; n = n + 1; z = z + 1; }
+        while (z < e10) { ob_put(out, &n, cap, '0'); z = z + 1; }
     }
     if (prec > 0) {
-        out[n] = '.'; n = n + 1;
+        ob_put(out, &n, cap, '.');
         int emitted = 0;
         /* Leading zeros for a value smaller than 0.1. */
         int lead = (int_have < 0) ? -int_have : 0;
-        while (emitted < lead && emitted < prec) { out[n] = '0'; n = n + 1; emitted = emitted + 1; }
+        while (emitted < lead && emitted < prec) { ob_put(out, &n, cap, '0'); emitted = emitted + 1; }
         int i = (int_have > 0) ? int_have : 0;
         while (i < ndig && emitted < prec) {
-            out[n] = digits[i]; n = n + 1; i = i + 1; emitted = emitted + 1;
+            ob_put(out, &n, cap, digits[i]); i = i + 1; emitted = emitted + 1;
         }
-        while (emitted < prec) { out[n] = '0'; n = n + 1; emitted = emitted + 1; }
+        while (emitted < prec) { ob_put(out, &n, cap, '0'); emitted = emitted + 1; }
     }
     return n;
 }
@@ -193,6 +203,8 @@ static int fmt_sci(char *out, long double a, int prec, int upper) {
     char digits[40];
     int ndig;
     int e10;
+    if (prec > 64) prec = 64;
+    if (prec < 0) prec = 0;
     if (a == 0.0L) { digits[0] = '0'; ndig = 1; e10 = 0; }
     else {
         ndig = decimal_digits(a, digits, &e10);
@@ -230,6 +242,7 @@ static int fmt_sci(char *out, long double a, int prec, int upper) {
 /* Format `a` as %g: %e when the exponent is far from zero, %f otherwise, with
  * trailing zeros removed (C99 7.19.6.1). */
 static int fmt_gen(char *out, long double a, int prec, int upper) {
+    if (prec > 64) prec = 64;
     if (prec == 0) prec = 1;
     int exp;
     if (a == 0.0L) exp = 0;
@@ -330,14 +343,16 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 }
             }
         }
-        /* Length modifiers.  Only l/ll and h/hh change how the argument is
-         * interpreted; the rest are accepted and ignored. */
+        /* Length modifiers. */
+        int size_mod = 0;   /* z/j/t → 64-bit */
+        int long_dbl = 0;
         int lenning = 1;
         while (lenning) {
             if (fmt[i] == 'l') { long_count = long_count + 1; i = i + 1; }
             else if (fmt[i] == 'h') { short_count = short_count + 1; i = i + 1; }
-            else if (fmt[i] == 'z' || fmt[i] == 'j'
-                     || fmt[i] == 't' || fmt[i] == 'L') i = i + 1;
+            else if (fmt[i] == 'z' || fmt[i] == 'j' || fmt[i] == 't') {
+                size_mod = 1; i = i + 1;
+            } else if (fmt[i] == 'L') { long_dbl = 1; i = i + 1; }
             else lenning = 0;
         }
         char spec = fmt[i];
@@ -357,14 +372,18 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
         if (spec == 's') {
             sbody = va_arg(ap, char *);
             if (sbody == 0) sbody = "(null)";
-            blen = (int)strlen(sbody);
-            if (precision >= 0 && blen > precision) blen = precision;
+            if (precision >= 0) {
+                blen = 0;
+                while (blen < precision && sbody[blen]) blen = blen + 1;
+            } else {
+                blen = (int)strlen(sbody);
+            }
         } else if (spec == 'c') {
             body[0] = (char)va_arg(ap, int);
             blen = 1;
         } else if (spec == 'd' || spec == 'i') {
             long long v;
-            if (long_count >= 2) v = va_arg(ap, long long);
+            if (long_count >= 2 || size_mod) v = va_arg(ap, long long);
             else if (long_count == 1) v = (long long)va_arg(ap, long);
             else {
                 int iv = va_arg(ap, int);
@@ -373,7 +392,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 else v = (long long)iv;
             }
             unsigned long long u;
-            if (v < 0) { prefix[0] = '-'; plen = 1; u = (unsigned long long)(-v); }
+            if (v < 0) { prefix[0] = '-'; plen = 1; u = 0ULL - (unsigned long long)v; }
             else {
                 u = (unsigned long long)v;
                 if (f_plus) { prefix[0] = '+'; plen = 1; }
@@ -393,7 +412,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 base = 16;
                 prefix[0] = '0'; prefix[1] = 'x'; plen = 2;
                 v = (unsigned long long)(unsigned long)va_arg(ap, void *);
-            } else if (long_count >= 2) v = va_arg(ap, unsigned long long);
+            } else if (long_count >= 2 || size_mod) v = va_arg(ap, unsigned long long);
             else if (long_count == 1) v = (unsigned long long)va_arg(ap, unsigned long);
             else {
                 unsigned int uv = va_arg(ap, unsigned int);
@@ -410,19 +429,35 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             zero_ok = (precision < 0);
         } else if (spec == 'f' || spec == 'F' || spec == 'e' || spec == 'E'
                    || spec == 'g' || spec == 'G') {
-            double dv = va_arg(ap, double);
-            /* The sign comes from the bit, not a comparison, so that -0.0 and
-             * a negative NaN print with their '-' the way C requires. */
-            unsigned long long dbits;
-            memcpy((void *)&dbits, (void *)&dv, 8);
-            int neg = (dbits >> 63) != 0;
-            long double a = (long double)dv;
-            if (neg) a = -a;
-            /* NaN and infinity have no decimal expansion; C prints them by
-             * name.  NaN is the only value that compares unequal to itself. */
-            if (dv != dv) {
+            long double a;
+            int neg = 0;
+            int is_nan = 0;
+            int is_inf = 0;
+            if (long_dbl) {
+                a = va_arg(ap, long double);
+                unsigned char lb[16];
+                memcpy((void *)lb, (void *)&a, 16);
+                neg = (lb[9] >> 7) != 0;
+                /* x87: exp=0x7fff is inf/nan; mantissa bit 62 distinguishes */
+                int exp = (int)(lb[8] | ((lb[9] & 0x7f) << 8));
+                if (exp == 0x7fff) {
+                    is_nan = (lb[7] & 0x40) != 0 || (lb[6] | lb[5] | lb[4] | lb[3] | lb[2] | lb[1] | lb[0]) != 0;
+                    is_inf = !is_nan;
+                }
+                if (neg) a = -a;
+            } else {
+                double dv = va_arg(ap, double);
+                unsigned long long dbits;
+                memcpy((void *)&dbits, (void *)&dv, 8);
+                neg = (dbits >> 63) != 0;
+                a = (long double)dv;
+                if (neg) a = -a;
+                if (dv != dv) is_nan = 1;
+                else if (dv - dv != 0.0) is_inf = 1;
+            }
+            if (is_nan) {
                 body[0] = 'n'; body[1] = 'a'; body[2] = 'n'; blen = 3;
-            } else if (dv - dv != 0.0) {   /* only infinities differ from themselves */
+            } else if (is_inf) {
                 body[0] = 'i'; body[1] = 'n'; body[2] = 'f'; blen = 3;
             } else {
                 if (spec == 'f' || spec == 'F')

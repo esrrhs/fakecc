@@ -336,22 +336,17 @@ static void emit_xor_rr(Buffer *b, int r) {
 /* xmm8-xmm15).  These mirror the GP emitters but use the F2/F3 0F      */
 /* opcode space.                                                         */
 
-/* movsd xmm_dst, xmm_src  →  F2 0F 10 [ModRM: reg=dst, rm=src, mod=11].
- * Used for reg-reg XMM moves (copies low 64 bits; zeroes upper bits).
- * Doubles as the reg-reg move for float values too (low 32 bits hold the
- * float, bits 32-63 are zero after any movss-producing op). */
+/* movaps xmm_dst, xmm_src  →  0F 28 /r.  Copies all 128 bits so a
+ * 16-byte vector in one XMM survives a reg-reg move. */
 static void emit_sse_mov_rr(Buffer *b, int dst, int src) {
-    emit_byte(b, 0xF2);
     emit_rex_wrb(b, 0, dst, src);
     emit_byte(b, 0x0F);
-    emit_byte(b, 0x10);
+    emit_byte(b, 0x28);
     emit_modrm(b, 3, dst & 7, src & 7);
 }
 
-/* movsd xmm_dst, [rbp+off]  →  F2 0F 10 /r.  Loads 8 bytes (a spill slot
- * always holds 8 bytes, even for float). */
+/* movups xmm_dst, [rbp+off]  →  0F 10 /r.  16-byte unaligned spill load. */
 static void emit_sse_load_spill(Buffer *b, int dst, int off) {
-    emit_byte(b, 0xF2);
     emit_rex_wrb(b, 0, dst, REG_RBP);
     emit_byte(b, 0x0F);
     emit_byte(b, 0x10);
@@ -364,9 +359,8 @@ static void emit_sse_load_spill(Buffer *b, int dst, int off) {
     }
 }
 
-/* movsd [rbp+off], xmm_src  →  F2 0F 11 /r.  Stores 8 bytes. */
+/* movups [rbp+off], xmm_src  →  0F 11 /r.  16-byte unaligned spill store. */
 static void emit_sse_store_spill(Buffer *b, int src, int off) {
-    emit_byte(b, 0xF2);
     emit_rex_wrb(b, 0, src, REG_RBP);
     emit_byte(b, 0x0F);
     emit_byte(b, 0x11);
@@ -493,6 +487,16 @@ static void emit_sse_store_rsp(Buffer *b, int src) {
     emit_byte(b, 0x24);  /* SIB: base=rsp, index=none */
 }
 
+/* movups [rsp], xmm_src  →  0F 11 [mod=00 reg=src rm=4 SIB=0x24].  16-byte
+ * SSE+SSEUP vector push; unaligned so the dance need not 16-align rsp. */
+static void emit_movups_store_rsp(Buffer *b, int src) {
+    emit_rex_wrb(b, 0, src, REG_RSP);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    emit_modrm(b, 0, src & 7, 4);
+    emit_byte(b, 0x24);
+}
+
 /* movaps xmm_dst, [rsp+off]  →  0F 29 [mod dst rm=4 SIB=0x24] disp.  Saves an
  * FP arg register into the variadic save area (16-byte aligned slots). */
 static void emit_sse_store_rsp_off(Buffer *b, int dst, int off) {
@@ -546,6 +550,15 @@ static void emit_sse_load_rsp(Buffer *b, int dst) {
     emit_byte(b, 0x10);
     emit_modrm(b, 0, dst & 7, 4);
     emit_byte(b, 0x24);  /* SIB: base=rsp, index=none */
+}
+
+/* movups xmm_dst, [rsp]  →  0F 10 [mod=00 reg=dst rm=4 SIB=0x24]. */
+static void emit_movups_load_rsp(Buffer *b, int dst) {
+    emit_rex_wrb(b, 0, dst, REG_RSP);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm(b, 0, dst & 7, 4);
+    emit_byte(b, 0x24);
 }
 
 /* jmp rel32  →  E9 rel32.  Returns offset of the rel32 field for patching. */
@@ -603,6 +616,19 @@ static void emit_add_rsp_imm32(Buffer *b, int32_t imm) {
         emit_byte(b, 0xC4);
         emit_int32(b, imm);
     }
+}
+
+/* Push/pop an XMM arg in the SysV dance.  16-byte vectors use movups and a
+ * 16-byte stack slot; scalars stay 8-byte movsd. */
+static void emit_xmm_push(Buffer *b, int xmm, int width16) {
+    emit_sub_rsp_imm32(b, width16 ? 16 : 8);
+    if (width16) emit_movups_store_rsp(b, xmm);
+    else emit_sse_store_rsp(b, xmm);
+}
+static void emit_xmm_pop(Buffer *b, int xmm, int width16) {
+    if (width16) emit_movups_load_rsp(b, xmm);
+    else emit_sse_load_rsp(b, xmm);
+    emit_add_rsp_imm32(b, width16 ? 16 : 8);
 }
 
 /* call rel32  →  E8 rel32.  Returns offset of the rel32 field for patching. */
@@ -876,6 +902,63 @@ static void emit_sse_store_via_ptr(Buffer *b, int ptr, int src, int is_float) {
     emit_byte(b, 0x0F);
     emit_byte(b, 0x11);
     emit_modrm_indirect(b, src, ptr);
+}
+
+/* movups xmm, [ptr] / [ptr], xmm — 16-byte unaligned, no alignment #GP. */
+static void emit_movups_load_via_ptr(Buffer *b, int dst, int ptr) {
+    emit_rex_wrb(b, 0, dst, ptr);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm_indirect(b, dst, ptr);
+}
+static void emit_movups_store_via_ptr(Buffer *b, int ptr, int src) {
+    emit_rex_wrb(b, 0, src, ptr);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    emit_modrm_indirect(b, src, ptr);
+}
+
+/* movq xmm, [ptr] (F3 0F 7E) — 8-byte vector lane. */
+static void emit_movq_xmm_mem(Buffer *b, int dst, int ptr) {
+    emit_byte(b, 0xF3);
+    emit_rex_wrb(b, 0, dst, ptr);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x7E);
+    emit_modrm_indirect(b, dst, ptr);
+}
+static void emit_movq_mem_xmm(Buffer *b, int ptr, int src) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, src, ptr);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0xD6);
+    emit_modrm_indirect(b, src, ptr);
+}
+
+/* movd xmm, [ptr] (66 0F 6E) — 4-byte vector lane. */
+static void emit_movd_xmm_mem(Buffer *b, int dst, int ptr) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, dst, ptr);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x6E);
+    emit_modrm_indirect(b, dst, ptr);
+}
+static void emit_movd_mem_xmm(Buffer *b, int ptr, int src) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, src, ptr);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x7E);
+    emit_modrm_indirect(b, src, ptr);
+}
+
+static void emit_vec_load_xmm(Buffer *b, int xmm, int ptr, int vec_sz) {
+    if (vec_sz >= 16) emit_movups_load_via_ptr(b, xmm, ptr);
+    else if (vec_sz >= 8) emit_movq_xmm_mem(b, xmm, ptr);
+    else emit_movd_xmm_mem(b, xmm, ptr);
+}
+static void emit_vec_store_xmm(Buffer *b, int ptr, int xmm, int vec_sz) {
+    if (vec_sz >= 16) emit_movups_store_via_ptr(b, ptr, xmm);
+    else if (vec_sz >= 8) emit_movq_mem_xmm(b, ptr, xmm);
+    else emit_movd_mem_xmm(b, ptr, xmm);
 }
 
 /* mov [ptr_reg], src_reg — store `width` low bytes of src to memory pointed by ptr. */
@@ -1228,6 +1311,8 @@ static int value_is_ld(const IRFunction *fn, int v) {
     if (!value_is_float_class(fn, v)) return 0;
     if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
     if (v >= fn->value_meta_cap) return 0;
+    /* 4 = 16-byte SSE vector (one XMM).  Long double is kind 1 + width 16. */
+    if (fn->value_is_float[v] == 4) return 0;
     return fn->value_width[v] == 16;
 }
 
@@ -1237,6 +1322,12 @@ static int value_width_of(const IRFunction *fn, int v) {
     if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
     if (v >= fn->value_meta_cap) return 0;
     return fn->value_width[v];
+}
+
+/* True if SSA value `v` is a 16-byte vector in one XMM (SSE+SSEUP). */
+static int value_is_xmm16(const IRFunction *fn, int v) {
+    return value_is_float_class(fn, v) && !value_is_ld(fn, v)
+        && value_width_of(fn, v) == 16;
 }
 
 /* Materialize the address of long-double value `v`'s 16-byte slot into GP
@@ -1369,7 +1460,7 @@ static void isel_shift(Buffer *b, const IRInst *inst, const IRFunction *fn,
  * curr_cs_count accounts for the callee-saved register save area above
  * the spill region (see spill_offset above). */
 static int spill_offset_xmm(int slot, int gp_spill_area) {
-    return -(gp_spill_area + 8 * (slot + 1 + curr_cs_count));
+    return -(gp_spill_area + 8 * curr_cs_count + 16 * (slot + 1));
 }
 
 /* Ensure float value `v` is in `dst_xmm`.  Emits movsd or load as needed. */
@@ -2775,16 +2866,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             int is_float = !is_ld && (pi->dst >= 0 && pi->dst < fn->next_value_id &&
                             value_is_float_class(fn, pi->dst));
             int force_stack = pi->force_stack || is_ld;
+            int w16 = is_float && (pi->width == 16 || value_is_xmm16(fn, pi->dst));
             if (force_stack) {
                 /* long double or MEMORY-class eightbyte: stack only.
-                 * 16-byte aligned types (ld / __int128) skip a slot when the
-                 * current overflow index is odd (rbp+16 is 16-aligned). */
-                if ((is_ld || pi->align16) && (stack_arg_idx & 1))
+                 * 16-byte aligned types (ld / __int128 / SSE+SSEUP vector)
+                 * skip a slot when the current overflow index is odd
+                 * (rbp+16 is 16-aligned). */
+                if ((is_ld || pi->align16 || w16) && (stack_arg_idx & 1))
                     stack_arg_idx++;
                 arrive_reg[p] = -1;
                 arrive_is_xmm[p] = 0;
                 stack_off[p] = 16 + 8 * stack_arg_idx;
-                stack_arg_idx += is_ld ? 2 : 1;
+                stack_arg_idx += (is_ld || w16) ? 2 : 1;
                 if (is_ld)
                     ld_off[pi->dst] = stack_off[p];
             } else if (is_float) {
@@ -2795,7 +2888,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 } else {
                     arrive_reg[p] = -1;
                     arrive_is_xmm[p] = 0;
-                    stack_off[p] = 16 + 8 * stack_arg_idx++;
+                    if ((pi->align16 || w16) && (stack_arg_idx & 1))
+                        stack_arg_idx++;
+                    stack_off[p] = 16 + 8 * stack_arg_idx;
+                    stack_arg_idx += w16 ? 2 : 1;
                 }
             } else {
                 if (gp_reg_idx < 6) {
@@ -2917,12 +3013,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             const IRInst *pi = &fn->insts.data[p];
             int w = pi->width ? pi->width : 4;
             int is_float = value_is_float_class(fn, pi->dst);
+            int w16 = is_float && (w == 16 || value_is_xmm16(fn, pi->dst));
             if (arrive_reg[p] < 0) {
                 if (is_float) {
-                    emit_sse_load_disp(&out->text, XMM_SCRATCH0, REG_RBP,
-                                       stack_off[p], w == 4);
-                    emit_sse_store_disp(&out->text, REG_RBP, XMM_SCRATCH0,
-                                        param_home_off[p], w == 4);
+                    if (w16) {
+                        emit_sse_load_spill(&out->text, XMM_SCRATCH0, stack_off[p]);
+                        emit_sse_store_spill(&out->text, XMM_SCRATCH0,
+                                             param_home_off[p]);
+                    } else {
+                        emit_sse_load_disp(&out->text, XMM_SCRATCH0, REG_RBP,
+                                           stack_off[p], w == 4);
+                        emit_sse_store_disp(&out->text, REG_RBP, XMM_SCRATCH0,
+                                            param_home_off[p], w == 4);
+                    }
                 } else {
                     emit_load_disp(&out->text, REG_RAX, REG_RBP, stack_off[p],
                                    w, pi->is_unsigned);
@@ -2930,8 +3033,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                     param_home_off[p], w);
                 }
             } else if (arrive_is_xmm[p]) {
-                emit_sse_store_disp(&out->text, REG_RBP, arrive_reg[p],
-                                    param_home_off[p], w == 4);
+                if (w16)
+                    emit_sse_store_spill(&out->text, arrive_reg[p],
+                                         param_home_off[p]);
+                else
+                    emit_sse_store_disp(&out->text, REG_RBP, arrive_reg[p],
+                                        param_home_off[p], w == 4);
             } else {
                 emit_store_disp(&out->text, REG_RBP, arrive_reg[p],
                                 param_home_off[p], w);
@@ -2943,8 +3050,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (param_home_off && param_home_off[p] != 0) continue;
             if (arrive_reg[p] < 0) continue;
             if (arrive_is_xmm[p]) {
-                emit_sub_rsp_imm32(&out->text, 8);
-                emit_sse_store_rsp(&out->text, arrive_reg[p]);
+                const IRInst *pi = &fn->insts.data[p];
+                emit_xmm_push(&out->text, arrive_reg[p],
+                              pi->width == 16 || value_is_xmm16(fn, pi->dst));
             } else {
                 emit_push_r(&out->text, arrive_reg[p]);
             }
@@ -2989,17 +3097,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 continue;
             }
             if (is_float) {
+                int w16 = pi->width == 16 || value_is_xmm16(fn, pi->dst);
                 int pdr_xmm = (ra_xmm && pi->dst >= 0 &&
                                pi->dst < ra_xmm->num_values)
                               ? ra_xmm->reg[pi->dst] : -1;
                 if (pdr_xmm >= 0) {
-                    emit_sse_load_rsp(&out->text, pdr_xmm);
+                    emit_xmm_pop(&out->text, pdr_xmm, w16);
                 } else {
-                    emit_sse_load_rsp(&out->text, XMM_SCRATCH0);
+                    emit_xmm_pop(&out->text, XMM_SCRATCH0, w16);
                     spill_if_needed_xmm(&out->text, pi->dst, XMM_SCRATCH0,
                                          ra_xmm, gp_spill_area);
                 }
-                emit_add_rsp_imm32(&out->text, 8);
             } else {
                 int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
                           ? ra->reg[pi->dst] : -1;
@@ -3633,12 +3741,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (value_is_float_class(fn, inst->dst)) {
-                    int is_float = (inst->width == 4);
                     int dst_xmm = dr >= 0 ? dr : XMM_SCRATCH0;
-                    if (folded)
-                        emit_sse_load_disp(&out->text, dst_xmm, REG_RBP, ptr_off, is_float);
-                    else
-                        emit_sse_load_via_ptr(&out->text, dst_xmm, REG_RCX, is_float);
+                    if (inst->width == 16) {
+                        if (folded) {
+                            emit_rex_wrb(&out->text, 0, dst_xmm, REG_RBP);
+                            emit_byte(&out->text, 0x0F);
+                            emit_byte(&out->text, 0x10);
+                            emit_modrm_disp(&out->text, dst_xmm, REG_RBP, ptr_off);
+                        } else
+                            emit_movups_load_via_ptr(&out->text, dst_xmm, REG_RCX);
+                    } else {
+                        int is_float = (inst->width == 4);
+                        if (folded)
+                            emit_sse_load_disp(&out->text, dst_xmm, REG_RBP, ptr_off, is_float);
+                        else
+                            emit_sse_load_via_ptr(&out->text, dst_xmm, REG_RCX, is_float);
+                    }
                     if (dr < 0)
                         spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
                                             ra_xmm, gp_spill_area);
@@ -3692,15 +3810,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_modrm(&out->text, 0, 7, REG_RCX & 7);
                     }
                 } else if (value_is_float_class(fn, inst->b)) {
-                    int is_float = (inst->width == 4);
                     ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm,
                                    gp_spill_area);
-                    if (folded)
-                        emit_sse_store_disp(&out->text, REG_RBP, XMM_SCRATCH0,
-                                            ptr_off, is_float);
-                    else
-                        emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0,
-                                               is_float);
+                    if (inst->width == 16) {
+                        if (folded) {
+                            emit_rex_wrb(&out->text, 0, XMM_SCRATCH0, REG_RBP);
+                            emit_byte(&out->text, 0x0F);
+                            emit_byte(&out->text, 0x11);
+                            emit_modrm_disp(&out->text, XMM_SCRATCH0, REG_RBP, ptr_off);
+                        } else
+                            emit_movups_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0);
+                    } else {
+                        int is_float = (inst->width == 4);
+                        if (folded)
+                            emit_sse_store_disp(&out->text, REG_RBP, XMM_SCRATCH0,
+                                                ptr_off, is_float);
+                        else
+                            emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0,
+                                                   is_float);
+                    }
                 } else if (use_rbp_i) {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     ensure_reg(&out->text, rbp_idx, REG_RCX, ra);
@@ -3730,86 +3858,32 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_VBAND:
             case IR_VBOR:
             case IR_VBXOR: {
+                /* Scratch is XMM14/XMM15 and RAX/RCX/RDX — never RDI/R8/R9
+                 * or XMM0-13, which the allocator hands out to live SSA. */
                 int vec_sz = inst->width;
                 int elem_sz = (int)inst->imm;
                 int is_float = inst->is_float;
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 ensure_reg(&out->text, inst->b, REG_RCX, ra);
-                /* Load left vector into XMM0 */
-                if (vec_sz >= 16) {
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x10);
-                    emit_modrm(&out->text, 0, 0, REG_RAX);
-                } else if (vec_sz >= 8) {
-                    emit_byte(&out->text, 0xF3);
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x7E);
-                    emit_modrm(&out->text, 0, 0, REG_RAX);
-                } else {
-                    emit_byte(&out->text, 0x66);
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x6E);
-                    emit_modrm(&out->text, 0, 0, REG_RAX);
-                }
-                /* Load right vector into XMM1 */
-                if (vec_sz >= 16) {
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x10);
-                    emit_modrm(&out->text, 0, 1, REG_RCX);
-                } else if (vec_sz >= 8) {
-                    emit_byte(&out->text, 0xF3);
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x7E);
-                    emit_modrm(&out->text, 0, 1, REG_RCX);
-                } else {
-                    emit_byte(&out->text, 0x66);
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x6E);
-                    emit_modrm(&out->text, 0, 1, REG_RCX);
-                }
-                /* Packed operation: XMM0 = XMM0 op XMM1 */
-                if (is_float) {
-                    if (elem_sz >= 8) {
-                        /* double */
-                        emit_byte(&out->text, 0x66);
-                        emit_byte(&out->text, 0x0F);
-                        if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
-                        else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
-                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
-                        else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
-                        else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
-                        else if (inst->op == IR_VBOR)  emit_byte(&out->text, 0x56);
-                        else if (inst->op == IR_VBXOR) emit_byte(&out->text, 0x57);
-                        emit_modrm(&out->text, 3, 0, 1);
-                    } else {
-                        /* float */
-                        emit_byte(&out->text, 0x0F);
-                        if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
-                        else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
-                        else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
-                        else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
-                        else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
-                        else if (inst->op == IR_VBOR)  emit_byte(&out->text, 0x56);
-                        else if (inst->op == IR_VBXOR) emit_byte(&out->text, 0x57);
-                        emit_modrm(&out->text, 3, 0, 1);
-                    }
-                } else if (inst->op == IR_VDIV
-                           || (inst->op == IR_VMUL
-                               && (elem_sz == 1 || elem_sz >= 8))) {
+                if (inst->op == IR_VDIV
+                    || (inst->op == IR_VMUL && !is_float
+                        && (elem_sz == 1 || elem_sz >= 8))) {
                     /* SSE has no packed integer div, no packed byte mul, and
-                     * no packed 64-bit mul of both lanes.  GCC scalarizes;
-                     * do the same instead of emitting a nearby add/sub. */
+                     * no packed 64-bit mul of both lanes.  Scalarize using
+                     * only reserved GP scratches, spilling the three
+                     * pointers onto the stack across the imul/div. */
                     int n = elem_sz > 0 ? vec_sz / elem_sz : 0;
-                    emit_mov_rr(&out->text, REG_R8, REG_RAX);
-                    emit_mov_rr(&out->text, REG_R9, REG_RCX);
-                    ensure_reg(&out->text, inst->dst, REG_RDI, ra);
+                    ensure_reg(&out->text, inst->dst, REG_RDX, ra);
+                    emit_push_r(&out->text, REG_RAX); /* src_a */
+                    emit_push_r(&out->text, REG_RCX); /* src_b */
+                    emit_push_r(&out->text, REG_RDX); /* dst  */
                     for (int ei = 0; ei < n; ei++) {
                         int off = ei * elem_sz;
-                        emit_mov_rr(&out->text, REG_RAX, REG_R8);
+                        emit_load_disp(&out->text, REG_RAX, REG_RSP, 16, 8, 1);
                         if (off) emit_add_imm32(&out->text, REG_RAX, off);
                         emit_load_via_ptr(&out->text, REG_RAX, REG_RAX, elem_sz,
                                           inst->is_unsigned);
-                        emit_mov_rr(&out->text, REG_RCX, REG_R9);
+                        emit_load_disp(&out->text, REG_RCX, REG_RSP, 8, 8, 1);
                         if (off) emit_add_imm32(&out->text, REG_RCX, off);
                         emit_load_via_ptr(&out->text, REG_RCX, REG_RCX, elem_sz,
                                           inst->is_unsigned);
@@ -3826,71 +3900,59 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_cqto(&out->text);
                             emit_idiv_rcx(&out->text);
                         }
-                        emit_mov_rr(&out->text, REG_RCX, REG_RDI);
+                        emit_load_disp(&out->text, REG_RCX, REG_RSP, 0, 8, 1);
                         if (off) emit_add_imm32(&out->text, REG_RCX, off);
                         emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, elem_sz);
                     }
+                    emit_add_rsp_imm32(&out->text, 24);
                     break;
+                }
+                emit_vec_load_xmm(&out->text, XMM_SCRATCH0, REG_RAX, vec_sz);
+                emit_vec_load_xmm(&out->text, XMM_SCRATCH1, REG_RCX, vec_sz);
+                /* Packed op: XMM14 = XMM14 op XMM15 */
+                if (is_float) {
+                    if (elem_sz >= 8) emit_byte(&out->text, 0x66);
+                    emit_rex_wrb(&out->text, 0, XMM_SCRATCH0, XMM_SCRATCH1);
+                    emit_byte(&out->text, 0x0F);
+                    if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
+                    else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
+                    else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
+                    else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
+                    else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
+                    else if (inst->op == IR_VBOR)  emit_byte(&out->text, 0x56);
+                    else emit_byte(&out->text, 0x57);
+                    emit_modrm(&out->text, 3, XMM_SCRATCH0, XMM_SCRATCH1);
                 } else {
-                    /* integer */
                     emit_byte(&out->text, 0x66);
+                    emit_rex_wrb(&out->text, 0, XMM_SCRATCH0, XMM_SCRATCH1);
+                    emit_byte(&out->text, 0x0F);
                     if (inst->op == IR_VBAND) {
-                        emit_byte(&out->text, 0x0F);
                         emit_byte(&out->text, 0xDB);
-                        emit_modrm(&out->text, 3, 0, 1);
                     } else if (inst->op == IR_VBOR) {
-                        emit_byte(&out->text, 0x0F);
                         emit_byte(&out->text, 0xEB);
-                        emit_modrm(&out->text, 3, 0, 1);
                     } else if (inst->op == IR_VBXOR) {
-                        emit_byte(&out->text, 0x0F);
                         emit_byte(&out->text, 0xEF);
-                        emit_modrm(&out->text, 3, 0, 1);
                     } else if (elem_sz == 1) {
-                        emit_byte(&out->text, 0x0F);
                         emit_byte(&out->text,
                                   inst->op == IR_VSUB ? 0xF8 : 0xFC);
-                        emit_modrm(&out->text, 3, 0, 1);
                     } else if (elem_sz == 2) {
-                        emit_byte(&out->text, 0x0F);
                         if (inst->op == IR_VADD) emit_byte(&out->text, 0xFD);
                         else if (inst->op == IR_VSUB) emit_byte(&out->text, 0xF9);
                         else emit_byte(&out->text, 0xD5); /* pmullw */
-                        emit_modrm(&out->text, 3, 0, 1);
                     } else if (elem_sz == 4) {
                         if (inst->op == IR_VMUL) {
-                            emit_byte(&out->text, 0x0F);
                             emit_byte(&out->text, 0x38);
                             emit_byte(&out->text, 0x40);
-                            emit_modrm(&out->text, 3, 0, 1);
                         } else {
-                            emit_byte(&out->text, 0x0F);
                             emit_byte(&out->text, (inst->op == IR_VSUB) ? 0xFA : 0xFE);
-                            emit_modrm(&out->text, 3, 0, 1);
                         }
-                    } else if (elem_sz >= 8) {
-                        emit_byte(&out->text, 0x0F);
+                    } else {
                         emit_byte(&out->text, (inst->op == IR_VSUB) ? 0xFB : 0xD4);
-                        emit_modrm(&out->text, 3, 0, 1);
                     }
+                    emit_modrm(&out->text, 3, XMM_SCRATCH0, XMM_SCRATCH1);
                 }
-                /* Store result from XMM0 to dst address */
-                ensure_reg(&out->text, inst->dst, REG_RDI, ra);
-                if (vec_sz >= 16) {
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x11);
-                    emit_modrm(&out->text, 0, 0, REG_RDI);
-                } else if (vec_sz >= 8) {
-                    emit_byte(&out->text, 0x66);
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0xD6);
-                    emit_modrm(&out->text, 0, 0, REG_RDI);
-                } else {
-                    emit_byte(&out->text, 0x66);
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x7E);
-                    emit_modrm(&out->text, 0, 0, REG_RDI);
-                }
+                ensure_reg(&out->text, inst->dst, REG_RAX, ra);
+                emit_vec_store_xmm(&out->text, REG_RAX, XMM_SCRATCH0, vec_sz);
                 break;
             }
 
@@ -4223,13 +4285,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
                     int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
+                    int w16 = is_float && value_is_xmm16(fn, inst->call_args[k]);
                     int on_stack = (inst->call_arg_on_stack && inst->call_arg_on_stack[k]);
                     int force_stack = on_stack || is_ld;
-                    int a16 = is_ld || (on_stack && (inst->call_arg_on_stack[k] & 2));
+                    int a16 = is_ld || w16 || (on_stack && (inst->call_arg_on_stack[k] & 2));
                     arg_slot[k] = -1;
                     arg_nslots[k] = 0;
                     if (force_stack) {
-                        int nslots = is_ld ? 2 : 1;
+                        int nslots = (is_ld || w16) ? 2 : 1;
                         if (a16 && (n_stack & 1)) n_stack++;
                         target_reg[k] = -1;
                         target_is_xmm[k] = 0;
@@ -4242,11 +4305,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             target_is_xmm[k] = 1;
                             n_xmm++;
                         } else {
+                            int nslots = w16 ? 2 : 1;
+                            if (w16 && (n_stack & 1)) n_stack++;
                             target_reg[k] = -1;
                             target_is_xmm[k] = 0;
                             arg_slot[k] = n_stack;
-                            arg_nslots[k] = 1;
-                            n_stack++;
+                            arg_nslots[k] = nslots;
+                            n_stack += nslots;
                         }
                     } else {
                         if (n_gp < 6) {
@@ -4295,11 +4360,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_x87_fstpt_rsp(&out->text);
                         slot -= 2;
                     } else if (value_is_float_class(fn, inst->call_args[found])) {
+                        int w16 = value_is_xmm16(fn, inst->call_args[found]);
                         ensure_reg_xmm(&out->text, inst->call_args[found],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
-                        emit_sub_rsp_imm32(&out->text, 8);
-                        emit_sse_store_rsp(&out->text, XMM_SCRATCH0);
-                        slot--;
+                        emit_xmm_push(&out->text, XMM_SCRATCH0, w16);
+                        slot -= w16 ? 2 : 1;
                     } else {
                         ensure_reg(&out->text, inst->call_args[found], REG_RAX, ra);
                         emit_push_r(&out->text, REG_RAX);
@@ -4359,10 +4424,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 for (int k = nargs - 1; k >= 0; k--) {
                     if (target_reg[k] < 0) continue; /* stack-passed */
                     if (target_is_xmm[k]) {
+                        int w16 = value_is_xmm16(fn, inst->call_args[k]);
                         ensure_reg_xmm(&out->text, inst->call_args[k],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
-                        emit_sub_rsp_imm32(&out->text, 8);
-                        emit_sse_store_rsp(&out->text, XMM_SCRATCH0);
+                        emit_xmm_push(&out->text, XMM_SCRATCH0, w16);
                     } else {
                         ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
                         emit_push_r(&out->text, REG_RAX);
@@ -4382,8 +4447,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 for (int k = 0; k < nargs; k++) {
                     if (target_reg[k] < 0) continue; /* stack-passed */
                     if (target_is_xmm[k]) {
-                        emit_sse_load_rsp(&out->text, target_reg[k]);
-                        emit_add_rsp_imm32(&out->text, 8);
+                        emit_xmm_pop(&out->text, target_reg[k],
+                                     value_is_xmm16(fn, inst->call_args[k]));
                     } else {
                         emit_pop_r(&out->text, target_reg[k]);
                     }

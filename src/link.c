@@ -948,8 +948,19 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t soname_dynstr_off = 0;
     size_t runpath_str_bytes = 0;
     size_t runpath_dynstr_off = 0;
-    /* GOT[0] (= &_DYNAMIC) needs R_X86_64_RELATIVE in a shared object. */
-    int num_relative = is_shared ? 1 : 0;
+    /* Shared objects need R_X86_64_RELATIVE for every link-time absolute
+     * address that lives in RW data: pointer initializers, internal GOT
+     * slots, and GOT[0] (= &_DYNAMIC).  Without these the DSO is loaded at
+     * a random base and the stored values stay at the unrelocated VA. */
+    int num_data_ptr_rel = 0;
+    int num_internal_got = 0;
+    if (is_shared) {
+        for (size_t i = 0; i < n; i++)
+            num_data_ptr_rel += (int)mods[i]->num_data_relocs;
+        for (int j = 0; j < num_data_ext; j++)
+            if (!data_got_external[j]) num_internal_got++;
+    }
+    int num_relative = is_shared ? (1 + num_data_ptr_rel + num_internal_got) : 0;
     if (need_dynamic) {
         buf_u8(&dynstr, 0);
         for (int i = 0; i < num_needed; i++) {
@@ -1309,6 +1320,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     }
 
     /* ---- Apply data relocations (pointer fixups in .data) ---- */
+    uint64_t *rel_roff = NULL;
+    uint64_t *rel_add = NULL;
+    int rel_fill = 0;
+    if (is_shared && num_relative > 0) {
+        rel_roff = xcalloc((size_t)num_relative, sizeof(uint64_t));
+        rel_add = xcalloc((size_t)num_relative, sizeof(uint64_t));
+    }
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_data_relocs; r++) {
@@ -1356,6 +1374,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             /* R_X86_64_64: absolute 64-bit, value = S + A. */
             uint64_t value = S + rel->addend;
             memcpy(data.data + patch_in_data, &value, 8);
+            if (is_shared && rel_fill < num_relative) {
+                rel_roff[rel_fill] = data_vaddr + patch_in_data;
+                rel_add[rel_fill] = value;
+                rel_fill++;
+            }
         }
     }
 
@@ -1443,16 +1466,31 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
                 rdj++;
             }
-            /* R_X86_64_RELATIVE for GOT[0] (= link-time &_DYNAMIC). */
-            if (num_relative > 0) {
+            /* R_X86_64_RELATIVE for pointer initializers, internal GOT slots,
+             * then GOT[0] (= link-time &_DYNAMIC). */
+            if (num_relative > 0 && rel_roff) {
+                for (int j = 0; j < num_data_ext; j++) {
+                    if (data_got_external[j]) continue;
+                    if (rel_fill < num_relative) {
+                        rel_roff[rel_fill] = got_vaddr + (3 + num_ext + j) * 8;
+                        rel_add[rel_fill] = data_got_addr[j];
+                        rel_fill++;
+                    }
+                }
                 uint64_t dyn_vaddr = is_shared
                     ? (data_vaddr + dynamic_data_off)
                     : (base + hdr_size + start_size + text.len + rodata.len + interp_len
                        + dynstr.len + dynsym.len + hash.len + rela_plt.len + rela_dyn.len);
-                uint64_t roff = got_vaddr;
-                size_t ent = (size_t)rdj * 24;
-                memcpy(rela_dyn.data + ent, &roff, 8);
-                memcpy(rela_dyn.data + ent + 16, &dyn_vaddr, 8);
+                if (rel_fill < num_relative) {
+                    rel_roff[rel_fill] = got_vaddr;
+                    rel_add[rel_fill] = dyn_vaddr;
+                    rel_fill++;
+                }
+                for (int r = 0; r < rel_fill; r++) {
+                    size_t ent = (size_t)(rdj + r) * 24;
+                    memcpy(rela_dyn.data + ent, &rel_roff[r], 8);
+                    memcpy(rela_dyn.data + ent + 16, &rel_add[r], 8);
+                }
             }
         }
         /* .dynamic */
@@ -1731,4 +1769,5 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     free(reloc_data_got_idx);
     free(plt_entry_off); free(plt_got_fixup);
     free(data_got_addr); free(data_got_external);
+    free(rel_roff); free(rel_add);
 }

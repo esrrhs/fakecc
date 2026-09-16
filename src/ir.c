@@ -757,7 +757,9 @@ static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) 
     return 0;
 }
 
-/* Record float-ness for value `v`. */
+/* Record float-ness for value `v`.
+ * 0 = integer/pointer, 1 = IEEE float/double (or x87 long double with
+ * width 16), 2 = _Decimal*, 4 = 16-byte SSE vector (one XMM, not ld). */
 static void set_value_float(IRFunction *fn, IRValue v, int is_float) {
     if (v < 0) return;
     if (v >= fn->value_meta_cap) {
@@ -1102,6 +1104,17 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
 static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
                           const SysVRegClass *cls, IRValue *out,
                           SourceLoc loc) {
+    /* 16-byte vector: one SSE register holds all 16 bytes (SSE+SSEUP).
+     * Float-kind 4 distinguishes this from x87 long double (kind 1, width 16). */
+    if (n == 1 && size == 16 && cls && cls[0] == SYSV_CLS_SSE) {
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, 16, 1, loc);
+        fn->insts.data[fn->insts.len - 1].is_float = 1;
+        set_value_type(fn, v, 16, 0);
+        set_value_float(fn, v, 4);
+        out[0] = v;
+        return;
+    }
     for (int i = 0; i < n; i++) {
         int off = i * 8;
         int remain = size - off;
@@ -1149,6 +1162,14 @@ static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
 static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
                            const SysVRegClass *cls, const IRValue *vals,
                            SourceLoc loc) {
+    if (n == 1 && size == 16
+        && ((cls && cls[0] == SYSV_CLS_SSE)
+            || (get_value_is_float(fn, vals[0])
+                && get_value_width(fn, vals[0]) == 16))) {
+        emit_inst_w(fn, IR_STORE_PTR, -1, addr, vals[0], 0, 16, 1, loc);
+        fn->insts.data[fn->insts.len - 1].is_float = 1;
+        return;
+    }
     (void)cls;
     for (int i = 0; i < n; i++) {
         int off = i * 8;
@@ -3722,7 +3743,8 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 
 static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
-                                  Type lt, Type rt, BinOp bop) {
+                                  Type lt, Type rt, BinOp bop,
+                                  IRValue forced_l_addr) {
     int lt_is_cplx = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
     int rt_is_cplx = (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0);
     
@@ -3743,7 +3765,8 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
     
     /* Load LHS components */
     if (lt_is_cplx) {
-        lv_addr = lower_expr(fn, st, e->u.bin.l);
+        lv_addr = (forced_l_addr >= 0) ? forced_l_addr
+                                       : lower_expr(fn, st, e->u.bin.l);
         l_real = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, l_real, lv_addr, -1, 0, l_elem_sz, l_is_unsigned, e->loc);
         if (l_is_float) set_value_float(fn, l_real, 1);
@@ -4973,7 +4996,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
-            return lower_complex_binop(fn, st, e, lt, rt, bop);
+            return lower_complex_binop(fn, st, e, lt, rt, bop, -1);
         }
         if (type_is_i128(lt) || type_is_i128(rt) || type_is_i128(e->type)) {
             IRValue lv = lower_expr(fn, st, e->u.bin.l);
@@ -6825,13 +6848,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (is_ret_struct && ret_nreg > 0) {
             /* Result eightbytes are INTEGER (RAX/RDX) or SSE (XMM0/XMM1).
-             * Mark float class on the SSA results so codegen picks XMM. */
-            inst.width = 8;
+             * Mark float class on the SSA results so codegen picks XMM.
+             * A 16-byte SSE+SSEUP vector is one XMM (width 16, kind 4). */
+            int vec16 = (ret_nreg == 1 && type_size(e->type) == 16
+                         && ret_cls[0] == SYSV_CLS_SSE);
+            inst.width = vec16 ? 16 : 8;
             inst.is_float = (ret_cls[0] == SYSV_CLS_SSE);
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
-            set_value_type(fn, ret_lo, 8, 1);
-            if (ret_cls[0] == SYSV_CLS_SSE) set_value_float(fn, ret_lo, 1);
+            set_value_type(fn, ret_lo, vec16 ? 16 : 8, vec16 ? 0 : 1);
+            if (ret_cls[0] == SYSV_CLS_SSE)
+                set_value_float(fn, ret_lo, vec16 ? 4 : 1);
             if (ret_hi >= 0) {
                 set_value_type(fn, ret_hi, 8, 1);
                 if (ret_cls[1] == SYSV_CLS_SSE) set_value_float(fn, ret_hi, 1);
@@ -7405,17 +7432,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (type_is_i128(lv->type)) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
-            Expr fake_bin;
-            memset(&fake_bin, 0, sizeof(fake_bin));
-            fake_bin.kind = EX_BINOP;
-            fake_bin.type = lv->type;
-            fake_bin.loc = e->loc;
-            fake_bin.u.bin.op = op;
-            fake_bin.u.bin.l = lv;
-            fake_bin.u.bin.r = e->u.comp.rvalue;
-            IRValue res = lower_expr(fn, st, &fake_bin);
+            IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
+            IRValue res = lower_i128_binop(fn, addr, rhs, lv->type,
+                                           e->u.comp.rvalue->type, op,
+                                           lv->type, e->loc);
             emit_struct_copy(fn, addr, res, 16, e->loc);
-            return addr;
+            return res;
         }
         if (lv->type.kind == TY_STRUCT && lv->type.tag && strncmp(lv->type.tag, "__complex_", 10) == 0) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
@@ -7427,22 +7449,31 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             fake_bin.u.bin.op = op;
             fake_bin.u.bin.l = lv;
             fake_bin.u.bin.r = e->u.comp.rvalue;
-            IRValue res_addr = lower_complex_binop(fn, st, &fake_bin, lv->type, e->u.comp.rvalue->type, op);
+            IRValue res_addr = lower_complex_binop(fn, st, &fake_bin, lv->type,
+                                                   e->u.comp.rvalue->type, op,
+                                                   addr);
             emit_struct_copy(fn, addr, res_addr, type_size(lv->type), e->loc);
-            return addr;
+            return res_addr;
         }
         if (lv->type.is_decimal) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
-            Expr fake_bin;
-            memset(&fake_bin, 0, sizeof(fake_bin));
-            fake_bin.kind = EX_BINOP;
-            fake_bin.type = lv->type;
-            fake_bin.loc = e->loc;
-            fake_bin.u.bin.op = op;
-            fake_bin.u.bin.l = lv;
-            fake_bin.u.bin.r = e->u.comp.rvalue;
-            IRValue res = lower_expr(fn, st, &fake_bin);
             int w = lv->type.width ? lv->type.width : 8;
+            IRValue oldv;
+            if (w == 16) {
+                oldv = i128_alloc(fn, e->loc);
+                emit_struct_copy(fn, oldv, addr, 16, e->loc);
+            } else {
+                oldv = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, w, 0, e->loc);
+                set_value_decimal(fn, oldv);
+            }
+            IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
+            rhs = convert_to_decimal(fn, rhs, e->u.comp.rvalue->type, lv->type, e->loc);
+            int aop = 0;
+            if (op == BOP_SUB) aop = 1;
+            else if (op == BOP_MUL) aop = 2;
+            else if (op == BOP_DIV) aop = 3;
+            IRValue res = emit_dfp_arith(fn, w, aop, oldv, rhs, e->loc);
             if (w == 16)
                 emit_struct_copy(fn, addr, res, 16, e->loc);
             else {
@@ -10504,14 +10535,17 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 for (int k = 0; k < nreg; k++) {
                     param_ebs[p][k] = new_value(&irfn);
                     int is_sse = !is_memory && (cls[k] == SYSV_CLS_SSE);
+                    int pw = 8;
+                    if (is_sse && nreg == 1 && type_size(pty) == 16)
+                        pw = 16;
                     emit_inst_w(&irfn, IR_PARAM, param_ebs[p][k], -1, -1,
-                                next_pidx++, 8, 1, ploc);
+                                next_pidx++, pw, 1, ploc);
                     if (!fits)
                         irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
                     if (!fits && k == 0 && type_needs_stack_align16(pty))
                         irfn.insts.data[irfn.insts.len - 1].align16 = 1;
                     if (is_sse)
-                        set_value_float(&irfn, param_ebs[p][k], 1);
+                        set_value_float(&irfn, param_ebs[p][k], pw == 16 ? 4 : 1);
                 }
                 }
             } else {

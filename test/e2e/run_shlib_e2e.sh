@@ -294,4 +294,66 @@ if [ -x "$TMP/p" ]; then
     if [ "$got" = "42" ]; then pass "fakecc exe ← gcc .so"; else fail "fakecc exe ← gcc .so (exit $got)"; fi
 fi
 
+# 8) fakecc .so with a .data pointer initializer needs R_X86_64_RELATIVE
+#    so the pointer is valid after ASLR.
+cat > "$TMP/libptr.c" <<'EOF'
+package main;
+int x = 7;
+int *p = &x;
+int get(void) { return *p; }
+EOF
+cat > "$TMP/useptr.c" <<'EOF'
+package main;
+extern int get(void);
+int main(void) { return get(); }
+EOF
+rm -f "$TMP/libptr.so" "$TMP/p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA -shared "$TMP/libptr.c" -o "$TMP/libptr.so" 2>"$TMP/err" \
+    || { fail "fakecc -shared data-ptr compile: $(head -1 "$TMP/err")"; }
+if [ -f "$TMP/libptr.so" ]; then
+    rela=$(LANG=C readelf -r "$TMP/libptr.so" 2>/dev/null | grep -c 'R_X86_64_RELATIVE' || true)
+    if [ "$rela" -ge 1 ]; then
+        pass "fakecc -shared emits R_X86_64_RELATIVE"
+    else
+        fail "fakecc -shared missing R_X86_64_RELATIVE (got $rela)"
+    fi
+    timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/useptr.c" -L"$TMP" -lptr -o "$TMP/p" 2>"$TMP/err" \
+        || { fail "fakecc←libptr.so compile: $(head -1 "$TMP/err")"; }
+    if [ -x "$TMP/p" ]; then
+        got=0
+        env -u LD_LIBRARY_PATH timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
+        if [ "$got" = "7" ]; then pass "fakecc .so data pointer RELATIVE"; else fail "fakecc .so data pointer (exit $got)"; fi
+    fi
+fi
+
+# 9) 16-byte vector SysV class is one XMM (SSE+SSEUP), matching GCC.
+cat > "$TMP/vec_gcc.c" <<'EOF'
+typedef float V __attribute__((vector_size(16)));
+V vid(V v) { return v; }
+EOF
+cat > "$TMP/vec_use.c" <<'EOF'
+package main;
+typedef float V __attribute__((vector_size(16)));
+extern V vid(V v);
+int main(void) {
+    V a = { 1.0f, 2.0f, 3.0f, 4.0f };
+    V b = vid(a);
+    if (b[0] != 1.0f) return 1;
+    if (b[1] != 2.0f) return 2;
+    if (b[2] != 3.0f) return 3;
+    if (b[3] != 4.0f) return 4;
+    return 0;
+}
+EOF
+gcc -shared -fPIC -o "$TMP/libvec.so" "$TMP/vec_gcc.c" \
+    || { fail "gcc -shared vector lib"; }
+rm -f "$TMP/p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/vec_use.c" -L"$TMP" -lvec -o "$TMP/p" 2>"$TMP/err" \
+    || { fail "fakecc←gcc vector .so compile: $(head -1 "$TMP/err")"; }
+if [ -x "$TMP/p" ]; then
+    got=0
+    env -u LD_LIBRARY_PATH timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
+    if [ "$got" = "0" ]; then pass "16-byte vector ABI vs gcc .so"; else fail "16-byte vector ABI vs gcc .so (exit $got)"; fi
+fi
+
 exit $FAIL

@@ -22,10 +22,8 @@
 static const char *predefined_macro_literal(const char *text, int *out_is_float) {
     *out_is_float = 0;
     if (strcmp(text, "__INT_MAX__") == 0) return "2147483647";
-    if (strcmp(text, "__INT_MIN__") == 0) return "-2147483648";
     if (strcmp(text, "__UINT_MAX__") == 0) return "4294967295u";
     if (strcmp(text, "__LONG_MAX__") == 0) return "9223372036854775807l";
-    if (strcmp(text, "__LONG_MIN__") == 0) return "-9223372036854775807l";
     if (strcmp(text, "__ULONG_MAX__") == 0) return "18446744073709551615ul";
     if (strcmp(text, "__CHAR_BIT__") == 0) return "8";
     if (strcmp(text, "__SIZEOF_INT__") == 0) return "4";
@@ -495,6 +493,28 @@ lex_loop_head:
             char ident_buf[64];
             memcpy(ident_buf, source + start, len);
             ident_buf[len] = '\0';
+            /* __INT_MIN__ / __LONG_MIN__ cannot be a single literal: the
+             * magnitude does not fit a signed type of that rank, so GCC
+             * spells them (-MAX-1).  Fold the same token sequence here. */
+            if (strcmp(ident_buf, "__INT_MIN__") == 0 ||
+                strcmp(ident_buf, "__LONG_MIN__") == 0) {
+                int is_long_min = (ident_buf[2] == 'L');
+                Token t;
+                t.loc.file = filename;
+                t.loc.line = start_line;
+                t.loc.col = start_col;
+                t.kind = TK_LPAREN; t.text = xstrdup("("); token_array_push(out, t);
+                t.kind = TK_MINUS; t.text = xstrdup("-"); token_array_push(out, t);
+                t.kind = TK_INT_LITERAL;
+                t.text = xstrdup(is_long_min ? "9223372036854775807l" : "2147483647");
+                token_array_push(out, t);
+                t.kind = TK_MINUS; t.text = xstrdup("-"); token_array_push(out, t);
+                t.kind = TK_INT_LITERAL;
+                t.text = xstrdup(is_long_min ? "1l" : "1");
+                token_array_push(out, t);
+                t.kind = TK_RPAREN; t.text = xstrdup(")"); token_array_push(out, t);
+                goto lex_loop_head;
+            }
             int is_float = 0;
             const char *lit = predefined_macro_literal(ident_buf, &is_float);
             if (lit) {

@@ -52,6 +52,8 @@ static int value_is_ld(const IRFunction *fn, int v) {
     if (!value_is_float_class(fn, v)) return 0;
     if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
     if (v >= fn->value_meta_cap) return 0;
+    /* 4 = 16-byte SSE vector (one XMM, SSE+SSEUP).  Not x87 long double. */
+    if (fn->value_is_float[v] == 4) return 0;
     return fn->value_width[v] == 16;
 }
 
@@ -985,10 +987,14 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     ra->num_spill_slots = num_spills;
     ra->num_values = nv;
 
-    /* Calculate stack size for spill slots, 16-byte aligned. */
-    int slots = num_spills;
-    if (slots % 2 != 0) slots++;  /* 2 slots = 16 bytes → alignment */
-    ra->stack_size = 8 * slots;
+    /* GP spills are 8 bytes; XMM spills are 16 bytes (full vector lane). */
+    if (float_class)
+        ra->stack_size = 16 * num_spills;
+    else {
+        int slots = num_spills;
+        if (slots % 2 != 0) slots++;
+        ra->stack_size = 8 * slots;
+    }
 
     /* Cleanup. */
     free(order);

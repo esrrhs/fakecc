@@ -209,6 +209,38 @@ static void test_sib_local_index(void) {
     emit_module_free(&em);
 }
 
+/* 0F 10/11 without F2/F3/66 is movups — required to move a 16-byte vector
+ * through one XMM.  Scalar float uses F2/F3 prefixes (movsd/movss). */
+static int text_has_unprefixed_0f(const EmitModule *em, unsigned char op) {
+    for (size_t i = 0; i + 1 < em->text.len; i++) {
+        if ((unsigned char)em->text.data[i] != 0x0F) continue;
+        if ((unsigned char)em->text.data[i + 1] != op) continue;
+        int pref = 0;
+        if (i > 0) {
+            unsigned char p = (unsigned char)em->text.data[i - 1];
+            if (p == 0xF2 || p == 0xF3 || p == 0x66) pref = 1;
+            if (!pref && i > 1 && (p & 0xF0) == 0x40) {
+                unsigned char p2 = (unsigned char)em->text.data[i - 2];
+                if (p2 == 0xF2 || p2 == 0xF3 || p2 == 0x66) pref = 1;
+            }
+        }
+        if (!pref) return 1;
+    }
+    return 0;
+}
+
+static void test_vector16_uses_movups(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef double V __attribute__((vector_size(16)));"
+        "V id(V v) { return v; }"
+        "int main(void) { V a = { 1.0, 2.0 }; V b = id(a); return (int)b[0]; }");
+    T_ASSERT(find_sym(&em, "id") != NULL);
+    T_ASSERT(text_has_unprefixed_0f(&em, 0x10)
+             || text_has_unprefixed_0f(&em, 0x11));
+    emit_module_free(&em);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -223,5 +255,6 @@ int main(void) {
     test_bitfield_codegen();
     test_sib_global_index();
     test_sib_local_index();
+    test_vector16_uses_movups();
     return t_finalize();
 }

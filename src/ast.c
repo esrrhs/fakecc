@@ -617,9 +617,9 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     cls[1] = SYSV_CLS_INTEGER;
     if (t.is_vector) {
         if (t.width == 16) {
+            /* SysV: __m128 / vector_size(16) is SSE + SSEUP → one XMM. */
             cls[0] = SYSV_CLS_SSE;
-            cls[1] = SYSV_CLS_SSE;
-            return 2;
+            return 1;
         }
         if (t.width == 8) {
             cls[0] = SYSV_CLS_SSE;

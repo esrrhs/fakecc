@@ -148,6 +148,38 @@ static void test_decl_init_ir(void) {
     ir_module_free(&ir);
 }
 
+/* 16-byte vector_size is one SSE PARAM (width 16), not two eightbytes and
+ * not x87 long double. */
+static void test_vector16_param_width(void) {
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "typedef double V __attribute__((vector_size(16)));"
+        "V id(V v) { return v; }"
+        "int main(void) { return 0; }");
+    T_ASSERT(ir.functions.len >= 1);
+    const IRFunction *fn = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "id") == 0) {
+            fn = &ir.functions.data[i];
+            break;
+        }
+    }
+    T_ASSERT(fn != NULL);
+    T_ASSERT(fn->insts.len > 0);
+    T_ASSERT_EQ_INT((int)fn->insts.data[0].op, (int)IR_PARAM);
+    T_ASSERT_EQ_INT(fn->insts.data[0].width, 16);
+    int saw_vec_mem = 0;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        IROpcode op = fn->insts.data[i].op;
+        if ((op == IR_LOAD_PTR || op == IR_STORE_PTR)
+            && fn->insts.data[i].width == 16)
+            saw_vec_mem = 1;
+    }
+    T_ASSERT(saw_vec_mem);
+    ir_module_free(&ir);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -162,5 +194,6 @@ int main(void) {
     test_div_mod_ir();
     test_var_ir_sequence();
     test_decl_init_ir();
+    test_vector16_param_width();
     return t_finalize();
 }

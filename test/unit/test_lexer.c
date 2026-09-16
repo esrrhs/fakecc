@@ -435,6 +435,26 @@ static void test_compound_not_confused(void) {
     token_array_free(&a);
 }
 
+static void test_int_min_macro_tokens(void) {
+    TokenArray a = lex_str("__INT_MIN__");
+    /* (-2147483647-1) EOF */
+    T_ASSERT_EQ_INT((int)a.len, 7);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_LPAREN);
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_MINUS);
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_STR_EQ(a.data[2].text, "2147483647");
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_MINUS);
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_INT_LITERAL);
+    T_ASSERT_EQ_INT((int)a.data[5].kind, (int)TK_RPAREN);
+    token_array_free(&a);
+
+    TokenArray b = lex_str("__LONG_MIN__");
+    T_ASSERT_EQ_INT((int)b.len, 7);
+    T_ASSERT_STR_EQ(b.data[2].text, "9223372036854775807l");
+    T_ASSERT_STR_EQ(b.data[4].text, "1l");
+    token_array_free(&b);
+}
+
 static void test_inc_dec_tokens(void) {
     /* "a++ + ++b" → IDENT INC PLUS INC IDENT EOF */
     TokenArray a = lex_str("a++ + ++b");
@@ -528,5 +548,6 @@ int main(void) {
     test_compound_assign_tokens();
     test_shift_compound_tokens();
     test_compound_not_confused();
+    test_int_min_macro_tokens();
     return t_finalize();
 }
