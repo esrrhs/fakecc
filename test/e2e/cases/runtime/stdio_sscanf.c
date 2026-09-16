@@ -48,5 +48,11 @@ int main() {
     r = runtime.sscanf("9", "%hd", &sh);
     if (r != 1 || sh != 9) return 17;
 
+    /* "0x" is a valid 0 for %x; the 'x' is not consumed */
+    r = runtime.sscanf("0xZ", "%x%c", &u, buf);
+    if (r != 2) return 18;
+    if (u != 0u) return 19;
+    if (buf[0] != 'x') return 20;
+
     return 0;
 }

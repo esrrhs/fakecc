@@ -356,4 +356,23 @@ if [ -x "$TMP/p" ]; then
     if [ "$got" = "0" ]; then pass "16-byte vector ABI vs gcc .so"; else fail "16-byte vector ABI vs gcc .so (exit $got)"; fi
 fi
 
+# 10) A TLS .so without __fakecc_tls_image must not emit a leftover
+#     R_X86_64_RELATIVE at r_offset 0 (that reloc would rewrite e_ident).
+cat > "$TMP/libtls.c" <<'EOF'
+package main;
+__thread int tv = 7;
+int get(void) { return tv; }
+EOF
+rm -f "$TMP/libtls.so"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA -shared "$TMP/libtls.c" -o "$TMP/libtls.so" 2>"$TMP/err" \
+    || { fail "fakecc -shared TLS compile: $(head -1 "$TMP/err")"; }
+if [ -f "$TMP/libtls.so" ]; then
+    bad=$(LANG=C readelf -rW "$TMP/libtls.so" 2>/dev/null | awk '/R_X86_64_RELATIVE/ && $1 ~ /^(0+|0000000000000000)$/ { print }' || true)
+    if [ -z "$bad" ]; then
+        pass "TLS .so has no RELATIVE at r_offset 0"
+    else
+        fail "TLS .so leftover RELATIVE at 0: $bad"
+    fi
+fi
+
 exit $FAIL

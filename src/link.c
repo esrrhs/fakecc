@@ -986,7 +986,19 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         }
         for (int j = 0; j < num_data_ext; j++)
             if (!data_got_external[j]) num_internal_got++;
-        if (tdata.len > 0 || tbss_size > 0) tls_image_rel = 1;
+        if (tdata.len > 0 || tbss_size > 0) {
+            size_t mi, mj;
+            for (mi = 0; mi < n && !tls_image_rel; mi++) {
+                EmitModule *m = mods[mi];
+                for (mj = 0; mj < m->num_syms; mj++) {
+                    if (m->syms[mj].name
+                        && strcmp(m->syms[mj].name, "__fakecc_tls_image") == 0) {
+                        tls_image_rel = 1;
+                        break;
+                    }
+                }
+            }
+        }
     }
     int num_relative = is_shared ? (1 + num_data_ptr_rel + num_internal_got + tls_image_rel) : 0;
     if (need_dynamic) {
@@ -1608,7 +1620,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                     memcpy(rela_dyn.data + ent, &rel_roff[r], 8);
                     memcpy(rela_dyn.data + ent + 16, &rel_add[r], 8);
                 }
-                rdj += rel_fill;
+                for (int r = rel_fill; r < num_relative; r++) {
+                    size_t ent = (size_t)(rdj + r) * 24;
+                    uint64_t none = 0;
+                    memcpy(rela_dyn.data + ent + 8, &none, 8); /* R_X86_64_NONE */
+                }
+                rdj += num_relative;
             }
             for (int t = 0; t < tpoff_fill; t++, rdj++) {
                 size_t ent = (size_t)rdj * 24;

@@ -46,5 +46,16 @@ int main() {
     if (v != -9223372036854775807L - 1L) return 14;
     if (runtime.errno != 0) return 15;
 
+    /* "0x" without a hex digit is a 0, remainder at 'x' (C99 7.20.1.4) */
+    v = runtime.strtol("0x", &end, 0);
+    if (v != 0) return 16;
+    if (end[0] != 'x') return 17;
+    v = runtime.strtol("0x", &end, 16);
+    if (v != 0) return 18;
+    if (end[0] != 'x') return 19;
+    v = runtime.strtol("0xg", &end, 16);
+    if (v != 0) return 20;
+    if (end[0] != 'x') return 21;
+
     return 0;
 }

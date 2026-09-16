@@ -774,12 +774,18 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
                 nread = nread + 1;
                 ch = scan_getc(f);
                 if (used < maxw && (ch == 'x' || ch == 'X')) {
+                    int xch = ch;
                     used = used + 1;
                     nread = nread + 1;
                     ch = scan_getc(f);
                     if (scan_digit(ch, 16) >= 0) base = 16;
                     else {
-                        /* "0x" with no hex digit: value 0, lookahead is after x */
+                        /* "0x" with no hex digit: value is 0 from the '0';
+                         * put 'x' back so it is not consumed (C99 strtoul). */
+                        scan_ungetc(ch, f);
+                        ch = xch;
+                        used = used - 1;
+                        nread = nread - 1;
                     }
                 } else if (spec == 'i') {
                     base = 8;

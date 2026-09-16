@@ -13,5 +13,18 @@ int main(void) {
     double s = runtime.sqrt(-1.0);
     if (s == s) return 4;
     if (runtime.sqrt(0.0) != 0.0) return 5;
+
+    char *end;
+    double z = runtime.strtod("0x", &end);
+    if (z != 0.0) return 6;
+    if (end[0] != 'x') return 7;
+
+    /* NAN( without a closing paren is just "nan", remainder at '(' */
+    double n2 = runtime.strtod("nan(foo", &end);
+    if (n2 == n2) return 8;
+    if (end[0] != '(') return 9;
+    n2 = runtime.strtod("nan(foo)", &end);
+    if (n2 == n2) return 10;
+    if (end[0] != '\0') return 11;
     return 0;
 }

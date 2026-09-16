@@ -15,9 +15,24 @@ int abs(int x) { return x < 0 ? -x : x; }
 long labs(long x) { return x < 0 ? -x : x; }
 long long llabs(long long x) { return x < 0 ? -x : x; }
 
-double fabs(double x) { return x < 0.0 ? -x : x; }
-float fabsf(float x) { return x < 0.0f ? -x : x; }
-long double fabsl(long double x) { return x < 0.0L ? -x : x; }
+double fabs(double x) {
+    union { double d; unsigned long long u; } ux;
+    ux.d = x;
+    ux.u = ux.u & 0x7fffffffffffffffULL;
+    return ux.d;
+}
+float fabsf(float x) {
+    union { float f; unsigned int u; } ux;
+    ux.f = x;
+    ux.u = ux.u & 0x7fffffffU;
+    return ux.f;
+}
+long double fabsl(long double x) {
+    union { long double ld; unsigned long long u[2]; } ux;
+    ux.ld = x;
+    ux.u[1] = ux.u[1] & ~0x8000ULL;
+    return ux.ld;
+}
 
 double copysign(double x, double y) {
     union { double d; unsigned long long u; } ux, uy;
@@ -171,12 +186,13 @@ static unsigned long long strtou_body(const char *s, char **end, int base,
         return 0;
     }
     if (base == 0) {
-        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X') && isxdigit((unsigned char)s[2])) {
             base = 16;
             s = s + 2;
         } else if (s[0] == '0') base = 8;
         else base = 10;
-    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')
+               && isxdigit((unsigned char)s[2])) {
         s = s + 2;
     }
     unsigned long long v = 0;
@@ -328,9 +344,10 @@ static long double strtofp_body(const char *s, char **end) {
         if (c0 == 'n' && c1 == 'a' && c2 == 'n') {
             s = s + 3;
             if (*s == '(') {
-                s = s + 1;
-                while (*s && *s != ')') s = s + 1;
-                if (*s == ')') s = s + 1;
+                const char *p = s + 1;
+                while (*p && *p != ')') p = p + 1;
+                if (*p == ')') s = p + 1;
+                /* else leave s at '(' so endptr is after "nan", matching C99 */
             }
             if (end) *end = (char *)s;
             union { long double ld; unsigned long long u[2]; } nanv;
@@ -342,6 +359,13 @@ static long double strtofp_body(const char *s, char **end) {
     }
 
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        const char *h = s + 2;
+        int hex_ok = 0;
+        if (hex_char_val(*h) >= 0) hex_ok = 1;
+        else if (*h == '.' && hex_char_val(h[1]) >= 0) hex_ok = 1;
+        if (!hex_ok) {
+            /* "0x" without a hex digit is a decimal 0, remainder at 'x'. */
+        } else {
         s = s + 2;
         long double mant = 0.0L;
         int any = 0;
@@ -408,6 +432,7 @@ static long double strtofp_body(const char *s, char **end) {
         }
         if (neg) mant = -mant;
         return mant;
+        }
     }
 
     long double mant = 0.0L;
