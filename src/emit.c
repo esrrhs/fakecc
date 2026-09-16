@@ -140,6 +140,7 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
     r->type = type;
     r->sym = (uint32_t)sym;
     r->addend = addend;
+    r->shndx = SECT_TEXT;
 }
 
 /* Add a relocation within .data (for pointer fixups in global initializers).
@@ -157,6 +158,7 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
     r->type = type;
     r->sym = (uint32_t)sym;
     r->addend = addend;
+    r->shndx = SECT_DATA;
 }
 
 /* ------------------------------------------------------------------ */

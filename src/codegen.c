@@ -1076,6 +1076,20 @@ static void emit_sse_load_disp(Buffer *b, int dst, int base, int off, int is_flo
     emit_modrm_disp(b, dst, base, off);
 }
 
+/* movups xmm, [base+off] / [base+off], xmm — 16-byte unaligned. */
+static void emit_movups_load_disp(Buffer *b, int dst, int base, int off) {
+    emit_rex_wrb(b, 0, dst, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm_disp(b, dst, base, off);
+}
+static void emit_movups_store_disp(Buffer *b, int base, int src, int off) {
+    emit_rex_wrb(b, 0, src, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    emit_modrm_disp(b, src, base, off);
+}
+
 static void emit_sse_store_disp(Buffer *b, int base, int src, int off, int is_float) {
     emit_byte(b, is_float ? 0xF3 : 0xF2);
     emit_rex_wrb(b, 0, src, base);
@@ -1905,6 +1919,40 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         int ov_step = (nbytes + 7) & ~7;
         if (ov_step < 8) ov_step = 8;
 
+        /* SSE+SSEUP aggregate (`struct { __m128 x; }`): one XMM, 16 bytes. */
+        if (!inst->force_stack && inst->float_imm == 1 && nbytes == 16) {
+            emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF);
+            emit_cmp_imm32(b, REG_RCX, 176 - 16);
+            size_t jae_ov = emit_jcc_rel32(b, 0x87); /* JA overflow */
+            emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF);
+            emit_add_rr(b, REG_R11, REG_RCX);
+            emit_movups_load_disp(b, 0, REG_R11, 0);
+            emit_movups_store_disp(b, REG_RSI, 0, 0);
+            emit_add_imm32(b, REG_RCX, 16);
+            emit_store_base_off32(b, ap_reg, REG_RCX, VA_FP_OFF);
+            size_t jmp_end = emit_jmp_rel32(b);
+            size_t ov_off = b->len;
+            patch_rel32(b, jae_ov, ov_off);
+            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            emit_add_imm32(b, REG_R11, 15);
+            emit_and_imm32(b, REG_R11, (int32_t)-16);
+            emit_movups_load_disp(b, 0, REG_R11, 0);
+            emit_movups_store_disp(b, REG_RSI, 0, 0);
+            emit_add_imm32(b, REG_R11, 16);
+            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            patch_rel32(b, jmp_end, b->len);
+            if (dst >= 0) {
+                if (ra && dst < ra->num_values && ra->reg[dst] >= 0
+                    && ra->reg[dst] < 16) {
+                    int dr = ra->reg[dst];
+                    if (dr != REG_RSI) emit_mov_rr(b, dr, REG_RSI);
+                } else {
+                    spill_if_needed(b, dst, REG_RSI, ra);
+                }
+            }
+            return;
+        }
+
         int num_gp = 0, num_fp = 0;
         for (int i = 0; i < n8; i++) {
             if ((inst->float_imm >> i) & 1) num_fp++;
@@ -1953,33 +2001,9 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             emit_add_imm32(b, REG_R11, ov_step);
             emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
             patch_rel32(b, jmp_end, b->len);
-        } else if (nbytes > 128) {
-            /* Huge MEMORY struct: caller passed a pointer in one GP slot.
-             * Load that pointer from the save/overflow area, then copy n8
-             * qwords from the pointed-to object. */
-            emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
-            emit_cmp_imm32(b, REG_RCX, 48);
-            size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
-            emit_load_base_off(b, REG_RDX, ap_reg, VA_REG_OFF);
-            emit_add_rr(b, REG_RDX, REG_RCX);
-            emit_load_base_off(b, REG_RDX, REG_RDX, 0);
-            emit_add_imm32(b, REG_RCX, 8);
-            emit_store_base_off32(b, ap_reg, REG_RCX, VA_GP_OFF);
-            size_t jmp_end = emit_jmp_rel32(b);
-            size_t ov_off = b->len;
-            patch_rel32(b, jae_ov, ov_off);
-            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
-            emit_load_base_off(b, REG_RDX, REG_R11, 0);
-            emit_add_imm32(b, REG_R11, 8);
-            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
-            patch_rel32(b, jmp_end, b->len);
-            for (int i = 0; i < n8; i++) {
-                emit_load_base_off(b, REG_R11, REG_RDX, i * 8);
-                emit_store_base_off(b, REG_RSI, REG_R11, i * 8);
-            }
         } else {
-            /* Small MEMORY-class struct: SysV passes eightbytes on the
-             * overflow stack.  Copy n8 qwords from overflow_arg_area. */
+            /* MEMORY-class struct: SysV copies eightbytes from the overflow
+             * stack (including aggregates larger than 16 bytes). */
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
             if (inst->align16) {
                 emit_add_imm32(b, REG_R11, 15);
@@ -2037,23 +2061,33 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         }
     } else {
         /* ---------------- FP class ---------------- */
+        int w16 = dst >= 0 && value_is_xmm16(fn, dst);
         emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF); /* ecx = fp_offset */
         emit_cmp_imm32(b, REG_RCX, 176);
         size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
         /* register path: load FP from [reg_save_area + fp_offset] */
         emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF); /* r11 = save_area */
         emit_add_rr(b, REG_R11, REG_RCX); /* r11 = save_area + fp_offset */
-        emit_sse_load_base_off(b, 0, REG_R11, 0); /* xmm0 = *[r11] (movsd) */
+        if (w16) emit_movups_load_disp(b, 0, REG_R11, 0);
+        else emit_sse_load_base_off(b, 0, REG_R11, 0); /* xmm0 = *[r11] (movsd) */
         emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF);
         emit_add_imm32(b, REG_RCX, 16);
         emit_store_base_off32(b, ap_reg, REG_RCX, VA_FP_OFF);
         size_t jmp_end = emit_jmp_rel32(b);
-        /* overflow_path: load FP from [overflow_arg_area], advance by 8 */
+        /* overflow_path: 16-byte SSE is 16-aligned and consumes 16 bytes;
+         * scalar float/double consume 8. */
         size_t ov_off = b->len;
         patch_rel32(b, jae_ov, ov_off);
         emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF); /* r11 = overflow */
-        emit_sse_load_base_off(b, 0, REG_R11, 0); /* xmm0 = *[overflow] */
-        emit_add_imm32(b, REG_R11, 8);
+        if (w16) {
+            emit_add_imm32(b, REG_R11, 15);
+            emit_and_imm32(b, REG_R11, (int32_t)-16);
+            emit_movups_load_disp(b, 0, REG_R11, 0);
+            emit_add_imm32(b, REG_R11, 16);
+        } else {
+            emit_sse_load_base_off(b, 0, REG_R11, 0); /* xmm0 = *[overflow] */
+            emit_add_imm32(b, REG_R11, 8);
+        }
         emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
         /* end: */
         patch_rel32(b, jmp_end, b->len);
@@ -2632,9 +2666,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
      * .data for initialized mutable, .bss for zero-initialized) and register
      * each as a defined symbol with its linkage binding. */
     size_t *global_off = NULL;
+    uint16_t *global_shndx = NULL;
     if (ir->globals.len > 0) {
         global_off = malloc(ir->globals.len * sizeof(size_t));
-        if (!global_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        global_shndx = malloc(ir->globals.len * sizeof(uint16_t));
+        if (!global_off || !global_shndx) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     }
     for (size_t gi = 0; gi < ir->globals.len; gi++) {
         const IRGlobal *g = &ir->globals.data[gi];
@@ -2673,9 +2709,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             out->bss_size += g->size;
             while (out->bss_size & 7) out->bss_size++;
         }
-        emit_module_add_symbol(out, g->name, binding, 1 /* STT_OBJECT */,
+        uint8_t st_type = g->is_tls ? 6 /* STT_TLS */ : 1 /* STT_OBJECT */;
+        emit_module_add_symbol(out, g->name, binding, st_type,
                                shndx, off, g->size);
         global_off[gi] = off;
+        global_shndx[gi] = shndx;
         if (want_debug && !g->is_readonly) {
             /* Skip anonymous string literals (readonly); emit mutable globals. */
             DebugVar gv;
@@ -5315,9 +5353,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 tsym = emit_module_add_undefined(out, g->fixups[fi].sym);
             emit_module_add_data_reloc(out, global_off[gi] + g->fixups[fi].offset,
                                        R_X86_64_64, tsym, g->fixups[fi].addend);
+            out->data_relocs[out->num_data_relocs - 1].shndx = global_shndx[gi];
         }
     }
     free(global_off);
+    free(global_shndx);
 
     /* ---- Resolve cross-function call patches ---- */
     for (size_t pi = 0; pi < num_call_patches; pi++) {

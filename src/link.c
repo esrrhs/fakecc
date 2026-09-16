@@ -726,7 +726,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     char **ext_list = NULL;
     int num_ext = 0;
     int *reloc_ext_idx = xcalloc(total_syms, sizeof(int));
-    for (size_t i = 0; i < total_syms; i++) reloc_ext_idx[i] = -1;
+    int *reloc_data_abs_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) {
+        reloc_ext_idx[i] = -1;
+        reloc_data_abs_idx[i] = -1;
+    }
+    char **abs_ext_list = NULL;
+    int num_abs_ext = 0;
 
     /* Helper: is `nm` defined GLOBAL in any module? */
     /* (open-coded below to avoid a nested function) */
@@ -755,14 +761,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             if (!resolved)
                 reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
-        /* .data R_X86_64_64 fixups also reference symbols.  A file-scope
-         * initializer like `static double (*fp)(double) = asin;` never emits a
-         * text reloc, so without this scan the pointer is patched to PLT0 /
-         * the ELF entry stub and calling it re-enters `_start`. */
+        /* .data R_X86_64_64 fixups also reference symbols.  Function
+         * pointers (already given a PLT slot by a text reloc) keep the PLT
+         * address.  Data objects get a dynsym + R_X86_64_64 / GLOB_DAT, not
+         * a PLT stub. */
         for (size_t r = 0; r < m->num_data_relocs; r++) {
             size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
             if (sinfo[gsi].defined) continue;
-            if (reloc_ext_idx[gsi] >= 0) continue;
             const char *nm = m->syms[m->data_relocs[r].sym].name
                              ? m->syms[m->data_relocs[r].sym].name : "";
             int resolved = 0;
@@ -778,8 +783,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                     }
                 }
             }
-            if (!resolved)
-                reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
+            if (resolved) continue;
+            if (reloc_ext_idx[gsi] >= 0) continue; /* function: PLT already */
+            reloc_data_abs_idx[gsi] = ext_find_or_add(&abs_ext_list, &num_abs_ext, nm);
         }
     }
 
@@ -832,7 +838,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 
     /* Dynamic link when something is truly undefined, or when producing a
      * shared library (ET_DYN always needs .dynamic / .dynsym for exports). */
-    int need_dynamic = is_shared || (num_ext > 0 || num_true_data_ext > 0);
+    int need_dynamic = is_shared
+        || (num_ext > 0 || num_true_data_ext > 0 || num_abs_ext > 0);
 
     /* ---- Shared-library DT_NEEDED list (from -l only; no automatic libc) ----
      * Builtin runtime/ supplies the hosted stdlib.  System libs are opt-in via -l,
@@ -941,8 +948,21 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
      * appear in .dynsym.  Shared libraries additionally export every defined
      * GLOBAL.  dynstr layout when dynamic:
      * "\0" + DT_NEEDED sonames + [DT_SONAME] + [DT_RUNPATH] + true-ext func names
-     * + true-ext data names + [exported defined names]. */
-    int num_dynsym_ext = num_ext + num_true_data_ext + num_exports;
+     * + true-ext data names + unresolved data-object names + [exported defined names]. */
+    int num_abs64_relocs = 0;
+    int num_tpoff_dyn = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_data_relocs; r++) {
+            size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+            if (reloc_data_abs_idx[gsi] >= 0) num_abs64_relocs++;
+        }
+        if (is_shared) {
+            for (size_t r = 0; r < m->num_relocs; r++)
+                if (m->relocs[r].type == R_X86_64_TPOFF32) num_tpoff_dyn++;
+        }
+    }
+    int num_dynsym_ext = num_ext + num_true_data_ext + num_abs_ext + num_exports;
     size_t needed_str_bytes = 0;
     size_t soname_str_bytes = 0;
     size_t soname_dynstr_off = 0;
@@ -950,17 +970,25 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t runpath_dynstr_off = 0;
     /* Shared objects need R_X86_64_RELATIVE for every link-time absolute
      * address that lives in RW data: pointer initializers, internal GOT
-     * slots, and GOT[0] (= &_DYNAMIC).  Without these the DSO is loaded at
-     * a random base and the stored values stay at the unrelocated VA. */
+     * slots, GOT[0] (= &_DYNAMIC), and __fakecc_tls_image.  Unresolved
+     * data objects use R_X86_64_64 instead of RELATIVE. */
     int num_data_ptr_rel = 0;
     int num_internal_got = 0;
+    int tls_image_rel = 0;
     if (is_shared) {
-        for (size_t i = 0; i < n; i++)
-            num_data_ptr_rel += (int)mods[i]->num_data_relocs;
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t r = 0; r < m->num_data_relocs; r++) {
+                size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+                if (reloc_data_abs_idx[gsi] >= 0) continue;
+                num_data_ptr_rel++;
+            }
+        }
         for (int j = 0; j < num_data_ext; j++)
             if (!data_got_external[j]) num_internal_got++;
+        if (tdata.len > 0 || tbss_size > 0) tls_image_rel = 1;
     }
-    int num_relative = is_shared ? (1 + num_data_ptr_rel + num_internal_got) : 0;
+    int num_relative = is_shared ? (1 + num_data_ptr_rel + num_internal_got + tls_image_rel) : 0;
     if (need_dynamic) {
         buf_u8(&dynstr, 0);
         for (int i = 0; i < num_needed; i++) {
@@ -983,10 +1011,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             if (!data_got_external[j]) continue;
             buf_bytes(&dynstr, data_ext_list[j], strlen(data_ext_list[j]) + 1);
         }
+        for (int a = 0; a < num_abs_ext; a++)
+            buf_bytes(&dynstr, abs_ext_list[a], strlen(abs_ext_list[a]) + 1);
         for (int e = 0; e < num_exports; e++)
             buf_bytes(&dynstr, exports[e].name, strlen(exports[e].name) + 1);
         buf_pad(&dynsym, 24); /* [0] NULL symbol */
-        for (int k = 0; k < num_ext + num_true_data_ext; k++) {
+        for (int k = 0; k < num_ext + num_true_data_ext + num_abs_ext; k++) {
             buf_u32(&dynsym, 0); /* st_name patched below */
             buf_u8(&dynsym, STB_GLOBAL << 4);
             buf_u8(&dynsym, 0);
@@ -1021,7 +1051,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                             seen++;
                         }
                     } else {
-                        nm = exports[want - num_true_data_ext].name;
+                        want -= num_true_data_ext;
+                        if (want < num_abs_ext) nm = abs_ext_list[want];
+                        else nm = exports[want - num_abs_ext].name;
                     }
                 }
             }
@@ -1048,11 +1080,23 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 buf_u64(&rela_dyn, 0);
                 dyn_sym_i++;
             }
+            dyn_sym_i = 1 + num_ext + num_true_data_ext;
+            for (int a = 0; a < num_abs64_relocs; a++) {
+                buf_u64(&rela_dyn, 0);
+                buf_u64(&rela_dyn, R_X86_64_64); /* r_info sym patched below */
+                buf_u64(&rela_dyn, 0);
+            }
+            (void)dyn_sym_i;
         }
         for (int r = 0; r < num_relative; r++) {
             buf_u64(&rela_dyn, 0); /* r_offset patched below */
             buf_u64(&rela_dyn, R_X86_64_RELATIVE);
             buf_u64(&rela_dyn, 0); /* r_addend patched below */
+        }
+        for (int t = 0; t < num_tpoff_dyn; t++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, R_X86_64_TPOFF32);
+            buf_u64(&rela_dyn, 0);
         }
     }
 
@@ -1078,7 +1122,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
      * DT_NULL, plus DT_RELA/RELASZ/RELENT when .rela.dyn is non-empty. */
     size_t dynamic_size = 0;
     if (need_dynamic) {
-        int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0);
+        int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0
+                             || num_abs64_relocs > 0 || num_tpoff_dyn > 0);
         dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0) + (soname ? 1 : 0)
                                 + (have_rela_dyn ? 3 : 0)) * 16;
     }
@@ -1192,6 +1237,22 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             }
         }
     }
+    uint64_t *tpoff_roff = NULL, *tpoff_add = NULL, *tpoff_info = NULL;
+    int tpoff_fill = 0;
+    if (num_tpoff_dyn > 0) {
+        tpoff_roff = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+        tpoff_add = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+        tpoff_info = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+    }
+    uint64_t *abs64_roff = NULL, *abs64_add = NULL, *abs64_info = NULL;
+    int abs64_fill = 0;
+    if (num_abs64_relocs > 0) {
+        abs64_roff = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+        abs64_add = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+        abs64_info = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+    }
+    size_t tls_image_doff = (size_t)-1;
+    uint64_t tls_image_val = 0;
     /* ---- Fill builtin TLS metadata symbols in .data if present ---- */
     for (size_t mi = 0; mi < n; mi++) {
         EmitModule *om = mods[mi];
@@ -1209,6 +1270,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             } else if (strcmp(nm, "__fakecc_tls_image") == 0) {
                 uint64_t val = have_tls ? tls_vaddr : 0;
                 memcpy(data.data + doff, &val, 8);
+                tls_image_doff = doff;
+                tls_image_val = val;
             } else if (strcmp(nm, "__fakecc_tls_align") == 0) {
                 uint64_t val = 16;
                 memcpy(data.data + doff, &val, 8);
@@ -1235,13 +1298,31 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 continue;
             }
             if (rel->type == R_X86_64_TPOFF32) {
-                /* TLS Local-Exec: `movq %fs:0, %reg; addq $sym@tpoff, %reg`.
-                 * The imm32 of the addq is the TLS offset: S + A - tp_end.
-                 * tp_end = tls_vaddr + tls_memsize (address just past the TLS
-                 * template block; on Linux, %fs:0 holds a pointer to this end).
-                 * The result is the signed negative offset from tp_end to the
-                 * variable, which when added to %fs:0 yields &sym. */
+                /* TLS Local-Exec in an executable.  Shared objects emit a
+                 * dynamic TPOFF32 instead: the load-time TLS offset is not
+                 * known until the DSO is placed in the thread block. */
                 size_t gsi = mod_sym_base[i] + rel->sym;
+                if (is_shared) {
+                    const char *nm = m->syms[rel->sym].name
+                                     ? m->syms[rel->sym].name : "";
+                    int dyn_sym = 0;
+                    for (int e = 0; e < num_exports; e++) {
+                        if (strcmp(exports[e].name, nm) == 0) {
+                            dyn_sym = 1 + num_ext + num_true_data_ext + num_abs_ext + e;
+                            break;
+                        }
+                    }
+                    if (tpoff_fill < num_tpoff_dyn) {
+                        tpoff_roff[tpoff_fill] = P;
+                        tpoff_add[tpoff_fill] = (uint64_t)(int64_t)rel->addend;
+                        tpoff_info[tpoff_fill] =
+                            ((uint64_t)dyn_sym << 32) | R_X86_64_TPOFF32;
+                        tpoff_fill++;
+                    }
+                    int32_t zero = 0;
+                    memcpy(text.data + patch_in_text, &zero, 4);
+                    continue;
+                }
                 uint64_t S;
                 if (sinfo[gsi].defined
                     && (sinfo[gsi].shndx == SECT_TDATA
@@ -1331,9 +1412,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_data_relocs; r++) {
             const EmitReloc *rel = &m->data_relocs[r];
-            size_t patch_in_data = mod_data_off[i] + rel->offset;
+            int in_tdata = (rel->shndx == SECT_TDATA);
+            size_t patch_in_sec = (in_tdata ? mod_tdata_off[i] : mod_data_off[i])
+                                  + rel->offset;
             size_t gsi = mod_sym_base[i] + rel->sym;
             uint64_t S;
+            int abs64 = 0;
+            int aidx = reloc_data_abs_idx[gsi];
             if (sinfo[gsi].defined) {
                 S = sym_addr[gsi];
             } else {
@@ -1356,30 +1441,51 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 }
                 if (global_addr != (size_t)-1) {
                     S = global_addr;
+                } else if (reloc_ext_idx[gsi] >= 0) {
+                    /* Function pointer: PLT is a stable callable address. */
+                    S = code_vaddr + plt_entry_off[reloc_ext_idx[gsi]];
+                } else if (aidx >= 0) {
+                    /* Data object (or function with no call reloc): dynlinker
+                     * fills this slot via R_X86_64_64. */
+                    S = 0;
+                    abs64 = 1;
                 } else {
-                    /* Truly external function address in .data → that
-                     * function's PLT stub (a stable, callable address). */
-                    int eidx = reloc_ext_idx[gsi];
-                    if (eidx < 0) {
-                        const char *nm = m->syms[rel->sym].name
-                                         ? m->syms[rel->sym].name : "";
-                        fprintf(stderr,
-                                "fakecc: data reloc against undefined '%s' "
-                                "has no PLT slot\n", nm);
-                        exit(1);
-                    }
-                    S = code_vaddr + plt_entry_off[eidx];
+                    const char *enm = m->syms[rel->sym].name
+                                      ? m->syms[rel->sym].name : "";
+                    fprintf(stderr,
+                            "fakecc: data reloc against undefined '%s' "
+                            "has no PLT or GLOB_DAT slot\n", enm);
+                    exit(1);
                 }
             }
             /* R_X86_64_64: absolute 64-bit, value = S + A. */
             uint64_t value = S + rel->addend;
-            memcpy(data.data + patch_in_data, &value, 8);
-            if (is_shared && rel_fill < num_relative) {
-                rel_roff[rel_fill] = data_vaddr + patch_in_data;
+            uint8_t *dst = (uint8_t *)(in_tdata ? tdata.data : data.data);
+            size_t dst_len = in_tdata ? tdata.len : data.len;
+            if (patch_in_sec + 8 <= dst_len)
+                memcpy(dst + patch_in_sec, &value, 8);
+            uint64_t site_va = in_tdata
+                ? (tls_vaddr + patch_in_sec)
+                : (data_vaddr + patch_in_sec);
+            if (abs64 && abs64_fill < num_abs64_relocs) {
+                abs64_roff[abs64_fill] = site_va;
+                abs64_add[abs64_fill] = (uint64_t)(int64_t)rel->addend;
+                abs64_info[abs64_fill] =
+                    ((uint64_t)(1 + num_ext + num_true_data_ext + aidx) << 32)
+                    | R_X86_64_64;
+                abs64_fill++;
+            } else if (is_shared && rel_fill < num_relative) {
+                rel_roff[rel_fill] = site_va;
                 rel_add[rel_fill] = value;
                 rel_fill++;
             }
         }
+    }
+    if (is_shared && tls_image_rel && tls_image_doff != (size_t)-1
+        && rel_fill < num_relative) {
+        rel_roff[rel_fill] = data_vaddr + tls_image_doff;
+        rel_add[rel_fill] = tls_image_val;
+        rel_fill++;
     }
 
     /* ---- Patch PLT GOT fixups ---- */
@@ -1443,6 +1549,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 acc += strlen(data_ext_list[j]) + 1;
                 k++;
             }
+            for (int a = 0; a < num_abs_ext; a++, k++) {
+                uint32_t noff = (uint32_t)acc;
+                memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                acc += strlen(abs_ext_list[a]) + 1;
+            }
             for (int e = 0; e < num_exports; e++, k++) {
                 uint32_t noff = (uint32_t)acc;
                 size_t ent = 24 + (size_t)k * 24;
@@ -1465,6 +1576,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 uint64_t roff = got_vaddr + (3 + num_ext + j) * 8;
                 memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
                 rdj++;
+            }
+            for (int a = 0; a < abs64_fill; a++, rdj++) {
+                size_t ent = (size_t)rdj * 24;
+                memcpy(rela_dyn.data + ent, &abs64_roff[a], 8);
+                memcpy(rela_dyn.data + ent + 8, &abs64_info[a], 8);
+                memcpy(rela_dyn.data + ent + 16, &abs64_add[a], 8);
             }
             /* R_X86_64_RELATIVE for pointer initializers, internal GOT slots,
              * then GOT[0] (= link-time &_DYNAMIC). */
@@ -1491,6 +1608,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                     memcpy(rela_dyn.data + ent, &rel_roff[r], 8);
                     memcpy(rela_dyn.data + ent + 16, &rel_add[r], 8);
                 }
+                rdj += rel_fill;
+            }
+            for (int t = 0; t < tpoff_fill; t++, rdj++) {
+                size_t ent = (size_t)rdj * 24;
+                memcpy(rela_dyn.data + ent, &tpoff_roff[t], 8);
+                memcpy(rela_dyn.data + ent + 8, &tpoff_info[t], 8);
+                memcpy(rela_dyn.data + ent + 16, &tpoff_add[t], 8);
             }
         }
         /* .dynamic */
@@ -1766,8 +1890,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     free(mod_text_off); free(mod_rodata_off); free(mod_data_off); free(mod_bss_off);
     free(mod_tdata_off); free(mod_tbss_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);
-    free(reloc_data_got_idx);
+    free(reloc_data_abs_idx); free(reloc_data_got_idx);
+    for (int a = 0; a < num_abs_ext; a++) free(abs_ext_list[a]);
+    free(abs_ext_list);
     free(plt_entry_off); free(plt_got_fixup);
     free(data_got_addr); free(data_got_external);
     free(rel_roff); free(rel_add);
+    free(tpoff_roff); free(tpoff_add); free(tpoff_info);
+    free(abs64_roff); free(abs64_add); free(abs64_info);
 }

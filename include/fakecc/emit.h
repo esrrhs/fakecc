@@ -39,6 +39,7 @@ typedef struct {
     uint32_t type;     /* R_X86_64_PC32(2), R_X86_64_32(1), etc. */
     uint32_t sym;      /* target symbol index into syms[] */
     int32_t  addend;   /* addend (rip-relative uses -4) */
+    uint16_t shndx;    /* section of the site: SECT_DATA or SECT_TDATA */
 } EmitReloc;
 
 /* ------------------------------------------------------------------ */

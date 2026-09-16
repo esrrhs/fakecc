@@ -4897,6 +4897,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue z = emit_dfp_zero(fn, w, e->loc);
                 return emit_dfp_cmp(fn, w, BOP_EQ, x, z, e->loc);
             }
+            if (e->u.un.operand->type.kind == TY_FLOAT
+                && !e->u.un.operand->type.is_vector) {
+                /* !f is (f == +0.0); IEEE -0.0 is also zero. */
+                IRValue x = lower_expr(fn, st, e->u.un.operand);
+                int w = get_value_width(fn, x);
+                IRValue zero = emit_float_const(fn, w, 0, e->loc);
+                return emit_fcmp(fn, x, zero, w, 4 /* EQ */, e->loc);
+            }
             IRValue x = lower_expr(fn, st, e->u.un.operand);
             int xw = get_value_width(fn, x), xu = get_value_is_unsigned(fn, x);
             IRValue zero = new_value(fn);
@@ -5043,7 +5051,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_done  = new_label(fn);
 
             IRValue lv = lower_expr(fn, st, e->u.bin.l);
-            emit_cbr(fn, lv, L_true, L_false, e->loc);
+            emit_cbr(fn, cbr_from_scalar(fn, lv, e->loc), L_true, L_false, e->loc);
 
             emit_label(fn, L_true, e->loc);
             IRValue true_val;
@@ -5054,10 +5062,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             } else {
                 IRValue rv = lower_expr(fn, st, e->u.bin.r);
                 int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                IRValue ri = coerce(fn, rv, rw, ru, 4, 0, e->loc);
-                IRValue zero = new_value(fn);
-                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
-                true_val = emit_bin_w(fn, IR_NE, ri, zero, 4, 0, e->loc);
+                int rf = get_value_is_float(fn, rv);
+                true_val = bool_normalize(fn, rv, rw, ru, rf, e->loc);
             }
             emit_inst_w(fn, IR_STORE, -1, slot, true_val, 0, 4, 0, e->loc);
             emit_br(fn, L_done, e->loc);
@@ -5071,10 +5077,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             } else {
                 IRValue rv = lower_expr(fn, st, e->u.bin.r);
                 int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                IRValue ri = coerce(fn, rv, rw, ru, 4, 0, e->loc);
-                IRValue zero = new_value(fn);
-                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
-                false_val = emit_bin_w(fn, IR_NE, ri, zero, 4, 0, e->loc);
+                int rf = get_value_is_float(fn, rv);
+                false_val = bool_normalize(fn, rv, rw, ru, rf, e->loc);
             }
             emit_inst_w(fn, IR_STORE, -1, slot, false_val, 0, 4, 0, e->loc);
             emit_br(fn, L_done, e->loc);
@@ -6430,12 +6434,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 if (last < 0)
                     inst.call_nargs = 1;
                 if (is_arg) {
-                    if (e->va_arg_type.kind == TY_STRUCT || type_is_i128(e->va_arg_type)) {
-                        int sz = type_is_i128(e->va_arg_type) ? 16 : type_size(e->va_arg_type);
+                    if (e->va_arg_type.kind == TY_STRUCT || e->va_arg_type.is_vector
+                        || type_is_pair16(e->va_arg_type)) {
+                        int sz = type_is_pair16(e->va_arg_type) ? 16
+                               : type_size(e->va_arg_type);
                         if (sz <= 0) sz = 8;
                         SysVRegClass cls[2];
                         int nreg;
                         if (type_is_i128(e->va_arg_type)) {
+                            cls[0] = SYSV_CLS_INTEGER;
+                            cls[1] = SYSV_CLS_INTEGER;
+                            nreg = 2;
+                        } else if (type_is_d128(e->va_arg_type)) {
+                            /* Match pair16 call lowering (two eightbytes). */
                             cls[0] = SYSV_CLS_INTEGER;
                             cls[1] = SYSV_CLS_INTEGER;
                             nreg = 2;
@@ -7800,6 +7811,10 @@ static IRValue lower_condition(IRFunction *fn, IRSymTable *st, const Expr *e) {
             cmp_i = emit_bin_w(fn, IR_NE, vi, zero, elem_sz, 1, e->loc);
         }
         return emit_bin_w(fn, IR_BOR, cmp_r, cmp_i, 4, 0, e->loc);
+    }
+    if (e->type.kind == TY_FLOAT && !e->type.is_vector) {
+        IRValue v = lower_expr(fn, st, e);
+        return cbr_from_scalar(fn, v, e->loc);
     }
     return lower_expr(fn, st, e);
 }

@@ -488,8 +488,9 @@ int type_is_vla(Type t) {
     return 0;
 }
 
-/* Field class for SysV eightbyte merging (NO_CLASS = 0). */
-enum { SV_NO = 0, SV_INT = 1, SV_SSE = 2, SV_MEM = 3 };
+/* Field class for SysV eightbyte merging (NO_CLASS = 0).
+ * SSEUP is the upper half of a 16-byte vector (same XMM as the preceding SSE). */
+enum { SV_NO = 0, SV_INT = 1, SV_SSE = 2, SV_MEM = 3, SV_SSEUP = 4 };
 
 static int sysv_merge(int a, int b) {
     if (a == b) return a;
@@ -497,6 +498,7 @@ static int sysv_merge(int a, int b) {
     if (b == SV_NO) return a;
     if (a == SV_MEM || b == SV_MEM) return SV_MEM;
     if (a == SV_INT || b == SV_INT) return SV_INT;
+    /* SSE and SSEUP in one eightbyte collapse to SSE. */
     return SV_SSE;
 }
 
@@ -520,13 +522,13 @@ static int sysv_field_class(Type t) {
  * use the MEMORY class. */
 static int sysv_paint(Type t, int offset, int eight[2]) {
     if (t.is_vector) {
-        /* SysV: 8- and 16-byte vectors (int or float) are SSE class.
-         * GCC passes `vector_size(8)` integer vectors in XMM0, not GP. */
-        int fc = SV_SSE;
+        /* SysV: 8-byte vectors are SSE; 16-byte vectors are SSE + SSEUP
+         * (one XMM).  GCC passes integer `vector_size(8)` in XMM0, not GP. */
         int end = offset + (int)t.width;
         for (int eb = 0; eb < 2; eb++) {
             int lo = eb * 8, hi = lo + 8;
             if (end <= lo || offset >= hi) continue;
+            int fc = (t.width >= 16 && lo >= offset + 8) ? SV_SSEUP : SV_SSE;
             eight[eb] = sysv_merge(eight[eb], fc);
             if (eight[eb] == SV_MEM) return 1;
         }
@@ -648,19 +650,28 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     int n = (sz + 7) / 8;
     if (n < 1) n = 1;
     if (n > 2) return 0;
+    /* SSEUP without a preceding SSE eightbyte is just SSE. */
+    if (n > 1 && eight[1] == SV_SSEUP && eight[0] != SV_SSE)
+        eight[1] = SV_SSE;
+    /* SSE + SSEUP share one XMM (`struct { __m128 x; }`, not `{double;double}`). */
+    if (n == 2 && eight[0] == SV_SSE && eight[1] == SV_SSEUP) {
+        cls[0] = SYSV_CLS_SSE;
+        return 1;
+    }
     for (int i = 0; i < n; i++) {
         int c = eight[i] == SV_NO ? SV_INT : eight[i];
         if (c == SV_MEM) return 0;
-        cls[i] = (c == SV_SSE) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
+        cls[i] = (c == SV_SSE || c == SV_SSEUP) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
     }
     return n;
 }
 
 int sysv_memory_pass_as_pointer(Type t) {
+    /* SysV MEMORY arguments are copied onto the stack.  The only pointer
+     * decay is GCC's `__va_list_tag` (array-of-1). */
     if (t.kind == TY_STRUCT && t.tag && strcmp(t.tag, "__va_list_tag") == 0)
         return 1;
-    int sz = type_size(t);
-    return sz > 128;
+    return 0;
 }
 
 static void close_bitfield_run(StructDef *sd) {

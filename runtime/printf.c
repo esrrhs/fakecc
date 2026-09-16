@@ -400,6 +400,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             }
             blen = uint_to_buf(body, u, 10, 0);
             zero_ok = (precision < 0);
+            if (precision == 0 && u == 0) blen = 0;
         } else if (spec == 'u' || spec == 'x' || spec == 'X' || spec == 'o'
                    || spec == 'p') {
             unsigned long long v;
@@ -427,6 +428,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             }
             blen = uint_to_buf(body, v, base, upper);
             zero_ok = (precision < 0);
+            if (precision == 0 && v == 0 && spec != 'p') blen = 0;
         } else if (spec == 'f' || spec == 'F' || spec == 'e' || spec == 'E'
                    || spec == 'g' || spec == 'G') {
             long double a;
@@ -456,9 +458,17 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 else if (dv - dv != 0.0) is_inf = 1;
             }
             if (is_nan) {
-                body[0] = 'n'; body[1] = 'a'; body[2] = 'n'; blen = 3;
+                int up = (spec == 'F' || spec == 'E' || spec == 'G');
+                body[0] = up ? 'N' : 'n';
+                body[1] = up ? 'A' : 'a';
+                body[2] = up ? 'N' : 'n';
+                blen = 3;
             } else if (is_inf) {
-                body[0] = 'i'; body[1] = 'n'; body[2] = 'f'; blen = 3;
+                int up = (spec == 'F' || spec == 'E' || spec == 'G');
+                body[0] = up ? 'I' : 'i';
+                body[1] = up ? 'N' : 'n';
+                body[2] = up ? 'F' : 'f';
+                blen = 3;
             } else {
                 if (spec == 'f' || spec == 'F')
                     blen = fmt_fixed(body, a, precision < 0 ? 6 : precision);

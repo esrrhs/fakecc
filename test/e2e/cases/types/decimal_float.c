@@ -60,5 +60,14 @@ int main(void) {
     g += 2.20DD;
     if (g != 3.30DD) return 27;
 
+    /* d128 divide with a 34-digit divisor needs a 256-bit intermediate. */
+    _Decimal128 one = 1.DL;
+    _Decimal128 den = 1234567890123456789012345678901234.DL;
+    _Decimal128 quot = one / den;
+    if (quot * den == 0.DL) return 28;
+    if (!(quot > 0.DL)) return 29;
+    _Decimal128 third = 1.DL / 3.DL;
+    if (!(third > 0.DL && third < 1.DL)) return 30;
+
     return 0;
 }

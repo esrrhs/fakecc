@@ -36,7 +36,12 @@ float copysignf(float x, float y) {
 }
 
 long double copysignl(long double x, long double y) {
-    return (long double)copysign((double)x, (double)y);
+    union { long double ld; unsigned long long u[2]; } ux, uy;
+    ux.ld = x;
+    uy.ld = y;
+    /* 80-bit sign is bit 15 of the exponent word (the low 16 bits of u[1]). */
+    ux.u[1] = (ux.u[1] & ~0x8000ULL) | (uy.u[1] & 0x8000ULL);
+    return ux.ld;
 }
 
 double floor(double x) {
@@ -286,16 +291,22 @@ static long double strtofp_body(const char *s, char **end) {
         s = s + 1;
     }
 
-    /* INF / INFINITY / NAN (C99).  Case-insensitive. */
+    /* INF / INFINITY / NAN (C99).  Case-insensitive.  Never read past NUL. */
     {
-        char c0 = s[0], c1 = s[1], c2 = s[2];
+        char c0 = s[0];
+        char c1 = c0 ? s[1] : 0;
+        char c2 = c1 ? s[2] : 0;
         if (c0 >= 'A' && c0 <= 'Z') c0 = (char)(c0 - 'A' + 'a');
         if (c1 >= 'A' && c1 <= 'Z') c1 = (char)(c1 - 'A' + 'a');
         if (c2 >= 'A' && c2 <= 'Z') c2 = (char)(c2 - 'A' + 'a');
         if (c0 == 'i' && c1 == 'n' && c2 == 'f') {
             s = s + 3;
             /* optional "inity" */
-            char w0 = s[0], w1 = s[1], w2 = s[2], w3 = s[3], w4 = s[4];
+            char w0 = s[0];
+            char w1 = w0 ? s[1] : 0;
+            char w2 = w1 ? s[2] : 0;
+            char w3 = w2 ? s[3] : 0;
+            char w4 = w3 ? s[4] : 0;
             if (w0 >= 'A' && w0 <= 'Z') w0 = (char)(w0 - 'A' + 'a');
             if (w1 >= 'A' && w1 <= 'Z') w1 = (char)(w1 - 'A' + 'a');
             if (w2 >= 'A' && w2 <= 'Z') w2 = (char)(w2 - 'A' + 'a');

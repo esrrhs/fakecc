@@ -33,13 +33,15 @@ void __fakecc_udivmodti4(unsigned long long nlo, unsigned long long nhi,
         return;
     }
     while (i >= 0) {
+        int carry = (int)(r_hi >> 63);
         r_hi = (r_hi << 1) | (r_lo >> 63);
         r_lo = r_lo << 1;
         unsigned long long bit;
         if (i >= 64) bit = (nhi >> (i - 64)) & 1ULL;
         else bit = (nlo >> i) & 1ULL;
         r_lo = r_lo | bit;
-        if (u128_ge(r_lo, r_hi, dlo, dhi)) {
+        /* carry is the 129th rem bit: rem >= 2^128 > any 128-bit divisor. */
+        if (carry || u128_ge(r_lo, r_hi, dlo, dhi)) {
             u128_sub(&r_lo, &r_hi, dlo, dhi);
             if (i >= 64) q_hi = q_hi | (1ULL << (i - 64));
             else q_lo = q_lo | (1ULL << i);

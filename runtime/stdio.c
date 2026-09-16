@@ -125,8 +125,10 @@ static int file_write(FILE *f, const char *p, size_t n) {
         }
         f->buf[f->buf_len] = p[i];
         f->buf_len = f->buf_len + 1;
-        /* Line-buffer stdout/stderr on newline. */
-        if (p[i] == '\n' && (f == stdout || f == stderr)) {
+        /* Line-buffer stdout on newline; stderr is unbuffered. */
+        if (f == stderr) {
+            if (fflush(f) != 0) return -1;
+        } else if (p[i] == '\n' && f == stdout) {
             if (fflush(f) != 0) return -1;
         }
         i = i + 1;
@@ -165,8 +167,12 @@ size_t fwrite(const void *p, size_t sz, size_t nm, FILE *f) {
         f->err = 1;
         return 0;
     }
-    size_t total = sz * nm;
-    if (file_write(f, (const char *)p, total) < 0) return 0;
+    size_t i = 0;
+    const char *src = (const char *)p;
+    while (i < nm) {
+        if (file_write(f, src + i * sz, sz) < 0) return i;
+        i = i + 1;
+    }
     return nm;
 }
 
@@ -272,7 +278,7 @@ long ftell(FILE *f) {
         f->err = 1;
         return -1;
     }
-    return r;
+    return r - (long)f->nunget;
 }
 
 int fileno(FILE *f) {
@@ -307,7 +313,8 @@ char *tmpnam(char *s) {
 }
 
 int remove(const char *path) {
-    return (int)__syscall(87, (long)path);
+    long r = __syscall(87, (long)path);
+    return r == 0 ? 0 : -1;
 }
 
 
