@@ -741,6 +741,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
             if (m->relocs[r].type == R_X86_64_GOTPCREL) continue;
+            if (m->relocs[r].type == R_X86_64_GOTTPOFF) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (sinfo[gsi].defined) continue;
             const char *nm = m->syms[m->relocs[r].sym].name
@@ -834,6 +835,45 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         }
         data_got_external[j] = !found;
         if (!found) num_true_data_ext++;
+    }
+
+    /* ---- TLS Initial-Exec GOT slots (GOTTPOFF) ----
+     * Each unique TLS symbol referenced via GOTTPOFF gets a GOT qword after
+     * the data GOT.  LOCAL symbols stay unique per gsi (two TUs may both
+     * have `static __thread int x`).  GLOBAL symbols merge by name. */
+    int *reloc_tls_ie_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) reloc_tls_ie_idx[i] = -1;
+    int *tls_ie_gsi = NULL;
+    const char **tls_ie_name = NULL;
+    int num_tls_ie = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            if (m->relocs[r].type != R_X86_64_GOTTPOFF) continue;
+            size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
+            if (reloc_tls_ie_idx[gsi] >= 0) continue;
+            const char *nm = m->syms[m->relocs[r].sym].name
+                             ? m->syms[m->relocs[r].sym].name : "";
+            int is_local = sinfo[gsi].defined && sinfo[gsi].binding == STB_LOCAL;
+            int slot = -1;
+            if (!is_local && nm[0]) {
+                for (int j = 0; j < num_tls_ie; j++) {
+                    if (tls_ie_name[j] && strcmp(tls_ie_name[j], nm) == 0) {
+                        slot = j;
+                        break;
+                    }
+                }
+            }
+            if (slot < 0) {
+                slot = num_tls_ie++;
+                tls_ie_gsi = realloc(tls_ie_gsi, (size_t)num_tls_ie * sizeof(int));
+                tls_ie_name = realloc(tls_ie_name, (size_t)num_tls_ie * sizeof(char *));
+                if (!tls_ie_gsi || !tls_ie_name) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                tls_ie_gsi[slot] = (int)gsi;
+                tls_ie_name[slot] = is_local ? NULL : nm;
+            }
+            reloc_tls_ie_idx[gsi] = slot;
+        }
     }
 
     /* Dynamic link when something is truly undefined, or when producing a
@@ -957,11 +997,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
             if (reloc_data_abs_idx[gsi] >= 0) num_abs64_relocs++;
         }
-        if (is_shared) {
-            for (size_t r = 0; r < m->num_relocs; r++)
-                if (m->relocs[r].type == R_X86_64_TPOFF32) num_tpoff_dyn++;
-        }
     }
+    num_tpoff_dyn = is_shared ? num_tls_ie : 0;
     int num_dynsym_ext = num_ext + num_true_data_ext + num_abs_ext + num_exports;
     size_t needed_str_bytes = 0;
     size_t soname_str_bytes = 0;
@@ -1107,7 +1144,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         }
         for (int t = 0; t < num_tpoff_dyn; t++) {
             buf_u64(&rela_dyn, 0);
-            buf_u64(&rela_dyn, R_X86_64_TPOFF32);
+            buf_u64(&rela_dyn, R_X86_64_TPOFF64);
             buf_u64(&rela_dyn, 0);
         }
     }
@@ -1155,8 +1192,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     while (got_data_off & 7) got_data_off++;
     uint64_t got_vaddr = data_vaddr + got_data_off;
     size_t layout_got_bytes = need_dynamic
-        ? (size_t)(3 + num_ext + num_data_ext) * 8
-        : (num_data_ext > 0 ? (size_t)(3 + num_data_ext) * 8 : 0);
+        ? (size_t)(3 + num_ext + num_data_ext + num_tls_ie) * 8
+        : ((num_data_ext + num_tls_ie) > 0
+               ? (size_t)(3 + num_data_ext + num_tls_ie) * 8 : 0);
     size_t got_end_off = layout_got_bytes
         ? got_data_off + layout_got_bytes : data.len;
     /* Shared: .dynamic follows the GOT in the RW segment. */
@@ -1249,12 +1287,72 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             }
         }
     }
+
+    /* Static TPOFF for each TLS IE GOT slot: S - tls_end.  Shared objects
+     * leave the slot at 0 and emit TPOFF64 for the dynamic linker. */
+    uint64_t *tls_ie_tpoff = num_tls_ie ? xcalloc((size_t)num_tls_ie, sizeof(uint64_t)) : NULL;
     uint64_t *tpoff_roff = NULL, *tpoff_add = NULL, *tpoff_info = NULL;
     int tpoff_fill = 0;
     if (num_tpoff_dyn > 0) {
         tpoff_roff = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
         tpoff_add = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
         tpoff_info = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+    }
+    for (int j = 0; j < num_tls_ie; j++) {
+        size_t gsi = (size_t)tls_ie_gsi[j];
+        uint64_t S = 0;
+        if (sinfo[gsi].defined
+            && (sinfo[gsi].shndx == SECT_TDATA || sinfo[gsi].shndx == SECT_TBSS)) {
+            S = sym_addr[gsi];
+        } else {
+            const char *nm = tls_ie_name[j] ? tls_ie_name[j] : "";
+            int found = 0;
+            for (size_t mi = 0; mi < n && !found; mi++) {
+                EmitModule *om = mods[mi];
+                for (size_t mj = 0; mj < om->num_syms; mj++) {
+                    size_t ogsi = mod_sym_base[mi] + mj;
+                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
+                        && (sinfo[ogsi].shndx == SECT_TDATA
+                            || sinfo[ogsi].shndx == SECT_TBSS)
+                        && om->syms[mj].name
+                        && strcmp(om->syms[mj].name, nm) == 0) {
+                        S = sym_addr[ogsi];
+                        found = 1;
+                        break;
+                    }
+                }
+            }
+            if (!found) {
+                fprintf(stderr,
+                        "fakecc: undefined TLS symbol '%s' "
+                        "(Initial-Exec needs the variable to be defined "
+                        "in the same link unit)\n", nm);
+                exit(1);
+            }
+        }
+        tls_ie_tpoff[j] = (uint64_t)((int64_t)S - (int64_t)tls_end_vaddr);
+        if (is_shared && tpoff_fill < num_tpoff_dyn) {
+            uint32_t dyn_sym = 0;
+            uint64_t addend = 0;
+            const char *nm = tls_ie_name[j];
+            if (nm) {
+                for (int e = 0; e < num_exports; e++) {
+                    if (strcmp(exports[e].name, nm) == 0) {
+                        dyn_sym = (uint32_t)(1 + num_ext + num_true_data_ext
+                                             + num_abs_ext + e);
+                        break;
+                    }
+                }
+            }
+            if (dyn_sym == 0)
+                addend = S - tls_vaddr;
+            tpoff_roff[tpoff_fill] = got_vaddr
+                + (uint64_t)(3 + num_ext + num_data_ext + j) * 8;
+            tpoff_add[tpoff_fill] = addend;
+            tpoff_info[tpoff_fill] =
+                ((uint64_t)dyn_sym << 32) | (uint64_t)R_X86_64_TPOFF64;
+            tpoff_fill++;
+        }
     }
     uint64_t *abs64_roff = NULL, *abs64_add = NULL, *abs64_info = NULL;
     int abs64_fill = 0;
@@ -1309,31 +1407,26 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
+            if (rel->type == R_X86_64_GOTTPOFF) {
+                /* TLS Initial-Exec: RIP-relative disp to the GOT slot that
+                 * holds this symbol's TPOFF (static fill or TPOFF64). */
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                int ieidx = reloc_tls_ie_idx[gsi];
+                uint64_t got_slot_vaddr = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + ieidx) * 8;
+                int32_t disp = (int32_t)(got_slot_vaddr - (P + 4));
+                memcpy(text.data + patch_in_text, &disp, 4);
+                continue;
+            }
             if (rel->type == R_X86_64_TPOFF32) {
-                /* TLS Local-Exec in an executable.  Shared objects emit a
-                 * dynamic TPOFF32 instead: the load-time TLS offset is not
-                 * known until the DSO is placed in the thread block. */
+                /* TLS Local-Exec in an executable (legacy objects).  Shared
+                 * objects cannot use TPOFF32 — ld.so rejects reloc type 0x17. */
                 size_t gsi = mod_sym_base[i] + rel->sym;
                 if (is_shared) {
-                    const char *nm = m->syms[rel->sym].name
-                                     ? m->syms[rel->sym].name : "";
-                    int dyn_sym = 0;
-                    for (int e = 0; e < num_exports; e++) {
-                        if (strcmp(exports[e].name, nm) == 0) {
-                            dyn_sym = 1 + num_ext + num_true_data_ext + num_abs_ext + e;
-                            break;
-                        }
-                    }
-                    if (tpoff_fill < num_tpoff_dyn) {
-                        tpoff_roff[tpoff_fill] = P;
-                        tpoff_add[tpoff_fill] = (uint64_t)(int64_t)rel->addend;
-                        tpoff_info[tpoff_fill] =
-                            ((uint64_t)dyn_sym << 32) | R_X86_64_TPOFF32;
-                        tpoff_fill++;
-                    }
-                    int32_t zero = 0;
-                    memcpy(text.data + patch_in_text, &zero, 4);
-                    continue;
+                    fprintf(stderr,
+                            "fakecc: R_X86_64_TPOFF32 cannot be used in a "
+                            "shared object (need Initial-Exec GOTTPOFF)\n");
+                    exit(1);
                 }
                 uint64_t S;
                 if (sinfo[gsi].defined
@@ -1342,9 +1435,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                     S = sym_addr[gsi];
                 } else {
                     /* Undefined locally — look for a GLOBAL TLS definition in
-                     * another module.  No fallback: TLS Local-Exec cannot
-                     * resolve truly external symbols (would need Initial-Exec
-                     * via GOT, which we don't implement). */
+                     * another module.  No fallback: Local-Exec cannot
+                     * resolve truly external symbols. */
                     const char *nm = m->syms[rel->sym].name
                                      ? m->syms[rel->sym].name : "";
                     size_t found = (size_t)-1;
@@ -1723,6 +1815,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             buf_u64(&got, code_vaddr + plt_entry_off[i] + 6); /* push $i addr */
         for (int j = 0; j < num_data_ext; j++)
             buf_u64(&got, data_got_external[j] ? 0 : data_got_addr[j]);
+        for (int j = 0; j < num_tls_ie; j++)
+            buf_u64(&got, is_shared ? 0 : tls_ie_tpoff[j]);
 
         /* ---- Build ELF ---- */
         /* NOTE: phnum computed AFTER buffer_init() to avoid a codegen
@@ -1827,13 +1921,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         size_t got_bytes = 0;
         Buffer got;
         buffer_init(&got);
-        if (num_data_ext > 0) {
-            got_bytes = (size_t)(3 + num_data_ext) * 8;
+        if (num_data_ext > 0 || num_tls_ie > 0) {
+            got_bytes = (size_t)(3 + num_data_ext + num_tls_ie) * 8;
             buf_u64(&got, 0);
             buf_u64(&got, 0);
             buf_u64(&got, 0);
             for (int j = 0; j < num_data_ext; j++)
                 buf_u64(&got, data_got_addr[j]);
+            for (int j = 0; j < num_tls_ie; j++)
+                buf_u64(&got, tls_ie_tpoff[j]);
         }
 
         Buffer elf;
@@ -1914,6 +2010,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     free(mod_tdata_off); free(mod_tbss_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);
     free(reloc_data_abs_idx); free(reloc_data_got_idx);
+    free(reloc_tls_ie_idx); free(tls_ie_gsi); free(tls_ie_name); free(tls_ie_tpoff);
     for (int a = 0; a < num_abs_ext; a++) free(abs_ext_list[a]);
     free(abs_ext_list);
     free(plt_entry_off); free(plt_got_fixup);

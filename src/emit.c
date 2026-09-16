@@ -144,7 +144,8 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
 }
 
 /* Add a relocation within .data (for pointer fixups in global initializers).
- * These are written to a separate .rela.data section. */
+ * Default site is SECT_DATA; callers that patch TLS pointer initializers
+ * overwrite shndx so emit_obj can split them into .rela.tdata. */
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend) {
     if (m->num_data_relocs >= m->cap_data_relocs) {
@@ -283,6 +284,8 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&shstrtab, ".rela.text", sizeof(".rela.text"));
     uint32_t shname_rela_data = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".rela.data", sizeof(".rela.data"));
+    uint32_t shname_rela_tdata = (uint32_t)shstrtab.len;
+    buf_bytes(&shstrtab, ".rela.tdata", sizeof(".rela.tdata"));
     uint32_t shname_fakecc_dbg = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".fakecc_dbg", sizeof(".fakecc_dbg"));
     uint32_t shname_shstrtab = (uint32_t)shstrtab.len;
@@ -381,17 +384,19 @@ void emit_obj(const EmitModule *m, const char *path) {
         buf_u64(&rela_text, ((uint64_t)new_sym << 32) | r->type);
         buf_u64(&rela_text, (uint64_t)(int64_t)r->addend);     /* r_addend */
     }
-    Buffer rela_data;
+    Buffer rela_data, rela_tdata;
     buffer_init(&rela_data);
+    buffer_init(&rela_tdata);
     for (size_t i = 0; i < m->num_data_relocs; i++) {
         const EmitReloc *r = &m->data_relocs[i];
         int old_sym = r->sym;
         int new_sym = (old_sym >= 0 && old_sym < (int)m->num_syms)
                       ? sym_remap[old_sym] : old_sym;
         if (new_sym < 0) new_sym = old_sym;
-        buf_u64(&rela_data, r->offset);                        /* r_offset */
-        buf_u64(&rela_data, ((uint64_t)new_sym << 32) | r->type);
-        buf_u64(&rela_data, (uint64_t)(int64_t)r->addend);     /* r_addend */
+        Buffer *dst = (r->shndx == SECT_TDATA) ? &rela_tdata : &rela_data;
+        buf_u64(dst, r->offset);                               /* r_offset */
+        buf_u64(dst, ((uint64_t)new_sym << 32) | r->type);
+        buf_u64(dst, (uint64_t)(int64_t)r->addend);            /* r_addend */
     }
 
     /* --- assemble section data in order --- */
@@ -420,6 +425,8 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&body, rela_text.data, rela_text.len);
     size_t off_rela_data = body.len;
     buf_bytes(&body, rela_data.data, rela_data.len);
+    size_t off_rela_tdata = body.len;
+    buf_bytes(&body, rela_tdata.data, rela_tdata.len);
 
     Buffer fakecc_dbg;
     buffer_init(&fakecc_dbg);
@@ -432,8 +439,8 @@ void emit_obj(const EmitModule *m, const char *path) {
 
     size_t shoff = hdr_size + body.len;
     /* null + 6 data/tls + symtab + strtab + shstrtab + rela.text + rela.data
-     * + [.fakecc_dbg] */
-    unsigned shnum = have_dbg ? 13 : 12;
+     * + rela.tdata + [.fakecc_dbg] */
+    unsigned shnum = have_dbg ? 14 : 13;
     unsigned shstrndx = 9; /* index of .shstrtab */
 
     /* --- ELF header --- */
@@ -474,7 +481,7 @@ void emit_obj(const EmitModule *m, const char *path) {
                0, hdr_size + off_tdata + m->tdata.len, m->tbss_size, 0, 0, 8, 0);
     /* Section indices (0-based): 0=NULL, 1=.text, 2=.rodata, 3=.data, 4=.bss,
      * 5=.tdata, 6=.tbss, 7=.symtab, 8=.strtab, 9=.shstrtab, 10=.rela.text,
-     * 11=.rela.data. */
+     * 11=.rela.data, 12=.rela.tdata. */
     unsigned symtab_idx = 7;
     unsigned strtab_idx = 8;
     /* Symbol table: sh_info = first_global (computed during symtab emission) */
@@ -495,6 +502,10 @@ void emit_obj(const EmitModule *m, const char *path) {
     write_shdr(&elf, shname_rela_data, SHT_RELA, 0,
                0, hdr_size + off_rela_data, rela_data.len, symtab_idx,
                3 /* .data */, 8, ELF64_RELA_SIZE);
+    /* .rela.tdata (sh_link = symtab index, sh_info = tdata index) */
+    write_shdr(&elf, shname_rela_tdata, SHT_RELA, 0,
+               0, hdr_size + off_rela_tdata, rela_tdata.len, symtab_idx,
+               5 /* .tdata */, 8, ELF64_RELA_SIZE);
     if (have_dbg) {
         write_shdr(&elf, shname_fakecc_dbg, SHT_PROGBITS, 0,
                    0, hdr_size + off_fakecc_dbg, fakecc_dbg.len, 0, 0, 1, 0);
@@ -514,6 +525,7 @@ void emit_obj(const EmitModule *m, const char *path) {
     buffer_free(&symtab);
     buffer_free(&rela_text);
     buffer_free(&rela_data);
+    buffer_free(&rela_tdata);
     buffer_free(&fakecc_dbg);
     buffer_free(&body);
     buffer_free(&elf);
@@ -583,7 +595,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
      * (`.rodata`, `.rodata.cst8`, `.rodata.str1.1`, …) are concatenated into
      * m->rodata so GCC objects that park float constants in `.rodata.cst8`
      * resolve their R_X86_64_PC32 relocs. */
-    int symtab_idx = -1, rela_text_idx = -1, rela_data_idx = -1, strtab_idx = -1;
+    int symtab_idx = -1, rela_text_idx = -1, rela_data_idx = -1, rela_tdata_idx = -1, strtab_idx = -1;
     int text_idx = -1, data_idx = -1, bss_idx = -1;
     int tdata_idx = -1, tbss_idx = -1;
     int fakecc_dbg_idx = -1;
@@ -622,6 +634,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
         else if (strcmp(sname, ".strtab") == 0 && type == SHT_STRTAB) strtab_idx = s;
         else if (strcmp(sname, ".rela.text") == 0 && type == SHT_RELA) rela_text_idx = s;
         else if (strcmp(sname, ".rela.data") == 0 && type == SHT_RELA) rela_data_idx = s;
+        else if (strcmp(sname, ".rela.tdata") == 0 && type == SHT_RELA) rela_tdata_idx = s;
         else if (strcmp(sname, ".fakecc_dbg") == 0 && type == SHT_PROGBITS) fakecc_dbg_idx = s;
     }
 
@@ -735,21 +748,28 @@ int emit_obj_read(const char *path, EmitModule *m) {
             emit_module_add_reloc(m, (size_t)roff, type, (int)sym, (int32_t)raddend);
         }
     }
-    /* Read data relocations (pointer fixups). */
-    if (rela_data_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)rela_data_idx * shentsize;
-        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        uint32_t entsize = rd_u32(sh + 56);
-        if (entsize == 0) entsize = ELF64_RELA_SIZE;
-        size_t count = sz / entsize;
-        for (size_t i = 0; i < count; i++) {
-            const unsigned char *r = buf + off + i * entsize;
-            uint64_t roff = rd_u64(r);
-            uint64_t rinfo = rd_u64(r + 8);
-            uint64_t raddend = rd_u64(r + 16);
-            uint32_t sym = (uint32_t)(rinfo >> 32);
-            uint32_t type = (uint32_t)(rinfo & 0xffffffff);
-            emit_module_add_data_reloc(m, (size_t)roff, type, (int)sym, (int32_t)raddend);
+    /* Read data / tdata relocations (pointer fixups). */
+    {
+        int rela_secs[2] = { rela_data_idx, rela_tdata_idx };
+        uint16_t site_shndx[2] = { SECT_DATA, SECT_TDATA };
+        for (int si = 0; si < 2; si++) {
+            int rela_idx = rela_secs[si];
+            if (rela_idx < 0) continue;
+            const unsigned char *sh = buf + shoff + (size_t)rela_idx * shentsize;
+            uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+            uint32_t entsize = rd_u32(sh + 56);
+            if (entsize == 0) entsize = ELF64_RELA_SIZE;
+            size_t count = sz / entsize;
+            for (size_t i = 0; i < count; i++) {
+                const unsigned char *r = buf + off + i * entsize;
+                uint64_t roff = rd_u64(r);
+                uint64_t rinfo = rd_u64(r + 8);
+                uint64_t raddend = rd_u64(r + 16);
+                uint32_t sym = (uint32_t)(rinfo >> 32);
+                uint32_t type = (uint32_t)(rinfo & 0xffffffff);
+                emit_module_add_data_reloc(m, (size_t)roff, type, (int)sym, (int32_t)raddend);
+                m->data_relocs[m->num_data_relocs - 1].shndx = site_shndx[si];
+            }
         }
     }
 

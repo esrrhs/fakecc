@@ -15,6 +15,9 @@ export FAKECC_PKG="${SUITE_DIR}/pkg_fixtures${FAKECC_PKG:+:$FAKECC_PKG}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+pass() { echo "PASS $*"; }
+fail() { echo "FAIL $*"; FAIL=1; }
+
 run_multi() {
     local expect="$1"; shift
     local out="$TMP/prog"
@@ -192,5 +195,45 @@ run_multi 0 "$TMP/tls1.c" "$TMP/tls_main.c"
 "$FAKECC" $CC_EXTRA -c "$TMP/tls1.c" -o "$TMP/tls1.o"
 "$FAKECC" $CC_EXTRA -c "$TMP/tls_main.c" -o "$TMP/tls_main.o"
 run_multi 0 "$TMP/tls1.o" "$TMP/tls_main.o"
+
+# TLS Initial-Exec in .o: GOTTPOFF, not Local-Exec TPOFF32
+if LANG=C readelf -rW "$TMP/tls1.o" 2>/dev/null | grep -q 'R_X86_64_GOTTPOFF'; then
+    pass "TLS .o has GOTTPOFF"
+else
+    fail "TLS .o missing GOTTPOFF: $(LANG=C readelf -rW "$TMP/tls1.o" 2>/dev/null | head -20)"
+fi
+if LANG=C readelf -rW "$TMP/tls1.o" 2>/dev/null | grep -q 'R_X86_64_TPOFF32'; then
+    fail "TLS .o still has TPOFF32"
+else
+    pass "TLS .o has no TPOFF32"
+fi
+
+# Pointer initializer in __thread storage: .rela.tdata must round-trip through -c
+echo 'package main; __thread const char *tls_msg = "xy"; const char *get_tls_msg(void) { return tls_msg; }' > "$TMP/tls_ptr.c"
+echo 'package main; extern const char *get_tls_msg(void); int main(void) { const char *p = get_tls_msg(); if (p[0] != '"'"'x'"'"') return 1; if (p[1] != '"'"'y'"'"') return 2; return 0; }' > "$TMP/tls_ptr_main.c"
+run_multi 0 "$TMP/tls_ptr.c" "$TMP/tls_ptr_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/tls_ptr.c" -o "$TMP/tls_ptr.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/tls_ptr_main.c" -o "$TMP/tls_ptr_main.o"
+if LANG=C readelf -S "$TMP/tls_ptr.o" 2>/dev/null | grep -q '\.rela\.tdata'; then
+    pass "TLS pointer .o has .rela.tdata"
+else
+    fail "TLS pointer .o missing .rela.tdata"
+fi
+if LANG=C readelf -rW "$TMP/tls_ptr.o" 2>/dev/null | grep -A20 '\.rela.tdata' | grep -q '__str'; then
+    pass "TLS pointer .o .rela.tdata relocates string"
+else
+    fail "TLS pointer .o .rela.tdata missing string reloc: $(LANG=C readelf -rW "$TMP/tls_ptr.o" 2>/dev/null)"
+fi
+run_multi 0 "$TMP/tls_ptr.o" "$TMP/tls_ptr_main.o"
+
+# static __thread in two TUs must not share an IE GOT slot (same name, distinct vars)
+echo 'package main; static __thread int x = 3; int get_a(void) { return x; } void set_a(int v) { x = v; }' > "$TMP/tls_la.c"
+echo 'package main; static __thread int x = 9; int get_b(void) { return x; }' > "$TMP/tls_lb.c"
+echo 'package main; extern int get_a(void); extern int get_b(void); extern void set_a(int); int main(void) { if (get_a() != 3) return 1; if (get_b() != 9) return 2; set_a(5); if (get_a() != 5) return 3; if (get_b() != 9) return 4; return 0; }' > "$TMP/tls_lm.c"
+run_multi 0 "$TMP/tls_la.c" "$TMP/tls_lb.c" "$TMP/tls_lm.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/tls_la.c" -o "$TMP/tls_la.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/tls_lb.c" -o "$TMP/tls_lb.o"
+"$FAKECC" $CC_EXTRA -c "$TMP/tls_lm.c" -o "$TMP/tls_lm.o"
+run_multi 0 "$TMP/tls_la.o" "$TMP/tls_lb.o" "$TMP/tls_lm.o"
 
 exit $FAIL

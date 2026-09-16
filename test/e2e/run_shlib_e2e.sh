@@ -375,6 +375,64 @@ if [ -f "$TMP/libtls.so" ]; then
     fi
 fi
 
+# 10b) fakecc DSO TLS uses Initial-Exec (GOTTPOFF + TPOFF64), not TPOFF32.
+# Two __thread vars plus a pointer initializer, including a -c round-trip
+# so .rela.tdata is read back before the shared link.
+cat > "$TMP/libtlsie.c" <<'EOF'
+package main;
+__thread int x = 1;
+__thread int y = 2;
+__thread const char *msg = "ok";
+int getx(void) { return x; }
+int gety(void) { return y; }
+int *px(void) { return &x; }
+int *py(void) { return &y; }
+const char *getmsg(void) { return msg; }
+void setx(int v) { x = v; }
+EOF
+cat > "$TMP/tlsie_main.c" <<'EOF'
+extern int getx(void);
+extern int gety(void);
+extern int *px(void);
+extern int *py(void);
+extern const char *getmsg(void);
+extern void setx(int v);
+int main(void) {
+    if (getx() != 1) return 1;
+    if (gety() != 2) return 2;
+    if (px() == py()) return 3;
+    if (getmsg()[0] != 'o' || getmsg()[1] != 'k') return 4;
+    setx(9);
+    if (getx() != 9) return 5;
+    if (gety() != 2) return 6;
+    return 0;
+}
+EOF
+rm -f "$TMP/libtlsie.o" "$TMP/libtlsie.so" "$TMP/tlsie_p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA -c "$TMP/libtlsie.c" -o "$TMP/libtlsie.o" 2>"$TMP/err" \
+    || { fail "fakecc -c TLS IE lib: $(head -1 "$TMP/err")"; }
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA -shared "$TMP/libtlsie.o" -o "$TMP/libtlsie.so" 2>"$TMP/err" \
+    || { fail "fakecc -shared TLS IE lib: $(head -1 "$TMP/err")"; }
+if [ -f "$TMP/libtlsie.so" ]; then
+    if LANG=C readelf -rW "$TMP/libtlsie.so" 2>/dev/null | grep -q 'R_X86_64_TPOFF32'; then
+        fail "TLS .so still has TPOFF32 (ld.so reloc 0x17)"
+    else
+        pass "TLS .so has no TPOFF32"
+    fi
+    if LANG=C readelf -rW "$TMP/libtlsie.so" 2>/dev/null | grep -q 'R_X86_64_TPOFF64'; then
+        pass "TLS .so has TPOFF64"
+    else
+        fail "TLS .so missing TPOFF64: $(LANG=C readelf -rW "$TMP/libtlsie.so" 2>/dev/null)"
+    fi
+    gcc -o "$TMP/tlsie_p" "$TMP/tlsie_main.c" -L"$TMP" -ltlsie -Wl,-rpath,"$TMP" 2>"$TMP/err" \
+        || { fail "gcc link vs fakecc TLS .so: $(head -1 "$TMP/err")"; }
+    if [ -x "$TMP/tlsie_p" ]; then
+        got=0
+        timeout "$RUN_TIMEOUT" "$TMP/tlsie_p" >/dev/null || got=$?
+        if [ "$got" = "0" ]; then pass "fakecc DSO TLS IE runtime"; else fail "fakecc DSO TLS IE runtime (exit $got)"; fi
+    fi
+fi
+
 # 11) `: 0` bitfield is not a SysV eightbyte — following float is XMM vs gcc.
 cat > "$TMP/zbf_gcc.c" <<'EOF'
 struct S { int a; int : 0; float f; };

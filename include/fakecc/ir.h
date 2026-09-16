@@ -73,9 +73,9 @@ typedef enum {
     IR_GADDR,       /* dst = &global; global name in call_name.  Result is 8-byte ptr. */
     IR_GADDR_TLS,   /* dst = &__thread global; global name in call_name.
                      * Result is 8-byte ptr to a thread-local variable; codegen
-                     * emits `lea %rxx, %fs:[rip+TPOFF64]` and the linker
-                     * resolves R_X86_64_TPOFF64 to the negative offset from
-                     * the thread pointer (Initial-Exec model). */
+                     * emits Initial-Exec: `movq %fs:0; addq x@gottpoff(%rip)`.
+                     * The linker fills the GOT slot with TPOFF (static exe) or
+                     * a dynamic R_X86_64_TPOFF64 (DSO). */
     IR_FADDR,       /* dst = &function; function name in call_name.  Result is 8-byte ptr. */
     IR_LADDR,       /* dst = &label; imm = label_id.  Result is 8-byte ptr. */
     IR_JMP_PTR,     /* jmp *a — indirect jump to pointer value in a */

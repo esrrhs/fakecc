@@ -275,10 +275,16 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_GOTPCREL  9
 #define R_X86_64_GLOB_DAT  6
 #define R_X86_64_64       10  /* absolute 64-bit (pointer fixups in .data) */
+#define R_X86_64_TPOFF64  18  /* TLS IE GOT fill (64-bit): dynamic linker writes
+                               * l_tls_offset + st_value + addend into the GOT slot.
+                               * Used in DSOs; executables fill the same slot statically. */
+#define R_X86_64_GOTTPOFF 22  /* TLS Initial-Exec: RIP-relative disp to a GOT slot
+                               * holding the TPOFF of a __thread symbol.
+                               * Code: movq %fs:0, %reg; addq x@gottpoff(%rip), %reg */
 #define R_X86_64_TPOFF32  23  /* TLS Local-Exec offset (32-bit signed): S + A - tp_end.
                                * Patches the imm32 of `addq $imm32, %reg` that follows
                                * a `movq %fs:0, %reg` to produce the thread-local address.
-                               * The linker computes a negative int32 offset from the
-                               * thread pointer (%fs:0) to the variable in the TLS template. */
+                               * Kept for legacy objects and static executables; DSOs
+                               * must use GOTTPOFF + TPOFF64 (ld.so rejects type 0x17). */
 
 #endif /* FAKECC_EMIT_H */

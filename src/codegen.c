@@ -286,15 +286,15 @@ static void emit_mov_fs0_reg(Buffer *b, int dst) {
     emit_int32(b, 0);                    /* disp32 = 0 → %fs:0 */
 }
 
-/* Emit `addq $0, %dst` and return the patch offset of the imm32.
- * The caller records a TPOFF32 relocation at the returned offset so the
- * linker fills in `S + A - tp_end` (a negative int32 value). */
-static size_t emit_add_tls_patch(Buffer *b, int dst) {
-    emit_rex_wrb(b, 1, 0, dst);          /* REX.W [REX.B if dst>=8] */
-    emit_byte(b, 0x81);                  /* ADD r/m64, imm32 */
-    emit_modrm(b, 3, 0, dst & 7);        /* mod=11 /0 rm=dst */
+/* Emit `addq dst, [rip+0]` (RIP-relative qword add) and return the disp32
+ * patch offset.  Encoding: REX.W 03 /r with mod=00 rm=5 (RIP-relative).
+ * Used for TLS Initial-Exec: add the TPOFF loaded from a GOT slot. */
+static size_t emit_add_rip(Buffer *b, int dst) {
+    emit_rex_wrb(b, 1, dst, 0 /* B unused — rm=5 is RIP */);
+    emit_byte(b, 0x03);
+    emit_modrm(b, 0, dst & 7, 5);
     size_t patch = b->len;
-    emit_int32(b, 0);                    /* placeholder imm32 — filled by linker */
+    emit_int32(b, 0);
     return patch;
 }
 
@@ -3608,15 +3608,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_GADDR_TLS: {
                 /* dst = &__thread-global; target name in inst->call_name.
                  *
-                 * Emit the x86-64 Local-Exec (LE) TLS address sequence:
+                 * Emit the x86-64 Initial-Exec (IE) TLS address sequence so the
+                 * same .o works in a static executable and in a DSO:
                  *
-                 *   movq %fs:0, %rdst      # load thread pointer (TP) from %fs base
-                 *   addq $sym@tpoff, %rdst # add negative offset → &sym in TLS block
+                 *   movq %fs:0, %rdst           # load thread pointer from %fs
+                 *   addq x@gottpoff(%rip), %rdst # add TPOFF from a GOT slot
                  *
-                 * The linker patches the imm32 of addq with R_X86_64_TPOFF32:
-                 *   value = S + A - tp_end  (a negative int32 for typical layouts)
-                 * where tp_end = tls_vaddr + tls_memsize (the address just past the
-                 * TLS template that %fs:0 points to on Linux/glibc).
+                 * The linker patches the RIP-relative disp with R_X86_64_GOTTPOFF.
+                 * The GOT slot is filled with TPOFF (S - tls_end) at static link,
+                 * or with a dynamic R_X86_64_TPOFF64 in a shared object.
+                 * Local-Exec TPOFF32 is rejected by ld.so as reloc type 0x17.
                  *
                  * NOTE: `lea %fs:[rip+disp32]` is NOT equivalent — on x86-64 the
                  * `lea` instruction ignores segment overrides entirely, so the %fs
@@ -3624,12 +3625,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int target = dr >= 0 ? dr : REG_RAX;
                 int gsym = emit_module_find_symbol(out, inst->call_name);
                 if (gsym < 0) gsym = emit_module_add_undefined(out, inst->call_name);
-                /* movq %fs:0, %target */
                 emit_mov_fs0_reg(&out->text, target);
-                /* addq $sym@tpoff, %target — patch slot for TPOFF32 reloc */
-                size_t patch = emit_add_tls_patch(&out->text, target);
-                /* Addend is 0: linker computes S - tp_end directly. */
-                emit_module_add_reloc(out, patch, R_X86_64_TPOFF32, gsym, 0);
+                size_t patch = emit_add_rip(&out->text, target);
+                emit_module_add_reloc(out, patch, R_X86_64_GOTTPOFF, gsym, -4);
                 if (dr < 0)
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
