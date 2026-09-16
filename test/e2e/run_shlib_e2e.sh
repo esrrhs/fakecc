@@ -433,7 +433,37 @@ if [ -f "$TMP/libtlsie.so" ]; then
     fi
 fi
 
-# 11) `: 0` bitfield is not a SysV eightbyte — following float is XMM vs gcc.
+# 11) GNU empty-struct return takes no hidden sret (RDI is the first real arg).
+cat > "$TMP/empty_gcc.c" <<'EOF'
+#include <stdlib.h>
+struct E {};
+struct E make(int x) { struct E e; if (x != 42) abort(); return e; }
+int peek(struct E z, int y) { (void)z; return y; }
+EOF
+cat > "$TMP/empty_use.c" <<'EOF'
+package main;
+struct E {};
+extern struct E make(int x);
+extern int peek(struct E z, int y);
+int main(void) {
+    struct E e = make(42);
+    if (peek(e, 7) != 7) return 1;
+    if (peek(make(42), 9) != 9) return 2;
+    return 0;
+}
+EOF
+gcc -shared -fPIC -o "$TMP/libempty.so" "$TMP/empty_gcc.c" \
+    || { fail "gcc -shared empty-struct lib"; }
+rm -f "$TMP/p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/empty_use.c" -L"$TMP" -lempty -o "$TMP/p" 2>"$TMP/err" \
+    || { fail "fakecc←gcc empty-struct .so compile: $(head -1 "$TMP/err")"; }
+if [ -x "$TMP/p" ]; then
+    got=0
+    env -u LD_LIBRARY_PATH timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
+    if [ "$got" = "0" ]; then pass "GNU empty-struct return ABI vs gcc .so"; else fail "GNU empty-struct return ABI vs gcc .so (exit $got)"; fi
+fi
+
+# 12) `: 0` bitfield is not a SysV eightbyte — following float is XMM vs gcc.
 cat > "$TMP/zbf_gcc.c" <<'EOF'
 struct S { int a; int : 0; float f; };
 float getf(struct S s) { return s.f; }

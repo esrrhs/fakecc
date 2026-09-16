@@ -6819,6 +6819,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             ret_nreg_pre = 2;
             ret_in_mem_pre = 0;
         }
+        /* GNU empty structs return in no slot and take no hidden sret
+         * (SysV/GCC).  classify_agg reports MEMORY for size 0, which would
+         * otherwise steal RDI and shift every later argument. */
+        if (type_is_empty_struct(e->type))
+            ret_in_mem_pre = 0;
         int arg_limit = IR_CALL_MAX_ARGS - (ret_in_mem_pre ? 1 : 0);
         /* Expand aggregates into per-eightbyte SSA args.  Register-class
          * eightbytes travel in GP/XMM; MEMORY-class eightbytes are forced
@@ -6952,9 +6957,20 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
             slot_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
-        IRValue v = ret_in_mem ? sret_addr
-                  : (is_ret_struct && ret_nreg > 0) ? slot_addr
-                  : (is_void ? -1 : new_value(fn));
+        IRValue v;
+        if (ret_in_mem) {
+            v = sret_addr;
+        } else if (is_ret_struct && ret_nreg > 0) {
+            v = slot_addr;
+        } else if (is_void) {
+            v = -1;
+        } else if (type_is_empty_struct(e->type)) {
+            /* Dummy empty object; the call itself is void-like (no dest). */
+            IRValue slot = emit_alloca(fn, 1, 8, 1, e->loc);
+            v = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        } else {
+            v = new_value(fn);
+        }
         IRValue ret_lo = -1, ret_hi = -1;
         int is_cld_ret = type_is_complex_ldouble(e->type);
         if (is_ret_struct && ret_nreg > 0 && !is_cld_ret) {
@@ -6968,7 +6984,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.dst = ret_in_mem ? -1
                  : is_cld_ret ? -1
                  : (is_ret_struct && ret_nreg > 0) ? ret_lo
-                 : v;
+                 : (type_is_empty_struct(e->type) ? -1 : v);
         inst.a = is_cld_ret ? slot_addr : -1;
         inst.b = ret_hi;   /* second return eightbyte, or -1 */
         inst.x87_pair = is_cld_ret;
@@ -7115,6 +7131,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (e->type.kind == TY_FLOAT)
                 set_value_float(fn, v, 1);
         } else if (ret_in_mem) {
+            set_value_type(fn, v, 8, 1);
+        } else if (type_is_empty_struct(e->type)) {
             set_value_type(fn, v, 8, 1);
         }
         free(arg_vals);
@@ -7765,13 +7783,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
         if (is_float) set_value_float(fn, old, 1);
         IRValue scaled;
+        int op_w = is_float ? lw : arith_w;
+        int op_u = is_float ? lu : arith_u;
         if (is_float) {
-            /* The right operand joins the lvalue's float type, whether it
-             * arrives as an int or as a float of another width. */
+            /* C99 6.5.16.2: E1 op= E2 is E1 = E1 op E2 (E1 once), so the
+             * usual arithmetic conversions apply before the op.  `float f;
+             * f -= 1e20;` is `(float)((double)f - 1e20)`, not a float sub. */
             int rw = get_value_width(fn, rhs);
-            scaled = (get_value_is_float(fn, rhs) && rw == lw)
+            int rf = get_value_is_float(fn, rhs);
+            if (rf && rw > op_w) op_w = rw;
+            scaled = (rf && rw == op_w)
                      ? rhs
-                     : convert_numeric(fn, rhs, rw, lw, 0, 1, e->loc);
+                     : convert_numeric(fn, rhs, rw, op_w, 0, 1, e->loc);
         } else if (is_ptr) {
             scaled = scale_rhs(fn, st, rhs, is_ptr, lv->type, op, e->loc);
         } else {
@@ -7781,14 +7804,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                               get_value_is_unsigned(fn, rhs), arith_w, arith_u, e->loc);
         }
         IRValue old_p = old;
-        if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
+        if (is_float && op_w != lw)
+            old_p = convert_numeric(fn, old, lw, op_w, 0, 1, e->loc);
+        else if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
             old_p = coerce(fn, old, lw, lu, arith_w, arith_u, e->loc);
-        IRValue neu = emit_bin_w(fn, ir_op, old_p, scaled,
-                                 is_float ? lw : arith_w,
-                                 is_float ? lu : arith_u, e->loc);
+        IRValue neu = emit_bin_w(fn, ir_op, old_p, scaled, op_w, op_u, e->loc);
         if (is_float) set_value_float(fn, neu, 1);
         IRValue back = neu;
-        if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
+        if (is_float && op_w != lw)
+            back = convert_numeric(fn, neu, op_w, lw, 0, 1, e->loc);
+        else if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
             back = coerce(fn, neu, arith_w, arith_u, lw, lu, e->loc);
         if (lv->type.is_bool) {
             back = bool_normalize(fn, back, lw, lu, 0, e->loc);
@@ -10554,7 +10579,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             if (!param_ebs || !param_nreg) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         }
         int next_pidx = 0;
-        if (irfn.ret_is_struct && irfn.ret_reg_n == 0) {
+        if (irfn.ret_is_struct && irfn.ret_reg_n == 0
+            && !type_is_empty_struct(fd->ret_type)) {
             irfn.sret_value = new_value(&irfn);
             emit_inst_w(&irfn, IR_PARAM, irfn.sret_value, -1, -1, next_pidx++,
                         8, 1, fd->loc);
@@ -10735,7 +10761,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             {
                 /* Debug: first IR param index for this formal (sret shifts). */
                 int pidx = 0;
-                if (irfn.ret_is_struct && irfn.ret_reg_n == 0) pidx = 1;
+                if (irfn.sret_value >= 0) pidx = 1;
                 for (size_t q = 0; q < p; q++) {
                     if (param_nreg[q] > 0) pidx += param_nreg[q];
                     else pidx += 1;

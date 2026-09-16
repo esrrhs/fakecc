@@ -755,10 +755,12 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
             }
             if (ch < 0) { input_fail = 1; break; }
             int sign = 1;
+            int saw_sign = 0;
             if (spec != 'p' && used < maxw && (ch == '-' || ch == '+')) {
                 if (ch == '-') sign = -1;
                 used = used + 1;
                 nread = nread + 1;
+                saw_sign = 1;
                 ch = scan_getc(f);
             }
             int base = 10;
@@ -801,7 +803,9 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
                 ch = scan_getc(f);
             }
             if (!read_digits) {
-                if (ch < 0) input_fail = 1;
+                /* A lone sign at EOF is a matching failure, not input failure
+                 * (C99: sscanf("-", "%d") returns 0, not EOF). */
+                if (ch < 0 && !saw_sign) input_fail = 1;
                 break;
             }
             if (sign < 0 && spec != 'd' && spec != 'i')

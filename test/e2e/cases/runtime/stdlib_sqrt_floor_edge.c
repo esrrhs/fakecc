@@ -20,6 +20,19 @@ int main(void) {
     if (z != 0.0) return 6;
     if (1.0 / z > 0.0) return 7;
 
+    /* Annex F: ceil of a value in (−1, 0) is −0. */
+    z = runtime.ceil(-0.5);
+    if (z != 0.0) return 10;
+    if (1.0 / z > 0.0) return 11;
+
+    /* sin(±Inf) is NaN and must not hang. */
+    s = runtime.sin(inf);
+    if (s == s) return 12;
+    s = runtime.sin(-inf);
+    if (s == s) return 13;
+    s = runtime.cos(inf);
+    if (s == s) return 14;
+
     if (runtime.floor(3.7) != 3.0) return 8;
     if (runtime.sqrt(0.0) != 0.0) return 9;
     return 0;

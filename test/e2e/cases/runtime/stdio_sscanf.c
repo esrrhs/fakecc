@@ -54,5 +54,11 @@ int main() {
     if (u != 0u) return 19;
     if (buf[0] != 'x') return 20;
 
+    /* A lone sign is a matching failure (0), not EOF. */
+    r = runtime.sscanf("-", "%d", &a);
+    if (r != 0) return 21;
+    r = runtime.sscanf("+", "%i", &a);
+    if (r != 0) return 22;
+
     return 0;
 }

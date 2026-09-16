@@ -71,9 +71,18 @@ double floor(double x) {
 float floorf(float x) { return (float)floor((double)x); }
 
 double ceil(double x) {
+    if (x != x) return x;
+    if (x == 0.0) return x; /* preserve ±0 */
     double f = floor(x);
     if (f == x) return f;
-    return f + 1.0;
+    double r = f + 1.0;
+    /* Annex F: ceil of a value in (−1, 0) is −0, not +0 from (−1)+1. */
+    if (x < 0.0 && r == 0.0) {
+        union { double d; unsigned long long u; } nz;
+        nz.u = 0x8000000000000000ULL;
+        return nz.d;
+    }
+    return r;
 }
 
 double sqrt(double x) {
@@ -99,10 +108,23 @@ double sin(double x) {
     if (x == 0.0 || x != x) return x;
     double pi2 = 6.28318530717958647692;
     double pi = 3.14159265358979323846;
-    long long k = (long long)(x / pi2);
-    x = x - (double)k * pi2;
-    while (x > pi) x = x - pi2;
-    while (x < -pi) x = x + pi2;
+    /* ±Inf: Annex F returns NaN.  Also avoid (long long)(Inf / 2π) UB and
+     * a non-terminating range-reduction loop for huge finite args. */
+    if (x > 1.7976931348623157e308 || x < -1.7976931348623157e308) {
+        union { double d; unsigned long long u; } nanv;
+        nanv.u = 0x7ff8000000000000ULL;
+        return nanv.d;
+    }
+    double n = floor(x / pi2);
+    x = x - n * pi2;
+    if (x != x) {
+        union { double d; unsigned long long u; } nanv;
+        nanv.u = 0x7ff8000000000000ULL;
+        return nanv.d;
+    }
+    int guard = 0;
+    while (x > pi && guard < 8) { x = x - pi2; guard = guard + 1; }
+    while (x < -pi && guard < 8) { x = x + pi2; guard = guard + 1; }
     if (x == 0.0) return x;
     double term = x;
     double sum = x;
