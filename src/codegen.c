@@ -5761,6 +5761,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             buffer_append(&out->init_array, (const char *)&z, 8);
             emit_module_add_data_reloc(out, slot, R_X86_64_64, fsym, 0);
             out->data_relocs[out->num_data_relocs - 1].shndx = SECT_INIT_ARRAY;
+            size_t n = out->init_array.len / 8;
+            out->init_prio = realloc(out->init_prio, n * sizeof(int));
+            if (!out->init_prio) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            out->init_prio[n - 1] = fn->ctor_prio ? fn->ctor_prio : INIT_PRIO_DEFAULT;
+        }
+        if (fn->is_destructor) {
+            int fsym = emit_module_find_symbol(out, fn->name);
+            size_t slot = out->fini_array.len;
+            uint64_t z = 0;
+            buffer_append(&out->fini_array, (const char *)&z, 8);
+            emit_module_add_data_reloc(out, slot, R_X86_64_64, fsym, 0);
+            out->data_relocs[out->num_data_relocs - 1].shndx = SECT_FINI_ARRAY;
+            size_t n = out->fini_array.len / 8;
+            out->fini_prio = realloc(out->fini_prio, n * sizeof(int));
+            if (!out->fini_prio) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            out->fini_prio[n - 1] = fn->dtor_prio ? fn->dtor_prio : INIT_PRIO_DEFAULT;
         }
     }
 

@@ -260,6 +260,38 @@ static void test_constructor_init_array(void) {
     emit_module_free(&em);
 }
 
+static void test_destructor_fini_array(void) {
+    EmitModule em = compile_to_code(
+        "package main;"
+        "int g;"
+        "__attribute__((destructor)) void dtor(void) { g = 1; }"
+        "int main(void) { return g; }");
+    T_ASSERT(find_sym(&em, "dtor") != NULL);
+    T_ASSERT_EQ_INT((int)em.fini_array.len, 8);
+    int saw = 0;
+    for (size_t i = 0; i < em.num_data_relocs; i++) {
+        if (em.data_relocs[i].shndx == SECT_FINI_ARRAY
+            && em.data_relocs[i].type == R_X86_64_64)
+            saw = 1;
+    }
+    T_ASSERT(saw);
+    emit_module_free(&em);
+}
+
+static void test_constructor_priority_slots(void) {
+    EmitModule em = compile_to_code(
+        "package main;"
+        "int g;"
+        "__attribute__((constructor(200))) void ctor_b(void) { g = 2; }"
+        "__attribute__((constructor(101))) void ctor_a(void) { g = 1; }"
+        "int main(void) { return g; }");
+    T_ASSERT_EQ_INT((int)em.init_array.len, 16);
+    T_ASSERT(em.init_prio != NULL);
+    T_ASSERT_EQ_INT(em.init_prio[0], 200);
+    T_ASSERT_EQ_INT(em.init_prio[1], 101);
+    emit_module_free(&em);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -276,5 +308,7 @@ int main(void) {
     test_sib_local_index();
     test_vector16_uses_movups();
     test_constructor_init_array();
+    test_destructor_fini_array();
+    test_constructor_priority_slots();
     return t_finalize();
 }

@@ -17,6 +17,8 @@
 #define SECT_TDATA  5  /* initialized __thread variables (ELF SHF_TLS) */
 #define SECT_TBSS   6  /* zero-initialized __thread variables (SHF_TLS) */
 #define SECT_INIT_ARRAY 7 /* .init_array constructor pointers */
+#define SECT_FINI_ARRAY 8 /* .fini_array destructor pointers */
+#define INIT_PRIO_DEFAULT 65535
 
 /* ------------------------------------------------------------------ */
 /* Symbol table entry                                                  */
@@ -194,6 +196,10 @@ typedef struct {
     size_t   tbss_align;
     Buffer   init_array; /* .init_array — constructor function pointers */
     size_t   init_array_align;
+    int     *init_prio;  /* one priority per 8-byte init_array slot */
+    Buffer   fini_array; /* .fini_array — destructor function pointers */
+    size_t   fini_array_align;
+    int     *fini_prio;  /* one priority per 8-byte fini_array slot */
 
     EmitSymbol *syms;  /* unified symbol table (section + defined + undefined) */
     size_t num_syms, cap_syms;
@@ -298,7 +304,10 @@ void emit_elf(const EmitModule *m, const char *path);
                                * Used in DSOs; executables fill the same slot statically. */
 #define R_X86_64_TLSGD    19  /* General-Dynamic: 16-byte lea+call __tls_get_addr.
                                * The linker relaxes this to Initial-Exec. */
-#define R_X86_64_TLSLD    20  /* Local-Dynamic (same 16-byte sequence as TLSGD). */
+#define R_X86_64_TLSLD    20  /* Local-Dynamic 12-byte lea+call __tls_get_addr.
+                               * Executables relax to LE (`movq %fs:0`). */
+#define R_X86_64_DTPOFF32 21  /* Local-Dynamic offset from the TLS block base.
+                               * After LD→LE this is filled as TPOFF32 (S+A−tp). */
 #define R_X86_64_GOTTPOFF 22  /* TLS Initial-Exec: RIP-relative disp to a GOT slot
                                * holding the TPOFF of a __thread symbol.
                                * Code: movq %fs:0, %reg; addq x@gottpoff(%rip), %reg */
@@ -310,5 +319,7 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_PC64          24 /* S + A - P, 64-bit (`.quad sym - .`) */
 #define R_X86_64_GOTPCRELX     41 /* relaxable GOTPCREL; same S as GOTPCREL */
 #define R_X86_64_REX_GOTPCRELX 42 /* REX-prefixed relaxable GOTPCREL */
+#define R_X86_64_IRELATIVE     37 /* STT_GNU_IFUNC: r_addend = resolver, GOT filled at startup */
+#define STT_GNU_IFUNC          10
 
 #endif /* FAKECC_EMIT_H */

@@ -401,6 +401,9 @@ typedef struct {
     int    align;       /* alignment attribute */
     int    no_instrument; /* 1 = __attribute__((no_instrument_function)) */
     int    is_constructor; /* 1 = __attribute__((constructor)) → .init_array */
+    int    is_destructor;  /* 1 = __attribute__((destructor)) → .fini_array */
+    int    ctor_prio;      /* constructor priority (smaller runs first; 65535 = default) */
+    int    dtor_prio;
 } FunctionDecl;
 
 typedef struct {

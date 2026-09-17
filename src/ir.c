@@ -10662,6 +10662,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
         irfn.is_constructor = fd->is_constructor;
+        irfn.is_destructor = fd->is_destructor;
+        irfn.ctor_prio = fd->ctor_prio ? fd->ctor_prio : 65535;
+        irfn.dtor_prio = fd->dtor_prio ? fd->dtor_prio : 65535;
         irfn.sret_value = -1;
         irfn.ret_reg_n = 0;
         irfn.ret_reg_cls[0] = 0;

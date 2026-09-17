@@ -47,6 +47,7 @@
 #define SHT_NOBITS       8
 #define SHT_DYNSYM      11
 #define SHT_INIT_ARRAY  14
+#define SHT_FINI_ARRAY  15
 #define SHT_DYNSTR      18
 
 #define SHF_WRITE        0x1
@@ -78,7 +79,9 @@
 #define DT_RUNPATH      29
 #define DT_FLAGS        30
 #define DT_INIT_ARRAY   25
+#define DT_FINI_ARRAY   26
 #define DT_INIT_ARRAYSZ 27
+#define DT_FINI_ARRAYSZ 28
 #define DF_STATIC_TLS   0x10
 #define R_X86_64_JUMP_SLOT 7
 #define R_X86_64_RELATIVE  8
@@ -87,9 +90,15 @@
 #define STT_TLS         6
 
 #define INIT_ARRAY_START 36 /* movabs×2 + test + jz + call/add/dec/jnz */
+#define FINI_ARRAY_START 42 /* save eax + reverse walk + restore edi */
+#define IREL_START       42 /* apply IRELATIVE GOT slots before ctors */
 
 static int reloc_is_tls_gd(uint32_t t) {
-    return t == R_X86_64_TLSGD || t == R_X86_64_TLSLD;
+    return t == R_X86_64_TLSGD;
+}
+
+static int reloc_is_tls_ld(uint32_t t) {
+    return t == R_X86_64_TLSLD;
 }
 
 static int reloc_is_copy_kind(uint32_t t) {
@@ -130,11 +139,13 @@ static size_t pad_size_to(size_t n, size_t align) {
 }
 
 /* Look up NAME in a DT_NEEDED shared object.  Returns st_size (0 if missing)
- * and optionally the ELF STT_* type. */
+ * and optionally the ELF STT_* type and copy-slot alignment. */
 static size_t so_symbol_lookup(const char **lib_paths, size_t npaths,
                                const char **needed, size_t nneeded,
-                               const char *name, uint8_t *out_type) {
+                               const char *name, uint8_t *out_type,
+                               size_t *out_align) {
     if (out_type) *out_type = 0;
+    if (out_align) *out_align = 8;
     if (!name || !name[0]) return 0;
     for (size_t ni = 0; ni < nneeded; ni++) {
         const char *soname = needed[ni];
@@ -199,6 +210,21 @@ static size_t so_symbol_lookup(const char **lib_paths, size_t npaths,
                             memcpy(&info, syms + k * 24 + 4, 1);
                             if (out_type) *out_type = info & 0xf;
                             memcpy(&found_sz, syms + k * 24 + 16, 8);
+                            uint16_t shn = 0;
+                            memcpy(&shn, syms + k * 24 + 6, 2);
+                            uint64_t stv = 0;
+                            memcpy(&stv, syms + k * 24 + 8, 8);
+                            size_t al = 1;
+                            if (shn > 0 && shn < shnum) {
+                                memcpy(&al, shdrs + (size_t)shn * shentsize + 48, 8);
+                                if (al < 1) al = 1;
+                            }
+                            if (stv) {
+                                size_t low = (size_t)(stv & -(int64_t)stv);
+                                if (low > al) al = low;
+                            }
+                            if (al > 4096) al = 4096;
+                            if (out_align) *out_align = al;
                             found = 1;
                             break;
                         }
@@ -217,7 +243,7 @@ static size_t so_symbol_lookup(const char **lib_paths, size_t npaths,
     return 0;
 }
 
-typedef struct { int defined; int shndx; size_t value; uint8_t binding; } LinkSymInfo;
+typedef struct { int defined; int shndx; size_t value; uint8_t binding; uint8_t type; } LinkSymInfo;
 
 /* Prefer STB_GLOBAL, then STB_WEAK, then SHN_COMMON. */
 static size_t find_export_gsi(EmitModule **mods, size_t n, const size_t *mod_sym_base,
@@ -397,6 +423,10 @@ typedef struct {
     uint64_t initarr_vaddr;
     size_t   initarr_file_offset;
     size_t   initarr_size;
+    int      have_finiarr;
+    uint64_t finiarr_vaddr;
+    size_t   finiarr_file_offset;
+    size_t   finiarr_size;
 } SectionLayout;
 
 static void finalize_sections(
@@ -526,6 +556,9 @@ static void finalize_sections(
     uint32_t shname_init_array = 0;
     if (lay->have_initarr)
         shname_init_array = append_string(&shstrtab, ".init_array");
+    uint32_t shname_fini_array = 0;
+    if (lay->have_finiarr)
+        shname_fini_array = append_string(&shstrtab, ".fini_array");
     uint32_t shname_symtab = append_string(&shstrtab, ".symtab");
     uint32_t shname_strtab = append_string(&shstrtab, ".strtab");
     uint32_t shname_shstrtab = append_string(&shstrtab, ".shstrtab");
@@ -610,13 +643,20 @@ static void finalize_sections(
                             tbss_bytes, 0, 0, 8, 0);
         }
     }
-    int init_sections = 0;
+    int array_sections = 0;
     if (lay->have_initarr && lay->initarr_size > 0) {
         write_shdr_exec(elf, shname_init_array, SHT_INIT_ARRAY,
                         SHF_ALLOC | SHF_WRITE,
                         lay->initarr_vaddr, lay->initarr_file_offset,
                         lay->initarr_size, 0, 0, 8, 8);
-        init_sections = 1;
+        array_sections++;
+    }
+    if (lay->have_finiarr && lay->finiarr_size > 0) {
+        write_shdr_exec(elf, shname_fini_array, SHT_FINI_ARRAY,
+                        SHF_ALLOC | SHF_WRITE,
+                        lay->finiarr_vaddr, lay->finiarr_file_offset,
+                        lay->finiarr_size, 0, 0, 8, 8);
+        array_sections++;
     }
     /* Count TLS sections actually emitted — only those with non-zero size
      * take a slot, so .tdata-only / .tbss-only / both combinations all
@@ -627,7 +667,7 @@ static void finalize_sections(
         if (lay->tls_memsize > lay->tls_filesize) tls_sections++;
     }
     write_shdr_exec(elf, shname_symtab, SHT_SYMTAB, 0, 0, off_symtab,
-                    symtab.len, 6 + tls_sections + init_sections, first_global, 8, ELF64_SYM_SIZE);
+                    symtab.len, 6 + tls_sections + array_sections, first_global, 8, ELF64_SYM_SIZE);
     write_shdr_exec(elf, shname_strtab, SHT_STRTAB, 0, 0, off_strtab,
                     strtab.len, 0, 0, 1, 0);
     write_shdr_exec(elf, shname_shstrtab, SHT_STRTAB, 0, 0, off_shstrtab,
@@ -651,7 +691,7 @@ static void finalize_sections(
      * the first dynamic section: 8 (no dbg) or 14 (with dbg).  When TLS is
      * present, .tdata and .tbss (only those that exist) take indices 8 and
      * 9 (or 14 and 15 with debug), shifting dyn_base accordingly. */
-    int dyn_base = (have_dbg ? 14 : 8) + tls_sections + init_sections;
+    int dyn_base = (have_dbg ? 14 : 8) + tls_sections + array_sections;
     if (lay->have_dynamic) {
         /* .dynstr is a string table: use SHT_STRTAB (not SHT_DYNSTR).  readelf
          * resolves DT_NEEDED strings by locating the section whose sh_type is
@@ -683,9 +723,9 @@ static void finalize_sections(
                         dyn_base + 0, 0, 8, 16);
     }
 
-    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + tls_sections + init_sections
+    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + tls_sections + array_sections
                                + (lay->have_dynamic ? 6 : 0));
-    uint16_t shstrndx = (uint16_t)(7 + tls_sections + init_sections);
+    uint16_t shstrndx = (uint16_t)(7 + tls_sections + array_sections);
     memcpy(elf->data + 40, &shoff, sizeof(shoff));
     memcpy(elf->data + 60, &shnum, sizeof(shnum));
     memcpy(elf->data + 62, &shstrndx, sizeof(shstrndx));
@@ -711,11 +751,38 @@ static void finalize_sections(
  *
  * Both forms are exactly START_SIZE bytes so the layout above does not have to
  * know which one it gets. */
-static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
-                      uint64_t exit_plt_vaddr, int have_tls,
-                      uint64_t tls_vaddr, uint64_t tcb_vaddr,
-                      size_t tls_memsize, size_t tdata_len,
-                      uint64_t init_start, uint64_t init_count) {
+typedef struct {
+    uint64_t call_vaddr;
+    uint64_t main_vaddr;
+    uint64_t exit_plt_vaddr;
+    int have_tls;
+    uint64_t tls_vaddr;
+    uint64_t tcb_vaddr;
+    size_t tls_memsize;
+    size_t tdata_len;
+    uint64_t init_start;
+    uint64_t init_count;
+    uint64_t fini_start;
+    uint64_t fini_count;
+    uint64_t irel_got;
+    uint64_t irel_count;
+} StartInfo;
+
+static void gen_start(Buffer *code, const StartInfo *st) {
+    uint64_t call_vaddr = st->call_vaddr;
+    uint64_t main_vaddr = st->main_vaddr;
+    uint64_t exit_plt_vaddr = st->exit_plt_vaddr;
+    int have_tls = st->have_tls;
+    uint64_t tls_vaddr = st->tls_vaddr;
+    uint64_t tcb_vaddr = st->tcb_vaddr;
+    size_t tls_memsize = st->tls_memsize;
+    size_t tdata_len = st->tdata_len;
+    uint64_t init_start = st->init_start;
+    uint64_t init_count = st->init_count;
+    uint64_t fini_start = st->fini_start;
+    uint64_t fini_count = st->fini_count;
+    uint64_t irel_got = st->irel_got;
+    uint64_t irel_count = st->irel_count;
     size_t prefix_len = 0;
     if (have_tls) {
         if (tdata_len > 0) {
@@ -756,6 +823,34 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
         uint8_t sysc[2] = {0x0f, 0x05};
         buffer_append(code, (const char *)sysc, 2);
     }
+    /* Static binaries have no ld.so to apply IRELATIVE; call each resolver
+     * and store the implementation pointer into the GOT slot (pre-filled
+     * with the resolver address).  Exactly IREL_START bytes. */
+    if (irel_count > 0) {
+        prefix_len += IREL_START;
+        uint8_t m_rbx[2] = {0x48, 0xbb}; /* movabs $irel_got, %rbx */
+        buffer_append(code, (const char *)m_rbx, 2);
+        buffer_append(code, (const char *)&irel_got, 8);
+        uint8_t m_r12[2] = {0x49, 0xbc}; /* movabs $irel_count, %r12 */
+        buffer_append(code, (const char *)m_r12, 2);
+        buffer_append(code, (const char *)&irel_count, 8);
+        uint8_t test_r12[3] = {0x4d, 0x85, 0xe4};
+        buffer_append(code, (const char *)test_r12, 3);
+        uint8_t jz[2] = {0x74, 0x11}; /* skip 17-byte body */
+        buffer_append(code, (const char *)jz, 2);
+        uint8_t ld_rax[3] = {0x48, 0x8b, 0x03}; /* mov (%rbx), %rax */
+        buffer_append(code, (const char *)ld_rax, 3);
+        uint8_t call_rax[2] = {0xff, 0xd0}; /* call *%rax */
+        buffer_append(code, (const char *)call_rax, 2);
+        uint8_t st_rax[3] = {0x48, 0x89, 0x03}; /* mov %rax, (%rbx) */
+        buffer_append(code, (const char *)st_rax, 3);
+        uint8_t add_rbx[4] = {0x48, 0x83, 0xc3, 0x08};
+        buffer_append(code, (const char *)add_rbx, 4);
+        uint8_t dec_r12[3] = {0x49, 0xff, 0xcc};
+        buffer_append(code, (const char *)dec_r12, 3);
+        uint8_t jnz[2] = {0x75, 0xef}; /* jnz: 17-byte body back */
+        buffer_append(code, (const char *)jnz, 2);
+    }
     /* Static executables have no ld.so to walk DT_INIT_ARRAY, so _start
      * calls each constructor pointer before main.  rbx/r12 are callee-saved
      * so constructors preserve the walk state.  Exactly INIT_ARRAY_START
@@ -792,12 +887,40 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
     buffer_append(code, (const char *)&call_opcode, 1);
     int32_t rel = (int32_t)(main_vaddr - (call_vaddr + prefix_len + 3 + 5 + CALL_SIZE));
     buffer_append(code, (const char *)&rel, 4);
-    uint8_t mov_reg[] = {0x89, 0xc7}; /* mov edi, eax (exit code = main return) */
-    buffer_append(code, (const char *)mov_reg, 2);
+    if (fini_count > 0) {
+        uint8_t save[3] = {0x41, 0x89, 0xc5}; /* mov %eax, %r13d */
+        buffer_append(code, (const char *)save, 3);
+        uint64_t last = fini_start + (fini_count - 1) * 8;
+        uint8_t m_rbx[2] = {0x48, 0xbb};
+        buffer_append(code, (const char *)m_rbx, 2);
+        buffer_append(code, (const char *)&last, 8);
+        uint8_t m_r12[2] = {0x49, 0xbc};
+        buffer_append(code, (const char *)m_r12, 2);
+        buffer_append(code, (const char *)&fini_count, 8);
+        uint8_t test_r12[3] = {0x4d, 0x85, 0xe4};
+        buffer_append(code, (const char *)test_r12, 3);
+        uint8_t jz[2] = {0x74, 0x0b};
+        buffer_append(code, (const char *)jz, 2);
+        uint8_t call_ind[2] = {0xff, 0x13};
+        buffer_append(code, (const char *)call_ind, 2);
+        uint8_t sub_rbx[4] = {0x48, 0x83, 0xeb, 0x08};
+        buffer_append(code, (const char *)sub_rbx, 4);
+        uint8_t dec_r12[3] = {0x49, 0xff, 0xcc};
+        buffer_append(code, (const char *)dec_r12, 3);
+        uint8_t jnz[2] = {0x75, 0xf5};
+        buffer_append(code, (const char *)jnz, 2);
+        uint8_t restore[3] = {0x44, 0x89, 0xef}; /* mov %r13d, %edi */
+        buffer_append(code, (const char *)restore, 3);
+    } else {
+        uint8_t mov_reg[] = {0x89, 0xc7}; /* mov edi, eax */
+        buffer_append(code, (const char *)mov_reg, 2);
+    }
     if (exit_plt_vaddr != 0) {
         buffer_append(code, (const char *)&call_opcode, 1);
+        size_t after_main = prefix_len + 3 + 5 + CALL_SIZE
+            + (fini_count > 0 ? (size_t)FINI_ARRAY_START : 2);
         int32_t erel = (int32_t)(exit_plt_vaddr -
-                                 (call_vaddr + prefix_len + 3 + 5 + CALL_SIZE + 2 + CALL_SIZE));
+                                 (call_vaddr + after_main + CALL_SIZE));
         buffer_append(code, (const char *)&erel, 4);
         uint8_t ud2[] = {0x0f, 0x0b}; /* exit() does not return */
         buffer_append(code, (const char *)ud2, 2);
@@ -856,7 +979,41 @@ static size_t emit_plt_entry(Buffer *code, size_t idx, size_t plt0_off,
 /* emit_link                                                           */
 /* ================================================================== */
 
-/* Find the PLT slot index for an undefined symbol name; create if absent. */
+typedef struct { int prio; size_t idx; } ArrSlotOrd;
+
+static int arr_slot_cmp(const void *a, const void *b) {
+    const ArrSlotOrd *x = a, *y = b;
+    if (x->prio != y->prio) return (x->prio > y->prio) - (x->prio < y->prio);
+    return (x->idx > y->idx) - (x->idx < y->idx);
+}
+
+/* Stable sort of 8-byte constructor/destructor slots by priority (smaller first).
+ * Writes old_slot → new_byte_offset into `remap` (length nslots). */
+static void sort_array_slots(Buffer *arr, int *prio, size_t **remap) {
+    size_t nslots = arr->len / 8;
+    *remap = NULL;
+    if (nslots == 0) return;
+    *remap = xcalloc(nslots, sizeof(size_t));
+    ArrSlotOrd *ord = xcalloc(nslots, sizeof(ArrSlotOrd));
+    for (size_t i = 0; i < nslots; i++) {
+        ord[i].idx = i;
+        ord[i].prio = prio ? prio[i] : INIT_PRIO_DEFAULT;
+    }
+    qsort(ord, nslots, sizeof(ArrSlotOrd), arr_slot_cmp);
+    char *tmp = malloc(arr->len ? arr->len : 1);
+    int *ptmp = malloc(nslots * sizeof(int));
+    if (!tmp || !ptmp) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    for (size_t ni = 0; ni < nslots; ni++) {
+        size_t oi = ord[ni].idx;
+        memcpy(tmp + ni * 8, arr->data + oi * 8, 8);
+        ptmp[ni] = ord[ni].prio;
+        (*remap)[oi] = ni * 8;
+    }
+    memcpy(arr->data, tmp, arr->len);
+    if (prio) memcpy(prio, ptmp, nslots * sizeof(int));
+    free(tmp); free(ptmp); free(ord);
+}
+
 static int ext_find_or_add(char ***ext, int *num_ext, const char *name) {
     for (int e = 0; e < *num_ext; e++)
         if (strcmp((*ext)[e], name) == 0) return e;
@@ -879,10 +1036,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared) {
     /* ---- Merge sections ---- */
-    Buffer text, rodata, data, tdata, initarr;
+    Buffer text, rodata, data, tdata, initarr, finiarr;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
     buffer_init(&tdata);
     buffer_init(&initarr);
+    buffer_init(&finiarr);
     size_t bss_size = 0;
     size_t tbss_size = 0;
     size_t *mod_text_off = xcalloc(n, sizeof(size_t));
@@ -892,6 +1050,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t *mod_tdata_off = xcalloc(n, sizeof(size_t));
     size_t *mod_tbss_off = xcalloc(n, sizeof(size_t));
     size_t *mod_init_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_fini_off = xcalloc(n, sizeof(size_t));
+    int *concat_init_prio = NULL;
+    int *concat_fini_prio = NULL;
 
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
@@ -919,8 +1080,44 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         tbss_size += m->tbss_size;
         pad_buf_to(&initarr, m->init_array_align ? m->init_array_align : 8);
         mod_init_off[i] = initarr.len;
-        buffer_append(&initarr, m->init_array.data, m->init_array.len);
+        {
+            size_t before = initarr.len;
+            buffer_append(&initarr, m->init_array.data, m->init_array.len);
+            size_t nnew = initarr.len / 8;
+            size_t nold = before / 8;
+            if (nnew > 0) {
+                concat_init_prio = realloc(concat_init_prio, nnew * sizeof(int));
+                if (!concat_init_prio) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                for (size_t s = nold; s < nnew; s++)
+                    concat_init_prio[s] = INIT_PRIO_DEFAULT;
+                if (m->init_prio) {
+                    size_t ms = m->init_array.len / 8;
+                    memcpy(concat_init_prio + nold, m->init_prio, ms * sizeof(int));
+                }
+            }
+        }
+        pad_buf_to(&finiarr, m->fini_array_align ? m->fini_array_align : 8);
+        mod_fini_off[i] = finiarr.len;
+        {
+            size_t before = finiarr.len;
+            buffer_append(&finiarr, m->fini_array.data, m->fini_array.len);
+            size_t nnew = finiarr.len / 8;
+            size_t nold = before / 8;
+            if (nnew > 0) {
+                concat_fini_prio = realloc(concat_fini_prio, nnew * sizeof(int));
+                if (!concat_fini_prio) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                for (size_t s = nold; s < nnew; s++)
+                    concat_fini_prio[s] = INIT_PRIO_DEFAULT;
+                if (m->fini_prio) {
+                    size_t ms = m->fini_array.len / 8;
+                    memcpy(concat_fini_prio + nold, m->fini_prio, ms * sizeof(int));
+                }
+            }
+        }
     }
+    size_t *init_remap = NULL, *fini_remap = NULL;
+    sort_array_slots(&initarr, concat_init_prio, &init_remap);
+    sort_array_slots(&finiarr, concat_fini_prio, &fini_remap);
     size_t max_ro_align = 8, max_bss_align = 8, max_td_align = 8, max_tbss_align = 8;
     for (size_t i = 0; i < n; i++) {
         if (mods[i]->rodata_align > max_ro_align) max_ro_align = mods[i]->rodata_align;
@@ -943,6 +1140,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             sinfo[gsi].shndx = m->syms[j].shndx;
             sinfo[gsi].value = m->syms[j].value;
             sinfo[gsi].binding = m->syms[j].binding;
+            sinfo[gsi].type = m->syms[j].type;
             sinfo[gsi].defined = (m->syms[j].shndx != SECT_UNDEF);
         }
     }
@@ -1011,21 +1209,29 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             if (reloc_is_gotpcrel(m->relocs[r].type)) continue;
             if (m->relocs[r].type == R_X86_64_GOTTPOFF) continue;
             if (reloc_is_tls_gd(m->relocs[r].type)) continue;
+            if (reloc_is_tls_ld(m->relocs[r].type)) continue;
+            if (m->relocs[r].type == R_X86_64_DTPOFF32) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (sinfo[gsi].defined) continue;
             const char *nm = m->syms[m->relocs[r].sym].name
                              ? m->syms[m->relocs[r].sym].name : "";
             if (m->relocs[r].type == R_X86_64_PLT32
                 && strcmp(nm, "__tls_get_addr") == 0) {
-                int pair_gd = 0;
+                int pair_skip = 0;
                 for (size_t r2 = 0; r2 < m->num_relocs; r2++) {
                     if (m->relocs[r2].type == R_X86_64_TLSGD
                         && m->relocs[r2].offset + 8 == m->relocs[r].offset) {
-                        pair_gd = 1;
+                        pair_skip = 1;
+                        break;
+                    }
+                    /* TLSLD→LE in executables drops the call; DSOs keep it. */
+                    if (!is_shared && m->relocs[r2].type == R_X86_64_TLSLD
+                        && m->relocs[r2].offset + 5 == m->relocs[r].offset) {
+                        pair_skip = 1;
                         break;
                     }
                 }
-                if (pair_gd) continue;
+                if (pair_skip) continue;
             }
             uint8_t stt = m->syms[m->relocs[r].sym].type;
             if (reloc_is_copy_kind(m->relocs[r].type)
@@ -1115,6 +1321,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
+            if (reloc_is_tls_ld(m->relocs[r].type)) continue;
             if (m->relocs[r].type != R_X86_64_GOTTPOFF
                 && !reloc_is_tls_gd(m->relocs[r].type)) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
@@ -1206,6 +1413,21 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             tls_ie_und_idx[j] = ext_find_or_add(&tls_und_list, &num_tls_und, nm);
         }
     }
+    int *tls_und_weak = num_tls_und ? xcalloc((size_t)num_tls_und, sizeof(int)) : NULL;
+    for (int t = 0; t < num_tls_und; t++) {
+        int any = 0, strong = 0;
+        const char *nm = tls_und_list[t];
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t j = 0; j < m->num_syms; j++) {
+                if (!m->syms[j].name || strcmp(m->syms[j].name, nm) != 0) continue;
+                if (sinfo[mod_sym_base[i] + j].defined) continue;
+                any = 1;
+                if (m->syms[j].binding != STB_WEAK) strong = 1;
+            }
+        }
+        tls_und_weak[t] = any && !strong;
+    }
 
     /* Dynamic link when something is truly undefined, or when producing a
      * shared library (ET_DYN always needs .dynamic / .dynsym for exports). */
@@ -1229,9 +1451,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         int w = 0;
         for (int j = 0; j < num_copy; j++) {
             uint8_t ty = 0;
+            size_t al = 8;
             size_t sz = so_symbol_lookup((const char **)lib_paths, num_lib_paths,
                                          (const char **)needed, (size_t)num_needed,
-                                         copy_list[j], &ty);
+                                         copy_list[j], &ty, &al);
             /* Direct PC32 to a DSO *function* (STT_NOTYPE in the .o) must stay
              * a PLT call, not a COPY of the function body into .bss. */
             if (ty != STT_OBJECT) {
@@ -1246,19 +1469,61 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 continue;
             }
             if (sz < 1) sz = 8;
+            if (al < 1) al = 8;
             if (w != j) {
                 for (size_t gsi = 0; gsi < total_syms; gsi++)
                     if (reloc_copy_idx[gsi] == j) reloc_copy_idx[gsi] = w;
                 copy_list[w] = copy_list[j];
             }
             copy_size[w] = sz;
-            bss_size = pad_size_to(bss_size, 8);
+            bss_size = pad_size_to(bss_size, al);
             copy_off[w] = bss_size;
             bss_size += sz;
-            if (8 > max_bss_align) max_bss_align = 8;
+            if (al > max_bss_align) max_bss_align = al;
             w++;
         }
         num_copy = w;
+    }
+
+    int have_tlsld = 0;
+    for (size_t i = 0; i < n && !have_tlsld; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            if (reloc_is_tls_ld(m->relocs[r].type)) { have_tlsld = 1; break; }
+        }
+    }
+    int tlsld_got_pair = is_shared && have_tlsld;
+
+    /* STT_GNU_IFUNC: one GOT slot + `jmp [got]` thunk per resolver. */
+    int num_ifunc = 0;
+    size_t *ifunc_gsi = NULL;
+    const char **ifunc_name = NULL;
+    size_t *ifunc_thunk_off = NULL;
+    size_t *ifunc_got_fixup = NULL;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            size_t gsi = mod_sym_base[i] + j;
+            if (!sinfo[gsi].defined || sinfo[gsi].shndx != SECT_TEXT) continue;
+            if (m->syms[j].type != STT_GNU_IFUNC) continue;
+            const char *nm = m->syms[j].name ? m->syms[j].name : "";
+            int dup = 0;
+            if (nm[0] && sinfo[gsi].binding != STB_LOCAL) {
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_name[k] && strcmp(ifunc_name[k], nm) == 0) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (dup) continue;
+            ifunc_gsi = realloc(ifunc_gsi, ((size_t)num_ifunc + 1) * sizeof(size_t));
+            ifunc_name = realloc(ifunc_name, ((size_t)num_ifunc + 1) * sizeof(char *));
+            if (!ifunc_gsi || !ifunc_name) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            ifunc_gsi[num_ifunc] = gsi;
+            ifunc_name[num_ifunc] = nm[0] ? nm : NULL;
+            num_ifunc++;
+        }
     }
 
     /* DT_SONAME defaults to the output basename so `gcc -lfoo` / `fakecc -lfoo`
@@ -1346,6 +1611,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         plt0_off = emit_plt0(&text, plt0_got_fixup);
         for (int e = 0; e < num_ext; e++)
             plt_entry_off[e] = emit_plt_entry(&text, e, plt0_off, &plt_got_fixup[e]);
+    }
+    ifunc_thunk_off = num_ifunc ? xcalloc((size_t)num_ifunc, sizeof(size_t)) : NULL;
+    ifunc_got_fixup = num_ifunc ? xcalloc((size_t)num_ifunc, sizeof(size_t)) : NULL;
+    for (int k = 0; k < num_ifunc; k++) {
+        ifunc_thunk_off[k] = text.len;
+        emit_byte(&text, 0xFF); emit_byte(&text, 0x25); /* jmp qword [rip+disp] */
+        ifunc_got_fixup[k] = text.len;
+        emit_int32(&text, 0);
     }
     /* ---- Build dynamic-linking section buffers (sizes needed for layout) ---- */
     Buffer dynstr, dynsym, hash, rela_plt, rela_dyn, dynamic;
@@ -1456,7 +1729,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         }
         for (int t = 0; t < num_tls_und; t++) {
             buf_u32(&dynsym, 0);
-            buf_u8(&dynsym, (uint8_t)((STB_GLOBAL << 4) | STT_TLS));
+            uint8_t bind = (tls_und_weak && tls_und_weak[t]) ? STB_WEAK : STB_GLOBAL;
+            buf_u8(&dynsym, (uint8_t)((bind << 4) | STT_TLS));
             buf_u8(&dynsym, 0);
             buf_u16(&dynsym, SHN_UNDEF);
             buf_u64(&dynsym, 0);
@@ -1557,16 +1831,30 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             buf_u64(&rela_dyn, ((uint64_t)(dyn_copy0 + c) << 32) | R_X86_64_COPY);
             buf_u64(&rela_dyn, 0);
         }
+        for (int k = 0; k < num_ifunc; k++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, R_X86_64_IRELATIVE);
+            buf_u64(&rela_dyn, 0);
+        }
+        if (tlsld_got_pair) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, R_X86_64_DTPMOD64);
+            buf_u64(&rela_dyn, 0);
+        }
     }
 
     /* ---- Compute layout ---- */
     int have_tls = (tdata.len > 0 || tbss_size > 0);
     int init_tls_in_start = have_tls && !need_dynamic;
     int run_ctors = !is_shared && !need_dynamic && initarr.len >= 8;
+    int run_dtors = !is_shared && !need_dynamic && finiarr.len >= 8;
+    int run_irel = !is_shared && !need_dynamic && num_ifunc > 0;
     size_t start_size = 0;
     if (!is_shared) {
         start_size = init_tls_in_start ? (START_SIZE + 25 + (tdata.len > 0 ? 27 : 0)) : START_SIZE;
         if (run_ctors) start_size += INIT_ARRAY_START;
+        if (run_dtors) start_size += (size_t)FINI_ARRAY_START - 2;
+        if (run_irel) start_size += IREL_START;
     }
     /* phnum is finalized after we know whether a data segment is needed;
      * reserve header space for the maximum so segment file offsets are stable.
@@ -1586,13 +1874,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     if (need_dynamic) {
         int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0
                              || num_abs64_relocs > 0 || num_tpoff_dyn > 0
-                             || num_copy > 0);
+                             || num_copy > 0 || num_ifunc > 0 || tlsld_got_pair);
         int have_dt_flags = is_shared && num_tls_ie > 0;
         int have_dt_init = initarr.len > 0;
+        int have_dt_fini = finiarr.len > 0;
         dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0) + (soname ? 1 : 0)
                                 + (have_rela_dyn ? 3 : 0)
                                 + (have_dt_flags ? 1 : 0)
-                                + (have_dt_init ? 2 : 0)) * 16;
+                                + (have_dt_init ? 2 : 0)
+                                + (have_dt_fini ? 2 : 0)) * 16;
     }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
         + rela_plt.len + rela_dyn.len;
@@ -1610,9 +1900,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     while (got_data_off & 7) got_data_off++;
     uint64_t got_vaddr = data_vaddr + got_data_off;
     size_t layout_got_bytes = need_dynamic
-        ? (size_t)(3 + num_ext + num_data_ext + num_tls_ie) * 8
-        : ((num_data_ext + num_tls_ie) > 0
-               ? (size_t)(3 + num_data_ext + num_tls_ie) * 8 : 0);
+        ? (size_t)(3 + num_ext + num_data_ext + num_tls_ie + num_ifunc) * 8
+            + (tlsld_got_pair ? 16 : 0)
+        : ((num_data_ext + num_tls_ie + num_ifunc) > 0
+               ? (size_t)(3 + num_data_ext + num_tls_ie + num_ifunc) * 8 : 0);
     size_t got_end_off = layout_got_bytes
         ? got_data_off + layout_got_bytes : data.len;
     /* Shared: .dynamic follows the GOT in the RW segment. */
@@ -1638,6 +1929,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t initarr_file_offset = data_file_offset + initarr_data_off;
     if (initarr.len > 0)
         rw_filesz = initarr_data_off + initarr.len;
+    size_t finiarr_data_off = pad_size_to(rw_filesz, 8);
+    uint64_t finiarr_vaddr = data_vaddr + finiarr_data_off;
+    size_t finiarr_file_offset = data_file_offset + finiarr_data_off;
+    if (finiarr.len > 0)
+        rw_filesz = finiarr_data_off + finiarr.len;
 
     size_t bss_data_off = rw_filesz;
     bss_data_off = pad_size_to(bss_data_off, max_bss_align);
@@ -1878,17 +2174,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
-            if (reloc_is_tls_gd(rel->type)) {
-                /* Relax TLSGD 16-byte lea+call __tls_get_addr to IE:
-                 *   movq %fs:0, %rax
-                 *   addq x@gottpoff(%rip), %rax
-                 * The TLSGD reloc sits at +4 of the 16-byte sequence. */
+            if (reloc_is_tls_gd(rel->type) || reloc_is_tls_ld(rel->type)) {
                 size_t gsi = mod_sym_base[i] + rel->sym;
                 int ieidx = reloc_tls_ie_idx[gsi];
                 uint64_t got_slot_vaddr = got_vaddr
                     + (uint64_t)(3 + num_ext + num_data_ext + ieidx) * 8;
                 if (rel->type == R_X86_64_TLSGD && patch_in_text >= 4
                     && patch_in_text - 4 + 16 <= text.len) {
+                    /* Relax TLSGD 16-byte lea+call __tls_get_addr to IE. */
                     size_t seq = patch_in_text - 4;
                     static const uint8_t ie[12] = {
                         0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
@@ -1898,7 +2191,50 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                     uint64_t Pdisp = code_vaddr + seq + 16;
                     int32_t disp = (int32_t)(got_slot_vaddr - Pdisp);
                     memcpy(text.data + seq + 12, &disp, 4);
+                } else if (rel->type == R_X86_64_TLSLD && patch_in_text >= 3
+                           && patch_in_text - 3 + 12 <= text.len) {
+                    if (!is_shared) {
+                        /* 12-byte LE: movq %fs:0, %rax with prefixes. */
+                        static const uint8_t le[12] = {
+                            0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25,
+                            0x00, 0x00, 0x00, 0x00
+                        };
+                        memcpy(text.data + patch_in_text - 3, le, 12);
+                    } else {
+                        /* Point the lea at a DTPMOD64 GOT pair; keep the call. */
+                        uint64_t pair = got_vaddr
+                            + (uint64_t)(3 + num_ext + num_data_ext
+                                         + num_tls_ie + num_ifunc) * 8;
+                        int32_t disp = (int32_t)(pair - (P + 4));
+                        memcpy(text.data + patch_in_text, &disp, 4);
+                    }
                 }
+                continue;
+            }
+            if (rel->type == R_X86_64_DTPOFF32) {
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                uint64_t S = 0;
+                if (sinfo[gsi].defined
+                    && (sinfo[gsi].shndx == SECT_TDATA
+                        || sinfo[gsi].shndx == SECT_TBSS)) {
+                    S = sym_addr[gsi];
+                } else {
+                    const char *nm = m->syms[rel->sym].name
+                                     ? m->syms[rel->sym].name : "";
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win != (size_t)-1
+                        && (sinfo[win].shndx == SECT_TDATA
+                            || sinfo[win].shndx == SECT_TBSS))
+                        S = sym_addr[win];
+                    else if (sinfo[gsi].defined)
+                        S = sym_addr[gsi];
+                    else
+                        S = tls_vaddr;
+                }
+                int32_t disp = is_shared
+                    ? (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_vaddr)
+                    : (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_end_vaddr);
+                memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
             if (rel->type == R_X86_64_TPOFF32) {
@@ -1946,6 +2282,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                         skip_gd_call = 1;
                         break;
                     }
+                    if (!is_shared && m->relocs[r2].type == R_X86_64_TLSLD
+                        && m->relocs[r2].offset + 5 == rel->offset) {
+                        skip_gd_call = 1;
+                        break;
+                    }
                 }
                 if (skip_gd_call) continue;
             }
@@ -1968,6 +2309,18 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             } else {
                 int eidx = reloc_ext_idx[gsi];
                 S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
+            }
+            {
+                int ik = -1;
+                const char *inm = rnm;
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_gsi[k] == gsi) { ik = k; break; }
+                    if (inm && ifunc_name[k] && strcmp(ifunc_name[k], inm) == 0) {
+                        ik = k; break;
+                    }
+                }
+                if (ik >= 0)
+                    S = code_vaddr + ifunc_thunk_off[ik];
             }
             /* 32 / 32S are 4-byte S+A; 64 is 8-byte S+A; PC64 is 8-byte
              * S+A−P.  Remaining .text relocs are 4-byte PC32 / PLT32. */
@@ -2002,11 +2355,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             int in_tdata = (rel->shndx == SECT_TDATA);
             int in_rodata = (rel->shndx == SECT_RODATA);
             int in_init = (rel->shndx == SECT_INIT_ARRAY);
+            int in_fini = (rel->shndx == SECT_FINI_ARRAY);
             size_t patch_in_sec = (in_tdata ? mod_tdata_off[i]
                                   : in_rodata ? mod_rodata_off[i]
                                   : in_init ? mod_init_off[i]
+                                  : in_fini ? mod_fini_off[i]
                                   : mod_data_off[i])
                                   + rel->offset;
+            if (in_init && init_remap && (patch_in_sec / 8) < (initarr.len / 8))
+                patch_in_sec = init_remap[patch_in_sec / 8];
+            if (in_fini && fini_remap && (patch_in_sec / 8) < (finiarr.len / 8))
+                patch_in_sec = fini_remap[patch_in_sec / 8];
             size_t gsi = mod_sym_base[i] + rel->sym;
             uint64_t S;
             int abs64 = 0;
@@ -2036,6 +2395,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                         "has no PLT or GLOB_DAT slot\n", dnm);
                 exit(1);
             }
+            {
+                int ik = -1;
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_gsi[k] == gsi) { ik = k; break; }
+                    if (dnm && ifunc_name[k] && strcmp(ifunc_name[k], dnm) == 0) {
+                        ik = k; break;
+                    }
+                }
+                if (ik >= 0)
+                    S = code_vaddr + ifunc_thunk_off[ik];
+            }
             /* Apply by reloc type: 64/PC64 are 8 bytes; 32/32S/PC32 are 4. */
             uint64_t A = (uint64_t)(int64_t)rel->addend;
             uint8_t *dst;
@@ -2053,6 +2423,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 dst = (uint8_t *)initarr.data;
                 dst_len = initarr.len;
                 P = initarr_vaddr + patch_in_sec;
+            } else if (in_fini) {
+                dst = (uint8_t *)finiarr.data;
+                dst_len = finiarr.len;
+                P = finiarr_vaddr + patch_in_sec;
             } else {
                 dst = (uint8_t *)data.data;
                 dst_len = data.len;
@@ -2103,6 +2477,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
             memcpy(text.data + plt_got_fixup[e], &disp, 4);
         }
+    }
+    for (int k = 0; k < num_ifunc; k++) {
+        uint64_t target = got_vaddr
+            + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + k) * 8;
+        uint64_t rip_next = code_vaddr + ifunc_got_fixup[k] + 4;
+        int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
+        memcpy(text.data + ifunc_got_fixup[k], &disp, 4);
     }
 
     /* ---- Find main (and optional static exit for the entry stub) ---- */
@@ -2245,6 +2626,20 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 uint64_t roff = bss_vaddr + copy_off[c];
                 memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
             }
+            for (int k = 0; k < num_ifunc; k++, rdj++) {
+                size_t ent = (size_t)rdj * 24;
+                uint64_t roff = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + k) * 8;
+                uint64_t add = sym_addr[ifunc_gsi[k]];
+                memcpy(rela_dyn.data + ent, &roff, 8);
+                memcpy(rela_dyn.data + ent + 16, &add, 8);
+            }
+            if (tlsld_got_pair) {
+                uint64_t roff = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + num_ifunc) * 8;
+                memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
+                rdj++;
+            }
         }
         /* .dynamic */
         size_t rx_base_vaddr = base + hdr_size;
@@ -2302,6 +2697,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             buf_u64(&dynamic, DT_INIT_ARRAYSZ);
             buf_u64(&dynamic, initarr.len);
         }
+        if (finiarr.len > 0) {
+            buf_u64(&dynamic, DT_FINI_ARRAY);
+            buf_u64(&dynamic, finiarr_vaddr);
+            buf_u64(&dynamic, DT_FINI_ARRAYSZ);
+            buf_u64(&dynamic, finiarr.len);
+        }
         buf_u64(&dynamic, DT_NULL);     buf_u64(&dynamic, 0);
 
         /* ---- Assemble RX segment content ---- */
@@ -2313,9 +2714,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 exit_call = code_vaddr + plt_entry_off[exit_ext_idx];
             else if (exit_static_addr)
                 exit_call = exit_static_addr;
-            gen_start(&rx, base + start_offset, main_addr, exit_call,
-                      init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len,
-                      0, 0);
+            StartInfo sti;
+            memset(&sti, 0, sizeof(sti));
+            sti.call_vaddr = base + start_offset;
+            sti.main_vaddr = main_addr;
+            sti.exit_plt_vaddr = exit_call;
+            sti.have_tls = init_tls_in_start;
+            sti.tls_vaddr = tls_vaddr;
+            sti.tcb_vaddr = tcb_vaddr;
+            sti.tls_memsize = tls_memsize;
+            sti.tdata_len = tdata.len;
+            gen_start(&rx, &sti);
         }
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
@@ -2342,6 +2751,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             buf_u64(&got, data_got_external[j] ? 0 : data_got_addr[j]);
         for (int j = 0; j < num_tls_ie; j++)
             buf_u64(&got, is_shared ? 0 : tls_ie_tpoff[j]);
+        for (int k = 0; k < num_ifunc; k++)
+            buf_u64(&got, 0);
+        if (tlsld_got_pair) {
+            buf_u64(&got, 0);
+            buf_u64(&got, 0);
+        }
 
         /* ---- Build ELF ---- */
         /* NOTE: phnum computed AFTER buffer_init() to avoid a codegen
@@ -2387,6 +2802,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             while (elf.len < initarr_file_offset) buf_u8(&elf, 0);
             buf_bytes(&elf, initarr.data, initarr.len);
         }
+        if (finiarr.len > 0) {
+            while (elf.len < finiarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, finiarr.data, finiarr.len);
+        }
         SectionLayout lay;
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
@@ -2409,6 +2828,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         lay.initarr_vaddr = initarr_vaddr;
         lay.initarr_file_offset = initarr_file_offset;
         lay.initarr_size = initarr.len;
+        lay.have_finiarr = finiarr.len > 0;
+        lay.finiarr_vaddr = finiarr_vaddr;
+        lay.finiarr_file_offset = finiarr_file_offset;
+        lay.finiarr_size = finiarr.len;
         /* RX content is written right after the program headers (file offset
          * hdr_size), so each dynamic section's file offset is hdr_size + its
          * offset inside the rx buffer.  vaddrs already include base+rx_base. */
@@ -2446,10 +2869,24 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         uint64_t entry = base + start_offset;
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr, exit_static_addr,
-                  init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len,
-                  run_ctors ? initarr_vaddr : 0,
-                  run_ctors ? (uint64_t)(initarr.len / 8) : 0);
+        StartInfo sti;
+        memset(&sti, 0, sizeof(sti));
+        sti.call_vaddr = base + start_offset;
+        sti.main_vaddr = main_addr;
+        sti.exit_plt_vaddr = exit_static_addr;
+        sti.have_tls = init_tls_in_start;
+        sti.tls_vaddr = tls_vaddr;
+        sti.tcb_vaddr = tcb_vaddr;
+        sti.tls_memsize = tls_memsize;
+        sti.tdata_len = tdata.len;
+        sti.init_start = run_ctors ? initarr_vaddr : 0;
+        sti.init_count = run_ctors ? (uint64_t)(initarr.len / 8) : 0;
+        sti.fini_start = run_dtors ? finiarr_vaddr : 0;
+        sti.fini_count = run_dtors ? (uint64_t)(finiarr.len / 8) : 0;
+        sti.irel_got = run_irel
+            ? (got_vaddr + (uint64_t)(3 + num_data_ext + num_tls_ie) * 8) : 0;
+        sti.irel_count = run_irel ? (uint64_t)num_ifunc : 0;
+        gen_start(&rx, &sti);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
 
@@ -2457,8 +2894,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         size_t got_bytes = 0;
         Buffer got;
         buffer_init(&got);
-        if (num_data_ext > 0 || num_tls_ie > 0) {
-            got_bytes = (size_t)(3 + num_data_ext + num_tls_ie) * 8;
+        if (num_data_ext > 0 || num_tls_ie > 0 || num_ifunc > 0) {
+            got_bytes = (size_t)(3 + num_data_ext + num_tls_ie + num_ifunc) * 8;
             buf_u64(&got, 0);
             buf_u64(&got, 0);
             buf_u64(&got, 0);
@@ -2466,12 +2903,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 buf_u64(&got, data_got_addr[j]);
             for (int j = 0; j < num_tls_ie; j++)
                 buf_u64(&got, tls_ie_tpoff[j]);
+            for (int k = 0; k < num_ifunc; k++)
+                buf_u64(&got, sym_addr[ifunc_gsi[k]]);
         }
 
         Buffer elf;
         buffer_init(&elf);
         int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0
-                      || (have_tls && tdata.len > 0) || initarr.len > 0);
+                      || (have_tls && tdata.len > 0) || initarr.len > 0
+                      || finiarr.len > 0);
         uint16_t phnum = has_rw ? 2 : 1;
         if (have_tls) phnum++;
         phnum++; /* PT_GNU_STACK */
@@ -2505,6 +2945,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             while (elf.len < initarr_file_offset) buf_u8(&elf, 0);
             buf_bytes(&elf, initarr.data, initarr.len);
         }
+        if (finiarr.len > 0) {
+            while (elf.len < finiarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, finiarr.data, finiarr.len);
+        }
         SectionLayout lay;
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
@@ -2527,6 +2971,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         lay.initarr_vaddr = initarr_vaddr;
         lay.initarr_file_offset = initarr_file_offset;
         lay.initarr_size = initarr.len;
+        lay.have_finiarr = finiarr.len > 0;
+        lay.finiarr_vaddr = finiarr_vaddr;
+        lay.finiarr_file_offset = finiarr_file_offset;
+        lay.finiarr_size = finiarr.len;
         lay.have_dynamic = 0;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
@@ -2554,8 +3002,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
     buffer_free(&tdata);
     buffer_free(&initarr);
+    buffer_free(&finiarr);
+    free(concat_init_prio); free(concat_fini_prio);
+    free(init_remap); free(fini_remap);
     free(mod_text_off); free(mod_rodata_off); free(mod_data_off); free(mod_bss_off);
-    free(mod_tdata_off); free(mod_tbss_off); free(mod_init_off);
+    free(mod_tdata_off); free(mod_tbss_off); free(mod_init_off); free(mod_fini_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);
     free(commons);
     free(reloc_data_abs_idx); free(reloc_data_got_idx);
@@ -2563,6 +3014,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     free(tls_ie_is_undef); free(tls_ie_und_idx);
     for (int t = 0; t < num_tls_und; t++) free(tls_und_list[t]);
     free(tls_und_list);
+    free(tls_und_weak);
+    free(ifunc_gsi); free(ifunc_name); free(ifunc_thunk_off); free(ifunc_got_fixup);
     free(reloc_copy_idx); free(copy_size); free(copy_off);
     for (int c = 0; c < num_copy; c++) free(copy_list[c]);
     free(copy_list);

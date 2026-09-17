@@ -491,6 +491,50 @@ if [ -x "$TMP/copy_p" ]; then
     if [ "$got" = "42" ]; then pass "COPY runtime"; else fail "COPY runtime (exit $got)"; fi
 fi
 
+# COPY slot uses DSO alignment (vmovaps needs 32).
+cat > "$TMP/libal.c" <<'EOF'
+_Alignas(32) int buf[8] = {1,2,3,4,5,6,7,8};
+EOF
+gcc -shared -fPIC -Wl,-soname,libal.so -o "$TMP/libal.so" "$TMP/libal.c" \
+    || { fail "gcc -shared aligned COPY lib"; }
+cat > "$TMP/mal.c" <<'EOF'
+typedef int V __attribute__((vector_size(32)));
+extern V buf;
+V get(void) { return buf; }
+int main(void) { V v = get(); return v[0]; }
+EOF
+gcc -fno-pic -fno-pie -mavx -c "$TMP/mal.c" -o "$TMP/mal.o" \
+    || { fail "gcc -fno-pic aligned COPY user"; }
+rm -f "$TMP/mal_p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/mal.o" -L"$TMP" -lal -o "$TMP/mal_p" 2>"$TMP/err" \
+    || { fail "aligned COPY link: $(head -1 "$TMP/err")"; }
+if [ -x "$TMP/mal_p" ]; then
+    got=0
+    env -u LD_LIBRARY_PATH timeout "$RUN_TIMEOUT" "$TMP/mal_p" >/dev/null || got=$?
+    if [ "$got" = "1" ]; then pass "COPY 32-align runtime"; else fail "COPY 32-align runtime (exit $got)"; fi
+fi
+
+# Weak undef TLS: STB_WEAK so ld.so resolves a missing symbol to 0.
+cat > "$TMP/weak_tls.c" <<'EOF'
+extern __thread int __attribute__((weak)) x;
+int main(void) { volatile void *p = &x; (void)p; return 0; }
+EOF
+gcc -fPIC -c "$TMP/weak_tls.c" -o "$TMP/weak_tls.o" \
+    || { fail "gcc -fPIC weak TLS -c"; }
+rm -f "$TMP/weak_tls_p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/weak_tls.o" -o "$TMP/weak_tls_p" 2>"$TMP/err" \
+    || { fail "weak undef TLS link: $(head -1 "$TMP/err")"; }
+if [ -x "$TMP/weak_tls_p" ]; then
+    if LANG=C readelf -sW "$TMP/weak_tls_p" 2>/dev/null | grep -E 'WEAK' | grep -q 'x'; then
+        pass "weak undef TLS is STB_WEAK"
+    else
+        fail "weak undef TLS not STB_WEAK: $(LANG=C readelf -sW "$TMP/weak_tls_p" 2>/dev/null | grep -E 'TLS|WEAK| x' | head -20)"
+    fi
+    got=0
+    timeout "$RUN_TIMEOUT" "$TMP/weak_tls_p" >/dev/null || got=$?
+    if [ "$got" = "0" ]; then pass "weak undef TLS runtime"; else fail "weak undef TLS runtime (exit $got)"; fi
+fi
+
 # 11) GNU empty-struct return takes no hidden sret (RDI is the first real arg).
 cat > "$TMP/empty_gcc.c" <<'EOF'
 #include <stdlib.h>

@@ -662,6 +662,76 @@ echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_
 gcc -c "$TMP/gcc_ctor.c" -o "$TMP/gcc_ctor.o"
 run_multi 9 "$TMP/fc_ctor_main.c" "$TMP/gcc_ctor.o"
 
+# gcc Local-Dynamic TLS (TLSLD + DTPOFF32) relaxed to LE.
+echo 'static __thread int x = 7; static __thread int y = 3; int get(void) { return x + y; }' > "$TMP/gcc_tlsld.c"
+echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_tlsld.c"
+gcc -fPIC -ftls-model=local-dynamic -c "$TMP/gcc_tlsld.c" -o "$TMP/gcc_tlsld.o"
+if LANG=C readelf -rW "$TMP/gcc_tlsld.o" 2>/dev/null | grep -q 'R_X86_64_TLSLD'; then
+    pass "gcc local-dynamic TLS object has TLSLD"
+else
+    fail "gcc local-dynamic TLS object missing TLSLD: $(LANG=C readelf -rW "$TMP/gcc_tlsld.o" 2>/dev/null | head -20)"
+fi
+run_multi 10 "$TMP/fc_tlsld.c" "$TMP/gcc_tlsld.o"
+
+# destructor runs after main (static _start reverse walk).
+echo 'package main; int g = 3; __attribute__((destructor)) void bye(void) { g = 1; } int main(void) { return g; }' > "$TMP/dtor.c"
+# destructor cannot change main's return; check it is present and a gcc dtor runs via write.
+cat > "$TMP/gcc_dtor.c" <<'EOF'
+int g;
+__attribute__((destructor)) void bye(void) { g = 9; }
+int get(void) { return g; }
+__attribute__((constructor)) void hi(void) { g = 4; }
+EOF
+echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_dtor_main.c"
+gcc -c "$TMP/gcc_dtor.c" -o "$TMP/gcc_dtor.o"
+if LANG=C readelf -S "$TMP/gcc_dtor.o" 2>/dev/null | grep -q 'FINI_ARRAY'; then
+    pass "gcc destructor .o has .fini_array"
+else
+    fail "gcc destructor .o missing .fini_array: $(LANG=C readelf -S "$TMP/gcc_dtor.o" 2>/dev/null | head -30)"
+fi
+run_multi 4 "$TMP/fc_dtor_main.c" "$TMP/gcc_dtor.o"
+
+echo 'package main; void exit(int); __attribute__((destructor)) void bye(void) { exit(11); } int main(void) { return 0; }' > "$TMP/fc_dtor_exit.c"
+run_multi 11 "$TMP/fc_dtor_exit.c"
+
+cat > "$TMP/gcc_dtor_exit.c" <<'EOF'
+void exit(int);
+__attribute__((destructor)) void bye(void) { exit(11); }
+EOF
+echo 'package main; int main(void) { return 0; }' > "$TMP/fc_dtor_exit_main.c"
+gcc -c "$TMP/gcc_dtor_exit.c" -o "$TMP/gcc_dtor_exit.o"
+run_multi 11 "$TMP/fc_dtor_exit_main.c" "$TMP/gcc_dtor_exit.o"
+
+# constructor priority: smaller runs first (gcc .init_array.00NNN).
+cat > "$TMP/gcc_prio.c" <<'EOF'
+int g;
+__attribute__((constructor(200))) void ctor_b(void) { g = 2; }
+__attribute__((constructor(101))) void ctor_a(void) { g = 1; }
+int get(void) { return g; }
+EOF
+echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_prio_main.c"
+gcc -c "$TMP/gcc_prio.c" -o "$TMP/gcc_prio.o"
+run_multi 2 "$TMP/fc_prio_main.c" "$TMP/gcc_prio.o"
+
+# fakecc constructor(N) in one TU.
+echo 'package main; int g; __attribute__((constructor(200))) void ctor_b(void) { g = 2; } __attribute__((constructor(101))) void ctor_a(void) { g = 1; } int main(void) { return g; }' > "$TMP/fc_prio.c"
+run_multi 2 "$TMP/fc_prio.c"
+
+# gcc STT_GNU_IFUNC: call the implementation, not the resolver.
+cat > "$TMP/gcc_ifunc.c" <<'EOF'
+static int impl(void) { return 42; }
+static void *resolve(void) { return impl; }
+int foo(void) __attribute__((ifunc("resolve")));
+EOF
+echo 'package main; int foo(void); int main(void) { return foo(); }' > "$TMP/fc_ifunc_main.c"
+gcc -c "$TMP/gcc_ifunc.c" -o "$TMP/gcc_ifunc.o"
+if LANG=C readelf -sW "$TMP/gcc_ifunc.o" 2>/dev/null | grep -q 'IFUNC'; then
+    pass "gcc IFUNC object has STT_GNU_IFUNC"
+else
+    fail "gcc IFUNC object missing STT_GNU_IFUNC: $(LANG=C readelf -sW "$TMP/gcc_ifunc.o" 2>/dev/null | head -20)"
+fi
+run_multi 42 "$TMP/fc_ifunc_main.c" "$TMP/gcc_ifunc.o"
+
 # -mno-avx: 32-byte vectors are MEMORY, matching gcc -mno-avx.
 echo 'typedef int V __attribute__((vector_size(32))); int take(V v) { return v[0] + v[7]; }' > "$TMP/gcc_v32.c"
 echo 'package main; typedef int V __attribute__((vector_size(32))); int take(V v); int main(void) { V v = {1,0,0,0,0,0,0,6}; return take(v); }' > "$TMP/fc_v32_main.c"
