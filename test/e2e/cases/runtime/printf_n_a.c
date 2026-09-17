@@ -32,5 +32,20 @@ int main(void) {
     n = -1;
     runtime.sprintf(buf, "%s%n", "hi", &n);
     if (n != 2) return 9;
+
+    /* Round-to-nearest-even: 1.5 = 0x1.8p+0, %.0a ties up to 0x2p+0. */
+    runtime.sprintf(buf, "%.0a", 1.5);
+    if (runtime.strcmp(buf, "0x2p+0") != 0) return 10;
+
+    runtime.sprintf(buf, "%.1a", 1.09375);
+    if (runtime.strcmp(buf, "0x1.2p+0") != 0) return 11;
+
+    /* Tie-to-even: 0x1.08p+0 keeps the even 0. */
+    runtime.sprintf(buf, "%.1a", 1.03125);
+    if (runtime.strcmp(buf, "0x1.0p+0") != 0) return 12;
+
+    runtime.sprintf(buf, "%.0La", 1.09375L);
+    if (runtime.strcmp(buf, "0x9p-3") != 0) return 13;
+
     return 0;
 }

@@ -682,11 +682,13 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
         eight[1] = SV_SSE;
     /* Size > two eightbytes: SysV says MEMORY unless the first eightbyte
      * is SSE and every later eightbyte is SSEUP — i.e. one YMM/ZMM.
+     * Padding eightbytes are NO_CLASS, not SSEUP, so
+     * `aligned(32) { __m128 }` is MEMORY (not a YMM).
      * 32-byte → one YMM (nreg=1).  64-byte → one ZMM if AVX-512F. */
     if (n > 2) {
         if (eight[0] != SV_SSE) return 0;
         for (int i = 1; i < n; i++) {
-            if (eight[i] != SV_SSEUP && eight[i] != SV_NO) return 0;
+            if (eight[i] != SV_SSEUP) return 0;
         }
         if (sz == 32 || (sz == 64 && host_has_avx512f())) {
             cls[0] = SYSV_CLS_SSE;

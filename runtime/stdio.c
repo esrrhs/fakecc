@@ -756,7 +756,7 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
             if (ch < 0) { input_fail = 1; break; }
             int sign = 1;
             int saw_sign = 0;
-            if (spec != 'p' && used < maxw && (ch == '-' || ch == '+')) {
+            if (used < maxw && (ch == '-' || ch == '+')) {
                 if (ch == '-') sign = -1;
                 used = used + 1;
                 nread = nread + 1;

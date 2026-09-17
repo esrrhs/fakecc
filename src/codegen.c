@@ -3059,6 +3059,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
          * `sub $stack_size`) so va_start can recover it as [rbp - frame_down]
          * even if a later VLA moves rsp.  apply_args/result follow it. */
         int apply_args_rsp_off = -1, apply_result_rsp_off = -1, apply_saved_sp_rsp_off = -1;
+        int aligned_call_saved_sp_rsp_off = -1;
         int bottom_extra = 0;
         if (fn->is_variadic) bottom_extra = 176;
         if (fn->needs_apply_args) {
@@ -3069,6 +3070,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             apply_result_rsp_off = bottom_extra;
             bottom_extra += APPLY_RESULT_SIZE;
             apply_saved_sp_rsp_off = bottom_extra;
+            bottom_extra += 8;
+        }
+        /* aligned_call used to lea rsp from the fixed frame, which lands on
+         * a live VLA.  Keep a rbp-relative copy of the current rsp so we
+         * can sub/and from it and restore after the call. */
+        if (fn->has_dyn_alloca) {
+            aligned_call_saved_sp_rsp_off = bottom_extra;
             bottom_extra += 8;
         }
         stack_size += bottom_extra;
@@ -3088,6 +3096,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             ? -(frame_down - apply_result_rsp_off) : 0;
         int apply_saved_sp_rbp_off = (apply_saved_sp_rsp_off >= 0)
             ? -(frame_down - apply_saved_sp_rsp_off) : 0;
+        int aligned_call_saved_sp_rbp_off = (aligned_call_saved_sp_rsp_off >= 0)
+            ? -(frame_down - aligned_call_saved_sp_rsp_off) : 0;
 
         emit_byte(&out->text, 0x55);              /* pushq %rbp */
         size_t after_push_rbp_pc = out->text.len;
@@ -4675,11 +4685,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     int slack = max_al;
                     /* Realign via rbp so we do not clobber GP arg homes
                      * (R11 previously held an outgoing eightbyte).  Restore
-                     * the same way after the call.  Dynamic alloca already
-                     * saved rsp separately; fall back to the fixed frame. */
-                    emit_lea_rbp(&out->text, REG_RSP,
-                                 -(frame_down + stack_bytes + slack));
-                    emit_and_imm32(&out->text, REG_RSP, (int32_t)-max_al);
+                     * the same way after the call.  A live VLA/alloca sits
+                     * below the fixed frame, so save the current rsp and
+                     * allocate from there instead of lea from rbp. */
+                    if (fn->has_dyn_alloca) {
+                        emit_store_spill(&out->text, REG_RSP,
+                                         aligned_call_saved_sp_rbp_off);
+                        emit_sub_rsp_imm32(&out->text, stack_bytes + slack);
+                        emit_and_imm32(&out->text, REG_RSP, (int32_t)-max_al);
+                    } else {
+                        emit_lea_rbp(&out->text, REG_RSP,
+                                     -(frame_down + stack_bytes + slack));
+                        emit_and_imm32(&out->text, REG_RSP, (int32_t)-max_al);
+                    }
                     for (int k = 0; k < nargs; k++) {
                         if (target_reg[k] >= 0) continue;
                         int off = 8 * arg_slot[k];
@@ -4991,7 +5009,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
                 /* Tear down stack args + padding. */
                 if (aligned_call) {
-                    emit_lea_rbp(&out->text, REG_RSP, -frame_down);
+                    if (fn->has_dyn_alloca)
+                        emit_load_spill(&out->text, REG_RSP,
+                                        aligned_call_saved_sp_rbp_off);
+                    else
+                        emit_lea_rbp(&out->text, REG_RSP, -frame_down);
                 } else {
                     int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
                     if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);

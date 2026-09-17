@@ -28,5 +28,21 @@ int main(void) {
 
     r = runtime.sscanf("123", "%[a-z]", a);
     if (r != 0) return 12;
+
+    /* glibc %p accepts a leading sign, like %x. */
+    {
+        void *p = (void *)0;
+        r = runtime.sscanf("-10", "%p", &p);
+        if (r != 1) return 13;
+        if (p != (void *)(unsigned long)0xfffffffffffffff0UL) return 14;
+        p = (void *)0;
+        r = runtime.sscanf("+0xabc", "%p", &p);
+        if (r != 1) return 15;
+        if (p != (void *)(unsigned long)0xabc) return 16;
+        p = (void *)0;
+        r = runtime.sscanf("-0x10", "%p", &p);
+        if (r != 1) return 17;
+        if (p != (void *)(unsigned long)0xfffffffffffffff0UL) return 18;
+    }
     return 0;
 }

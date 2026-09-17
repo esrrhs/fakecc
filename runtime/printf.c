@@ -285,43 +285,80 @@ static int hex_digit_ch(int d, int upper) {
 }
 
 /* 0xL[.frac]p±exp.  `frac_bits` is the payload after the leading hex digit,
- * packed in the high bits of `frac` (MSB first). */
+ * packed in the high bits of `frac` (MSB first).
+ * Finite precision rounds to nearest-even at the first dropped nibble
+ * (glibc: `%.0a` of 1.5 is `0x2p+0`, not `0x1p+0`). */
 static int fmt_hex_payload(char *out, int lead, unsigned long long frac,
                            int frac_bits, int pexp, int prec, int upper, int alt) {
     int n = 0;
-    out[n] = '0'; n = n + 1;
-    out[n] = upper ? 'X' : 'x'; n = n + 1;
-    out[n] = (char)hex_digit_ch(lead, upper); n = n + 1;
-
     int ndig = (frac_bits + 3) / 4;
-    char hex[24];
+    int digits[24];
     int i = 0;
-    while (i < ndig) {
-        hex[i] = (char)hex_digit_ch((int)((frac >> 60) & 15), upper);
+    int hlen;
+    while (i < ndig && i < 24) {
+        digits[i] = (int)((frac >> 60) & 15);
         frac = frac << 4;
         i = i + 1;
     }
-    int hlen = ndig;
     if (prec < 0) {
-        while (hlen > 0 && hex[hlen - 1] == '0') hlen = hlen - 1;
-    } else if (prec < hlen) {
-        hlen = prec;
-        while (hlen < prec) { hex[hlen] = '0'; hlen = hlen + 1; }
+        hlen = ndig;
+        while (hlen > 0 && digits[hlen - 1] == 0) hlen = hlen - 1;
     } else {
-        while (hlen < prec && hlen < 20) { hex[hlen] = '0'; hlen = hlen + 1; }
+        if (prec < ndig) {
+            int guard = digits[prec];
+            int sticky = 0;
+            int k = prec + 1;
+            int last;
+            int round_up = 0;
+            while (k < ndig) {
+                if (digits[k] != 0) sticky = 1;
+                k = k + 1;
+            }
+            last = (prec == 0) ? lead : digits[prec - 1];
+            if (guard > 8) round_up = 1;
+            else if (guard == 8 && (sticky || (last & 1))) round_up = 1;
+            if (round_up) {
+                int p = prec - 1;
+                while (p >= 0 && digits[p] == 15) {
+                    digits[p] = 0;
+                    p = p - 1;
+                }
+                if (p >= 0) {
+                    digits[p] = digits[p] + 1;
+                } else {
+                    lead = lead + 1;
+                    if (lead >= 16) {
+                        lead = 1;
+                        pexp = pexp + 4;
+                    }
+                }
+            }
+            hlen = prec;
+        } else {
+            hlen = ndig;
+            while (hlen < prec && hlen < 20) {
+                digits[hlen] = 0;
+                hlen = hlen + 1;
+            }
+        }
     }
+    out[n] = '0'; n = n + 1;
+    out[n] = upper ? 'X' : 'x'; n = n + 1;
+    out[n] = (char)hex_digit_ch(lead, upper); n = n + 1;
     if (hlen > 0 || alt) {
         out[n] = '.'; n = n + 1;
         i = 0;
-        while (i < hlen) { out[n] = hex[i]; n = n + 1; i = i + 1; }
+        while (i < hlen) { out[n] = (char)hex_digit_ch(digits[i], upper); n = n + 1; i = i + 1; }
     }
     out[n] = upper ? 'P' : 'p'; n = n + 1;
     if (pexp < 0) { out[n] = '-'; n = n + 1; pexp = -pexp; }
     else { out[n] = '+'; n = n + 1; }
-    char eb[16];
-    int el = uint_to_buf(eb, (unsigned long long)pexp, 10, 0);
-    i = 0;
-    while (i < el) { out[n] = eb[i]; n = n + 1; i = i + 1; }
+    {
+        char eb[16];
+        int el = uint_to_buf(eb, (unsigned long long)pexp, 10, 0);
+        i = 0;
+        while (i < el) { out[n] = eb[i]; n = n + 1; i = i + 1; }
+    }
     return n;
 }
 

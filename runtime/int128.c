@@ -280,8 +280,9 @@ long double __fakecc_floatuntixf(unsigned long long lo, unsigned long long hi) {
     return pack_xf(lo, hi, 0);
 }
 
-static void mag_to_i128(int sign, int exp, unsigned long long frac, int frac_bits,
-                        int implicit, unsigned long long *olo, unsigned long long *ohi) {
+static void mag_to_i128(int sign, int is_unsigned, int exp, unsigned long long frac,
+                        int frac_bits, int implicit,
+                        unsigned long long *olo, unsigned long long *ohi) {
     unsigned long long lo;
     unsigned long long hi;
     int sh;
@@ -299,7 +300,15 @@ static void mag_to_i128(int sign, int exp, unsigned long long frac, int frac_bit
     sh = exp - frac_bits;
     if (sh < 0) u128_shr(&lo, &hi, -sh);
     else u128_shl(&lo, &hi, sh);
-    if (sign) u128_neg(&lo, &hi);
+    if (sign) {
+        /* libgcc __fixunsdfti uses cvttsd2si on each 64-bit half, so a
+         * negative value with |x| < 2^64 becomes 2^64-|x| in the low
+         * half and high=0 — not the 128-bit two's complement. */
+        if (is_unsigned && hi == 0)
+            lo = 0ULL - lo;
+        else
+            u128_neg(&lo, &hi);
+    }
     *olo = lo;
     *ohi = hi;
 }
@@ -328,7 +337,7 @@ static void fix_double(double a, int is_unsigned,
     }
     if (expf == 0) { exp = -1022; implicit = 0; }
     else { exp = expf - 1023; implicit = 1; }
-    mag_to_i128(sign, exp, frac, 52, implicit, lo, hi);
+    mag_to_i128(sign, is_unsigned, exp, frac, 52, implicit, lo, hi);
 }
 
 static void fix_float(float a, int is_unsigned,
@@ -350,7 +359,7 @@ static void fix_float(float a, int is_unsigned,
     }
     if (expf == 0) { exp = -126; implicit = 0; }
     else { exp = expf - 127; implicit = 1; }
-    mag_to_i128(sign, exp, frac, 23, implicit, lo, hi);
+    mag_to_i128(sign, is_unsigned, exp, frac, 23, implicit, lo, hi);
 }
 
 static void fix_ld(long double a, int is_unsigned,
@@ -378,7 +387,7 @@ static void fix_ld(long double a, int is_unsigned,
     }
     if (expf == 0) exp = -16382;
     else exp = (int)expf - 16383;
-    mag_to_i128(sign, exp, frac, 63, 0, lo, hi);
+    mag_to_i128(sign, is_unsigned, exp, frac, 63, 0, lo, hi);
 }
 
 void __fakecc_fixdfti(double a, unsigned long long *lo, unsigned long long *hi) {

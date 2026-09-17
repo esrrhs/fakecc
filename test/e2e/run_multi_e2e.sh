@@ -298,4 +298,17 @@ echo 'struct Big { unsigned char x[200]; }; int pick(struct Big b, int i) { retu
 gcc -std=c99 -c "$TMP/gcc_pick.c" -o "$TMP/gcc_pick.o"
 run_multi 7 "$TMP/fc_big_main.c" "$TMP/gcc_pick.o"
 
+# Over-aligned SSE is MEMORY (padding eightbytes are NO_CLASS, not SSEUP).
+# gcc callee + fakecc caller, and the reverse.
+echo 'typedef double V __attribute__((vector_size(16))); struct __attribute__((aligned(32))) A { V x; }; int take(struct A a) { return (int)a.x[0] + (int)a.x[1]; }' > "$TMP/gcc_oa.c"
+echo 'package main; typedef double V __attribute__((vector_size(16))); struct __attribute__((aligned(32))) A { V x; }; int take(struct A a); int main(void) { struct A a; a.x[0] = 3.0; a.x[1] = 4.0; return take(a); }' > "$TMP/fc_oa_main.c"
+gcc -std=c99 -c "$TMP/gcc_oa.c" -o "$TMP/gcc_oa.o"
+run_multi 7 "$TMP/fc_oa_main.c" "$TMP/gcc_oa.o"
+
+echo 'package main; typedef double V __attribute__((vector_size(16))); struct __attribute__((aligned(32))) A { V x; }; int take(struct A a) { return (int)a.x[0] + (int)a.x[1]; }' > "$TMP/fc_oa.c"
+echo 'typedef double V __attribute__((vector_size(16))); struct __attribute__((aligned(32))) A { V x; }; int take(struct A a); int main(void) { struct A a; a.x[0] = 3.0; a.x[1] = 4.0; return take(a); }' > "$TMP/gcc_oa_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_oa.c" -o "$TMP/fc_oa.o"
+gcc -std=c99 -c "$TMP/gcc_oa_main.c" -o "$TMP/gcc_oa_main.o"
+run_multi 7 "$TMP/fc_oa.o" "$TMP/gcc_oa_main.o"
+
 exit $FAIL
