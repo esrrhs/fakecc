@@ -486,6 +486,8 @@ static int scan_collect_fp(FILE *f, int *chp, int *nreadp, int maxw,
             goto fail;
         }
         any = 1;
+        /* Match glibc scanf: NAN is the subject sequence; a following
+         * `(n-char-sequence)` is leftover, unlike C99 strtod. */
         goto done;
     }
 

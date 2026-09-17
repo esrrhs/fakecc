@@ -576,11 +576,13 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
             const StructMember *m = &sd->members[mi];
             /* Zero-width `: 0` only forces alignment; it is not an ABI object. */
             if (m->bit_width == 0) continue;
+            /* GNU union with a true FAM (`char d[]`, length < 0) is MEMORY.
+             * `[0]` is not a FAM and does not force this. */
+            if (sd->is_union && m->type.kind == TY_ARRAY && m->type.length < 0
+                && !m->type.vla_dim)
+                return 1;
             int moff = offset + m->offset;
-            int msz = m->bit_width > 0
-                      ? (m->bit_width <= 8 ? 1 : m->bit_width <= 16 ? 2
-                         : m->bit_width <= 32 ? 4 : 8)
-                      : type_size(m->type);
+            int msz = m->bit_width > 0 ? 0 : type_size(m->type);
             if (msz <= 0 && m->bit_width <= 0) {
                 if (m->type.kind == TY_ARRAY || m->type.kind == TY_STRUCT
                     || m->type.is_vector) {
@@ -593,10 +595,17 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
                 if (ma > 1 && (m->offset % ma) != 0) return 1;
             }
             if (m->bit_width > 0) {
-                int end = moff + msz;
+                /* Occupy every byte that holds any bit of the field.
+                 * Rounding width to 1/2/4/8 from the container byte misses
+                 * a packed field that starts mid-byte and spills into the
+                 * next eightbyte (`unsigned long :60` then `unsigned :8`). */
+                int start_bit = moff * 8 + m->bit_offset;
+                int last_bit = start_bit + m->bit_width - 1;
+                int start_byte = start_bit / 8;
+                int last_byte = last_bit / 8;
                 for (int eb = 0; eb < 8; eb++) {
                     int lo = eb * 8, hi = lo + 8;
-                    if (end <= lo || moff >= hi) continue;
+                    if (last_byte + 1 <= lo || start_byte >= hi) continue;
                     eight[eb] = sysv_merge(eight[eb], SV_INT);
                     if (eight[eb] == SV_MEM) return 1;
                 }
@@ -703,12 +712,52 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
         cls[0] = SYSV_CLS_SSE;
         return 1;
     }
+    /* Trailing padding eightbytes are NO_CLASS: they do not consume a
+     * register.  `aligned(16) { long x; }` is 16 bytes but only RDI;
+     * converting the pad to INTEGER would steal RSI from the next arg. */
+    while (n > 1 && eight[n - 1] == SV_NO) n--;
     for (int i = 0; i < n; i++) {
         int c = eight[i] == SV_NO ? SV_INT : eight[i];
         if (c == SV_MEM) return 0;
         cls[i] = (c == SV_SSE || c == SV_SSEUP) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
     }
     return n;
+}
+
+static int type_is_pure_x87(Type t) {
+    if (t.is_vector) return 0;
+    if (t.kind == TY_FLOAT && t.width == 16) return 1;
+    if (t.kind == TY_ARRAY && t.elem_type) {
+        if (t.length <= 0) return 1;
+        return type_is_pure_x87(*t.elem_type);
+    }
+    if (t.kind != TY_STRUCT || !t.tag) return 0;
+    const StructRegistry *reg = get_ir_structs();
+    if (!reg) reg = get_sema_structs();
+    if (!reg) reg = get_parser_structs();
+    const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : NULL;
+    if (!sd) return 0;
+    int any = 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        if (sd->members[i].bit_width == 0) continue;
+        Type mt = sd->members[i].type;
+        if (mt.kind == TY_ARRAY && mt.length <= 0 && !mt.vla_dim) continue;
+        if (!type_is_pure_x87(mt)) return 0;
+        any = 1;
+    }
+    return any;
+}
+
+int sysv_agg_ret_x87(Type t) {
+    /* SysV: one X87+X87UP object (16 bytes) returns in st0.  A 32-byte
+     * `{ long double a, b }` or `_Complex long double` is not this case.
+     * A union that also has INTEGER/SSE members is MEMORY and uses sret. */
+    if (type_is_complex_ldouble(t)) return 0;
+    if (t.kind != TY_STRUCT) return 0;
+    if (type_size(t) != 16) return 0;
+    SysVRegClass cls[2];
+    if (sysv_classify_agg(t, cls) != 0) return 0;
+    return type_is_pure_x87(t);
 }
 
 int sysv_memory_pass_as_pointer(Type t) {
@@ -764,6 +813,8 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
     long long a = sd->is_packed ? 1 : type_align(ty);
     if (!sd->is_packed && align > a) a = align;
     long long sz = type_size(ty);
+    /* FAM / incomplete array: no allocated bytes; `[0]` is already 0. */
+    if (sz < 0) sz = 0;
     /* Track the max member alignment for final struct alignment. */
     if (!sd->is_packed && a > sd->align) sd->align = a;
     long long off;

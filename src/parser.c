@@ -323,6 +323,16 @@ static int skip_attribute(Parser *p) {
     return parse_attribute(p, NULL, NULL, NULL, NULL, NULL);
 }
 
+/* `aligned(N)` after the identifier is consumed inside parse_declarator
+ * (and prefix attrs by parse_specifiers / skip_attribute).  Both paths
+ * record N in g_parsed_align; copy it onto the ST_DECL so IR/codegen
+ * see the real alignment. */
+static void apply_decl_align(int *align, int prefix) {
+    if (g_parsed_align > *align) *align = g_parsed_align;
+    if (prefix > *align) *align = prefix;
+    g_parsed_align = 0;
+}
+
 /* True if `name` appears in this TU's import list. */
 static int tu_has_import(const TranslationUnit *tu, const char *name) {
     for (size_t i = 0; i < tu->imports.len; i++)
@@ -1544,11 +1554,12 @@ static Expr *parse_expr(Parser *p); /* forward declaration */
 
 /* Parse an array dimension size: an int literal, enum constant,
  * full constant expression, or dynamic expression for VLA.
- * Returns the constant value (0 if absent, -1 if VLA with *dim_expr set). */
+ * Returns the constant value (0 for `[0]`, -1 if absent/`[]` FAM or a VLA
+ * with *dim_expr set). */
 static long long parse_array_size_ext(Parser *p, Expr **dim_expr) {
     if (dim_expr) *dim_expr = NULL;
     if (peek(p)->kind == TK_RBRACKET) {
-        return 0;
+        return -1; /* incomplete / flexible array member */
     }
     Expr *e = parse_expr(p);
     long long val = 0;
@@ -2137,7 +2148,7 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
         return types_compatible_unqual(a->pointee, b->pointee);
     }
     if (a->kind == TY_ARRAY) {
-        if (a->length != b->length && a->length != 0 && b->length != 0) return 0;
+        if (a->length != b->length && a->length > 0 && b->length > 0) return 0;
         if (!a->elem_type || !b->elem_type) return 0;
         if (a->elem_type->is_const != b->elem_type->is_const ||
             a->elem_type->is_volatile != b->elem_type->is_volatile) return 0;
@@ -3656,6 +3667,7 @@ static Stmt parse_stmt(Parser *p) {
          * `const` is handled inside parse_specifiers. */
         int storage_class = 0; /* 0=default, 1=static, 2=extern */
         g_parsed_tls = 0;
+        g_parsed_align = 0;
         for (;;) {
             if (peek(p)->kind == TK_KW_STATIC) {
                 storage_class = 1;
@@ -3702,6 +3714,8 @@ static Stmt parse_stmt(Parser *p) {
                 advance(p);
             } else break;
         }
+        int prefix_align = g_parsed_align;
+        g_parsed_align = 0;
         /* A definition-only declaration (`enum { ... };`, `struct { ... };`)
          * has no declarator or variable name — the specifiers consumed the
          * whole definition and the next token is `;`.  Accept it as a no-op. */
@@ -3762,6 +3776,7 @@ static Stmt parse_stmt(Parser *p) {
             }
             while (parse_attribute(p, &s.u.decl.align, NULL, NULL, NULL,
                                    &s.u.decl.alias_target)) {}
+            apply_decl_align(&s.u.decl.align, prefix_align);
             if (!s.u.decl.alias_target && g_parsed_alias) {
                 s.u.decl.alias_target = g_parsed_alias;
                 g_parsed_alias = NULL;

@@ -54,6 +54,9 @@
 #define SHF_TLS          0x400
 
 #define STB_LOCAL        0
+#define STB_GLOBAL       1
+#define STB_WEAK         2
+#define SHN_COMMON       0xfff2
 #define STT_SECTION      3
 
 #define DT_NULL         0
@@ -74,6 +77,69 @@
 #define DT_RUNPATH      29
 #define R_X86_64_JUMP_SLOT 7
 #define R_X86_64_RELATIVE  8
+
+static int reloc_is_gotpcrel(uint32_t t) {
+    return t == R_X86_64_GOTPCREL
+        || t == R_X86_64_GOTPCRELX
+        || t == R_X86_64_REX_GOTPCRELX;
+}
+
+static int reloc_is_pc(uint32_t t) {
+    return t == R_X86_64_PC32 || t == R_X86_64_PLT32 || t == R_X86_64_PC64;
+}
+
+static int reloc_is_abs32(uint32_t t) {
+    return t == R_X86_64_32 || t == R_X86_64_32S;
+}
+
+static int reloc_width(uint32_t t) {
+    if (t == R_X86_64_64 || t == R_X86_64_PC64) return 8;
+    return 4;
+}
+
+static void pad_buf_to(Buffer *b, size_t align) {
+    if (align < 1) align = 1;
+    while (b->len % align) {
+        char z = 0;
+        buffer_append(b, &z, 1);
+    }
+}
+
+static size_t pad_size_to(size_t n, size_t align) {
+    if (align < 1) align = 1;
+    return (n + align - 1) / align * align;
+}
+
+typedef struct { int defined; int shndx; size_t value; uint8_t binding; } LinkSymInfo;
+
+/* Prefer STB_GLOBAL, then STB_WEAK, then SHN_COMMON. */
+static size_t find_export_gsi(EmitModule **mods, size_t n, const size_t *mod_sym_base,
+                              const LinkSymInfo *sinfo, const char *nm) {
+    size_t best_g = (size_t)-1, best_w = (size_t)-1, best_c = (size_t)-1;
+    if (!nm || !nm[0]) return (size_t)-1;
+    for (size_t mi = 0; mi < n; mi++) {
+        EmitModule *om = mods[mi];
+        for (size_t mj = 0; mj < om->num_syms; mj++) {
+            size_t ogsi = mod_sym_base[mi] + mj;
+            if (!sinfo[ogsi].defined || !om->syms[mj].name) continue;
+            if (strcmp(om->syms[mj].name, nm) != 0) continue;
+            int sh = sinfo[ogsi].shndx;
+            uint8_t b = sinfo[ogsi].binding;
+            if (sh == SHN_COMMON) {
+                if (best_c == (size_t)-1) best_c = ogsi;
+                continue;
+            }
+            if (b == STB_GLOBAL) {
+                if (best_g == (size_t)-1) best_g = ogsi;
+            } else if (b == STB_WEAK) {
+                if (best_w == (size_t)-1) best_w = ogsi;
+            }
+        }
+    }
+    if (best_g != (size_t)-1) return best_g;
+    if (best_w != (size_t)-1) return best_w;
+    return best_c;
+}
 
 #define STB_GLOBAL      1
 #define SHN_UNDEF       0
@@ -678,27 +744,35 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
-        while (text.len & 15) { char z = 0; buffer_append(&text, &z, 1); }
+        size_t ta = m->text_align > 16 ? m->text_align : 16;
+        pad_buf_to(&text, ta);
         mod_text_off[i] = text.len;
         buffer_append(&text, m->text.data, m->text.len);
-        while (rodata.len & 7) { char z = 0; buffer_append(&rodata, &z, 1); }
+        pad_buf_to(&rodata, m->rodata_align ? m->rodata_align : 8);
         mod_rodata_off[i] = rodata.len;
         buffer_append(&rodata, m->rodata.data, m->rodata.len);
-        while (data.len & 7) { char z = 0; buffer_append(&data, &z, 1); }
+        pad_buf_to(&data, m->data_align ? m->data_align : 8);
         mod_data_off[i] = data.len;
         buffer_append(&data, m->data.data, m->data.len);
-        while (bss_size & 7) bss_size++;
+        bss_size = pad_size_to(bss_size, m->bss_align ? m->bss_align : 8);
         mod_bss_off[i] = bss_size;
         bss_size += m->bss_size;
         /* .tdata / .tbss concatenated per-module.  tdata is file-resident
          * (loaded into the TLS template); tbss is zero-fill at run time and
          * contributes only to memsz of PT_TLS. */
-        while (tdata.len & 7) { char z = 0; buffer_append(&tdata, &z, 1); }
+        pad_buf_to(&tdata, m->tdata_align ? m->tdata_align : 8);
         mod_tdata_off[i] = tdata.len;
         buffer_append(&tdata, m->tdata.data, m->tdata.len);
-        while (tbss_size & 7) tbss_size++;
+        tbss_size = pad_size_to(tbss_size, m->tbss_align ? m->tbss_align : 8);
         mod_tbss_off[i] = tbss_size;
         tbss_size += m->tbss_size;
+    }
+    size_t max_ro_align = 8, max_bss_align = 8, max_td_align = 8, max_tbss_align = 8;
+    for (size_t i = 0; i < n; i++) {
+        if (mods[i]->rodata_align > max_ro_align) max_ro_align = mods[i]->rodata_align;
+        if (mods[i]->bss_align > max_bss_align) max_bss_align = mods[i]->bss_align;
+        if (mods[i]->tdata_align > max_td_align) max_td_align = mods[i]->tdata_align;
+        if (mods[i]->tbss_align > max_tbss_align) max_tbss_align = mods[i]->tbss_align;
     }
 
     /* ---- Per-module symbol base indices ---- */
@@ -707,9 +781,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         mod_sym_base[i + 1] = mod_sym_base[i] + mods[i]->num_syms;
     size_t total_syms = mod_sym_base[n];
 
-    /* ---- Per-symbol metadata ---- */
-    typedef struct { int defined; int shndx; size_t value; uint8_t binding; } SymInfo;
-    SymInfo *sinfo = xcalloc(total_syms, sizeof(SymInfo));
+    LinkSymInfo *sinfo = xcalloc(total_syms, sizeof(LinkSymInfo));
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -719,6 +791,47 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             sinfo[gsi].binding = m->syms[j].binding;
             sinfo[gsi].defined = (m->syms[j].shndx != SECT_UNDEF);
         }
+    }
+
+    /* Tentative COMMON (SHN_COMMON) symbols share one BSS slot per name
+     * unless a real GLOBAL/WEAK definition exists.  st_value is alignment. */
+    typedef struct { const char *name; size_t align, size, off; } CommonEnt;
+    CommonEnt *commons = NULL;
+    int n_commons = 0, cap_commons = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            if (m->syms[j].shndx != SHN_COMMON || !m->syms[j].name) continue;
+            const char *nm = m->syms[j].name;
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win != (size_t)-1 && sinfo[win].shndx != SHN_COMMON) continue;
+            int found = -1;
+            for (int c = 0; c < n_commons; c++)
+                if (strcmp(commons[c].name, nm) == 0) { found = c; break; }
+            size_t al = m->syms[j].value ? m->syms[j].value : 1;
+            size_t sz = m->syms[j].size ? m->syms[j].size : al;
+            if (found < 0) {
+                if (n_commons >= cap_commons) {
+                    cap_commons = cap_commons ? cap_commons * 2 : 4;
+                    commons = realloc(commons, (size_t)cap_commons * sizeof(CommonEnt));
+                    if (!commons) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                }
+                commons[n_commons].name = nm;
+                commons[n_commons].align = al;
+                commons[n_commons].size = sz;
+                commons[n_commons].off = 0;
+                n_commons++;
+            } else {
+                if (al > commons[found].align) commons[found].align = al;
+                if (sz > commons[found].size) commons[found].size = sz;
+            }
+        }
+    }
+    for (int c = 0; c < n_commons; c++) {
+        if (commons[c].align > max_bss_align) max_bss_align = commons[c].align;
+        bss_size = pad_size_to(bss_size, commons[c].align);
+        commons[c].off = bss_size;
+        bss_size += commons[c].size;
     }
 
     /* ---- PLT slot assignment for undefined referenced symbols (functions)
@@ -741,26 +854,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
-            if (m->relocs[r].type == R_X86_64_GOTPCREL) continue;
+            if (reloc_is_gotpcrel(m->relocs[r].type)) continue;
             if (m->relocs[r].type == R_X86_64_GOTTPOFF) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (sinfo[gsi].defined) continue;
             const char *nm = m->syms[m->relocs[r].sym].name
                              ? m->syms[m->relocs[r].sym].name : "";
-            int resolved = 0;
-            for (size_t mi = 0; mi < n && !resolved; mi++) {
-                EmitModule *om = mods[mi];
-                for (size_t mj = 0; mj < om->num_syms; mj++) {
-                    size_t ogsi = mod_sym_base[mi] + mj;
-                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                        && om->syms[mj].name
-                        && strcmp(om->syms[mj].name, nm) == 0) {
-                        resolved = 1;
-                        break;
-                    }
-                }
-            }
-            if (!resolved)
+            if (find_export_gsi(mods, n, mod_sym_base, sinfo, nm) == (size_t)-1)
                 reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
         /* .data R_X86_64_64 fixups also reference symbols.  A file-scope
@@ -806,7 +906,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
-            if (m->relocs[r].type != R_X86_64_GOTPCREL) continue;
+            if (!reloc_is_gotpcrel(m->relocs[r].type)) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (reloc_data_got_idx[gsi] >= 0) continue;
             const char *nm = m->syms[m->relocs[r].sym].name
@@ -822,19 +922,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     int num_true_data_ext = 0;
     for (int j = 0; j < num_data_ext; j++) {
         const char *nm = data_ext_list[j];
-        int found = 0;
-        for (size_t mi = 0; mi < n && !found; mi++) {
-            EmitModule *om = mods[mi];
-            for (size_t mj = 0; mj < om->num_syms; mj++) {
-                size_t ogsi = mod_sym_base[mi] + mj;
-                if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
-                    && om->syms[mj].name
-                    && strcmp(om->syms[mj].name, nm) == 0) {
-                    found = 1;
-                    break;
-                }
-            }
-        }
+        int found = find_export_gsi(mods, n, mod_sym_base, sinfo, nm) != (size_t)-1;
         data_got_external[j] = !found;
         if (!found) num_true_data_ext++;
     }
@@ -1020,6 +1108,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             for (size_t r = 0; r < m->num_data_relocs; r++) {
                 size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
                 if (reloc_data_abs_idx[gsi] >= 0) continue;
+                /* PC-relative and 32-bit abs are not R_X86_64_RELATIVE. */
+                uint32_t rt = m->data_relocs[r].type;
+                if (reloc_is_pc(rt) || reloc_is_abs32(rt)) continue;
                 num_data_ptr_rel++;
             }
         }
@@ -1210,37 +1301,62 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     /* If have_tls, .tdata lives right after GOT/.dynamic in the data segment so it is
      * resident in memory (part of RW PT_LOAD) and matches standard ELF layout. */
     size_t tdata_data_off = dynamic_rw_end;
-    if (have_tls) while (tdata_data_off & 7) tdata_data_off++;
+    size_t tls_p_align = 16;
+    if (max_td_align > tls_p_align) tls_p_align = max_td_align;
+    if (max_tbss_align > tls_p_align) tls_p_align = max_tbss_align;
+    if (have_tls) tdata_data_off = pad_size_to(tdata_data_off, tls_p_align);
     uint64_t tls_vaddr = data_vaddr + tdata_data_off;
     size_t tls_file_offset_base = data_file_offset + tdata_data_off;
     size_t rw_filesz = tdata_data_off + (have_tls ? tdata.len : 0);
 
     size_t bss_data_off = rw_filesz;
-    while (bss_data_off & 7) bss_data_off++;
+    bss_data_off = pad_size_to(bss_data_off, max_bss_align);
     uint64_t bss_vaddr = data_vaddr + bss_data_off;
     size_t bss_file_offset = data_file_offset + bss_data_off;
     uint64_t code_vaddr = base + text_offset;
+    /* Combined .rodata follows .text; pad so its vaddr matches max_ro_align
+     * even when text_offset is not 16-aligned (hdr + _start = 0x16e). */
+    {
+        size_t ro_va = (size_t)(code_vaddr + text.len);
+        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
+        while (extra--) {
+            char z = 0;
+            buffer_append(&text, &z, 1);
+        }
+    }
 
     /* ---- Compute final symbol addresses ---- */
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));
-    /* Reserve space in .bss for the initial thread's TLS block and TCB */
+    /* .tbss follows .tdata in the TLS template.  Object-file .tbss offsets
+     * are section-relative (aligned to the start of .tbss), so the linker
+     * must pad after .tdata until the combined TLS offset of .tbss is a
+     * multiple of max_tbss_align; otherwise an aligned(32) tbss object
+     * sitting after a 1-byte tdata lands at offset 1. */
     size_t tls_filesize = tdata.len;
-    size_t tls_memsize = tdata.len + tbss_size;
+    size_t tbss_tls_off = tdata.len;
+    if (tbss_size > 0)
+        tbss_tls_off = pad_size_to(tdata.len, max_tbss_align);
+    size_t tls_memsize = tbss_tls_off + tbss_size;
+    /* Reserve space in .bss for the initial thread's TLS block and TCB.
+     * The image start must be p_align-aligned so object offsets keep their
+     * declared alignment at run time (same contract as PT_TLS p_align). */
     size_t tls_bss_alloc_off = 0;
     if (have_tls) {
-        while (bss_size & 15) bss_size++;
-        tls_bss_alloc_off = bss_size;
-        bss_size += tls_memsize + 16;
+        size_t start = pad_size_to(bss_size, tls_p_align);
+        size_t mis = (size_t)((bss_vaddr + start) % tls_p_align);
+        if (mis) start += tls_p_align - mis;
+        tls_bss_alloc_off = start;
+        bss_size = start + tls_memsize + 16;
     }
     uint64_t tcb_vaddr = bss_vaddr + tls_bss_alloc_off + tls_memsize;
     /* The TLS template (PT_TLS) lives in memory right after GOT (part of RW PT_LOAD).
      * tdata (initialized) is file-resident, tbss (zero-init) is not.
      * tls_end_vaddr is p_vaddr + p_memsz; the TPOFF32 reloc writes
      * `S - tls_end_vaddr + A`, a negative offset from %fs:0 to the symbol. */
-    uint64_t tls_end_vaddr = tls_vaddr + tdata.len + tbss_size;
+    uint64_t tls_end_vaddr = tls_vaddr + tls_memsize;
     /* tdata/tbss virtual offsets inside the TLS template */
     uint64_t tdata_vaddr = tls_vaddr;
-    uint64_t tbss_vaddr = tls_vaddr + tdata.len;
+    uint64_t tbss_vaddr = tls_vaddr + tbss_tls_off;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -1261,8 +1377,32 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             case SECT_TBSS:
                 sym_addr[gsi] = tbss_vaddr + mod_tbss_off[i] + sym->value; break;
             default:
-                sym_addr[gsi] = sym->value; break;
+                if (sym->shndx == SHN_COMMON) {
+                    const char *nm = sym->name ? sym->name : "";
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win != (size_t)-1 && sinfo[win].shndx != SHN_COMMON)
+                        break; /* filled in a second pass */
+                    int ci;
+                    for (ci = 0; ci < n_commons; ci++)
+                        if (strcmp(commons[ci].name, nm) == 0) break;
+                    if (ci < n_commons)
+                        sym_addr[gsi] = bss_vaddr + commons[ci].off;
+                } else {
+                    sym_addr[gsi] = sym->value;
+                }
+                break;
             }
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            size_t gsi = mod_sym_base[i] + j;
+            if (m->syms[j].shndx != SHN_COMMON || sym_addr[gsi] != 0) continue;
+            const char *nm = m->syms[j].name ? m->syms[j].name : "";
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win != (size_t)-1)
+                sym_addr[gsi] = sym_addr[win];
         }
     }
 
@@ -1276,18 +1416,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     for (int j = 0; j < num_data_ext; j++) {
         if (data_got_external[j]) continue; /* external: dynlinker fills it */
         const char *nm = data_ext_list[j];
-        for (size_t mi = 0; mi < n; mi++) {
-            EmitModule *om = mods[mi];
-            for (size_t mj = 0; mj < om->num_syms; mj++) {
-                size_t ogsi = mod_sym_base[mi] + mj;
-                if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
-                    && om->syms[mj].name
-                    && strcmp(om->syms[mj].name, nm) == 0) {
-                    data_got_addr[j] = sym_addr[ogsi];
-                    break;
-                }
-            }
-        }
+        size_t ogsi = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+        if (ogsi != (size_t)-1)
+            data_got_addr[j] = sym_addr[ogsi];
     }
 
     /* Static TPOFF for each TLS IE GOT slot: S - tls_end.  Shared objects
@@ -1308,29 +1439,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             S = sym_addr[gsi];
         } else {
             const char *nm = tls_ie_name[j] ? tls_ie_name[j] : "";
-            int found = 0;
-            for (size_t mi = 0; mi < n && !found; mi++) {
-                EmitModule *om = mods[mi];
-                for (size_t mj = 0; mj < om->num_syms; mj++) {
-                    size_t ogsi = mod_sym_base[mi] + mj;
-                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                        && (sinfo[ogsi].shndx == SECT_TDATA
-                            || sinfo[ogsi].shndx == SECT_TBSS)
-                        && om->syms[mj].name
-                        && strcmp(om->syms[mj].name, nm) == 0) {
-                        S = sym_addr[ogsi];
-                        found = 1;
-                        break;
-                    }
-                }
-            }
-            if (!found) {
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win == (size_t)-1
+                || (sinfo[win].shndx != SECT_TDATA
+                    && sinfo[win].shndx != SECT_TBSS)) {
                 fprintf(stderr,
                         "fakecc: undefined TLS symbol '%s' "
                         "(Initial-Exec needs the variable to be defined "
                         "in the same link unit)\n", nm);
                 exit(1);
             }
+            S = sym_addr[win];
         }
         tls_ie_tpoff[j] = (uint64_t)((int64_t)S - (int64_t)tls_end_vaddr);
         if (is_shared && tpoff_fill < num_tpoff_dyn) {
@@ -1377,7 +1496,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 uint64_t val = have_tls ? tdata.len : 0;
                 memcpy(data.data + doff, &val, 8);
             } else if (strcmp(nm, "__fakecc_tls_memsz") == 0) {
-                uint64_t val = have_tls ? (tdata.len + tbss_size) : 0;
+                uint64_t val = have_tls ? tls_memsize : 0;
                 memcpy(data.data + doff, &val, 8);
             } else if (strcmp(nm, "__fakecc_tls_image") == 0) {
                 uint64_t val = have_tls ? tls_vaddr : 0;
@@ -1385,7 +1504,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 tls_image_doff = doff;
                 tls_image_val = val;
             } else if (strcmp(nm, "__fakecc_tls_align") == 0) {
-                uint64_t val = 16;
+                uint64_t val = have_tls ? tls_p_align : 16;
                 memcpy(data.data + doff, &val, 8);
             }
         }
@@ -1398,10 +1517,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             const EmitReloc *rel = &m->relocs[r];
             size_t patch_in_text = mod_text_off[i] + rel->offset;
             uint64_t P = code_vaddr + patch_in_text;
-            if (rel->type == R_X86_64_GOTPCREL) {
+            if (reloc_is_gotpcrel(rel->type)) {
                 /* Load &global from a data GOT entry: the disp targets the GOT
                  * slot, whose qword holds the symbol's address (filled below,
-                 * either statically or via R_X86_64_GLOB_DAT). */
+                 * either statically or via R_X86_64_GLOB_DAT).
+                 * GOTPCRELX / REX_GOTPCRELX are the same S as GOTPCREL. */
                 size_t gsi = mod_sym_base[i] + rel->sym;
                 int dgidx = reloc_data_got_idx[gsi];
                 uint64_t got_slot_vaddr = got_vaddr + (3 + num_ext + dgidx) * 8;
@@ -1441,30 +1561,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                      * resolve truly external symbols. */
                     const char *nm = m->syms[rel->sym].name
                                      ? m->syms[rel->sym].name : "";
-                    size_t found = (size_t)-1;
-                    for (size_t mi = 0; mi < n && found == (size_t)-1; mi++) {
-                        EmitModule *om = mods[mi];
-                        for (size_t mj = 0; mj < om->num_syms; mj++) {
-                            size_t ogsi = mod_sym_base[mi] + mj;
-                            if (sinfo[ogsi].defined
-                                && sinfo[ogsi].binding == 1 /* GLOBAL */
-                                && (sinfo[ogsi].shndx == SECT_TDATA
-                                    || sinfo[ogsi].shndx == SECT_TBSS)
-                                && om->syms[mj].name
-                                && strcmp(om->syms[mj].name, nm) == 0) {
-                                found = sym_addr[ogsi];
-                                break;
-                            }
-                        }
-                    }
-                    if (found == (size_t)-1) {
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win == (size_t)-1
+                        || (sinfo[win].shndx != SECT_TDATA
+                            && sinfo[win].shndx != SECT_TBSS)) {
                         fprintf(stderr,
                                 "fakecc: undefined TLS symbol '%s' "
                                 "(Local-Exec needs the variable to be defined "
                                 "in the same link unit)\n", nm);
                         exit(1);
                     }
-                    S = found;
+                    S = sym_addr[win];
                 }
                 int32_t disp = (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_end_vaddr);
                 memcpy(text.data + patch_in_text, &disp, 4);
@@ -1472,37 +1579,37 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             }
             size_t gsi = mod_sym_base[i] + rel->sym;
             uint64_t S;
-            if (sinfo[gsi].defined) {
-                /* Defined in its own module. */
+            const char *rnm = m->syms[rel->sym].name
+                              ? m->syms[rel->sym].name : "";
+            size_t found = find_export_gsi(mods, n, mod_sym_base, sinfo, rnm);
+            int local_strong = sinfo[gsi].defined
+                && sinfo[gsi].binding == STB_GLOBAL
+                && sinfo[gsi].shndx != SHN_COMMON;
+            if (local_strong) {
+                S = sym_addr[gsi];
+            } else if (found != (size_t)-1) {
+                S = sym_addr[found];
+            } else if (sinfo[gsi].defined) {
                 S = sym_addr[gsi];
             } else {
-                /* Undefined locally — look for a GLOBAL definition in another
-                 * module with the same name. */
-                const char *nm = m->syms[rel->sym].name
-                                 ? m->syms[rel->sym].name : "";
-                size_t global_addr = (size_t)-1;
-                for (size_t mi = 0; mi < n && global_addr == (size_t)-1; mi++) {
-                    EmitModule *om = mods[mi];
-                    for (size_t mj = 0; mj < om->num_syms; mj++) {
-                        size_t ogsi = mod_sym_base[mi] + mj;
-                        if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
-                            && om->syms[mj].name
-                            && strcmp(om->syms[mj].name, nm) == 0) {
-                            global_addr = sym_addr[ogsi];
-                            break;
-                        }
-                    }
-                }
-                if (global_addr != (size_t)-1) {
-                    S = global_addr;
-                } else {
-                    /* Truly external (libc) → PLT. */
-                    int eidx = reloc_ext_idx[gsi];
-                    S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
-                }
+                int eidx = reloc_ext_idx[gsi];
+                S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
             }
-            int32_t disp = (int32_t)(S + rel->addend - P);
-            memcpy(text.data + patch_in_text, &disp, 4);
+            /* 32 / 32S are 4-byte S+A; 64 is 8-byte S+A; PC64 is 8-byte
+             * S+A−P.  Remaining .text relocs are 4-byte PC32 / PLT32. */
+            if (rel->type == R_X86_64_64) {
+                uint64_t abs64 = S + (uint64_t)(int64_t)rel->addend;
+                memcpy(text.data + patch_in_text, &abs64, 8);
+            } else if (rel->type == R_X86_64_PC64) {
+                uint64_t disp64 = S + (uint64_t)(int64_t)rel->addend - P;
+                memcpy(text.data + patch_in_text, &disp64, 8);
+            } else if (rel->type == R_X86_64_32 || rel->type == R_X86_64_32S) {
+                int32_t abs32 = (int32_t)(S + rel->addend);
+                memcpy(text.data + patch_in_text, &abs32, 4);
+            } else {
+                int32_t disp = (int32_t)(S + rel->addend - P);
+                memcpy(text.data + patch_in_text, &disp, 4);
+            }
         }
     }
 
@@ -1519,68 +1626,74 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         for (size_t r = 0; r < m->num_data_relocs; r++) {
             const EmitReloc *rel = &m->data_relocs[r];
             int in_tdata = (rel->shndx == SECT_TDATA);
-            size_t patch_in_sec = (in_tdata ? mod_tdata_off[i] : mod_data_off[i])
+            int in_rodata = (rel->shndx == SECT_RODATA);
+            size_t patch_in_sec = (in_tdata ? mod_tdata_off[i]
+                                  : in_rodata ? mod_rodata_off[i]
+                                  : mod_data_off[i])
                                   + rel->offset;
             size_t gsi = mod_sym_base[i] + rel->sym;
             uint64_t S;
             int abs64 = 0;
             int aidx = reloc_data_abs_idx[gsi];
-            if (sinfo[gsi].defined) {
+            const char *dnm = m->syms[rel->sym].name
+                              ? m->syms[rel->sym].name : "";
+            size_t dfound = find_export_gsi(mods, n, mod_sym_base, sinfo, dnm);
+            int local_keep = sinfo[gsi].defined
+                && sinfo[gsi].shndx != SHN_COMMON
+                && sinfo[gsi].binding != STB_WEAK;
+            if (local_keep) {
                 S = sym_addr[gsi];
+            } else if (dfound != (size_t)-1) {
+                S = sym_addr[dfound];
+            } else if (sinfo[gsi].defined) {
+                S = sym_addr[gsi];
+            } else if (reloc_ext_idx[gsi] >= 0) {
+                S = code_vaddr + plt_entry_off[reloc_ext_idx[gsi]];
+            } else if (aidx >= 0) {
+                S = 0;
+                abs64 = 1;
             } else {
-                /* Undefined locally — look for a GLOBAL definition in another
-                 * module with the same name. */
-                const char *nm = m->syms[rel->sym].name
-                                 ? m->syms[rel->sym].name : "";
-                size_t global_addr = (size_t)-1;
-                for (size_t mi = 0; mi < n && global_addr == (size_t)-1; mi++) {
-                    EmitModule *om = mods[mi];
-                    for (size_t mj = 0; mj < om->num_syms; mj++) {
-                        size_t ogsi = mod_sym_base[mi] + mj;
-                        if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
-                            && om->syms[mj].name
-                            && strcmp(om->syms[mj].name, nm) == 0) {
-                            global_addr = sym_addr[ogsi];
-                            break;
-                        }
-                    }
-                }
-                if (global_addr != (size_t)-1) {
-                    S = global_addr;
-                } else if (reloc_ext_idx[gsi] >= 0) {
-                    /* Function pointer: PLT is a stable callable address. */
-                    S = code_vaddr + plt_entry_off[reloc_ext_idx[gsi]];
-                } else if (aidx >= 0) {
-                    /* Data object (or function with no call reloc): dynlinker
-                     * fills this slot via R_X86_64_64. */
-                    S = 0;
-                    abs64 = 1;
-                } else {
-                    const char *enm = m->syms[rel->sym].name
-                                      ? m->syms[rel->sym].name : "";
-                    fprintf(stderr,
-                            "fakecc: data reloc against undefined '%s' "
-                            "has no PLT or GLOB_DAT slot\n", enm);
-                    exit(1);
-                }
+                fprintf(stderr,
+                        "fakecc: data reloc against undefined '%s' "
+                        "has no PLT or GLOB_DAT slot\n", dnm);
+                exit(1);
             }
-            /* R_X86_64_64: absolute 64-bit, value = S + A. */
-            uint64_t value = S + rel->addend;
-            uint8_t *dst = (uint8_t *)(in_tdata ? tdata.data : data.data);
-            size_t dst_len = in_tdata ? tdata.len : data.len;
-            if (patch_in_sec + 8 <= dst_len)
-                memcpy(dst + patch_in_sec, &value, 8);
-            uint64_t site_va = in_tdata
-                ? (tls_vaddr + patch_in_sec)
-                : (data_vaddr + patch_in_sec);
+            /* Apply by reloc type: 64/PC64 are 8 bytes; 32/32S/PC32 are 4. */
+            uint64_t A = (uint64_t)(int64_t)rel->addend;
+            uint8_t *dst;
+            size_t dst_len;
+            uint64_t P;
+            if (in_tdata) {
+                dst = (uint8_t *)tdata.data;
+                dst_len = tdata.len;
+                P = tls_vaddr + patch_in_sec;
+            } else if (in_rodata) {
+                dst = (uint8_t *)rodata.data;
+                dst_len = rodata.len;
+                P = code_vaddr + text.len + patch_in_sec;
+            } else {
+                dst = (uint8_t *)data.data;
+                dst_len = data.len;
+                P = data_vaddr + patch_in_sec;
+            }
+            uint64_t value;
+            int width = reloc_width(rel->type);
+            if (reloc_is_pc(rel->type))
+                value = S + A - P;
+            else
+                value = S + A;
+            if (patch_in_sec + (size_t)width <= dst_len)
+                memcpy(dst + patch_in_sec, &value, (size_t)width);
+            uint64_t site_va = P;
             if (abs64 && abs64_fill < num_abs64_relocs) {
                 abs64_roff[abs64_fill] = site_va;
-                abs64_add[abs64_fill] = (uint64_t)(int64_t)rel->addend;
+                abs64_add[abs64_fill] = A;
                 abs64_info[abs64_fill] =
                     ((uint64_t)(1 + num_ext + num_true_data_ext + aidx) << 32)
                     | R_X86_64_64;
                 abs64_fill++;
-            } else if (is_shared && rel_fill < num_relative) {
+            } else if (is_shared && rel_fill < num_relative
+                       && !reloc_is_pc(rel->type) && !reloc_is_abs32(rel->type)) {
                 rel_roff[rel_fill] = site_va;
                 rel_add[rel_fill] = value;
                 rel_fill++;
@@ -1844,7 +1957,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                    dynamic.len, dynamic.len, 8);
         if (have_tls) {
             write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
-                       tls_filesize, tls_memsize, 8);
+                       tls_filesize, tls_memsize, tls_p_align);
         }
         write_phdr(&elf, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 16);
         buf_bytes(&elf, rx.data, rx.len);
@@ -1950,7 +2063,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         }
         if (have_tls) {
             write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
-                       tls_filesize, tls_memsize, 8);
+                       tls_filesize, tls_memsize, tls_p_align);
         }
         write_phdr(&elf, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 16);
         while (elf.len < hdr_size)
@@ -2014,6 +2127,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     free(mod_text_off); free(mod_rodata_off); free(mod_data_off); free(mod_bss_off);
     free(mod_tdata_off); free(mod_tbss_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);
+    free(commons);
     free(reloc_data_abs_idx); free(reloc_data_got_idx);
     free(reloc_tls_ie_idx); free(tls_ie_gsi); free(tls_ie_name); free(tls_ie_tpoff);
     for (int a = 0; a < num_abs_ext; a++) free(abs_ext_list[a]);

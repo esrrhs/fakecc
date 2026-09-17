@@ -114,6 +114,11 @@ typedef enum {
     SYSV_CLS_SSE     = 2
 } SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+/* True if a 16-byte aggregate that classify reports as MEMORY is a
+ * single X87+X87UP object (`struct { long double }`, nested the same,
+ * or `union { long double }`).  SysV returns that in st0, not sret.
+ * Arguments of this class still go on the stack. */
+int sysv_agg_ret_x87(Type t);
 /* MEMORY-class passing: 0 = copy the object onto the outgoing stack
  * (SysV); 1 = pass a pointer to a copy.  Pointer is used only for
  * `__va_list_tag` (matches libc/GCC array decay). */

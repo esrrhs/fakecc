@@ -314,6 +314,215 @@ static void test_zero_length_struct_no_slot(void) {
     ir_module_free(&ir);
 }
 
+/* 16-byte `{ long double }` returns in st0: no hidden sret PARAM. */
+static void test_x87_agg_ret_no_sret(void) {
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "struct Ld { long double x; };"
+        "struct Ld make(long double v) { struct Ld s; s.x = v; return s; }"
+        "int main(void) { struct Ld s = make(1.0L); return (int)s.x; }");
+    const IRFunction *make = NULL;
+    const IRFunction *mainfn = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "make") == 0)
+            make = &ir.functions.data[i];
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "main") == 0)
+            mainfn = &ir.functions.data[i];
+    }
+    T_ASSERT(make != NULL);
+    T_ASSERT(mainfn != NULL);
+    T_ASSERT_EQ_INT(make->ret_x87_bytes, 16);
+    T_ASSERT_EQ_INT(make->sret_value, -1);
+    int saw_x87_ret = 0;
+    for (size_t i = 0; i < make->insts.len; i++) {
+        const IRInst *inst = &make->insts.data[i];
+        if (inst->op != IR_RETURN) continue;
+        T_ASSERT_EQ_INT(inst->x87_pair, 1);
+        T_ASSERT_EQ_INT((int)inst->imm, 16);
+        saw_x87_ret = 1;
+    }
+    T_ASSERT(saw_x87_ret);
+
+    int saw_x87_call = 0;
+    for (size_t i = 0; i < mainfn->insts.len; i++) {
+        const IRInst *inst = &mainfn->insts.data[i];
+        if (inst->op != IR_CALL || !inst->call_name) continue;
+        if (strcmp(inst->call_name, "make") != 0) continue;
+        T_ASSERT_EQ_INT(inst->x87_pair, 1);
+        T_ASSERT_EQ_INT((int)inst->imm, 16);
+        T_ASSERT_EQ_INT(inst->dst, -1);
+        saw_x87_call = 1;
+    }
+    T_ASSERT(saw_x87_call);
+    ir_module_free(&ir);
+}
+
+/* `union { int n; char d[]; }` is MEMORY; `[0]` stays INTEGER. */
+static void test_union_fam_is_memory(void) {
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "union U { int n; char d[]; };"
+        "int take(union U u, int k) { return u.n + k; }"
+        "int main(void) { union U u; u.n = 1; return take(u, 7); }");
+    const IRFunction *take = NULL;
+    const IRFunction *mainfn = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "take") == 0)
+            take = &ir.functions.data[i];
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "main") == 0)
+            mainfn = &ir.functions.data[i];
+    }
+    T_ASSERT(take != NULL);
+    T_ASSERT(mainfn != NULL);
+    T_ASSERT(take->insts.len > 0);
+    T_ASSERT_EQ_INT((int)take->insts.data[0].op, (int)IR_PARAM);
+    T_ASSERT_EQ_INT(take->insts.data[0].force_stack, 1);
+    T_ASSERT_EQ_INT(take->insts.data[0].alloca_bytes, 4);
+
+    int saw_blob = 0;
+    for (size_t i = 0; i < mainfn->insts.len; i++) {
+        const IRInst *inst = &mainfn->insts.data[i];
+        if (inst->op != IR_CALL || !inst->call_name) continue;
+        if (strcmp(inst->call_name, "take") != 0) continue;
+        T_ASSERT(inst->call_arg_on_stack != NULL);
+        T_ASSERT(inst->call_nargs >= 1);
+        T_ASSERT((inst->call_arg_on_stack[0] & CALL_ARG_BLOB) != 0);
+        saw_blob = 1;
+    }
+    T_ASSERT(saw_blob);
+    ir_module_free(&ir);
+}
+
+static void test_union_zero_array_is_integer(void) {
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "union U { int n; char d[0]; };"
+        "int take(union U u, int k) { return u.n + k; }"
+        "int main(void) { union U u; u.n = 1; return take(u, 7); }");
+    const IRFunction *take = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "take") == 0)
+            take = &ir.functions.data[i];
+    }
+    T_ASSERT(take != NULL);
+    T_ASSERT(take->insts.len > 0);
+    T_ASSERT_EQ_INT((int)take->insts.data[0].op, (int)IR_PARAM);
+    T_ASSERT_EQ_INT(take->insts.data[0].force_stack, 0);
+    ir_module_free(&ir);
+}
+
+/* Trailing NO_CLASS padding is not INTEGER: aligned(16) { long } is one GP. */
+static void test_aligned16_pad_one_gp(void) {
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "struct __attribute__((aligned(16))) S { long x; };"
+        "int take(struct S s, int k) { return (int)s.x + k; }"
+        "int main(void) { struct S s; s.x = 3; return take(s, 4); }");
+    const IRFunction *take = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "take") == 0)
+            take = &ir.functions.data[i];
+    }
+    T_ASSERT(take != NULL);
+    int nparam = 0;
+    for (size_t i = 0; i < take->insts.len; i++) {
+        if (take->insts.data[i].op != IR_PARAM) break;
+        nparam++;
+    }
+    T_ASSERT_EQ_INT(nparam, 2);
+    T_ASSERT_EQ_INT(take->insts.data[0].force_stack, 0);
+    ir_module_free(&ir);
+}
+
+/* Mixed union { long double; long long } returns via sret, not st0. */
+static void test_mixed_ld_union_uses_sret(void) {
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "union U { long double d; long long l; };"
+        "union U make(long double v) { union U u; u.d = v; return u; }"
+        "int main(void) { union U u = make(1.0L); return (int)u.d; }");
+    const IRFunction *make = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "make") == 0)
+            make = &ir.functions.data[i];
+    }
+    T_ASSERT(make != NULL);
+    T_ASSERT_EQ_INT(make->ret_x87_bytes, 0);
+    T_ASSERT(make->sret_value >= 0);
+    T_ASSERT(make->insts.len > 0);
+    T_ASSERT_EQ_INT((int)make->insts.data[0].op, (int)IR_PARAM);
+    ir_module_free(&ir);
+}
+
+/* Packed `:60` + `:8` spills into the next eightbyte: two GP params + k. */
+static void test_packed_bitfield_spill_two_gp(void) {
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "struct __attribute__((packed)) P { unsigned long a:60; unsigned b:8; };"
+        "int take(struct P p, int k) { return (int)p.b + k; }"
+        "int main(void) { struct P p; p.a = 1; p.b = 2; return take(p, 5); }");
+    const IRFunction *take = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "take") == 0)
+            take = &ir.functions.data[i];
+    }
+    T_ASSERT(take != NULL);
+    int nparam = 0;
+    for (size_t i = 0; i < take->insts.len; i++) {
+        if (take->insts.data[i].op != IR_PARAM) break;
+        nparam++;
+    }
+    T_ASSERT_EQ_INT(nparam, 3);
+    T_ASSERT_EQ_INT(take->insts.data[0].force_stack, 0);
+    T_ASSERT_EQ_INT(take->insts.data[1].force_stack, 0);
+    ir_module_free(&ir);
+}
+
+/* File-scope `aligned(16)` is recorded on the IR global; a matching local
+ * pinned alloca carries the alignment in IR_ALLOCA.imm. */
+static void test_aligned16_storage_ir(void) {
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "char pad;"
+        "int g __attribute__((aligned(16)));"
+        "int main(void) {"
+        "  char c; int x __attribute__((aligned(16)));"
+        "  return (int)((unsigned long)&x & 15ul)"
+        "       + (int)((unsigned long)&g & 15ul);"
+        "}");
+    const IRGlobal *g = NULL;
+    for (size_t i = 0; i < ir.globals.len; i++) {
+        if (ir.globals.data[i].name &&
+            strcmp(ir.globals.data[i].name, "g") == 0)
+            g = &ir.globals.data[i];
+    }
+    T_ASSERT(g != NULL);
+    T_ASSERT_EQ_INT(g->align, 16);
+    const IRFunction *main_fn = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "main") == 0)
+            main_fn = &ir.functions.data[i];
+    }
+    T_ASSERT(main_fn != NULL);
+    int saw_aln = 0;
+    for (size_t i = 0; i < main_fn->insts.len; i++) {
+        if (main_fn->insts.data[i].op == IR_ALLOCA
+            && main_fn->insts.data[i].imm >= 16)
+            saw_aln = 1;
+    }
+    T_ASSERT_EQ_INT(saw_aln, 1);
+    ir_module_free(&ir);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -333,5 +542,12 @@ int main(void) {
     test_overaligned_sse_is_memory_blob();
     test_fam_prefix_is_integer();
     test_zero_length_struct_no_slot();
+    test_x87_agg_ret_no_sret();
+    test_union_fam_is_memory();
+    test_union_zero_array_is_integer();
+    test_aligned16_pad_one_gp();
+    test_mixed_ld_union_uses_sret();
+    test_packed_bitfield_spill_two_gp();
+    test_aligned16_storage_ir();
     return t_finalize();
 }

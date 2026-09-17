@@ -145,7 +145,8 @@ typedef struct {
      * over-aligned MEMORY.  call_arg_on_stack bit 1 = ≥16, bit 2 = ≥32,
      * bit 3 = ≥64, bit 4 = MEMORY blob. */
     int      align16;
-    /* IR_CALL / IR_RETURN: `_Complex long double` travels in st0/st1. */
+    /* IR_CALL / IR_RETURN: X87 aggregate in st0(/st1).  imm is 16 (one
+     * long double in st0) or 32 (`_Complex long double` in st0/st1). */
     int      x87_pair;
     /* IR_CALL only: per-arg force_stack; heap array length call_nargs, or NULL.
      * See CALL_ARG_* bits. */
@@ -251,6 +252,9 @@ typedef struct {
     int   ret_is_bool;
     /* 1 if the function returns `_Complex long double` in st0/st1. */
     int   ret_is_complex_ld;
+    /* SysV X87 return size: 16 = one long double in st0, 32 = complex
+     * pair in st0/st1, 0 = not an X87 return. */
+    int   ret_x87_bytes;
     /* Variadic: 1 if the function was defined with a `...` tail.  The prologue
      * emits a register-save area and the va_* builtins read/write it. */
     int   is_variadic;
@@ -300,6 +304,7 @@ typedef struct {
     int   is_readonly;  /* 1 = string literal → rodata; 0 = mutable → data */
     int   is_static;    /* 1 = `static` global — LOCAL linkage */
     int   is_tls;       /* 1 = `__thread` / `_Thread_local` global — .tdata/.tbss */
+    int   align;        /* byte alignment (`aligned(N)` / natural); ≥1 */
     SourceLoc loc;
     GlobalFixup *fixups;/* pointer slots needing link-time address patching */
     int   num_fixups, cap_fixups;

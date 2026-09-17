@@ -234,6 +234,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->is_readonly = is_readonly;
     g->is_static = is_static;
     g->is_tls = is_tls;
+    g->align = 8;
     g->loc = loc;
     g->fixups = NULL;
     g->num_fixups = 0;
@@ -959,7 +960,8 @@ static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
     snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
     char *init = malloc(10);
     memcpy(init, &val, 10);
-    ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
+    IRGlobal *lg = ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
+    lg->align = 16;
     IRValue v = new_value(fn);
     emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, loc);
     fn->insts.data[fn->insts.len - 1].is_float = 1;
@@ -1087,18 +1089,21 @@ static IRValue emit_alloca(IRFunction *fn, int total_bytes, int width,
     return v;
 }
 
-/* Pin a stack slot with SysV natural alignment.  Alignments > 16 are
- * recorded in IR_ALLOCA.imm so codegen can bump the pointer (incoming
- * rbp is only 16-aligned). */
-static IRValue emit_alloca_ty(IRFunction *fn, Type ty, SourceLoc loc) {
-    int total = type_size(ty);
+/* Pin a stack slot with SysV natural alignment.  Alignments ≥ 16 are
+ * recorded in IR_ALLOCA.imm so codegen can place/realign the slot
+ * (incoming rbp is only 16-aligned). */
+static IRValue emit_alloca_aligned(IRFunction *fn, int total, int al, SourceLoc loc) {
     if (total < 1) total = 1;
-    int al = (int)type_align(ty);
+    if (al < 1) al = 1;
     int slack = (al > 16) ? al : 0;
     IRValue v = emit_alloca(fn, total + slack, 8, 1, loc);
-    if (al > 16)
+    if (al >= 16)
         fn->insts.data[fn->insts.len - 1].imm = al;
     return v;
+}
+
+static IRValue emit_alloca_ty(IRFunction *fn, Type ty, SourceLoc loc) {
+    return emit_alloca_aligned(fn, type_size(ty), (int)type_align(ty), loc);
 }
 
 static int sysv_sse_vec_bytes(int nreg, int size, const SysVRegClass *cls) {
@@ -6881,6 +6886,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             ret_nreg_pre = 2;
             ret_in_mem_pre = 0;
         }
+        int is_x87_st0 = sysv_agg_ret_x87(e->type);
+        if (is_x87_st0)
+            ret_in_mem_pre = 0;
         /* GNU empty structs return in no slot and take no hidden sret
          * (SysV/GCC).  classify_agg reports MEMORY for size 0, which would
          * otherwise steal RDI and shift every later argument. */
@@ -7027,7 +7035,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             sret_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
         IRValue slot_addr = -1;
-        if (is_ret_struct && ret_nreg > 0) {
+        if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
             int total = type_size(e->type);
             if (total < 1) total = 1;
             IRValue slot = emit_alloca_ty(fn, e->type, e->loc);
@@ -7036,7 +7044,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue v;
         if (ret_in_mem) {
             v = sret_addr;
-        } else if (is_ret_struct && ret_nreg > 0) {
+        } else if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
             v = slot_addr;
         } else if (is_void) {
             v = -1;
@@ -7049,6 +7057,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         IRValue ret_lo = -1, ret_hi = -1;
         int is_cld_ret = type_is_complex_ldouble(e->type);
+        int is_x87_ret = is_cld_ret || is_x87_st0;
         if (is_ret_struct && ret_nreg > 0 && !is_cld_ret) {
             ret_lo = new_value(fn);
             if (ret_nreg > 1) ret_hi = new_value(fn);
@@ -7058,13 +7067,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         memset(&inst, 0, sizeof(inst));
         inst.op = IR_CALL;
         inst.dst = ret_in_mem ? -1
-                 : is_cld_ret ? -1
+                 : is_x87_ret ? -1
                  : (is_ret_struct && ret_nreg > 0) ? ret_lo
                  : (type_is_empty_struct(e->type) ? -1 : v);
-        inst.a = is_cld_ret ? slot_addr : -1;
+        inst.a = is_x87_ret ? slot_addr : -1;
         inst.b = ret_hi;   /* second return eightbyte, or -1 */
-        inst.x87_pair = is_cld_ret;
-        inst.imm = 0;
+        inst.x87_pair = is_x87_ret;
+        inst.imm = is_x87_st0 ? 16 : (is_cld_ret ? 32 : 0);
         inst.loc = e->loc;
         inst.call_name = NULL;
         inst.call_callee = -1;
@@ -7163,7 +7172,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Register-returned structs: result eightbytes land in dst(/b); the
          * expression value is still the slot address.  MEMORY structs: value
          * is the sret pointer (width 8). */
-        if (is_cld_ret) {
+        if (is_x87_ret) {
             inst.width = 8;
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
@@ -8437,6 +8446,11 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
              * attach its link-time fixup to this global. */
             IRGlobal *sg = ir_module_push_global(g_ir_module, mangled, sz, bytes,
                                                  0, 1, 0, s->loc);
+            {
+                int al = (int)type_align(dty);
+                if (s->u.decl.align > al) al = s->u.decl.align;
+                if (al > 0) sg->align = al;
+            }
             if (s->u.decl.init) {
                 pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
                           s->u.decl.name, s->loc, sg);
@@ -8495,8 +8509,10 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             /* A pinned alloca must reserve at least 1 byte so codegen can
              * form its address (empty unions/structs have size 0). */
             if (total < 1) total = 1;
-            if (dty.kind == TY_STRUCT || dty.is_vector)
-                v = emit_alloca_ty(fn, dty, s->loc);
+            int al = (int)type_align(dty);
+            if (s->u.decl.align > al) al = s->u.decl.align;
+            if (dty.kind == TY_STRUCT || dty.is_vector || al >= 16)
+                v = emit_alloca_aligned(fn, total, al, s->loc);
             else
                 v = emit_alloca(fn, total, dw, du, s->loc);
         } else {
@@ -8619,7 +8635,13 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             /* GNU C `return;` in a non-void function: typed zero. */
             int dw = fn->ret_width, du = fn->ret_is_unsigned;
             if (fn->ret_is_struct) {
-                if (fn->ret_reg_n > 0) {
+                if (fn->ret_x87_bytes > 0) {
+                    IRValue slot = emit_alloca(fn, fn->ret_x87_bytes, 16, 1, s->loc);
+                    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, s->loc);
+                    emit_inst_w(fn, IR_RETURN, -1, addr, -1, fn->ret_x87_bytes,
+                                8, 1, s->loc);
+                    fn->insts.data[fn->insts.len - 1].x87_pair = 1;
+                } else if (fn->ret_reg_n > 0) {
                     IRValue z = new_value(fn);
                     emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 8, 1, s->loc);
                     IRValue hi = -1;
@@ -8643,8 +8665,10 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             }
         } else if (fn->ret_is_struct) {
             IRValue v = lower_expr(fn, st, s->u.value);
-            if (fn->ret_is_complex_ld) {
-                emit_inst_w(fn, IR_RETURN, -1, v, -1, 0, 8, 1, s->loc);
+            if (fn->ret_is_complex_ld || fn->ret_x87_bytes > 0) {
+                emit_inst_w(fn, IR_RETURN, -1, v, -1,
+                            fn->ret_x87_bytes ? fn->ret_x87_bytes : 32,
+                            8, 1, s->loc);
                 fn->insts.data[fn->insts.len - 1].x87_pair = 1;
             } else if (fn->ret_reg_n > 0) {
                 /* SysV register return: load eightbytes into RAX(/RDX) or
@@ -9076,6 +9100,8 @@ static void flush_pending_globals(IRModule *m) {
                                              g_pending_globals[i].bytes,
                                              g_pending_globals[i].is_readonly,
                                              1, 0, g_pending_globals[i].loc);
+        if (g_pending_globals[i].size >= 16 && (g_pending_globals[i].size % 16) == 0)
+            g->align = g_pending_globals[i].size >= 32 ? 32 : 16;
         /* Transfer any fixups collected while packing the literal's own init.
          * tmp->init_bytes aliases the buffer the real global now owns, so it
          * must not be freed here. */
@@ -10036,7 +10062,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                                        sd->is_big_endian, uw);
                 } else {
                     int msz = type_size(sm->type);
-                    if (msz == 0 && sm->type.kind == TY_ARRAY && sm->type.elem_type) {
+                    if (msz <= 0 && sm->type.kind == TY_ARRAY && sm->type.elem_type) {
                         const Expr *el = e->u.init_list.elements[i];
                         if (el->kind == EX_STR)
                             msz = el->u.str.len + 1;
@@ -10558,7 +10584,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     const Type *mt = &sd->members[mi].type;
                     int msz = type_size(*mt);
                     const Expr *el = s->u.decl.init->u.init_list.elements[mi];
-                    if (el && msz == 0 && mt->kind == TY_ARRAY && mt->elem_type) {
+                    if (el && msz <= 0 && mt->kind == TY_ARRAY && mt->elem_type) {
                         if (el->kind == EX_STR)
                             msz = el->u.str.len + 1;
                         else if (el->kind == EX_INIT_LIST)
@@ -10587,6 +10613,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * when an array/struct member decays to a pointer (e.g. `.regs = ARR`). */
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
                                             0, is_static, is_tls, s->loc);
+        {
+            int al = (int)type_align(s->u.decl.type);
+            if (s->u.decl.align > al) al = s->u.decl.align;
+            if (al > 0) g->align = al;
+        }
         if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);
@@ -10627,6 +10658,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                              || type_is_pair16(fd->ret_type));
         irfn.ret_is_bool = fd->ret_type.is_bool;
         irfn.ret_is_complex_ld = type_is_complex_ldouble(fd->ret_type);
+        irfn.ret_x87_bytes = 0;
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
         irfn.sret_value = -1;
@@ -10650,6 +10682,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             /* SysV: `_Complex long double` returns in st0/st1, not sret. */
             irfn.ret_reg_n = 2;
             irfn.ret_width = type_size(fd->ret_type);
+            irfn.ret_x87_bytes = 32;
+        } else if (sysv_agg_ret_x87(fd->ret_type)) {
+            /* SysV: one X87+X87UP object returns in st0, not sret. */
+            irfn.ret_width = type_size(fd->ret_type);
+            irfn.ret_x87_bytes = 16;
         }
         irfn.dbg_vars = NULL;
         irfn.num_dbg_vars = 0;
@@ -10677,7 +10714,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         }
         int next_pidx = 0;
         if (irfn.ret_is_struct && irfn.ret_reg_n == 0
-            && !type_is_empty_struct(fd->ret_type)) {
+            && !type_is_empty_struct(fd->ret_type)
+            && irfn.ret_x87_bytes == 0) {
             irfn.sret_value = new_value(&irfn);
             emit_inst_w(&irfn, IR_PARAM, irfn.sret_value, -1, -1, next_pidx++,
                         8, 1, fd->loc);

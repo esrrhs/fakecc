@@ -2917,6 +2917,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         uint8_t binding = g->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
         uint16_t shndx;
         size_t off;
+        size_t al = g->align > 0 ? (size_t)g->align : 8;
+        if (al < 1) al = 1;
         if (g->is_tls) {
             /* __thread globals live in .tdata (initialized) or .tbss
              * (zero-init).  The linker assembles them into the TLS
@@ -2924,30 +2926,41 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
              * via %fs:[TPOFF64]. */
             if (g->init_bytes) {
                 shndx = SECT_TDATA;
+                while (out->tdata.len % al) {
+                    char z = 0; buffer_append(&out->tdata, &z, 1);
+                }
                 off = out->tdata.len;
                 buffer_append(&out->tdata, g->init_bytes, g->size);
-                while (out->tdata.len & 7) { char z = 0; buffer_append(&out->tdata, &z, 1); }
+                if (al > out->tdata_align) out->tdata_align = al;
             } else {
                 shndx = SECT_TBSS;
+                while (out->tbss_size % al) out->tbss_size++;
                 off = out->tbss_size;
                 out->tbss_size += g->size;
-                while (out->tbss_size & 7) out->tbss_size++;
+                if (al > out->tbss_align) out->tbss_align = al;
             }
         } else if (g->is_readonly) {
             shndx = SECT_RODATA;
+            while (out->rodata.len % al) {
+                char z = 0; buffer_append(&out->rodata, &z, 1);
+            }
             off = out->rodata.len;
             buffer_append(&out->rodata, g->init_bytes, g->size);
-            while (out->rodata.len & 7) { char z = 0; buffer_append(&out->rodata, &z, 1); }
+            if (al > out->rodata_align) out->rodata_align = al;
         } else if (g->init_bytes) {
             shndx = SECT_DATA;
+            while (out->data.len % al) {
+                char z = 0; buffer_append(&out->data, &z, 1);
+            }
             off = out->data.len;
             buffer_append(&out->data, g->init_bytes, g->size);
-            while (out->data.len & 7) { char z = 0; buffer_append(&out->data, &z, 1); }
+            if (al > out->data_align) out->data_align = al;
         } else {
             shndx = SECT_BSS;
+            while (out->bss_size % al) out->bss_size++;
             off = out->bss_size;
             out->bss_size += g->size;
-            while (out->bss_size & 7) out->bss_size++;
+            if (al > out->bss_align) out->bss_align = al;
         }
         uint8_t st_type = g->is_tls ? 6 /* STT_TLS */ : 1 /* STT_OBJECT */;
         emit_module_add_symbol(out, g->name, binding, st_type,
@@ -3023,8 +3036,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (inst->op == IR_ALLOCA && inst->alloca_bytes > 0 && inst->dst >= 0) {
                 int bytes = inst->alloca_bytes;
                 if (bytes % 8 != 0) bytes += 8 - (bytes % 8);
+                int aln = (inst->imm >= 16) ? (int)inst->imm : 8;
+                if (aln < 8) aln = 8;
                 pinned_area += bytes;
-                alloca_off[inst->dst] = -(cs_save_area + gp_spill_area + xmm_spill_area + pinned_area);
+                int abs_off = cs_save_area + gp_spill_area + xmm_spill_area + pinned_area;
+                if (aln > 1 && (abs_off % aln) != 0)
+                    abs_off += aln - (abs_off % aln);
+                pinned_area = abs_off - (cs_save_area + gp_spill_area + xmm_spill_area);
+                alloca_off[inst->dst] = -abs_off;
             }
         }
 
@@ -3910,7 +3929,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * prefix is a no-op.  The correct TP read is `movq %fs:0, %reg`. */
                 int target = dr >= 0 ? dr : REG_RAX;
                 int gsym = emit_module_find_symbol(out, inst->call_name);
-                if (gsym < 0) gsym = emit_module_add_undefined(out, inst->call_name);
+                if (gsym < 0)
+                    gsym = emit_module_add_undefined_type(out, inst->call_name,
+                                                         6 /* STT_TLS */);
+                else if (out->syms[gsym].shndx == SECT_UNDEF
+                         && out->syms[gsym].type == 0)
+                    out->syms[gsym].type = 6 /* STT_TLS */;
                 emit_mov_fs0_reg(&out->text, target);
                 size_t patch = emit_add_rip(&out->text, target);
                 emit_module_add_reloc(out, patch, R_X86_64_GOTTPOFF, gsym, -4);
@@ -5020,12 +5044,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
 
                 if (inst->x87_pair && inst->a >= 0) {
-                    /* `_Complex long double` comes back in st0 (real) / st1
-                     * (imag).  Store into the caller-provided 32-byte slot. */
+                    /* X87 aggregate: st0 (16-byte) or st0/st1 (32-byte
+                     * `_Complex long double`).  Store into the caller slot. */
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                     emit_x87_fstptRCX(&out->text);
-                    emit_add_imm32(&out->text, REG_RCX, 16);
-                    emit_x87_fstptRCX(&out->text);
+                    if (inst->imm != 16) {
+                        emit_add_imm32(&out->text, REG_RCX, 16);
+                        emit_x87_fstptRCX(&out->text);
+                    }
                 } else {
 
                 /* Multi-eightbyte aggregate return: SysV assigns INTEGER
@@ -5109,13 +5135,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * SysV multi-eightbyte returns: INTEGER eightbytes go to
                  * RAX then RDX; SSE eightbytes go to XMM0 then XMM1. */
                 if (inst->x87_pair && inst->a >= 0) {
-                    /* `_Complex long double`: st0=real, st1=imag.  Load imag
-                     * first so the subsequent fldt of real leaves that order. */
+                    /* 16-byte X87: fldt once into st0.  32-byte complex:
+                     * load imag first so the subsequent fldt of real
+                     * leaves st0=real, st1=imag. */
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
-                    emit_add_imm32(&out->text, REG_RCX, 16);
-                    emit_x87_fldtRCX(&out->text);
-                    emit_add_imm32(&out->text, REG_RCX, -16);
-                    emit_x87_fldtRCX(&out->text);
+                    if (inst->imm == 16) {
+                        emit_x87_fldtRCX(&out->text);
+                    } else {
+                        emit_add_imm32(&out->text, REG_RCX, 16);
+                        emit_x87_fldtRCX(&out->text);
+                        emit_add_imm32(&out->text, REG_RCX, -16);
+                        emit_x87_fldtRCX(&out->text);
+                    }
                 } else if (inst->a != -1 && inst->b != -1) {
                     int a_f = value_is_float_class(fn, inst->a);
                     int b_f = value_is_float_class(fn, inst->b);

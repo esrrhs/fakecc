@@ -19,6 +19,12 @@ void emit_module_init(EmitModule *m) {
     m->bss_size = 0;
     buffer_init(&m->tdata);
     m->tbss_size = 0;
+    m->text_align = 16;
+    m->rodata_align = 8;
+    m->data_align = 8;
+    m->bss_align = 8;
+    m->tdata_align = 8;
+    m->tbss_align = 8;
     m->syms = NULL; m->num_syms = 0; m->cap_syms = 0;
     m->relocs = NULL; m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = NULL; m->num_data_relocs = 0; m->cap_data_relocs = 0;
@@ -105,22 +111,32 @@ int emit_module_find_symbol(EmitModule *m, const char *name) {
     return -1;
 }
 
-int emit_module_add_undefined(EmitModule *m, const char *name) {
+int emit_module_add_undefined_type(EmitModule *m, const char *name,
+                                  uint8_t st_type) {
     if (!name) {
         /* No relocatable name (e.g. a long-double IR_CONST whose call_name
          * was not set): emit an unnamed absolute undefined symbol rather than
          * dereference NULL in strcmp.  It will not be referenced by name. */
         return emit_module_add_symbol(m, NULL, 1 /* STB_GLOBAL */,
-                                      0 /* STT_NOTYPE */, SECT_UNDEF, 0, 0);
+                                      st_type, SECT_UNDEF, 0, 0);
     }
-    /* Reuse an existing undefined symbol of the same name if present. */
+    /* Reuse an existing undefined symbol of the same name if present.
+     * Upgrade STT_NOTYPE when a later reference knows the real type
+     * (`extern __thread` → STT_TLS). */
     for (size_t i = 0; i < m->num_syms; i++) {
         if (m->syms[i].name && strcmp(m->syms[i].name, name) == 0 &&
-            m->syms[i].shndx == SECT_UNDEF)
+            m->syms[i].shndx == SECT_UNDEF) {
+            if (st_type != 0 && m->syms[i].type == 0)
+                m->syms[i].type = st_type;
             return (int)i;
+        }
     }
-    return emit_module_add_symbol(m, name, 1 /* STB_GLOBAL */, 0 /* STT_NOTYPE */,
+    return emit_module_add_symbol(m, name, 1 /* STB_GLOBAL */, st_type,
                                   SECT_UNDEF, 0, 0);
+}
+
+int emit_module_add_undefined(EmitModule *m, const char *name) {
+    return emit_module_add_undefined_type(m, name, 0 /* STT_NOTYPE */);
 }
 
 /* ------------------------------------------------------------------ */
@@ -194,6 +210,7 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
 
 #define SHN_UNDEF       0
 #define SHN_ABS         0xfff1
+#define SHN_COMMON      0xfff2
 
 #define ELF64_EHDR_SIZE 64
 #define ELF64_PHDR_SIZE 56
@@ -465,22 +482,28 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_pad(&elf, ELF64_SHDR_SIZE);
     /* [1] .text */
     write_shdr(&elf, shname_text, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
-               0, hdr_size + off_text, m->text.len, 0, 0, 16, 0);
+               0, hdr_size + off_text, m->text.len, 0, 0,
+               m->text_align ? m->text_align : 16, 0);
     /* [2] .rodata */
     write_shdr(&elf, shname_rodata, SHT_PROGBITS, SHF_ALLOC,
-               0, hdr_size + off_rodata, m->rodata.len, 0, 0, 8, 0);
+               0, hdr_size + off_rodata, m->rodata.len, 0, 0,
+               m->rodata_align ? m->rodata_align : 8, 0);
     /* [3] .data */
     write_shdr(&elf, shname_data, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE,
-               0, hdr_size + off_data, m->data.len, 0, 0, 8, 0);
+               0, hdr_size + off_data, m->data.len, 0, 0,
+               m->data_align ? m->data_align : 8, 0);
     /* [4] .bss */
     write_shdr(&elf, shname_bss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE,
-               0, hdr_size + off_data + m->data.len, m->bss_size, 0, 0, 8, 0);
+               0, hdr_size + off_data + m->data.len, m->bss_size, 0, 0,
+               m->bss_align ? m->bss_align : 8, 0);
     /* [5] .tdata */
     write_shdr(&elf, shname_tdata, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
-               0, hdr_size + off_tdata, m->tdata.len, 0, 0, 8, 0);
+               0, hdr_size + off_tdata, m->tdata.len, 0, 0,
+               m->tdata_align ? m->tdata_align : 8, 0);
     /* [6] .tbss */
     write_shdr(&elf, shname_tbss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
-               0, hdr_size + off_tdata + m->tdata.len, m->tbss_size, 0, 0, 8, 0);
+               0, hdr_size + off_tdata + m->tdata.len, m->tbss_size, 0, 0,
+               m->tbss_align ? m->tbss_align : 8, 0);
     /* Section indices (0-based): 0=NULL, 1=.text, 2=.rodata, 3=.data, 4=.bss,
      * 5=.tdata, 6=.tbss, 7=.symtab, 8=.strtab, 9=.shstrtab, 10=.rela.text,
      * 11=.rela.data, 12=.rela.tdata. */
@@ -562,6 +585,10 @@ static uint16_t rd_u16(const unsigned char *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
 }
 
+static void bump_align(size_t *dst, uint64_t a) {
+    if (a > *dst) *dst = (size_t)a;
+}
+
 int emit_obj_read(const char *path, EmitModule *m) {
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "fakecc: cannot open '%s'\n", path); return -1; }
@@ -596,28 +623,64 @@ int emit_obj_read(const char *path, EmitModule *m) {
     const char *shstr = (const char *)buf + shstr_off;
 
     /* Map section index → section id (SECT_TEXT etc.) by name, and find
-     * symtab + rela.text indices.  All SHT_PROGBITS sections named `.rodata*`
-     * (`.rodata`, `.rodata.cst8`, `.rodata.str1.1`, …) are concatenated into
-     * m->rodata so GCC objects that park float constants in `.rodata.cst8`
-     * resolve their R_X86_64_PC32 relocs. */
-    int symtab_idx = -1, rela_text_idx = -1, rela_data_idx = -1, rela_tdata_idx = -1, strtab_idx = -1;
-    int text_idx = -1, data_idx = -1, bss_idx = -1;
-    int tdata_idx = -1, tbss_idx = -1;
+     * symtab.  Concatenate `.text*` (SHF_EXECINSTR), `.rodata*`,
+     * `.data`/`.data.*` (including `.data.rel.ro`), `.bss`/`.bss.*`,
+     * `.tdata`/`.tdata.*` and `.tbss`/`.tbss.*` so gcc mix objects work. */
+    int symtab_idx = -1, strtab_idx = -1;
+    int *td_idx = NULL;
+    size_t *td_off = NULL;
+    int n_td = 0, cap_td = 0;
+    size_t total_td = 0;
+    int *tb_idx = NULL;
+    size_t *tb_off = NULL;
+    int n_tb = 0, cap_tb = 0;
+    size_t total_tb = 0;
     int fakecc_dbg_idx = -1;
     int *ro_idx = NULL;
     size_t *ro_off = NULL;
     int n_ro = 0, cap_ro = 0;
     size_t total_ro = 0;
+    int *tx_idx = NULL;
+    size_t *tx_off = NULL;
+    int n_tx = 0, cap_tx = 0;
+    size_t total_tx = 0;
+    int *da_idx = NULL;
+    size_t *da_off = NULL;
+    int n_da = 0, cap_da = 0;
+    size_t total_da = 0;
+    int *bs_idx = NULL;
+    size_t *bs_off = NULL;
+    int n_bs = 0, cap_bs = 0;
+    size_t total_bs = 0;
     for (int s = 0; s < shnum; s++) {
         const unsigned char *sh = buf + shoff + (size_t)s * shentsize;
         uint32_t name_idx = rd_u32(sh);
         const char *sname = shstr + name_idx;
         uint32_t type = rd_u32(sh + 4);
-        if (strcmp(sname, ".text") == 0 && type == SHT_PROGBITS) text_idx = s;
-        else if (strncmp(sname, ".rodata", 7) == 0 && type == SHT_PROGBITS) {
+        uint64_t flags = rd_u64(sh + 8);
+        uint64_t sh_align = rd_u64(sh + 48);
+        if (type == SHT_PROGBITS && (flags & SHF_EXECINSTR)
+            && !(flags & SHF_TLS)) {
             uint64_t sz = rd_u64(sh + 32);
-            uint64_t align = rd_u64(sh + 48);
+            uint64_t align = sh_align < 1 ? 1 : sh_align;
+            bump_align(&m->text_align, align);
+            size_t pad = (size_t)((align - (total_tx % (size_t)align)) % (size_t)align);
+            total_tx += pad;
+            if (n_tx >= cap_tx) {
+                cap_tx = cap_tx ? cap_tx * 2 : 4;
+                tx_idx = realloc(tx_idx, (size_t)cap_tx * sizeof(int));
+                tx_off = realloc(tx_off, (size_t)cap_tx * sizeof(size_t));
+                if (!tx_idx || !tx_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
+            tx_idx[n_tx] = s;
+            tx_off[n_tx] = total_tx;
+            n_tx++;
+            total_tx += (size_t)sz;
+        } else if (strncmp(sname, ".rodata", 7) == 0 && type == SHT_PROGBITS) {
+            uint64_t sz = rd_u64(sh + 32);
+            uint64_t align = sh_align;
             if (align < 1) align = 1;
+            bump_align(&m->rodata_align, align);
             size_t pad = (size_t)((align - (total_ro % (size_t)align)) % (size_t)align);
             total_ro += pad;
             if (n_ro >= cap_ro) {
@@ -630,16 +693,82 @@ int emit_obj_read(const char *path, EmitModule *m) {
             ro_off[n_ro] = total_ro;
             n_ro++;
             total_ro += (size_t)sz;
-        }
-        else if (strcmp(sname, ".data") == 0 && type == SHT_PROGBITS) data_idx = s;
-        else if (strcmp(sname, ".bss") == 0 && type == SHT_NOBITS) bss_idx = s;
-        else if (strcmp(sname, ".tdata") == 0 && type == SHT_PROGBITS) tdata_idx = s;
-        else if (strcmp(sname, ".tbss") == 0 && type == SHT_NOBITS) tbss_idx = s;
-        else if (strcmp(sname, ".symtab") == 0 && type == SHT_SYMTAB) symtab_idx = s;
+        } else if (type == SHT_PROGBITS && !(flags & SHF_EXECINSTR)
+                   && !(flags & SHF_TLS)
+                   && (strcmp(sname, ".data") == 0 || strncmp(sname, ".data.", 6) == 0)) {
+            uint64_t sz = rd_u64(sh + 32);
+            uint64_t align = sh_align < 1 ? 1 : sh_align;
+            bump_align(&m->data_align, align);
+            size_t pad = (size_t)((align - (total_da % (size_t)align)) % (size_t)align);
+            total_da += pad;
+            if (n_da >= cap_da) {
+                cap_da = cap_da ? cap_da * 2 : 4;
+                da_idx = realloc(da_idx, (size_t)cap_da * sizeof(int));
+                da_off = realloc(da_off, (size_t)cap_da * sizeof(size_t));
+                if (!da_idx || !da_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
+            da_idx[n_da] = s;
+            da_off[n_da] = total_da;
+            n_da++;
+            total_da += (size_t)sz;
+        } else if (type == SHT_NOBITS && !(flags & SHF_TLS)
+                   && (strcmp(sname, ".bss") == 0 || strncmp(sname, ".bss.", 5) == 0)) {
+            uint64_t sz = rd_u64(sh + 32);
+            uint64_t align = sh_align < 1 ? 1 : sh_align;
+            bump_align(&m->bss_align, align);
+            size_t pad = (size_t)((align - (total_bs % (size_t)align)) % (size_t)align);
+            total_bs += pad;
+            if (n_bs >= cap_bs) {
+                cap_bs = cap_bs ? cap_bs * 2 : 4;
+                bs_idx = realloc(bs_idx, (size_t)cap_bs * sizeof(int));
+                bs_off = realloc(bs_off, (size_t)cap_bs * sizeof(size_t));
+                if (!bs_idx || !bs_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
+            bs_idx[n_bs] = s;
+            bs_off[n_bs] = total_bs;
+            n_bs++;
+            total_bs += (size_t)sz;
+        } else if (type == SHT_PROGBITS
+                   && ((flags & SHF_TLS)
+                       || strcmp(sname, ".tdata") == 0
+                       || strncmp(sname, ".tdata.", 7) == 0)
+                   && !(flags & SHF_EXECINSTR)) {
+            uint64_t sz = rd_u64(sh + 32);
+            uint64_t align = sh_align < 1 ? 1 : sh_align;
+            bump_align(&m->tdata_align, align);
+            size_t pad = (size_t)((align - (total_td % (size_t)align)) % (size_t)align);
+            total_td += pad;
+            if (n_td >= cap_td) {
+                cap_td = cap_td ? cap_td * 2 : 4;
+                td_idx = realloc(td_idx, (size_t)cap_td * sizeof(int));
+                td_off = realloc(td_off, (size_t)cap_td * sizeof(size_t));
+                if (!td_idx || !td_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
+            td_idx[n_td] = s;
+            td_off[n_td] = total_td;
+            n_td++;
+            total_td += (size_t)sz;
+        } else if (type == SHT_NOBITS
+                   && ((flags & SHF_TLS)
+                       || strcmp(sname, ".tbss") == 0
+                       || strncmp(sname, ".tbss.", 6) == 0)) {
+            uint64_t sz = rd_u64(sh + 32);
+            uint64_t align = sh_align < 1 ? 1 : sh_align;
+            bump_align(&m->tbss_align, align);
+            size_t pad = (size_t)((align - (total_tb % (size_t)align)) % (size_t)align);
+            total_tb += pad;
+            if (n_tb >= cap_tb) {
+                cap_tb = cap_tb ? cap_tb * 2 : 4;
+                tb_idx = realloc(tb_idx, (size_t)cap_tb * sizeof(int));
+                tb_off = realloc(tb_off, (size_t)cap_tb * sizeof(size_t));
+                if (!tb_idx || !tb_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
+            tb_idx[n_tb] = s;
+            tb_off[n_tb] = total_tb;
+            n_tb++;
+            total_tb += (size_t)sz;
+        } else if (strcmp(sname, ".symtab") == 0 && type == SHT_SYMTAB) symtab_idx = s;
         else if (strcmp(sname, ".strtab") == 0 && type == SHT_STRTAB) strtab_idx = s;
-        else if (strcmp(sname, ".rela.text") == 0 && type == SHT_RELA) rela_text_idx = s;
-        else if (strcmp(sname, ".rela.data") == 0 && type == SHT_RELA) rela_data_idx = s;
-        else if (strcmp(sname, ".rela.tdata") == 0 && type == SHT_RELA) rela_tdata_idx = s;
         else if (strcmp(sname, ".fakecc_dbg") == 0 && type == SHT_PROGBITS) fakecc_dbg_idx = s;
     }
 
@@ -654,10 +783,17 @@ int emit_obj_read(const char *path, EmitModule *m) {
     }
 
     /* Read section data. */
-    if (text_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)text_idx * shentsize;
-        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        m->text.data = malloc(sz); memcpy(m->text.data, buf + off, sz); m->text.len = sz; m->text.cap = sz;
+    if (n_tx > 0) {
+        m->text.data = malloc(total_tx ? total_tx : 1);
+        if (!m->text.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        memset(m->text.data, 0, total_tx);
+        m->text.len = total_tx;
+        m->text.cap = total_tx;
+        for (int i = 0; i < n_tx; i++) {
+            const unsigned char *sh = buf + shoff + (size_t)tx_idx[i] * shentsize;
+            uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+            if (sz > 0) memcpy(m->text.data + tx_off[i], buf + off, (size_t)sz);
+        }
     }
     if (n_ro > 0) {
         m->rodata.data = malloc(total_ro ? total_ro : 1);
@@ -671,24 +807,34 @@ int emit_obj_read(const char *path, EmitModule *m) {
             if (sz > 0) memcpy(m->rodata.data + ro_off[i], buf + off, (size_t)sz);
         }
     }
-    if (data_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)data_idx * shentsize;
-        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        m->data.data = malloc(sz); memcpy(m->data.data, buf + off, sz); m->data.len = sz; m->data.cap = sz;
+    if (n_da > 0) {
+        m->data.data = malloc(total_da ? total_da : 1);
+        if (!m->data.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        memset(m->data.data, 0, total_da);
+        m->data.len = total_da;
+        m->data.cap = total_da;
+        for (int i = 0; i < n_da; i++) {
+            const unsigned char *sh = buf + shoff + (size_t)da_idx[i] * shentsize;
+            uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+            if (sz > 0) memcpy(m->data.data + da_off[i], buf + off, (size_t)sz);
+        }
     }
-    if (bss_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)bss_idx * shentsize;
-        m->bss_size = (size_t)rd_u64(sh + 32);
+    if (n_bs > 0)
+        m->bss_size = total_bs;
+    if (n_td > 0) {
+        m->tdata.data = malloc(total_td ? total_td : 1);
+        if (!m->tdata.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        memset(m->tdata.data, 0, total_td);
+        m->tdata.len = total_td;
+        m->tdata.cap = total_td ? total_td : 1;
+        for (int i = 0; i < n_td; i++) {
+            const unsigned char *sh = buf + shoff + (size_t)td_idx[i] * shentsize;
+            uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+            if (sz > 0) memcpy(m->tdata.data + td_off[i], buf + off, (size_t)sz);
+        }
     }
-    if (tdata_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)tdata_idx * shentsize;
-        uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-        m->tdata.data = malloc(sz); memcpy(m->tdata.data, buf + off, sz); m->tdata.len = sz; m->tdata.cap = sz;
-    }
-    if (tbss_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)tbss_idx * shentsize;
-        m->tbss_size = (size_t)rd_u64(sh + 32);
-    }
+    if (n_tb > 0)
+        m->tbss_size = total_tb;
 
     /* Read symbol table. */
     if (symtab_idx >= 0) {
@@ -713,22 +859,56 @@ int emit_obj_read(const char *path, EmitModule *m) {
             }
             uint16_t mapped_shndx = shndx;
             size_t mapped_value = (size_t)value;
-            int ro_hit = 0;
-            for (int ri = 0; ri < n_ro; ri++) {
+            int mapped = 0;
+            if (shndx == SHN_COMMON) {
+                mapped_shndx = SHN_COMMON;
+                mapped_value = (size_t)value; /* alignment */
+                mapped = 1;
+            }
+            for (int ri = 0; !mapped && ri < n_ro; ri++) {
                 if (shndx == ro_idx[ri]) {
                     mapped_shndx = SECT_RODATA;
                     mapped_value = (size_t)value + ro_off[ri];
-                    ro_hit = 1;
-                    break;
+                    mapped = 1;
                 }
             }
-            if (!ro_hit) {
-                if (shndx == text_idx) mapped_shndx = SECT_TEXT;
-                else if (shndx == data_idx) mapped_shndx = SECT_DATA;
-                else if (shndx == bss_idx) mapped_shndx = SECT_BSS;
-                else if (shndx == tdata_idx) mapped_shndx = SECT_TDATA;
-                else if (shndx == tbss_idx) mapped_shndx = SECT_TBSS;
-                else if (shndx == 0) mapped_shndx = SECT_UNDEF;
+            for (int ti = 0; !mapped && ti < n_tx; ti++) {
+                if (shndx == tx_idx[ti]) {
+                    mapped_shndx = SECT_TEXT;
+                    mapped_value = (size_t)value + tx_off[ti];
+                    mapped = 1;
+                }
+            }
+            for (int di = 0; !mapped && di < n_da; di++) {
+                if (shndx == da_idx[di]) {
+                    mapped_shndx = SECT_DATA;
+                    mapped_value = (size_t)value + da_off[di];
+                    mapped = 1;
+                }
+            }
+            for (int bi = 0; !mapped && bi < n_bs; bi++) {
+                if (shndx == bs_idx[bi]) {
+                    mapped_shndx = SECT_BSS;
+                    mapped_value = (size_t)value + bs_off[bi];
+                    mapped = 1;
+                }
+            }
+            for (int ki = 0; !mapped && ki < n_td; ki++) {
+                if (shndx == td_idx[ki]) {
+                    mapped_shndx = SECT_TDATA;
+                    mapped_value = (size_t)value + td_off[ki];
+                    mapped = 1;
+                }
+            }
+            for (int ki = 0; !mapped && ki < n_tb; ki++) {
+                if (shndx == tb_idx[ki]) {
+                    mapped_shndx = SECT_TBSS;
+                    mapped_value = (size_t)value + tb_off[ki];
+                    mapped = 1;
+                }
+            }
+            if (!mapped) {
+                if (shndx == 0) mapped_shndx = SECT_UNDEF;
             }
             emit_module_add_symbol(m, name,
                                    (uint8_t)(info >> 4), (uint8_t)(info & 0xf),
@@ -736,13 +916,25 @@ int emit_obj_read(const char *path, EmitModule *m) {
         }
     }
 
-    /* Read relocations. */
-    if (rela_text_idx >= 0) {
-        const unsigned char *sh = buf + shoff + (size_t)rela_text_idx * shentsize;
+    /* Read relocations by sh_info (covers .rela.text.startup, .rela.data.rel.ro). */
+    for (int s = 0; s < shnum; s++) {
+        const unsigned char *sh = buf + shoff + (size_t)s * shentsize;
+        if (rd_u32(sh + 4) != SHT_RELA) continue;
+        uint32_t info = rd_u32(sh + 44);
         uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
         uint32_t entsize = rd_u32(sh + 56);
         if (entsize == 0) entsize = ELF64_RELA_SIZE;
         size_t count = sz / entsize;
+        int tx_i = -1, da_i = -1, ro_i = -1, td_i = -1;
+        for (int ti = 0; ti < n_tx; ti++)
+            if ((int)info == tx_idx[ti]) { tx_i = ti; break; }
+        for (int di = 0; di < n_da; di++)
+            if ((int)info == da_idx[di]) { da_i = di; break; }
+        for (int ri = 0; ri < n_ro; ri++)
+            if ((int)info == ro_idx[ri]) { ro_i = ri; break; }
+        for (int ki = 0; ki < n_td; ki++)
+            if ((int)info == td_idx[ki]) { td_i = ki; break; }
+        if (tx_i < 0 && da_i < 0 && ro_i < 0 && td_i < 0) continue;
         for (size_t i = 0; i < count; i++) {
             const unsigned char *r = buf + off + i * entsize;
             uint64_t roff = rd_u64(r);
@@ -750,30 +942,21 @@ int emit_obj_read(const char *path, EmitModule *m) {
             uint64_t raddend = rd_u64(r + 16);
             uint32_t sym = (uint32_t)(rinfo >> 32);
             uint32_t type = (uint32_t)(rinfo & 0xffffffff);
-            emit_module_add_reloc(m, (size_t)roff, type, (int)sym, (int32_t)raddend);
-        }
-    }
-    /* Read data / tdata relocations (pointer fixups). */
-    {
-        int rela_secs[2] = { rela_data_idx, rela_tdata_idx };
-        uint16_t site_shndx[2] = { SECT_DATA, SECT_TDATA };
-        for (int si = 0; si < 2; si++) {
-            int rela_idx = rela_secs[si];
-            if (rela_idx < 0) continue;
-            const unsigned char *sh = buf + shoff + (size_t)rela_idx * shentsize;
-            uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
-            uint32_t entsize = rd_u32(sh + 56);
-            if (entsize == 0) entsize = ELF64_RELA_SIZE;
-            size_t count = sz / entsize;
-            for (size_t i = 0; i < count; i++) {
-                const unsigned char *r = buf + off + i * entsize;
-                uint64_t roff = rd_u64(r);
-                uint64_t rinfo = rd_u64(r + 8);
-                uint64_t raddend = rd_u64(r + 16);
-                uint32_t sym = (uint32_t)(rinfo >> 32);
-                uint32_t type = (uint32_t)(rinfo & 0xffffffff);
-                emit_module_add_data_reloc(m, (size_t)roff, type, (int)sym, (int32_t)raddend);
-                m->data_relocs[m->num_data_relocs - 1].shndx = site_shndx[si];
+            if (tx_i >= 0) {
+                emit_module_add_reloc(m, (size_t)roff + tx_off[tx_i],
+                                      type, (int)sym, (int32_t)raddend);
+            } else if (da_i >= 0) {
+                emit_module_add_data_reloc(m, (size_t)roff + da_off[da_i],
+                                           type, (int)sym, (int32_t)raddend);
+                m->data_relocs[m->num_data_relocs - 1].shndx = SECT_DATA;
+            } else if (td_i >= 0) {
+                emit_module_add_data_reloc(m, (size_t)roff + td_off[td_i],
+                                           type, (int)sym, (int32_t)raddend);
+                m->data_relocs[m->num_data_relocs - 1].shndx = SECT_TDATA;
+            } else {
+                emit_module_add_data_reloc(m, (size_t)roff + ro_off[ro_i],
+                                           type, (int)sym, (int32_t)raddend);
+                m->data_relocs[m->num_data_relocs - 1].shndx = SECT_RODATA;
             }
         }
     }
@@ -789,6 +972,16 @@ int emit_obj_read(const char *path, EmitModule *m) {
 
     free(ro_idx);
     free(ro_off);
+    free(tx_idx);
+    free(tx_off);
+    free(da_idx);
+    free(da_off);
+    free(bs_idx);
+    free(bs_off);
+    free(td_idx);
+    free(td_off);
+    free(tb_idx);
+    free(tb_off);
     free(buf);
     return 0;
 }

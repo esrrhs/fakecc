@@ -346,4 +346,285 @@ echo 'struct Z { char x[0]; }; int take6z(int a,int b,int c,int d,int e,int f, s
 gcc -std=gnu99 -c "$TMP/gcc_z0_main.c" -o "$TMP/gcc_z0_main.o"
 run_multi 99 "$TMP/fc_z0.o" "$TMP/gcc_z0_main.o"
 
+# 16-byte X87 aggregate returns in st0 (not sret).  Mix both directions.
+echo 'struct Ld { long double x; }; struct Ld make(long double v) { struct Ld s; s.x = v; return s; } long double take(struct Ld s) { return s.x; }' > "$TMP/gcc_x87r.c"
+echo 'package main; struct Ld { long double x; }; struct Ld make(long double v); long double take(struct Ld s); int main(void) { struct Ld a = make(3.0L); if (take(a) != 3.0L) return 1; struct Ld b; b.x = 4.0L; if (take(b) != 4.0L) return 2; return 0; }' > "$TMP/fc_x87r_main.c"
+gcc -std=c99 -c "$TMP/gcc_x87r.c" -o "$TMP/gcc_x87r.o"
+run_multi 0 "$TMP/fc_x87r_main.c" "$TMP/gcc_x87r.o"
+
+echo 'package main; struct Ld { long double x; }; struct Ld make(long double v) { struct Ld s; s.x = v; return s; } long double take(struct Ld s) { return s.x; }' > "$TMP/fc_x87r.c"
+echo 'struct Ld { long double x; }; struct Ld make(long double v); long double take(struct Ld s); int main(void) { struct Ld a = make(3.0L); if (take(a) != 3.0L) return 1; struct Ld b; b.x = 4.0L; if (take(b) != 4.0L) return 2; return 0; }' > "$TMP/gcc_x87r_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_x87r.c" -o "$TMP/fc_x87r.o"
+gcc -std=c99 -c "$TMP/gcc_x87r_main.c" -o "$TMP/gcc_x87r_main.o"
+run_multi 0 "$TMP/fc_x87r.o" "$TMP/gcc_x87r_main.o"
+
+# Union true-FAM is MEMORY; union `[0]` stays INTEGER.  Mix both directions.
+echo 'union U { int n; char d[]; }; int take(union U u, int k) { return u.n + k; }' > "$TMP/gcc_ufam.c"
+echo 'package main; union U { int n; char d[]; }; int take(union U u, int k); int main(void) { union U u; u.n = 1; return take(u, 6); }' > "$TMP/fc_ufam_main.c"
+gcc -std=gnu99 -c "$TMP/gcc_ufam.c" -o "$TMP/gcc_ufam.o"
+run_multi 7 "$TMP/fc_ufam_main.c" "$TMP/gcc_ufam.o"
+
+echo 'package main; union U { int n; char d[]; }; int take(union U u, int k) { return u.n + k; }' > "$TMP/fc_ufam.c"
+echo 'union U { int n; char d[]; }; int take(union U u, int k); int main(void) { union U u; u.n = 1; return take(u, 6); }' > "$TMP/gcc_ufam_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_ufam.c" -o "$TMP/fc_ufam.o"
+gcc -std=gnu99 -c "$TMP/gcc_ufam_main.c" -o "$TMP/gcc_ufam_main.o"
+run_multi 7 "$TMP/fc_ufam.o" "$TMP/gcc_ufam_main.o"
+
+echo 'union U { int n; char d[0]; }; int take(union U u, int k) { return u.n + k; }' > "$TMP/gcc_uz0.c"
+echo 'package main; union U { int n; char d[0]; }; int take(union U u, int k); int main(void) { union U u; u.n = 4; return take(u, 7); }' > "$TMP/fc_uz0_main.c"
+gcc -std=gnu99 -c "$TMP/gcc_uz0.c" -o "$TMP/gcc_uz0.o"
+run_multi 11 "$TMP/fc_uz0_main.c" "$TMP/gcc_uz0.o"
+
+echo 'package main; union U { int n; char d[0]; }; int take(union U u, int k) { return u.n + k; }' > "$TMP/fc_uz0.c"
+echo 'union U { int n; char d[0]; }; int take(union U u, int k); int main(void) { union U u; u.n = 4; return take(u, 7); }' > "$TMP/gcc_uz0_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_uz0.c" -o "$TMP/fc_uz0.o"
+gcc -std=gnu99 -c "$TMP/gcc_uz0_main.c" -o "$TMP/gcc_uz0_main.o"
+run_multi 11 "$TMP/fc_uz0.o" "$TMP/gcc_uz0_main.o"
+
+# Padding eightbytes are NO_CLASS (not INTEGER).  Mix both directions.
+echo 'struct __attribute__((aligned(16))) S { long x; }; int take(struct S s, int k) { return (int)s.x + k; }' > "$TMP/gcc_pad.c"
+echo 'package main; struct __attribute__((aligned(16))) S { long x; }; int take(struct S s, int k); int main(void) { struct S s; s.x = 3; return take(s, 4); }' > "$TMP/fc_pad_main.c"
+gcc -std=c99 -c "$TMP/gcc_pad.c" -o "$TMP/gcc_pad.o"
+run_multi 7 "$TMP/fc_pad_main.c" "$TMP/gcc_pad.o"
+
+echo 'package main; struct __attribute__((aligned(16))) S { long x; }; int take(struct S s, int k) { return (int)s.x + k; }' > "$TMP/fc_pad.c"
+echo 'struct __attribute__((aligned(16))) S { long x; }; int take(struct S s, int k); int main(void) { struct S s; s.x = 3; return take(s, 4); }' > "$TMP/gcc_pad_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_pad.c" -o "$TMP/fc_pad.o"
+gcc -std=c99 -c "$TMP/gcc_pad_main.c" -o "$TMP/gcc_pad_main.o"
+run_multi 7 "$TMP/fc_pad.o" "$TMP/gcc_pad_main.o"
+
+# Mixed union { long double; long long } returns via sret, not st0.
+echo 'union U { long double d; long long l; }; union U make(long double v) { union U u; u.d = v; return u; }' > "$TMP/gcc_uld.c"
+echo 'package main; union U { long double d; long long l; }; union U make(long double v); int main(void) { union U u = make(3.0L); return u.d != 3.0L; }' > "$TMP/fc_uld_main.c"
+gcc -std=c99 -c "$TMP/gcc_uld.c" -o "$TMP/gcc_uld.o"
+run_multi 0 "$TMP/fc_uld_main.c" "$TMP/gcc_uld.o"
+
+echo 'package main; union U { long double d; long long l; }; union U make(long double v) { union U u; u.d = v; return u; }' > "$TMP/fc_uld.c"
+echo 'union U { long double d; long long l; }; union U make(long double v); int main(void) { union U u = make(3.0L); return u.d != 3.0L; }' > "$TMP/gcc_uld_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_uld.c" -o "$TMP/fc_uld.o"
+gcc -std=c99 -c "$TMP/gcc_uld_main.c" -o "$TMP/gcc_uld_main.o"
+run_multi 0 "$TMP/fc_uld.o" "$TMP/gcc_uld_main.o"
+
+# Packed bitfields that spill into a later eightbyte are INTEGER+INTEGER.
+echo 'struct __attribute__((packed)) P { unsigned long a:60; unsigned b:8; }; int take(struct P p, int k) { return p.b != 0xa5 ? 2 : k; }' > "$TMP/gcc_pbf.c"
+echo 'package main; struct __attribute__((packed)) P { unsigned long a:60; unsigned b:8; }; int take(struct P p, int k); int main(void) { struct P p; p.a = 0xfffffffffffffffUL; p.b = 0xa5; return take(p, 7); }' > "$TMP/fc_pbf_main.c"
+gcc -std=c99 -c "$TMP/gcc_pbf.c" -o "$TMP/gcc_pbf.o"
+run_multi 7 "$TMP/fc_pbf_main.c" "$TMP/gcc_pbf.o"
+
+echo 'package main; struct __attribute__((packed)) P { unsigned long a:60; unsigned b:8; }; int take(struct P p, int k) { return p.b != 0xa5 ? 2 : k; }' > "$TMP/fc_pbf.c"
+echo 'struct __attribute__((packed)) P { unsigned long a:60; unsigned b:8; }; int take(struct P p, int k); int main(void) { struct P p; p.a = 0xfffffffffffffffUL; p.b = 0xa5; return take(p, 7); }' > "$TMP/gcc_pbf_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_pbf.c" -o "$TMP/fc_pbf.o"
+gcc -std=c99 -c "$TMP/gcc_pbf_main.c" -o "$TMP/gcc_pbf_main.o"
+run_multi 7 "$TMP/fc_pbf.o" "$TMP/gcc_pbf_main.o"
+
+# gcc -fno-pic text refs are R_X86_64_32S (absolute S+A), not PC32.
+echo 'extern int arr[4]; int idx(int i) { return arr[i]; }' > "$TMP/gcc_32s.c"
+echo 'package main; int arr[4] = {1,2,3,42}; int idx(int i); int main(void) { return idx(3); }' > "$TMP/fc_32s_main.c"
+gcc -fno-pic -fno-pie -c "$TMP/gcc_32s.c" -o "$TMP/gcc_32s.o"
+if LANG=C readelf -rW "$TMP/gcc_32s.o" 2>/dev/null | grep -q 'R_X86_64_32S'; then
+    pass "gcc -fno-pic idx has R_X86_64_32S"
+else
+    fail "gcc -fno-pic idx missing R_X86_64_32S: $(LANG=C readelf -rW "$TMP/gcc_32s.o" 2>/dev/null | head)"
+fi
+run_multi 42 "$TMP/fc_32s_main.c" "$TMP/gcc_32s.o"
+
+echo 'extern int x; int get(void) { return x; }' > "$TMP/gcc_32s_x.c"
+echo 'package main; int x = 7; int get(void); int main(void) { return get(); }' > "$TMP/fc_32s_x_main.c"
+gcc -fno-pic -fno-pie -c "$TMP/gcc_32s_x.c" -o "$TMP/gcc_32s_x.o"
+run_multi 7 "$TMP/fc_32s_x_main.c" "$TMP/gcc_32s_x.o"
+
+# gcc -mcmodel=large uses R_X86_64_64 in .text (8-byte S+A, not PC32).
+echo 'int g = 7; int get(void) { return g; }' > "$TMP/gcc_large.c"
+echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_large_main.c"
+gcc -O2 -mcmodel=large -fno-pic -c "$TMP/gcc_large.c" -o "$TMP/gcc_large.o"
+run_multi 7 "$TMP/fc_large_main.c" "$TMP/gcc_large.o"
+
+# gcc -O2 jump tables live in .rodata with .rela.rodata (R_X86_64_64 / PC32).
+{
+    echo 'int sw(int x) { switch (x) {'
+    i=0
+    while [ "$i" -lt 32 ]; do
+        echo "  case $i: return $((100 + i));"
+        i=$((i + 1))
+    done
+    echo '  default: return -1; } }'
+} > "$TMP/gcc_sw.c"
+echo 'package main; int sw(int); int main(void) { if (sw(0) != 100) return 1; if (sw(31) != 131) return 2; if (sw(7) != 107) return 3; if (sw(99) != -1) return 4; return 0; }' > "$TMP/fc_sw_main.c"
+gcc -O2 -fno-pic -fno-tree-switch-conversion -c "$TMP/gcc_sw.c" -o "$TMP/gcc_sw.o"
+if LANG=C readelf -S "$TMP/gcc_sw.o" 2>/dev/null | grep -q '\.rela\.rodata'; then
+    pass "gcc -O2 switch has .rela.rodata"
+else
+    fail "gcc -O2 switch missing .rela.rodata: $(LANG=C readelf -S "$TMP/gcc_sw.o" 2>/dev/null | grep rela)"
+fi
+run_multi 0 "$TMP/fc_sw_main.c" "$TMP/gcc_sw.o"
+
+# PIC jump tables are R_X86_64_PC32 in .rodata.
+gcc -O2 -fPIC -fno-tree-switch-conversion -c "$TMP/gcc_sw.c" -o "$TMP/gcc_sw_pic.o"
+run_multi 0 "$TMP/fc_sw_main.c" "$TMP/gcc_sw_pic.o"
+
+# .data R_X86_64_PC64 is S+A−P; R_X86_64_32 must not clobber the next word.
+cat > "$TMP/gcc_pc64.s" << 'EOF'
+    .globl read_diff
+    .globl diff
+    .data
+    .align 8
+diff:
+    .quad g - .
+    .text
+read_diff:
+    movq diff(%rip), %rax
+    ret
+EOF
+echo 'int g = 1;' > "$TMP/gcc_g.c"
+echo 'package main; long read_diff(void); extern long diff; extern int g; int main(void) { return read_diff() == ((long)&g - (long)&diff) ? 0 : 1; }' > "$TMP/fc_pc64_main.c"
+gcc -c "$TMP/gcc_pc64.s" -o "$TMP/gcc_pc64.o"
+gcc -c "$TMP/gcc_g.c" -o "$TMP/gcc_g.o"
+run_multi 0 "$TMP/fc_pc64_main.c" "$TMP/gcc_pc64.o" "$TMP/gcc_g.o"
+
+cat > "$TMP/gcc_d32.s" << 'EOF'
+    .globl check_marker
+    .data
+    .long g
+marker:
+    .long 0x11223344
+    .text
+check_marker:
+    movl marker(%rip), %eax
+    ret
+EOF
+echo 'package main; int check_marker(void); int g = 1; int main(void) { return check_marker() == 0x11223344 ? 0 : 1; }' > "$TMP/fc_d32_main.c"
+gcc -c "$TMP/gcc_d32.s" -o "$TMP/gcc_d32.o"
+run_multi 0 "$TMP/fc_d32_main.c" "$TMP/gcc_d32.o"
+
+# gcc 16-aligned objects: concat must honor sh_addralign (movdqa / movaps).
+echo 'package main; int check(void); int main(void) { return check(); }' > "$TMP/fc_al16_main.c"
+echo '_Alignas(16) int g[4]; int check(void) { __asm__ volatile("movdqa %0, %%xmm0" :: "m"(g) : "xmm0"); return 0; }' > "$TMP/gcc_bss16.c"
+gcc -O2 -c "$TMP/gcc_bss16.c" -o "$TMP/gcc_bss16.o"
+run_multi 0 "$TMP/fc_al16_main.c" "$TMP/gcc_bss16.o"
+
+echo 'package main; char pad = 1; int check(void); int main(void) { return check(); }' > "$TMP/fc_al16_pad.c"
+echo '_Alignas(16) int g[4] = {1,2,3,4}; int check(void) { __asm__ volatile("movdqa %0, %%xmm0" :: "m"(g) : "xmm0"); return 0; }' > "$TMP/gcc_data16.c"
+gcc -O2 -c "$TMP/gcc_data16.c" -o "$TMP/gcc_data16.o"
+run_multi 0 "$TMP/fc_al16_pad.c" "$TMP/gcc_data16.o"
+
+echo 'package main; int check(void); int main(void) { const char *s = "x"; (void)s; return check(); }' > "$TMP/fc_al16_str.c"
+echo 'typedef int V __attribute__((vector_size(16))); V gv = {1,2,3,4}; int check(void) { V x = gv; return x[0]+x[1]+x[2]+x[3]; }' > "$TMP/gcc_cst16.c"
+gcc -O2 -c "$TMP/gcc_cst16.c" -o "$TMP/gcc_cst16.o"
+run_multi 10 "$TMP/fc_al16_str.c" "$TMP/gcc_cst16.o"
+
+# gcc -fPIE data refs are GOTPCRELX; fakecc must apply them as GOT loads.
+echo 'package main; int x = 3; int k = 4;' > "$TMP/fc_gotx.c"
+echo 'extern int x; extern int k; int main(void) { return x + k; }' > "$TMP/gcc_gotx.c"
+gcc -fPIE -c "$TMP/gcc_gotx.c" -o "$TMP/gcc_gotx.o"
+run_multi 7 "$TMP/fc_gotx.c" "$TMP/gcc_gotx.o"
+
+echo 'package main; extern int x; extern int k; int main(void) { return x + k; }' > "$TMP/fc_gotx_main.c"
+echo 'int x = 3; int k = 4;' > "$TMP/gcc_gotx_def.c"
+gcc -fPIE -c "$TMP/gcc_gotx_def.c" -o "$TMP/gcc_gotx_def.o"
+run_multi 7 "$TMP/fc_gotx_main.c" "$TMP/gcc_gotx_def.o"
+
+# extern __thread UND must be STT_TLS, not STT_NOTYPE (GNU ld mix).
+echo 'package main; extern __thread int tv; int get(void) { return tv; }' > "$TMP/tls_und.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/tls_und.c" -o "$TMP/tls_und.o" 2>"$TMP/cc.err" \
+    || { fail "extern TLS -c: $(head -1 "$TMP/cc.err")"; }
+if [ -f "$TMP/tls_und.o" ]; then
+    if LANG=C readelf -s "$TMP/tls_und.o" 2>/dev/null | awk '/ UND / && $NF == "tv" && $4 == "TLS" { found=1 } END { exit found ? 0 : 1 }'; then
+        pass "extern __thread UND is STT_TLS"
+    else
+        fail "extern __thread UND is not STT_TLS: $(LANG=C readelf -s "$TMP/tls_und.o" 2>/dev/null | grep tv)"
+    fi
+fi
+
+# gcc -fcommon: SHN_COMMON must merge into BSS and be writable.
+echo 'int g; int get(void) { return g; }' > "$TMP/gcc_common.c"
+echo 'package main; extern int g; int get(void); int main(void) { g = 9; return get(); }' > "$TMP/fc_common_main.c"
+gcc -fcommon -c "$TMP/gcc_common.c" -o "$TMP/gcc_common.o"
+run_multi 9 "$TMP/fc_common_main.c" "$TMP/gcc_common.o"
+
+# Two COMMON defs of the same name share one slot (max size).
+echo 'int g; int setg(int v) { g = v; return g; }' > "$TMP/gcc_c1.c"
+echo 'char g[8]; int getg(void) { return (int)g[0]; }' > "$TMP/gcc_c2.c"
+echo 'package main; int setg(int v); int getg(void); int main(void) { setg(6); return getg(); }' > "$TMP/fc_cmerge.c"
+gcc -fcommon -c "$TMP/gcc_c1.c" -o "$TMP/gcc_c1.o"
+gcc -fcommon -c "$TMP/gcc_c2.c" -o "$TMP/gcc_c2.o"
+run_multi 6 "$TMP/fc_cmerge.c" "$TMP/gcc_c1.o" "$TMP/gcc_c2.o"
+
+# GLOBAL definition overrides COMMON.
+echo 'int g; int get(void) { return g; }' > "$TMP/gcc_common2.c"
+echo 'package main; int g = 11; int get(void); int main(void) { return get(); }' > "$TMP/fc_common_ov.c"
+gcc -fcommon -c "$TMP/gcc_common2.c" -o "$TMP/gcc_common2.o"
+run_multi 11 "$TMP/fc_common_ov.c" "$TMP/gcc_common2.o"
+
+# gcc STB_WEAK definition satisfies UND; GLOBAL overrides WEAK.
+echo 'int __attribute__((weak)) val(void) { return 3; }' > "$TMP/gcc_weak.c"
+echo 'package main; int val(void); int main(void) { return val(); }' > "$TMP/fc_weak_main.c"
+gcc -c "$TMP/gcc_weak.c" -o "$TMP/gcc_weak.o"
+run_multi 3 "$TMP/fc_weak_main.c" "$TMP/gcc_weak.o"
+
+echo 'int __attribute__((weak)) val(void) { return 3; }' > "$TMP/gcc_weak2.c"
+echo 'package main; int val(void) { return 8; } int main(void) { return val(); }' > "$TMP/fc_weak_ov.c"
+gcc -c "$TMP/gcc_weak2.c" -o "$TMP/gcc_weak2.o"
+run_multi 8 "$TMP/fc_weak_ov.c" "$TMP/gcc_weak2.o"
+
+# gcc .text.startup must concat with .text and keep relocs.
+echo 'int __attribute__((section(".text.startup"))) check(void) { return 42; }' > "$TMP/gcc_startup.c"
+echo 'package main; int check(void); int main(void) { return check(); }' > "$TMP/fc_startup.c"
+gcc -c "$TMP/gcc_startup.c" -o "$TMP/gcc_startup.o"
+run_multi 42 "$TMP/fc_startup.c" "$TMP/gcc_startup.o"
+
+# gcc -fPIC pointer init lives in .data.rel.ro.
+echo 'int x = 3; int *p = &x; int check(void) { return *p; }' > "$TMP/gcc_relro.c"
+echo 'package main; int check(void); int main(void) { return check(); }' > "$TMP/fc_relro.c"
+gcc -fPIC -c "$TMP/gcc_relro.c" -o "$TMP/gcc_relro.o"
+run_multi 3 "$TMP/fc_relro.c" "$TMP/gcc_relro.o"
+
+# gcc -fdata-sections puts BSS objects in .bss.<name>.
+echo 'int a; int b; int sum(void) { a = 2; b = 5; return a + b; }' > "$TMP/gcc_bsssec.c"
+echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_bsssec.c"
+gcc -fdata-sections -c "$TMP/gcc_bsssec.c" -o "$TMP/gcc_bsssec.o"
+run_multi 7 "$TMP/fc_bsssec.c" "$TMP/gcc_bsssec.o"
+
+# gcc .rodata.cst16 as the only rodata (fakecc TU has no string literals).
+echo 'package main; int check(void); int main(void) { return check(); }' > "$TMP/fc_cst16_only.c"
+echo 'typedef int V __attribute__((vector_size(16))); V gv = {1,2,3,4}; int check(void) { V x = gv; return x[0]+x[1]+x[2]+x[3]; }' > "$TMP/gcc_cst16_only.c"
+gcc -O2 -c "$TMP/gcc_cst16_only.c" -o "$TMP/gcc_cst16_only.o"
+run_multi 10 "$TMP/fc_cst16_only.c" "$TMP/gcc_cst16_only.o"
+
+# gcc WEAK TLS is a valid Initial-Exec definition for a fakecc UND TLS ref.
+echo '__thread int __attribute__((weak)) tv = 5;' > "$TMP/gcc_wtls.c"
+echo 'package main; extern __thread int tv; int main(void) { return tv; }' > "$TMP/fc_wtls.c"
+gcc -c "$TMP/gcc_wtls.c" -o "$TMP/gcc_wtls.o"
+run_multi 5 "$TMP/fc_wtls.c" "$TMP/gcc_wtls.o"
+
+# PT_TLS p_align must cover 32-byte TLS objects (not a hardcoded 16).
+echo 'package main; __thread char tc = 1; __thread int tx __attribute__((aligned(32))); int main(void) { tx = 1; return ((unsigned long)&tx & 31ul) ? 1 : 0; }' > "$TMP/tls_al32.c"
+run_multi 0 "$TMP/tls_al32.c"
+if [ -f "$TMP/prog" ]; then
+    tls_align=$(LANG=C readelf -lW "$TMP/prog" 2>/dev/null | awk '/TLS/ { print $NF; exit }')
+    tls_n=0
+    [ -n "$tls_align" ] && tls_n=$((tls_align))
+    if [ "$tls_n" -ge 32 ]; then
+        pass "PT_TLS p_align is $tls_align (>=32)"
+    else
+        fail "PT_TLS p_align is '${tls_align:-missing}', want >= 32"
+    fi
+fi
+
+# gcc -fdata-sections splits TLS into .tdata.<name> / .tbss.<name>.
+echo '__thread int a = 3; __thread int b = 4; int sum(void) { return a + b; }' > "$TMP/gcc_tdsec.c"
+echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_tdsec.c"
+gcc -fdata-sections -c "$TMP/gcc_tdsec.c" -o "$TMP/gcc_tdsec.o"
+run_multi 7 "$TMP/fc_tdsec.c" "$TMP/gcc_tdsec.o"
+
+echo '__thread int a; __thread int b; int sum(void) { a = 2; b = 5; return a + b; }' > "$TMP/gcc_tbsec.c"
+echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_tbsec.c"
+gcc -fdata-sections -c "$TMP/gcc_tbsec.c" -o "$TMP/gcc_tbsec.o"
+run_multi 7 "$TMP/fc_tbsec.c" "$TMP/gcc_tbsec.o"
+
+# gcc aligned tbss after a fakecc tdata byte: object offset must stay 32-aligned.
+echo '__thread int tx __attribute__((aligned(32)));' > "$TMP/gcc_tx32.c"
+echo 'package main; extern __thread int tx; __thread char tc = 1; int main(void) { tx = 1; return ((unsigned long)&tx & 31ul) ? 1 : 0; }' > "$TMP/fc_tx32.c"
+gcc -c "$TMP/gcc_tx32.c" -o "$TMP/gcc_tx32.o"
+run_multi 0 "$TMP/fc_tx32.c" "$TMP/gcc_tx32.o"
+
 exit $FAIL

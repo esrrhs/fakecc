@@ -24,7 +24,7 @@
 typedef struct {
     char *name;        /* symbol name (NULL for section symbols) */
     uint8_t binding;   /* STB_LOCAL (0) / STB_GLOBAL (1) */
-    uint8_t type;      /* STT_NOTYPE(0) / STT_OBJECT(1) / STT_FUNC(2) / STT_SECTION(3) */
+    uint8_t type;      /* STT_NOTYPE(0) / STT_OBJECT(1) / STT_FUNC(2) / STT_SECTION(3) / STT_TLS(6) */
     uint16_t shndx;    /* section index, or SHN_UNDEF(0) for undefined */
     size_t value;      /* offset within section (defined symbols) */
     size_t size;       /* byte size (0 for undefined symbols) */
@@ -39,7 +39,7 @@ typedef struct {
     uint32_t type;     /* R_X86_64_64(1), R_X86_64_PC32(2), etc. */
     uint32_t sym;      /* target symbol index into syms[] */
     int32_t  addend;   /* addend (rip-relative uses -4) */
-    uint16_t shndx;    /* section of the site: SECT_DATA or SECT_TDATA */
+    uint16_t shndx;    /* site section: SECT_DATA, SECT_TDATA, or SECT_RODATA */
 } EmitReloc;
 
 /* ------------------------------------------------------------------ */
@@ -184,6 +184,13 @@ typedef struct {
     size_t   bss_size; /* .bss total bytes (zero-initialized globals) */
     Buffer   tdata;    /* .tdata — initialized __thread variables */
     size_t   tbss_size;/* .tbss total bytes (zero-init __thread variables) */
+    /* Max sh_addralign of each output section (gcc objects often use 16). */
+    size_t   text_align;
+    size_t   rodata_align;
+    size_t   data_align;
+    size_t   bss_align;
+    size_t   tdata_align;
+    size_t   tbss_align;
 
     EmitSymbol *syms;  /* unified symbol table (section + defined + undefined) */
     size_t num_syms, cap_syms;
@@ -222,6 +229,10 @@ int  emit_module_add_symbol(EmitModule *m, const char *name,
 int  emit_module_find_symbol(EmitModule *m, const char *name);
 /* Add (or reuse) an undefined symbol; returns its index. */
 int  emit_module_add_undefined(EmitModule *m, const char *name);
+/* Like emit_module_add_undefined, with an explicit ELF st_type
+ * (STT_NOTYPE / STT_TLS).  Reusing an existing UND upgrades NOTYPE. */
+int  emit_module_add_undefined_type(EmitModule *m, const char *name,
+                                   uint8_t st_type);
 
 /* ------------------------------------------------------------------ */
 /* Relocations                                                         */
@@ -275,6 +286,7 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_GLOB_DAT  6
 #define R_X86_64_GOTPCREL  9
 #define R_X86_64_32       10
+#define R_X86_64_32S      11
 #define R_X86_64_TPOFF64  18  /* TLS IE GOT fill (64-bit): dynamic linker writes
                                * l_tls_offset + st_value + addend into the GOT slot.
                                * Used in DSOs; executables fill the same slot statically. */
@@ -286,5 +298,8 @@ void emit_elf(const EmitModule *m, const char *path);
                                * a `movq %fs:0, %reg` to produce the thread-local address.
                                * Kept for legacy objects and static executables; DSOs
                                * must use GOTTPOFF + TPOFF64 (ld.so rejects type 0x17). */
+#define R_X86_64_PC64          24 /* S + A - P, 64-bit (`.quad sym - .`) */
+#define R_X86_64_GOTPCRELX     41 /* relaxable GOTPCREL; same S as GOTPCREL */
+#define R_X86_64_REX_GOTPCRELX 42 /* REX-prefixed relaxable GOTPCREL */
 
 #endif /* FAKECC_EMIT_H */

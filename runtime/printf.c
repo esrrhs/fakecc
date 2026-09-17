@@ -1,6 +1,6 @@
 /* printf family — FakeCC dialect.
- * Supports %s %c %d %i %u %x %X %p %n %a %A %f %F %e %E %g %G %%, the l/ll
- * length modifiers, field width and precision.
+ * Supports %s %ls %c %lc %d %i %u %x %X %p %n %a %A %f %F %e %E %g %G %%,
+ * the l/ll length modifiers, field width and precision.
  *
  * Floating point is formatted from an 18-significant-digit decimal expansion
  * computed in long double, which covers the 17 digits a double carries.
@@ -50,6 +50,53 @@ static int uint_to_buf(char *out, unsigned long long v, int base, int upper) {
     }
     int i = 0;
     while (i < n) { out[i] = tmp[n - 1 - i]; i = i + 1; }
+    return n;
+}
+
+static int utf8_put(char *dst, int cap, unsigned int cp) {
+    if (cp <= 0x7fu) {
+        if (cap < 1) return 0;
+        dst[0] = (char)cp;
+        return 1;
+    }
+    if (cp <= 0x7ffu) {
+        if (cap < 2) return 0;
+        dst[0] = (char)(0xc0 | (cp >> 6));
+        dst[1] = (char)(0x80 | (cp & 0x3f));
+        return 2;
+    }
+    if (cp <= 0xffffu) {
+        if (cap < 3) return 0;
+        dst[0] = (char)(0xe0 | (cp >> 12));
+        dst[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+        dst[2] = (char)(0x80 | (cp & 0x3f));
+        return 3;
+    }
+    if (cap < 4) return 0;
+    dst[0] = (char)(0xf0 | (cp >> 18));
+    dst[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
+    dst[2] = (char)(0x80 | ((cp >> 6) & 0x3f));
+    dst[3] = (char)(0x80 | (cp & 0x3f));
+    return 4;
+}
+
+static int conv_ls(char *body, const int *ws, int precision) {
+    int nch = 0;
+    int blen = 0;
+    while (ws[nch] && (precision < 0 || blen < precision)) {
+        unsigned int cp = (unsigned int)ws[nch];
+        int n = utf8_put(body + blen, 512 - blen, cp);
+        if (n <= 0) break;
+        if (precision >= 0 && blen + n > precision) break;
+        blen = blen + n;
+        nch = nch + 1;
+    }
+    return blen;
+}
+
+static int conv_lc(char *body, unsigned int wc) {
+    int n = utf8_put(body, 512, wc);
+    if (n < 1) { body[0] = '?'; return 1; }
     return n;
 }
 
@@ -159,7 +206,7 @@ static int ob_put(char *out, int *n, int cap, char c) {
 
 /* Format `a` (non-negative, finite) as %f with `prec` digits after the point.
  * Returns the length written to out. */
-static int fmt_fixed(char *out, long double a, int prec) {
+static int fmt_fixed(char *out, long double a, int prec, int alt) {
     char digits[40];
     int ndig;
     int e10;
@@ -183,7 +230,7 @@ static int fmt_fixed(char *out, long double a, int prec) {
         int z = 0;
         while (z < e10) { ob_put(out, &n, cap, '0'); z = z + 1; }
     }
-    if (prec > 0) {
+    if (prec > 0 || alt) {
         ob_put(out, &n, cap, '.');
         int emitted = 0;
         /* Leading zeros for a value smaller than 0.1. */
@@ -199,7 +246,7 @@ static int fmt_fixed(char *out, long double a, int prec) {
 }
 
 /* Format `a` (non-negative, finite) as %e with `prec` digits after the point. */
-static int fmt_sci(char *out, long double a, int prec, int upper) {
+static int fmt_sci(char *out, long double a, int prec, int upper, int alt) {
     char digits[40];
     int ndig;
     int e10;
@@ -217,7 +264,7 @@ static int fmt_sci(char *out, long double a, int prec, int upper) {
     int exp = (a == 0.0L) ? 0 : (e10 + ndig - 1);
     int n = 0;
     out[n] = digits[0]; n = n + 1;
-    if (prec > 0) {
+    if (prec > 0 || alt) {
         out[n] = '.'; n = n + 1;
         int i = 1;
         int emitted = 0;
@@ -240,8 +287,9 @@ static int fmt_sci(char *out, long double a, int prec, int upper) {
 }
 
 /* Format `a` as %g: %e when the exponent is far from zero, %f otherwise, with
- * trailing zeros removed (C99 7.19.6.1). */
-static int fmt_gen(char *out, long double a, int prec, int upper) {
+ * trailing zeros removed (C99 7.19.6.1).  `#` keeps trailing zeros and
+ * always prints a decimal point. */
+static int fmt_gen(char *out, long double a, int prec, int upper, int alt) {
     if (prec > 64) prec = 64;
     if (prec == 0) prec = 1;
     int exp;
@@ -258,8 +306,9 @@ static int fmt_gen(char *out, long double a, int prec, int upper) {
         exp = e10 + ndig - 1;
     }
     int n;
-    if (exp < -4 || exp >= prec) n = fmt_sci(out, a, prec - 1, upper);
-    else n = fmt_fixed(out, a, prec - 1 - exp);
+    if (exp < -4 || exp >= prec) n = fmt_sci(out, a, prec - 1, upper, alt);
+    else n = fmt_fixed(out, a, prec - 1 - exp, alt);
+    if (alt) return n;
     /* Strip trailing zeros in the fraction (and a bare trailing point). */
     int dot = -1;
     int i = 0;
@@ -480,17 +529,32 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
         const char *sbody = 0;   /* %s prints from the argument, not body[] */
 
         if (spec == 's') {
-            sbody = va_arg(ap, char *);
-            if (sbody == 0) sbody = "(null)";
-            if (precision >= 0) {
-                blen = 0;
-                while (blen < precision && sbody[blen]) blen = blen + 1;
+            if (long_count >= 1) {
+                const int *ws = va_arg(ap, const int *);
+                if (ws == 0) {
+                    sbody = "(null)";
+                    blen = 6;
+                } else {
+                    blen = conv_ls(body, ws, precision);
+                    sbody = body;
+                }
             } else {
-                blen = (int)strlen(sbody);
+                sbody = va_arg(ap, char *);
+                if (sbody == 0) sbody = "(null)";
+                if (precision >= 0) {
+                    blen = 0;
+                    while (blen < precision && sbody[blen]) blen = blen + 1;
+                } else {
+                    blen = (int)strlen(sbody);
+                }
             }
         } else if (spec == 'c') {
-            body[0] = (char)va_arg(ap, int);
-            blen = 1;
+            if (long_count >= 1) {
+                blen = conv_lc(body, (unsigned int)va_arg(ap, int));
+            } else {
+                body[0] = (char)va_arg(ap, int);
+                blen = 1;
+            }
         } else if (spec == 'd' || spec == 'i') {
             long long v;
             if (long_count >= 2 || size_mod) v = va_arg(ap, long long);
@@ -520,9 +584,19 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             else if (spec == 'X') { base = 16; upper = 1; }
             else if (spec == 'o') base = 8;
             if (spec == 'p') {
+                void *ptr = va_arg(ap, void *);
+                if (!ptr) {
+                    /* glibc: `%p` of NULL is `(nil)` with no 0x prefix. */
+                    body[0] = '('; body[1] = 'n'; body[2] = 'i';
+                    body[3] = 'l'; body[4] = ')';
+                    blen = 5;
+                    plen = 0;
+                    zero_ok = 1;
+                    goto emit_conv;
+                }
                 base = 16;
                 prefix[0] = '0'; prefix[1] = 'x'; plen = 2;
-                v = (unsigned long long)(unsigned long)va_arg(ap, void *);
+                v = (unsigned long long)(unsigned long)ptr;
             } else if (long_count >= 2 || size_mod) v = va_arg(ap, unsigned long long);
             else if (long_count == 1) v = (unsigned long long)va_arg(ap, unsigned long);
             else {
@@ -538,7 +612,10 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             }
             blen = uint_to_buf(body, v, base, upper);
             zero_ok = (precision < 0);
-            if (precision == 0 && v == 0 && spec != 'p') blen = 0;
+            /* `%#.0o` of 0 is `0` (C: `#` forces a leading zero). */
+            if (precision == 0 && v == 0 && spec != 'p'
+                && !(f_alt && spec == 'o'))
+                blen = 0;
         } else if (spec == 'n') {
             /* Characters written so far; consume the pointer so later
              * conversions stay aligned. */
@@ -608,13 +685,13 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 zero_ok = 1;
             } else {
                 if (spec == 'f' || spec == 'F')
-                    blen = fmt_fixed(body, a, precision < 0 ? 6 : precision);
+                    blen = fmt_fixed(body, a, precision < 0 ? 6 : precision, f_alt);
                 else if (spec == 'e' || spec == 'E')
                     blen = fmt_sci(body, a, precision < 0 ? 6 : precision,
-                                   spec == 'E');
+                                   spec == 'E', f_alt);
                 else
                     blen = fmt_gen(body, a, precision < 0 ? 6 : precision,
-                                   spec == 'G');
+                                   spec == 'G', f_alt);
                 zero_ok = 1;
             }
             if (neg) { prefix[0] = '-'; plen = 1; }
@@ -626,6 +703,7 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             blen = 2;
         }
 
+        emit_conv:
         /* Integer conversions zero-extend the digits to the precision. */
         int lead_zeros = 0;
         if (precision >= 0 && (spec == 'd' || spec == 'i' || spec == 'u'

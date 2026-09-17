@@ -2095,8 +2095,10 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
 
 /* Number of scalar slots an aggregate swallows when its braces are elided. */
 static int init_leaf_count(Type t) {
-    if (t.kind == TY_ARRAY && t.elem_type)
+    if (t.kind == TY_ARRAY && t.elem_type) {
+        if (t.length <= 0) return 0;
         return t.length * init_leaf_count(*t.elem_type);
+    }
     if (t.kind == TY_STRUCT) {
         const StructDef *sd = struct_registry_find_c(g_sema_structs, t.tag);
         if (!sd || sd->num_members == 0) return 1;
@@ -2269,7 +2271,7 @@ static void overlay_init_list(Type *target, Expr *dst, Expr *src, SourceLoc loc)
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested) {
     int n = list->u.init_list.num_elements;
     /* 1. Infer array length for an empty `[]` declarator. */
-    if (target->kind == TY_ARRAY && target->length == 0) {
+    if (target->kind == TY_ARRAY && target->length < 0 && !target->vla_dim) {
         int len = n;
         /* With elided braces each slot swallows several flat elements, so
          * `int m[][3] = {1,2,3,4,5,6}` has length 2, not 6. */
@@ -2406,7 +2408,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
          * Empty initializer list `{}` is allowed (no elements initialized). */
         if (is_nested && target->kind == TY_STRUCT && sd && member_idx == sd->num_members - 1) {
             const Type *mtype = &sd->members[member_idx].type;
-            if (mtype->kind == TY_ARRAY && mtype->length == 0 && mtype->elem_type) {
+            if (mtype->kind == TY_ARRAY && mtype->length <= 0 && mtype->elem_type) {
                 int is_empty = (elem->kind == EX_INIT_LIST && elem->u.init_list.num_elements == 0);
                 if (!is_empty) {
                     sema_report_error(&elem->loc,
@@ -2636,7 +2638,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         try_fold_vla_type(&s->u.decl.type);
         if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
             && s->u.decl.type.kind == TY_ARRAY) {
-            if (s->u.decl.type.length == 0)
+            if (s->u.decl.type.length < 0)
                 s->u.decl.type.length = s->u.decl.init->u.compound.target_type.length;
             Expr *cl = s->u.decl.init;
             s->u.decl.init = cl->u.compound.init;
@@ -2646,7 +2648,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         /* Infer array length from an empty `[]` declarator when initialized by
          * a string literal: `char s[] = "hi"` → length strlen+1.  (Array length
          * from an init list is inferred later by normalize_init_list.) */
-        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
+        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length < 0
             && s->u.decl.init && s->u.decl.init->kind == EX_STR
             && s->u.decl.type.elem_type
             && s->u.decl.type.elem_type->width == 1) {
@@ -2953,7 +2955,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                         prev->u.decl.storage_class = s->u.decl.storage_class;
                     /* Update symbol table with completed type */
                     symtable_push(&globals, prev->u.decl.name, prev->u.decl.type, prev->loc, prev->u.decl.align);
-                    if (prev->u.decl.type.kind == TY_ARRAY && prev->u.decl.type.length == 0
+                    if (prev->u.decl.type.kind == TY_ARRAY && prev->u.decl.type.length < 0
                         && prev->u.decl.init && prev->u.decl.init->kind == EX_STR
                         && prev->u.decl.type.elem_type
                         && prev->u.decl.type.elem_type->width == 1) {
@@ -2998,7 +3000,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         }
         if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
             && s->u.decl.type.kind == TY_ARRAY) {
-            if (s->u.decl.type.length == 0)
+            if (s->u.decl.type.length < 0)
                 s->u.decl.type.length = s->u.decl.init->u.compound.target_type.length;
             Expr *cl = s->u.decl.init;
             s->u.decl.init = cl->u.compound.init;
@@ -3008,7 +3010,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         /* Infer array length from an empty `[]` declarator when initialized by
          * a string literal: `char s[] = "hi"` → length strlen+1.  (Array length
          * from an init list is inferred later by normalize_init_list.) */
-        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length == 0
+        if (s->u.decl.type.kind == TY_ARRAY && s->u.decl.type.length < 0
             && s->u.decl.init && s->u.decl.init->kind == EX_STR
             && s->u.decl.type.elem_type
             && s->u.decl.type.elem_type->width == 1) {
@@ -3075,7 +3077,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                 type_free(&dt);
             }
             int own_ptr = 0;
-            if (pty.kind == TY_ARRAY && pty.length == 0) {
+            if (pty.kind == TY_ARRAY && pty.length <= 0) {
                 pty = type_make_ptr(*pty.elem_type);
                 own_ptr = 1;
             }
