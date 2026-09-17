@@ -241,6 +241,25 @@ static void test_vector16_uses_movups(void) {
     emit_module_free(&em);
 }
 
+static void test_constructor_init_array(void) {
+    EmitModule em = compile_to_code(
+        "package main;"
+        "int g;"
+        "__attribute__((constructor)) void ctor(void) { g = 7; }"
+        "int main(void) { return g; }");
+    T_ASSERT(find_sym(&em, "ctor") != NULL);
+    T_ASSERT_EQ_INT((int)em.init_array.len, 8);
+    T_ASSERT(em.num_data_relocs >= 1);
+    int saw = 0;
+    for (size_t i = 0; i < em.num_data_relocs; i++) {
+        if (em.data_relocs[i].shndx == SECT_INIT_ARRAY
+            && em.data_relocs[i].type == R_X86_64_64)
+            saw = 1;
+    }
+    T_ASSERT(saw);
+    emit_module_free(&em);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -256,5 +275,6 @@ int main(void) {
     test_sib_global_index();
     test_sib_local_index();
     test_vector16_uses_movups();
+    test_constructor_init_array();
     return t_finalize();
 }

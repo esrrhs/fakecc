@@ -16,6 +16,7 @@
 #define SECT_BSS    4
 #define SECT_TDATA  5  /* initialized __thread variables (ELF SHF_TLS) */
 #define SECT_TBSS   6  /* zero-initialized __thread variables (SHF_TLS) */
+#define SECT_INIT_ARRAY 7 /* .init_array constructor pointers */
 
 /* ------------------------------------------------------------------ */
 /* Symbol table entry                                                  */
@@ -191,6 +192,8 @@ typedef struct {
     size_t   bss_align;
     size_t   tdata_align;
     size_t   tbss_align;
+    Buffer   init_array; /* .init_array — constructor function pointers */
+    size_t   init_array_align;
 
     EmitSymbol *syms;  /* unified symbol table (section + defined + undefined) */
     size_t num_syms, cap_syms;
@@ -283,13 +286,19 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_64        1  /* absolute 64-bit (pointer fixups in .data) */
 #define R_X86_64_PC32      2
 #define R_X86_64_PLT32     4
+#define R_X86_64_COPY          5  /* executable copy of a DSO data object */
 #define R_X86_64_GLOB_DAT  6
 #define R_X86_64_GOTPCREL  9
 #define R_X86_64_32       10
 #define R_X86_64_32S      11
+#define R_X86_64_DTPMOD64 16  /* TLS GD GOT pair: module ID */
+#define R_X86_64_DTPOFF64 17  /* TLS GD GOT pair: offset in TLS block */
 #define R_X86_64_TPOFF64  18  /* TLS IE GOT fill (64-bit): dynamic linker writes
                                * l_tls_offset + st_value + addend into the GOT slot.
                                * Used in DSOs; executables fill the same slot statically. */
+#define R_X86_64_TLSGD    19  /* General-Dynamic: 16-byte lea+call __tls_get_addr.
+                               * The linker relaxes this to Initial-Exec. */
+#define R_X86_64_TLSLD    20  /* Local-Dynamic (same 16-byte sequence as TLSGD). */
 #define R_X86_64_GOTTPOFF 22  /* TLS Initial-Exec: RIP-relative disp to a GOT slot
                                * holding the TPOFF of a __thread symbol.
                                * Code: movq %fs:0, %reg; addq x@gottpoff(%rip), %reg */

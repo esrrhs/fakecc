@@ -645,7 +645,9 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     cls[1] = SYSV_CLS_INTEGER;
     if (t.is_vector) {
         if (t.width == 32) {
-            /* SysV: __m256 / vector_size(32) is SSE+SSEUP×3 → one YMM. */
+            /* SysV: __m256 / vector_size(32) is SSE+SSEUP×3 → one YMM.
+             * gcc -mno-avx cannot use YMM, so the same type is MEMORY. */
+            if (g_no_avx) return 0;
             cls[0] = SYSV_CLS_SSE;
             return 1;
         }
@@ -697,6 +699,7 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
      * `aligned(32) { __m128 }` is MEMORY (not a YMM).
      * 32-byte → one YMM (nreg=1).  64-byte → one ZMM if AVX-512F. */
     if (n > 2) {
+        if (g_no_avx && sz >= 32) return 0;
         if (eight[0] != SV_SSE) return 0;
         for (int i = 1; i < n; i++) {
             if (eight[i] != SV_SSEUP) return 0;
@@ -768,10 +771,13 @@ int sysv_memory_pass_as_pointer(Type t) {
         && strcmp(t.tag, "__va_list_tag") == 0;
 }
 
+int g_no_avx = 0;
+
 int host_has_avx512f(void) {
     static int cached = -1;
     unsigned eax, ebx, ecx, edx;
     unsigned xcr0_lo, xcr0_hi;
+    if (g_no_avx) return 0;
     if (cached >= 0) return cached;
     cached = 0;
     /* CPUID.1: OSXSAVE (ecx bit 27).  XCR0 must save SSE+AVX+opmask+ZMM. */

@@ -25,6 +25,8 @@ void emit_module_init(EmitModule *m) {
     m->bss_align = 8;
     m->tdata_align = 8;
     m->tbss_align = 8;
+    buffer_init(&m->init_array);
+    m->init_array_align = 8;
     m->syms = NULL; m->num_syms = 0; m->cap_syms = 0;
     m->relocs = NULL; m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = NULL; m->num_data_relocs = 0; m->cap_data_relocs = 0;
@@ -47,6 +49,7 @@ void emit_module_free(EmitModule *m) {
     buffer_free(&m->rodata);
     buffer_free(&m->data);
     buffer_free(&m->tdata);
+    buffer_free(&m->init_array);
     free(m->dbg_tu_name);
     for (size_t i = 0; i < m->num_dbg_lines; i++) free(m->dbg_lines[i].file);
     free(m->dbg_lines);
@@ -195,6 +198,7 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
 #define SHT_STRTAB      3
 #define SHT_RELA        4
 #define SHT_NOBITS      8
+#define SHT_INIT_ARRAY 14
 
 #define SHF_WRITE       0x1
 #define SHF_ALLOC       0x2
@@ -307,6 +311,10 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&shstrtab, ".fakecc_dbg", sizeof(".fakecc_dbg"));
     uint32_t shname_gnu_stack = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".note.GNU-stack", sizeof(".note.GNU-stack"));
+    uint32_t shname_init_array = (uint32_t)shstrtab.len;
+    buf_bytes(&shstrtab, ".init_array", sizeof(".init_array"));
+    uint32_t shname_rela_init = (uint32_t)shstrtab.len;
+    buf_bytes(&shstrtab, ".rela.init_array", sizeof(".rela.init_array"));
     uint32_t shname_shstrtab = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".shstrtab", sizeof(".shstrtab"));
 
@@ -403,16 +411,19 @@ void emit_obj(const EmitModule *m, const char *path) {
         buf_u64(&rela_text, ((uint64_t)new_sym << 32) | r->type);
         buf_u64(&rela_text, (uint64_t)(int64_t)r->addend);     /* r_addend */
     }
-    Buffer rela_data, rela_tdata;
+    Buffer rela_data, rela_tdata, rela_init;
     buffer_init(&rela_data);
     buffer_init(&rela_tdata);
+    buffer_init(&rela_init);
     for (size_t i = 0; i < m->num_data_relocs; i++) {
         const EmitReloc *r = &m->data_relocs[i];
         int old_sym = r->sym;
         int new_sym = (old_sym >= 0 && old_sym < (int)m->num_syms)
                       ? sym_remap[old_sym] : old_sym;
         if (new_sym < 0) new_sym = old_sym;
-        Buffer *dst = (r->shndx == SECT_TDATA) ? &rela_tdata : &rela_data;
+        Buffer *dst = (r->shndx == SECT_TDATA) ? &rela_tdata
+                    : (r->shndx == SECT_INIT_ARRAY) ? &rela_init
+                    : &rela_data;
         buf_u64(dst, r->offset);                               /* r_offset */
         buf_u64(dst, ((uint64_t)new_sym << 32) | r->type);
         buf_u64(dst, (uint64_t)(int64_t)r->addend);            /* r_addend */
@@ -446,6 +457,13 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&body, rela_data.data, rela_data.len);
     size_t off_rela_tdata = body.len;
     buf_bytes(&body, rela_tdata.data, rela_tdata.len);
+    int have_init = m->init_array.len > 0;
+    size_t off_init_array = body.len;
+    if (have_init)
+        buf_bytes(&body, m->init_array.data, m->init_array.len);
+    size_t off_rela_init = body.len;
+    if (have_init)
+        buf_bytes(&body, rela_init.data, rela_init.len);
 
     Buffer fakecc_dbg;
     buffer_init(&fakecc_dbg);
@@ -460,6 +478,7 @@ void emit_obj(const EmitModule *m, const char *path) {
     /* null + 6 data/tls + symtab + strtab + shstrtab + rela.text + rela.data
      * + rela.tdata + .note.GNU-stack + [.fakecc_dbg] */
     unsigned shnum = have_dbg ? 15 : 14;
+    if (have_init) shnum += 2;
     unsigned shstrndx = 9; /* index of .shstrtab */
 
     /* --- ELF header --- */
@@ -538,6 +557,14 @@ void emit_obj(const EmitModule *m, const char *path) {
         write_shdr(&elf, shname_fakecc_dbg, SHT_PROGBITS, 0,
                    0, hdr_size + off_fakecc_dbg, fakecc_dbg.len, 0, 0, 1, 0);
     }
+    if (have_init) {
+        unsigned ia_idx = have_dbg ? 15 : 14;
+        write_shdr(&elf, shname_init_array, SHT_INIT_ARRAY, SHF_ALLOC | SHF_WRITE,
+                   0, hdr_size + off_init_array, m->init_array.len, 0, 0, 8, 8);
+        write_shdr(&elf, shname_rela_init, SHT_RELA, 0,
+                   0, hdr_size + off_rela_init, rela_init.len, symtab_idx,
+                   ia_idx, 8, ELF64_RELA_SIZE);
+    }
 
     (void)shstrndx; (void)symtab_idx; (void)strtab_idx; (void)first_global;
     (void)shname_fakecc_dbg;
@@ -554,6 +581,7 @@ void emit_obj(const EmitModule *m, const char *path) {
     buffer_free(&rela_text);
     buffer_free(&rela_data);
     buffer_free(&rela_tdata);
+    buffer_free(&rela_init);
     buffer_free(&fakecc_dbg);
     buffer_free(&body);
     buffer_free(&elf);
@@ -635,6 +663,10 @@ int emit_obj_read(const char *path, EmitModule *m) {
     size_t *tb_off = NULL;
     int n_tb = 0, cap_tb = 0;
     size_t total_tb = 0;
+    int *ia_idx = NULL;
+    size_t *ia_off = NULL;
+    int n_ia = 0, cap_ia = 0;
+    size_t total_ia = 0;
     int fakecc_dbg_idx = -1;
     int *ro_idx = NULL;
     size_t *ro_off = NULL;
@@ -767,6 +799,24 @@ int emit_obj_read(const char *path, EmitModule *m) {
             tb_off[n_tb] = total_tb;
             n_tb++;
             total_tb += (size_t)sz;
+        } else if (type == SHT_INIT_ARRAY
+                   || strcmp(sname, ".init_array") == 0
+                   || strncmp(sname, ".init_array.", 12) == 0) {
+            uint64_t sz = rd_u64(sh + 32);
+            uint64_t align = sh_align < 1 ? 8 : sh_align;
+            bump_align(&m->init_array_align, align);
+            size_t pad = (size_t)((align - (total_ia % (size_t)align)) % (size_t)align);
+            total_ia += pad;
+            if (n_ia >= cap_ia) {
+                cap_ia = cap_ia ? cap_ia * 2 : 4;
+                ia_idx = realloc(ia_idx, (size_t)cap_ia * sizeof(int));
+                ia_off = realloc(ia_off, (size_t)cap_ia * sizeof(size_t));
+                if (!ia_idx || !ia_off) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
+            ia_idx[n_ia] = s;
+            ia_off[n_ia] = total_ia;
+            n_ia++;
+            total_ia += (size_t)sz;
         } else if (strcmp(sname, ".symtab") == 0 && type == SHT_SYMTAB) symtab_idx = s;
         else if (strcmp(sname, ".strtab") == 0 && type == SHT_STRTAB) strtab_idx = s;
         else if (strcmp(sname, ".fakecc_dbg") == 0 && type == SHT_PROGBITS) fakecc_dbg_idx = s;
@@ -835,6 +885,18 @@ int emit_obj_read(const char *path, EmitModule *m) {
     }
     if (n_tb > 0)
         m->tbss_size = total_tb;
+    if (n_ia > 0) {
+        m->init_array.data = malloc(total_ia ? total_ia : 1);
+        if (!m->init_array.data) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        memset(m->init_array.data, 0, total_ia);
+        m->init_array.len = total_ia;
+        m->init_array.cap = total_ia ? total_ia : 1;
+        for (int i = 0; i < n_ia; i++) {
+            const unsigned char *sh = buf + shoff + (size_t)ia_idx[i] * shentsize;
+            uint64_t off = rd_u64(sh + 24); uint64_t sz = rd_u64(sh + 32);
+            if (sz > 0) memcpy(m->init_array.data + ia_off[i], buf + off, (size_t)sz);
+        }
+    }
 
     /* Read symbol table. */
     if (symtab_idx >= 0) {
@@ -925,7 +987,7 @@ int emit_obj_read(const char *path, EmitModule *m) {
         uint32_t entsize = rd_u32(sh + 56);
         if (entsize == 0) entsize = ELF64_RELA_SIZE;
         size_t count = sz / entsize;
-        int tx_i = -1, da_i = -1, ro_i = -1, td_i = -1;
+        int tx_i = -1, da_i = -1, ro_i = -1, td_i = -1, ia_i = -1;
         for (int ti = 0; ti < n_tx; ti++)
             if ((int)info == tx_idx[ti]) { tx_i = ti; break; }
         for (int di = 0; di < n_da; di++)
@@ -934,7 +996,9 @@ int emit_obj_read(const char *path, EmitModule *m) {
             if ((int)info == ro_idx[ri]) { ro_i = ri; break; }
         for (int ki = 0; ki < n_td; ki++)
             if ((int)info == td_idx[ki]) { td_i = ki; break; }
-        if (tx_i < 0 && da_i < 0 && ro_i < 0 && td_i < 0) continue;
+        for (int ki = 0; ki < n_ia; ki++)
+            if ((int)info == ia_idx[ki]) { ia_i = ki; break; }
+        if (tx_i < 0 && da_i < 0 && ro_i < 0 && td_i < 0 && ia_i < 0) continue;
         for (size_t i = 0; i < count; i++) {
             const unsigned char *r = buf + off + i * entsize;
             uint64_t roff = rd_u64(r);
@@ -953,6 +1017,10 @@ int emit_obj_read(const char *path, EmitModule *m) {
                 emit_module_add_data_reloc(m, (size_t)roff + td_off[td_i],
                                            type, (int)sym, (int32_t)raddend);
                 m->data_relocs[m->num_data_relocs - 1].shndx = SECT_TDATA;
+            } else if (ia_i >= 0) {
+                emit_module_add_data_reloc(m, (size_t)roff + ia_off[ia_i],
+                                           type, (int)sym, (int32_t)raddend);
+                m->data_relocs[m->num_data_relocs - 1].shndx = SECT_INIT_ARRAY;
             } else {
                 emit_module_add_data_reloc(m, (size_t)roff + ro_off[ro_i],
                                            type, (int)sym, (int32_t)raddend);
@@ -982,6 +1050,8 @@ int emit_obj_read(const char *path, EmitModule *m) {
     free(td_off);
     free(tb_idx);
     free(tb_off);
+    free(ia_idx);
+    free(ia_off);
     free(buf);
     return 0;
 }

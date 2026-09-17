@@ -259,6 +259,7 @@ typedef struct {
      * emits a register-save area and the va_* builtins read/write it. */
     int   is_variadic;
     int   is_static;  /* 1 = `static` function — LOCAL linkage */
+    int   is_constructor; /* 1 = emit a .init_array pointer to this function */
     int   has_dyn_alloca; /* 1 = function uses dynamic alloca / VLA */
     /* GNU __builtin_apply_args: save incoming arg regs at prologue (GCC
      * migrates the save to function entry so later calls cannot clobber

@@ -97,6 +97,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 static char *g_parsed_alias = NULL;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
+static int g_parsed_constructor = 0;
 static int g_parsed_align = 0;
 static int g_parsed_inline = 0;  /* `inline` among type specifiers (`extern int inline f`) */
 static int g_parsed_tls = 0;     /* `__thread`/`_Thread_local` among type specifiers */
@@ -293,6 +294,10 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                 continue;
             } else if (strcmp(name, "no_instrument_function") == 0 || strcmp(name, "__no_instrument_function__") == 0) {
                 g_parsed_no_instrument = 1;
+                advance(p);
+                continue;
+            } else if (strcmp(name, "constructor") == 0 || strcmp(name, "__constructor__") == 0) {
+                g_parsed_constructor = 1;
                 advance(p);
                 continue;
             }
@@ -4486,6 +4491,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.align = 0;
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
+    fn.is_constructor = g_parsed_constructor;
+    g_parsed_constructor = 0;
 
     char **kr_names = NULL;
     int nkr = 0;
@@ -4663,10 +4670,20 @@ static FunctionDecl parse_function_decl(Parser *p) {
         fn.no_instrument = 1;
         g_parsed_no_instrument = 0;
     }
+    if (g_parsed_constructor) {
+        fn.is_constructor = 1;
+        g_parsed_constructor = 0;
+    }
     if (p->tu) {
         for (size_t i = 0; i < p->tu->functions.len; i++) {
             if (strcmp(p->tu->functions.data[i].name, fn.name) == 0 && p->tu->functions.data[i].no_instrument) {
                 fn.no_instrument = 1;
+                break;
+            }
+        }
+        for (size_t i = 0; i < p->tu->functions.len; i++) {
+            if (strcmp(p->tu->functions.data[i].name, fn.name) == 0 && p->tu->functions.data[i].is_constructor) {
+                fn.is_constructor = 1;
                 break;
             }
         }
@@ -4703,6 +4720,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 extra_fn.is_extern = 1;
                 extra_fn.is_static = is_static;
                 extra_fn.no_instrument = fn.no_instrument;
+                extra_fn.is_constructor = fn.is_constructor;
                 /* If the parsed declarator is a function type, extract its params.
                  * Otherwise expect optional (param-list) after the name. */
                 if (extra_ty.kind == TY_FUNC) {
@@ -4803,6 +4821,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 extra_fn.is_extern = 1;
                 extra_fn.is_static = is_static;
                 extra_fn.no_instrument = fn.no_instrument;
+                extra_fn.is_constructor = fn.is_constructor;
                 if (peek(p)->kind == TK_LPAREN) {
                     advance(p);
                     if (peek(p)->kind == TK_KW_VOID
@@ -4874,6 +4893,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 extra_fn.is_extern = 1;
                 extra_fn.is_static = is_static;
                 extra_fn.no_instrument = fn.no_instrument;
+                extra_fn.is_constructor = fn.is_constructor;
                 if (peek(p)->kind == TK_LPAREN) {
                     advance(p);
                     if (peek(p)->kind == TK_KW_VOID

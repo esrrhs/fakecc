@@ -5754,6 +5754,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         uint8_t binding = fn->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
         emit_module_add_symbol(out, fn->name, binding, 2 /* STT_FUNC */,
                                (uint16_t)SECT_TEXT, start_offset, fn_size);
+        if (fn->is_constructor) {
+            int fsym = emit_module_find_symbol(out, fn->name);
+            size_t slot = out->init_array.len;
+            uint64_t z = 0;
+            buffer_append(&out->init_array, (const char *)&z, 8);
+            emit_module_add_data_reloc(out, slot, R_X86_64_64, fsym, 0);
+            out->data_relocs[out->num_data_relocs - 1].shndx = SECT_INIT_ARRAY;
+        }
     }
 
     /* Pointer slots that must hold the address of another global or function

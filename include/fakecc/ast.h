@@ -101,6 +101,8 @@ int type_stack_align(Type t);
 
 /* True if this process can run AVX-512F (CPUID + OS XSAVE of ZMM). */
 int host_has_avx512f(void);
+/* 1 after `-mno-avx`: 32-byte vectors are MEMORY (no YMM), matching gcc. */
+extern int g_no_avx;
 
 /* SysV AMD64 aggregate classification for ≤64-byte structs/unions.
  * Returns the number of register slots (1 or 2), writing INTEGER/SSE class
@@ -398,6 +400,7 @@ typedef struct {
     char  *alias_target; /* __attribute__((alias("..."))) or NULL */
     int    align;       /* alignment attribute */
     int    no_instrument; /* 1 = __attribute__((no_instrument_function)) */
+    int    is_constructor; /* 1 = __attribute__((constructor)) → .init_array */
 } FunctionDecl;
 
 typedef struct {

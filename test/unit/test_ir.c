@@ -211,6 +211,48 @@ static void test_vector32_param_width(void) {
     ir_module_free(&ir);
 }
 
+/* -mno-avx: 32-byte vector_size is MEMORY (no YMM), not one SSE PARAM. */
+static void test_vector32_mno_avx_is_memory(void) {
+    int saved = g_no_avx;
+    g_no_avx = 1;
+    IRModule ir = compile_to_ir(
+        "package main;"
+        "typedef int V __attribute__((vector_size(32)));"
+        "int take(V v) { return v[0] + v[7]; }"
+        "int main(void) { V v = {1,0,0,0,0,0,0,6}; return take(v); }");
+    const IRFunction *take = NULL;
+    const IRFunction *mainfn = NULL;
+    for (size_t i = 0; i < ir.functions.len; i++) {
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "take") == 0)
+            take = &ir.functions.data[i];
+        if (ir.functions.data[i].name &&
+            strcmp(ir.functions.data[i].name, "main") == 0)
+            mainfn = &ir.functions.data[i];
+    }
+    T_ASSERT(take != NULL);
+    T_ASSERT(mainfn != NULL);
+    T_ASSERT(take->insts.len > 0);
+    T_ASSERT_EQ_INT((int)take->insts.data[0].op, (int)IR_PARAM);
+    T_ASSERT_EQ_INT(take->insts.data[0].force_stack, 1);
+    T_ASSERT_EQ_INT(take->insts.data[0].alloca_bytes, 32);
+    int saw_blob = 0;
+    for (size_t i = 0; i < mainfn->insts.len; i++) {
+        const IRInst *inst = &mainfn->insts.data[i];
+        if (inst->op != IR_CALL || !inst->call_name) continue;
+        if (strcmp(inst->call_name, "take") != 0) continue;
+        T_ASSERT(inst->call_arg_on_stack != NULL);
+        T_ASSERT(inst->call_nargs >= 1);
+        T_ASSERT((inst->call_arg_on_stack[0] & CALL_ARG_BLOB) != 0);
+        T_ASSERT(inst->call_arg_nbytes != NULL);
+        T_ASSERT_EQ_INT(inst->call_arg_nbytes[0], 32);
+        saw_blob = 1;
+    }
+    T_ASSERT(saw_blob);
+    ir_module_free(&ir);
+    g_no_avx = saved;
+}
+
 /* aligned(32) { vector_size(16) } is MEMORY (padding is NO_CLASS), not YMM. */
 static void test_overaligned_sse_is_memory_blob(void) {
     IRModule ir = compile_to_ir(
@@ -539,6 +581,7 @@ int main(void) {
     test_decl_init_ir();
     test_vector16_param_width();
     test_vector32_param_width();
+    test_vector32_mno_avx_is_memory();
     test_overaligned_sse_is_memory_blob();
     test_fam_prefix_is_integer();
     test_zero_length_struct_no_slot();

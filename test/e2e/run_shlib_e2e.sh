@@ -431,6 +431,64 @@ if [ -f "$TMP/libtlsie.so" ]; then
         timeout "$RUN_TIMEOUT" "$TMP/tlsie_p" >/dev/null || got=$?
         if [ "$got" = "0" ]; then pass "fakecc DSO TLS IE runtime"; else fail "fakecc DSO TLS IE runtime (exit $got)"; fi
     fi
+    if LANG=C readelf -d "$TMP/libtlsie.so" 2>/dev/null | grep -q 'STATIC_TLS'; then
+        pass "TLS IE .so has DF_STATIC_TLS"
+    else
+        fail "TLS IE .so missing DF_STATIC_TLS: $(LANG=C readelf -d "$TMP/libtlsie.so" 2>/dev/null | head -40)"
+    fi
+fi
+
+# Undef IE in an executable: TPOFF64 against a DSO STT_TLS symbol.
+cat > "$TMP/libtv.c" <<'EOF'
+package main;
+__thread int tv = 7;
+int dummy(void) { return 0; }
+EOF
+cat > "$TMP/use_tv.c" <<'EOF'
+package main;
+extern __thread int tv;
+int main(void) { return tv; }
+EOF
+rm -f "$TMP/libtv.so" "$TMP/use_tv_p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA -shared "$TMP/libtv.c" -o "$TMP/libtv.so" 2>"$TMP/err" \
+    || { fail "fakecc -shared undef-IE lib: $(head -1 "$TMP/err")"; }
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/use_tv.c" -L"$TMP" -ltv -o "$TMP/use_tv_p" 2>"$TMP/err" \
+    || { fail "undef IE exe compile: $(head -1 "$TMP/err")"; }
+if [ -x "$TMP/use_tv_p" ]; then
+    if LANG=C readelf -rW "$TMP/use_tv_p" 2>/dev/null | grep -q 'R_X86_64_TPOFF64'; then
+        pass "undef IE exe has TPOFF64"
+    else
+        fail "undef IE exe missing TPOFF64: $(LANG=C readelf -rW "$TMP/use_tv_p" 2>/dev/null)"
+    fi
+    got=0
+    env -u LD_LIBRARY_PATH timeout "$RUN_TIMEOUT" "$TMP/use_tv_p" >/dev/null || got=$?
+    if [ "$got" = "7" ]; then pass "undef IE exe runtime"; else fail "undef IE exe runtime (exit $got)"; fi
+fi
+
+# R_X86_64_COPY: gcc -fno-pic executable access to a DSO data object.
+cat > "$TMP/gcopy.c" <<'EOF'
+int g = 42;
+EOF
+gcc -shared -fPIC -Wl,-soname,libgcopy.so -o "$TMP/libgcopy.so" "$TMP/gcopy.c" \
+    || { fail "gcc -shared COPY lib"; }
+cat > "$TMP/copy_main.c" <<'EOF'
+extern int g;
+int main(void) { return g; }
+EOF
+gcc -fno-pic -fno-pie -c "$TMP/copy_main.c" -o "$TMP/copy_main.o" \
+    || { fail "gcc -fno-pic COPY user"; }
+rm -f "$TMP/copy_p"
+timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/copy_main.o" -L"$TMP" -lgcopy -o "$TMP/copy_p" 2>"$TMP/err" \
+    || { fail "COPY link: $(head -1 "$TMP/err")"; }
+if [ -x "$TMP/copy_p" ]; then
+    if LANG=C readelf -rW "$TMP/copy_p" 2>/dev/null | grep -q 'R_X86_64_COPY'; then
+        pass "exe has R_X86_64_COPY"
+    else
+        fail "exe missing R_X86_64_COPY: $(LANG=C readelf -rW "$TMP/copy_p" 2>/dev/null)"
+    fi
+    got=0
+    env -u LD_LIBRARY_PATH timeout "$RUN_TIMEOUT" "$TMP/copy_p" >/dev/null || got=$?
+    if [ "$got" = "42" ]; then pass "COPY runtime"; else fail "COPY runtime (exit $got)"; fi
 fi
 
 # 11) GNU empty-struct return takes no hidden sret (RDI is the first real arg).

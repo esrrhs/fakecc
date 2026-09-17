@@ -627,4 +627,54 @@ echo 'package main; extern __thread int tx; __thread char tc = 1; int main(void)
 gcc -c "$TMP/gcc_tx32.c" -o "$TMP/gcc_tx32.o"
 run_multi 0 "$TMP/fc_tx32.c" "$TMP/gcc_tx32.o"
 
+# gcc -fPIC Global-Dynamic TLS (TLSGD + __tls_get_addr) relaxed to IE.
+echo '__thread int tv = 9; int get(void) { return tv; }' > "$TMP/gcc_tlsgd.c"
+echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_tlsgd.c"
+gcc -fPIC -c "$TMP/gcc_tlsgd.c" -o "$TMP/gcc_tlsgd.o"
+if LANG=C readelf -rW "$TMP/gcc_tlsgd.o" 2>/dev/null | grep -q 'R_X86_64_TLSGD'; then
+    pass "gcc -fPIC TLS object has TLSGD"
+else
+    fail "gcc -fPIC TLS object missing TLSGD: $(LANG=C readelf -rW "$TMP/gcc_tlsgd.o" 2>/dev/null | head -20)"
+fi
+run_multi 9 "$TMP/fc_tlsgd.c" "$TMP/gcc_tlsgd.o"
+
+# Reverse: fakecc TLS def, gcc -fPIC access (TLSGD to a defined symbol).
+echo 'package main; __thread int tv = 11; int dummy(void) { return tv; }' > "$TMP/fc_tlsdef.c"
+echo 'extern __thread int tv; int get(void) { return tv; }' > "$TMP/gcc_tlsuse.c"
+echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_tlsuse_main.c"
+gcc -fPIC -c "$TMP/gcc_tlsuse.c" -o "$TMP/gcc_tlsuse.o"
+run_multi 11 "$TMP/fc_tlsdef.c" "$TMP/gcc_tlsuse.o" "$TMP/fc_tlsuse_main.c"
+
+# __attribute__((constructor)) runs before main (static _start walk).
+echo 'package main; int g; __attribute__((constructor)) void ctor(void) { g = 7; } int main(void) { return g; }' > "$TMP/ctor.c"
+run_multi 7 "$TMP/ctor.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/ctor.c" -o "$TMP/ctor.o"
+if LANG=C readelf -S "$TMP/ctor.o" 2>/dev/null | grep -q 'INIT_ARRAY'; then
+    pass "constructor .o has .init_array"
+else
+    fail "constructor .o missing .init_array: $(LANG=C readelf -S "$TMP/ctor.o" 2>/dev/null | head -30)"
+fi
+run_multi 7 "$TMP/ctor.o"
+
+# gcc constructor .o linked by fakecc.
+echo 'int g; __attribute__((constructor)) void ctor(void) { g = 9; } int get(void) { return g; }' > "$TMP/gcc_ctor.c"
+echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_ctor_main.c"
+gcc -c "$TMP/gcc_ctor.c" -o "$TMP/gcc_ctor.o"
+run_multi 9 "$TMP/fc_ctor_main.c" "$TMP/gcc_ctor.o"
+
+# -mno-avx: 32-byte vectors are MEMORY, matching gcc -mno-avx.
+echo 'typedef int V __attribute__((vector_size(32))); int take(V v) { return v[0] + v[7]; }' > "$TMP/gcc_v32.c"
+echo 'package main; typedef int V __attribute__((vector_size(32))); int take(V v); int main(void) { V v = {1,0,0,0,0,0,0,6}; return take(v); }' > "$TMP/fc_v32_main.c"
+gcc -mno-avx -c "$TMP/gcc_v32.c" -o "$TMP/gcc_v32.o"
+"$FAKECC" $CC_EXTRA -mno-avx -c "$TMP/fc_v32_main.c" -o "$TMP/fc_v32_main.o" 2>"$TMP/cc.err" \
+    || { fail "fakecc -mno-avx main -c: $(head -1 "$TMP/cc.err")"; }
+run_multi 7 "$TMP/fc_v32_main.o" "$TMP/gcc_v32.o"
+
+echo 'package main; typedef int V __attribute__((vector_size(32))); int take(V v) { return v[0] + v[7]; }' > "$TMP/fc_v32.c"
+echo 'typedef int V __attribute__((vector_size(32))); int take(V v); int main(void) { V v = {1,0,0,0,0,0,0,6}; return take(v); }' > "$TMP/gcc_v32_main.c"
+gcc -mno-avx -c "$TMP/gcc_v32_main.c" -o "$TMP/gcc_v32_main.o"
+"$FAKECC" $CC_EXTRA -mno-avx -c "$TMP/fc_v32.c" -o "$TMP/fc_v32.o" 2>"$TMP/cc.err" \
+    || { fail "fakecc -mno-avx callee -c: $(head -1 "$TMP/cc.err")"; }
+run_multi 7 "$TMP/fc_v32.o" "$TMP/gcc_v32_main.o"
+
 exit $FAIL
