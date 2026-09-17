@@ -66,11 +66,9 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  # Wall-clock of this job is dominated by self-hosted e2e (~28 min) and
-  # difftest (~30 min), each run twice (-O0 then -O1) on one runner.  Each
-  # suite already saturates nproc, so overlapping them on the same VM does
-  # not help; splitting across runners does.  Recent master: ~62 min serial
-  # vs ~stage2 + max(one suite) ≈ 18 min after the split.
+  # Wall-clock of this job is dominated by self-hosted e2e and difftest
+  # (each run twice, -O0 then -O1).  -O0 finishes around 33 min; -O1 needs
+  # the 75-minute job budget (40 min cancelled the -O1 legs).
   bootstrap:
     name: bootstrap (fixed point)
     runs-on: ubuntu-latest
@@ -130,7 +128,7 @@ jobs:
     name: bootstrap · ${{ matrix.label }}
     needs: bootstrap
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
