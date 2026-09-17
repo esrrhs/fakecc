@@ -4509,6 +4509,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     }
 
     FunctionDecl fn;
+    memset(&fn, 0, sizeof(fn));
     fn.name = is_grouped_fn ? grouped_fn_name : xstrdup(name->text);
     fn.ret_type = ret_ty;
     if (is_grouped_fn) {

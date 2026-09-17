@@ -220,7 +220,7 @@ static size_t so_symbol_lookup(const char **lib_paths, size_t npaths,
                                 if (al < 1) al = 1;
                             }
                             if (stv) {
-                                size_t low = (size_t)(stv & -(int64_t)stv);
+                                size_t low = (size_t)stv & -(size_t)stv;
                                 if (low > al) al = low;
                             }
                             if (al > 4096) al = 4096;
@@ -419,14 +419,14 @@ typedef struct {
     size_t   rela_plt_size, rela_dyn_size, dynamic_size;
     uint64_t dynstr_vaddr, dynsym_vaddr, hash_vaddr;
     uint64_t rela_plt_vaddr, rela_dyn_vaddr, dynamic_vaddr;
-    int      have_initarr;
     uint64_t initarr_vaddr;
+    uint64_t finiarr_vaddr;
     size_t   initarr_file_offset;
     size_t   initarr_size;
-    int      have_finiarr;
-    uint64_t finiarr_vaddr;
     size_t   finiarr_file_offset;
     size_t   finiarr_size;
+    int      have_initarr;
+    int      have_finiarr;
 } SectionLayout;
 
 static void finalize_sections(
@@ -755,17 +755,17 @@ typedef struct {
     uint64_t call_vaddr;
     uint64_t main_vaddr;
     uint64_t exit_plt_vaddr;
-    int have_tls;
     uint64_t tls_vaddr;
     uint64_t tcb_vaddr;
-    size_t tls_memsize;
-    size_t tdata_len;
+    uint64_t tls_memsize;
+    uint64_t tdata_len;
     uint64_t init_start;
     uint64_t init_count;
     uint64_t fini_start;
     uint64_t fini_count;
     uint64_t irel_got;
     uint64_t irel_count;
+    int have_tls;
 } StartInfo;
 
 static void gen_start(Buffer *code, const StartInfo *st) {
@@ -981,14 +981,10 @@ static size_t emit_plt_entry(Buffer *code, size_t idx, size_t plt0_off,
 
 typedef struct { int prio; size_t idx; } ArrSlotOrd;
 
-static int arr_slot_cmp(const void *a, const void *b) {
-    const ArrSlotOrd *x = a, *y = b;
-    if (x->prio != y->prio) return (x->prio > y->prio) - (x->prio < y->prio);
-    return (x->idx > y->idx) - (x->idx < y->idx);
-}
-
 /* Stable sort of 8-byte constructor/destructor slots by priority (smaller first).
- * Writes old_slot → new_byte_offset into `remap` (length nslots). */
+ * Writes old_slot → new_byte_offset into `remap` (length nslots).
+ * Insertion sort avoids a qsort callback (function-pointer codegen is a
+ * bootstrap-sensitive dialect corner, and n is tiny). */
 static void sort_array_slots(Buffer *arr, int *prio, size_t **remap) {
     size_t nslots = arr->len / 8;
     *remap = NULL;
@@ -999,7 +995,19 @@ static void sort_array_slots(Buffer *arr, int *prio, size_t **remap) {
         ord[i].idx = i;
         ord[i].prio = prio ? prio[i] : INIT_PRIO_DEFAULT;
     }
-    qsort(ord, nslots, sizeof(ArrSlotOrd), arr_slot_cmp);
+    for (size_t i = 1; i < nslots; i++) {
+        ArrSlotOrd key = ord[i];
+        size_t j = i;
+        while (j > 0) {
+            int cmp = (ord[j - 1].prio > key.prio) - (ord[j - 1].prio < key.prio);
+            if (cmp == 0)
+                cmp = (ord[j - 1].idx > key.idx) - (ord[j - 1].idx < key.idx);
+            if (cmp <= 0) break;
+            ord[j] = ord[j - 1];
+            j--;
+        }
+        ord[j] = key;
+    }
     char *tmp = malloc(arr->len ? arr->len : 1);
     int *ptmp = malloc(nslots * sizeof(int));
     if (!tmp || !ptmp) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
@@ -2807,6 +2815,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             buf_bytes(&elf, finiarr.data, finiarr.len);
         }
         SectionLayout lay;
+        memset(&lay, 0, sizeof(lay));
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
         lay.bss_vaddr = bss_vaddr;
@@ -2950,6 +2959,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             buf_bytes(&elf, finiarr.data, finiarr.len);
         }
         SectionLayout lay;
+        memset(&lay, 0, sizeof(lay));
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
         lay.bss_vaddr = bss_vaddr;
