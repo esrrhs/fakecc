@@ -81,18 +81,19 @@ jobs:
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
 
-      # -O2 only speeds Stage 0 (gcc-built fakecc compiling v0/*.c).  It does
-      # not change fakecc-1's codegen, so the fixed-point comparison is the
-      # same as an unoptimized Stage 0.
-      # Pin gcc-16 by name.  PATH via GITHUB_PATH is not enough: cmake may
-      # still pick /usr/bin/gcc → GCC 13, which has miscompiled Stage 0 at
-      # -O2 after the -shared linker work and broken the fixed point.
+      # Stage 0 is unoptimized on purpose.  The fixed point compares two
+      # fakecc-built binaries (fakecc-1 vs fakecc-2); -O2 only speeds the
+      # gcc-built Stage 0 and must not change that comparison.  Ubuntu's
+      # toolchain-test GCC 16 snapshot (16-20260315) miscompiles Stage 0
+      # at -O2 — rbp displacements in the emitted compiler differ by 32
+      # bytes from a correctly compiled Stage 0 (local GCC 16.2.0 is fine).
+      # Pin gcc-16 by name so cmake does not pick /usr/bin/gcc → GCC 13.
       - name: Build stage 0
         run: |
+          gcc-16 --version
           cmake -S . -B build \
             -DCMAKE_C_COMPILER=gcc-16 \
-            -DCMAKE_CXX_COMPILER=g++-16 \
-            -DCMAKE_C_FLAGS="-O2"
+            -DCMAKE_CXX_COMPILER=g++-16
           cmake --build build --parallel
 
       # Stage 0 compiles and links fakecc; that fakecc compiles and links
@@ -109,6 +110,17 @@ jobs:
           path: v0/fakecc-1
           if-no-files-found: error
           retention-days: 1
+
+      - name: Upload mismatch binaries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-mismatch
+          path: |
+            v0/fakecc-1
+            v0/fakecc-2
+          if-no-files-found: ignore
+          retention-days: 3
 
   # A fixed point alone does not prove correctness — a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
