@@ -776,19 +776,13 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
                 nread = nread + 1;
                 ch = scan_getc(f);
                 if (used < maxw && (ch == 'x' || ch == 'X')) {
-                    int xch = ch;
+                    /* glibc vfscanf consumes the 0x prefix even when no hex
+                     * digit follows (`sscanf("0xZ","%x%c")` assigns 'Z').
+                     * strtoul is different and still stops at 'x'. */
                     used = used + 1;
                     nread = nread + 1;
                     ch = scan_getc(f);
-                    if (scan_digit(ch, 16) >= 0) base = 16;
-                    else {
-                        /* "0x" with no hex digit: value is 0 from the '0';
-                         * put 'x' back so it is not consumed (C99 strtoul). */
-                        scan_ungetc(ch, f);
-                        ch = xch;
-                        used = used - 1;
-                        nread = nread - 1;
-                    }
+                    base = 16;
                 } else if (spec == 'i') {
                     base = 8;
                 }
@@ -849,6 +843,55 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
                 }
                 matched++;
             }
+            continue;
+        }
+
+        if (spec == '[') {
+            char set[256];
+            int si = 0;
+            while (si < 256) { set[si] = 0; si = si + 1; }
+            int invert = 0;
+            if (*fmt == '^') { invert = 1; fmt++; }
+            if (*fmt == ']') { set[(unsigned char)']'] = 1; fmt++; }
+            int prev = -1;
+            while (*fmt && *fmt != ']') {
+                unsigned char c = (unsigned char)*fmt;
+                fmt++;
+                if (prev >= 0 && c == '-' && *fmt && *fmt != ']') {
+                    unsigned char e = (unsigned char)*fmt;
+                    fmt++;
+                    unsigned char lo = (unsigned char)prev;
+                    unsigned char hi = e;
+                    if (lo > hi) { unsigned char t = lo; lo = hi; hi = t; }
+                    while (lo <= hi) {
+                        set[lo] = 1;
+                        if (lo == 255) break;
+                        lo = (unsigned char)(lo + 1);
+                    }
+                    prev = -1;
+                    continue;
+                }
+                set[c] = 1;
+                prev = (int)c;
+            }
+            if (*fmt == ']') fmt++;
+            else break;
+            if (ch < 0) { input_fail = 1; break; }
+            char *s = 0;
+            if (!suppress) s = va_arg(ap, char *);
+            int len = 0;
+            while (ch >= 0 && len < maxw) {
+                int in = set[(unsigned char)ch];
+                if (invert) in = !in;
+                if (!in) break;
+                if (s) s[len] = (char)ch;
+                len = len + 1;
+                nread = nread + 1;
+                ch = scan_getc(f);
+            }
+            if (len == 0) break;
+            if (s) s[len] = '\0';
+            if (!suppress) matched++;
             continue;
         }
         break;

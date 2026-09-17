@@ -36,7 +36,7 @@ typedef struct {
 
 typedef struct {
     size_t   offset;   /* offset within the section being relocated */
-    uint32_t type;     /* R_X86_64_PC32(2), R_X86_64_32(1), etc. */
+    uint32_t type;     /* R_X86_64_64(1), R_X86_64_PC32(2), etc. */
     uint32_t sym;      /* target symbol index into syms[] */
     int32_t  addend;   /* addend (rip-relative uses -4) */
     uint16_t shndx;    /* section of the site: SECT_DATA or SECT_TDATA */
@@ -268,13 +268,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
  * Equivalent to emit_link(&m, 1, path, NULL, 0, 0, NULL, 0, 0, 0). */
 void emit_elf(const EmitModule *m, const char *path);
 
-/* ELF relocation type constants. */
-#define R_X86_64_32        1
+/* ELF relocation type constants (SysV AMD64 ABI). */
+#define R_X86_64_64        1  /* absolute 64-bit (pointer fixups in .data) */
 #define R_X86_64_PC32      2
 #define R_X86_64_PLT32     4
-#define R_X86_64_GOTPCREL  9
 #define R_X86_64_GLOB_DAT  6
-#define R_X86_64_64       10  /* absolute 64-bit (pointer fixups in .data) */
+#define R_X86_64_GOTPCREL  9
+#define R_X86_64_32       10
 #define R_X86_64_TPOFF64  18  /* TLS IE GOT fill (64-bit): dynamic linker writes
                                * l_tls_offset + st_value + addend into the GOT slot.
                                * Used in DSOs; executables fill the same slot statically. */

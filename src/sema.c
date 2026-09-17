@@ -1041,7 +1041,8 @@ static Type check_expr_inner(Expr *e) {
                     for (int i = 0; i < pf->arity; i++)
                         ptys[i] = &pf->param_types[i];
                 }
-                Type fn = type_make_func(pf->ret_type, (Type **)ptys, pf->arity);
+                Type fn = type_make_func_var(pf->ret_type, (Type **)ptys, pf->arity,
+                                             pf->is_variadic);
                 free(ptys);
                 Type fp = type_make_ptr(fn);
                 type_free(&fn);
@@ -1067,7 +1068,9 @@ static Type check_expr_inner(Expr *e) {
                 for (int i = 0; i < sig->arity; i++)
                     ptys[i] = &sig->param_types[i];
             }
-            Type fn = type_make_func(sig->ret_type, (Type **)ptys, sig->arity);
+            Type fn = type_make_func_var(sig->ret_type, (Type **)ptys, sig->arity,
+                                         sig->is_variadic);
+            fn.func_is_unprototyped = sig->is_unprototyped;
             free(ptys);
             Type fp = type_make_ptr(fn);
             type_free(&fn);
@@ -1088,7 +1091,8 @@ static Type check_expr_inner(Expr *e) {
                         for (int i = 0; i < pf->arity; i++)
                             ptys[i] = &pf->param_types[i];
                     }
-                    Type fn = type_make_func(pf->ret_type, (Type **)ptys, pf->arity);
+                    Type fn = type_make_func_var(pf->ret_type, (Type **)ptys, pf->arity,
+                                                 pf->is_variadic);
                     free(ptys);
                     Type fp = type_make_ptr(fn);
                     type_free(&fn);

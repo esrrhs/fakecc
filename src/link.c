@@ -24,6 +24,7 @@
 #define PT_INTERP       3
 #define PT_DYNAMIC      2
 #define PT_TLS          7
+#define PT_GNU_STACK    0x6474e551
 #define PF_X            1
 #define PF_W            2
 #define PF_R            4
@@ -762,13 +763,16 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             if (!resolved)
                 reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
-        /* .data R_X86_64_64 fixups also reference symbols.  Function
-         * pointers (already given a PLT slot by a text reloc) keep the PLT
-         * address.  Data objects get a dynsym + R_X86_64_64 / GLOB_DAT, not
-         * a PLT stub. */
+        /* .data R_X86_64_64 fixups also reference symbols.  A file-scope
+         * initializer like `static double (*fp)(double) = asin;` never emits a
+         * text reloc, so without this scan the pointer is patched to PLT0 /
+         * the ELF entry stub and calling it re-enters `_start`.  Match LOCAL
+         * definitions too (`static int gx[]` is STB_LOCAL).  Unresolved names
+         * get a PLT slot — GLOB_DAT / abs64 is for GOTPCREL data objects. */
         for (size_t r = 0; r < m->num_data_relocs; r++) {
             size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
             if (sinfo[gsi].defined) continue;
+            if (reloc_ext_idx[gsi] >= 0) continue;
             const char *nm = m->syms[m->data_relocs[r].sym].name
                              ? m->syms[m->data_relocs[r].sym].name : "";
             int resolved = 0;
@@ -776,17 +780,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 EmitModule *om = mods[mi];
                 for (size_t mj = 0; mj < om->num_syms; mj++) {
                     size_t ogsi = mod_sym_base[mi] + mj;
-                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                        && om->syms[mj].name
+                    if (sinfo[ogsi].defined && om->syms[mj].name
                         && strcmp(om->syms[mj].name, nm) == 0) {
                         resolved = 1;
                         break;
                     }
                 }
             }
-            if (resolved) continue;
-            if (reloc_ext_idx[gsi] >= 0) continue; /* function: PLT already */
-            reloc_data_abs_idx[gsi] = ext_find_or_add(&abs_ext_list, &num_abs_ext, nm);
+            if (!resolved)
+                reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
     }
 
@@ -1157,13 +1159,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         start_size = init_tls_in_start ? (START_SIZE + 25 + (tdata.len > 0 ? 27 : 0)) : START_SIZE;
     /* phnum is finalized after we know whether a data segment is needed;
      * reserve header space for the maximum so segment file offsets are stable.
-     * Executables keep the historical 4/5-phdr reservation (even when static)
-     * so layout stays byte-identical.  Shared objects omit PT_INTERP. */
+     * GNU_STACK is always present (non-executable stack).  Shared objects
+     * omit PT_INTERP. */
     uint16_t phnum_max;
     if (is_shared)
-        phnum_max = have_tls ? 4 : 3;
+        phnum_max = have_tls ? 5 : 4; /* RX, RW, DYNAMIC, GNU_STACK, [TLS] */
     else
-        phnum_max = have_tls ? 5 : 4;
+        phnum_max = have_tls ? 6 : 5; /* RX, RW, INTERP, DYNAMIC, GNU_STACK, [TLS] */
     size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
@@ -1826,9 +1828,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         buffer_init(&elf);
         uint16_t phnum;
         if (is_shared)
-            phnum = have_tls ? 4 : 3; /* RX, RW, DYNAMIC, [TLS] */
+            phnum = have_tls ? 5 : 4; /* RX, RW, DYNAMIC, GNU_STACK, [TLS] */
         else
-            phnum = have_tls ? 5 : 4; /* RX, RW, INTERP, DYNAMIC, [TLS] */
+            phnum = have_tls ? 6 : 5; /* RX, RW, INTERP, DYNAMIC, GNU_STACK, [TLS] */
         write_ehdr(&elf, is_shared ? ET_DYN : ET_EXEC, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base, rx_filesz, rx_filesz, PAGE_SIZE);
         write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
@@ -1844,6 +1846,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
                        tls_filesize, tls_memsize, 8);
         }
+        write_phdr(&elf, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 16);
         buf_bytes(&elf, rx.data, rx.len);
         while (elf.len < data_file_offset) buf_u8(&elf, 0);
         buf_bytes(&elf, data.data, data.len);
@@ -1937,6 +1940,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0 || (have_tls && tdata.len > 0));
         uint16_t phnum = has_rw ? 2 : 1;
         if (have_tls) phnum++;
+        phnum++; /* PT_GNU_STACK */
         write_ehdr(&elf, ET_EXEC, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base,
                    rx_filesz, rx_filesz, PAGE_SIZE);
@@ -1948,6 +1952,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
                        tls_filesize, tls_memsize, 8);
         }
+        write_phdr(&elf, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 16);
         while (elf.len < hdr_size)
             buf_u8(&elf, 0);
         buf_bytes(&elf, rx.data, rx.len);

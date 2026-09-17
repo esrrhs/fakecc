@@ -1,6 +1,7 @@
 #include "fakecc/regalloc.h"
 #include "fakecc/cfg.h"
 #include "fakecc/common.h"
+#include "fakecc/ast.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -987,9 +988,9 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     ra->num_spill_slots = num_spills;
     ra->num_values = nv;
 
-    /* GP spills are 8 bytes; XMM spills are 16 bytes (full vector lane). */
+    /* GP spills are 8 bytes; XMM spills are 32 (YMM) or 64 (ZMM). */
     if (float_class)
-        ra->stack_size = 16 * num_spills;
+        ra->stack_size = (host_has_avx512f() ? 64 : 32) * num_spills;
     else {
         int slots = num_spills;
         if (slots % 2 != 0) slots++;

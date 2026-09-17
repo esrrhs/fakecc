@@ -164,6 +164,17 @@ int type_needs_stack_align16(Type t) {
     return type_align(t) >= 16;
 }
 
+int type_stack_align(Type t) {
+    long long a = type_align(t);
+    if (t.kind == TY_FLOAT && t.width == 16 && !t.is_vector) return 16;
+    if (t.kind == TY_INT && t.width == 16 && !t.is_vector) return 16;
+    if (type_is_complex_ldouble(t)) return 16;
+    if (a >= 64) return 64;
+    if (a >= 32) return 32;
+    if (a >= 16) return 16;
+    return 0;
+}
+
 Type type_make_vector(Type elem, long long vec_size) {
     Type t = elem;
     t.is_vector = 1;
@@ -448,14 +459,15 @@ static long long align_up(long long x, long long align) {
     return (x + align - 1) & ~(align - 1);
 }
 
-/* Natural alignment of a type: 1/2/4/8 for scalars, elem's alignment for
- * arrays, max member alignment for structs. */
+/* Natural alignment of a type: 1/2/4/8 for scalars, the vector width for
+ * GCC vector_size (8/16/32/64), elem's alignment for arrays, max member
+ * alignment for structs.  SysV: __m256 aligns to 32, __m512 to 64. */
 long long type_align(Type t) {
-    if (t.is_vector) return t.width > 16 ? 16 : (t.width > 0 ? t.width : 1);
+    if (t.is_vector) return t.width > 0 ? t.width : 1;
     /* Pointer walk rather than self-recursion — see type_size(). */
     const Type *p = &t;
     while (p->kind == TY_ARRAY && p->elem_type) p = p->elem_type;
-    if (p->is_vector) return p->width > 16 ? 16 : (p->width > 0 ? p->width : 1);
+    if (p->is_vector) return p->width > 0 ? p->width : 1;
     switch (p->kind) {
     case TY_VOID:  return 1;    /* void has no size; alignment is a no-op */
     case TY_INT:   return p->width;
@@ -520,12 +532,13 @@ static int sysv_field_class(Type t) {
  * (SysV AMD64) so a `{double; long}` inner struct stays SSE+INTEGER rather
  * than collapsing to INTEGER,INTEGER.  Returns 1 if the whole object must
  * use the MEMORY class. */
-static int sysv_paint(Type t, int offset, int eight[2]) {
+static int sysv_paint(Type t, int offset, int eight[8]) {
     if (t.is_vector) {
-        /* SysV: 8-byte vectors are SSE; 16-byte vectors are SSE + SSEUP
-         * (one XMM).  GCC passes integer `vector_size(8)` in XMM0, not GP. */
+        /* SysV: 8-byte vectors are SSE; 16-byte are SSE+SSEUP (one XMM);
+         * 32-byte are SSE+SSEUP×3 (one YMM).  Integer vector_size(8) is
+         * SSE, not GP. */
         int end = offset + (int)t.width;
-        for (int eb = 0; eb < 2; eb++) {
+        for (int eb = 0; eb < 8; eb++) {
             int lo = eb * 8, hi = lo + 8;
             if (end <= lo || offset >= hi) continue;
             int fc = (t.width >= 16 && lo >= offset + 8) ? SV_SSEUP : SV_SSE;
@@ -539,7 +552,7 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
         if (esz <= 0) return 0;
         for (long long i = 0; i < t.length; i++) {
             int eoff = offset + (int)(i * esz);
-            if (eoff >= 16) break;
+            if (eoff >= 64) break;
             if (sysv_paint(*t.elem_type, eoff, eight)) return 1;
         }
         return 0;
@@ -550,7 +563,7 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
         if (!sd) {
             int sz = type_size(t);
             int end = offset + (sz > 0 ? sz : 0);
-            for (int eb = 0; eb < 2; eb++) {
+            for (int eb = 0; eb < 8; eb++) {
                 int lo = eb * 8, hi = lo + 8;
                 if (end <= lo || offset >= hi) continue;
                 eight[eb] = sysv_merge(eight[eb], SV_INT);
@@ -579,7 +592,7 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
             }
             if (m->bit_width > 0) {
                 int end = moff + msz;
-                for (int eb = 0; eb < 2; eb++) {
+                for (int eb = 0; eb < 8; eb++) {
                     int lo = eb * 8, hi = lo + 8;
                     if (end <= lo || moff >= hi) continue;
                     eight[eb] = sysv_merge(eight[eb], SV_INT);
@@ -592,7 +605,7 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
                 int fc = sysv_field_class(m->type);
                 if (fc == SV_MEM) return 1;
                 int end = moff + msz;
-                for (int eb = 0; eb < 2; eb++) {
+                for (int eb = 0; eb < 8; eb++) {
                     int lo = eb * 8, hi = lo + 8;
                     if (end <= lo || moff >= hi) continue;
                     eight[eb] = sysv_merge(eight[eb], fc);
@@ -607,7 +620,7 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
     int sz = type_size(t);
     if (sz <= 0) sz = (int)t.width;
     int end = offset + sz;
-    for (int eb = 0; eb < 2; eb++) {
+    for (int eb = 0; eb < 8; eb++) {
         int lo = eb * 8, hi = lo + 8;
         if (end <= lo || offset >= hi) continue;
         eight[eb] = sysv_merge(eight[eb], fc);
@@ -620,6 +633,11 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     cls[0] = SYSV_CLS_INTEGER;
     cls[1] = SYSV_CLS_INTEGER;
     if (t.is_vector) {
+        if (t.width == 32) {
+            /* SysV: __m256 / vector_size(32) is SSE+SSEUP×3 → one YMM. */
+            cls[0] = SYSV_CLS_SSE;
+            return 1;
+        }
         if (t.width == 16) {
             /* SysV: __m128 / vector_size(16) is SSE + SSEUP → one XMM. */
             cls[0] = SYSV_CLS_SSE;
@@ -633,28 +651,49 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
             cls[0] = (t.kind == TY_FLOAT) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
             return 1;
         }
+        if (t.width == 64 && host_has_avx512f()) {
+            /* SysV: __m512 / vector_size(64) is one ZMM.  Needs EVEX. */
+            cls[0] = SYSV_CLS_SSE;
+            return 1;
+        }
+        /* vector_size(64) without AVX-512: MEMORY, 64-byte-aligned stack. */
         return 0;
     }
     if (t.kind != TY_STRUCT || !t.tag) return 0;
     int sz = type_size(t);
-    if (sz <= 0 || sz > 16) return 0;
+    if (sz <= 0 || sz > 64) return 0;
     const StructRegistry *reg = get_ir_structs();
     const StructDef *sd = NULL;
     if (reg) sd = struct_registry_find_c(reg, t.tag);
     if (!sd) {
+        if (sz > 16) return 0;
         int n = (sz + 7) / 8;
         cls[0] = SYSV_CLS_INTEGER;
         if (n > 1) cls[1] = SYSV_CLS_INTEGER;
         return n;
     }
-    int eight[2] = { SV_NO, SV_NO };
+    int eight[8] = { SV_NO, SV_NO, SV_NO, SV_NO, SV_NO, SV_NO, SV_NO, SV_NO };
     if (sysv_paint(t, 0, eight)) return 0;
     int n = (sz + 7) / 8;
     if (n < 1) n = 1;
-    if (n > 2) return 0;
+    if (n > 8) return 0;
     /* SSEUP without a preceding SSE eightbyte is just SSE. */
     if (n > 1 && eight[1] == SV_SSEUP && eight[0] != SV_SSE)
         eight[1] = SV_SSE;
+    /* Size > two eightbytes: SysV says MEMORY unless the first eightbyte
+     * is SSE and every later eightbyte is SSEUP — i.e. one YMM/ZMM.
+     * 32-byte → one YMM (nreg=1).  64-byte → one ZMM if AVX-512F. */
+    if (n > 2) {
+        if (eight[0] != SV_SSE) return 0;
+        for (int i = 1; i < n; i++) {
+            if (eight[i] != SV_SSEUP && eight[i] != SV_NO) return 0;
+        }
+        if (sz == 32 || (sz == 64 && host_has_avx512f())) {
+            cls[0] = SYSV_CLS_SSE;
+            return 1;
+        }
+        return 0;
+    }
     /* SSE + SSEUP share one XMM (`struct { __m128 x; }`, not `{double;double}`). */
     if (n == 2 && eight[0] == SV_SSE && eight[1] == SV_SSEUP) {
         cls[0] = SYSV_CLS_SSE;
@@ -669,11 +708,32 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
 }
 
 int sysv_memory_pass_as_pointer(Type t) {
-    /* SysV MEMORY arguments are copied onto the stack.  The only pointer
-     * decay is GCC's `__va_list_tag` (array-of-1). */
-    if (t.kind == TY_STRUCT && t.tag && strcmp(t.tag, "__va_list_tag") == 0)
-        return 1;
-    return 0;
+    /* SysV MEMORY arguments are copied onto the outgoing stack.  GCC's
+     * `__va_list_tag` (array-of-1) is the exception: it decays to a
+     * pointer, matching libc. */
+    return t.kind == TY_STRUCT && t.tag
+        && strcmp(t.tag, "__va_list_tag") == 0;
+}
+
+int host_has_avx512f(void) {
+    static int cached = -1;
+    unsigned eax, ebx, ecx, edx;
+    unsigned xcr0_lo, xcr0_hi;
+    if (cached >= 0) return cached;
+    cached = 0;
+    /* CPUID.1: OSXSAVE (ecx bit 27).  XCR0 must save SSE+AVX+opmask+ZMM. */
+    __asm__ __volatile__("cpuid"
+                         : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                         : "a"(1), "c"(0));
+    if ((ecx & (1u << 27)) == 0) return cached;
+    __asm__ __volatile__("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+    if ((xcr0_lo & 0xE6u) != 0xE6u) return cached;
+    /* CPUID.7.0: AVX512F is ebx bit 16. */
+    __asm__ __volatile__("cpuid"
+                         : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                         : "a"(7), "c"(0));
+    if (ebx & (1u << 16)) cached = 1;
+    return cached;
 }
 
 static void close_bitfield_run(StructDef *sd) {

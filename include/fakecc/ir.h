@@ -97,12 +97,19 @@ typedef enum {
 } IROpcode;
 
 /* Maximum arguments to IR_CALL.  SysV packs small aggregates into 1–2
- * register args and MEMORY-class aggregates into one stack eightbyte per
- * 8 bytes of payload, so a single large struct can consume many slots.
- * Kept in sync with MAX_PARAMS (common.h).  Args are heap-allocated on the
- * IR_CALL itself — do NOT embed [IR_CALL_MAX_ARGS] in IRInst (that made every
- * instruction ~5KB and ballooned compile time across the whole suite). */
+ * register args; MEMORY-class aggregates are one stack blob (not one IR
+ * arg per eightbyte).  Kept in sync with MAX_PARAMS (common.h).  Args are
+ * heap-allocated on the IR_CALL itself — do NOT embed [IR_CALL_MAX_ARGS]
+ * in IRInst (that made every instruction ~5KB and ballooned compile time). */
 #define IR_CALL_MAX_ARGS 1024
+
+/* call_arg_on_stack bits: 0 = stack, 1 = align≥16, 2 = ≥32, 3 = ≥64,
+ * 4 = MEMORY blob (SSA is a pointer; copy call_arg_nbytes bytes). */
+#define CALL_ARG_STACK   1
+#define CALL_ARG_ALIGN16 2
+#define CALL_ARG_ALIGN32 4
+#define CALL_ARG_ALIGN64 8
+#define CALL_ARG_BLOB    16
 
 typedef struct {
     IROpcode op;
@@ -133,18 +140,21 @@ typedef struct {
      * assign a GP/XMM register even if one is free).  For IR_CALL, see also
      * call_arg_on_stack[]. */
     int      force_stack;
-    /* IR_PARAM / IR_CALL: this stack eightbyte is 16-byte aligned (SysV
-     * long double / __int128 / over-aligned MEMORY).  call_arg_on_stack
-     * bit 1 also records this for IR_CALL args. */
+    /* IR_PARAM / IR_CALL: stack-slot alignment in bytes (16/32/64), or 1
+     * for legacy 16-byte.  SysV long double / __int128 / AVX vectors /
+     * over-aligned MEMORY.  call_arg_on_stack bit 1 = ≥16, bit 2 = ≥32,
+     * bit 3 = ≥64, bit 4 = MEMORY blob. */
     int      align16;
     /* IR_CALL / IR_RETURN: `_Complex long double` travels in st0/st1. */
     int      x87_pair;
     /* IR_CALL only: per-arg force_stack; heap array length call_nargs, or NULL.
-     * Bit 0 = stack, bit 1 = 16-byte align the stack slot. */
+     * See CALL_ARG_* bits. */
     unsigned char *call_arg_on_stack;
-    /* Slice 7b/c: for IR_ALLOCA only. Total bytes reserved on the stack when
-     * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
-     * mem2reg promotes get 0 here (they never reach codegen anyway). */
+    /* IR_CALL only: MEMORY-blob byte counts, length call_nargs, or NULL. */
+    int     *call_arg_nbytes;
+    /* Slice 7b/c: for IR_ALLOCA, total bytes reserved on the stack when
+     * the alloca is pinned.  For IR_PARAM, a MEMORY blob's incoming size
+     * (codegen LEAs [rbp+off] when alloca_bytes > 8). */
     int      alloca_bytes;
     /* IR_LOAD / IR_LOAD_PTR: the access is volatile and must not be DCE'd. */
     int      is_volatile;

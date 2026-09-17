@@ -288,6 +288,8 @@ void emit_obj(const EmitModule *m, const char *path) {
     buf_bytes(&shstrtab, ".rela.tdata", sizeof(".rela.tdata"));
     uint32_t shname_fakecc_dbg = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".fakecc_dbg", sizeof(".fakecc_dbg"));
+    uint32_t shname_gnu_stack = (uint32_t)shstrtab.len;
+    buf_bytes(&shstrtab, ".note.GNU-stack", sizeof(".note.GNU-stack"));
     uint32_t shname_shstrtab = (uint32_t)shstrtab.len;
     buf_bytes(&shstrtab, ".shstrtab", sizeof(".shstrtab"));
 
@@ -439,8 +441,8 @@ void emit_obj(const EmitModule *m, const char *path) {
 
     size_t shoff = hdr_size + body.len;
     /* null + 6 data/tls + symtab + strtab + shstrtab + rela.text + rela.data
-     * + rela.tdata + [.fakecc_dbg] */
-    unsigned shnum = have_dbg ? 14 : 13;
+     * + rela.tdata + .note.GNU-stack + [.fakecc_dbg] */
+    unsigned shnum = have_dbg ? 15 : 14;
     unsigned shstrndx = 9; /* index of .shstrtab */
 
     /* --- ELF header --- */
@@ -506,6 +508,9 @@ void emit_obj(const EmitModule *m, const char *path) {
     write_shdr(&elf, shname_rela_tdata, SHT_RELA, 0,
                0, hdr_size + off_rela_tdata, rela_tdata.len, symtab_idx,
                5 /* .tdata */, 8, ELF64_RELA_SIZE);
+    /* .note.GNU-stack: empty PROGBITS, no SHF_EXECINSTR → non-exec stack. */
+    write_shdr(&elf, shname_gnu_stack, SHT_PROGBITS, 0,
+               0, 0, 0, 0, 0, 1, 0);
     if (have_dbg) {
         write_shdr(&elf, shname_fakecc_dbg, SHT_PROGBITS, 0,
                    0, hdr_size + off_fakecc_dbg, fakecc_dbg.len, 0, 0, 1, 0);

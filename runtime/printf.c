@@ -1,6 +1,6 @@
 /* printf family — FakeCC dialect.
- * Supports %s %c %d %i %u %x %X %p %f %F %e %E %g %G %%, the l/ll length
- * modifiers, field width and precision.
+ * Supports %s %c %d %i %u %x %X %p %n %a %A %f %F %e %E %g %G %%, the l/ll
+ * length modifiers, field width and precision.
  *
  * Floating point is formatted from an 18-significant-digit decimal expansion
  * computed in long double, which covers the 17 digits a double carries.
@@ -279,6 +279,79 @@ static int fmt_gen(char *out, long double a, int prec, int upper) {
     return end;
 }
 
+static int hex_digit_ch(int d, int upper) {
+    if (d < 10) return '0' + d;
+    return (upper ? 'A' : 'a') + (d - 10);
+}
+
+/* 0xL[.frac]p±exp.  `frac_bits` is the payload after the leading hex digit,
+ * packed in the high bits of `frac` (MSB first). */
+static int fmt_hex_payload(char *out, int lead, unsigned long long frac,
+                           int frac_bits, int pexp, int prec, int upper, int alt) {
+    int n = 0;
+    out[n] = '0'; n = n + 1;
+    out[n] = upper ? 'X' : 'x'; n = n + 1;
+    out[n] = (char)hex_digit_ch(lead, upper); n = n + 1;
+
+    int ndig = (frac_bits + 3) / 4;
+    char hex[24];
+    int i = 0;
+    while (i < ndig) {
+        hex[i] = (char)hex_digit_ch((int)((frac >> 60) & 15), upper);
+        frac = frac << 4;
+        i = i + 1;
+    }
+    int hlen = ndig;
+    if (prec < 0) {
+        while (hlen > 0 && hex[hlen - 1] == '0') hlen = hlen - 1;
+    } else if (prec < hlen) {
+        hlen = prec;
+        while (hlen < prec) { hex[hlen] = '0'; hlen = hlen + 1; }
+    } else {
+        while (hlen < prec && hlen < 20) { hex[hlen] = '0'; hlen = hlen + 1; }
+    }
+    if (hlen > 0 || alt) {
+        out[n] = '.'; n = n + 1;
+        i = 0;
+        while (i < hlen) { out[n] = hex[i]; n = n + 1; i = i + 1; }
+    }
+    out[n] = upper ? 'P' : 'p'; n = n + 1;
+    if (pexp < 0) { out[n] = '-'; n = n + 1; pexp = -pexp; }
+    else { out[n] = '+'; n = n + 1; }
+    char eb[16];
+    int el = uint_to_buf(eb, (unsigned long long)pexp, 10, 0);
+    i = 0;
+    while (i < el) { out[n] = eb[i]; n = n + 1; i = i + 1; }
+    return n;
+}
+
+static int fmt_a_double(char *out, unsigned long long bits, int prec, int upper, int alt) {
+    int exp = (int)((bits >> 52) & 0x7ff);
+    unsigned long long frac = bits & 0xfffffffffffffULL;
+    if (exp == 0 && frac == 0)
+        return fmt_hex_payload(out, 0, 0, 0, 0, prec, upper, alt);
+    if (exp == 0) {
+        /* subnormal: 0x0.frac p-1022 */
+        return fmt_hex_payload(out, 0, frac << 12, 52, -1022, prec, upper, alt);
+    }
+    /* normal: 0x1.frac p+(exp-1023); 52 frac bits left-aligned in u64. */
+    return fmt_hex_payload(out, 1, frac << 12, 52, exp - 1023, prec, upper, alt);
+}
+
+static int fmt_a_ld80(char *out, unsigned char *lb, int prec, int upper, int alt) {
+    unsigned long long mant = 0;
+    memcpy((void *)&mant, (void *)lb, 8);
+    int exp = (int)(lb[8] | ((lb[9] & 0x7f) << 8));
+    if (exp == 0 && mant == 0)
+        return fmt_hex_payload(out, 0, 0, 0, 0, prec, upper, alt);
+    /* glibc %La: leading hex nibble of the 64-bit significand, binary
+     * point after that nibble, exponent unbiased-3. */
+    int lead = (int)((mant >> 60) & 15);
+    unsigned long long rest = mant << 4;
+    int pexp = (exp == 0 ? -16382 : exp - 16383) - 3;
+    return fmt_hex_payload(out, lead, rest, 60, pexp, prec, upper, alt);
+}
+
 static int pad(char **bufp, size_t *left, int *count, FILE *f, int n, char ch) {
     while (n > 0) {
         if (emit_ch(bufp, left, count, f, ch) < 0) return -1;
@@ -429,16 +502,39 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             blen = uint_to_buf(body, v, base, upper);
             zero_ok = (precision < 0);
             if (precision == 0 && v == 0 && spec != 'p') blen = 0;
+        } else if (spec == 'n') {
+            /* Characters written so far; consume the pointer so later
+             * conversions stay aligned. */
+            if (long_count >= 2 || size_mod) {
+                long long *p = va_arg(ap, long long *);
+                if (p) *p = (long long)count;
+            } else if (long_count == 1) {
+                long *p = va_arg(ap, long *);
+                if (p) *p = (long)count;
+            } else if (short_count >= 2) {
+                signed char *p = va_arg(ap, signed char *);
+                if (p) *p = (signed char)count;
+            } else if (short_count == 1) {
+                short *p = va_arg(ap, short *);
+                if (p) *p = (short)count;
+            } else {
+                int *p = va_arg(ap, int *);
+                if (p) *p = count;
+            }
+            continue;
         } else if (spec == 'f' || spec == 'F' || spec == 'e' || spec == 'E'
-                   || spec == 'g' || spec == 'G') {
+                   || spec == 'g' || spec == 'G' || spec == 'a' || spec == 'A') {
             long double a;
             int neg = 0;
             int is_nan = 0;
             int is_inf = 0;
+            unsigned long long dbits = 0;
+            unsigned char lb[16];
+            int have_ld = 0;
             if (long_dbl) {
                 a = va_arg(ap, long double);
-                unsigned char lb[16];
                 memcpy((void *)lb, (void *)&a, 16);
+                have_ld = 1;
                 neg = (lb[9] >> 7) != 0;
                 /* x87: exp=0x7fff is inf/nan; mantissa bit 62 distinguishes */
                 int exp = (int)(lb[8] | ((lb[9] & 0x7f) << 8));
@@ -449,7 +545,6 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 if (neg) a = -a;
             } else {
                 double dv = va_arg(ap, double);
-                unsigned long long dbits;
                 memcpy((void *)&dbits, (void *)&dv, 8);
                 neg = (dbits >> 63) != 0;
                 a = (long double)dv;
@@ -457,18 +552,23 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 if (dv != dv) is_nan = 1;
                 else if (dv - dv != 0.0) is_inf = 1;
             }
+            int up = (spec == 'F' || spec == 'E' || spec == 'G' || spec == 'A');
             if (is_nan) {
-                int up = (spec == 'F' || spec == 'E' || spec == 'G');
                 body[0] = up ? 'N' : 'n';
                 body[1] = up ? 'A' : 'a';
                 body[2] = up ? 'N' : 'n';
                 blen = 3;
             } else if (is_inf) {
-                int up = (spec == 'F' || spec == 'E' || spec == 'G');
                 body[0] = up ? 'I' : 'i';
                 body[1] = up ? 'N' : 'n';
                 body[2] = up ? 'F' : 'f';
                 blen = 3;
+            } else if (spec == 'a' || spec == 'A') {
+                if (have_ld)
+                    blen = fmt_a_ld80(body, lb, precision, up, f_alt);
+                else
+                    blen = fmt_a_double(body, dbits, precision, up, f_alt);
+                zero_ok = 1;
             } else {
                 if (spec == 'f' || spec == 'F')
                     blen = fmt_fixed(body, a, precision < 0 ? 6 : precision);

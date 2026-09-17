@@ -4,6 +4,7 @@
 #include "fakecc/emit.h"
 #include "fakecc/ir.h"
 #include "fakecc/regalloc.h"
+#include "fakecc/ast.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -28,6 +29,9 @@ static void emit_int32(Buffer *b, int32_t val) {
 static void emit_modrm(Buffer *b, int mod, int reg, int rm) {
     emit_byte(b, (uint8_t)(((mod & 3) << 6) | ((reg & 7) << 3) | (rm & 7)));
 }
+static void emit_modrm_disp(Buffer *b, int reg_field, int base, int off);
+static void emit_modrm_indirect(Buffer *b, int reg_field, int base);
+static void ensure_reg(Buffer *b, int v, int dst_reg, const RAResult *ra);
 
 /* Emit REX prefix: 0x40 | (W<<3) | (R<<2) | (X<<1) | B.
  * R comes from the top bit of the ModRM.reg field's register.
@@ -345,6 +349,88 @@ static void emit_sse_mov_rr(Buffer *b, int dst, int src) {
     emit_modrm(b, 3, dst & 7, src & 7);
 }
 
+/* VEX prefix for the 0F map, W=0, no extra vvvv operand.
+ * L=1 → 256-bit (YMM), L=0 → 128-bit.  R from `xmm`, B from `base`. */
+static void emit_vex_0f(Buffer *b, int xmm, int base, int L) {
+    int R = (xmm >> 3) & 1;
+    int B = (base >> 3) & 1;
+    int vvvv = 0xF;
+    int pp = 0;
+    if (!B) {
+        emit_byte(b, 0xC5);
+        emit_byte(b, (uint8_t)((R ? 0 : 0x80) | (vvvv << 3) | ((L ? 1 : 0) << 2) | pp));
+    } else {
+        emit_byte(b, 0xC4);
+        emit_byte(b, (uint8_t)(((R ? 0 : 1) << 7) | (1 << 6) | ((B ? 0 : 1) << 5) | 1));
+        emit_byte(b, (uint8_t)((vvvv << 3) | ((L ? 1 : 0) << 2) | pp));
+    }
+}
+
+static void emit_vmovups_mem(Buffer *b, int xmm, int base, int off, int is_store) {
+    emit_vex_0f(b, xmm, base, 1);
+    emit_byte(b, is_store ? 0x11 : 0x10);
+    emit_modrm_disp(b, xmm, base, off);
+}
+
+static void emit_vmovups_via_ptr(Buffer *b, int xmm, int ptr, int is_store) {
+    emit_vex_0f(b, xmm, ptr, 1);
+    emit_byte(b, is_store ? 0x11 : 0x10);
+    emit_modrm_indirect(b, xmm, ptr);
+}
+
+/* EVEX prefix for the 0F map, W=0, no extra vvvv operand.
+ * LLL=2 → 512-bit (ZMM).  Always pair with disp32 addressing so we do
+ * not depend on EVEX compressed disp8*N. */
+static void emit_evex_0f(Buffer *b, int xmm, int base, int LLL) {
+    int R = (xmm >> 3) & 1;
+    int B = (base >> 3) & 1;
+    /* P0 is R̅ X̅ B̅ R̅′ 00 mm (mm=01 → 0F).  R′=0 for xmm0–15 so R̅′=1.
+     * Putting R in B̅ / B in R̅′ encoded zmm8+ and [r8+] as the low regs. */
+    uint8_t p0 = (uint8_t)(((R ? 0 : 1) << 7) | (1u << 6)
+                           | ((B ? 0 : 1) << 5) | (1u << 4) | 0x01);
+    uint8_t p1 = (uint8_t)((0xF << 3) | (1 << 2));
+    uint8_t p2 = (uint8_t)(((LLL & 3) << 5) | (1 << 3));
+    emit_byte(b, 0x62);
+    emit_byte(b, p0);
+    emit_byte(b, p1);
+    emit_byte(b, p2);
+}
+
+static void emit_evex_modrm_disp32(Buffer *b, int reg_field, int base, int off) {
+    int rm = base & 7;
+    if (rm == 4) {
+        emit_modrm(b, 2, reg_field & 7, 4);
+        emit_byte(b, 0x24);
+    } else {
+        emit_modrm(b, 2, reg_field & 7, rm);
+    }
+    emit_int32(b, off);
+}
+
+static void emit_evex_vmovups_mem(Buffer *b, int xmm, int base, int off, int is_store) {
+    emit_evex_0f(b, xmm, base, 2);
+    emit_byte(b, is_store ? 0x11 : 0x10);
+    emit_evex_modrm_disp32(b, xmm, base, off);
+}
+
+static void emit_evex_vmovups_via_ptr(Buffer *b, int xmm, int ptr, int is_store) {
+    emit_evex_0f(b, xmm, ptr, 2);
+    emit_byte(b, is_store ? 0x11 : 0x10);
+    emit_evex_modrm_disp32(b, xmm, ptr, 0);
+}
+
+static void emit_evex_vmovaps_rr(Buffer *b, int dst, int src) {
+    emit_evex_0f(b, dst, src, 2);
+    emit_byte(b, 0x28);
+    emit_modrm(b, 3, dst & 7, src & 7);
+}
+
+static void emit_vmovaps_rr(Buffer *b, int dst, int src) {
+    emit_vex_0f(b, dst, src, 1);
+    emit_byte(b, 0x28);
+    emit_modrm(b, 3, dst & 7, src & 7);
+}
+
 /* movups xmm_dst, [rbp+off]  →  0F 10 /r.  16-byte unaligned spill load. */
 static void emit_sse_load_spill(Buffer *b, int dst, int off) {
     emit_rex_wrb(b, 0, dst, REG_RBP);
@@ -618,17 +704,23 @@ static void emit_add_rsp_imm32(Buffer *b, int32_t imm) {
     }
 }
 
-/* Push/pop an XMM arg in the SysV dance.  16-byte vectors use movups and a
- * 16-byte stack slot; scalars stay 8-byte movsd. */
-static void emit_xmm_push(Buffer *b, int xmm, int width16) {
-    emit_sub_rsp_imm32(b, width16 ? 16 : 8);
-    if (width16) emit_movups_store_rsp(b, xmm);
+/* Push/pop an XMM/YMM arg in the SysV dance.  32-byte vectors use
+ * vmovups ymm and a 32-byte slot; 16-byte use movups; scalars stay 8-byte. */
+static void emit_xmm_push(Buffer *b, int xmm, int nbytes) {
+    int n = nbytes >= 64 ? 64 : nbytes >= 32 ? 32 : nbytes >= 16 ? 16 : 8;
+    emit_sub_rsp_imm32(b, n);
+    if (n >= 64) emit_evex_vmovups_mem(b, xmm, REG_RSP, 0, 1);
+    else if (n >= 32) emit_vmovups_mem(b, xmm, REG_RSP, 0, 1);
+    else if (n >= 16) emit_movups_store_rsp(b, xmm);
     else emit_sse_store_rsp(b, xmm);
 }
-static void emit_xmm_pop(Buffer *b, int xmm, int width16) {
-    if (width16) emit_movups_load_rsp(b, xmm);
+static void emit_xmm_pop(Buffer *b, int xmm, int nbytes) {
+    int n = nbytes >= 64 ? 64 : nbytes >= 32 ? 32 : nbytes >= 16 ? 16 : 8;
+    if (n >= 64) emit_evex_vmovups_mem(b, xmm, REG_RSP, 0, 0);
+    else if (n >= 32) emit_vmovups_mem(b, xmm, REG_RSP, 0, 0);
+    else if (n >= 16) emit_movups_load_rsp(b, xmm);
     else emit_sse_load_rsp(b, xmm);
-    emit_add_rsp_imm32(b, width16 ? 16 : 8);
+    emit_add_rsp_imm32(b, n);
 }
 
 /* call rel32  →  E8 rel32.  Returns offset of the rel32 field for patching. */
@@ -801,6 +893,8 @@ static const int SYSV_ARG_REGS[6] = {
 /* ================================================================== */
 
 static int curr_cs_count = 0;
+static const IRFunction *curr_fn = NULL;
+static int curr_xmm_spill = 16;
 
 static int spill_offset(int slot) { return -8 * (slot + 1 + curr_cs_count); }
 
@@ -951,12 +1045,16 @@ static void emit_movd_mem_xmm(Buffer *b, int ptr, int src) {
 }
 
 static void emit_vec_load_xmm(Buffer *b, int xmm, int ptr, int vec_sz) {
-    if (vec_sz >= 16) emit_movups_load_via_ptr(b, xmm, ptr);
+    if (vec_sz >= 64) emit_evex_vmovups_via_ptr(b, xmm, ptr, 0);
+    else if (vec_sz >= 32) emit_vmovups_via_ptr(b, xmm, ptr, 0);
+    else if (vec_sz >= 16) emit_movups_load_via_ptr(b, xmm, ptr);
     else if (vec_sz >= 8) emit_movq_xmm_mem(b, xmm, ptr);
     else emit_movd_xmm_mem(b, xmm, ptr);
 }
 static void emit_vec_store_xmm(Buffer *b, int ptr, int xmm, int vec_sz) {
-    if (vec_sz >= 16) emit_movups_store_via_ptr(b, ptr, xmm);
+    if (vec_sz >= 64) emit_evex_vmovups_via_ptr(b, xmm, ptr, 1);
+    else if (vec_sz >= 32) emit_vmovups_via_ptr(b, xmm, ptr, 1);
+    else if (vec_sz >= 16) emit_movups_store_via_ptr(b, ptr, xmm);
     else if (vec_sz >= 8) emit_movq_mem_xmm(b, ptr, xmm);
     else emit_movd_mem_xmm(b, ptr, xmm);
 }
@@ -1344,6 +1442,79 @@ static int value_is_xmm16(const IRFunction *fn, int v) {
         && value_width_of(fn, v) == 16;
 }
 
+/* Packed SSE/AVX vector width in bytes: 16 (XMM) or 32 (YMM).  0 if scalar. */
+static int value_vec_bytes(const IRFunction *fn, int v) {
+    if (!value_is_float_class(fn, v) || value_is_ld(fn, v)) return 0;
+    int w = value_width_of(fn, v);
+    if (w == 16 || w == 32 || w == 64) return w;
+    return 0;
+}
+
+static int vec_nslots(int vec_bytes, int is_ld) {
+    if (is_ld) return 2;
+    if (vec_bytes >= 64) return 8;
+    if (vec_bytes >= 32) return 4;
+    if (vec_bytes >= 16) return 2;
+    return 1;
+}
+
+static void stack_idx_align(int *idx, int align) {
+    if (align < 16 || !idx) return;
+    int slots = align / 8;
+    if (slots <= 1) return;
+    if (*idx % slots)
+        *idx += slots - (*idx % slots);
+}
+
+static int flags_stack_align(unsigned char flags, int vec_bytes, int align16) {
+    int al = 8;
+    if (flags & CALL_ARG_ALIGN64) al = 64;
+    else if (flags & CALL_ARG_ALIGN32) al = 32;
+    else if (flags & CALL_ARG_ALIGN16) al = 16;
+    if (align16 >= 16 && align16 > al) al = align16;
+    else if (align16 == 1 && al < 16) al = 16;
+    if (vec_bytes >= 64 && al < 64) al = 64;
+    else if (vec_bytes >= 32 && al < 32) al = 32;
+    else if (vec_bytes >= 16 && al < 16) al = 16;
+    return al;
+}
+
+static int param_is_mem_blob(const IRInst *pi) {
+    return pi && pi->force_stack && pi->alloca_bytes > 0;
+}
+
+static int call_arg_blob_bytes(const IRInst *inst, int k) {
+    if (!inst->call_arg_on_stack || !(inst->call_arg_on_stack[k] & CALL_ARG_BLOB))
+        return 0;
+    if (inst->call_arg_nbytes && inst->call_arg_nbytes[k] > 0)
+        return inst->call_arg_nbytes[k];
+    return 1;
+}
+
+/* Copy `nbytes` from SSA pointer `src_v` onto [dst_base+dst_off].
+ * Saves RSI/RDI/RCX so a later SysV GP arg whose home is those
+ * registers survives the copy.  DF is cleared. */
+static void emit_memcpy_to_addr(Buffer *b, int dst_base, int dst_off,
+                                int src_v, const RAResult *ra, int nbytes) {
+    if (nbytes <= 0) return;
+    emit_push_r(b, REG_RSI);
+    emit_push_r(b, REG_RDI);
+    emit_push_r(b, REG_RCX);
+    ensure_reg(b, src_v, REG_RSI, ra);
+    if (dst_base == REG_RSP)
+        dst_off += 24;
+    emit_rex_wrb(b, 1, REG_RDI, dst_base);
+    emit_byte(b, 0x8D);
+    emit_modrm_disp(b, REG_RDI, dst_base, dst_off);
+    emit_mov_imm32(b, REG_RCX, nbytes);
+    emit_byte(b, 0xFC);
+    emit_byte(b, 0xF3);
+    emit_byte(b, 0xA4);
+    emit_pop_r(b, REG_RCX);
+    emit_pop_r(b, REG_RDI);
+    emit_pop_r(b, REG_RSI);
+}
+
 /* Materialize the address of long-double value `v`'s 16-byte slot into GP
  * register `reg`.  ld_off[v] is the rbp-relative offset assigned in the
  * prologue (negative for locals/results, positive for stack-passed params). */
@@ -1474,7 +1645,26 @@ static void isel_shift(Buffer *b, const IRInst *inst, const IRFunction *fn,
  * curr_cs_count accounts for the callee-saved register save area above
  * the spill region (see spill_offset above). */
 static int spill_offset_xmm(int slot, int gp_spill_area) {
-    return -(gp_spill_area + 8 * curr_cs_count + 16 * (slot + 1));
+    return -(gp_spill_area + 8 * curr_cs_count + curr_xmm_spill * (slot + 1));
+}
+
+static void emit_xmm_copy(Buffer *b, int dst, int src, int nbytes) {
+    if (dst == src) return;
+    if (nbytes >= 64) emit_evex_vmovaps_rr(b, dst, src);
+    else if (nbytes >= 32) emit_vmovaps_rr(b, dst, src);
+    else emit_sse_mov_rr(b, dst, src);
+}
+
+static void emit_xmm_load_spill(Buffer *b, int dst, int off, int nbytes) {
+    if (nbytes >= 64) emit_evex_vmovups_mem(b, dst, REG_RBP, off, 0);
+    else if (nbytes >= 32) emit_vmovups_mem(b, dst, REG_RBP, off, 0);
+    else emit_sse_load_spill(b, dst, off);
+}
+
+static void emit_xmm_store_spill(Buffer *b, int src, int off, int nbytes) {
+    if (nbytes >= 64) emit_evex_vmovups_mem(b, src, REG_RBP, off, 1);
+    else if (nbytes >= 32) emit_vmovups_mem(b, src, REG_RBP, off, 1);
+    else emit_sse_store_spill(b, src, off);
 }
 
 /* Ensure float value `v` is in `dst_xmm`.  Emits movsd or load as needed. */
@@ -1485,12 +1675,14 @@ static void ensure_reg_xmm(Buffer *b, int v, int dst_xmm, const RAResult *ra_xmm
         exit(1);
     }
     int vr = ra_xmm->reg[v];
+    int nbytes = curr_fn ? value_vec_bytes(curr_fn, v) : 0;
     if (vr == dst_xmm) return;
     if (vr >= 0 && vr < 16) {
-        emit_sse_mov_rr(b, dst_xmm, vr);
+        emit_xmm_copy(b, dst_xmm, vr, nbytes);
     } else {
-        emit_sse_load_spill(b, dst_xmm, spill_offset_xmm(ra_xmm->spill_slot[v],
-                                                          gp_spill_area));
+        emit_xmm_load_spill(b, dst_xmm,
+                            spill_offset_xmm(ra_xmm->spill_slot[v], gp_spill_area),
+                            nbytes);
     }
 }
 
@@ -1499,8 +1691,10 @@ static void spill_if_needed_xmm(Buffer *b, int v, int src_xmm,
                                 const RAResult *ra_xmm, int gp_spill_area) {
     if (!ra_xmm || v < 0 || v >= ra_xmm->num_values) return;
     if (ra_xmm->reg[v] >= 0 && ra_xmm->reg[v] < 16) return;
-    emit_sse_store_spill(b, src_xmm,
-                         spill_offset_xmm(ra_xmm->spill_slot[v], gp_spill_area));
+    int nbytes = curr_fn ? value_vec_bytes(curr_fn, v) : 0;
+    emit_xmm_store_spill(b, src_xmm,
+                         spill_offset_xmm(ra_xmm->spill_slot[v], gp_spill_area),
+                         nbytes);
 }
 
 /* Materialize a float/double constant into xmm_dst.  The IEEE-754 bit
@@ -1918,9 +2112,49 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         ensure_reg(b, destv, REG_RSI, ra);
         int ov_step = (nbytes + 7) & ~7;
         if (ov_step < 8) ov_step = 8;
+        int ov_align = 8;
+        if (inst->align16 >= 16) ov_align = inst->align16;
+        else if (inst->align16) ov_align = 16;
+        /* Do not bump overflow alignment from size: `struct { char x[32]; }`
+         * is MEMORY with align 1.  type_stack_align already reports 32/64
+         * for real YMM/ZMM / aligned(32) types. */
 
-        /* SSE+SSEUP aggregate (`struct { __m128 x; }`): one XMM, 16 bytes. */
-        if (!inst->force_stack && inst->float_imm == 1 && nbytes == 16) {
+        /* YMM (SSE class, one register) always lives in the overflow area —
+         * the GP/XMM save area is only 16 bytes per slot.  32-byte INTEGER
+         * MEMORY structs must not take this path (va_arg_22 A32). */
+        if (!inst->force_stack && (inst->float_imm & 0x10)
+            && (nbytes == 32 || nbytes == 64)) {
+            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            emit_add_imm32(b, REG_R11, ov_align - 1);
+            emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
+            if (nbytes == 64 && host_has_avx512f()) {
+                emit_evex_vmovups_mem(b, 0, REG_R11, 0, 0);
+                emit_evex_vmovups_mem(b, 0, REG_RSI, 0, 1);
+            } else {
+                emit_vmovups_mem(b, 0, REG_R11, 0, 0);
+                emit_vmovups_mem(b, 0, REG_RSI, 0, 1);
+                if (nbytes == 64) {
+                    emit_vmovups_mem(b, 0, REG_R11, 32, 0);
+                    emit_vmovups_mem(b, 0, REG_RSI, 32, 1);
+                }
+            }
+            emit_add_imm32(b, REG_R11, nbytes);
+            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            if (dst >= 0) {
+                if (ra && dst < ra->num_values && ra->reg[dst] >= 0
+                    && ra->reg[dst] < 16) {
+                    int dr = ra->reg[dst];
+                    if (dr != REG_RSI) emit_mov_rr(b, dr, REG_RSI);
+                } else {
+                    spill_if_needed(b, dst, REG_RSI, ra);
+                }
+            }
+            return;
+        }
+
+        /* SSE+SSEUP aggregate (`struct { __m128 x; }`): one XMM, 16 bytes.
+         * `{double; long}` is SSE+INTEGER (float_imm==1, no 0x10). */
+        if (!inst->force_stack && (inst->float_imm & 0x10) && nbytes == 16) {
             emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF);
             emit_cmp_imm32(b, REG_RCX, 176 - 16);
             size_t jae_ov = emit_jcc_rel32(b, 0x87); /* JA overflow */
@@ -1987,12 +2221,9 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             if (num_gp > 0) patch_rel32(b, jae_gp, ov_off);
             if (num_fp > 0) patch_rel32(b, jae_fp, ov_off);
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
-            if (inst->align16) {
-                emit_add_imm32(b, REG_R11, 15);
-                emit_rex_wrb(b, 1, 0, REG_R11);
-                emit_byte(b, 0x83);
-                emit_modrm(b, 3, 4, REG_R11 & 7); /* and $~15, %r11 */
-                emit_byte(b, 0xF0);
+            if (ov_align >= 16) {
+                emit_add_imm32(b, REG_R11, ov_align - 1);
+                emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
             }
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
@@ -2005,9 +2236,9 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             /* MEMORY-class struct: SysV copies eightbytes from the overflow
              * stack (including aggregates larger than 16 bytes). */
             emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
-            if (inst->align16) {
-                emit_add_imm32(b, REG_R11, 15);
-                emit_and_imm32(b, REG_R11, (int32_t)-16);
+            if (ov_align >= 16) {
+                emit_add_imm32(b, REG_R11, ov_align - 1);
+                emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
             }
             for (int i = 0; i < n8; i++) {
                 emit_load_base_off(b, REG_RDX, REG_R11, i * 8);
@@ -2427,7 +2658,15 @@ static int *codegen_build_defs(const IRFunction *fn) {
 }
 
 /* If `v` is &pinned_alloca or (&pinned_alloca)+const, write rbp offset and
- * return 1.  This is the addressing fold gcc -O0 does for stack slots. */
+ * return 1.  This is the addressing fold gcc -O0 does for stack slots.
+ * Allocas with IR_ALLOCA.imm >= 32 are realigned at IR_ADDR, so a static
+ * rbp offset would miss the runtime `and $-align`. */
+static int alloca_dyn_align(const IRFunction *fn, const int *def, IRValue slot) {
+    if (slot < 0 || slot >= fn->next_value_id || !def || def[slot] < 0) return 0;
+    const IRInst *al = &fn->insts.data[def[slot]];
+    return al->op == IR_ALLOCA && al->imm >= 32;
+}
+
 static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_off,
                         IRValue v, int *out_off, int depth) {
     if (depth > 8 || v < 0 || v >= fn->next_value_id || !def || !alloca_off) return 0;
@@ -2435,6 +2674,7 @@ static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_
     if (di < 0) return 0;
     const IRInst *d = &fn->insts.data[di];
     if (d->op == IR_ADDR && d->a >= 0 && d->a < fn->next_value_id && alloca_off[d->a] != 0) {
+        if (alloca_dyn_align(fn, def, d->a)) return 0;
         *out_off = alloca_off[d->a];
         return 1;
     }
@@ -2744,6 +2984,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         const IRFunction *fn = &ir->functions.data[i];
         const RAResult *ra = (const RAResult *)fn->ra;
         const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
+        curr_fn = fn;
+        curr_xmm_spill = host_has_avx512f() ? 64 : 32;
         size_t start_offset = out->text.len;
         int dbg_func_idx = -1;
         size_t prologue_end_pc = start_offset;
@@ -2904,18 +3146,24 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             int is_float = !is_ld && (pi->dst >= 0 && pi->dst < fn->next_value_id &&
                             value_is_float_class(fn, pi->dst));
             int force_stack = pi->force_stack || is_ld;
-            int w16 = is_float && (pi->width == 16 || value_is_xmm16(fn, pi->dst));
+            int vecb = is_float ? value_vec_bytes(fn, pi->dst) : 0;
+            if (!vecb && is_float && (pi->width == 16 || pi->width == 32 || pi->width == 64))
+                vecb = pi->width;
+            int pal = flags_stack_align(0, vecb, pi->align16);
+            if (is_ld && pal < 16) pal = 16;
+            int nslots = vec_nslots(vecb, is_ld);
+            int blob = param_is_mem_blob(pi);
+            if (blob) {
+                nslots = (pi->alloca_bytes + 7) / 8;
+                if (nslots < 1) nslots = 1;
+            }
             if (force_stack) {
-                /* long double or MEMORY-class eightbyte: stack only.
-                 * 16-byte aligned types (ld / __int128 / SSE+SSEUP vector)
-                 * skip a slot when the current overflow index is odd
-                 * (rbp+16 is 16-aligned). */
-                if ((is_ld || pi->align16 || w16) && (stack_arg_idx & 1))
-                    stack_arg_idx++;
+                /* long double or MEMORY-class eightbyte: stack only. */
+                stack_idx_align(&stack_arg_idx, pal);
                 arrive_reg[p] = -1;
                 arrive_is_xmm[p] = 0;
                 stack_off[p] = 16 + 8 * stack_arg_idx;
-                stack_arg_idx += (is_ld || w16) ? 2 : 1;
+                stack_arg_idx += nslots;
                 if (is_ld)
                     ld_off[pi->dst] = stack_off[p];
             } else if (is_float) {
@@ -2926,10 +3174,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 } else {
                     arrive_reg[p] = -1;
                     arrive_is_xmm[p] = 0;
-                    if ((pi->align16 || w16) && (stack_arg_idx & 1))
-                        stack_arg_idx++;
+                    stack_idx_align(&stack_arg_idx, pal);
                     stack_off[p] = 16 + 8 * stack_arg_idx;
-                    stack_arg_idx += w16 ? 2 : 1;
+                    stack_arg_idx += nslots;
                 }
             } else {
                 if (gp_reg_idx < 6) {
@@ -2959,6 +3206,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             const IRInst *pi = &fn->insts.data[p];
             IRValue v = pi->dst;
             if (v < 0 || value_is_ld(fn, v)) continue;
+            if (param_is_mem_blob(pi)) continue;
             int store_i = -1, nstore = 0, other = 0;
             for (size_t j = 0; j < fn->insts.len; j++) {
                 const IRInst *in = &fn->insts.data[j];
@@ -3051,13 +3299,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             const IRInst *pi = &fn->insts.data[p];
             int w = pi->width ? pi->width : 4;
             int is_float = value_is_float_class(fn, pi->dst);
-            int w16 = is_float && (w == 16 || value_is_xmm16(fn, pi->dst));
+            int vecb = is_float ? value_vec_bytes(fn, pi->dst) : 0;
+            if (!vecb && is_float && (w == 16 || w == 32 || w == 64)) vecb = w;
             if (arrive_reg[p] < 0) {
                 if (is_float) {
-                    if (w16) {
-                        emit_sse_load_spill(&out->text, XMM_SCRATCH0, stack_off[p]);
-                        emit_sse_store_spill(&out->text, XMM_SCRATCH0,
-                                             param_home_off[p]);
+                    if (vecb >= 16) {
+                        emit_xmm_load_spill(&out->text, XMM_SCRATCH0, stack_off[p], vecb);
+                        emit_xmm_store_spill(&out->text, XMM_SCRATCH0,
+                                             param_home_off[p], vecb);
                     } else {
                         emit_sse_load_disp(&out->text, XMM_SCRATCH0, REG_RBP,
                                            stack_off[p], w == 4);
@@ -3071,9 +3320,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                     param_home_off[p], w);
                 }
             } else if (arrive_is_xmm[p]) {
-                if (w16)
-                    emit_sse_store_spill(&out->text, arrive_reg[p],
-                                         param_home_off[p]);
+                if (vecb >= 16)
+                    emit_xmm_store_spill(&out->text, arrive_reg[p],
+                                         param_home_off[p], vecb);
                 else
                     emit_sse_store_disp(&out->text, REG_RBP, arrive_reg[p],
                                         param_home_off[p], w == 4);
@@ -3089,8 +3338,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (arrive_reg[p] < 0) continue;
             if (arrive_is_xmm[p]) {
                 const IRInst *pi = &fn->insts.data[p];
-                emit_xmm_push(&out->text, arrive_reg[p],
-                              pi->width == 16 || value_is_xmm16(fn, pi->dst));
+                int vb = value_vec_bytes(fn, pi->dst);
+                if (!vb && (pi->width == 16 || pi->width == 32 || pi->width == 64))
+                    vb = pi->width;
+                emit_xmm_push(&out->text, arrive_reg[p], vb);
             } else {
                 emit_push_r(&out->text, arrive_reg[p]);
             }
@@ -3105,6 +3356,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             value_is_float_class(fn, pi->dst));
             if (arrive_reg[p] < 0) {
                 /* Stack-passed arg: load from [rbp + stack_off] into home. */
+                if (param_is_mem_blob(pi)) {
+                    int pdr = (ra && pi->dst >= 0 && pi->dst < ra->num_values)
+                              ? ra->reg[pi->dst] : -1;
+                    if (pdr >= 0) {
+                        emit_lea_rbp(&out->text, pdr, stack_off[p]);
+                    } else {
+                        emit_lea_rbp(&out->text, REG_RAX, stack_off[p]);
+                        spill_if_needed(&out->text, pi->dst, REG_RAX, ra);
+                    }
+                    continue;
+                }
                 if (is_ld) {
                     /* long double: already in its 16-byte stack slot (ld_off set
                      * in the param loop); it lives in memory, not XMM — nothing
@@ -3112,13 +3374,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     continue;
                 }
                 if (is_float) {
+                    int vb = value_vec_bytes(fn, pi->dst);
+                    if (!vb && (pi->width == 16 || pi->width == 32 || pi->width == 64))
+                        vb = pi->width;
                     int pdr_xmm = (ra_xmm && pi->dst >= 0 &&
                                    pi->dst < ra_xmm->num_values)
                                   ? ra_xmm->reg[pi->dst] : -1;
                     if (pdr_xmm >= 0) {
-                        emit_sse_load_spill(&out->text, pdr_xmm, stack_off[p]);
+                        emit_xmm_load_spill(&out->text, pdr_xmm, stack_off[p], vb);
                     } else {
-                        emit_sse_load_spill(&out->text, XMM_SCRATCH0, stack_off[p]);
+                        emit_xmm_load_spill(&out->text, XMM_SCRATCH0, stack_off[p], vb);
                         spill_if_needed_xmm(&out->text, pi->dst, XMM_SCRATCH0,
                                              ra_xmm, gp_spill_area);
                     }
@@ -3135,14 +3400,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 continue;
             }
             if (is_float) {
-                int w16 = pi->width == 16 || value_is_xmm16(fn, pi->dst);
+                int vb = value_vec_bytes(fn, pi->dst);
+                if (!vb && (pi->width == 16 || pi->width == 32 || pi->width == 64))
+                    vb = pi->width;
                 int pdr_xmm = (ra_xmm && pi->dst >= 0 &&
                                pi->dst < ra_xmm->num_values)
                               ? ra_xmm->reg[pi->dst] : -1;
                 if (pdr_xmm >= 0) {
-                    emit_xmm_pop(&out->text, pdr_xmm, w16);
+                    emit_xmm_pop(&out->text, pdr_xmm, vb);
                 } else {
-                    emit_xmm_pop(&out->text, XMM_SCRATCH0, w16);
+                    emit_xmm_pop(&out->text, XMM_SCRATCH0, vb);
                     spill_if_needed_xmm(&out->text, pi->dst, XMM_SCRATCH0,
                                          ra_xmm, gp_spill_area);
                 }
@@ -3419,7 +3686,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
                     if (dr_xmm >= 0 && dr_xmm != XMM_SCRATCH0) {
-                        emit_sse_mov_rr(&out->text, dr_xmm, XMM_SCRATCH0);
+                        emit_xmm_copy(&out->text, dr_xmm, XMM_SCRATCH0,
+                                      value_vec_bytes(fn, inst->dst));
                     }
                     spill_if_needed_xmm(&out->text, inst->dst, dr_xmm >= 0 ? dr_xmm : XMM_SCRATCH0, ra_xmm, gp_spill_area);
                     break;
@@ -3503,7 +3771,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                  ? ra_xmm->reg[inst->dst] : -1;
                     ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
                     if (dr_xmm >= 0 && dr_xmm != XMM_SCRATCH0) {
-                        emit_sse_mov_rr(&out->text, dr_xmm, XMM_SCRATCH0);
+                        emit_xmm_copy(&out->text, dr_xmm, XMM_SCRATCH0,
+                                      value_vec_bytes(fn, inst->dst));
                     }
                     spill_if_needed_xmm(&out->text, inst->dst, dr_xmm >= 0 ? dr_xmm : XMM_SCRATCH0, ra_xmm, gp_spill_area);
                     break;
@@ -3568,12 +3837,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     fprintf(stderr, "fakecc: IR_ADDR on non-pinned alloca %d\n", inst->a);
                     exit(1);
                 }
-                if (dr >= 0) {
-                    emit_lea_rbp(&out->text, dr, off);
-                } else {
-                    emit_lea_rbp(&out->text, REG_RAX, off);
-                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                int target = dr >= 0 ? dr : REG_RAX;
+                emit_lea_rbp(&out->text, target, off);
+                /* Alignments > 16: incoming rbp is only 16-aligned, so bump. */
+                if (inst->a >= 0 && inst->a < fn->next_value_id && ssa_def[inst->a] >= 0) {
+                    const IRInst *al = &fn->insts.data[ssa_def[inst->a]];
+                    int aln = (al->op == IR_ALLOCA) ? (int)al->imm : 0;
+                    if (aln >= 32) {
+                        emit_add_imm32(&out->text, target, aln - 1);
+                        emit_and_imm32(&out->text, target, (int32_t)-aln);
+                    }
                 }
+                if (dr < 0)
+                    spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
             }
 
@@ -3778,7 +4054,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (value_is_float_class(fn, inst->dst)) {
                     int dst_xmm = dr >= 0 ? dr : XMM_SCRATCH0;
-                    if (inst->width == 16) {
+                    int vw = inst->width;
+                    if (vw >= 64) {
+                        if (folded)
+                            emit_evex_vmovups_mem(&out->text, dst_xmm, REG_RBP, ptr_off, 0);
+                        else
+                            emit_evex_vmovups_via_ptr(&out->text, dst_xmm, REG_RCX, 0);
+                    } else if (vw >= 32) {
+                        if (folded)
+                            emit_vmovups_mem(&out->text, dst_xmm, REG_RBP, ptr_off, 0);
+                        else
+                            emit_vmovups_via_ptr(&out->text, dst_xmm, REG_RCX, 0);
+                    } else if (vw == 16) {
                         if (folded) {
                             emit_rex_wrb(&out->text, 0, dst_xmm, REG_RBP);
                             emit_byte(&out->text, 0x0F);
@@ -3848,7 +4135,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 } else if (value_is_float_class(fn, inst->b)) {
                     ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm,
                                    gp_spill_area);
-                    if (inst->width == 16) {
+                    if (inst->width >= 64) {
+                        if (folded)
+                            emit_evex_vmovups_mem(&out->text, XMM_SCRATCH0, REG_RBP, ptr_off, 1);
+                        else
+                            emit_evex_vmovups_via_ptr(&out->text, XMM_SCRATCH0, REG_RCX, 1);
+                    } else if (inst->width >= 32) {
+                        if (folded)
+                            emit_vmovups_mem(&out->text, XMM_SCRATCH0, REG_RBP, ptr_off, 1);
+                        else
+                            emit_vmovups_via_ptr(&out->text, XMM_SCRATCH0, REG_RCX, 1);
+                    } else if (inst->width == 16) {
                         if (folded) {
                             emit_rex_wrb(&out->text, 0, XMM_SCRATCH0, REG_RBP);
                             emit_byte(&out->text, 0x0F);
@@ -4318,18 +4615,24 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         exit(1);
                     }
                 }
+                int max_al = 16;
                 for (int k = 0; k < nargs; k++) {
                     int is_ld = value_is_ld(fn, inst->call_args[k]);
                     int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
-                    int w16 = is_float && value_is_xmm16(fn, inst->call_args[k]);
-                    int on_stack = (inst->call_arg_on_stack && inst->call_arg_on_stack[k]);
+                    int vecb = is_float ? value_vec_bytes(fn, inst->call_args[k]) : 0;
+                    unsigned char flags = (inst->call_arg_on_stack && inst->call_arg_on_stack[k])
+                                          ? inst->call_arg_on_stack[k] : 0;
+                    int on_stack = flags & CALL_ARG_STACK;
                     int force_stack = on_stack || is_ld;
-                    int a16 = is_ld || w16 || (on_stack && (inst->call_arg_on_stack[k] & 2));
+                    int pal = flags_stack_align(flags, vecb, is_ld ? 16 : 0);
+                    int blob_n = call_arg_blob_bytes(inst, k);
                     arg_slot[k] = -1;
                     arg_nslots[k] = 0;
                     if (force_stack) {
-                        int nslots = (is_ld || w16) ? 2 : 1;
-                        if (a16 && (n_stack & 1)) n_stack++;
+                        int nslots = blob_n ? (blob_n + 7) / 8 : vec_nslots(vecb, is_ld);
+                        if (nslots < 1) nslots = 1;
+                        stack_idx_align(&n_stack, pal);
+                        if (pal > max_al) max_al = pal;
                         target_reg[k] = -1;
                         target_is_xmm[k] = 0;
                         arg_slot[k] = n_stack;
@@ -4341,8 +4644,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             target_is_xmm[k] = 1;
                             n_xmm++;
                         } else {
-                            int nslots = w16 ? 2 : 1;
-                            if (w16 && (n_stack & 1)) n_stack++;
+                            int nslots = vec_nslots(vecb, 0);
+                            stack_idx_align(&n_stack, pal);
+                            if (pal > max_al) max_al = pal;
                             target_reg[k] = -1;
                             target_is_xmm[k] = 0;
                             arg_slot[k] = n_stack;
@@ -4362,10 +4666,57 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         }
                     }
                 }
+                int need_pad = 0;
+                int aligned_call = (max_al >= 32 && n_stack > 0);
+                int stack_bytes = n_stack * 8;
+                if (aligned_call) {
+                    stack_idx_align(&n_stack, max_al);
+                    stack_bytes = n_stack * 8;
+                    int slack = max_al;
+                    /* Realign via rbp so we do not clobber GP arg homes
+                     * (R11 previously held an outgoing eightbyte).  Restore
+                     * the same way after the call.  Dynamic alloca already
+                     * saved rsp separately; fall back to the fixed frame. */
+                    emit_lea_rbp(&out->text, REG_RSP,
+                                 -(frame_down + stack_bytes + slack));
+                    emit_and_imm32(&out->text, REG_RSP, (int32_t)-max_al);
+                    for (int k = 0; k < nargs; k++) {
+                        if (target_reg[k] >= 0) continue;
+                        int off = 8 * arg_slot[k];
+                        if (value_is_ld(fn, inst->call_args[k])) {
+                            emit_ld_load(&out->text, inst->call_args[k], ld_off);
+                            emit_x87_fstpt_disp(&out->text, REG_RSP, off);
+                        } else if (call_arg_blob_bytes(inst, k)) {
+                            emit_memcpy_to_addr(&out->text, REG_RSP, off,
+                                                inst->call_args[k], ra,
+                                                call_arg_blob_bytes(inst, k));
+                        } else if (value_is_float_class(fn, inst->call_args[k])) {
+                            int vb = value_vec_bytes(fn, inst->call_args[k]);
+                            ensure_reg_xmm(&out->text, inst->call_args[k],
+                                           XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                            if (vb >= 64)
+                                emit_evex_vmovups_mem(&out->text, XMM_SCRATCH0,
+                                                      REG_RSP, off, 1);
+                            else if (vb >= 32)
+                                emit_vmovups_mem(&out->text, XMM_SCRATCH0,
+                                                 REG_RSP, off, 1);
+                            else if (vb >= 16)
+                                emit_movups_store_disp(&out->text, REG_RSP,
+                                                       XMM_SCRATCH0, off);
+                            else
+                                emit_sse_store_disp(&out->text, REG_RSP,
+                                                    XMM_SCRATCH0, off, 0);
+                        } else {
+                            ensure_reg(&out->text, inst->call_args[k],
+                                       REG_RAX, ra);
+                            emit_store_rsp_off(&out->text, REG_RAX, off);
+                        }
+                    }
+                } else {
                 /* Alignment: at call time rsp must be 16-aligned.  The reg-arg
                  * dance is balanced (pushes == pops), so only the nstack
                  * pushes shift alignment.  Pad iff nstack is odd. */
-                int need_pad = (n_stack & 1);
+                need_pad = (n_stack & 1);
                 if (need_pad) emit_sub_rsp_imm32(&out->text, 8);
 
                 /* Push stack-passed args right-to-left, inserting 8-byte
@@ -4395,17 +4746,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_sub_rsp_imm32(&out->text, 16);
                         emit_x87_fstpt_rsp(&out->text);
                         slot -= 2;
+                    } else if (call_arg_blob_bytes(inst, found)) {
+                        int bn = call_arg_blob_bytes(inst, found);
+                        int ns = arg_nslots[found];
+                        emit_sub_rsp_imm32(&out->text, ns * 8);
+                        emit_memcpy_to_addr(&out->text, REG_RSP, 0,
+                                            inst->call_args[found], ra, bn);
+                        slot -= ns;
                     } else if (value_is_float_class(fn, inst->call_args[found])) {
-                        int w16 = value_is_xmm16(fn, inst->call_args[found]);
+                        int vb = value_vec_bytes(fn, inst->call_args[found]);
                         ensure_reg_xmm(&out->text, inst->call_args[found],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
-                        emit_xmm_push(&out->text, XMM_SCRATCH0, w16);
-                        slot -= w16 ? 2 : 1;
+                        emit_xmm_push(&out->text, XMM_SCRATCH0, vb);
+                        slot -= vec_nslots(vb, 0);
                     } else {
                         ensure_reg(&out->text, inst->call_args[found], REG_RAX, ra);
                         emit_push_r(&out->text, REG_RAX);
                         slot--;
                     }
+                }
                 }
                 free(arg_slot);
                 free(arg_nslots);
@@ -4460,10 +4819,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 for (int k = nargs - 1; k >= 0; k--) {
                     if (target_reg[k] < 0) continue; /* stack-passed */
                     if (target_is_xmm[k]) {
-                        int w16 = value_is_xmm16(fn, inst->call_args[k]);
+                        int vb = value_vec_bytes(fn, inst->call_args[k]);
                         ensure_reg_xmm(&out->text, inst->call_args[k],
                                        XMM_SCRATCH0, ra_xmm, gp_spill_area);
-                        emit_xmm_push(&out->text, XMM_SCRATCH0, w16);
+                        emit_xmm_push(&out->text, XMM_SCRATCH0, vb);
                     } else {
                         ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
                         emit_push_r(&out->text, REG_RAX);
@@ -4484,7 +4843,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (target_reg[k] < 0) continue; /* stack-passed */
                     if (target_is_xmm[k]) {
                         emit_xmm_pop(&out->text, target_reg[k],
-                                     value_is_xmm16(fn, inst->call_args[k]));
+                                     value_vec_bytes(fn, inst->call_args[k]));
                     } else {
                         emit_pop_r(&out->text, target_reg[k]);
                     }
@@ -4631,8 +4990,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
 
                 /* Tear down stack args + padding. */
-                int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
-                if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);
+                if (aligned_call) {
+                    emit_lea_rbp(&out->text, REG_RSP, -frame_down);
+                } else {
+                    int cleanup = n_stack * 8 + (need_pad ? 8 : 0);
+                    if (cleanup > 0) emit_add_rsp_imm32(&out->text, cleanup);
+                }
 
                 if (inst->x87_pair && inst->a >= 0) {
                     /* `_Complex long double` comes back in st0 (real) / st1
@@ -4674,7 +5037,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     /* Float result comes back in XMM0 (SysV float ABI).  Move
                      * it to dst's XMM home, or spill.  Void: dst == -1. */
                     if (dr >= 0 && dr != 0)
-                        emit_sse_mov_rr(&out->text, dr, 0); /* 0 == XMM0 */
+                        emit_xmm_copy(&out->text, dr, 0, value_vec_bytes(fn, inst->dst));
                     else if (dr < 0)
                         spill_if_needed_xmm(&out->text, inst->dst, 0,
                                             ra_xmm, gp_spill_area);

@@ -236,4 +236,66 @@ run_multi 0 "$TMP/tls_la.c" "$TMP/tls_lb.c" "$TMP/tls_lm.c"
 "$FAKECC" $CC_EXTRA -c "$TMP/tls_lm.c" -o "$TMP/tls_lm.o"
 run_multi 0 "$TMP/tls_la.o" "$TMP/tls_lb.o" "$TMP/tls_lm.o"
 
+# ELF R_X86_64_64 in .rela.data (function pointer initializer).  The old
+# type-10 encoding was R_X86_64_32 and overflowed gcc PIE / libm.
+echo 'package main; int f(void) { return 42; } int (*fp)(void) = f; int main(void) { return fp(); }' > "$TMP/fp_data.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fp_data.c" -o "$TMP/fp_data.o"
+if LANG=C readelf -rW "$TMP/fp_data.o" 2>/dev/null | grep -q 'R_X86_64_64'; then
+    pass "fnptr .data reloc is R_X86_64_64"
+else
+    fail "fnptr .data reloc not R_X86_64_64: $(LANG=C readelf -rW "$TMP/fp_data.o" 2>/dev/null | head -20)"
+fi
+if LANG=C readelf -rW "$TMP/fp_data.o" 2>/dev/null | grep -q 'R_X86_64_32'; then
+    fail "fnptr .data still has R_X86_64_32"
+else
+    pass "fnptr .data has no R_X86_64_32"
+fi
+if gcc -pie -o "$TMP/fp_pie" "$TMP/fp_data.o" 2>"$TMP/fp_pie.err"; then
+    got=0
+    timeout "$RUN_TIMEOUT" "$TMP/fp_pie" >/dev/null 2>&1 || got=$?
+    if [ "$got" = "42" ]; then
+        pass "gcc -pie links fakecc fnptr .o"
+    else
+        fail "gcc -pie fnptr ran with $got"
+    fi
+else
+    fail "gcc -pie failed: $(head -1 "$TMP/fp_pie.err")"
+fi
+
+# .note.GNU-stack in .o; PT_GNU_STACK RW (not executable) in the linked image.
+if LANG=C readelf -S "$TMP/fp_data.o" 2>/dev/null | grep -q '\.note\.GNU-stack'; then
+    pass ".o has .note.GNU-stack"
+else
+    fail ".o missing .note.GNU-stack"
+fi
+echo 'package main; int main(void) { return 7; }' > "$TMP/gs.c"
+run_multi 7 "$TMP/gs.c"
+if LANG=C readelf -l "$TMP/prog" 2>/dev/null | grep -q 'GNU_STACK'; then
+    if LANG=C readelf -l "$TMP/prog" 2>/dev/null | grep 'GNU_STACK' | grep -qE 'RWE|E '; then
+        fail "GNU_STACK is executable: $(LANG=C readelf -l "$TMP/prog" | grep GNU_STACK)"
+    else
+        pass "GNU_STACK is non-executable"
+    fi
+else
+    fail "linked image missing GNU_STACK"
+fi
+
+# MEMORY blob interop: fakecc callee + gcc caller (24-byte and 200-byte).
+echo 'package main; struct M { long a; long b; long c; }; long sum3(struct M s) { return s.a + s.b + s.c; }' > "$TMP/fc_mem.c"
+echo 'struct M { long a; long b; long c; }; long sum3(struct M s); int main(void) { struct M s; s.a = 1; s.b = 2; s.c = 4; return (int)sum3(s); }' > "$TMP/gcc_mem_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_mem.c" -o "$TMP/fc_mem.o"
+gcc -std=c99 -c "$TMP/gcc_mem_main.c" -o "$TMP/gcc_mem_main.o"
+run_multi 7 "$TMP/fc_mem.o" "$TMP/gcc_mem_main.o"
+
+echo 'package main; struct Big { unsigned char x[200]; }; int pick(struct Big b, int i) { return b.x[i]; }' > "$TMP/fc_big.c"
+echo 'struct Big { unsigned char x[200]; }; int pick(struct Big b, int i); int main(void) { struct Big b; int i; for (i = 0; i < 200; i++) b.x[i] = (unsigned char)i; return pick(b, 199) - 199; }' > "$TMP/gcc_big_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_big.c" -o "$TMP/fc_big.o"
+gcc -std=c99 -c "$TMP/gcc_big_main.c" -o "$TMP/gcc_big_main.o"
+run_multi 0 "$TMP/fc_big.o" "$TMP/gcc_big_main.o"
+
+echo 'package main; struct Big { unsigned char x[200]; }; int pick(struct Big b, int i); int main(void) { struct Big b; int i; for (i = 0; i < 200; i++) b.x[i] = (unsigned char)i; return pick(b, 7); }' > "$TMP/fc_big_main.c"
+echo 'struct Big { unsigned char x[200]; }; int pick(struct Big b, int i) { return b.x[i]; }' > "$TMP/gcc_pick.c"
+gcc -std=c99 -c "$TMP/gcc_pick.c" -o "$TMP/gcc_pick.o"
+run_multi 7 "$TMP/fc_big_main.c" "$TMP/gcc_pick.o"
+
 exit $FAIL
