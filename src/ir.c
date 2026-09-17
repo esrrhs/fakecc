@@ -6701,6 +6701,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 if (last < 0)
                     inst.call_nargs = 1;
                 if (is_arg) {
+                    if (type_is_empty_struct(e->va_arg_type)) {
+                        /* gcc: size-0 / `[0]` structs consume no va_arg slot. */
+                        free(inst.call_name);
+                        free(inst.call_args);
+                        free(inst.call_arg_on_stack);
+                        free(inst.call_arg_nbytes);
+                        {
+                            IRValue slot = emit_alloca(fn, 1, 8, 1, e->loc);
+                            return emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                        }
+                    }
                     if (e->va_arg_type.kind == TY_STRUCT || e->va_arg_type.is_vector
                         || type_is_pair16(e->va_arg_type)) {
                         int sz = type_is_pair16(e->va_arg_type) ? 16

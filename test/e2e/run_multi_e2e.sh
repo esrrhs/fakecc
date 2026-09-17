@@ -311,4 +311,39 @@ echo 'typedef double V __attribute__((vector_size(16))); struct __attribute__((a
 gcc -std=c99 -c "$TMP/gcc_oa_main.c" -o "$TMP/gcc_oa_main.o"
 run_multi 7 "$TMP/fc_oa.o" "$TMP/gcc_oa_main.o"
 
+# FAM / `[0]`: gcc classifies only the fixed prefix; `{ char x[0]; }` is
+# a GNU empty slot.  Mix both directions for pass, return, and 7th-arg.
+echo 'struct F { int n; char d[]; }; int take(struct F f, int k) { return f.n + k; }' > "$TMP/gcc_fam.c"
+echo 'package main; struct F { int n; char d[]; }; int take(struct F f, int k); int main(void) { struct F f; f.n = 1; return take(f, 6); }' > "$TMP/fc_fam_main.c"
+gcc -std=c99 -c "$TMP/gcc_fam.c" -o "$TMP/gcc_fam.o"
+run_multi 7 "$TMP/fc_fam_main.c" "$TMP/gcc_fam.o"
+
+echo 'package main; struct F { int n; char d[]; }; int take(struct F f, int k) { return f.n + k; }' > "$TMP/fc_fam.c"
+echo 'struct F { int n; char d[]; }; int take(struct F f, int k); int main(void) { struct F f; f.n = 1; return take(f, 6); }' > "$TMP/gcc_fam_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_fam.c" -o "$TMP/fc_fam.o"
+gcc -std=c99 -c "$TMP/gcc_fam_main.c" -o "$TMP/gcc_fam_main.o"
+run_multi 7 "$TMP/fc_fam.o" "$TMP/gcc_fam_main.o"
+
+echo 'struct F { int n; char d[]; }; struct F make(void) { struct F f; f.n = 42; return f; }' > "$TMP/gcc_famr.c"
+echo 'package main; struct F { int n; char d[]; }; struct F make(void); int main(void) { struct F f = make(); return f.n; }' > "$TMP/fc_famr_main.c"
+gcc -std=c99 -c "$TMP/gcc_famr.c" -o "$TMP/gcc_famr.o"
+run_multi 42 "$TMP/fc_famr_main.c" "$TMP/gcc_famr.o"
+
+echo 'package main; struct F { int n; char d[]; }; struct F make(void) { struct F f; f.n = 42; return f; }' > "$TMP/fc_famr.c"
+echo 'struct F { int n; char d[]; }; struct F make(void); int main(void) { struct F f = make(); return f.n; }' > "$TMP/gcc_famr_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_famr.c" -o "$TMP/fc_famr.o"
+gcc -std=c99 -c "$TMP/gcc_famr_main.c" -o "$TMP/gcc_famr_main.o"
+run_multi 42 "$TMP/fc_famr.o" "$TMP/gcc_famr_main.o"
+
+echo 'struct Z { char x[0]; }; int take6z(int a,int b,int c,int d,int e,int f, struct Z z, int h) { return h; }' > "$TMP/gcc_z0.c"
+echo 'package main; struct Z { char x[0]; }; int take6z(int a,int b,int c,int d,int e,int f, struct Z z, int h); int main(void) { struct Z z; return take6z(1,2,3,4,5,6,z,99); }' > "$TMP/fc_z0_main.c"
+gcc -std=gnu99 -c "$TMP/gcc_z0.c" -o "$TMP/gcc_z0.o"
+run_multi 99 "$TMP/fc_z0_main.c" "$TMP/gcc_z0.o"
+
+echo 'package main; struct Z { char x[0]; }; int take6z(int a,int b,int c,int d,int e,int f, struct Z z, int h) { return h; }' > "$TMP/fc_z0.c"
+echo 'struct Z { char x[0]; }; int take6z(int a,int b,int c,int d,int e,int f, struct Z z, int h); int main(void) { struct Z z; return take6z(1,2,3,4,5,6,z,99); }' > "$TMP/gcc_z0_main.c"
+"$FAKECC" $CC_EXTRA -c "$TMP/fc_z0.c" -o "$TMP/fc_z0.o"
+gcc -std=gnu99 -c "$TMP/gcc_z0_main.c" -o "$TMP/gcc_z0_main.o"
+run_multi 99 "$TMP/fc_z0.o" "$TMP/gcc_z0_main.o"
+
 exit $FAIL

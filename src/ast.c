@@ -143,16 +143,15 @@ int type_is_complex_ldouble(Type t) {
 }
 
 int type_is_empty_struct(Type t) {
-    /* GNU `struct E {}` (no members, size 0) consumes no argument slots.
-     * A size-0 type that still has members — e.g. `struct { char x[0]; }` —
-     * is passed as a dummy eightbyte so va_arg walks stay in sync. */
+    /* GNU empty structs and size-0 types (only a flexible/`[0]` member)
+     * consume no argument slots.  gcc named args and va_arg agree. */
     if (t.kind != TY_STRUCT) return 0;
     const StructRegistry *reg = get_ir_structs();
     if (!reg) reg = get_sema_structs();
     if (!reg) reg = get_parser_structs();
     if (t.tag && reg) {
         const StructDef *sd = struct_registry_find_c(reg, t.tag);
-        if (sd) return sd->num_members == 0;
+        if (sd) return sd->size <= 0 || sd->num_members == 0;
     }
     return type_size(t) <= 0;
 }
@@ -547,7 +546,10 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
         }
         return 0;
     }
-    if (t.kind == TY_ARRAY && t.elem_type && t.length > 0) {
+    if (t.kind == TY_ARRAY && t.elem_type) {
+        /* FAM / `[0]`: no allocated eightbytes.  Only the fixed prefix
+         * of the enclosing struct is classified (gcc/SysV). */
+        if (t.length <= 0) return 0;
         int esz = type_size(*t.elem_type);
         if (esz <= 0) return 0;
         for (long long i = 0; i < t.length; i++) {

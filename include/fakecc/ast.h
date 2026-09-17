@@ -94,7 +94,7 @@ void type_free(Type *t);
 long long  type_size(Type t);
 long long  type_align(Type t); /* natural alignment of a type */
 int type_is_complex_ldouble(Type t); /* `_Complex long double` (X87 pair) */
-int type_is_empty_struct(Type t);    /* GNU empty struct/union, size 0 */
+int type_is_empty_struct(Type t);    /* GNU empty or size-0 (FAM / [0]) */
 int type_needs_stack_align16(Type t); /* long double / __int128 / align≥16 */
 /* SysV overflow-arg alignment: 16, 32, or 64, else 0. */
 int type_stack_align(Type t);
