@@ -2998,6 +2998,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         const RAResult *ra = (const RAResult *)fn->ra;
         const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
         curr_fn = fn;
+        /* XMM spill stride follows -mavx512f (ZMM) vs default YMM. */
         curr_xmm_spill = host_has_avx512f() ? 64 : 32;
         size_t start_offset = out->text.len;
         int dbg_func_idx = -1;

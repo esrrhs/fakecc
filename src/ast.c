@@ -665,7 +665,7 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
             return 1;
         }
         if (t.width == 64 && host_has_avx512f()) {
-            /* SysV: __m512 / vector_size(64) is one ZMM.  Needs EVEX. */
+            /* SysV: __m512 / vector_size(64) is one ZMM under -mavx512f. */
             cls[0] = SYSV_CLS_SSE;
             return 1;
         }
@@ -772,16 +772,13 @@ int sysv_memory_pass_as_pointer(Type t) {
 }
 
 int g_no_avx = 0;
+int g_avx512f = 0;
 
 int host_has_avx512f(void) {
-    /* Do not probe CPUID.  XMM spill-slot size (32 vs 64) and SysV ZMM
-     * classification must be a target choice, not a property of the
-     * build machine: GitHub runners mix AVX-512 and not, and self-hosted
-     * fakecc currently miscompiles CPUID/xgetbv, so Stage 0 and fakecc-1
-     * emit 64- vs 32-byte spills — seen as a 32-byte rbp delta in
-     * runtime tan().  There is no -mavx512f yet; 64-byte vectors stay
-     * MEMORY. */
-    return 0;
+    /* Target flag only — never CPUID.  Host probing made XMM spill size
+     * (and thus runtime tan() rbp offsets) depend on the build CPU, so
+     * Stage 0 and fakecc-1 disagreed on AVX-512 runners. */
+    return g_avx512f && !g_no_avx;
 }
 
 static void close_bitfield_run(StructDef *sd) {

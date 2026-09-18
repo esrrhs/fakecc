@@ -988,7 +988,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     ra->num_spill_slots = num_spills;
     ra->num_values = nv;
 
-    /* GP spills are 8 bytes; XMM spills are 32 (YMM) or 64 (ZMM). */
+    /* GP spills are 8 bytes; XMM spills are 32 (YMM) or 64 (ZMM, -mavx512f). */
     if (float_class)
         ra->stack_size = (host_has_avx512f() ? 64 : 32) * num_spills;
     else {

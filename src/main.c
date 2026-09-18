@@ -81,7 +81,8 @@ static void module_free(EmitModule *m) {
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mavx|-mno-avx] [-nostdlib] [-nodefaultlibs]\n"
+            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
+            "              [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
             "  -shared         produce a shared object (.so) library\n"
@@ -91,6 +92,8 @@ static void usage(void) {
             "  -O1             default: SSA promotion + folding + DCE\n"
             "  -mno-avx        pass 32-byte vectors in memory (gcc -mno-avx)\n"
             "  -mavx           default: 32-byte vectors in one YMM\n"
+            "  -mavx512f       pass 64-byte vectors in one ZMM (gcc -mavx512f)\n"
+            "  -mno-avx512f    default: 64-byte vectors in memory\n"
             "  -nostdlib       do not link builtin runtime/; use -l for system libs\n"
             "  -lLIB           link against libLIB.so (DT_NEEDED; optional interop)\n"
             "  -l:SONAME       link against exact soname SONAME\n"
@@ -311,11 +314,17 @@ int main(int argc, char **argv) {
         } else if (strncmp(argv[i], "-fsanitize=", 11) == 0) {
             /* Accept standard sanitize flags */
             if (strstr(argv[i], "address")) g_sanitize_address = 1;
-            } else if (strcmp(argv[i], "-g") == 0) {
+        } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
         } else if (strcmp(argv[i], "-mno-avx") == 0) {
             g_no_avx = 1;
+            g_avx512f = 0;
         } else if (strcmp(argv[i], "-mavx") == 0) {
+            g_no_avx = 0;
+        } else if (strcmp(argv[i], "-mno-avx512f") == 0) {
+            g_avx512f = 0;
+        } else if (strcmp(argv[i], "-mavx512f") == 0) {
+            g_avx512f = 1;
             g_no_avx = 0;
         } else if (strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;

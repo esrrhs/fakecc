@@ -99,16 +99,18 @@ int type_needs_stack_align16(Type t); /* long double / __int128 / align≥16 */
 /* SysV overflow-arg alignment: 16, 32, or 64, else 0. */
 int type_stack_align(Type t);
 
-/* Target AVX-512F: currently always 0 (no -mavx512f; must not probe CPUID). */
+/* Target AVX-512F from `-mavx512f` (not host CPUID).  0 after `-mno-avx`. */
 int host_has_avx512f(void);
 /* 1 after `-mno-avx`: 32-byte vectors are MEMORY (no YMM), matching gcc. */
 extern int g_no_avx;
+/* 1 after `-mavx512f`: 64-byte vectors are one ZMM (EVEX).  Default 0. */
+extern int g_avx512f;
 
 /* SysV AMD64 aggregate classification for ≤64-byte structs/unions.
  * Returns the number of register slots (1 or 2), writing INTEGER/SSE class
  * per eightbyte into `cls`.  A 16-byte SSE+SSEUP vector is one XMM; a
  * 32-byte SSE+SSEUP×3 vector is one YMM (nreg=1).  A 64-byte SSE+SSEUP
- * vector is one ZMM when the host has AVX-512F, else MEMORY.  Returns 0
+ * vector is one ZMM when `-mavx512f` is set, else MEMORY.  Returns 0
  * for MEMORY: size > 64, unaligned fields, X87 members, or mixed
  * aggregates larger than two eightbytes that are not a single vector. */
 typedef enum {
