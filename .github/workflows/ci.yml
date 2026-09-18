@@ -44,6 +44,12 @@ jobs:
             cc: clang
             cxx: clang++
             cflags: "-O2"
+          - label: ubuntu-latest · gcc coverage
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+            cflags: ""
+            cov: true
 
     steps:
       - uses: actions/checkout@v4
@@ -54,8 +60,27 @@ jobs:
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
 
+      - name: Setup lcov
+        if: matrix.config.cov
+        run: |
+          wget https://github.com/linux-test-project/lcov/releases/download/v2.0/lcov-2.0.tar.gz
+          tar -xf lcov-2.0.tar.gz
+          cd lcov-2.0/
+          sudo make install
+          yes|sudo perl -MCPAN -e 'install Capture::Tiny'
+          sudo apt-get install libdatetime-perl -y
+          sudo rm /usr/bin/lcov -f
+          sudo ln -s /usr/local/bin/lcov /usr/bin/lcov
+          lcov --version
+          cd ..
+
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_C_FLAGS="${{ matrix.config.cflags }}"
+        run: |
+          EXTRA_FLAGS=""
+          if [ "${{ matrix.config.cov }}" = "true" ]; then
+            EXTRA_FLAGS="-DUSE_COV=ON"
+          fi
+          cmake -S . -B build -DCMAKE_C_FLAGS="${{ matrix.config.cflags }}" $EXTRA_FLAGS
         env:
           CC: ${{ matrix.config.cc }}
           CXX: ${{ matrix.config.cxx }}
@@ -65,6 +90,16 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Coverage report
+        if: matrix.config.cov
+        run: |
+          set -x
+          cd build
+          lcov --directory ./ --capture --output-file coverage.info --ignore-errors source --ignore-errors mismatch
+          ls -l coverage.info
+          lcov --list coverage.info
+          bash <(curl -s https://codecov.io/bash) -t ${{ secrets.CODECOV || secrets.CODECOV_TOKEN }} -f coverage.info || echo "Codecov did not collect coverage reports"
 
   # Wall-clock of this job is dominated by self-hosted e2e and difftest
   # (each run twice, -O0 then -O1).  -O0 finishes around 33 min; -O1 needs

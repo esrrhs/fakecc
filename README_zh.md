@@ -1,6 +1,7 @@
 # FakeCC
 
 [![CI](https://github.com/esrrhs/fakecc/actions/workflows/ci.yml/badge.svg)](https://github.com/esrrhs/fakecc/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/esrrhs/fakecc/graph/badge.svg)](https://codecov.io/gh/esrrhs/fakecc)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Language: C99 + GCC Extensions](https://img.shields.io/badge/language-C99%20%2B%20GCC-orange.svg)
 ![Self-hosting](https://img.shields.io/badge/self--hosting-yes-brightgreen.svg)
