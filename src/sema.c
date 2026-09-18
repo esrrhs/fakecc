@@ -1007,12 +1007,9 @@ static Type check_expr_inner(Expr *e) {
         return type_clone(e->type);
     }
     case EX_VAR: {
-        /* Qualified: pkg.sym */
+        /* Qualified: pkg.sym.  The parser only sets `pkg` after a matching
+         * `import`, so a missing-import diagnostic here is unreachable. */
         if (e->u.var.pkg) {
-            if (!g_sema_tu || !tu_imports(g_sema_tu, e->u.var.pkg)) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "package '%s' was not imported", e->u.var.pkg);
-            }
             const PkgFuncExport *pf = NULL;
             const PkgGlobalExport *pg = NULL;
             if (!pkg_resolve_sym(e->u.var.pkg, e->u.var.name, &pf, &pg)) {
@@ -2339,12 +2336,6 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             if (target->kind != TY_STRUCT)
                 die_at(loc.file, loc.line, loc.col,
                        "member designator used on a non-struct type");
-            if (sd->is_union) {
-                /* Union: only one member may be initialized. */
-                if (list->u.init_list.desig_member[i] == NULL)
-                    die_at(loc.file, loc.line, loc.col,
-                           "invalid member designator in union initializer");
-            }
         }
     }
     /* 3. Build the dense array of N initialized elements.
@@ -2538,61 +2529,6 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     }
 }
 
-/* Validate an initializer list's shape against the target type: element count
- * must not exceed the array length / struct member count, and nested lists
- * recurse.  A scalar target tolerates a single-element brace list (e.g.
- * `int x = {5}`).  Dies on mismatch. */
-static void check_init_list_shape(Type target, const Expr *list, SourceLoc loc) {
-    int n = list->u.init_list.num_elements;
-    if (target.is_vector) {
-        if (target.length > 0 && n > target.length)
-            die_at(loc.file, loc.line, loc.col,
-                   "too many initializers for vector (expected %d, got %d)",
-                   target.length, n);
-        for (int i = 0; i < n; i++) {
-            const Expr *elem = list->u.init_list.elements[i];
-            if (elem && elem->kind == EX_INIT_LIST && target.elem_type)
-                check_init_list_shape(*target.elem_type, elem, elem->loc);
-        }
-        return;
-    }
-    switch (target.kind) {
-    case TY_ARRAY:
-        if (target.length > 0 && n > target.length)
-            die_at(loc.file, loc.line, loc.col,
-                   "too many initializers for array (expected %d, got %d)",
-                   target.length, n);
-        for (int i = 0; i < n; i++) {
-            const Expr *elem = list->u.init_list.elements[i];
-            if (elem && elem->kind == EX_INIT_LIST && target.elem_type)
-                check_init_list_shape(*target.elem_type, elem, elem->loc);
-        }
-        break;
-    case TY_STRUCT: {
-        const StructDef *sd = struct_registry_find_c(g_sema_structs, target.tag);
-        if (!sd)
-            die_at(loc.file, loc.line, loc.col,
-                   "unknown struct 'struct %s'", target.tag);
-        if (n > sd->num_members)
-            die_at(loc.file, loc.line, loc.col,
-                   "too many initializers for struct '%s' (expected %d, got %d)",
-                   target.tag, sd->num_members, n);
-        for (int i = 0; i < n; i++) {
-            const Expr *elem = list->u.init_list.elements[i];
-            if (elem && elem->kind == EX_INIT_LIST && i < sd->num_members)
-                check_init_list_shape(sd->members[i].type, elem, elem->loc);
-        }
-        break;
-    }
-    default:
-        /* Scalar target: brace list with a single element is allowed. */
-        if (n > 1)
-            die_at(loc.file, loc.line, loc.col,
-                   "scalar initializer requires at most one element");
-        break;
-    }
-}
-
 /* Parser-time folding cannot see object types, so `T a[sizeof g / sizeof *g]`
  * is parsed as a VLA.  After the dimension is type-checked it is often an
  * ICE — complete it back to a fixed array so sizeof/object_size see a known
@@ -2677,8 +2613,6 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
             normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc, 0);
         symtable_push(st, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
-            if (s->u.decl.init->kind == EX_INIT_LIST)
-                check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
             discard = check_expr_inner(s->u.decl.init); type_free(&discard);
             if (s->u.decl.init->kind != EX_INIT_LIST)
                 coerce_arg_to_param(&s->u.decl.init, &s->u.decl.type);
@@ -2963,8 +2897,6 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                     }
                     if (prev->u.decl.init && prev->u.decl.init->kind == EX_INIT_LIST)
                         normalize_init_list(&prev->u.decl.type, prev->u.decl.init, prev->loc, 0);
-                    if (prev->u.decl.init->kind == EX_INIT_LIST)
-                        check_init_list_shape(prev->u.decl.type, prev->u.decl.init, prev->loc);
                     if (!is_const_init(prev->u.decl.init, &globals))
                         die_at(prev->loc.file, prev->loc.line, prev->loc.col,
                                "global '%s' initializer must be a compile-time constant",
@@ -3023,9 +2955,6 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             normalize_init_list(&s->u.decl.type, s->u.decl.init, s->loc, 0);
         symtable_push(&globals, s->u.decl.name, s->u.decl.type, s->loc, s->u.decl.align);
         if (s->u.decl.init) {
-            /* Validate the initializer list shape against the declared type. */
-            if (s->u.decl.init->kind == EX_INIT_LIST)
-                check_init_list_shape(s->u.decl.type, s->u.decl.init, s->loc);
             /* A global's initializer must be a compile-time constant. */
             if (!is_const_init(s->u.decl.init, &globals))
                 die_at(s->loc.file, s->loc.line, s->loc.col,

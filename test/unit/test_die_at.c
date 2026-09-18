@@ -103,8 +103,12 @@ static const DieCase k_cases[] = {
     /* ---- parser ---- */
     {ST_PARSE, "struct_tag", "package main; struct 1 { int x; }; int main(){return 0;}"},
     {ST_PARSE, "struct_redef", "package main; struct S { int x; }; struct S { int y; }; int main(){return 0;}"},
+    {ST_PARSE, "struct_redef_with_var",
+     "package main; struct S { int x; } a; struct S { int y; } b; int main(){return 0;}"},
     {ST_PARSE, "union_tag", "package main; union 1 { int x; }; int main(){return 0;}"},
     {ST_PARSE, "union_redef", "package main; union U { int x; }; union U { int y; }; int main(){return 0;}"},
+    {ST_PARSE, "union_redef_with_var",
+     "package main; union U { int x; } a; union U { int y; } b; int main(){return 0;}"},
     {ST_PARSE, "enum_tag", "package main; enum 1; int main(){return 0;}"},
     {ST_PARSE, "restrict_nonptr", "package main; int restrict x; int main(){return 0;}"},
     {ST_PARSE, "member_name", "package main; struct S { int 1; }; int main(){return 0;}"},
@@ -120,6 +124,8 @@ static const DieCase k_cases[] = {
      "package main; int main() { int a[1][1][1][1][1][1][1][1][1]; return 0; }"},
     {ST_PARSE, "too_many_array_dims_abs",
      "package main; int main() { return (int)sizeof(int[1][1][1][1][1][1][1][1][1]); }"},
+    {ST_PARSE, "too_many_array_dims_grouped",
+     "package main; int main() { int (a)[1][1][1][1][1][1][1][1][1]; return 0; }"},
     {ST_PARSE, "alignof_no_paren", "package main; int main() { return _Alignof int; }"},
     {ST_PARSE, "offsetof_missing_member",
      "package main; struct S { int x; }; int main() { return __builtin_offsetof(struct S, no); }"},
@@ -160,6 +166,8 @@ static const DieCase k_cases[] = {
     {ST_PARSE, "file_scope_stmt", "package main; return 0; int main(){return 0;}"},
     {ST_PARSE, "grouped_fn", "package main; int (1)(void) { return 0; }"},
     {ST_PARSE, "kr_decl_name", "package main; int f(a) int; { return a; } int main(){return 0;}"},
+    {ST_PARSE, "kr_decl_ptr_no_name",
+     "package main; int f(a) int *; { return 0; } int main(){return 0;}"},
     {ST_PARSE, "enum_redef",
      "package main; enum E { A }; enum E { B }; int main(){return 0;}"},
     {ST_PARSE, "fn_ptr_param_type",
@@ -235,6 +243,13 @@ static const DieCase k_cases[] = {
     {ST_SEMA, "fnptr_call_variadic",
      "package main; int main() { int (*fp)(int a, ...); return (*fp)(); }"},
     {ST_SEMA, "float_bit_assign", "package main; int main() { float x; x &= 1; return 0; }"},
+    {ST_SEMA, "float_vector_bit_assign",
+     "package main; typedef float V __attribute__((vector_size(16)));"
+     " int main() { V x; x &= 1; return 0; }"},
+    {ST_SEMA, "incomplete_struct_member",
+     "package main; int main() { struct NeverDefined x; return x.foo; }"},
+    {ST_SEMA, "incomplete_struct_init",
+     "package main; int main() { struct NeverDefined x = {1}; return 0; }"},
     {ST_SEMA, "sync_not_ptr", "package main; int main() { return __sync_fetch_and_add(1); }"},
     {ST_SEMA, "tentative_then_nonconst",
      "package main; int f(void); int x; int x = f(); int main(){return 0;}"},
@@ -308,6 +323,10 @@ static const DieCase k_cases[] = {
     {ST_IR, "va_arg_pack_invalid",
      "package main; int id(int x) { return x; }"
      "int main() { return id(__builtin_va_arg_pack()); }"},
+    {ST_IR, "global_var_init_forward",
+     "package main; int x = n; int n = 1; int main(){return 0;}"},
+    {ST_IR, "global_extern_init",
+     "package main; extern int n; int x = n; int main(){return 0;}"},
 };
 
 static void test_table(void) {
@@ -343,6 +362,35 @@ static const char *too_many_kr_params(void) {
     return buf;
 }
 
+static const char *nested_va_arg_pack(void) {
+    static char *buf;
+    if (buf)
+        return buf;
+    buf = malloc(4096);
+    if (!buf)
+        exit(1);
+    char *p = buf;
+    int i;
+    p += sprintf(p, "package main;\n");
+    p += sprintf(p,
+                 "extern inline __attribute__((always_inline, gnu_inline)) "
+                 "int w0(int x, ...) {\n"
+                 "  (void)__builtin_va_arg_pack_len();\n"
+                 "  return x;\n"
+                 "}\n");
+    for (i = 1; i <= 8; i++) {
+        p += sprintf(p,
+                     "extern inline __attribute__((always_inline, gnu_inline)) "
+                     "int w%d(int x, ...) {\n"
+                     "  (void)__builtin_va_arg_pack_len();\n"
+                     "  return w%d(x, 1);\n"
+                     "}\n",
+                     i, i - 1);
+    }
+    sprintf(p, "int main() { return w8(1); }\n");
+    return buf;
+}
+
 static const char *too_many_fnptr_params(void) {
     static char *buf;
     if (buf)
@@ -371,10 +419,12 @@ static void test_generated(void) {
         {"too_many_params", too_many_params},
         {"too_many_kr_params", too_many_kr_params},
         {"too_many_fnptr_params", too_many_fnptr_params},
+        {"nested_va_arg_pack", nested_va_arg_pack},
     };
+    static const Stage extra_st[] = {ST_PARSE, ST_PARSE, ST_PARSE, ST_IR};
     size_t i;
     for (i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
-        if (!dies(ST_PARSE, extra[i].mk())) {
+        if (!dies(extra_st[i], extra[i].mk())) {
             fprintf(stderr, "test_die_at: expected die: %s\n", extra[i].name);
             T_ASSERT(0);
         } else {
