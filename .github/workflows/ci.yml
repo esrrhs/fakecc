@@ -99,7 +99,14 @@ jobs:
           lcov --directory ./ --capture --output-file coverage.info --ignore-errors source --ignore-errors mismatch
           ls -l coverage.info
           lcov --list coverage.info
-          bash <(curl -s https://codecov.io/bash) -t ${{ secrets.CODECOV || secrets.CODECOV_TOKEN }} -f coverage.info || echo "Codecov did not collect coverage reports"
+
+      - name: Upload coverage reports to Codecov
+        if: matrix.config.cov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/coverage.info
+          fail_ci_if_error: true
 
   # Wall-clock of this job is dominated by self-hosted e2e and difftest
   # (each run twice, -O0 then -O1).  -O0 finishes around 33 min; -O1 needs
