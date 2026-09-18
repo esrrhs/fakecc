@@ -774,25 +774,14 @@ int sysv_memory_pass_as_pointer(Type t) {
 int g_no_avx = 0;
 
 int host_has_avx512f(void) {
-    static int cached = -1;
-    unsigned eax, ebx, ecx, edx;
-    unsigned xcr0_lo, xcr0_hi;
-    if (g_no_avx) return 0;
-    if (cached >= 0) return cached;
-    cached = 0;
-    /* CPUID.1: OSXSAVE (ecx bit 27).  XCR0 must save SSE+AVX+opmask+ZMM. */
-    __asm__ __volatile__("cpuid"
-                         : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                         : "a"(1), "c"(0));
-    if ((ecx & (1u << 27)) == 0) return cached;
-    __asm__ __volatile__("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
-    if ((xcr0_lo & 0xE6u) != 0xE6u) return cached;
-    /* CPUID.7.0: AVX512F is ebx bit 16. */
-    __asm__ __volatile__("cpuid"
-                         : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                         : "a"(7), "c"(0));
-    if (ebx & (1u << 16)) cached = 1;
-    return cached;
+    /* Do not probe CPUID.  XMM spill-slot size (32 vs 64) and SysV ZMM
+     * classification must be a target choice, not a property of the
+     * build machine: GitHub runners mix AVX-512 and not, and self-hosted
+     * fakecc currently miscompiles CPUID/xgetbv, so Stage 0 and fakecc-1
+     * emit 64- vs 32-byte spills — seen as a 32-byte rbp delta in
+     * runtime tan().  There is no -mavx512f yet; 64-byte vectors stay
+     * MEMORY. */
+    return 0;
 }
 
 static void close_bitfield_run(StructDef *sd) {
