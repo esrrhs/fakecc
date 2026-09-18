@@ -13,6 +13,13 @@ if(ENABLE_ASAN)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
+option(USE_COV "use cov" OFF)
+if(USE_COV)
+    message("build with cov")
+    add_compile_options(-fprofile-arcs -ftest-coverage -O0)
+    add_link_options(-fprofile-arcs -ftest-coverage)
+endif()
+
 add_library(fakecc_core
     src/common.c
     src/lexer.c
@@ -35,6 +42,9 @@ add_library(fakecc_core
 )
 target_include_directories(fakecc_core PUBLIC include)
 target_link_libraries(fakecc_core PUBLIC m)
+if(USE_COV)
+    target_link_libraries(fakecc_core PUBLIC gcov)
+endif()
 
 add_executable(fakecc src/main.c)
 target_link_libraries(fakecc PRIVATE fakecc_core)

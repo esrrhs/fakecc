@@ -32,6 +32,9 @@ sudo apt-get install -y gcc-16 g++-16
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$(command -v gcc-16)" "$HOME/.local/bin/gcc"
 ln -sfn "$(command -v g++-16)" "$HOME/.local/bin/g++"
+if command -v gcov-16 >/dev/null 2>&1; then
+    ln -sfn "$(command -v gcov-16)" "$HOME/.local/bin/gcov"
+fi
 
 if [ -n "${GITHUB_PATH:-}" ]; then
     echo "$HOME/.local/bin" >> "$GITHUB_PATH"
