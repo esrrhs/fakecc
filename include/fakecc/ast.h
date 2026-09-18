@@ -99,7 +99,7 @@ int type_needs_stack_align16(Type t); /* long double / __int128 / align≥16 */
 /* SysV overflow-arg alignment: 16, 32, or 64, else 0. */
 int type_stack_align(Type t);
 
-/* True if this process can run AVX-512F (CPUID + OS XSAVE of ZMM). */
+/* Target AVX-512F: currently always 0 (no -mavx512f; must not probe CPUID). */
 int host_has_avx512f(void);
 /* 1 after `-mno-avx`: 32-byte vectors are MEMORY (no YMM), matching gcc. */
 extern int g_no_avx;
