@@ -195,6 +195,9 @@ static const DieCase k_cases[] = {
     {ST_PARSE, "param_after_type",
      "package main; int f(int a, 1) { return 0; } int main(){return 0;}"},
     {ST_PARSE, "grouped_not_fn", "package main; int (*x) { return 0; }"},
+    {ST_PARSE, "grouped_unnamed_fn", "package main; int (*()) { return 0; }"},
+    {ST_PARSE, "ptr_grouped_unnamed_fn", "package main; int *(*()) { return 0; }"},
+    {ST_PARSE, "implicit_int_grouped_fn", "package main; (*foo()) { return 0; }"},
 
     /* ---- sema ---- */
     {ST_SEMA, "no_main", "package other; int f(void) { return 0; }"},
