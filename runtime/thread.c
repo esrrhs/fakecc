@@ -100,20 +100,24 @@ int pthread_create(pthread_t *thread, const void *attr, void *(*start_routine)(v
     size_t stack_size = FAKECC_STACK_SIZE;
 
     size_t tls_memsz = __fakecc_tls_memsz;
-    size_t tls_pad = 0;
-    while ((tls_memsz + tls_pad) & 15) tls_pad++;
-    size_t tcb_offset = tls_memsz + tls_pad;
-    if (tcb_offset < 16) tcb_offset = 16;
-    size_t tls_alloc = (tcb_offset + 64 + 4095) & ~4095UL;
+    size_t al = __fakecc_tls_align;
+    if (al < 16) al = 16;
+    /* mmap is page-aligned; align the TLS image to p_align so object
+     * offsets keep the alignment encoded in PT_TLS.  TCB sits immediately
+     * after the image (TPOFF = offset - memsz). */
+    size_t tls_alloc = (al + tls_memsz + 16 + 64 + 4095) & ~4095UL;
+    if (tls_alloc < 4096) tls_alloc = 4096;
     void *tls_base = (void *)__syscall(9, 0, (long)tls_alloc, 3, 0x22, -1, 0);
     if ((long)tls_base < 0) {
         __syscall(11, (long)stack_base, (long)stack_size);
         return -1;
     }
 
-    char *tls_ptr = (char *)tls_base;
-    unsigned long tcb = (unsigned long)(tls_ptr + tcb_offset);
-    char *init_tls = (char *)(tcb - tls_memsz);
+    unsigned long init_u = (unsigned long)tls_base;
+    while (init_u % al) init_u = init_u + 1;
+    char *init_tls = (char *)init_u;
+    unsigned long tcb = init_u + tls_memsz;
+    if (tls_memsz == 0) tcb = init_u + 16;
     if (__fakecc_tls_filesz > 0 && __fakecc_tls_image) {
         memcpy(init_tls, __fakecc_tls_image, __fakecc_tls_filesz);
     }

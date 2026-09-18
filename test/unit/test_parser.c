@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "fakecc/ast.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
@@ -7,6 +9,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 

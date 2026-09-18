@@ -78,6 +78,14 @@ difftest_one() {
     python3 "$TOOLS_DIR/gcc_stdarg_prep.py" < "$WORK/$name.body.c" > "$WORK/$name.prep.c"
     {
         echo '#define _GNU_SOURCE 1'
+        # fakecc lexer folds these to (-MAX-1); gcc does not predefine them
+        # because the magnitude is not a valid signed literal of that rank.
+        echo '#ifndef __INT_MIN__'
+        echo '#define __INT_MIN__ (-2147483647 - 1)'
+        echo '#endif'
+        echo '#ifndef __LONG_MIN__'
+        echo '#define __LONG_MIN__ (-9223372036854775807l - 1l)'
+        echo '#endif'
         if grep -qE '\b(va_(list|start|arg|end|copy)|__builtin_va_(list|start|arg|end|copy))\b' \
                "$WORK/$name.prep.c"; then
             echo '#include <stdarg.h>'
@@ -119,6 +127,12 @@ difftest_one() {
        || grep -qE 'implicit declaration|隐式声明' "$WORK/$name.gcc.err"; then
         {
             echo '#define _GNU_SOURCE 1'
+            echo '#ifndef __INT_MIN__'
+            echo '#define __INT_MIN__ (-2147483647 - 1)'
+            echo '#endif'
+            echo '#ifndef __LONG_MIN__'
+            echo '#define __LONG_MIN__ (-9223372036854775807l - 1l)'
+            echo '#endif'
             echo '#include <stdio.h>'
             echo '#include <stdlib.h>'
             echo '#include <string.h>'
@@ -128,6 +142,10 @@ difftest_one() {
             echo '#include <unistd.h>'
             echo '#include <sys/stat.h>'
             echo '#include <errno.h>'
+            # runtime.* math (sqrt/fabs/copysignl/sin/...) becomes a bare
+            # libc call after the prefix strip.  GCC 16 treats implicit
+            # decls as errors even with -w, so libm headers belong here.
+            echo '#include <math.h>'
             echo '#define __syscall syscall'
             # Drop port libc prototypes that clash with glibc (GCC 16+).
             # fprintf(void*,...) vs FILE* is the common one; strip the whole
@@ -136,11 +154,15 @@ difftest_one() {
 import re, sys
 src = open(sys.argv[1], encoding="latin-1").read()
 libc = (
-    "abort|abs|atoi|atol|atof|calloc|ceil|exit|fabs|floor|fprintf|free|"
+    "abort|abs|atoi|atol|atof|calloc|ceil|ceill|ceilf|exit|"
+    "copysign|copysignf|copysignl|fabs|fabsf|fabsl|floor|floorf|floorl|"
+    "fprintf|free|"
     "isalnum|isalpha|isdigit|islower|isprint|isspace|isupper|isxdigit|"
     "labs|malloc|memchr|memcmp|memcpy|memmove|memset|pow|printf|putchar|"
-    "puts|realloc|snprintf|sprintf|sqrt|strcat|strchr|strcmp|strcpy|"
+    "puts|realloc|sin|sinf|sinl|cos|cosf|cosl|tan|tanf|tanl|"
+    "snprintf|sprintf|sqrt|sqrtf|sqrtl|strcat|strchr|strcmp|strcpy|"
     "strlen|strncat|strncmp|strncpy|strrchr|strstr|"
+    "strtod|strtof|strtold|"
     "rand|srand|stdin|stdout|stderr|open|close|read|write|unlink|tmpnam"
 )
 src = re.sub(

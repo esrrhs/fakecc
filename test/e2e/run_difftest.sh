@@ -26,6 +26,11 @@ for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
     if grep -qE '^//[[:space:]]*expect_error' "$f"; then
         continue
     fi
+    # Fakecc-runtime behaviour that glibc does not match (locale-dependent
+    # %lc/%ls, UTF-8 always, …).  e2e still runs these against expect:.
+    if grep -qE '^//[[:space:]]*skip_difftest' "$f"; then
+        continue
+    fi
     if grep '^import[[:space:]]' "$f" | grep -vqE '^import[[:space:]]+runtime;'; then
         continue
     fi

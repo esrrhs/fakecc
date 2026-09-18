@@ -73,9 +73,9 @@ typedef enum {
     IR_GADDR,       /* dst = &global; global name in call_name.  Result is 8-byte ptr. */
     IR_GADDR_TLS,   /* dst = &__thread global; global name in call_name.
                      * Result is 8-byte ptr to a thread-local variable; codegen
-                     * emits `lea %rxx, %fs:[rip+TPOFF64]` and the linker
-                     * resolves R_X86_64_TPOFF64 to the negative offset from
-                     * the thread pointer (Initial-Exec model). */
+                     * emits Initial-Exec: `movq %fs:0; addq x@gottpoff(%rip)`.
+                     * The linker fills the GOT slot with TPOFF (static exe) or
+                     * a dynamic R_X86_64_TPOFF64 (DSO). */
     IR_FADDR,       /* dst = &function; function name in call_name.  Result is 8-byte ptr. */
     IR_LADDR,       /* dst = &label; imm = label_id.  Result is 8-byte ptr. */
     IR_JMP_PTR,     /* jmp *a — indirect jump to pointer value in a */
@@ -97,12 +97,19 @@ typedef enum {
 } IROpcode;
 
 /* Maximum arguments to IR_CALL.  SysV packs small aggregates into 1–2
- * register args and MEMORY-class aggregates into one stack eightbyte per
- * 8 bytes of payload, so a single large struct can consume many slots.
- * Kept in sync with MAX_PARAMS (common.h).  Args are heap-allocated on the
- * IR_CALL itself — do NOT embed [IR_CALL_MAX_ARGS] in IRInst (that made every
- * instruction ~5KB and ballooned compile time across the whole suite). */
+ * register args; MEMORY-class aggregates are one stack blob (not one IR
+ * arg per eightbyte).  Kept in sync with MAX_PARAMS (common.h).  Args are
+ * heap-allocated on the IR_CALL itself — do NOT embed [IR_CALL_MAX_ARGS]
+ * in IRInst (that made every instruction ~5KB and ballooned compile time). */
 #define IR_CALL_MAX_ARGS 1024
+
+/* call_arg_on_stack bits: 0 = stack, 1 = align≥16, 2 = ≥32, 3 = ≥64,
+ * 4 = MEMORY blob (SSA is a pointer; copy call_arg_nbytes bytes). */
+#define CALL_ARG_STACK   1
+#define CALL_ARG_ALIGN16 2
+#define CALL_ARG_ALIGN32 4
+#define CALL_ARG_ALIGN64 8
+#define CALL_ARG_BLOB    16
 
 typedef struct {
     IROpcode op;
@@ -133,18 +140,22 @@ typedef struct {
      * assign a GP/XMM register even if one is free).  For IR_CALL, see also
      * call_arg_on_stack[]. */
     int      force_stack;
-    /* IR_PARAM / IR_CALL: this stack eightbyte is 16-byte aligned (SysV
-     * long double / __int128 / over-aligned MEMORY).  call_arg_on_stack
-     * bit 1 also records this for IR_CALL args. */
+    /* IR_PARAM / IR_CALL: stack-slot alignment in bytes (16/32/64), or 1
+     * for legacy 16-byte.  SysV long double / __int128 / AVX vectors /
+     * over-aligned MEMORY.  call_arg_on_stack bit 1 = ≥16, bit 2 = ≥32,
+     * bit 3 = ≥64, bit 4 = MEMORY blob. */
     int      align16;
-    /* IR_CALL / IR_RETURN: `_Complex long double` travels in st0/st1. */
+    /* IR_CALL / IR_RETURN: X87 aggregate in st0(/st1).  imm is 16 (one
+     * long double in st0) or 32 (`_Complex long double` in st0/st1). */
     int      x87_pair;
     /* IR_CALL only: per-arg force_stack; heap array length call_nargs, or NULL.
-     * Bit 0 = stack, bit 1 = 16-byte align the stack slot. */
+     * See CALL_ARG_* bits. */
     unsigned char *call_arg_on_stack;
-    /* Slice 7b/c: for IR_ALLOCA only. Total bytes reserved on the stack when
-     * the alloca is pinned (address-taken or TY_ARRAY).  Scalar allocas that
-     * mem2reg promotes get 0 here (they never reach codegen anyway). */
+    /* IR_CALL only: MEMORY-blob byte counts, length call_nargs, or NULL. */
+    int     *call_arg_nbytes;
+    /* Slice 7b/c: for IR_ALLOCA, total bytes reserved on the stack when
+     * the alloca is pinned.  For IR_PARAM, a MEMORY blob's incoming size
+     * (codegen LEAs [rbp+off] when alloca_bytes > 8). */
     int      alloca_bytes;
     /* IR_LOAD / IR_LOAD_PTR: the access is volatile and must not be DCE'd. */
     int      is_volatile;
@@ -241,10 +252,17 @@ typedef struct {
     int   ret_is_bool;
     /* 1 if the function returns `_Complex long double` in st0/st1. */
     int   ret_is_complex_ld;
+    /* SysV X87 return size: 16 = one long double in st0, 32 = complex
+     * pair in st0/st1, 0 = not an X87 return. */
+    int   ret_x87_bytes;
     /* Variadic: 1 if the function was defined with a `...` tail.  The prologue
      * emits a register-save area and the va_* builtins read/write it. */
     int   is_variadic;
     int   is_static;  /* 1 = `static` function — LOCAL linkage */
+    int   is_constructor; /* 1 = emit a .init_array pointer to this function */
+    int   is_destructor;  /* 1 = emit a .fini_array pointer to this function */
+    int   ctor_prio;
+    int   dtor_prio;
     int   has_dyn_alloca; /* 1 = function uses dynamic alloca / VLA */
     /* GNU __builtin_apply_args: save incoming arg regs at prologue (GCC
      * migrates the save to function entry so later calls cannot clobber
@@ -290,6 +308,7 @@ typedef struct {
     int   is_readonly;  /* 1 = string literal → rodata; 0 = mutable → data */
     int   is_static;    /* 1 = `static` global — LOCAL linkage */
     int   is_tls;       /* 1 = `__thread` / `_Thread_local` global — .tdata/.tbss */
+    int   align;        /* byte alignment (`aligned(N)` / natural); ≥1 */
     SourceLoc loc;
     GlobalFixup *fixups;/* pointer slots needing link-time address patching */
     int   num_fixups, cap_fixups;

@@ -171,6 +171,7 @@ static void make_dbg_value(IRInst *inst, int var, IRValue val) {
     inst->call_name = NULL;
     inst->call_args = NULL;
     inst->call_arg_on_stack = NULL;
+    inst->call_arg_nbytes = NULL;
     inst->call_nargs = 0;
 }
 

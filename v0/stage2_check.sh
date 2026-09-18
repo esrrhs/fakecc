@@ -61,6 +61,11 @@ else
     echo "NOT a fixed point — stage 1 and stage 2 binaries differ"
     echo "  stage 1: $(stat -c%s "$WORK/s1/fakecc") bytes"
     echo "  stage 2: $(stat -c%s "$WORK/s2/fakecc") bytes"
+    echo "  first differing bytes (cmp -l):"
+    cmp -l "$WORK/s1/fakecc" "$WORK/s2/fakecc" | head -20
+    cp "$WORK/s1/fakecc" "$ROOT/v0/fakecc-1"
+    cp "$WORK/s2/fakecc" "$ROOT/v0/fakecc-2"
+    echo "wrote v0/fakecc-1 and v0/fakecc-2 (mismatch)"
     exit 1
 fi
 

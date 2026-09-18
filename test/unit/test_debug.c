@@ -444,8 +444,10 @@ static void test_promoted_local_has_loclist(void) {
     emit_module_free(&em);
 }
 
-/* At -O0 nothing is promoted, so every local is a plain stack slot and no
- * location lists are needed. */
+/* At -O0 nothing is promoted.  Locals are a single rbp-relative slot for
+ * the whole function (no loclist).  Parameters arrive in ABI registers and
+ * are spilled in the prologue, so they need a location list — register
+ * until prologue_end, then the stack slot. */
 static void test_o0_locals_are_stack_slots(void) {
     EmitModule em;
     compile_module("package main;\n"
@@ -455,12 +457,31 @@ static void test_o0_locals_are_stack_slots(void) {
     const DebugFunc *f = find_func(&em, "add");
     T_ASSERT(f != NULL);
     T_ASSERT(f->num_vars >= 3);
+    int saw_local = 0, saw_param = 0;
     for (size_t i = 0; i < f->num_vars; i++) {
         const DebugVar *v = &f->vars[i];
-        T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)v->loc_kind);
-        T_ASSERT_EQ_INT(0, (int)v->num_ranges);
-        T_ASSERT(v->rbp_offset < 0);
+        if (v->kind == DBG_VAR_PARAM) {
+            saw_param = 1;
+            T_ASSERT(v->num_ranges > 0);
+            T_ASSERT_EQ_INT(DBG_LOC_REG, (int)v->ranges[0].loc_kind);
+            T_ASSERT_EQ_INT((int)f->start_pc, (int)v->ranges[0].pc_start);
+            int on_stack = 0;
+            for (size_t r = 0; r < v->num_ranges; r++) {
+                if (v->ranges[r].loc_kind == DBG_LOC_FBREG) {
+                    T_ASSERT(v->ranges[r].rbp_offset < 0);
+                    on_stack = 1;
+                }
+            }
+            T_ASSERT(on_stack);
+        } else {
+            saw_local = 1;
+            T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)v->loc_kind);
+            T_ASSERT_EQ_INT(0, (int)v->num_ranges);
+            T_ASSERT(v->rbp_offset < 0);
+        }
     }
+    T_ASSERT(saw_local);
+    T_ASSERT(saw_param);
     emit_module_free(&em);
 }
 
@@ -553,10 +574,21 @@ static void test_float_var_locations(void) {
     T_ASSERT(d != NULL);
     T_ASSERT_EQ_INT(DBG_TY_FLOAT, (int)d->type_tag);
     T_ASSERT_EQ_INT(8, d->width);
+    /* Float params are pinned, so they typically arrive in xmmN and spill
+     * to a stack slot — described by a loclist, not a single loc_kind. */
+    int xmm_or_stack = 0;
     if (d->loc_kind == DBG_LOC_REG)
-        T_ASSERT(d->dwarf_reg >= 17);
-    else
-        T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)d->loc_kind);
+        xmm_or_stack = d->dwarf_reg >= 17;
+    else if (d->loc_kind == DBG_LOC_FBREG)
+        xmm_or_stack = 1;
+    for (size_t i = 0; !xmm_or_stack && i < d->num_ranges; i++) {
+        const DebugLocRange *r = &d->ranges[i];
+        if (r->loc_kind == DBG_LOC_REG && r->dwarf_reg >= 17)
+            xmm_or_stack = 1;
+        else if (r->loc_kind == DBG_LOC_FBREG)
+            xmm_or_stack = 1;
+    }
+    T_ASSERT(xmm_or_stack);
     emit_module_free(&em);
 }
 
@@ -689,6 +721,5 @@ int main(void) {
     test_all_vars_present();
     test_link_rebases_loclists();
     test_loclist_section_present();
-    printf("ok\n");
-    return 0;
+    return t_finalize();
 }

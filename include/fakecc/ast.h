@@ -94,23 +94,36 @@ void type_free(Type *t);
 long long  type_size(Type t);
 long long  type_align(Type t); /* natural alignment of a type */
 int type_is_complex_ldouble(Type t); /* `_Complex long double` (X87 pair) */
-int type_is_empty_struct(Type t);    /* GNU empty struct/union, size 0 */
+int type_is_empty_struct(Type t);    /* GNU empty or size-0 (FAM / [0]) */
 int type_needs_stack_align16(Type t); /* long double / __int128 / align≥16 */
+/* SysV overflow-arg alignment: 16, 32, or 64, else 0. */
+int type_stack_align(Type t);
 
-/* SysV AMD64 aggregate classification for ≤16-byte structs/unions.
- * Returns the number of eightbytes passed/returned in registers (1 or 2),
- * writing INTEGER/SSE class per eightbyte into `cls`.  Returns 0 when the
- * aggregate must use the MEMORY convention (hidden pointer / sret) — size
- * > 16, unaligned fields, X87 members, or anything we do not yet classify. */
+/* True if this process can run AVX-512F (CPUID + OS XSAVE of ZMM). */
+int host_has_avx512f(void);
+/* 1 after `-mno-avx`: 32-byte vectors are MEMORY (no YMM), matching gcc. */
+extern int g_no_avx;
+
+/* SysV AMD64 aggregate classification for ≤64-byte structs/unions.
+ * Returns the number of register slots (1 or 2), writing INTEGER/SSE class
+ * per eightbyte into `cls`.  A 16-byte SSE+SSEUP vector is one XMM; a
+ * 32-byte SSE+SSEUP×3 vector is one YMM (nreg=1).  A 64-byte SSE+SSEUP
+ * vector is one ZMM when the host has AVX-512F, else MEMORY.  Returns 0
+ * for MEMORY: size > 64, unaligned fields, X87 members, or mixed
+ * aggregates larger than two eightbytes that are not a single vector. */
 typedef enum {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE     = 2
 } SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
-/* MEMORY-class passing: 0 = expand into stack eightbytes (SysV);
- * 1 = pass a pointer to a copy.  Pointer is used for `__va_list_tag`
- * (matches libc/GCC array decay) and for aggregates larger than 128 bytes
- * so lowering does not explode into thousands of IR args. */
+/* True if a 16-byte aggregate that classify reports as MEMORY is a
+ * single X87+X87UP object (`struct { long double }`, nested the same,
+ * or `union { long double }`).  SysV returns that in st0, not sret.
+ * Arguments of this class still go on the stack. */
+int sysv_agg_ret_x87(Type t);
+/* MEMORY-class passing: 0 = copy the object onto the outgoing stack
+ * (SysV); 1 = pass a pointer to a copy.  Pointer is used only for
+ * `__va_list_tag` (matches libc/GCC array decay). */
 int sysv_memory_pass_as_pointer(Type t);
 
 Type type_make_ptr(Type pointee);
@@ -387,6 +400,10 @@ typedef struct {
     char  *alias_target; /* __attribute__((alias("..."))) or NULL */
     int    align;       /* alignment attribute */
     int    no_instrument; /* 1 = __attribute__((no_instrument_function)) */
+    int    is_constructor; /* 1 = __attribute__((constructor)) → .init_array */
+    int    is_destructor;  /* 1 = __attribute__((destructor)) → .fini_array */
+    int    ctor_prio;      /* constructor priority (smaller runs first; 65535 = default) */
+    int    dtor_prio;
 } FunctionDecl;
 
 typedef struct {

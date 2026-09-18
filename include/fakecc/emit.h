@@ -16,6 +16,9 @@
 #define SECT_BSS    4
 #define SECT_TDATA  5  /* initialized __thread variables (ELF SHF_TLS) */
 #define SECT_TBSS   6  /* zero-initialized __thread variables (SHF_TLS) */
+#define SECT_INIT_ARRAY 7 /* .init_array constructor pointers */
+#define SECT_FINI_ARRAY 8 /* .fini_array destructor pointers */
+#define INIT_PRIO_DEFAULT 65535
 
 /* ------------------------------------------------------------------ */
 /* Symbol table entry                                                  */
@@ -24,7 +27,7 @@
 typedef struct {
     char *name;        /* symbol name (NULL for section symbols) */
     uint8_t binding;   /* STB_LOCAL (0) / STB_GLOBAL (1) */
-    uint8_t type;      /* STT_NOTYPE(0) / STT_OBJECT(1) / STT_FUNC(2) / STT_SECTION(3) */
+    uint8_t type;      /* STT_NOTYPE(0) / STT_OBJECT(1) / STT_FUNC(2) / STT_SECTION(3) / STT_TLS(6) */
     uint16_t shndx;    /* section index, or SHN_UNDEF(0) for undefined */
     size_t value;      /* offset within section (defined symbols) */
     size_t size;       /* byte size (0 for undefined symbols) */
@@ -36,9 +39,10 @@ typedef struct {
 
 typedef struct {
     size_t   offset;   /* offset within the section being relocated */
-    uint32_t type;     /* R_X86_64_PC32(2), R_X86_64_32(1), etc. */
+    uint32_t type;     /* R_X86_64_64(1), R_X86_64_PC32(2), etc. */
     uint32_t sym;      /* target symbol index into syms[] */
     int32_t  addend;   /* addend (rip-relative uses -4) */
+    uint16_t shndx;    /* site section: SECT_DATA, SECT_TDATA, or SECT_RODATA */
 } EmitReloc;
 
 /* ------------------------------------------------------------------ */
@@ -183,6 +187,19 @@ typedef struct {
     size_t   bss_size; /* .bss total bytes (zero-initialized globals) */
     Buffer   tdata;    /* .tdata — initialized __thread variables */
     size_t   tbss_size;/* .tbss total bytes (zero-init __thread variables) */
+    /* Max sh_addralign of each output section (gcc objects often use 16). */
+    size_t   text_align;
+    size_t   rodata_align;
+    size_t   data_align;
+    size_t   bss_align;
+    size_t   tdata_align;
+    size_t   tbss_align;
+    Buffer   init_array; /* .init_array — constructor function pointers */
+    size_t   init_array_align;
+    int     *init_prio;  /* one priority per 8-byte init_array slot */
+    Buffer   fini_array; /* .fini_array — destructor function pointers */
+    size_t   fini_array_align;
+    int     *fini_prio;  /* one priority per 8-byte fini_array slot */
 
     EmitSymbol *syms;  /* unified symbol table (section + defined + undefined) */
     size_t num_syms, cap_syms;
@@ -221,6 +238,10 @@ int  emit_module_add_symbol(EmitModule *m, const char *name,
 int  emit_module_find_symbol(EmitModule *m, const char *name);
 /* Add (or reuse) an undefined symbol; returns its index. */
 int  emit_module_add_undefined(EmitModule *m, const char *name);
+/* Like emit_module_add_undefined, with an explicit ELF st_type
+ * (STT_NOTYPE / STT_TLS).  Reusing an existing UND upgrades NOTYPE. */
+int  emit_module_add_undefined_type(EmitModule *m, const char *name,
+                                   uint8_t st_type);
 
 /* ------------------------------------------------------------------ */
 /* Relocations                                                         */
@@ -267,17 +288,38 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
  * Equivalent to emit_link(&m, 1, path, NULL, 0, 0, NULL, 0, 0, 0). */
 void emit_elf(const EmitModule *m, const char *path);
 
-/* ELF relocation type constants. */
-#define R_X86_64_32        1
+/* ELF relocation type constants (SysV AMD64 ABI). */
+#define R_X86_64_64        1  /* absolute 64-bit (pointer fixups in .data) */
 #define R_X86_64_PC32      2
 #define R_X86_64_PLT32     4
-#define R_X86_64_GOTPCREL  9
+#define R_X86_64_COPY          5  /* executable copy of a DSO data object */
 #define R_X86_64_GLOB_DAT  6
-#define R_X86_64_64       10  /* absolute 64-bit (pointer fixups in .data) */
+#define R_X86_64_GOTPCREL  9
+#define R_X86_64_32       10
+#define R_X86_64_32S      11
+#define R_X86_64_DTPMOD64 16  /* TLS GD GOT pair: module ID */
+#define R_X86_64_DTPOFF64 17  /* TLS GD GOT pair: offset in TLS block */
+#define R_X86_64_TPOFF64  18  /* TLS IE GOT fill (64-bit): dynamic linker writes
+                               * l_tls_offset + st_value + addend into the GOT slot.
+                               * Used in DSOs; executables fill the same slot statically. */
+#define R_X86_64_TLSGD    19  /* General-Dynamic: 16-byte lea+call __tls_get_addr.
+                               * The linker relaxes this to Initial-Exec. */
+#define R_X86_64_TLSLD    20  /* Local-Dynamic 12-byte lea+call __tls_get_addr.
+                               * Executables relax to LE (`movq %fs:0`). */
+#define R_X86_64_DTPOFF32 21  /* Local-Dynamic offset from the TLS block base.
+                               * After LD→LE this is filled as TPOFF32 (S+A−tp). */
+#define R_X86_64_GOTTPOFF 22  /* TLS Initial-Exec: RIP-relative disp to a GOT slot
+                               * holding the TPOFF of a __thread symbol.
+                               * Code: movq %fs:0, %reg; addq x@gottpoff(%rip), %reg */
 #define R_X86_64_TPOFF32  23  /* TLS Local-Exec offset (32-bit signed): S + A - tp_end.
                                * Patches the imm32 of `addq $imm32, %reg` that follows
                                * a `movq %fs:0, %reg` to produce the thread-local address.
-                               * The linker computes a negative int32 offset from the
-                               * thread pointer (%fs:0) to the variable in the TLS template. */
+                               * Kept for legacy objects and static executables; DSOs
+                               * must use GOTTPOFF + TPOFF64 (ld.so rejects type 0x17). */
+#define R_X86_64_PC64          24 /* S + A - P, 64-bit (`.quad sym - .`) */
+#define R_X86_64_GOTPCRELX     41 /* relaxable GOTPCREL; same S as GOTPCREL */
+#define R_X86_64_REX_GOTPCRELX 42 /* REX-prefixed relaxable GOTPCREL */
+#define R_X86_64_IRELATIVE     37 /* STT_GNU_IFUNC: r_addend = resolver, GOT filled at startup */
+#define STT_GNU_IFUNC          10
 
 #endif /* FAKECC_EMIT_H */

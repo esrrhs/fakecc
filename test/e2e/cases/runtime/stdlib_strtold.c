@@ -21,5 +21,9 @@ int main() {
     long double big = runtime.strtold("100000000000000000000", 0);
     if (big != 1e20L) return 6;
 
+    /* 2^64 is 20 digits; a 19-digit cap dropped the last digit (2^64-6). */
+    long double p64 = runtime.strtold("18446744073709551616", 0);
+    if (p64 != 18446744073709551616.0L) return 7;
+
     return 0;
 }

@@ -48,5 +48,24 @@ int main() {
     r = runtime.sscanf("9", "%hd", &sh);
     if (r != 1 || sh != 9) return 17;
 
+    /* glibc vfscanf consumes the 0x prefix even with no following hex digit. */
+    r = runtime.sscanf("0xZ", "%x%c", &u, buf);
+    if (r != 2) return 18;
+    if (u != 0u) return 19;
+    if (buf[0] != 'Z') return 20;
+
+    r = runtime.sscanf("0xZ", "%i%c", &a, buf);
+    if (r != 2 || a != 0 || buf[0] != 'Z') return 23;
+    r = runtime.sscanf("0xZ", "%1x%c", &u, buf);
+    if (r != 2 || u != 0u || buf[0] != 'x') return 24;
+    r = runtime.sscanf("0x", "%x%n", &u, &n);
+    if (r != 1 || u != 0u || n != 2) return 25;
+
+    /* A lone sign is a matching failure (0), not EOF. */
+    r = runtime.sscanf("-", "%d", &a);
+    if (r != 0) return 21;
+    r = runtime.sscanf("+", "%i", &a);
+    if (r != 0) return 22;
+
     return 0;
 }

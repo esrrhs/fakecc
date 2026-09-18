@@ -97,6 +97,10 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 static char *g_parsed_alias = NULL;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
+static int g_parsed_constructor = 0;
+static int g_parsed_destructor = 0;
+static int g_parsed_ctor_prio = 65535;
+static int g_parsed_dtor_prio = 65535;
 static int g_parsed_align = 0;
 static int g_parsed_inline = 0;  /* `inline` among type specifiers (`extern int inline f`) */
 static int g_parsed_tls = 0;     /* `__thread`/`_Thread_local` among type specifiers */
@@ -295,6 +299,42 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                 g_parsed_no_instrument = 1;
                 advance(p);
                 continue;
+            } else if (strcmp(name, "constructor") == 0 || strcmp(name, "__constructor__") == 0) {
+                g_parsed_constructor = 1;
+                g_parsed_ctor_prio = 65535;
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    Expr *e = parse_ternary(p);
+                    long long val = 0;
+                    if (fold_const_int(e, &val) && val >= 0 && val <= 65535)
+                        g_parsed_ctor_prio = (int)val;
+                    expr_free(e);
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                }
+                continue;
+            } else if (strcmp(name, "destructor") == 0 || strcmp(name, "__destructor__") == 0) {
+                g_parsed_destructor = 1;
+                g_parsed_dtor_prio = 65535;
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    Expr *e = parse_ternary(p);
+                    long long val = 0;
+                    if (fold_const_int(e, &val) && val >= 0 && val <= 65535)
+                        g_parsed_dtor_prio = (int)val;
+                    expr_free(e);
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                }
+                continue;
             }
         }
         if (peek(p)->kind == TK_LPAREN) depth++;
@@ -321,6 +361,16 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
 
 static int skip_attribute(Parser *p) {
     return parse_attribute(p, NULL, NULL, NULL, NULL, NULL);
+}
+
+/* `aligned(N)` after the identifier is consumed inside parse_declarator
+ * (and prefix attrs by parse_specifiers / skip_attribute).  Both paths
+ * record N in g_parsed_align; copy it onto the ST_DECL so IR/codegen
+ * see the real alignment. */
+static void apply_decl_align(int *align, int prefix) {
+    if (g_parsed_align > *align) *align = g_parsed_align;
+    if (prefix > *align) *align = prefix;
+    g_parsed_align = 0;
 }
 
 /* True if `name` appears in this TU's import list. */
@@ -1544,11 +1594,12 @@ static Expr *parse_expr(Parser *p); /* forward declaration */
 
 /* Parse an array dimension size: an int literal, enum constant,
  * full constant expression, or dynamic expression for VLA.
- * Returns the constant value (0 if absent, -1 if VLA with *dim_expr set). */
+ * Returns the constant value (0 for `[0]`, -1 if absent/`[]` FAM or a VLA
+ * with *dim_expr set). */
 static long long parse_array_size_ext(Parser *p, Expr **dim_expr) {
     if (dim_expr) *dim_expr = NULL;
     if (peek(p)->kind == TK_RBRACKET) {
-        return 0;
+        return -1; /* incomplete / flexible array member */
     }
     Expr *e = parse_expr(p);
     long long val = 0;
@@ -2137,7 +2188,7 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
         return types_compatible_unqual(a->pointee, b->pointee);
     }
     if (a->kind == TY_ARRAY) {
-        if (a->length != b->length && a->length != 0 && b->length != 0) return 0;
+        if (a->length != b->length && a->length > 0 && b->length > 0) return 0;
         if (!a->elem_type || !b->elem_type) return 0;
         if (a->elem_type->is_const != b->elem_type->is_const ||
             a->elem_type->is_volatile != b->elem_type->is_volatile) return 0;
@@ -3656,6 +3707,7 @@ static Stmt parse_stmt(Parser *p) {
          * `const` is handled inside parse_specifiers. */
         int storage_class = 0; /* 0=default, 1=static, 2=extern */
         g_parsed_tls = 0;
+        g_parsed_align = 0;
         for (;;) {
             if (peek(p)->kind == TK_KW_STATIC) {
                 storage_class = 1;
@@ -3702,6 +3754,8 @@ static Stmt parse_stmt(Parser *p) {
                 advance(p);
             } else break;
         }
+        int prefix_align = g_parsed_align;
+        g_parsed_align = 0;
         /* A definition-only declaration (`enum { ... };`, `struct { ... };`)
          * has no declarator or variable name — the specifiers consumed the
          * whole definition and the next token is `;`.  Accept it as a no-op. */
@@ -3762,6 +3816,7 @@ static Stmt parse_stmt(Parser *p) {
             }
             while (parse_attribute(p, &s.u.decl.align, NULL, NULL, NULL,
                                    &s.u.decl.alias_target)) {}
+            apply_decl_align(&s.u.decl.align, prefix_align);
             if (!s.u.decl.alias_target && g_parsed_alias) {
                 s.u.decl.alias_target = g_parsed_alias;
                 g_parsed_alias = NULL;
@@ -4454,6 +4509,7 @@ static FunctionDecl parse_function_decl(Parser *p) {
     }
 
     FunctionDecl fn;
+    memset(&fn, 0, sizeof(fn));
     fn.name = is_grouped_fn ? grouped_fn_name : xstrdup(name->text);
     fn.ret_type = ret_ty;
     if (is_grouped_fn) {
@@ -4471,6 +4527,14 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.align = 0;
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
+    fn.is_constructor = g_parsed_constructor;
+    fn.is_destructor = g_parsed_destructor;
+    fn.ctor_prio = g_parsed_ctor_prio;
+    fn.dtor_prio = g_parsed_dtor_prio;
+    g_parsed_constructor = 0;
+    g_parsed_destructor = 0;
+    g_parsed_ctor_prio = 65535;
+    g_parsed_dtor_prio = 65535;
 
     char **kr_names = NULL;
     int nkr = 0;
@@ -4648,10 +4712,36 @@ static FunctionDecl parse_function_decl(Parser *p) {
         fn.no_instrument = 1;
         g_parsed_no_instrument = 0;
     }
+    if (g_parsed_constructor) {
+        fn.is_constructor = 1;
+        fn.ctor_prio = g_parsed_ctor_prio;
+        g_parsed_constructor = 0;
+        g_parsed_ctor_prio = 65535;
+    }
+    if (g_parsed_destructor) {
+        fn.is_destructor = 1;
+        fn.dtor_prio = g_parsed_dtor_prio;
+        g_parsed_destructor = 0;
+        g_parsed_dtor_prio = 65535;
+    }
     if (p->tu) {
         for (size_t i = 0; i < p->tu->functions.len; i++) {
             if (strcmp(p->tu->functions.data[i].name, fn.name) == 0 && p->tu->functions.data[i].no_instrument) {
                 fn.no_instrument = 1;
+                break;
+            }
+        }
+        for (size_t i = 0; i < p->tu->functions.len; i++) {
+            if (strcmp(p->tu->functions.data[i].name, fn.name) == 0 && p->tu->functions.data[i].is_constructor) {
+                fn.is_constructor = 1;
+                fn.ctor_prio = p->tu->functions.data[i].ctor_prio;
+                break;
+            }
+        }
+        for (size_t i = 0; i < p->tu->functions.len; i++) {
+            if (strcmp(p->tu->functions.data[i].name, fn.name) == 0 && p->tu->functions.data[i].is_destructor) {
+                fn.is_destructor = 1;
+                fn.dtor_prio = p->tu->functions.data[i].dtor_prio;
                 break;
             }
         }
@@ -4688,6 +4778,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 extra_fn.is_extern = 1;
                 extra_fn.is_static = is_static;
                 extra_fn.no_instrument = fn.no_instrument;
+                extra_fn.is_constructor = fn.is_constructor;
+                extra_fn.is_destructor = fn.is_destructor;
+                extra_fn.ctor_prio = fn.ctor_prio;
+                extra_fn.dtor_prio = fn.dtor_prio;
                 /* If the parsed declarator is a function type, extract its params.
                  * Otherwise expect optional (param-list) after the name. */
                 if (extra_ty.kind == TY_FUNC) {
@@ -4788,6 +4882,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 extra_fn.is_extern = 1;
                 extra_fn.is_static = is_static;
                 extra_fn.no_instrument = fn.no_instrument;
+                extra_fn.is_constructor = fn.is_constructor;
+                extra_fn.is_destructor = fn.is_destructor;
+                extra_fn.ctor_prio = fn.ctor_prio;
+                extra_fn.dtor_prio = fn.dtor_prio;
                 if (peek(p)->kind == TK_LPAREN) {
                     advance(p);
                     if (peek(p)->kind == TK_KW_VOID
@@ -4859,6 +4957,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
                 extra_fn.is_extern = 1;
                 extra_fn.is_static = is_static;
                 extra_fn.no_instrument = fn.no_instrument;
+                extra_fn.is_constructor = fn.is_constructor;
+                extra_fn.is_destructor = fn.is_destructor;
+                extra_fn.ctor_prio = fn.ctor_prio;
+                extra_fn.dtor_prio = fn.dtor_prio;
                 if (peek(p)->kind == TK_LPAREN) {
                     advance(p);
                     if (peek(p)->kind == TK_KW_VOID

@@ -155,6 +155,7 @@ void ir_module_free(IRModule *m) {
             free(m->functions.data[i].insts.data[j].call_name);
             free(m->functions.data[i].insts.data[j].call_args);
             free(m->functions.data[i].insts.data[j].call_arg_on_stack);
+            free(m->functions.data[i].insts.data[j].call_arg_nbytes);
         }
         free(m->functions.data[i].insts.data);
         free(m->functions.data[i].value_width);
@@ -233,6 +234,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->is_readonly = is_readonly;
     g->is_static = is_static;
     g->is_tls = is_tls;
+    g->align = 8;
     g->loc = loc;
     g->fixups = NULL;
     g->num_fixups = 0;
@@ -279,6 +281,7 @@ static void ir_call_reserve_args(IRInst *inst, int nargs) {
     inst->call_nargs = nargs;
     inst->call_args = NULL;
     inst->call_arg_on_stack = NULL;
+    inst->call_arg_nbytes = NULL;
     if (nargs <= 0) return;
     if (nargs > IR_CALL_MAX_ARGS) {
         fprintf(stderr, "fakecc: internal error: call with %d args (max %d)\n",
@@ -287,7 +290,8 @@ static void ir_call_reserve_args(IRInst *inst, int nargs) {
     }
     inst->call_args = calloc((size_t)nargs, sizeof(IRValue));
     inst->call_arg_on_stack = calloc((size_t)nargs, sizeof(unsigned char));
-    if (!inst->call_args || !inst->call_arg_on_stack) {
+    inst->call_arg_nbytes = calloc((size_t)nargs, sizeof(int));
+    if (!inst->call_args || !inst->call_arg_on_stack || !inst->call_arg_nbytes) {
         fprintf(stderr, "fakecc: OOM\n");
         exit(1);
     }
@@ -539,6 +543,50 @@ static IRValue emit_bswap_val(IRFunction *fn, IRValue v, int uw, SourceLoc loc) 
         emit_inst_w(fn, IR_BOR, res, or2, b2, 0, 4, 1, loc);
         return res;
     }
+    if (uw == 8) {
+        /* Pairwise byte/half/word swaps: 01234567 -> 10325476 -> 32107654 -> 76543210. */
+        IRValue s8 = new_value(fn);
+        emit_inst_w(fn, IR_CONST, s8, -1, -1, 8, 8, 1, loc);
+        IRValue s16 = new_value(fn);
+        emit_inst_w(fn, IR_CONST, s16, -1, -1, 16, 8, 1, loc);
+        IRValue s32 = new_value(fn);
+        emit_inst_w(fn, IR_CONST, s32, -1, -1, 32, 8, 1, loc);
+        IRValue m_odd = new_value(fn);
+        emit_inst_w(fn, IR_CONST, m_odd, -1, -1, (int64_t)0x00ff00ff00ff00ffULL, 8, 1, loc);
+        IRValue m_ev = new_value(fn);
+        emit_inst_w(fn, IR_CONST, m_ev, -1, -1, (int64_t)0xff00ff00ff00ff00ULL, 8, 1, loc);
+        IRValue a = new_value(fn);
+        emit_inst_w(fn, IR_SHR, a, v, s8, 0, 8, 1, loc);
+        IRValue a2 = new_value(fn);
+        emit_inst_w(fn, IR_BAND, a2, a, m_odd, 0, 8, 1, loc);
+        IRValue b = new_value(fn);
+        emit_inst_w(fn, IR_SHL, b, v, s8, 0, 8, 1, loc);
+        IRValue b2 = new_value(fn);
+        emit_inst_w(fn, IR_BAND, b2, b, m_ev, 0, 8, 1, loc);
+        IRValue t = new_value(fn);
+        emit_inst_w(fn, IR_BOR, t, a2, b2, 0, 8, 1, loc);
+        IRValue m_o16 = new_value(fn);
+        emit_inst_w(fn, IR_CONST, m_o16, -1, -1, (int64_t)0x0000ffff0000ffffULL, 8, 1, loc);
+        IRValue m_e16 = new_value(fn);
+        emit_inst_w(fn, IR_CONST, m_e16, -1, -1, (int64_t)0xffff0000ffff0000ULL, 8, 1, loc);
+        a = new_value(fn);
+        emit_inst_w(fn, IR_SHR, a, t, s16, 0, 8, 1, loc);
+        a2 = new_value(fn);
+        emit_inst_w(fn, IR_BAND, a2, a, m_o16, 0, 8, 1, loc);
+        b = new_value(fn);
+        emit_inst_w(fn, IR_SHL, b, t, s16, 0, 8, 1, loc);
+        b2 = new_value(fn);
+        emit_inst_w(fn, IR_BAND, b2, b, m_e16, 0, 8, 1, loc);
+        t = new_value(fn);
+        emit_inst_w(fn, IR_BOR, t, a2, b2, 0, 8, 1, loc);
+        a = new_value(fn);
+        emit_inst_w(fn, IR_SHR, a, t, s32, 0, 8, 1, loc);
+        b = new_value(fn);
+        emit_inst_w(fn, IR_SHL, b, t, s32, 0, 8, 1, loc);
+        IRValue res = new_value(fn);
+        emit_inst_w(fn, IR_BOR, res, a, b, 0, 8, 1, loc);
+        return res;
+    }
     return v;
 }
 
@@ -564,8 +612,9 @@ static int member_bitfield(const Expr *e, int *bit_width, int *bit_offset,
     if (*unit_width > 8) *unit_width = 8;
     if (*unit_width < 1) *unit_width = 1;
     /* Packed fields can start at a non-zero bit in their first byte and
-     * spill past T; widen the load so bit_offset+width still fits. */
-    if (*bit_offset + *bit_width > *unit_width * 8 && *bit_offset + *bit_width <= 64)
+     * spill past T.  Widen the primary load to 8 bytes; if the field also
+     * spills past 64 bits, emit_bf_load reads extra bytes past that. */
+    if (*bit_offset + *bit_width > *unit_width * 8)
         *unit_width = 8;
     if (is_be) *is_be = sd->is_big_endian;
     if (is_unsigned) *is_unsigned = m->type.is_unsigned;
@@ -757,7 +806,9 @@ static int is_pinned_in_body(const FunctionDecl *fd, const char *name, Type ty) 
     return 0;
 }
 
-/* Record float-ness for value `v`. */
+/* Record float-ness for value `v`.
+ * 0 = integer/pointer, 1 = IEEE float/double (or x87 long double with
+ * width 16), 2 = _Decimal*, 4 = 16-byte SSE vector (one XMM, not ld). */
 static void set_value_float(IRFunction *fn, IRValue v, int is_float) {
     if (v < 0) return;
     if (v >= fn->value_meta_cap) {
@@ -846,6 +897,7 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     inst.call_name = NULL;
     inst.call_args = NULL;
     inst.call_arg_on_stack = NULL;
+    inst.call_arg_nbytes = NULL;
     inst.call_nargs = 0;
     inst.call_callee = -1;
     inst.width = width;
@@ -908,7 +960,8 @@ static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
     snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
     char *init = malloc(10);
     memcpy(init, &val, 10);
-    ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
+    IRGlobal *lg = ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
+    lg->align = 16;
     IRValue v = new_value(fn);
     emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 16, 0, loc);
     fn->insts.data[fn->insts.len - 1].is_float = 1;
@@ -1036,6 +1089,39 @@ static IRValue emit_alloca(IRFunction *fn, int total_bytes, int width,
     return v;
 }
 
+/* Pin a stack slot with SysV natural alignment.  Alignments ≥ 16 are
+ * recorded in IR_ALLOCA.imm so codegen can place/realign the slot
+ * (incoming rbp is only 16-aligned). */
+static IRValue emit_alloca_aligned(IRFunction *fn, int total, int al, SourceLoc loc) {
+    if (total < 1) total = 1;
+    if (al < 1) al = 1;
+    int slack = (al > 16) ? al : 0;
+    IRValue v = emit_alloca(fn, total + slack, 8, 1, loc);
+    if (al >= 16)
+        fn->insts.data[fn->insts.len - 1].imm = al;
+    return v;
+}
+
+static IRValue emit_alloca_ty(IRFunction *fn, Type ty, SourceLoc loc) {
+    return emit_alloca_aligned(fn, type_size(ty), (int)type_align(ty), loc);
+}
+
+static int sysv_sse_vec_bytes(int nreg, int size, const SysVRegClass *cls) {
+    if (nreg == 1 && cls && cls[0] == SYSV_CLS_SSE
+        && (size == 8 || size == 16 || size == 32 || size == 64))
+        return size;
+    return 0;
+}
+
+static unsigned char sysv_stack_arg_flags(int on_stack, Type ty) {
+    unsigned char f = on_stack ? CALL_ARG_STACK : 0;
+    int al = type_stack_align(ty);
+    if (al >= 16) f |= CALL_ARG_ALIGN16;
+    if (al >= 32) f |= CALL_ARG_ALIGN32;
+    if (al >= 64) f |= CALL_ARG_ALIGN64;
+    return f;
+}
+
 /* Emit `dst = ptr + delta` where delta is a compile-time byte constant.
  * Used to form addresses of struct members / copy chunks. */
 static IRValue emit_add_const(IRFunction *fn, IRValue ptr, int delta,
@@ -1044,6 +1130,206 @@ static IRValue emit_add_const(IRFunction *fn, IRValue ptr, int delta,
     IRValue c = new_value(fn);
     emit_inst_w(fn, IR_CONST, c, -1, -1, delta, 8, 1, loc);
     return emit_bin_w(fn, IR_ADD, ptr, c, 8, 1, loc);
+}
+
+/* Packed bitfields may start at a non-zero bit and spill past 64 bits
+ * (e.g. `unsigned char a:1; unsigned long long b:64` in a packed struct).
+ * The storage is split into an 8-byte low load and a 1..8-byte high load. */
+typedef struct {
+    IRValue lo;
+    IRValue hi;  /* -1 if the field fits in 8 bytes */
+    int uw;      /* bytes in lo */
+    int hi_w;    /* bytes in hi; 0 if none */
+} BFUnit;
+
+static int bitfield_span_bytes(int bit_offset, int bit_width) {
+    int bits = bit_offset + bit_width;
+    int n = (bits + 7) / 8;
+    if (n < 1) n = 1;
+    if (n > 16) n = 16;
+    return n;
+}
+
+static IRValue emit_iconst_w(IRFunction *fn, int64_t val, int w, int u, SourceLoc loc) {
+    IRValue c = new_value(fn);
+    emit_inst_w(fn, IR_CONST, c, -1, -1, val, w, u, loc);
+    return c;
+}
+
+static BFUnit emit_bf_load(IRFunction *fn, IRValue addr, int bit_offset, int bit_width,
+                          int unit_width, int is_be, SourceLoc loc) {
+    BFUnit u;
+    int span = bitfield_span_bytes(bit_offset, bit_width);
+    u.hi = -1;
+    u.hi_w = 0;
+    if (span <= 8) {
+        u.uw = unit_width ? unit_width : 4;
+        if (u.uw < 1) u.uw = 1;
+        if (u.uw > 8) u.uw = 8;
+        u.lo = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, u.lo, addr, -1, 0, u.uw, 1, loc);
+        if (is_be) u.lo = emit_bswap_val(fn, u.lo, u.uw, loc);
+        return u;
+    }
+    u.uw = 8;
+    u.hi_w = span - 8;
+    u.lo = new_value(fn);
+    emit_inst_w(fn, IR_LOAD_PTR, u.lo, addr, -1, 0, 8, 1, loc);
+    {
+        IRValue hi_addr = emit_add_const(fn, addr, 8, loc);
+        u.hi = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, u.hi, hi_addr, -1, 0, u.hi_w, 1, loc);
+    }
+    return u;
+}
+
+static void emit_bf_store(IRFunction *fn, IRValue addr, BFUnit u, int is_be, SourceLoc loc) {
+    IRValue lo = u.lo;
+    if (u.hi_w == 0 && is_be)
+        lo = emit_bswap_val(fn, lo, u.uw, loc);
+    emit_inst_w(fn, IR_STORE_PTR, -1, addr, lo, 0, u.uw, 1, loc);
+    if (u.hi_w > 0) {
+        IRValue hi_addr = emit_add_const(fn, addr, 8, loc);
+        emit_inst_w(fn, IR_STORE_PTR, -1, hi_addr, u.hi, 0, u.hi_w, 1, loc);
+    }
+}
+
+static int bf_work_width(const BFUnit *u) {
+    return u->hi_w ? 8 : u->uw;
+}
+
+static IRValue emit_bf_extract(IRFunction *fn, BFUnit u, int bit_offset, int bit_width,
+                              SourceLoc loc) {
+    int ww = bf_work_width(&u);
+    int64_t mask = bitfield_mask64(bit_width);
+    IRValue v;
+    if (u.hi_w == 0) {
+        v = u.lo;
+        if (bit_offset > 0) {
+            IRValue s = emit_iconst_w(fn, bit_offset, 8, 1, loc);
+            IRValue shifted = new_value(fn);
+            emit_inst_w(fn, IR_SHR, shifted, v, s, 0, ww, 1, loc);
+            v = shifted;
+        }
+    } else {
+        IRValue hi8 = (u.hi_w == 8) ? u.hi : coerce(fn, u.hi, u.hi_w, 1, 8, 1, loc);
+        IRValue lo_part = u.lo;
+        if (bit_offset > 0) {
+            IRValue s = emit_iconst_w(fn, bit_offset, 8, 1, loc);
+            lo_part = new_value(fn);
+            emit_inst_w(fn, IR_SHR, lo_part, u.lo, s, 0, 8, 1, loc);
+        }
+        IRValue hs = emit_iconst_w(fn, 64 - bit_offset, 8, 1, loc);
+        IRValue hi_part = new_value(fn);
+        emit_inst_w(fn, IR_SHL, hi_part, hi8, hs, 0, 8, 1, loc);
+        v = new_value(fn);
+        emit_inst_w(fn, IR_BOR, v, lo_part, hi_part, 0, 8, 1, loc);
+    }
+    IRValue m = emit_iconst_w(fn, mask, ww, 1, loc);
+    IRValue masked = new_value(fn);
+    emit_inst_w(fn, IR_BAND, masked, v, m, 0, ww, 1, loc);
+    return masked;
+}
+
+static BFUnit emit_bf_insert(IRFunction *fn, BFUnit u, IRValue val, int bit_offset,
+                            int bit_width, SourceLoc loc) {
+    int ww = bf_work_width(&u);
+    int64_t mask = bitfield_mask64(bit_width);
+    IRValue vm = coerce(fn, val, get_value_width(fn, val), 1, ww, 1, loc);
+    IRValue m = emit_iconst_w(fn, mask, ww, 1, loc);
+    IRValue masked = new_value(fn);
+    emit_inst_w(fn, IR_BAND, masked, vm, m, 0, ww, 1, loc);
+    if (u.hi_w == 0) {
+        IRValue so = emit_iconst_w(fn, bit_offset, 8, 1, loc);
+        IRValue ms = new_value(fn);
+        emit_inst_w(fn, IR_SHL, ms, m, so, 0, ww, 1, loc);
+        IRValue nm = new_value(fn);
+        emit_inst_w(fn, IR_BNOT, nm, ms, -1, 0, ww, 1, loc);
+        IRValue cleared = new_value(fn);
+        emit_inst_w(fn, IR_BAND, cleared, u.lo, nm, 0, ww, 1, loc);
+        IRValue vs = new_value(fn);
+        emit_inst_w(fn, IR_SHL, vs, masked, so, 0, ww, 1, loc);
+        u.lo = new_value(fn);
+        emit_inst_w(fn, IR_BOR, u.lo, cleared, vs, 0, ww, 1, loc);
+        return u;
+    }
+    /* Spanning: low `bit_offset` bits of lo stay; the rest of lo plus
+     * `hi_bits` of hi take the field. */
+    uint64_t lo_keep = (bit_offset <= 0) ? 0ULL
+                    : (bit_offset >= 64 ? ~(uint64_t)0 : ((1ULL << bit_offset) - 1));
+    IRValue lo_kept = new_value(fn);
+    emit_inst_w(fn, IR_BAND, lo_kept, u.lo, emit_iconst_w(fn, (int64_t)lo_keep, 8, 1, loc),
+                0, 8, 1, loc);
+    IRValue lo_ins = new_value(fn);
+    emit_inst_w(fn, IR_SHL, lo_ins, masked, emit_iconst_w(fn, bit_offset, 8, 1, loc),
+                0, 8, 1, loc);
+    u.lo = new_value(fn);
+    emit_inst_w(fn, IR_BOR, u.lo, lo_kept, lo_ins, 0, 8, 1, loc);
+    int lo_bits = 64 - bit_offset;
+    int hi_bits = bit_offset + bit_width - 64;
+    int64_t hi_mask = bitfield_mask64(hi_bits);
+    IRValue hi8 = (u.hi_w == 8) ? u.hi : coerce(fn, u.hi, u.hi_w, 1, 8, 1, loc);
+    IRValue hm = emit_iconst_w(fn, hi_mask, 8, 1, loc);
+    IRValue nhm = new_value(fn);
+    emit_inst_w(fn, IR_BNOT, nhm, hm, -1, 0, 8, 1, loc);
+    IRValue hi_kept = new_value(fn);
+    emit_inst_w(fn, IR_BAND, hi_kept, hi8, nhm, 0, 8, 1, loc);
+    IRValue hi_ins = new_value(fn);
+    emit_inst_w(fn, IR_SHR, hi_ins, masked, emit_iconst_w(fn, lo_bits, 8, 1, loc),
+                0, 8, 1, loc);
+    IRValue hi_bitsv = new_value(fn);
+    emit_inst_w(fn, IR_BAND, hi_bitsv, hi_ins, hm, 0, 8, 1, loc);
+    IRValue hi_new = new_value(fn);
+    emit_inst_w(fn, IR_BOR, hi_new, hi_kept, hi_bitsv, 0, 8, 1, loc);
+    u.hi = (u.hi_w == 8) ? hi_new : coerce(fn, hi_new, 8, 1, u.hi_w, 1, loc);
+    return u;
+}
+
+/* Host-side insert of a bitfield into a packed initializer blob. */
+static void pack_bitfield_host(char *bytes, int nbytes, int byte_off,
+                               int bit_offset, int bit_width, uint64_t val_masked,
+                               int is_be, int uw) {
+    int span = bitfield_span_bytes(bit_offset, bit_width);
+    if (byte_off < 0 || byte_off >= nbytes) return;
+    if (byte_off + span > nbytes) span = nbytes - byte_off;
+    if (span <= 8) {
+        int n = uw;
+        if (n < 1) n = 1;
+        if (n > span) n = span;
+        if (n > 8) n = 8;
+        uint64_t mask = (uint64_t)bitfield_mask64(bit_width);
+        if (is_be) {
+            uint64_t unit = 0;
+            int b;
+            for (b = 0; b < n; b++)
+                unit = (unit << 8) | (unsigned char)bytes[byte_off + b];
+            unit &= ~(mask << bit_offset);
+            unit |= (val_masked << bit_offset);
+            for (b = 0; b < n; b++)
+                bytes[byte_off + b] = (char)((unit >> ((n - 1 - b) * 8)) & 0xff);
+        } else {
+            uint64_t unit = 0;
+            memcpy(&unit, bytes + byte_off, (size_t)n);
+            unit &= ~(mask << bit_offset);
+            unit |= (val_masked << bit_offset);
+            memcpy(bytes + byte_off, &unit, (size_t)n);
+        }
+        return;
+    }
+    uint64_t lo = 0, hi = 0;
+    memcpy(&lo, bytes + byte_off, 8);
+    memcpy(&hi, bytes + byte_off + 8, (size_t)(span - 8));
+    uint64_t lo_keep = (bit_offset <= 0) ? 0ULL
+                     : (bit_offset >= 64 ? ~(uint64_t)0 : ((1ULL << bit_offset) - 1));
+    lo = (lo & lo_keep) | (val_masked << bit_offset);
+    {
+        int lo_bits = 64 - bit_offset;
+        int hi_bits = bit_offset + bit_width - 64;
+        uint64_t hi_mask = (uint64_t)bitfield_mask64(hi_bits);
+        hi = (hi & ~hi_mask) | ((val_masked >> lo_bits) & hi_mask);
+    }
+    memcpy(bytes + byte_off, &lo, 8);
+    memcpy(bytes + byte_off + 8, &hi, (size_t)(span - 8));
 }
 
 /* Copy `size` bytes from *src into *dst, one natural-width chunk at a time
@@ -1102,6 +1388,20 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
 static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
                           const SysVRegClass *cls, IRValue *out,
                           SourceLoc loc) {
+    /* 8/16/32-byte SSE vector: one XMM/YMM holds the whole object.
+     * Float-kind 4 distinguishes this from x87 long double (kind 1, width 16). */
+    {
+        int vw = sysv_sse_vec_bytes(n, size, cls);
+        if (vw) {
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, vw, 1, loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            set_value_type(fn, v, vw, 0);
+            set_value_float(fn, v, 4);
+            out[0] = v;
+            return;
+        }
+    }
     for (int i = 0; i < n; i++) {
         int off = i * 8;
         int remain = size - off;
@@ -1149,11 +1449,24 @@ static void load_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
 static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
                            const SysVRegClass *cls, const IRValue *vals,
                            SourceLoc loc) {
+    {
+        int vw = sysv_sse_vec_bytes(n, size, cls);
+        if (!vw && n == 1 && get_value_is_float(fn, vals[0])) {
+            int gw = get_value_width(fn, vals[0]);
+            if (gw == 8 || gw == 16 || gw == 32 || gw == 64) vw = gw;
+        }
+        if (vw) {
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, vals[0], 0, vw, 1, loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            return;
+        }
+    }
     (void)cls;
     for (int i = 0; i < n; i++) {
         int off = i * 8;
         int remain = size - off;
         if (remain <= 0) break;
+        if (remain > 8) remain = 8;
         int remain_n = remain;
         int off_b = 0;
         IRValue srcv = vals[i];
@@ -3722,7 +4035,8 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 
 static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
-                                  Type lt, Type rt, BinOp bop) {
+                                  Type lt, Type rt, BinOp bop,
+                                  IRValue forced_l_addr) {
     int lt_is_cplx = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
     int rt_is_cplx = (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0);
     
@@ -3743,7 +4057,8 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
     
     /* Load LHS components */
     if (lt_is_cplx) {
-        lv_addr = lower_expr(fn, st, e->u.bin.l);
+        lv_addr = (forced_l_addr >= 0) ? forced_l_addr
+                                       : lower_expr(fn, st, e->u.bin.l);
         l_real = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, l_real, lv_addr, -1, 0, l_elem_sz, l_is_unsigned, e->loc);
         if (l_is_float) set_value_float(fn, l_real, 1);
@@ -4874,6 +5189,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue z = emit_dfp_zero(fn, w, e->loc);
                 return emit_dfp_cmp(fn, w, BOP_EQ, x, z, e->loc);
             }
+            if (e->u.un.operand->type.kind == TY_FLOAT
+                && !e->u.un.operand->type.is_vector) {
+                /* !f is (f == +0.0); IEEE -0.0 is also zero. */
+                IRValue x = lower_expr(fn, st, e->u.un.operand);
+                int w = get_value_width(fn, x);
+                IRValue zero = emit_float_const(fn, w, 0, e->loc);
+                return emit_fcmp(fn, x, zero, w, 4 /* EQ */, e->loc);
+            }
             IRValue x = lower_expr(fn, st, e->u.un.operand);
             int xw = get_value_width(fn, x), xu = get_value_is_unsigned(fn, x);
             IRValue zero = new_value(fn);
@@ -4973,7 +5296,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
-            return lower_complex_binop(fn, st, e, lt, rt, bop);
+            return lower_complex_binop(fn, st, e, lt, rt, bop, -1);
         }
         if (type_is_i128(lt) || type_is_i128(rt) || type_is_i128(e->type)) {
             IRValue lv = lower_expr(fn, st, e->u.bin.l);
@@ -5020,7 +5343,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_done  = new_label(fn);
 
             IRValue lv = lower_expr(fn, st, e->u.bin.l);
-            emit_cbr(fn, lv, L_true, L_false, e->loc);
+            emit_cbr(fn, cbr_from_scalar(fn, lv, e->loc), L_true, L_false, e->loc);
 
             emit_label(fn, L_true, e->loc);
             IRValue true_val;
@@ -5031,10 +5354,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             } else {
                 IRValue rv = lower_expr(fn, st, e->u.bin.r);
                 int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                IRValue ri = coerce(fn, rv, rw, ru, 4, 0, e->loc);
-                IRValue zero = new_value(fn);
-                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
-                true_val = emit_bin_w(fn, IR_NE, ri, zero, 4, 0, e->loc);
+                int rf = get_value_is_float(fn, rv);
+                true_val = bool_normalize(fn, rv, rw, ru, rf, e->loc);
             }
             emit_inst_w(fn, IR_STORE, -1, slot, true_val, 0, 4, 0, e->loc);
             emit_br(fn, L_done, e->loc);
@@ -5048,10 +5369,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             } else {
                 IRValue rv = lower_expr(fn, st, e->u.bin.r);
                 int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                IRValue ri = coerce(fn, rv, rw, ru, 4, 0, e->loc);
-                IRValue zero = new_value(fn);
-                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
-                false_val = emit_bin_w(fn, IR_NE, ri, zero, 4, 0, e->loc);
+                int rf = get_value_is_float(fn, rv);
+                false_val = bool_normalize(fn, rv, rw, ru, rf, e->loc);
             }
             emit_inst_w(fn, IR_STORE, -1, slot, false_val, 0, 4, 0, e->loc);
             emit_br(fn, L_done, e->loc);
@@ -5582,41 +5901,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int bit_width = 0, bit_offset = 0, unit_width = 0, is_be = 0;
             if (lv->kind == EX_MEMBER
                 && member_bitfield(lv, &bit_width, &bit_offset, &unit_width, &is_be, NULL)) {
-                /* Bitfield store: read-modify-write the storage unit.
-                 * unit = load(addr);
-                 * unit = unit & ~(mask << bit_offset);   // clear the field
-                 * unit = unit | ((val & mask) << bit_offset); // set the field
-                 * store(addr, unit); */
-                int uw = unit_width ? unit_width : 4;
-                IRValue unit = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
-                if (is_be) unit = emit_bswap_val(fn, unit, uw, e->loc);
+                /* Bitfield store: read-modify-write the storage unit. */
+                BFUnit unit = emit_bf_load(fn, addr, bit_offset, bit_width,
+                                           unit_width, is_be, e->loc);
+                int uw = bf_work_width(&unit);
+                unit = emit_bf_insert(fn, unit, coerced, bit_offset, bit_width, e->loc);
+                emit_bf_store(fn, addr, unit, is_be, e->loc);
                 int64_t mask = bitfield_mask64(bit_width);
-                /* Clear the field bits: unit &= ~(mask << bit_offset). */
-                IRValue m = new_value(fn);
-                emit_inst_w(fn, IR_CONST, m, -1, -1, mask, uw, 1, e->loc);
-                IRValue so = new_value(fn);
-                emit_inst_w(fn, IR_CONST, so, -1, -1, bit_offset, 8, 1, e->loc);
-                IRValue ms = new_value(fn);
-                emit_inst_w(fn, IR_SHL, ms, m, so, 0, uw, 1, e->loc);
-                IRValue nm = new_value(fn);
-                emit_inst_w(fn, IR_BNOT, nm, ms, -1, 0, uw, 1, e->loc);
-                IRValue cleared = new_value(fn);
-                emit_inst_w(fn, IR_BAND, cleared, unit, nm, 0, uw, 1, e->loc);
-                /* Position the new value's bits: (val & mask) << bit_offset. */
+                IRValue m = emit_iconst_w(fn, mask, uw, 1, e->loc);
                 IRValue vm = new_value(fn);
-                emit_inst_w(fn, IR_BAND, vm, coerced, m, 0, uw, 1, e->loc);
-                IRValue vs = new_value(fn);
-                emit_inst_w(fn, IR_SHL, vs, vm, so, 0, uw, 1, e->loc);
-                IRValue merged = new_value(fn);
-                emit_inst_w(fn, IR_BOR, merged, cleared, vs, 0, uw, 1, e->loc);
-                IRValue to_store = merged;
-                if (is_be) to_store = emit_bswap_val(fn, merged, uw, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, to_store, 0, uw, 1, e->loc);
+                IRValue cv = coerce(fn, coerced, get_value_width(fn, coerced),
+                                    get_value_is_unsigned(fn, coerced), uw, 1, e->loc);
+                emit_inst_w(fn, IR_BAND, vm, cv, m, 0, uw, 1, e->loc);
                 if (!e->type.is_unsigned && bit_width < uw * 8) {
                     int shift = uw * 8 - bit_width;
-                    IRValue s_val = new_value(fn);
-                    emit_inst_w(fn, IR_CONST, s_val, -1, -1, shift, 8, 1, e->loc);
+                    IRValue s_val = emit_iconst_w(fn, shift, 8, 1, e->loc);
                     IRValue shl = new_value(fn);
                     emit_inst_w(fn, IR_SHL, shl, vm, s_val, 0, uw, 0, e->loc);
                     IRValue ashr = new_value(fn);
@@ -6407,8 +6706,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 if (last < 0)
                     inst.call_nargs = 1;
                 if (is_arg) {
-                    if (e->va_arg_type.kind == TY_STRUCT || type_is_i128(e->va_arg_type)) {
-                        int sz = type_is_i128(e->va_arg_type) ? 16 : type_size(e->va_arg_type);
+                    if (type_is_empty_struct(e->va_arg_type)) {
+                        /* gcc: size-0 / `[0]` structs consume no va_arg slot. */
+                        free(inst.call_name);
+                        free(inst.call_args);
+                        free(inst.call_arg_on_stack);
+                        free(inst.call_arg_nbytes);
+                        {
+                            IRValue slot = emit_alloca(fn, 1, 8, 1, e->loc);
+                            return emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                        }
+                    }
+                    if (e->va_arg_type.kind == TY_STRUCT || e->va_arg_type.is_vector
+                        || type_is_pair16(e->va_arg_type)) {
+                        int sz = type_is_pair16(e->va_arg_type) ? 16
+                               : type_size(e->va_arg_type);
                         if (sz <= 0) sz = 8;
                         SysVRegClass cls[2];
                         int nreg;
@@ -6416,10 +6728,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                             cls[0] = SYSV_CLS_INTEGER;
                             cls[1] = SYSV_CLS_INTEGER;
                             nreg = 2;
+                        } else if (type_is_d128(e->va_arg_type)) {
+                            /* Match pair16 call lowering (two eightbytes). */
+                            cls[0] = SYSV_CLS_INTEGER;
+                            cls[1] = SYSV_CLS_INTEGER;
+                            nreg = 2;
                         } else {
                             nreg = sysv_classify_agg(e->va_arg_type, cls);
                         }
-                        IRValue slot = emit_alloca(fn, sz < 8 ? 8 : sz, 8, 1, e->loc);
+                        IRValue slot = emit_alloca_ty(fn, e->va_arg_type, e->loc);
                         IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
                         inst.dst = new_value(fn);
                         inst.width = 8;
@@ -6427,9 +6744,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                         inst.is_float = 0;
                         inst.imm = sz;
                         inst.force_stack = (nreg == 0);
-                        inst.align16 = type_needs_stack_align16(e->va_arg_type);
+                        inst.align16 = type_stack_align(e->va_arg_type);
                         inst.float_imm = (nreg > 0 && cls[0] == SYSV_CLS_SSE ? 1 : 0) |
                                          (nreg > 1 && cls[1] == SYSV_CLS_SSE ? 2 : 0);
+                        /* nreg==1 SSE is one XMM/YMM (SSE+SSEUP), not two
+                         * eightbytes.  Distinguishes `struct { __m128 }` from
+                         * `{double; long}` which also has float_imm==1. */
+                        if (nreg == 1 && cls[0] == SYSV_CLS_SSE && sz >= 16)
+                            inst.float_imm |= 0x10;
                         inst.call_nargs = 2;
                         inst.call_args[1] = addr;
                         ir_inst_array_push(&fn->insts, inst);
@@ -6539,7 +6861,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         IRValue *arg_vals = malloc(IR_CALL_MAX_ARGS * sizeof(IRValue));
         unsigned char *arg_on_stack = malloc(IR_CALL_MAX_ARGS);
-        if (!arg_vals || !arg_on_stack) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        int *arg_nbytes = calloc(IR_CALL_MAX_ARGS, sizeof(int));
+        if (!arg_vals || !arg_on_stack || !arg_nbytes) {
+            fprintf(stderr, "fakecc: OOM\n");
+            exit(1);
+        }
         int nargs = 0;
         memset(arg_on_stack, 0, IR_CALL_MAX_ARGS);
         /* Reserve a slot if the return needs a hidden sret pointer. */
@@ -6560,12 +6886,26 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             ret_nreg_pre = 2;
             ret_in_mem_pre = 0;
         }
+        int is_x87_st0 = sysv_agg_ret_x87(e->type);
+        if (is_x87_st0)
+            ret_in_mem_pre = 0;
+        /* GNU empty structs return in no slot and take no hidden sret
+         * (SysV/GCC).  classify_agg reports MEMORY for size 0, which would
+         * otherwise steal RDI and shift every later argument. */
+        if (type_is_empty_struct(e->type))
+            ret_in_mem_pre = 0;
         int arg_limit = IR_CALL_MAX_ARGS - (ret_in_mem_pre ? 1 : 0);
-        /* Expand aggregates into per-eightbyte SSA args.  Register-class
-         * eightbytes travel in GP/XMM; MEMORY-class eightbytes are forced
-         * onto the stack (SysV). */
+        /* Register-class aggregates expand into per-eightbyte SSA args.
+         * MEMORY-class aggregates are one stack blob (pointer + nbytes)
+         * so huge by-value structs do not explode IR_CALL. */
         int call_used_gp = ret_in_mem_pre ? 1 : 0;
         int call_used_xmm = 0;
+        Type callee_ty = e->u.call.callee->type;
+        while (callee_ty.kind == TY_PTR && callee_ty.pointee)
+            callee_ty = *callee_ty.pointee;
+        int call_variadic = callee_ty.kind == TY_FUNC
+            && (callee_ty.func_is_variadic || callee_ty.func_is_unprototyped);
+        int call_nparams = callee_ty.kind == TY_FUNC ? callee_ty.func_nparams : 0;
         for (int i = 0; i < (int)e->u.call.args.len; i++) {
             Expr *arg = e->u.call.args.data[i];
             IRValue av = lower_expr(fn, st, arg);
@@ -6582,14 +6922,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     nreg = sysv_classify_agg(arg->type, cls);
                 }
                 int is_memory = (nreg == 0);
+                /* SysV: unnamed __m256/__m512 to a variadic or unprototyped
+                 * callee are MEMORY — the XMM save area is 16 bytes/slot. */
+                if (!is_memory && call_variadic && i >= call_nparams
+                    && nreg == 1 && cls[0] == SYSV_CLS_SSE && asz >= 32) {
+                    is_memory = 1;
+                    nreg = 0;
+                }
                 if (type_is_empty_struct(arg->type)) {
                     /* GNU empty structs occupy no argument slots. */
                     continue;
                 }
                 if (is_memory && sysv_memory_pass_as_pointer(arg->type)) {
-                    /* Huge MEMORY / va_list: pass a pointer to a stack copy.
-                     * Matches libc's va_list pointer and avoids exploding IR
-                     * on 100KB+ by-value structs. */
+                    /* va_list: pass a pointer to a stack copy (array decay). */
                     int copy_sz = asz;
                     if (copy_sz < 1) copy_sz = 1;
                     IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
@@ -6608,21 +6953,27 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     continue;
                 }
                 if (is_memory) {
-                    /* SysV MEMORY class: pass (size+7)/8 INTEGER eightbytes
-                     * on the stack, never in registers. */
-                    if (asz < 0) asz = 0;
-                    nreg = (asz + 7) / 8;
-                    if (nreg < 1) nreg = 1;
+                    /* SysV MEMORY: copy the object onto the outgoing stack.
+                     * One IR arg (pointer to the source) plus a blob flag. */
+                    if (nargs >= arg_limit) {
+                        fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                                IR_CALL_MAX_ARGS);
+                        exit(1);
+                    }
+                    arg_vals[nargs] = av;
+                    arg_on_stack[nargs] = (unsigned char)(sysv_stack_arg_flags(1, arg->type)
+                                                          | CALL_ARG_BLOB);
+                    arg_nbytes[nargs] = asz > 0 ? asz : 1;
+                    nargs++;
+                    continue;
                 }
                 int need_gp = 0, need_fp = 0;
-                if (!is_memory) {
-                    for (int k = 0; k < nreg; k++) {
-                        if (cls[k] == SYSV_CLS_SSE) need_fp++;
-                        else need_gp++;
-                    }
+                for (int k = 0; k < nreg; k++) {
+                    if (cls[k] == SYSV_CLS_SSE) need_fp++;
+                    else need_gp++;
                 }
-                int fits_in_regs = !is_memory
-                    && (call_used_gp + need_gp <= 6 && call_used_xmm + need_fp <= 8);
+                int fits_in_regs = (call_used_gp + need_gp <= 6
+                                    && call_used_xmm + need_fp <= 8);
                 if (fits_in_regs) {
                     call_used_gp += need_gp;
                     call_used_xmm += need_fp;
@@ -6630,11 +6981,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 SysVRegClass *acls = malloc((size_t)nreg * sizeof(SysVRegClass));
                 IRValue *ebs = malloc((size_t)nreg * sizeof(IRValue));
                 if (!acls || !ebs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-                if (is_memory) {
-                    for (int k = 0; k < nreg; k++) acls[k] = SYSV_CLS_INTEGER;
-                } else {
-                    for (int k = 0; k < nreg; k++) acls[k] = cls[k];
-                }
+                for (int k = 0; k < nreg; k++) acls[k] = cls[k];
                 load_agg_regs(fn, av, asz, nreg, acls, ebs, e->loc);
                 for (int k = 0; k < nreg; k++) {
                     if (nargs >= arg_limit) {
@@ -6643,9 +6990,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                         exit(1);
                     }
                     arg_vals[nargs] = ebs[k];
-                    arg_on_stack[nargs] = !fits_in_regs;
-                    if (!fits_in_regs && k == 0 && type_needs_stack_align16(arg->type))
-                        arg_on_stack[nargs] |= 2;
+                    arg_on_stack[nargs] = !fits_in_regs
+                        ? sysv_stack_arg_flags(1, arg->type) : 0;
+                    if (k != 0 && arg_on_stack[nargs])
+                        arg_on_stack[nargs] = CALL_ARG_STACK; /* only first eightbyte aligns */
                     nargs++;
                 }
                 free(acls);
@@ -6683,21 +7031,33 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             /* Pin the slot (alloca_bytes > 0) even for size-0 types such as
              * empty unions — codegen's IR_ADDR requires a pinned alloca. */
             if (total < 1) total = 1;
-            IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
+            IRValue slot = emit_alloca_ty(fn, e->type, e->loc);
             sret_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
         IRValue slot_addr = -1;
-        if (is_ret_struct && ret_nreg > 0) {
+        if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
             int total = type_size(e->type);
             if (total < 1) total = 1;
-            IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
+            IRValue slot = emit_alloca_ty(fn, e->type, e->loc);
             slot_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
-        IRValue v = ret_in_mem ? sret_addr
-                  : (is_ret_struct && ret_nreg > 0) ? slot_addr
-                  : (is_void ? -1 : new_value(fn));
+        IRValue v;
+        if (ret_in_mem) {
+            v = sret_addr;
+        } else if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
+            v = slot_addr;
+        } else if (is_void) {
+            v = -1;
+        } else if (type_is_empty_struct(e->type)) {
+            /* Dummy empty object; the call itself is void-like (no dest). */
+            IRValue slot = emit_alloca(fn, 1, 8, 1, e->loc);
+            v = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        } else {
+            v = new_value(fn);
+        }
         IRValue ret_lo = -1, ret_hi = -1;
         int is_cld_ret = type_is_complex_ldouble(e->type);
+        int is_x87_ret = is_cld_ret || is_x87_st0;
         if (is_ret_struct && ret_nreg > 0 && !is_cld_ret) {
             ret_lo = new_value(fn);
             if (ret_nreg > 1) ret_hi = new_value(fn);
@@ -6707,13 +7067,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         memset(&inst, 0, sizeof(inst));
         inst.op = IR_CALL;
         inst.dst = ret_in_mem ? -1
-                 : is_cld_ret ? -1
+                 : is_x87_ret ? -1
                  : (is_ret_struct && ret_nreg > 0) ? ret_lo
-                 : v;
-        inst.a = is_cld_ret ? slot_addr : -1;
+                 : (type_is_empty_struct(e->type) ? -1 : v);
+        inst.a = is_x87_ret ? slot_addr : -1;
         inst.b = ret_hi;   /* second return eightbyte, or -1 */
-        inst.x87_pair = is_cld_ret;
-        inst.imm = 0;
+        inst.x87_pair = is_x87_ret;
+        inst.imm = is_x87_st0 ? 16 : (is_cld_ret ? 32 : 0);
         inst.loc = e->loc;
         inst.call_name = NULL;
         inst.call_callee = -1;
@@ -6800,17 +7160,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             for (int i = 0; i < nargs; i++) {
                 inst.call_args[i + 1] = arg_vals[i];
                 inst.call_arg_on_stack[i + 1] = arg_on_stack[i];
+                inst.call_arg_nbytes[i + 1] = arg_nbytes[i];
             }
         } else {
             for (int i = 0; i < nargs; i++) {
                 inst.call_args[i] = arg_vals[i];
                 inst.call_arg_on_stack[i] = arg_on_stack[i];
+                inst.call_arg_nbytes[i] = arg_nbytes[i];
             }
         }
         /* Register-returned structs: result eightbytes land in dst(/b); the
          * expression value is still the slot address.  MEMORY structs: value
          * is the sret pointer (width 8). */
-        if (is_cld_ret) {
+        if (is_x87_ret) {
             inst.width = 8;
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
@@ -6821,17 +7183,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             emit_inst_w(fn, IR_STORE, -1, keep, slot_addr, 0, 8, 1, e->loc);
             free(arg_vals);
             free(arg_on_stack);
+            free(arg_nbytes);
             return v;
         }
         if (is_ret_struct && ret_nreg > 0) {
             /* Result eightbytes are INTEGER (RAX/RDX) or SSE (XMM0/XMM1).
-             * Mark float class on the SSA results so codegen picks XMM. */
-            inst.width = 8;
+             * Mark float class on the SSA results so codegen picks XMM.
+             * A 16-byte SSE+SSEUP vector is one XMM (width 16, kind 4). */
+            int vecw = sysv_sse_vec_bytes(ret_nreg, type_size(e->type), ret_cls);
+            inst.width = vecw ? vecw : 8;
             inst.is_float = (ret_cls[0] == SYSV_CLS_SSE);
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
-            set_value_type(fn, ret_lo, 8, 1);
-            if (ret_cls[0] == SYSV_CLS_SSE) set_value_float(fn, ret_lo, 1);
+            set_value_type(fn, ret_lo, vecw ? vecw : 8, vecw ? 0 : 1);
+            if (ret_cls[0] == SYSV_CLS_SSE)
+                set_value_float(fn, ret_lo, vecw ? 4 : 1);
             if (ret_hi >= 0) {
                 set_value_type(fn, ret_hi, 8, 1);
                 if (ret_cls[1] == SYSV_CLS_SSE) set_value_float(fn, ret_hi, 1);
@@ -6841,6 +7207,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                            ret_cls, ebs, e->loc);
             free(arg_vals);
             free(arg_on_stack);
+            free(arg_nbytes);
             return slot_addr;
         }
         inst.width = ret_in_mem ? 8
@@ -6853,9 +7220,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 set_value_float(fn, v, 1);
         } else if (ret_in_mem) {
             set_value_type(fn, v, 8, 1);
+        } else if (type_is_empty_struct(e->type)) {
+            set_value_type(fn, v, 8, 1);
         }
         free(arg_vals);
         free(arg_on_stack);
+        free(arg_nbytes);
         return v;
     }
     case EX_ADDR: {
@@ -6927,74 +7297,48 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int bit_width = 0, bit_offset = 0, unit_width = 0, is_be_bf = 0, m_is_unsigned = 0;
         int is_bf = member_bitfield(e, &bit_width, &bit_offset, &unit_width, &is_be_bf, &m_is_unsigned);
         int is_be = member_struct_be(e);
-        /* Bitfields are loaded as their storage unit (e.g. 4-byte int), then
-         * shifted/masked to the member's declared width below. */
-        int w = is_bf ? (unit_width ? unit_width : 4)
-                      : (e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4));
-        int u = is_bf ? 1 : e->type.is_unsigned;  /* bitfields read as unsigned unit */
-        IRValue v = new_value(fn);
-        emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
-        mark_last_volatile(fn, e->type.is_volatile);
-        if (!is_bf && is_be && (w == 2 || w == 4 || w == 8)
-            && e->type.kind != TY_STRUCT && e->type.kind != TY_ARRAY)
-            v = emit_bswap_val(fn, v, w, e->loc);
-        if (is_bf && is_be) {
-            v = emit_bswap_val(fn, v, w, e->loc);
-        }
         if (is_bf) {
-            /* Extract the bitfield: v = (v >> bit_offset) & ((1<<bit_width)-1). */
-            if (bit_offset > 0) {
-                IRValue s = new_value(fn);
-                emit_inst_w(fn, IR_CONST, s, -1, -1, bit_offset, 8, 1, e->loc);
-                IRValue shifted = new_value(fn);
-                emit_inst_w(fn, IR_SHR, shifted, v, s, 0, w, 1, e->loc);
-                v = shifted;
-            }
-            if (bit_width < w * 8) {
-                int is_signed_bf = (!m_is_unsigned && !e->type.is_bool);
-                if (e->type.enum_id > 0) {
-                    is_signed_bf = 0;
-                    if (g_ir_tu && (size_t)(e->type.enum_id - 1) < g_ir_tu->enums.len) {
-                        const EnumDef *ed = &g_ir_tu->enums.data[e->type.enum_id - 1];
-                        for (int k = 0; k < ed->num_constants; k++) {
-                            if (ed->constants[k].value < 0) {
-                                is_signed_bf = 1;
-                                break;
-                            }
+            BFUnit unit = emit_bf_load(fn, addr, bit_offset, bit_width,
+                                       unit_width, is_be_bf, e->loc);
+            int w = bf_work_width(&unit);
+            IRValue v = emit_bf_extract(fn, unit, bit_offset, bit_width, e->loc);
+            mark_last_volatile(fn, e->type.is_volatile);
+            int u = 1;
+            int is_signed_bf = (!m_is_unsigned && !e->type.is_bool);
+            if (e->type.enum_id > 0) {
+                is_signed_bf = 0;
+                if (g_ir_tu && (size_t)(e->type.enum_id - 1) < g_ir_tu->enums.len) {
+                    const EnumDef *ed = &g_ir_tu->enums.data[e->type.enum_id - 1];
+                    int k;
+                    for (k = 0; k < ed->num_constants; k++) {
+                        if (ed->constants[k].value < 0) {
+                            is_signed_bf = 1;
+                            break;
                         }
                     }
                 }
-                if (is_signed_bf) {
-                    /* A signed bitfield holds a two's-complement value in
-                     * bit_width bits: shift it up to the unit's sign bit and
-                     * back down arithmetically.  Masking alone would read
-                     * `int a : 3` holding -3 back as 5. */
-                    int shift = w * 8 - bit_width;
-                    IRValue s = new_value(fn);
-                    emit_inst_w(fn, IR_CONST, s, -1, -1, shift, 8, 1, e->loc);
-                    /* The left shift is tagged signed so its result is
-                     * sign-extended in the register — the arithmetic shift
-                     * below reads the full 64-bit value. */
-                    IRValue up = new_value(fn);
-                    emit_inst_w(fn, IR_SHL, up, v, s, 0, w, 0, e->loc);
-                    IRValue down = new_value(fn);
-                    emit_inst_w(fn, IR_SHR, down, up, s, 0, w, 0, e->loc);
-                    v = down;
-                    u = 0;
-                } else {
-                    int64_t mask = bitfield_mask64(bit_width);
-                    IRValue m = new_value(fn);
-                    emit_inst_w(fn, IR_CONST, m, -1, -1, mask, w, 1, e->loc);
-                    IRValue masked = new_value(fn);
-                    emit_inst_w(fn, IR_BAND, masked, v, m, 0, w, 1, e->loc);
-                    v = masked;
-                    u = 1;
-                }
             }
-            /* Result is a small int; coerce to the member's declared width. */
+            if (is_signed_bf && bit_width < w * 8) {
+                int shift = w * 8 - bit_width;
+                IRValue s = emit_iconst_w(fn, shift, 8, 1, e->loc);
+                IRValue up = new_value(fn);
+                emit_inst_w(fn, IR_SHL, up, v, s, 0, w, 0, e->loc);
+                IRValue down = new_value(fn);
+                emit_inst_w(fn, IR_SHR, down, up, s, 0, w, 0, e->loc);
+                v = down;
+                u = 0;
+            }
             return coerce(fn, v, w, u, e->type.width ? e->type.width : 4,
                           u, e->loc);
         }
+        int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+        int u = e->type.is_unsigned;
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, w, u, e->loc);
+        mark_last_volatile(fn, e->type.is_volatile);
+        if (is_be && (w == 2 || w == 4 || w == 8)
+            && e->type.kind != TY_STRUCT && e->type.kind != TY_ARRAY)
+            v = emit_bswap_val(fn, v, w, e->loc);
         if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
         return v;
     }
@@ -7308,61 +7652,24 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int bf_width = 0, bf_offset = 0, bf_unit = 0, is_be = 0, m_is_unsigned = 0;
         if (lv->kind == EX_MEMBER
             && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be, &m_is_unsigned)) {
-            int uw = bf_unit ? bf_unit : 4;
+            BFUnit unit = emit_bf_load(fn, addr, bf_offset, bf_width, bf_unit, is_be, e->loc);
+            int uw = bf_work_width(&unit);
             int64_t mask = bitfield_mask64(bf_width);
-            /* Load the full storage unit. */
-            IRValue unit = new_value(fn);
-            emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
-            if (is_be) unit = emit_bswap_val(fn, unit, uw, e->loc);
-            /* Extract the old bitfield value: (unit >> bf_offset) & mask. */
-            IRValue old_bf;
-            if (bf_offset > 0) {
-                IRValue sh = new_value(fn);
-                emit_inst_w(fn, IR_CONST, sh, -1, -1, bf_offset, 8, 1, e->loc);
-                IRValue shifted = new_value(fn);
-                emit_inst_w(fn, IR_SHR, shifted, unit, sh, 0, uw, 1, e->loc);
-                old_bf = shifted;
-            } else {
-                old_bf = unit;
-            }
-            IRValue m_mask = new_value(fn);
-            emit_inst_w(fn, IR_CONST, m_mask, -1, -1, mask, uw, 1, e->loc);
-            IRValue old_bits = new_value(fn);
-            emit_inst_w(fn, IR_BAND, old_bits, old_bf, m_mask, 0, uw, 1, e->loc);
+            IRValue old_bits = emit_bf_extract(fn, unit, bf_offset, bf_width, e->loc);
             IRValue old_val = bitfield_to_promoted(fn, old_bits, uw, bf_width,
                                                    m_is_unsigned, lv->type.is_bool,
                                                    e->loc);
             int pw = uw > 4 ? uw : 4;
             int pu = (!m_is_unsigned && !lv->type.is_bool) ? 0 : 1;
-            /* Compute new value = (promoted old +/- 1), then mask for the store. */
-            IRValue one = new_value(fn);
-            emit_inst_w(fn, IR_CONST, one, -1, -1, 1, pw, pu, e->loc);
+            IRValue one = emit_iconst_w(fn, 1, pw, pu, e->loc);
             IRValue new_val = new_value(fn);
             emit_inst_w(fn, is_inc ? IR_ADD : IR_SUB, new_val, old_val, one, 0, pw, pu, e->loc);
             IRValue new_u = coerce(fn, new_val, pw, pu, uw, 1, e->loc);
+            IRValue m_mask = emit_iconst_w(fn, mask, uw, 1, e->loc);
             IRValue new_masked = new_value(fn);
             emit_inst_w(fn, IR_BAND, new_masked, new_u, m_mask, 0, uw, 1, e->loc);
-            /* Shift new_masked into position. */
-            IRValue shifted_new;
-            if (bf_offset > 0) {
-                IRValue sh2 = new_value(fn);
-                emit_inst_w(fn, IR_CONST, sh2, -1, -1, bf_offset, 8, 1, e->loc);
-                shifted_new = new_value(fn);
-                emit_inst_w(fn, IR_SHL, shifted_new, new_masked, sh2, 0, uw, 1, e->loc);
-            } else {
-                shifted_new = new_masked;
-            }
-            /* Clear the bitfield in the unit and OR in the new value. */
-            IRValue clr = new_value(fn);
-            emit_inst_w(fn, IR_CONST, clr, -1, -1, ~(mask << bf_offset), uw, 1, e->loc);
-            IRValue unit_cleared = new_value(fn);
-            emit_inst_w(fn, IR_BAND, unit_cleared, unit, clr, 0, uw, 1, e->loc);
-            IRValue unit_new = new_value(fn);
-            emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_new, 0, uw, 1, e->loc);
-            IRValue to_store = unit_new;
-            if (is_be) to_store = emit_bswap_val(fn, unit_new, uw, e->loc);
-            emit_inst_w(fn, IR_STORE_PTR, -1, addr, to_store, 0, uw, 1, e->loc);
-            /* Return old or new bitfield value as a promoted integer. */
+            unit = emit_bf_insert(fn, unit, new_masked, bf_offset, bf_width, e->loc);
+            emit_bf_store(fn, addr, unit, is_be, e->loc);
             if (is_prefix) {
                 IRValue neu = bitfield_to_promoted(fn, new_masked, uw, bf_width,
                                                    m_is_unsigned, lv->type.is_bool,
@@ -7405,17 +7712,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (type_is_i128(lv->type)) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
-            Expr fake_bin;
-            memset(&fake_bin, 0, sizeof(fake_bin));
-            fake_bin.kind = EX_BINOP;
-            fake_bin.type = lv->type;
-            fake_bin.loc = e->loc;
-            fake_bin.u.bin.op = op;
-            fake_bin.u.bin.l = lv;
-            fake_bin.u.bin.r = e->u.comp.rvalue;
-            IRValue res = lower_expr(fn, st, &fake_bin);
+            IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
+            IRValue res = lower_i128_binop(fn, addr, rhs, lv->type,
+                                           e->u.comp.rvalue->type, op,
+                                           lv->type, e->loc);
             emit_struct_copy(fn, addr, res, 16, e->loc);
-            return addr;
+            return res;
         }
         if (lv->type.kind == TY_STRUCT && lv->type.tag && strncmp(lv->type.tag, "__complex_", 10) == 0) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
@@ -7427,22 +7729,31 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             fake_bin.u.bin.op = op;
             fake_bin.u.bin.l = lv;
             fake_bin.u.bin.r = e->u.comp.rvalue;
-            IRValue res_addr = lower_complex_binop(fn, st, &fake_bin, lv->type, e->u.comp.rvalue->type, op);
+            IRValue res_addr = lower_complex_binop(fn, st, &fake_bin, lv->type,
+                                                   e->u.comp.rvalue->type, op,
+                                                   addr);
             emit_struct_copy(fn, addr, res_addr, type_size(lv->type), e->loc);
-            return addr;
+            return res_addr;
         }
         if (lv->type.is_decimal) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
-            Expr fake_bin;
-            memset(&fake_bin, 0, sizeof(fake_bin));
-            fake_bin.kind = EX_BINOP;
-            fake_bin.type = lv->type;
-            fake_bin.loc = e->loc;
-            fake_bin.u.bin.op = op;
-            fake_bin.u.bin.l = lv;
-            fake_bin.u.bin.r = e->u.comp.rvalue;
-            IRValue res = lower_expr(fn, st, &fake_bin);
             int w = lv->type.width ? lv->type.width : 8;
+            IRValue oldv;
+            if (w == 16) {
+                oldv = i128_alloc(fn, e->loc);
+                emit_struct_copy(fn, oldv, addr, 16, e->loc);
+            } else {
+                oldv = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, w, 0, e->loc);
+                set_value_decimal(fn, oldv);
+            }
+            IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
+            rhs = convert_to_decimal(fn, rhs, e->u.comp.rvalue->type, lv->type, e->loc);
+            int aop = 0;
+            if (op == BOP_SUB) aop = 1;
+            else if (op == BOP_MUL) aop = 2;
+            else if (op == BOP_DIV) aop = 3;
+            IRValue res = emit_dfp_arith(fn, w, aop, oldv, rhs, e->loc);
             if (w == 16)
                 emit_struct_copy(fn, addr, res, 16, e->loc);
             else {
@@ -7512,20 +7823,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (!is_float && !is_ptr && lv->kind == EX_MEMBER
             && member_bitfield(lv, &bf_width, &bf_offset, &bf_unit, &is_be, &m_is_unsigned)) {
             IRValue rhs = lower_expr(fn, st, e->u.comp.rvalue);
-            int uw = bf_unit ? bf_unit : 4;
+            BFUnit unit = emit_bf_load(fn, addr, bf_offset, bf_width, bf_unit, is_be, e->loc);
+            int uw = bf_work_width(&unit);
             int64_t mask = bitfield_mask64(bf_width);
-            IRValue unit = new_value(fn);
-            emit_inst_w(fn, IR_LOAD_PTR, unit, addr, -1, 0, uw, 1, e->loc);
-            if (is_be) unit = emit_bswap_val(fn, unit, uw, e->loc);
-            IRValue extracted;
-            if (bf_offset > 0) {
-                IRValue sh = new_value(fn);
-                emit_inst_w(fn, IR_CONST, sh, -1, -1, bf_offset, 8, 1, e->loc);
-                extracted = new_value(fn);
-                emit_inst_w(fn, IR_SHR, extracted, unit, sh, 0, uw, 1, e->loc);
-            } else {
-                extracted = unit;
-            }
+            IRValue extracted = emit_bf_extract(fn, unit, bf_offset, bf_width, e->loc);
             /* Use the member's *declared* signedness, not the promoted
              * EX_MEMBER type.  An `unsigned int : 6` promotes to signed int
              * as an rvalue, but compound-assign must still extract it as
@@ -7533,17 +7834,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue old_val;
             if (!m_is_unsigned && !lv->type.is_bool && bf_width < uw * 8) {
                 int shift = uw * 8 - bf_width;
-                IRValue s = new_value(fn);
-                emit_inst_w(fn, IR_CONST, s, -1, -1, shift, 8, 1, e->loc);
+                IRValue s = emit_iconst_w(fn, shift, 8, 1, e->loc);
                 IRValue up = new_value(fn);
                 emit_inst_w(fn, IR_SHL, up, extracted, s, 0, uw, 0, e->loc);
                 old_val = new_value(fn);
                 emit_inst_w(fn, IR_SHR, old_val, up, s, 0, uw, 0, e->loc);
             } else {
-                IRValue m_mask = new_value(fn);
-                emit_inst_w(fn, IR_CONST, m_mask, -1, -1, mask, uw, 1, e->loc);
-                old_val = new_value(fn);
-                emit_inst_w(fn, IR_BAND, old_val, extracted, m_mask, 0, uw, 1, e->loc);
+                old_val = extracted;
             }
             int cw = (uw > 4) ? uw : 4;
             int cu = (m_is_unsigned && bf_width >= 32) ? 1 : 0;
@@ -7555,28 +7852,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue rhs_p = coerce(fn, rhs, rw, ru, cw, cu, e->loc);
             IRValue neu = emit_bin_w(fn, ir_op, old_p, rhs_p, cw, cu, e->loc);
             IRValue neu_u = coerce(fn, neu, cw, cu, uw, 1, e->loc);
-            IRValue m_mask2 = new_value(fn);
-            emit_inst_w(fn, IR_CONST, m_mask2, -1, -1, mask, uw, 1, e->loc);
+            IRValue m_mask2 = emit_iconst_w(fn, mask, uw, 1, e->loc);
             IRValue new_masked = new_value(fn);
             emit_inst_w(fn, IR_BAND, new_masked, neu_u, m_mask2, 0, uw, 1, e->loc);
-            IRValue shifted_new;
-            if (bf_offset > 0) {
-                IRValue sh2 = new_value(fn);
-                emit_inst_w(fn, IR_CONST, sh2, -1, -1, bf_offset, 8, 1, e->loc);
-                shifted_new = new_value(fn);
-                emit_inst_w(fn, IR_SHL, shifted_new, new_masked, sh2, 0, uw, 1, e->loc);
-            } else {
-                shifted_new = new_masked;
-            }
-            IRValue clr = new_value(fn);
-            emit_inst_w(fn, IR_CONST, clr, -1, -1, ~(mask << bf_offset), uw, 1, e->loc);
-            IRValue unit_cleared = new_value(fn);
-            emit_inst_w(fn, IR_BAND, unit_cleared, unit, clr, 0, uw, 1, e->loc);
-            IRValue unit_new = new_value(fn);
-            emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_new, 0, uw, 1, e->loc);
-            IRValue to_store = unit_new;
-            if (is_be) to_store = emit_bswap_val(fn, unit_new, uw, e->loc);
-            emit_inst_w(fn, IR_STORE_PTR, -1, addr, to_store, 0, uw, 1, e->loc);
+            unit = emit_bf_insert(fn, unit, new_masked, bf_offset, bf_width, e->loc);
+            emit_bf_store(fn, addr, unit, is_be, e->loc);
             IRValue ret = bitfield_to_promoted(fn, new_masked, uw, bf_width,
                                                m_is_unsigned, lv->type.is_bool,
                                                e->loc);
@@ -7592,13 +7872,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         emit_inst_w(fn, IR_LOAD_PTR, old, addr, -1, 0, lw, lu, e->loc);
         if (is_float) set_value_float(fn, old, 1);
         IRValue scaled;
+        int op_w = is_float ? lw : arith_w;
+        int op_u = is_float ? lu : arith_u;
         if (is_float) {
-            /* The right operand joins the lvalue's float type, whether it
-             * arrives as an int or as a float of another width. */
+            /* C99 6.5.16.2: E1 op= E2 is E1 = E1 op E2 (E1 once), so the
+             * usual arithmetic conversions apply before the op.  `float f;
+             * f -= 1e20;` is `(float)((double)f - 1e20)`, not a float sub. */
             int rw = get_value_width(fn, rhs);
-            scaled = (get_value_is_float(fn, rhs) && rw == lw)
+            int rf = get_value_is_float(fn, rhs);
+            if (rf && rw > op_w) op_w = rw;
+            scaled = (rf && rw == op_w)
                      ? rhs
-                     : convert_numeric(fn, rhs, rw, lw, 0, 1, e->loc);
+                     : convert_numeric(fn, rhs, rw, op_w, 0, 1, e->loc);
         } else if (is_ptr) {
             scaled = scale_rhs(fn, st, rhs, is_ptr, lv->type, op, e->loc);
         } else {
@@ -7608,14 +7893,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                               get_value_is_unsigned(fn, rhs), arith_w, arith_u, e->loc);
         }
         IRValue old_p = old;
-        if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
+        if (is_float && op_w != lw)
+            old_p = convert_numeric(fn, old, lw, op_w, 0, 1, e->loc);
+        else if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
             old_p = coerce(fn, old, lw, lu, arith_w, arith_u, e->loc);
-        IRValue neu = emit_bin_w(fn, ir_op, old_p, scaled,
-                                 is_float ? lw : arith_w,
-                                 is_float ? lu : arith_u, e->loc);
+        IRValue neu = emit_bin_w(fn, ir_op, old_p, scaled, op_w, op_u, e->loc);
         if (is_float) set_value_float(fn, neu, 1);
         IRValue back = neu;
-        if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
+        if (is_float && op_w != lw)
+            back = convert_numeric(fn, neu, op_w, lw, 0, 1, e->loc);
+        else if (!is_float && !is_ptr && (arith_w != lw || arith_u != lu))
             back = coerce(fn, neu, arith_w, arith_u, lw, lu, e->loc);
         if (lv->type.is_bool) {
             back = bool_normalize(fn, back, lw, lu, 0, e->loc);
@@ -7769,6 +8056,10 @@ static IRValue lower_condition(IRFunction *fn, IRSymTable *st, const Expr *e) {
             cmp_i = emit_bin_w(fn, IR_NE, vi, zero, elem_sz, 1, e->loc);
         }
         return emit_bin_w(fn, IR_BOR, cmp_r, cmp_i, 4, 0, e->loc);
+    }
+    if (e->type.kind == TY_FLOAT && !e->type.is_vector) {
+        IRValue v = lower_expr(fn, st, e);
+        return cbr_from_scalar(fn, v, e->loc);
     }
     return lower_expr(fn, st, e);
 }
@@ -8155,6 +8446,11 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
              * attach its link-time fixup to this global. */
             IRGlobal *sg = ir_module_push_global(g_ir_module, mangled, sz, bytes,
                                                  0, 1, 0, s->loc);
+            {
+                int al = (int)type_align(dty);
+                if (s->u.decl.align > al) al = s->u.decl.align;
+                if (al > 0) sg->align = al;
+            }
             if (s->u.decl.init) {
                 pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
                           s->u.decl.name, s->loc, sg);
@@ -8213,7 +8509,12 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             /* A pinned alloca must reserve at least 1 byte so codegen can
              * form its address (empty unions/structs have size 0). */
             if (total < 1) total = 1;
-            v = emit_alloca(fn, total, dw, du, s->loc);
+            int al = (int)type_align(dty);
+            if (s->u.decl.align > al) al = s->u.decl.align;
+            if (dty.kind == TY_STRUCT || dty.is_vector || al >= 16)
+                v = emit_alloca_aligned(fn, total, al, s->loc);
+            else
+                v = emit_alloca(fn, total, dw, du, s->loc);
         } else {
             v = new_value(fn);
             emit_inst_w(fn, IR_ALLOCA, v, -1, -1, 0, dw, du, s->loc);
@@ -8334,7 +8635,13 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             /* GNU C `return;` in a non-void function: typed zero. */
             int dw = fn->ret_width, du = fn->ret_is_unsigned;
             if (fn->ret_is_struct) {
-                if (fn->ret_reg_n > 0) {
+                if (fn->ret_x87_bytes > 0) {
+                    IRValue slot = emit_alloca(fn, fn->ret_x87_bytes, 16, 1, s->loc);
+                    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, s->loc);
+                    emit_inst_w(fn, IR_RETURN, -1, addr, -1, fn->ret_x87_bytes,
+                                8, 1, s->loc);
+                    fn->insts.data[fn->insts.len - 1].x87_pair = 1;
+                } else if (fn->ret_reg_n > 0) {
                     IRValue z = new_value(fn);
                     emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 8, 1, s->loc);
                     IRValue hi = -1;
@@ -8358,8 +8665,10 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             }
         } else if (fn->ret_is_struct) {
             IRValue v = lower_expr(fn, st, s->u.value);
-            if (fn->ret_is_complex_ld) {
-                emit_inst_w(fn, IR_RETURN, -1, v, -1, 0, 8, 1, s->loc);
+            if (fn->ret_is_complex_ld || fn->ret_x87_bytes > 0) {
+                emit_inst_w(fn, IR_RETURN, -1, v, -1,
+                            fn->ret_x87_bytes ? fn->ret_x87_bytes : 32,
+                            8, 1, s->loc);
                 fn->insts.data[fn->insts.len - 1].x87_pair = 1;
             } else if (fn->ret_reg_n > 0) {
                 /* SysV register return: load eightbytes into RAX(/RDX) or
@@ -8730,11 +9039,23 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
 /* Find a previously-packed global by name (for const-global references in
  * initializers, e.g. `.regs = ALLOCATABLE_REGS`).  Returns NULL if not found. */
 static const IRGlobal *find_packed_global(const IRModule *m, const char *name) {
+    if (!m || !name) return NULL;
     for (size_t i = 0; i < m->globals.len; i++)
         if (m->globals.data[i].name
             && strcmp(m->globals.data[i].name, name) == 0)
             return &m->globals.data[i];
     return NULL;
+}
+
+/* Static locals are stored as mangled `fn.varname` globals.  Initializers
+ * still name the C identifier (`static int *hx = gx`). */
+static const IRGlobal *find_init_global(const IRModule *ir, const char *name) {
+    const IRGlobal *g = find_packed_global(ir, name);
+    if (g) return g;
+    if (!g_ir_cur_fd || !g_ir_cur_fd->name || !name) return NULL;
+    char mangled[256];
+    snprintf(mangled, sizeof mangled, "%s.%s", g_ir_cur_fd->name, name);
+    return find_packed_global(ir, mangled);
 }
 
 /* Globals created while packing an initializer are queued instead of pushed
@@ -8779,6 +9100,8 @@ static void flush_pending_globals(IRModule *m) {
                                              g_pending_globals[i].bytes,
                                              g_pending_globals[i].is_readonly,
                                              1, 0, g_pending_globals[i].loc);
+        if (g_pending_globals[i].size >= 16 && (g_pending_globals[i].size % 16) == 0)
+            g->align = g_pending_globals[i].size >= 32 ? 32 : 16;
         /* Transfer any fixups collected while packing the literal's own init.
          * tmp->init_bytes aliases the buffer the real global now owns, so it
          * must not be freed here. */
@@ -9201,7 +9524,8 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
         return eval_global_addr_offset(e->u.cast.operand, out_sym, out_offset);
     }
     if (e->kind == EX_VAR) {
-        *out_sym = e->u.var.name;
+        const IRGlobal *sg = find_init_global(g_ir_module, e->u.var.name);
+        *out_sym = sg ? sg->name : e->u.var.name;
         *out_offset = 0;
         return 1;
     }
@@ -9231,7 +9555,8 @@ static int eval_global_addr_offset(const Expr *e, const char **out_sym, int *out
         while (sub && sub->kind == EX_CAST) sub = sub->u.cast.operand;
         if (!sub) return 0;
         if (sub->kind == EX_VAR) {
-            *out_sym = sub->u.var.name;
+            const IRGlobal *sg = find_init_global(g_ir_module, sub->u.var.name);
+            *out_sym = sg ? sg->name : sub->u.var.name;
             *out_offset = 0;
             return 1;
         }
@@ -9728,33 +10053,16 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                     int uw = type_size(sm->type);
                     if (uw > 8) uw = 8;
                     if (uw < 1) uw = 1;
-                    if (sm->bit_offset + sm->bit_width > uw * 8
-                        && sm->bit_offset + sm->bit_width <= 64)
+                    if (sm->bit_offset + sm->bit_width > uw * 8)
                         uw = 8;
-                    uint64_t mask = bitfield_mask64(sm->bit_width);
+                    uint64_t mask = (uint64_t)bitfield_mask64(sm->bit_width);
                     uint64_t val_masked = ((uint64_t)fv) & mask;
-                    const StructDef *sd = (ty->kind == TY_STRUCT && ty->tag && g_ir_structs) ?
-                        struct_registry_find_c(g_ir_structs, ty->tag) : NULL;
-                    if (sd && sd->is_big_endian) {
-                        uint64_t unit = 0;
-                        for (int b = 0; b < uw; b++) {
-                            unit = (unit << 8) | (uint8_t)bytes[sm->offset + b];
-                        }
-                        unit &= ~(mask << sm->bit_offset);
-                        unit |= (val_masked << sm->bit_offset);
-                        for (int b = 0; b < uw; b++) {
-                            bytes[sm->offset + b] = (unit >> ((uw - 1 - b) * 8)) & 0xff;
-                        }
-                    } else {
-                        uint64_t unit = 0;
-                        memcpy(&unit, bytes + sm->offset, uw);
-                        unit &= ~(mask << sm->bit_offset);
-                        unit |= (val_masked << sm->bit_offset);
-                        memcpy(bytes + sm->offset, &unit, uw);
-                    }
+                    pack_bitfield_host(bytes, sz, sm->offset, sm->bit_offset,
+                                       sm->bit_width, val_masked,
+                                       sd->is_big_endian, uw);
                 } else {
                     int msz = type_size(sm->type);
-                    if (msz == 0 && sm->type.kind == TY_ARRAY && sm->type.elem_type) {
+                    if (msz <= 0 && sm->type.kind == TY_ARRAY && sm->type.elem_type) {
                         const Expr *el = e->u.init_list.elements[i];
                         if (el->kind == EX_STR)
                             msz = el->u.str.len + 1;
@@ -9981,7 +10289,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
      * ADDRESS (a link-time constant) — record a fixup so codegen emits a
      * R_X86_64_64 relocation.  Otherwise copy its already-packed bytes. */
     if (e->kind == EX_VAR && ir) {
-        const IRGlobal *src = find_packed_global(ir, e->u.var.name);
+        const IRGlobal *src = find_init_global(ir, e->u.var.name);
         if (src) {
             if (ty->kind == TY_PTR && g) {
                 int off = (int)(bytes - g->init_bytes);
@@ -10146,53 +10454,16 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                     /* Bitfield member: read-modify-write the storage unit so
                      * that we don't overwrite adjacent bitfields sharing the
                      * same storage unit at the same byte offset. */
-                    int uw = type_size(sm->type); /* unit width in bytes */
+                    int uw = type_size(sm->type);
                     if (uw > 8) uw = 8;
                     if (uw < 1) uw = 1;
-                    if (sm->bit_offset + sm->bit_width > uw * 8
-                        && sm->bit_offset + sm->bit_width <= 64)
+                    if (sm->bit_offset + sm->bit_width > uw * 8)
                         uw = 8;
-                    int64_t mask = bitfield_mask64(sm->bit_width);
-                    /* Lower the initializer expression to get the value. */
                     IRValue rv = lower_expr(fn, st, e->u.init_list.elements[i]);
-                    int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                    /* Mask the value to the bitfield width. */
-                    IRValue m_mask = new_value(fn);
-                    emit_inst_w(fn, IR_CONST, m_mask, -1, -1, mask, uw, 1, loc);
-                    IRValue val_masked = new_value(fn);
-                    IRValue rv_coerced = coerce(fn, rv, rw, ru, uw, 1, loc);
-                    emit_inst_w(fn, IR_BAND, val_masked, rv_coerced, m_mask, 0, uw, 1, loc);
-                    /* Shift into position. */
-                    IRValue shifted_val;
-                    if (sm->bit_offset > 0) {
-                        IRValue shift_v = new_value(fn);
-                        emit_inst_w(fn, IR_CONST, shift_v, -1, -1, sm->bit_offset, 8, 1, loc);
-                        shifted_val = new_value(fn);
-                        emit_inst_w(fn, IR_SHL, shifted_val, val_masked, shift_v, 0, uw, 1, loc);
-                    } else {
-                        shifted_val = val_masked;
-                    }
-                    /* Read the current unit value. */
-                    IRValue unit_old = new_value(fn);
-                    emit_inst_w(fn, IR_LOAD_PTR, unit_old, ptr, -1, 0, uw, 1, loc);
-                    if (sd->is_big_endian) {
-                        unit_old = emit_bswap_val(fn, unit_old, uw, loc);
-                    }
-                    /* Clear the bitfield's bits: unit &= ~(mask << bit_offset). */
-                    IRValue clr_mask = new_value(fn);
-                    emit_inst_w(fn, IR_CONST, clr_mask, -1, -1,
-                                ~(mask << sm->bit_offset), uw, 1, loc);
-                    IRValue unit_cleared = new_value(fn);
-                    emit_inst_w(fn, IR_BAND, unit_cleared, unit_old, clr_mask, 0, uw, 1, loc);
-                    /* OR in the new value. */
-                    IRValue unit_new = new_value(fn);
-                    emit_inst_w(fn, IR_BOR, unit_new, unit_cleared, shifted_val, 0, uw, 1, loc);
-                    /* Store back. */
-                    IRValue to_store = unit_new;
-                    if (sd->is_big_endian) {
-                        to_store = emit_bswap_val(fn, unit_new, uw, loc);
-                    }
-                    emit_inst_w(fn, IR_STORE_PTR, -1, ptr, to_store, 0, uw, 1, loc);
+                    BFUnit unit = emit_bf_load(fn, ptr, sm->bit_offset, sm->bit_width,
+                                               uw, sd->is_big_endian, loc);
+                    unit = emit_bf_insert(fn, unit, rv, sm->bit_offset, sm->bit_width, loc);
+                    emit_bf_store(fn, ptr, unit, sd->is_big_endian, loc);
                 } else {
                     lower_init_list(fn, st, ptr, &sm->type,
                                     e->u.init_list.elements[i], loc);
@@ -10313,7 +10584,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     const Type *mt = &sd->members[mi].type;
                     int msz = type_size(*mt);
                     const Expr *el = s->u.decl.init->u.init_list.elements[mi];
-                    if (el && msz == 0 && mt->kind == TY_ARRAY && mt->elem_type) {
+                    if (el && msz <= 0 && mt->kind == TY_ARRAY && mt->elem_type) {
                         if (el->kind == EX_STR)
                             msz = el->u.str.len + 1;
                         else if (el->kind == EX_INIT_LIST)
@@ -10342,6 +10613,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * when an array/struct member decays to a pointer (e.g. `.regs = ARR`). */
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,
                                             0, is_static, is_tls, s->loc);
+        {
+            int al = (int)type_align(s->u.decl.type);
+            if (s->u.decl.align > al) al = s->u.decl.align;
+            if (al > 0) g->align = al;
+        }
         if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);
@@ -10382,8 +10658,13 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                              || type_is_pair16(fd->ret_type));
         irfn.ret_is_bool = fd->ret_type.is_bool;
         irfn.ret_is_complex_ld = type_is_complex_ldouble(fd->ret_type);
+        irfn.ret_x87_bytes = 0;
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
+        irfn.is_constructor = fd->is_constructor;
+        irfn.is_destructor = fd->is_destructor;
+        irfn.ctor_prio = fd->ctor_prio ? fd->ctor_prio : 65535;
+        irfn.dtor_prio = fd->dtor_prio ? fd->dtor_prio : 65535;
         irfn.sret_value = -1;
         irfn.ret_reg_n = 0;
         irfn.ret_reg_cls[0] = 0;
@@ -10405,6 +10686,11 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             /* SysV: `_Complex long double` returns in st0/st1, not sret. */
             irfn.ret_reg_n = 2;
             irfn.ret_width = type_size(fd->ret_type);
+            irfn.ret_x87_bytes = 32;
+        } else if (sysv_agg_ret_x87(fd->ret_type)) {
+            /* SysV: one X87+X87UP object returns in st0, not sret. */
+            irfn.ret_width = type_size(fd->ret_type);
+            irfn.ret_x87_bytes = 16;
         }
         irfn.dbg_vars = NULL;
         irfn.num_dbg_vars = 0;
@@ -10420,8 +10706,8 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          *
          * SysV: MEMORY-class struct returns get a hidden sret pointer as
          * param 0.  Register-class struct returns need no hidden param.
-         * Struct formals ≤16 bytes expand into 1–2 register PARAMs; larger
-         * (MEMORY) formals expand into stack-only eightbyte PARAMs. */
+         * Struct formals ≤16 bytes expand into 1–2 register PARAMs; MEMORY
+         * formals are one stack blob (IR_PARAM with alloca_bytes = size). */
         size_t nparams = fd->params.len;
         IRValue **param_ebs = NULL;
         int *param_nreg = NULL;
@@ -10431,7 +10717,9 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             if (!param_ebs || !param_nreg) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         }
         int next_pidx = 0;
-        if (irfn.ret_is_struct && irfn.ret_reg_n == 0) {
+        if (irfn.ret_is_struct && irfn.ret_reg_n == 0
+            && !type_is_empty_struct(fd->ret_type)
+            && irfn.ret_x87_bytes == 0) {
             irfn.sret_value = new_value(&irfn);
             emit_inst_w(&irfn, IR_PARAM, irfn.sret_value, -1, -1, next_pidx++,
                         8, 1, fd->loc);
@@ -10466,34 +10754,31 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                                 next_pidx++, 8, 1, ploc);
                     if (used_gp < 6) used_gp++;
                 } else if (is_memory) {
+                    /* Incoming stack blob: PARAM dst is LEA [rbp+off]. */
                     int total = type_size(pty);
-                    if (total < 0) total = 0;
-                    nreg = (total + 7) / 8;
-                    if (nreg < 1) nreg = 1;
-                    param_nreg[p] = nreg;
-                    param_ebs[p] = malloc((size_t)nreg * sizeof(IRValue));
+                    if (total < 1) total = 1;
+                    param_nreg[p] = -1;
+                    param_ebs[p] = malloc(sizeof(IRValue));
                     if (!param_ebs[p]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-                    for (int k = 0; k < nreg; k++) {
-                        param_ebs[p][k] = new_value(&irfn);
-                        emit_inst_w(&irfn, IR_PARAM, param_ebs[p][k], -1, -1,
-                                    next_pidx++, 8, 1, ploc);
-                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
-                        if (k == 0 && type_needs_stack_align16(pty))
-                            irfn.insts.data[irfn.insts.len - 1].align16 = 1;
+                    param_ebs[p][0] = new_value(&irfn);
+                    emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
+                                next_pidx++, 8, 1, ploc);
+                    irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
+                    irfn.insts.data[irfn.insts.len - 1].alloca_bytes = total;
+                    {
+                        int al = type_stack_align(pty);
+                        if (al) irfn.insts.data[irfn.insts.len - 1].align16 = al;
                     }
                 } else {
                 int need_gp = 0, need_fp = 0;
-                if (!is_memory) {
-                    for (int k = 0; k < nreg; k++) {
-                        if (cls[k] == SYSV_CLS_SSE) need_fp++;
-                        else need_gp++;
-                    }
+                for (int k = 0; k < nreg; k++) {
+                    if (cls[k] == SYSV_CLS_SSE) need_fp++;
+                    else need_gp++;
                 }
                 /* SysV: an aggregate is passed entirely in registers or
-                 * entirely on the stack.  MEMORY-class and register-class
-                 * that do not fit go on the stack. */
-                int fits = !is_memory
-                    && (used_gp + need_gp <= 6 && used_xmm + need_fp <= 8);
+                 * entirely on the stack.  Register-class that do not fit
+                 * go on the stack as eightbytes. */
+                int fits = (used_gp + need_gp <= 6 && used_xmm + need_fp <= 8);
                 if (fits) {
                     used_gp += need_gp;
                     used_xmm += need_fp;
@@ -10503,15 +10788,24 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 if (!param_ebs[p]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                 for (int k = 0; k < nreg; k++) {
                     param_ebs[p][k] = new_value(&irfn);
-                    int is_sse = !is_memory && (cls[k] == SYSV_CLS_SSE);
+                    int is_sse = (cls[k] == SYSV_CLS_SSE);
+                    int pw = 8;
+                    if (is_sse && nreg == 1) {
+                        int sz = type_size(pty);
+                        if (sz == 8 || sz == 16 || sz == 32 || sz == 64)
+                            pw = sz;
+                    }
                     emit_inst_w(&irfn, IR_PARAM, param_ebs[p][k], -1, -1,
-                                next_pidx++, 8, 1, ploc);
+                                next_pidx++, pw, 1, ploc);
                     if (!fits)
                         irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
-                    if (!fits && k == 0 && type_needs_stack_align16(pty))
-                        irfn.insts.data[irfn.insts.len - 1].align16 = 1;
+                    if (!fits && k == 0) {
+                        int al = type_stack_align(pty);
+                        if (al) irfn.insts.data[irfn.insts.len - 1].align16 = al;
+                    }
                     if (is_sse)
-                        set_value_float(&irfn, param_ebs[p][k], 1);
+                        set_value_float(&irfn, param_ebs[p][k],
+                                        (pw == 16 || pw == 32 || pw == 64) ? 4 : 1);
                 }
                 }
             } else {
@@ -10567,7 +10861,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 /* Pin the slot (alloca_bytes > 0) even for size-0 types
                  * (empty unions): codegen's IR_ADDR requires a pinned alloca. */
                 if (total < 1) total = 1;
-                slot = emit_alloca(&irfn, total, 8, 1, ploc);
+                slot = emit_alloca_ty(&irfn, pty, ploc);
                 IRValue addr = emit_bin_w(&irfn, IR_ADDR, slot, -1, 8, 1, ploc);
                 if (param_nreg[p] > 0) {
                     int n = param_nreg[p];
@@ -10609,7 +10903,7 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             {
                 /* Debug: first IR param index for this formal (sret shifts). */
                 int pidx = 0;
-                if (irfn.ret_is_struct && irfn.ret_reg_n == 0) pidx = 1;
+                if (irfn.sret_value >= 0) pidx = 1;
                 for (size_t q = 0; q < p; q++) {
                     if (param_nreg[q] > 0) pidx += param_nreg[q];
                     else pidx += 1;

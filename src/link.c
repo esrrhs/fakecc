@@ -24,6 +24,7 @@
 #define PT_INTERP       3
 #define PT_DYNAMIC      2
 #define PT_TLS          7
+#define PT_GNU_STACK    0x6474e551
 #define PF_X            1
 #define PF_W            2
 #define PF_R            4
@@ -45,6 +46,8 @@
 #define SHT_DYNAMIC      6
 #define SHT_NOBITS       8
 #define SHT_DYNSYM      11
+#define SHT_INIT_ARRAY  14
+#define SHT_FINI_ARRAY  15
 #define SHT_DYNSTR      18
 
 #define SHF_WRITE        0x1
@@ -53,6 +56,9 @@
 #define SHF_TLS          0x400
 
 #define STB_LOCAL        0
+#define STB_GLOBAL       1
+#define STB_WEAK         2
+#define SHN_COMMON       0xfff2
 #define STT_SECTION      3
 
 #define DT_NULL         0
@@ -71,8 +77,202 @@
 #define DT_RELASZ       8
 #define DT_RELENT       9
 #define DT_RUNPATH      29
+#define DT_FLAGS        30
+#define DT_INIT_ARRAY   25
+#define DT_FINI_ARRAY   26
+#define DT_INIT_ARRAYSZ 27
+#define DT_FINI_ARRAYSZ 28
+#define DF_STATIC_TLS   0x10
 #define R_X86_64_JUMP_SLOT 7
 #define R_X86_64_RELATIVE  8
+#define STT_OBJECT      1
+#define STT_FUNC        2
+#define STT_TLS         6
+
+#define INIT_ARRAY_START 36 /* movabs×2 + test + jz + call/add/dec/jnz */
+#define FINI_ARRAY_START 42 /* save eax + reverse walk + restore edi */
+#define IREL_START       42 /* apply IRELATIVE GOT slots before ctors */
+
+static int reloc_is_tls_gd(uint32_t t) {
+    return t == R_X86_64_TLSGD;
+}
+
+static int reloc_is_tls_ld(uint32_t t) {
+    return t == R_X86_64_TLSLD;
+}
+
+static int reloc_is_copy_kind(uint32_t t) {
+    return t == R_X86_64_PC32 || t == R_X86_64_32 || t == R_X86_64_32S
+        || t == R_X86_64_64;
+}
+
+static int reloc_is_gotpcrel(uint32_t t) {
+    return t == R_X86_64_GOTPCREL
+        || t == R_X86_64_GOTPCRELX
+        || t == R_X86_64_REX_GOTPCRELX;
+}
+
+static int reloc_is_pc(uint32_t t) {
+    return t == R_X86_64_PC32 || t == R_X86_64_PLT32 || t == R_X86_64_PC64;
+}
+
+static int reloc_is_abs32(uint32_t t) {
+    return t == R_X86_64_32 || t == R_X86_64_32S;
+}
+
+static int reloc_width(uint32_t t) {
+    if (t == R_X86_64_64 || t == R_X86_64_PC64) return 8;
+    return 4;
+}
+
+static void pad_buf_to(Buffer *b, size_t align) {
+    if (align < 1) align = 1;
+    while (b->len % align) {
+        char z = 0;
+        buffer_append(b, &z, 1);
+    }
+}
+
+static size_t pad_size_to(size_t n, size_t align) {
+    if (align < 1) align = 1;
+    return (n + align - 1) / align * align;
+}
+
+/* Look up NAME in a DT_NEEDED shared object.  Returns st_size (0 if missing)
+ * and optionally the ELF STT_* type and copy-slot alignment. */
+static size_t so_symbol_lookup(const char **lib_paths, size_t npaths,
+                               const char **needed, size_t nneeded,
+                               const char *name, uint8_t *out_type,
+                               size_t *out_align) {
+    if (out_type) *out_type = 0;
+    if (out_align) *out_align = 8;
+    if (!name || !name[0]) return 0;
+    for (size_t ni = 0; ni < nneeded; ni++) {
+        const char *soname = needed[ni];
+        for (size_t d = 0; d <= npaths; d++) {
+            char path[512];
+            if (d < npaths)
+                snprintf(path, sizeof path, "%s/%s", lib_paths[d], soname);
+            else
+                snprintf(path, sizeof path, "/lib64/%s", soname);
+            FILE *f = fopen(path, "rb");
+            if (!f) continue;
+            unsigned char ehdr[64];
+            if (fread(ehdr, 1, 64, f) != 64) { fclose(f); continue; }
+            if (ehdr[0] != 0x7f) { fclose(f); continue; }
+            uint64_t shoff = 0;
+            memcpy(&shoff, ehdr + 40, 8);
+            uint16_t shentsize = 0, shnum = 0, shstrndx = 0;
+            memcpy(&shentsize, ehdr + 58, 2);
+            memcpy(&shnum, ehdr + 60, 2);
+            memcpy(&shstrndx, ehdr + 62, 2);
+            if (shentsize < 64 || shnum == 0) { fclose(f); continue; }
+            unsigned char *shdrs = malloc((size_t)shnum * shentsize);
+            if (!shdrs) { fclose(f); continue; }
+            if (fseek(f, (long)shoff, SEEK_SET) != 0
+                || fread(shdrs, shentsize, shnum, f) != shnum) {
+                free(shdrs); fclose(f); continue;
+            }
+            int dynsym = -1, dynstr = -1;
+            for (int s = 0; s < shnum; s++) {
+                uint32_t type = 0;
+                memcpy(&type, shdrs + (size_t)s * shentsize + 4, 4);
+                if (type == 11) dynsym = s;      /* SHT_DYNSYM */
+                if (type == 3 && dynstr < 0) dynstr = s; /* first STRTAB; prefer link */
+            }
+            if (dynsym >= 0) {
+                uint32_t link = 0;
+                memcpy(&link, shdrs + (size_t)dynsym * shentsize + 40, 4);
+                if (link > 0 && link < shnum) dynstr = (int)link;
+            }
+            size_t found_sz = 0;
+            if (dynsym >= 0 && dynstr >= 0) {
+                uint64_t symoff = 0, symsz = 0, stroff = 0, strsz = 0;
+                memcpy(&symoff, shdrs + (size_t)dynsym * shentsize + 24, 8);
+                memcpy(&symsz, shdrs + (size_t)dynsym * shentsize + 32, 8);
+                memcpy(&stroff, shdrs + (size_t)dynstr * shentsize + 24, 8);
+                memcpy(&strsz, shdrs + (size_t)dynstr * shentsize + 32, 8);
+                unsigned char *syms = malloc(symsz ? symsz : 1);
+                unsigned char *strs = malloc(strsz ? strsz : 1);
+                if (syms && strs
+                    && fseek(f, (long)symoff, SEEK_SET) == 0
+                    && fread(syms, 1, (size_t)symsz, f) == (size_t)symsz
+                    && fseek(f, (long)stroff, SEEK_SET) == 0
+                    && fread(strs, 1, (size_t)strsz, f) == (size_t)strsz) {
+                    size_t nsym = (size_t)symsz / 24;
+                    int found = 0;
+                    for (size_t k = 0; k < nsym; k++) {
+                        uint32_t noff = 0;
+                        memcpy(&noff, syms + k * 24, 4);
+                        if (noff >= strsz) continue;
+                        if (strcmp((char *)strs + noff, name) == 0) {
+                            uint8_t info = 0;
+                            memcpy(&info, syms + k * 24 + 4, 1);
+                            if (out_type) *out_type = info & 0xf;
+                            memcpy(&found_sz, syms + k * 24 + 16, 8);
+                            uint16_t shn = 0;
+                            memcpy(&shn, syms + k * 24 + 6, 2);
+                            uint64_t stv = 0;
+                            memcpy(&stv, syms + k * 24 + 8, 8);
+                            size_t al = 1;
+                            if (shn > 0 && shn < shnum) {
+                                memcpy(&al, shdrs + (size_t)shn * shentsize + 48, 8);
+                                if (al < 1) al = 1;
+                            }
+                            if (stv) {
+                                size_t low = (size_t)stv & -(size_t)stv;
+                                if (low > al) al = low;
+                            }
+                            if (al > 4096) al = 4096;
+                            if (out_align) *out_align = al;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (found) {
+                        free(syms); free(strs);
+                        free(shdrs); fclose(f);
+                        return found_sz;
+                    }
+                }
+                free(syms); free(strs);
+            }
+            free(shdrs); fclose(f);
+        }
+    }
+    return 0;
+}
+
+typedef struct { int defined; int shndx; size_t value; uint8_t binding; uint8_t type; } LinkSymInfo;
+
+/* Prefer STB_GLOBAL, then STB_WEAK, then SHN_COMMON. */
+static size_t find_export_gsi(EmitModule **mods, size_t n, const size_t *mod_sym_base,
+                              const LinkSymInfo *sinfo, const char *nm) {
+    size_t best_g = (size_t)-1, best_w = (size_t)-1, best_c = (size_t)-1;
+    if (!nm || !nm[0]) return (size_t)-1;
+    for (size_t mi = 0; mi < n; mi++) {
+        EmitModule *om = mods[mi];
+        for (size_t mj = 0; mj < om->num_syms; mj++) {
+            size_t ogsi = mod_sym_base[mi] + mj;
+            if (!sinfo[ogsi].defined || !om->syms[mj].name) continue;
+            if (strcmp(om->syms[mj].name, nm) != 0) continue;
+            int sh = sinfo[ogsi].shndx;
+            uint8_t b = sinfo[ogsi].binding;
+            if (sh == SHN_COMMON) {
+                if (best_c == (size_t)-1) best_c = ogsi;
+                continue;
+            }
+            if (b == STB_GLOBAL) {
+                if (best_g == (size_t)-1) best_g = ogsi;
+            } else if (b == STB_WEAK) {
+                if (best_w == (size_t)-1) best_w = ogsi;
+            }
+        }
+    }
+    if (best_g != (size_t)-1) return best_g;
+    if (best_w != (size_t)-1) return best_w;
+    return best_c;
+}
 
 #define STB_GLOBAL      1
 #define SHN_UNDEF       0
@@ -219,6 +419,14 @@ typedef struct {
     size_t   rela_plt_size, rela_dyn_size, dynamic_size;
     uint64_t dynstr_vaddr, dynsym_vaddr, hash_vaddr;
     uint64_t rela_plt_vaddr, rela_dyn_vaddr, dynamic_vaddr;
+    uint64_t initarr_vaddr;
+    uint64_t finiarr_vaddr;
+    size_t   initarr_file_offset;
+    size_t   initarr_size;
+    size_t   finiarr_file_offset;
+    size_t   finiarr_size;
+    int      have_initarr;
+    int      have_finiarr;
 } SectionLayout;
 
 static void finalize_sections(
@@ -345,6 +553,12 @@ static void finalize_sections(
         shname_tdata = append_string(&shstrtab, ".tdata");
         shname_tbss = append_string(&shstrtab, ".tbss");
     }
+    uint32_t shname_init_array = 0;
+    if (lay->have_initarr)
+        shname_init_array = append_string(&shstrtab, ".init_array");
+    uint32_t shname_fini_array = 0;
+    if (lay->have_finiarr)
+        shname_fini_array = append_string(&shstrtab, ".fini_array");
     uint32_t shname_symtab = append_string(&shstrtab, ".symtab");
     uint32_t shname_strtab = append_string(&shstrtab, ".strtab");
     uint32_t shname_shstrtab = append_string(&shstrtab, ".shstrtab");
@@ -429,6 +643,21 @@ static void finalize_sections(
                             tbss_bytes, 0, 0, 8, 0);
         }
     }
+    int array_sections = 0;
+    if (lay->have_initarr && lay->initarr_size > 0) {
+        write_shdr_exec(elf, shname_init_array, SHT_INIT_ARRAY,
+                        SHF_ALLOC | SHF_WRITE,
+                        lay->initarr_vaddr, lay->initarr_file_offset,
+                        lay->initarr_size, 0, 0, 8, 8);
+        array_sections++;
+    }
+    if (lay->have_finiarr && lay->finiarr_size > 0) {
+        write_shdr_exec(elf, shname_fini_array, SHT_FINI_ARRAY,
+                        SHF_ALLOC | SHF_WRITE,
+                        lay->finiarr_vaddr, lay->finiarr_file_offset,
+                        lay->finiarr_size, 0, 0, 8, 8);
+        array_sections++;
+    }
     /* Count TLS sections actually emitted — only those with non-zero size
      * take a slot, so .tdata-only / .tbss-only / both combinations all
      * produce the right shnum and downstream section indices. */
@@ -438,7 +667,7 @@ static void finalize_sections(
         if (lay->tls_memsize > lay->tls_filesize) tls_sections++;
     }
     write_shdr_exec(elf, shname_symtab, SHT_SYMTAB, 0, 0, off_symtab,
-                    symtab.len, 6 + tls_sections, first_global, 8, ELF64_SYM_SIZE);
+                    symtab.len, 6 + tls_sections + array_sections, first_global, 8, ELF64_SYM_SIZE);
     write_shdr_exec(elf, shname_strtab, SHT_STRTAB, 0, 0, off_strtab,
                     strtab.len, 0, 0, 1, 0);
     write_shdr_exec(elf, shname_shstrtab, SHT_STRTAB, 0, 0, off_shstrtab,
@@ -462,7 +691,7 @@ static void finalize_sections(
      * the first dynamic section: 8 (no dbg) or 14 (with dbg).  When TLS is
      * present, .tdata and .tbss (only those that exist) take indices 8 and
      * 9 (or 14 and 15 with debug), shifting dyn_base accordingly. */
-    int dyn_base = (have_dbg ? 14 : 8) + tls_sections;
+    int dyn_base = (have_dbg ? 14 : 8) + tls_sections + array_sections;
     if (lay->have_dynamic) {
         /* .dynstr is a string table: use SHT_STRTAB (not SHT_DYNSTR).  readelf
          * resolves DT_NEEDED strings by locating the section whose sh_type is
@@ -494,8 +723,9 @@ static void finalize_sections(
                         dyn_base + 0, 0, 8, 16);
     }
 
-    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + tls_sections + (lay->have_dynamic ? 6 : 0));
-    uint16_t shstrndx = (uint16_t)(7 + tls_sections);
+    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + tls_sections + array_sections
+                               + (lay->have_dynamic ? 6 : 0));
+    uint16_t shstrndx = (uint16_t)(7 + tls_sections + array_sections);
     memcpy(elf->data + 40, &shoff, sizeof(shoff));
     memcpy(elf->data + 60, &shnum, sizeof(shnum));
     memcpy(elf->data + 62, &shstrndx, sizeof(shstrndx));
@@ -521,10 +751,38 @@ static void finalize_sections(
  *
  * Both forms are exactly START_SIZE bytes so the layout above does not have to
  * know which one it gets. */
-static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
-                      uint64_t exit_plt_vaddr, int have_tls,
-                      uint64_t tls_vaddr, uint64_t tcb_vaddr,
-                      size_t tls_memsize, size_t tdata_len) {
+typedef struct {
+    uint64_t call_vaddr;
+    uint64_t main_vaddr;
+    uint64_t exit_plt_vaddr;
+    uint64_t tls_vaddr;
+    uint64_t tcb_vaddr;
+    uint64_t tls_memsize;
+    uint64_t tdata_len;
+    uint64_t init_start;
+    uint64_t init_count;
+    uint64_t fini_start;
+    uint64_t fini_count;
+    uint64_t irel_got;
+    uint64_t irel_count;
+    int have_tls;
+} StartInfo;
+
+static void gen_start(Buffer *code, const StartInfo *st) {
+    uint64_t call_vaddr = st->call_vaddr;
+    uint64_t main_vaddr = st->main_vaddr;
+    uint64_t exit_plt_vaddr = st->exit_plt_vaddr;
+    int have_tls = st->have_tls;
+    uint64_t tls_vaddr = st->tls_vaddr;
+    uint64_t tcb_vaddr = st->tcb_vaddr;
+    size_t tls_memsize = st->tls_memsize;
+    size_t tdata_len = st->tdata_len;
+    uint64_t init_start = st->init_start;
+    uint64_t init_count = st->init_count;
+    uint64_t fini_start = st->fini_start;
+    uint64_t fini_count = st->fini_count;
+    uint64_t irel_got = st->irel_got;
+    uint64_t irel_count = st->irel_count;
     size_t prefix_len = 0;
     if (have_tls) {
         if (tdata_len > 0) {
@@ -565,6 +823,59 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
         uint8_t sysc[2] = {0x0f, 0x05};
         buffer_append(code, (const char *)sysc, 2);
     }
+    /* Static binaries have no ld.so to apply IRELATIVE; call each resolver
+     * and store the implementation pointer into the GOT slot (pre-filled
+     * with the resolver address).  Exactly IREL_START bytes. */
+    if (irel_count > 0) {
+        prefix_len += IREL_START;
+        uint8_t m_rbx[2] = {0x48, 0xbb}; /* movabs $irel_got, %rbx */
+        buffer_append(code, (const char *)m_rbx, 2);
+        buffer_append(code, (const char *)&irel_got, 8);
+        uint8_t m_r12[2] = {0x49, 0xbc}; /* movabs $irel_count, %r12 */
+        buffer_append(code, (const char *)m_r12, 2);
+        buffer_append(code, (const char *)&irel_count, 8);
+        uint8_t test_r12[3] = {0x4d, 0x85, 0xe4};
+        buffer_append(code, (const char *)test_r12, 3);
+        uint8_t jz[2] = {0x74, 0x11}; /* skip 17-byte body */
+        buffer_append(code, (const char *)jz, 2);
+        uint8_t ld_rax[3] = {0x48, 0x8b, 0x03}; /* mov (%rbx), %rax */
+        buffer_append(code, (const char *)ld_rax, 3);
+        uint8_t call_rax[2] = {0xff, 0xd0}; /* call *%rax */
+        buffer_append(code, (const char *)call_rax, 2);
+        uint8_t st_rax[3] = {0x48, 0x89, 0x03}; /* mov %rax, (%rbx) */
+        buffer_append(code, (const char *)st_rax, 3);
+        uint8_t add_rbx[4] = {0x48, 0x83, 0xc3, 0x08};
+        buffer_append(code, (const char *)add_rbx, 4);
+        uint8_t dec_r12[3] = {0x49, 0xff, 0xcc};
+        buffer_append(code, (const char *)dec_r12, 3);
+        uint8_t jnz[2] = {0x75, 0xef}; /* jnz: 17-byte body back */
+        buffer_append(code, (const char *)jnz, 2);
+    }
+    /* Static executables have no ld.so to walk DT_INIT_ARRAY, so _start
+     * calls each constructor pointer before main.  rbx/r12 are callee-saved
+     * so constructors preserve the walk state.  Exactly INIT_ARRAY_START
+     * bytes so start_size stays a compile-time layout constant. */
+    if (init_count > 0) {
+        prefix_len += INIT_ARRAY_START;
+        uint8_t m_rbx[2] = {0x48, 0xbb}; /* movabs $init_start, %rbx */
+        buffer_append(code, (const char *)m_rbx, 2);
+        buffer_append(code, (const char *)&init_start, 8);
+        uint8_t m_r12[2] = {0x49, 0xbc}; /* movabs $init_count, %r12 */
+        buffer_append(code, (const char *)m_r12, 2);
+        buffer_append(code, (const char *)&init_count, 8);
+        uint8_t test_r12[3] = {0x4d, 0x85, 0xe4}; /* test %r12, %r12 */
+        buffer_append(code, (const char *)test_r12, 3);
+        uint8_t jz[2] = {0x74, 0x0b}; /* jz 1f  (skip 11-byte loop body) */
+        buffer_append(code, (const char *)jz, 2);
+        uint8_t call_ind[2] = {0xff, 0x13}; /* call *(%rbx) */
+        buffer_append(code, (const char *)call_ind, 2);
+        uint8_t add_rbx[4] = {0x48, 0x83, 0xc3, 0x08}; /* add $8, %rbx */
+        buffer_append(code, (const char *)add_rbx, 4);
+        uint8_t dec_r12[3] = {0x49, 0xff, 0xcc}; /* dec %r12 */
+        buffer_append(code, (const char *)dec_r12, 3);
+        uint8_t jnz[2] = {0x75, 0xf5}; /* jnz loop */
+        buffer_append(code, (const char *)jnz, 2);
+    }
     /* SysV ABI: main(argc @ edi, argv @ rsi). At process entry the kernel
      * leaves [rsp]=argc, [rsp+8]=argv. Load them before calling main. */
     uint8_t mov_edi[] = {0x8b, 0x3c, 0x24}; /* mov edi, [rsp] */
@@ -576,12 +887,40 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
     buffer_append(code, (const char *)&call_opcode, 1);
     int32_t rel = (int32_t)(main_vaddr - (call_vaddr + prefix_len + 3 + 5 + CALL_SIZE));
     buffer_append(code, (const char *)&rel, 4);
-    uint8_t mov_reg[] = {0x89, 0xc7}; /* mov edi, eax (exit code = main return) */
-    buffer_append(code, (const char *)mov_reg, 2);
+    if (fini_count > 0) {
+        uint8_t save[3] = {0x41, 0x89, 0xc5}; /* mov %eax, %r13d */
+        buffer_append(code, (const char *)save, 3);
+        uint64_t last = fini_start + (fini_count - 1) * 8;
+        uint8_t m_rbx[2] = {0x48, 0xbb};
+        buffer_append(code, (const char *)m_rbx, 2);
+        buffer_append(code, (const char *)&last, 8);
+        uint8_t m_r12[2] = {0x49, 0xbc};
+        buffer_append(code, (const char *)m_r12, 2);
+        buffer_append(code, (const char *)&fini_count, 8);
+        uint8_t test_r12[3] = {0x4d, 0x85, 0xe4};
+        buffer_append(code, (const char *)test_r12, 3);
+        uint8_t jz[2] = {0x74, 0x0b};
+        buffer_append(code, (const char *)jz, 2);
+        uint8_t call_ind[2] = {0xff, 0x13};
+        buffer_append(code, (const char *)call_ind, 2);
+        uint8_t sub_rbx[4] = {0x48, 0x83, 0xeb, 0x08};
+        buffer_append(code, (const char *)sub_rbx, 4);
+        uint8_t dec_r12[3] = {0x49, 0xff, 0xcc};
+        buffer_append(code, (const char *)dec_r12, 3);
+        uint8_t jnz[2] = {0x75, 0xf5};
+        buffer_append(code, (const char *)jnz, 2);
+        uint8_t restore[3] = {0x44, 0x89, 0xef}; /* mov %r13d, %edi */
+        buffer_append(code, (const char *)restore, 3);
+    } else {
+        uint8_t mov_reg[] = {0x89, 0xc7}; /* mov edi, eax */
+        buffer_append(code, (const char *)mov_reg, 2);
+    }
     if (exit_plt_vaddr != 0) {
         buffer_append(code, (const char *)&call_opcode, 1);
+        size_t after_main = prefix_len + 3 + 5 + CALL_SIZE
+            + (fini_count > 0 ? (size_t)FINI_ARRAY_START : 2);
         int32_t erel = (int32_t)(exit_plt_vaddr -
-                                 (call_vaddr + prefix_len + 3 + 5 + CALL_SIZE + 2 + CALL_SIZE));
+                                 (call_vaddr + after_main + CALL_SIZE));
         buffer_append(code, (const char *)&erel, 4);
         uint8_t ud2[] = {0x0f, 0x0b}; /* exit() does not return */
         buffer_append(code, (const char *)ud2, 2);
@@ -640,7 +979,49 @@ static size_t emit_plt_entry(Buffer *code, size_t idx, size_t plt0_off,
 /* emit_link                                                           */
 /* ================================================================== */
 
-/* Find the PLT slot index for an undefined symbol name; create if absent. */
+typedef struct { int prio; size_t idx; } ArrSlotOrd;
+
+/* Stable sort of 8-byte constructor/destructor slots by priority (smaller first).
+ * Writes old_slot → new_byte_offset into `remap` (length nslots).
+ * Insertion sort avoids a qsort callback (function-pointer codegen is a
+ * bootstrap-sensitive dialect corner, and n is tiny). */
+static void sort_array_slots(Buffer *arr, int *prio, size_t **remap) {
+    size_t nslots = arr->len / 8;
+    *remap = NULL;
+    if (nslots == 0) return;
+    *remap = xcalloc(nslots, sizeof(size_t));
+    ArrSlotOrd *ord = xcalloc(nslots, sizeof(ArrSlotOrd));
+    for (size_t i = 0; i < nslots; i++) {
+        ord[i].idx = i;
+        ord[i].prio = prio ? prio[i] : INIT_PRIO_DEFAULT;
+    }
+    for (size_t i = 1; i < nslots; i++) {
+        ArrSlotOrd key = ord[i];
+        size_t j = i;
+        while (j > 0) {
+            int cmp = (ord[j - 1].prio > key.prio) - (ord[j - 1].prio < key.prio);
+            if (cmp == 0)
+                cmp = (ord[j - 1].idx > key.idx) - (ord[j - 1].idx < key.idx);
+            if (cmp <= 0) break;
+            ord[j] = ord[j - 1];
+            j--;
+        }
+        ord[j] = key;
+    }
+    char *tmp = malloc(arr->len ? arr->len : 1);
+    int *ptmp = malloc(nslots * sizeof(int));
+    if (!tmp || !ptmp) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    for (size_t ni = 0; ni < nslots; ni++) {
+        size_t oi = ord[ni].idx;
+        memcpy(tmp + ni * 8, arr->data + oi * 8, 8);
+        ptmp[ni] = ord[ni].prio;
+        (*remap)[oi] = ni * 8;
+    }
+    memcpy(arr->data, tmp, arr->len);
+    if (prio) memcpy(prio, ptmp, nslots * sizeof(int));
+    free(tmp); free(ptmp); free(ord);
+}
+
 static int ext_find_or_add(char ***ext, int *num_ext, const char *name) {
     for (int e = 0; e < *num_ext; e++)
         if (strcmp((*ext)[e], name) == 0) return e;
@@ -663,9 +1044,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared) {
     /* ---- Merge sections ---- */
-    Buffer text, rodata, data, tdata;
+    Buffer text, rodata, data, tdata, initarr, finiarr;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
     buffer_init(&tdata);
+    buffer_init(&initarr);
+    buffer_init(&finiarr);
     size_t bss_size = 0;
     size_t tbss_size = 0;
     size_t *mod_text_off = xcalloc(n, sizeof(size_t));
@@ -674,30 +1057,81 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t *mod_bss_off = xcalloc(n, sizeof(size_t));
     size_t *mod_tdata_off = xcalloc(n, sizeof(size_t));
     size_t *mod_tbss_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_init_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_fini_off = xcalloc(n, sizeof(size_t));
+    int *concat_init_prio = NULL;
+    int *concat_fini_prio = NULL;
 
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
-        while (text.len & 15) { char z = 0; buffer_append(&text, &z, 1); }
+        size_t ta = m->text_align > 16 ? m->text_align : 16;
+        pad_buf_to(&text, ta);
         mod_text_off[i] = text.len;
         buffer_append(&text, m->text.data, m->text.len);
-        while (rodata.len & 7) { char z = 0; buffer_append(&rodata, &z, 1); }
+        pad_buf_to(&rodata, m->rodata_align ? m->rodata_align : 8);
         mod_rodata_off[i] = rodata.len;
         buffer_append(&rodata, m->rodata.data, m->rodata.len);
-        while (data.len & 7) { char z = 0; buffer_append(&data, &z, 1); }
+        pad_buf_to(&data, m->data_align ? m->data_align : 8);
         mod_data_off[i] = data.len;
         buffer_append(&data, m->data.data, m->data.len);
-        while (bss_size & 7) bss_size++;
+        bss_size = pad_size_to(bss_size, m->bss_align ? m->bss_align : 8);
         mod_bss_off[i] = bss_size;
         bss_size += m->bss_size;
         /* .tdata / .tbss concatenated per-module.  tdata is file-resident
          * (loaded into the TLS template); tbss is zero-fill at run time and
          * contributes only to memsz of PT_TLS. */
-        while (tdata.len & 7) { char z = 0; buffer_append(&tdata, &z, 1); }
+        pad_buf_to(&tdata, m->tdata_align ? m->tdata_align : 8);
         mod_tdata_off[i] = tdata.len;
         buffer_append(&tdata, m->tdata.data, m->tdata.len);
-        while (tbss_size & 7) tbss_size++;
+        tbss_size = pad_size_to(tbss_size, m->tbss_align ? m->tbss_align : 8);
         mod_tbss_off[i] = tbss_size;
         tbss_size += m->tbss_size;
+        pad_buf_to(&initarr, m->init_array_align ? m->init_array_align : 8);
+        mod_init_off[i] = initarr.len;
+        {
+            size_t before = initarr.len;
+            buffer_append(&initarr, m->init_array.data, m->init_array.len);
+            size_t nnew = initarr.len / 8;
+            size_t nold = before / 8;
+            if (nnew > 0) {
+                concat_init_prio = realloc(concat_init_prio, nnew * sizeof(int));
+                if (!concat_init_prio) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                for (size_t s = nold; s < nnew; s++)
+                    concat_init_prio[s] = INIT_PRIO_DEFAULT;
+                if (m->init_prio) {
+                    size_t ms = m->init_array.len / 8;
+                    memcpy(concat_init_prio + nold, m->init_prio, ms * sizeof(int));
+                }
+            }
+        }
+        pad_buf_to(&finiarr, m->fini_array_align ? m->fini_array_align : 8);
+        mod_fini_off[i] = finiarr.len;
+        {
+            size_t before = finiarr.len;
+            buffer_append(&finiarr, m->fini_array.data, m->fini_array.len);
+            size_t nnew = finiarr.len / 8;
+            size_t nold = before / 8;
+            if (nnew > 0) {
+                concat_fini_prio = realloc(concat_fini_prio, nnew * sizeof(int));
+                if (!concat_fini_prio) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                for (size_t s = nold; s < nnew; s++)
+                    concat_fini_prio[s] = INIT_PRIO_DEFAULT;
+                if (m->fini_prio) {
+                    size_t ms = m->fini_array.len / 8;
+                    memcpy(concat_fini_prio + nold, m->fini_prio, ms * sizeof(int));
+                }
+            }
+        }
+    }
+    size_t *init_remap = NULL, *fini_remap = NULL;
+    sort_array_slots(&initarr, concat_init_prio, &init_remap);
+    sort_array_slots(&finiarr, concat_fini_prio, &fini_remap);
+    size_t max_ro_align = 8, max_bss_align = 8, max_td_align = 8, max_tbss_align = 8;
+    for (size_t i = 0; i < n; i++) {
+        if (mods[i]->rodata_align > max_ro_align) max_ro_align = mods[i]->rodata_align;
+        if (mods[i]->bss_align > max_bss_align) max_bss_align = mods[i]->bss_align;
+        if (mods[i]->tdata_align > max_td_align) max_td_align = mods[i]->tdata_align;
+        if (mods[i]->tbss_align > max_tbss_align) max_tbss_align = mods[i]->tbss_align;
     }
 
     /* ---- Per-module symbol base indices ---- */
@@ -706,9 +1140,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         mod_sym_base[i + 1] = mod_sym_base[i] + mods[i]->num_syms;
     size_t total_syms = mod_sym_base[n];
 
-    /* ---- Per-symbol metadata ---- */
-    typedef struct { int defined; int shndx; size_t value; uint8_t binding; } SymInfo;
-    SymInfo *sinfo = xcalloc(total_syms, sizeof(SymInfo));
+    LinkSymInfo *sinfo = xcalloc(total_syms, sizeof(LinkSymInfo));
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -716,8 +1148,50 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             sinfo[gsi].shndx = m->syms[j].shndx;
             sinfo[gsi].value = m->syms[j].value;
             sinfo[gsi].binding = m->syms[j].binding;
+            sinfo[gsi].type = m->syms[j].type;
             sinfo[gsi].defined = (m->syms[j].shndx != SECT_UNDEF);
         }
+    }
+
+    /* Tentative COMMON (SHN_COMMON) symbols share one BSS slot per name
+     * unless a real GLOBAL/WEAK definition exists.  st_value is alignment. */
+    typedef struct { const char *name; size_t align, size, off; } CommonEnt;
+    CommonEnt *commons = NULL;
+    int n_commons = 0, cap_commons = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            if (m->syms[j].shndx != SHN_COMMON || !m->syms[j].name) continue;
+            const char *nm = m->syms[j].name;
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win != (size_t)-1 && sinfo[win].shndx != SHN_COMMON) continue;
+            int found = -1;
+            for (int c = 0; c < n_commons; c++)
+                if (strcmp(commons[c].name, nm) == 0) { found = c; break; }
+            size_t al = m->syms[j].value ? m->syms[j].value : 1;
+            size_t sz = m->syms[j].size ? m->syms[j].size : al;
+            if (found < 0) {
+                if (n_commons >= cap_commons) {
+                    cap_commons = cap_commons ? cap_commons * 2 : 4;
+                    commons = realloc(commons, (size_t)cap_commons * sizeof(CommonEnt));
+                    if (!commons) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                }
+                commons[n_commons].name = nm;
+                commons[n_commons].align = al;
+                commons[n_commons].size = sz;
+                commons[n_commons].off = 0;
+                n_commons++;
+            } else {
+                if (al > commons[found].align) commons[found].align = al;
+                if (sz > commons[found].size) commons[found].size = sz;
+            }
+        }
+    }
+    for (int c = 0; c < n_commons; c++) {
+        if (commons[c].align > max_bss_align) max_bss_align = commons[c].align;
+        bss_size = pad_size_to(bss_size, commons[c].align);
+        commons[c].off = bss_size;
+        bss_size += commons[c].size;
     }
 
     /* ---- PLT slot assignment for undefined referenced symbols (functions)
@@ -726,7 +1200,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     char **ext_list = NULL;
     int num_ext = 0;
     int *reloc_ext_idx = xcalloc(total_syms, sizeof(int));
-    for (size_t i = 0; i < total_syms; i++) reloc_ext_idx[i] = -1;
+    int *reloc_data_abs_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) {
+        reloc_ext_idx[i] = -1;
+        reloc_data_abs_idx[i] = -1;
+    }
+    char **abs_ext_list = NULL;
+    int num_abs_ext = 0;
 
     /* Helper: is `nm` defined GLOBAL in any module? */
     /* (open-coded below to avoid a nested function) */
@@ -734,31 +1214,51 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
-            if (m->relocs[r].type == R_X86_64_GOTPCREL) continue;
+            if (reloc_is_gotpcrel(m->relocs[r].type)) continue;
+            if (m->relocs[r].type == R_X86_64_GOTTPOFF) continue;
+            if (reloc_is_tls_gd(m->relocs[r].type)) continue;
+            if (reloc_is_tls_ld(m->relocs[r].type)) continue;
+            if (m->relocs[r].type == R_X86_64_DTPOFF32) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (sinfo[gsi].defined) continue;
             const char *nm = m->syms[m->relocs[r].sym].name
                              ? m->syms[m->relocs[r].sym].name : "";
-            int resolved = 0;
-            for (size_t mi = 0; mi < n && !resolved; mi++) {
-                EmitModule *om = mods[mi];
-                for (size_t mj = 0; mj < om->num_syms; mj++) {
-                    size_t ogsi = mod_sym_base[mi] + mj;
-                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                        && om->syms[mj].name
-                        && strcmp(om->syms[mj].name, nm) == 0) {
-                        resolved = 1;
+            if (m->relocs[r].type == R_X86_64_PLT32
+                && strcmp(nm, "__tls_get_addr") == 0) {
+                int pair_skip = 0;
+                for (size_t r2 = 0; r2 < m->num_relocs; r2++) {
+                    if (m->relocs[r2].type == R_X86_64_TLSGD
+                        && m->relocs[r2].offset + 8 == m->relocs[r].offset) {
+                        pair_skip = 1;
+                        break;
+                    }
+                    /* TLSLD→LE in executables drops the call; DSOs keep it. */
+                    if (!is_shared && m->relocs[r2].type == R_X86_64_TLSLD
+                        && m->relocs[r2].offset + 5 == m->relocs[r].offset) {
+                        pair_skip = 1;
                         break;
                     }
                 }
+                if (pair_skip) continue;
             }
-            if (!resolved)
+            uint8_t stt = m->syms[m->relocs[r].sym].type;
+            if (reloc_is_copy_kind(m->relocs[r].type)
+                && m->relocs[r].type != R_X86_64_PLT32
+                && stt != STT_FUNC
+                && stt != STT_TLS
+                && find_export_gsi(mods, n, mod_sym_base, sinfo, nm) == (size_t)-1) {
+                /* Direct access to a DSO object → COPY, not PLT. */
+                continue;
+            }
+            if (find_export_gsi(mods, n, mod_sym_base, sinfo, nm) == (size_t)-1)
                 reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
         /* .data R_X86_64_64 fixups also reference symbols.  A file-scope
          * initializer like `static double (*fp)(double) = asin;` never emits a
          * text reloc, so without this scan the pointer is patched to PLT0 /
-         * the ELF entry stub and calling it re-enters `_start`. */
+         * the ELF entry stub and calling it re-enters `_start`.  Match LOCAL
+         * definitions too (`static int gx[]` is STB_LOCAL).  Unresolved names
+         * get a PLT slot — GLOB_DAT / abs64 is for GOTPCREL data objects. */
         for (size_t r = 0; r < m->num_data_relocs; r++) {
             size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
             if (sinfo[gsi].defined) continue;
@@ -770,8 +1270,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 EmitModule *om = mods[mi];
                 for (size_t mj = 0; mj < om->num_syms; mj++) {
                     size_t ogsi = mod_sym_base[mi] + mj;
-                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                        && om->syms[mj].name
+                    if (sinfo[ogsi].defined && om->syms[mj].name
                         && strcmp(om->syms[mj].name, nm) == 0) {
                         resolved = 1;
                         break;
@@ -797,7 +1296,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
-            if (m->relocs[r].type != R_X86_64_GOTPCREL) continue;
+            if (!reloc_is_gotpcrel(m->relocs[r].type)) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (reloc_data_got_idx[gsi] >= 0) continue;
             const char *nm = m->syms[m->relocs[r].sym].name
@@ -813,26 +1312,136 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     int num_true_data_ext = 0;
     for (int j = 0; j < num_data_ext; j++) {
         const char *nm = data_ext_list[j];
-        int found = 0;
-        for (size_t mi = 0; mi < n && !found; mi++) {
-            EmitModule *om = mods[mi];
-            for (size_t mj = 0; mj < om->num_syms; mj++) {
-                size_t ogsi = mod_sym_base[mi] + mj;
-                if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
-                    && om->syms[mj].name
-                    && strcmp(om->syms[mj].name, nm) == 0) {
-                    found = 1;
-                    break;
-                }
-            }
-        }
+        int found = find_export_gsi(mods, n, mod_sym_base, sinfo, nm) != (size_t)-1;
         data_got_external[j] = !found;
         if (!found) num_true_data_ext++;
     }
 
+    /* ---- TLS Initial-Exec GOT slots (GOTTPOFF) ----
+     * Each unique TLS symbol referenced via GOTTPOFF gets a GOT qword after
+     * the data GOT.  LOCAL symbols stay unique per gsi (two TUs may both
+     * have `static __thread int x`).  GLOBAL symbols merge by name. */
+    int *reloc_tls_ie_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) reloc_tls_ie_idx[i] = -1;
+    int *tls_ie_gsi = NULL;
+    const char **tls_ie_name = NULL;
+    int num_tls_ie = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            if (reloc_is_tls_ld(m->relocs[r].type)) continue;
+            if (m->relocs[r].type != R_X86_64_GOTTPOFF
+                && !reloc_is_tls_gd(m->relocs[r].type)) continue;
+            size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
+            if (reloc_tls_ie_idx[gsi] >= 0) continue;
+            const char *nm = m->syms[m->relocs[r].sym].name
+                             ? m->syms[m->relocs[r].sym].name : "";
+            int is_local = sinfo[gsi].defined && sinfo[gsi].binding == STB_LOCAL;
+            int slot = -1;
+            if (!is_local && nm[0]) {
+                for (int j = 0; j < num_tls_ie; j++) {
+                    if (tls_ie_name[j] && strcmp(tls_ie_name[j], nm) == 0) {
+                        slot = j;
+                        break;
+                    }
+                }
+            }
+            if (slot < 0) {
+                slot = num_tls_ie++;
+                tls_ie_gsi = realloc(tls_ie_gsi, (size_t)num_tls_ie * sizeof(int));
+                tls_ie_name = realloc(tls_ie_name, (size_t)num_tls_ie * sizeof(char *));
+                if (!tls_ie_gsi || !tls_ie_name) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                tls_ie_gsi[slot] = (int)gsi;
+                tls_ie_name[slot] = is_local ? NULL : nm;
+            }
+            reloc_tls_ie_idx[gsi] = slot;
+        }
+    }
+
+    /* ---- COPY relocs: direct (non-GOT) refs to DSO data objects ----
+     * Only executables copy; a DSO uses GLOB_DAT / symbolic relocs. */
+    char **copy_list = NULL;
+    int num_copy = 0;
+    int *reloc_copy_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) reloc_copy_idx[i] = -1;
+    for (size_t i = 0; i < n && !is_shared; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            uint32_t rt = m->relocs[r].type;
+            if (!reloc_is_copy_kind(rt) || rt == R_X86_64_PLT32) continue;
+            size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
+            if (sinfo[gsi].defined || reloc_copy_idx[gsi] >= 0) continue;
+            if (reloc_ext_idx[gsi] >= 0) continue;
+            uint8_t stt = m->syms[m->relocs[r].sym].type;
+            if (stt == STT_FUNC || stt == STT_TLS) continue;
+            const char *nm = m->syms[m->relocs[r].sym].name
+                             ? m->syms[m->relocs[r].sym].name : "";
+            if (find_export_gsi(mods, n, mod_sym_base, sinfo, nm) != (size_t)-1)
+                continue;
+            reloc_copy_idx[gsi] = ext_find_or_add(&copy_list, &num_copy, nm);
+        }
+        for (size_t r = 0; r < m->num_data_relocs; r++) {
+            if (m->data_relocs[r].type != R_X86_64_64) continue;
+            size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+            if (sinfo[gsi].defined || reloc_copy_idx[gsi] >= 0) continue;
+            if (reloc_ext_idx[gsi] >= 0) continue;
+            uint8_t stt = m->syms[m->data_relocs[r].sym].type;
+            /* Data-pointer abs64 to STT_NOTYPE is a function pointer (PLT).
+             * Only a real STT_OBJECT is a COPY of DSO data. */
+            if (stt != STT_OBJECT) continue;
+            const char *nm = m->syms[m->data_relocs[r].sym].name
+                             ? m->syms[m->data_relocs[r].sym].name : "";
+            if (find_export_gsi(mods, n, mod_sym_base, sinfo, nm) != (size_t)-1)
+                continue;
+            reloc_copy_idx[gsi] = ext_find_or_add(&copy_list, &num_copy, nm);
+        }
+    }
+
+    int *tls_ie_is_undef = num_tls_ie ? xcalloc((size_t)num_tls_ie, sizeof(int)) : NULL;
+    char **tls_und_list = NULL;
+    int num_tls_und = 0;
+    int *tls_ie_und_idx = num_tls_ie ? xcalloc((size_t)num_tls_ie, sizeof(int)) : NULL;
+    for (int j = 0; j < num_tls_ie; j++) {
+        if (tls_ie_und_idx) tls_ie_und_idx[j] = -1;
+        size_t gsi = (size_t)tls_ie_gsi[j];
+        int defined = 0;
+        if (sinfo[gsi].defined
+            && (sinfo[gsi].shndx == SECT_TDATA || sinfo[gsi].shndx == SECT_TBSS))
+            defined = 1;
+        else {
+            const char *nm = tls_ie_name[j] ? tls_ie_name[j] : "";
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win != (size_t)-1
+                && (sinfo[win].shndx == SECT_TDATA || sinfo[win].shndx == SECT_TBSS))
+                defined = 1;
+        }
+        if (!defined) {
+            tls_ie_is_undef[j] = 1;
+            const char *nm = tls_ie_name[j] ? tls_ie_name[j] : "";
+            tls_ie_und_idx[j] = ext_find_or_add(&tls_und_list, &num_tls_und, nm);
+        }
+    }
+    int *tls_und_weak = num_tls_und ? xcalloc((size_t)num_tls_und, sizeof(int)) : NULL;
+    for (int t = 0; t < num_tls_und; t++) {
+        int any = 0, strong = 0;
+        const char *nm = tls_und_list[t];
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t j = 0; j < m->num_syms; j++) {
+                if (!m->syms[j].name || strcmp(m->syms[j].name, nm) != 0) continue;
+                if (sinfo[mod_sym_base[i] + j].defined) continue;
+                any = 1;
+                if (m->syms[j].binding != STB_WEAK) strong = 1;
+            }
+        }
+        tls_und_weak[t] = any && !strong;
+    }
+
     /* Dynamic link when something is truly undefined, or when producing a
      * shared library (ET_DYN always needs .dynamic / .dynsym for exports). */
-    int need_dynamic = is_shared || (num_ext > 0 || num_true_data_ext > 0);
+    int need_dynamic = is_shared
+        || (num_ext > 0 || num_true_data_ext > 0 || num_abs_ext > 0
+            || num_copy > 0 || num_tls_und > 0);
 
     /* ---- Shared-library DT_NEEDED list (from -l only; no automatic libc) ----
      * Builtin runtime/ supplies the hosted stdlib.  System libs are opt-in via -l,
@@ -843,6 +1452,87 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     for (size_t i = 0; i < num_needed_in; i++)
         needed_add(&needed, &num_needed, needed_in[i]);
     (void)nodefaultlibs;
+
+    size_t *copy_size = num_copy ? xcalloc((size_t)num_copy, sizeof(size_t)) : NULL;
+    size_t *copy_off = num_copy ? xcalloc((size_t)num_copy, sizeof(size_t)) : NULL;
+    {
+        int w = 0;
+        for (int j = 0; j < num_copy; j++) {
+            uint8_t ty = 0;
+            size_t al = 8;
+            size_t sz = so_symbol_lookup((const char **)lib_paths, num_lib_paths,
+                                         (const char **)needed, (size_t)num_needed,
+                                         copy_list[j], &ty, &al);
+            /* Direct PC32 to a DSO *function* (STT_NOTYPE in the .o) must stay
+             * a PLT call, not a COPY of the function body into .bss. */
+            if (ty != STT_OBJECT) {
+                int eidx = ext_find_or_add(&ext_list, &num_ext, copy_list[j]);
+                for (size_t gsi = 0; gsi < total_syms; gsi++) {
+                    if (reloc_copy_idx[gsi] == j) {
+                        reloc_copy_idx[gsi] = -1;
+                        reloc_ext_idx[gsi] = eidx;
+                    }
+                }
+                free(copy_list[j]);
+                continue;
+            }
+            if (sz < 1) sz = 8;
+            if (al < 1) al = 8;
+            if (w != j) {
+                for (size_t gsi = 0; gsi < total_syms; gsi++)
+                    if (reloc_copy_idx[gsi] == j) reloc_copy_idx[gsi] = w;
+                copy_list[w] = copy_list[j];
+            }
+            copy_size[w] = sz;
+            bss_size = pad_size_to(bss_size, al);
+            copy_off[w] = bss_size;
+            bss_size += sz;
+            if (al > max_bss_align) max_bss_align = al;
+            w++;
+        }
+        num_copy = w;
+    }
+
+    int have_tlsld = 0;
+    for (size_t i = 0; i < n && !have_tlsld; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            if (reloc_is_tls_ld(m->relocs[r].type)) { have_tlsld = 1; break; }
+        }
+    }
+    int tlsld_got_pair = is_shared && have_tlsld;
+
+    /* STT_GNU_IFUNC: one GOT slot + `jmp [got]` thunk per resolver. */
+    int num_ifunc = 0;
+    size_t *ifunc_gsi = NULL;
+    const char **ifunc_name = NULL;
+    size_t *ifunc_thunk_off = NULL;
+    size_t *ifunc_got_fixup = NULL;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            size_t gsi = mod_sym_base[i] + j;
+            if (!sinfo[gsi].defined || sinfo[gsi].shndx != SECT_TEXT) continue;
+            if (m->syms[j].type != STT_GNU_IFUNC) continue;
+            const char *nm = m->syms[j].name ? m->syms[j].name : "";
+            int dup = 0;
+            if (nm[0] && sinfo[gsi].binding != STB_LOCAL) {
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_name[k] && strcmp(ifunc_name[k], nm) == 0) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (dup) continue;
+            ifunc_gsi = realloc(ifunc_gsi, ((size_t)num_ifunc + 1) * sizeof(size_t));
+            ifunc_name = realloc(ifunc_name, ((size_t)num_ifunc + 1) * sizeof(char *));
+            if (!ifunc_gsi || !ifunc_name) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            ifunc_gsi[num_ifunc] = gsi;
+            ifunc_name[num_ifunc] = nm[0] ? nm : NULL;
+            num_ifunc++;
+        }
+    }
 
     /* DT_SONAME defaults to the output basename so `gcc -lfoo` / `fakecc -lfoo`
      * resolve the same file the driver wrote. */
@@ -930,6 +1620,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         for (int e = 0; e < num_ext; e++)
             plt_entry_off[e] = emit_plt_entry(&text, e, plt0_off, &plt_got_fixup[e]);
     }
+    ifunc_thunk_off = num_ifunc ? xcalloc((size_t)num_ifunc, sizeof(size_t)) : NULL;
+    ifunc_got_fixup = num_ifunc ? xcalloc((size_t)num_ifunc, sizeof(size_t)) : NULL;
+    for (int k = 0; k < num_ifunc; k++) {
+        ifunc_thunk_off[k] = text.len;
+        emit_byte(&text, 0xFF); emit_byte(&text, 0x25); /* jmp qword [rip+disp] */
+        ifunc_got_fixup[k] = text.len;
+        emit_int32(&text, 0);
+    }
     /* ---- Build dynamic-linking section buffers (sizes needed for layout) ---- */
     Buffer dynstr, dynsym, hash, rela_plt, rela_dyn, dynamic;
     buffer_init(&dynstr); buffer_init(&dynsym); buffer_init(&hash);
@@ -941,15 +1639,63 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
      * appear in .dynsym.  Shared libraries additionally export every defined
      * GLOBAL.  dynstr layout when dynamic:
      * "\0" + DT_NEEDED sonames + [DT_SONAME] + [DT_RUNPATH] + true-ext func names
-     * + true-ext data names + [exported defined names]. */
-    int num_dynsym_ext = num_ext + num_true_data_ext + num_exports;
+     * + true-ext data names + unresolved data-object names + [exported defined names]. */
+    int num_abs64_relocs = 0;
+    int num_tpoff_dyn = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_data_relocs; r++) {
+            size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+            if (reloc_data_abs_idx[gsi] >= 0) num_abs64_relocs++;
+        }
+    }
+    num_tpoff_dyn = is_shared ? num_tls_ie : num_tls_und;
+    int num_dynsym_ext = num_ext + num_true_data_ext + num_abs_ext
+        + num_tls_und + num_copy + num_exports;
+    int dyn_tls_und0 = 1 + num_ext + num_true_data_ext + num_abs_ext;
+    int dyn_copy0 = dyn_tls_und0 + num_tls_und;
+    int dyn_export0 = dyn_copy0 + num_copy;
     size_t needed_str_bytes = 0;
     size_t soname_str_bytes = 0;
     size_t soname_dynstr_off = 0;
     size_t runpath_str_bytes = 0;
     size_t runpath_dynstr_off = 0;
-    /* GOT[0] (= &_DYNAMIC) needs R_X86_64_RELATIVE in a shared object. */
-    int num_relative = is_shared ? 1 : 0;
+    /* Shared objects need R_X86_64_RELATIVE for every link-time absolute
+     * address that lives in RW data: pointer initializers, internal GOT
+     * slots, GOT[0] (= &_DYNAMIC), and __fakecc_tls_image.  Unresolved
+     * data objects use R_X86_64_64 instead of RELATIVE. */
+    int num_data_ptr_rel = 0;
+    int num_internal_got = 0;
+    int tls_image_rel = 0;
+    if (is_shared) {
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t r = 0; r < m->num_data_relocs; r++) {
+                size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+                if (reloc_data_abs_idx[gsi] >= 0) continue;
+                /* PC-relative and 32-bit abs are not R_X86_64_RELATIVE. */
+                uint32_t rt = m->data_relocs[r].type;
+                if (reloc_is_pc(rt) || reloc_is_abs32(rt)) continue;
+                num_data_ptr_rel++;
+            }
+        }
+        for (int j = 0; j < num_data_ext; j++)
+            if (!data_got_external[j]) num_internal_got++;
+        if (tdata.len > 0 || tbss_size > 0) {
+            size_t mi, mj;
+            for (mi = 0; mi < n && !tls_image_rel; mi++) {
+                EmitModule *m = mods[mi];
+                for (mj = 0; mj < m->num_syms; mj++) {
+                    if (m->syms[mj].name
+                        && strcmp(m->syms[mj].name, "__fakecc_tls_image") == 0) {
+                        tls_image_rel = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    int num_relative = is_shared ? (1 + num_data_ptr_rel + num_internal_got + tls_image_rel) : 0;
     if (need_dynamic) {
         buf_u8(&dynstr, 0);
         for (int i = 0; i < num_needed; i++) {
@@ -972,16 +1718,39 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             if (!data_got_external[j]) continue;
             buf_bytes(&dynstr, data_ext_list[j], strlen(data_ext_list[j]) + 1);
         }
+        for (int a = 0; a < num_abs_ext; a++)
+            buf_bytes(&dynstr, abs_ext_list[a], strlen(abs_ext_list[a]) + 1);
+        for (int t = 0; t < num_tls_und; t++)
+            buf_bytes(&dynstr, tls_und_list[t], strlen(tls_und_list[t]) + 1);
+        for (int c = 0; c < num_copy; c++)
+            buf_bytes(&dynstr, copy_list[c], strlen(copy_list[c]) + 1);
         for (int e = 0; e < num_exports; e++)
             buf_bytes(&dynstr, exports[e].name, strlen(exports[e].name) + 1);
         buf_pad(&dynsym, 24); /* [0] NULL symbol */
-        for (int k = 0; k < num_ext + num_true_data_ext; k++) {
+        for (int k = 0; k < num_ext + num_true_data_ext + num_abs_ext; k++) {
             buf_u32(&dynsym, 0); /* st_name patched below */
             buf_u8(&dynsym, STB_GLOBAL << 4);
             buf_u8(&dynsym, 0);
             buf_u16(&dynsym, SHN_UNDEF);
             buf_u64(&dynsym, 0);
             buf_u64(&dynsym, 0);
+        }
+        for (int t = 0; t < num_tls_und; t++) {
+            buf_u32(&dynsym, 0);
+            uint8_t bind = (tls_und_weak && tls_und_weak[t]) ? STB_WEAK : STB_GLOBAL;
+            buf_u8(&dynsym, (uint8_t)((bind << 4) | STT_TLS));
+            buf_u8(&dynsym, 0);
+            buf_u16(&dynsym, SHN_UNDEF);
+            buf_u64(&dynsym, 0);
+            buf_u64(&dynsym, 0);
+        }
+        for (int c = 0; c < num_copy; c++) {
+            buf_u32(&dynsym, 0);
+            buf_u8(&dynsym, (uint8_t)((STB_GLOBAL << 4) | STT_OBJECT));
+            buf_u8(&dynsym, 0);
+            buf_u16(&dynsym, 4); /* .bss */
+            buf_u64(&dynsym, 0); /* st_value patched after layout */
+            buf_u64(&dynsym, copy_size[c]);
         }
         for (int e = 0; e < num_exports; e++) {
             buf_u32(&dynsym, 0); /* st_name patched below */
@@ -1010,7 +1779,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                             seen++;
                         }
                     } else {
-                        nm = exports[want - num_true_data_ext].name;
+                        want -= num_true_data_ext;
+                        if (want < num_abs_ext) nm = abs_ext_list[want];
+                        else {
+                            want -= num_abs_ext;
+                            if (want < num_tls_und) nm = tls_und_list[want];
+                            else {
+                                want -= num_tls_und;
+                                if (want < num_copy) nm = copy_list[want];
+                                else nm = exports[want - num_copy].name;
+                            }
+                        }
                     }
                 }
             }
@@ -1037,29 +1816,63 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 buf_u64(&rela_dyn, 0);
                 dyn_sym_i++;
             }
+            dyn_sym_i = 1 + num_ext + num_true_data_ext;
+            for (int a = 0; a < num_abs64_relocs; a++) {
+                buf_u64(&rela_dyn, 0);
+                buf_u64(&rela_dyn, R_X86_64_64); /* r_info sym patched below */
+                buf_u64(&rela_dyn, 0);
+            }
+            (void)dyn_sym_i;
         }
         for (int r = 0; r < num_relative; r++) {
             buf_u64(&rela_dyn, 0); /* r_offset patched below */
             buf_u64(&rela_dyn, R_X86_64_RELATIVE);
             buf_u64(&rela_dyn, 0); /* r_addend patched below */
         }
+        for (int t = 0; t < num_tpoff_dyn; t++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, R_X86_64_TPOFF64);
+            buf_u64(&rela_dyn, 0);
+        }
+        for (int c = 0; c < num_copy; c++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, ((uint64_t)(dyn_copy0 + c) << 32) | R_X86_64_COPY);
+            buf_u64(&rela_dyn, 0);
+        }
+        for (int k = 0; k < num_ifunc; k++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, R_X86_64_IRELATIVE);
+            buf_u64(&rela_dyn, 0);
+        }
+        if (tlsld_got_pair) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, R_X86_64_DTPMOD64);
+            buf_u64(&rela_dyn, 0);
+        }
     }
 
     /* ---- Compute layout ---- */
     int have_tls = (tdata.len > 0 || tbss_size > 0);
     int init_tls_in_start = have_tls && !need_dynamic;
+    int run_ctors = !is_shared && !need_dynamic && initarr.len >= 8;
+    int run_dtors = !is_shared && !need_dynamic && finiarr.len >= 8;
+    int run_irel = !is_shared && !need_dynamic && num_ifunc > 0;
     size_t start_size = 0;
-    if (!is_shared)
+    if (!is_shared) {
         start_size = init_tls_in_start ? (START_SIZE + 25 + (tdata.len > 0 ? 27 : 0)) : START_SIZE;
+        if (run_ctors) start_size += INIT_ARRAY_START;
+        if (run_dtors) start_size += (size_t)FINI_ARRAY_START - 2;
+        if (run_irel) start_size += IREL_START;
+    }
     /* phnum is finalized after we know whether a data segment is needed;
      * reserve header space for the maximum so segment file offsets are stable.
-     * Executables keep the historical 4/5-phdr reservation (even when static)
-     * so layout stays byte-identical.  Shared objects omit PT_INTERP. */
+     * GNU_STACK is always present (non-executable stack).  Shared objects
+     * omit PT_INTERP. */
     uint16_t phnum_max;
     if (is_shared)
-        phnum_max = have_tls ? 4 : 3;
+        phnum_max = have_tls ? 5 : 4; /* RX, RW, DYNAMIC, GNU_STACK, [TLS] */
     else
-        phnum_max = have_tls ? 5 : 4;
+        phnum_max = have_tls ? 6 : 5; /* RX, RW, INTERP, DYNAMIC, GNU_STACK, [TLS] */
     size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
@@ -1067,9 +1880,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
      * DT_NULL, plus DT_RELA/RELASZ/RELENT when .rela.dyn is non-empty. */
     size_t dynamic_size = 0;
     if (need_dynamic) {
-        int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0);
+        int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0
+                             || num_abs64_relocs > 0 || num_tpoff_dyn > 0
+                             || num_copy > 0 || num_ifunc > 0 || tlsld_got_pair);
+        int have_dt_flags = is_shared && num_tls_ie > 0;
+        int have_dt_init = initarr.len > 0;
+        int have_dt_fini = finiarr.len > 0;
         dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0) + (soname ? 1 : 0)
-                                + (have_rela_dyn ? 3 : 0)) * 16;
+                                + (have_rela_dyn ? 3 : 0)
+                                + (have_dt_flags ? 1 : 0)
+                                + (have_dt_init ? 2 : 0)
+                                + (have_dt_fini ? 2 : 0)) * 16;
     }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
         + rela_plt.len + rela_dyn.len;
@@ -1087,8 +1908,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     while (got_data_off & 7) got_data_off++;
     uint64_t got_vaddr = data_vaddr + got_data_off;
     size_t layout_got_bytes = need_dynamic
-        ? (size_t)(3 + num_ext + num_data_ext) * 8
-        : (num_data_ext > 0 ? (size_t)(3 + num_data_ext) * 8 : 0);
+        ? (size_t)(3 + num_ext + num_data_ext + num_tls_ie + num_ifunc) * 8
+            + (tlsld_got_pair ? 16 : 0)
+        : ((num_data_ext + num_tls_ie + num_ifunc) > 0
+               ? (size_t)(3 + num_data_ext + num_tls_ie + num_ifunc) * 8 : 0);
     size_t got_end_off = layout_got_bytes
         ? got_data_off + layout_got_bytes : data.len;
     /* Shared: .dynamic follows the GOT in the RW segment. */
@@ -1102,37 +1925,72 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     /* If have_tls, .tdata lives right after GOT/.dynamic in the data segment so it is
      * resident in memory (part of RW PT_LOAD) and matches standard ELF layout. */
     size_t tdata_data_off = dynamic_rw_end;
-    if (have_tls) while (tdata_data_off & 7) tdata_data_off++;
+    size_t tls_p_align = 16;
+    if (max_td_align > tls_p_align) tls_p_align = max_td_align;
+    if (max_tbss_align > tls_p_align) tls_p_align = max_tbss_align;
+    if (have_tls) tdata_data_off = pad_size_to(tdata_data_off, tls_p_align);
     uint64_t tls_vaddr = data_vaddr + tdata_data_off;
     size_t tls_file_offset_base = data_file_offset + tdata_data_off;
     size_t rw_filesz = tdata_data_off + (have_tls ? tdata.len : 0);
+    size_t initarr_data_off = pad_size_to(rw_filesz, 8);
+    uint64_t initarr_vaddr = data_vaddr + initarr_data_off;
+    size_t initarr_file_offset = data_file_offset + initarr_data_off;
+    if (initarr.len > 0)
+        rw_filesz = initarr_data_off + initarr.len;
+    size_t finiarr_data_off = pad_size_to(rw_filesz, 8);
+    uint64_t finiarr_vaddr = data_vaddr + finiarr_data_off;
+    size_t finiarr_file_offset = data_file_offset + finiarr_data_off;
+    if (finiarr.len > 0)
+        rw_filesz = finiarr_data_off + finiarr.len;
 
     size_t bss_data_off = rw_filesz;
-    while (bss_data_off & 7) bss_data_off++;
+    bss_data_off = pad_size_to(bss_data_off, max_bss_align);
     uint64_t bss_vaddr = data_vaddr + bss_data_off;
     size_t bss_file_offset = data_file_offset + bss_data_off;
     uint64_t code_vaddr = base + text_offset;
+    /* Combined .rodata follows .text; pad so its vaddr matches max_ro_align
+     * even when text_offset is not 16-aligned (hdr + _start = 0x16e). */
+    {
+        size_t ro_va = (size_t)(code_vaddr + text.len);
+        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
+        while (extra--) {
+            char z = 0;
+            buffer_append(&text, &z, 1);
+        }
+    }
 
     /* ---- Compute final symbol addresses ---- */
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));
-    /* Reserve space in .bss for the initial thread's TLS block and TCB */
+    /* .tbss follows .tdata in the TLS template.  Object-file .tbss offsets
+     * are section-relative (aligned to the start of .tbss), so the linker
+     * must pad after .tdata until the combined TLS offset of .tbss is a
+     * multiple of max_tbss_align; otherwise an aligned(32) tbss object
+     * sitting after a 1-byte tdata lands at offset 1. */
     size_t tls_filesize = tdata.len;
-    size_t tls_memsize = tdata.len + tbss_size;
+    size_t tbss_tls_off = tdata.len;
+    if (tbss_size > 0)
+        tbss_tls_off = pad_size_to(tdata.len, max_tbss_align);
+    size_t tls_memsize = tbss_tls_off + tbss_size;
+    /* Reserve space in .bss for the initial thread's TLS block and TCB.
+     * The image start must be p_align-aligned so object offsets keep their
+     * declared alignment at run time (same contract as PT_TLS p_align). */
     size_t tls_bss_alloc_off = 0;
     if (have_tls) {
-        while (bss_size & 15) bss_size++;
-        tls_bss_alloc_off = bss_size;
-        bss_size += tls_memsize + 16;
+        size_t start = pad_size_to(bss_size, tls_p_align);
+        size_t mis = (size_t)((bss_vaddr + start) % tls_p_align);
+        if (mis) start += tls_p_align - mis;
+        tls_bss_alloc_off = start;
+        bss_size = start + tls_memsize + 16;
     }
     uint64_t tcb_vaddr = bss_vaddr + tls_bss_alloc_off + tls_memsize;
     /* The TLS template (PT_TLS) lives in memory right after GOT (part of RW PT_LOAD).
      * tdata (initialized) is file-resident, tbss (zero-init) is not.
      * tls_end_vaddr is p_vaddr + p_memsz; the TPOFF32 reloc writes
      * `S - tls_end_vaddr + A`, a negative offset from %fs:0 to the symbol. */
-    uint64_t tls_end_vaddr = tls_vaddr + tdata.len + tbss_size;
+    uint64_t tls_end_vaddr = tls_vaddr + tls_memsize;
     /* tdata/tbss virtual offsets inside the TLS template */
     uint64_t tdata_vaddr = tls_vaddr;
-    uint64_t tbss_vaddr = tls_vaddr + tdata.len;
+    uint64_t tbss_vaddr = tls_vaddr + tbss_tls_off;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -1153,8 +2011,32 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             case SECT_TBSS:
                 sym_addr[gsi] = tbss_vaddr + mod_tbss_off[i] + sym->value; break;
             default:
-                sym_addr[gsi] = sym->value; break;
+                if (sym->shndx == SHN_COMMON) {
+                    const char *nm = sym->name ? sym->name : "";
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win != (size_t)-1 && sinfo[win].shndx != SHN_COMMON)
+                        break; /* filled in a second pass */
+                    int ci;
+                    for (ci = 0; ci < n_commons; ci++)
+                        if (strcmp(commons[ci].name, nm) == 0) break;
+                    if (ci < n_commons)
+                        sym_addr[gsi] = bss_vaddr + commons[ci].off;
+                } else {
+                    sym_addr[gsi] = sym->value;
+                }
+                break;
             }
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            size_t gsi = mod_sym_base[i] + j;
+            if (m->syms[j].shndx != SHN_COMMON || sym_addr[gsi] != 0) continue;
+            const char *nm = m->syms[j].name ? m->syms[j].name : "";
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win != (size_t)-1)
+                sym_addr[gsi] = sym_addr[win];
         }
     }
 
@@ -1168,19 +2050,82 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     for (int j = 0; j < num_data_ext; j++) {
         if (data_got_external[j]) continue; /* external: dynlinker fills it */
         const char *nm = data_ext_list[j];
-        for (size_t mi = 0; mi < n; mi++) {
-            EmitModule *om = mods[mi];
-            for (size_t mj = 0; mj < om->num_syms; mj++) {
-                size_t ogsi = mod_sym_base[mi] + mj;
-                if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
-                    && om->syms[mj].name
-                    && strcmp(om->syms[mj].name, nm) == 0) {
-                    data_got_addr[j] = sym_addr[ogsi];
-                    break;
+        size_t ogsi = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+        if (ogsi != (size_t)-1)
+            data_got_addr[j] = sym_addr[ogsi];
+    }
+
+    /* Static TPOFF for each TLS IE GOT slot: S - tls_end.  Shared objects
+     * leave the slot at 0 and emit TPOFF64 for the dynamic linker. */
+    uint64_t *tls_ie_tpoff = num_tls_ie ? xcalloc((size_t)num_tls_ie, sizeof(uint64_t)) : NULL;
+    uint64_t *tpoff_roff = NULL, *tpoff_add = NULL, *tpoff_info = NULL;
+    int tpoff_fill = 0;
+    if (num_tpoff_dyn > 0) {
+        tpoff_roff = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+        tpoff_add = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+        tpoff_info = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+    }
+    for (int j = 0; j < num_tls_ie; j++) {
+        size_t gsi = (size_t)tls_ie_gsi[j];
+        uint64_t S = 0;
+        if (sinfo[gsi].defined
+            && (sinfo[gsi].shndx == SECT_TDATA || sinfo[gsi].shndx == SECT_TBSS)) {
+            S = sym_addr[gsi];
+        } else {
+            const char *nm = tls_ie_name[j] ? tls_ie_name[j] : "";
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win == (size_t)-1
+                || (sinfo[win].shndx != SECT_TDATA
+                    && sinfo[win].shndx != SECT_TBSS)) {
+                /* Undef IE: leave the GOT slot for a TPOFF64. */
+                tls_ie_tpoff[j] = 0;
+                if (tpoff_fill < num_tpoff_dyn) {
+                    uint32_t dyn_sym = 0;
+                    if (tls_ie_und_idx && tls_ie_und_idx[j] >= 0)
+                        dyn_sym = (uint32_t)(dyn_tls_und0 + tls_ie_und_idx[j]);
+                    tpoff_roff[tpoff_fill] = got_vaddr
+                        + (uint64_t)(3 + num_ext + num_data_ext + j) * 8;
+                    tpoff_add[tpoff_fill] = 0;
+                    tpoff_info[tpoff_fill] =
+                        ((uint64_t)dyn_sym << 32) | (uint64_t)R_X86_64_TPOFF64;
+                    tpoff_fill++;
+                }
+                continue;
+            }
+            S = sym_addr[win];
+        }
+        tls_ie_tpoff[j] = (uint64_t)((int64_t)S - (int64_t)tls_end_vaddr);
+        if (is_shared && tpoff_fill < num_tpoff_dyn) {
+            uint32_t dyn_sym = 0;
+            uint64_t addend = 0;
+            const char *nm = tls_ie_name[j];
+            if (nm) {
+                for (int e = 0; e < num_exports; e++) {
+                    if (strcmp(exports[e].name, nm) == 0) {
+                        dyn_sym = (uint32_t)(dyn_export0 + e);
+                        break;
+                    }
                 }
             }
+            if (dyn_sym == 0)
+                addend = S - tls_vaddr;
+            tpoff_roff[tpoff_fill] = got_vaddr
+                + (uint64_t)(3 + num_ext + num_data_ext + j) * 8;
+            tpoff_add[tpoff_fill] = addend;
+            tpoff_info[tpoff_fill] =
+                ((uint64_t)dyn_sym << 32) | (uint64_t)R_X86_64_TPOFF64;
+            tpoff_fill++;
         }
     }
+    uint64_t *abs64_roff = NULL, *abs64_add = NULL, *abs64_info = NULL;
+    int abs64_fill = 0;
+    if (num_abs64_relocs > 0) {
+        abs64_roff = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+        abs64_add = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+        abs64_info = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+    }
+    size_t tls_image_doff = (size_t)-1;
+    uint64_t tls_image_val = 0;
     /* ---- Fill builtin TLS metadata symbols in .data if present ---- */
     for (size_t mi = 0; mi < n; mi++) {
         EmitModule *om = mods[mi];
@@ -1193,13 +2138,15 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 uint64_t val = have_tls ? tdata.len : 0;
                 memcpy(data.data + doff, &val, 8);
             } else if (strcmp(nm, "__fakecc_tls_memsz") == 0) {
-                uint64_t val = have_tls ? (tdata.len + tbss_size) : 0;
+                uint64_t val = have_tls ? tls_memsize : 0;
                 memcpy(data.data + doff, &val, 8);
             } else if (strcmp(nm, "__fakecc_tls_image") == 0) {
                 uint64_t val = have_tls ? tls_vaddr : 0;
                 memcpy(data.data + doff, &val, 8);
+                tls_image_doff = doff;
+                tls_image_val = val;
             } else if (strcmp(nm, "__fakecc_tls_align") == 0) {
-                uint64_t val = 16;
+                uint64_t val = have_tls ? tls_p_align : 16;
                 memcpy(data.data + doff, &val, 8);
             }
         }
@@ -1212,10 +2159,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             const EmitReloc *rel = &m->relocs[r];
             size_t patch_in_text = mod_text_off[i] + rel->offset;
             uint64_t P = code_vaddr + patch_in_text;
-            if (rel->type == R_X86_64_GOTPCREL) {
+            if (reloc_is_gotpcrel(rel->type)) {
                 /* Load &global from a data GOT entry: the disp targets the GOT
                  * slot, whose qword holds the symbol's address (filled below,
-                 * either statically or via R_X86_64_GLOB_DAT). */
+                 * either statically or via R_X86_64_GLOB_DAT).
+                 * GOTPCRELX / REX_GOTPCRELX are the same S as GOTPCREL. */
                 size_t gsi = mod_sym_base[i] + rel->sym;
                 int dgidx = reloc_data_got_idx[gsi];
                 uint64_t got_slot_vaddr = got_vaddr + (3 + num_ext + dgidx) * 8;
@@ -1223,14 +2171,90 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
-            if (rel->type == R_X86_64_TPOFF32) {
-                /* TLS Local-Exec: `movq %fs:0, %reg; addq $sym@tpoff, %reg`.
-                 * The imm32 of the addq is the TLS offset: S + A - tp_end.
-                 * tp_end = tls_vaddr + tls_memsize (address just past the TLS
-                 * template block; on Linux, %fs:0 holds a pointer to this end).
-                 * The result is the signed negative offset from tp_end to the
-                 * variable, which when added to %fs:0 yields &sym. */
+            if (rel->type == R_X86_64_GOTTPOFF) {
+                /* TLS Initial-Exec: RIP-relative disp to the GOT slot that
+                 * holds this symbol's TPOFF (static fill or TPOFF64). */
                 size_t gsi = mod_sym_base[i] + rel->sym;
+                int ieidx = reloc_tls_ie_idx[gsi];
+                uint64_t got_slot_vaddr = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + ieidx) * 8;
+                int32_t disp = (int32_t)(got_slot_vaddr - (P + 4));
+                memcpy(text.data + patch_in_text, &disp, 4);
+                continue;
+            }
+            if (reloc_is_tls_gd(rel->type) || reloc_is_tls_ld(rel->type)) {
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                int ieidx = reloc_tls_ie_idx[gsi];
+                uint64_t got_slot_vaddr = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + ieidx) * 8;
+                if (rel->type == R_X86_64_TLSGD && patch_in_text >= 4
+                    && patch_in_text - 4 + 16 <= text.len) {
+                    /* Relax TLSGD 16-byte lea+call __tls_get_addr to IE. */
+                    size_t seq = patch_in_text - 4;
+                    static const uint8_t ie[12] = {
+                        0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+                        0x48, 0x03, 0x05
+                    };
+                    memcpy(text.data + seq, ie, 12);
+                    uint64_t Pdisp = code_vaddr + seq + 16;
+                    int32_t disp = (int32_t)(got_slot_vaddr - Pdisp);
+                    memcpy(text.data + seq + 12, &disp, 4);
+                } else if (rel->type == R_X86_64_TLSLD && patch_in_text >= 3
+                           && patch_in_text - 3 + 12 <= text.len) {
+                    if (!is_shared) {
+                        /* 12-byte LE: movq %fs:0, %rax with prefixes. */
+                        static const uint8_t le[12] = {
+                            0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25,
+                            0x00, 0x00, 0x00, 0x00
+                        };
+                        memcpy(text.data + patch_in_text - 3, le, 12);
+                    } else {
+                        /* Point the lea at a DTPMOD64 GOT pair; keep the call. */
+                        uint64_t pair = got_vaddr
+                            + (uint64_t)(3 + num_ext + num_data_ext
+                                         + num_tls_ie + num_ifunc) * 8;
+                        int32_t disp = (int32_t)(pair - (P + 4));
+                        memcpy(text.data + patch_in_text, &disp, 4);
+                    }
+                }
+                continue;
+            }
+            if (rel->type == R_X86_64_DTPOFF32) {
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                uint64_t S = 0;
+                if (sinfo[gsi].defined
+                    && (sinfo[gsi].shndx == SECT_TDATA
+                        || sinfo[gsi].shndx == SECT_TBSS)) {
+                    S = sym_addr[gsi];
+                } else {
+                    const char *nm = m->syms[rel->sym].name
+                                     ? m->syms[rel->sym].name : "";
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win != (size_t)-1
+                        && (sinfo[win].shndx == SECT_TDATA
+                            || sinfo[win].shndx == SECT_TBSS))
+                        S = sym_addr[win];
+                    else if (sinfo[gsi].defined)
+                        S = sym_addr[gsi];
+                    else
+                        S = tls_vaddr;
+                }
+                int32_t disp = is_shared
+                    ? (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_vaddr)
+                    : (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_end_vaddr);
+                memcpy(text.data + patch_in_text, &disp, 4);
+                continue;
+            }
+            if (rel->type == R_X86_64_TPOFF32) {
+                /* TLS Local-Exec in an executable (legacy objects).  Shared
+                 * objects cannot use TPOFF32 — ld.so rejects reloc type 0x17. */
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                if (is_shared) {
+                    fprintf(stderr,
+                            "fakecc: R_X86_64_TPOFF32 cannot be used in a "
+                            "shared object (need Initial-Exec GOTTPOFF)\n");
+                    exit(1);
+                }
                 uint64_t S;
                 if (sinfo[gsi].defined
                     && (sinfo[gsi].shndx == SECT_TDATA
@@ -1238,125 +2262,213 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                     S = sym_addr[gsi];
                 } else {
                     /* Undefined locally — look for a GLOBAL TLS definition in
-                     * another module.  No fallback: TLS Local-Exec cannot
-                     * resolve truly external symbols (would need Initial-Exec
-                     * via GOT, which we don't implement). */
+                     * another module.  No fallback: Local-Exec cannot
+                     * resolve truly external symbols. */
                     const char *nm = m->syms[rel->sym].name
                                      ? m->syms[rel->sym].name : "";
-                    size_t found = (size_t)-1;
-                    for (size_t mi = 0; mi < n && found == (size_t)-1; mi++) {
-                        EmitModule *om = mods[mi];
-                        for (size_t mj = 0; mj < om->num_syms; mj++) {
-                            size_t ogsi = mod_sym_base[mi] + mj;
-                            if (sinfo[ogsi].defined
-                                && sinfo[ogsi].binding == 1 /* GLOBAL */
-                                && (sinfo[ogsi].shndx == SECT_TDATA
-                                    || sinfo[ogsi].shndx == SECT_TBSS)
-                                && om->syms[mj].name
-                                && strcmp(om->syms[mj].name, nm) == 0) {
-                                found = sym_addr[ogsi];
-                                break;
-                            }
-                        }
-                    }
-                    if (found == (size_t)-1) {
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win == (size_t)-1
+                        || (sinfo[win].shndx != SECT_TDATA
+                            && sinfo[win].shndx != SECT_TBSS)) {
                         fprintf(stderr,
                                 "fakecc: undefined TLS symbol '%s' "
                                 "(Local-Exec needs the variable to be defined "
                                 "in the same link unit)\n", nm);
                         exit(1);
                     }
-                    S = found;
+                    S = sym_addr[win];
                 }
                 int32_t disp = (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_end_vaddr);
                 memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
-            size_t gsi = mod_sym_base[i] + rel->sym;
-            uint64_t S;
-            if (sinfo[gsi].defined) {
-                /* Defined in its own module. */
-                S = sym_addr[gsi];
-            } else {
-                /* Undefined locally — look for a GLOBAL definition in another
-                 * module with the same name. */
-                const char *nm = m->syms[rel->sym].name
-                                 ? m->syms[rel->sym].name : "";
-                size_t global_addr = (size_t)-1;
-                for (size_t mi = 0; mi < n && global_addr == (size_t)-1; mi++) {
-                    EmitModule *om = mods[mi];
-                    for (size_t mj = 0; mj < om->num_syms; mj++) {
-                        size_t ogsi = mod_sym_base[mi] + mj;
-                        if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
-                            && om->syms[mj].name
-                            && strcmp(om->syms[mj].name, nm) == 0) {
-                            global_addr = sym_addr[ogsi];
-                            break;
-                        }
+            if (rel->type == R_X86_64_PLT32) {
+                int skip_gd_call = 0;
+                for (size_t r2 = 0; r2 < m->num_relocs; r2++) {
+                    if (m->relocs[r2].type == R_X86_64_TLSGD
+                        && m->relocs[r2].offset + 8 == rel->offset) {
+                        skip_gd_call = 1;
+                        break;
+                    }
+                    if (!is_shared && m->relocs[r2].type == R_X86_64_TLSLD
+                        && m->relocs[r2].offset + 5 == rel->offset) {
+                        skip_gd_call = 1;
+                        break;
                     }
                 }
-                if (global_addr != (size_t)-1) {
-                    S = global_addr;
-                } else {
-                    /* Truly external (libc) → PLT. */
-                    int eidx = reloc_ext_idx[gsi];
-                    S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
-                }
+                if (skip_gd_call) continue;
             }
-            int32_t disp = (int32_t)(S + rel->addend - P);
-            memcpy(text.data + patch_in_text, &disp, 4);
+            size_t gsi = mod_sym_base[i] + rel->sym;
+            uint64_t S;
+            const char *rnm = m->syms[rel->sym].name
+                              ? m->syms[rel->sym].name : "";
+            size_t found = find_export_gsi(mods, n, mod_sym_base, sinfo, rnm);
+            int local_strong = sinfo[gsi].defined
+                && sinfo[gsi].binding == STB_GLOBAL
+                && sinfo[gsi].shndx != SHN_COMMON;
+            if (local_strong) {
+                S = sym_addr[gsi];
+            } else if (found != (size_t)-1) {
+                S = sym_addr[found];
+            } else if (sinfo[gsi].defined) {
+                S = sym_addr[gsi];
+            } else if (reloc_copy_idx[gsi] >= 0) {
+                S = bss_vaddr + copy_off[reloc_copy_idx[gsi]];
+            } else {
+                int eidx = reloc_ext_idx[gsi];
+                S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
+            }
+            {
+                int ik = -1;
+                const char *inm = rnm;
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_gsi[k] == gsi) { ik = k; break; }
+                    if (inm && ifunc_name[k] && strcmp(ifunc_name[k], inm) == 0) {
+                        ik = k; break;
+                    }
+                }
+                if (ik >= 0)
+                    S = code_vaddr + ifunc_thunk_off[ik];
+            }
+            /* 32 / 32S are 4-byte S+A; 64 is 8-byte S+A; PC64 is 8-byte
+             * S+A−P.  Remaining .text relocs are 4-byte PC32 / PLT32. */
+            if (rel->type == R_X86_64_64) {
+                uint64_t abs64 = S + (uint64_t)(int64_t)rel->addend;
+                memcpy(text.data + patch_in_text, &abs64, 8);
+            } else if (rel->type == R_X86_64_PC64) {
+                uint64_t disp64 = S + (uint64_t)(int64_t)rel->addend - P;
+                memcpy(text.data + patch_in_text, &disp64, 8);
+            } else if (rel->type == R_X86_64_32 || rel->type == R_X86_64_32S) {
+                int32_t abs32 = (int32_t)(S + rel->addend);
+                memcpy(text.data + patch_in_text, &abs32, 4);
+            } else {
+                int32_t disp = (int32_t)(S + rel->addend - P);
+                memcpy(text.data + patch_in_text, &disp, 4);
+            }
         }
     }
 
     /* ---- Apply data relocations (pointer fixups in .data) ---- */
+    uint64_t *rel_roff = NULL;
+    uint64_t *rel_add = NULL;
+    int rel_fill = 0;
+    if (is_shared && num_relative > 0) {
+        rel_roff = xcalloc((size_t)num_relative, sizeof(uint64_t));
+        rel_add = xcalloc((size_t)num_relative, sizeof(uint64_t));
+    }
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_data_relocs; r++) {
             const EmitReloc *rel = &m->data_relocs[r];
-            size_t patch_in_data = mod_data_off[i] + rel->offset;
+            int in_tdata = (rel->shndx == SECT_TDATA);
+            int in_rodata = (rel->shndx == SECT_RODATA);
+            int in_init = (rel->shndx == SECT_INIT_ARRAY);
+            int in_fini = (rel->shndx == SECT_FINI_ARRAY);
+            size_t patch_in_sec = (in_tdata ? mod_tdata_off[i]
+                                  : in_rodata ? mod_rodata_off[i]
+                                  : in_init ? mod_init_off[i]
+                                  : in_fini ? mod_fini_off[i]
+                                  : mod_data_off[i])
+                                  + rel->offset;
+            if (in_init && init_remap && (patch_in_sec / 8) < (initarr.len / 8))
+                patch_in_sec = init_remap[patch_in_sec / 8];
+            if (in_fini && fini_remap && (patch_in_sec / 8) < (finiarr.len / 8))
+                patch_in_sec = fini_remap[patch_in_sec / 8];
             size_t gsi = mod_sym_base[i] + rel->sym;
             uint64_t S;
-            if (sinfo[gsi].defined) {
+            int abs64 = 0;
+            int aidx = reloc_data_abs_idx[gsi];
+            const char *dnm = m->syms[rel->sym].name
+                              ? m->syms[rel->sym].name : "";
+            size_t dfound = find_export_gsi(mods, n, mod_sym_base, sinfo, dnm);
+            int local_keep = sinfo[gsi].defined
+                && sinfo[gsi].shndx != SHN_COMMON
+                && sinfo[gsi].binding != STB_WEAK;
+            if (local_keep) {
                 S = sym_addr[gsi];
+            } else if (dfound != (size_t)-1) {
+                S = sym_addr[dfound];
+            } else if (sinfo[gsi].defined) {
+                S = sym_addr[gsi];
+            } else if (reloc_copy_idx[gsi] >= 0) {
+                S = bss_vaddr + copy_off[reloc_copy_idx[gsi]];
+            } else if (reloc_ext_idx[gsi] >= 0) {
+                S = code_vaddr + plt_entry_off[reloc_ext_idx[gsi]];
+            } else if (aidx >= 0) {
+                S = 0;
+                abs64 = 1;
             } else {
-                /* Undefined locally — look for a GLOBAL definition in another
-                 * module with the same name. */
-                const char *nm = m->syms[rel->sym].name
-                                 ? m->syms[rel->sym].name : "";
-                size_t global_addr = (size_t)-1;
-                for (size_t mi = 0; mi < n && global_addr == (size_t)-1; mi++) {
-                    EmitModule *om = mods[mi];
-                    for (size_t mj = 0; mj < om->num_syms; mj++) {
-                        size_t ogsi = mod_sym_base[mi] + mj;
-                        if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1 /* GLOBAL */
-                            && om->syms[mj].name
-                            && strcmp(om->syms[mj].name, nm) == 0) {
-                            global_addr = sym_addr[ogsi];
-                            break;
-                        }
-                    }
-                }
-                if (global_addr != (size_t)-1) {
-                    S = global_addr;
-                } else {
-                    /* Truly external function address in .data → that
-                     * function's PLT stub (a stable, callable address). */
-                    int eidx = reloc_ext_idx[gsi];
-                    if (eidx < 0) {
-                        const char *nm = m->syms[rel->sym].name
-                                         ? m->syms[rel->sym].name : "";
-                        fprintf(stderr,
-                                "fakecc: data reloc against undefined '%s' "
-                                "has no PLT slot\n", nm);
-                        exit(1);
-                    }
-                    S = code_vaddr + plt_entry_off[eidx];
-                }
+                fprintf(stderr,
+                        "fakecc: data reloc against undefined '%s' "
+                        "has no PLT or GLOB_DAT slot\n", dnm);
+                exit(1);
             }
-            /* R_X86_64_64: absolute 64-bit, value = S + A. */
-            uint64_t value = S + rel->addend;
-            memcpy(data.data + patch_in_data, &value, 8);
+            {
+                int ik = -1;
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_gsi[k] == gsi) { ik = k; break; }
+                    if (dnm && ifunc_name[k] && strcmp(ifunc_name[k], dnm) == 0) {
+                        ik = k; break;
+                    }
+                }
+                if (ik >= 0)
+                    S = code_vaddr + ifunc_thunk_off[ik];
+            }
+            /* Apply by reloc type: 64/PC64 are 8 bytes; 32/32S/PC32 are 4. */
+            uint64_t A = (uint64_t)(int64_t)rel->addend;
+            uint8_t *dst;
+            size_t dst_len;
+            uint64_t P;
+            if (in_tdata) {
+                dst = (uint8_t *)tdata.data;
+                dst_len = tdata.len;
+                P = tls_vaddr + patch_in_sec;
+            } else if (in_rodata) {
+                dst = (uint8_t *)rodata.data;
+                dst_len = rodata.len;
+                P = code_vaddr + text.len + patch_in_sec;
+            } else if (in_init) {
+                dst = (uint8_t *)initarr.data;
+                dst_len = initarr.len;
+                P = initarr_vaddr + patch_in_sec;
+            } else if (in_fini) {
+                dst = (uint8_t *)finiarr.data;
+                dst_len = finiarr.len;
+                P = finiarr_vaddr + patch_in_sec;
+            } else {
+                dst = (uint8_t *)data.data;
+                dst_len = data.len;
+                P = data_vaddr + patch_in_sec;
+            }
+            uint64_t value;
+            int width = reloc_width(rel->type);
+            if (reloc_is_pc(rel->type))
+                value = S + A - P;
+            else
+                value = S + A;
+            if (patch_in_sec + (size_t)width <= dst_len)
+                memcpy(dst + patch_in_sec, &value, (size_t)width);
+            uint64_t site_va = P;
+            if (abs64 && abs64_fill < num_abs64_relocs) {
+                abs64_roff[abs64_fill] = site_va;
+                abs64_add[abs64_fill] = A;
+                abs64_info[abs64_fill] =
+                    ((uint64_t)(1 + num_ext + num_true_data_ext + aidx) << 32)
+                    | R_X86_64_64;
+                abs64_fill++;
+            } else if (is_shared && rel_fill < num_relative
+                       && !reloc_is_pc(rel->type) && !reloc_is_abs32(rel->type)) {
+                rel_roff[rel_fill] = site_va;
+                rel_add[rel_fill] = value;
+                rel_fill++;
+            }
         }
+    }
+    if (is_shared && tls_image_rel && tls_image_doff != (size_t)-1
+        && rel_fill < num_relative) {
+        rel_roff[rel_fill] = data_vaddr + tls_image_doff;
+        rel_add[rel_fill] = tls_image_val;
+        rel_fill++;
     }
 
     /* ---- Patch PLT GOT fixups ---- */
@@ -1373,6 +2485,13 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
             memcpy(text.data + plt_got_fixup[e], &disp, 4);
         }
+    }
+    for (int k = 0; k < num_ifunc; k++) {
+        uint64_t target = got_vaddr
+            + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + k) * 8;
+        uint64_t rip_next = code_vaddr + ifunc_got_fixup[k] + 4;
+        int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
+        memcpy(text.data + ifunc_got_fixup[k], &disp, 4);
     }
 
     /* ---- Find main (and optional static exit for the entry stub) ---- */
@@ -1420,11 +2539,35 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 acc += strlen(data_ext_list[j]) + 1;
                 k++;
             }
+            for (int a = 0; a < num_abs_ext; a++, k++) {
+                uint32_t noff = (uint32_t)acc;
+                memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                acc += strlen(abs_ext_list[a]) + 1;
+            }
+            for (int t = 0; t < num_tls_und; t++, k++) {
+                uint32_t noff = (uint32_t)acc;
+                memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                acc += strlen(tls_und_list[t]) + 1;
+            }
+            for (int c = 0; c < num_copy; c++, k++) {
+                uint32_t noff = (uint32_t)acc;
+                size_t ent = 24 + (size_t)k * 24;
+                memcpy(dynsym.data + ent, &noff, 4);
+                uint64_t val = bss_vaddr + copy_off[c];
+                memcpy(dynsym.data + ent + 8, &val, 8);
+                acc += strlen(copy_list[c]) + 1;
+            }
             for (int e = 0; e < num_exports; e++, k++) {
                 uint32_t noff = (uint32_t)acc;
                 size_t ent = 24 + (size_t)k * 24;
                 memcpy(dynsym.data + ent, &noff, 4);
                 uint64_t val = sym_addr[exports[e].gsi];
+                /* STT_TLS st_value is the offset from the start of this
+                 * object's TLS template, not a load virtual address. */
+                if (exports[e].type == 6 /* STT_TLS */
+                    || exports[e].shndx == SECT_TDATA
+                    || exports[e].shndx == SECT_TBSS)
+                    val = val - tls_vaddr;
                 memcpy(dynsym.data + ent + 8, &val, 8);
                 acc += strlen(exports[e].name) + 1;
             }
@@ -1443,16 +2586,67 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
                 rdj++;
             }
-            /* R_X86_64_RELATIVE for GOT[0] (= link-time &_DYNAMIC). */
-            if (num_relative > 0) {
+            for (int a = 0; a < abs64_fill; a++, rdj++) {
+                size_t ent = (size_t)rdj * 24;
+                memcpy(rela_dyn.data + ent, &abs64_roff[a], 8);
+                memcpy(rela_dyn.data + ent + 8, &abs64_info[a], 8);
+                memcpy(rela_dyn.data + ent + 16, &abs64_add[a], 8);
+            }
+            /* R_X86_64_RELATIVE for pointer initializers, internal GOT slots,
+             * then GOT[0] (= link-time &_DYNAMIC). */
+            if (num_relative > 0 && rel_roff) {
+                for (int j = 0; j < num_data_ext; j++) {
+                    if (data_got_external[j]) continue;
+                    if (rel_fill < num_relative) {
+                        rel_roff[rel_fill] = got_vaddr + (3 + num_ext + j) * 8;
+                        rel_add[rel_fill] = data_got_addr[j];
+                        rel_fill++;
+                    }
+                }
                 uint64_t dyn_vaddr = is_shared
                     ? (data_vaddr + dynamic_data_off)
                     : (base + hdr_size + start_size + text.len + rodata.len + interp_len
                        + dynstr.len + dynsym.len + hash.len + rela_plt.len + rela_dyn.len);
-                uint64_t roff = got_vaddr;
+                if (rel_fill < num_relative) {
+                    rel_roff[rel_fill] = got_vaddr;
+                    rel_add[rel_fill] = dyn_vaddr;
+                    rel_fill++;
+                }
+                for (int r = 0; r < rel_fill; r++) {
+                    size_t ent = (size_t)(rdj + r) * 24;
+                    memcpy(rela_dyn.data + ent, &rel_roff[r], 8);
+                    memcpy(rela_dyn.data + ent + 16, &rel_add[r], 8);
+                }
+                for (int r = rel_fill; r < num_relative; r++) {
+                    size_t ent = (size_t)(rdj + r) * 24;
+                    uint64_t none = 0;
+                    memcpy(rela_dyn.data + ent + 8, &none, 8); /* R_X86_64_NONE */
+                }
+                rdj += num_relative;
+            }
+            for (int t = 0; t < tpoff_fill; t++, rdj++) {
                 size_t ent = (size_t)rdj * 24;
+                memcpy(rela_dyn.data + ent, &tpoff_roff[t], 8);
+                memcpy(rela_dyn.data + ent + 8, &tpoff_info[t], 8);
+                memcpy(rela_dyn.data + ent + 16, &tpoff_add[t], 8);
+            }
+            for (int c = 0; c < num_copy; c++, rdj++) {
+                uint64_t roff = bss_vaddr + copy_off[c];
+                memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
+            }
+            for (int k = 0; k < num_ifunc; k++, rdj++) {
+                size_t ent = (size_t)rdj * 24;
+                uint64_t roff = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + k) * 8;
+                uint64_t add = sym_addr[ifunc_gsi[k]];
                 memcpy(rela_dyn.data + ent, &roff, 8);
-                memcpy(rela_dyn.data + ent + 16, &dyn_vaddr, 8);
+                memcpy(rela_dyn.data + ent + 16, &add, 8);
+            }
+            if (tlsld_got_pair) {
+                uint64_t roff = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + num_ifunc) * 8;
+                memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
+                rdj++;
             }
         }
         /* .dynamic */
@@ -1501,6 +2695,22 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             buf_u64(&dynamic, DT_RELASZ);   buf_u64(&dynamic, rela_dyn.len);
             buf_u64(&dynamic, DT_RELENT);   buf_u64(&dynamic, 24);
         }
+        if (is_shared && num_tls_ie > 0) {
+            buf_u64(&dynamic, DT_FLAGS);
+            buf_u64(&dynamic, DF_STATIC_TLS);
+        }
+        if (initarr.len > 0) {
+            buf_u64(&dynamic, DT_INIT_ARRAY);
+            buf_u64(&dynamic, initarr_vaddr);
+            buf_u64(&dynamic, DT_INIT_ARRAYSZ);
+            buf_u64(&dynamic, initarr.len);
+        }
+        if (finiarr.len > 0) {
+            buf_u64(&dynamic, DT_FINI_ARRAY);
+            buf_u64(&dynamic, finiarr_vaddr);
+            buf_u64(&dynamic, DT_FINI_ARRAYSZ);
+            buf_u64(&dynamic, finiarr.len);
+        }
         buf_u64(&dynamic, DT_NULL);     buf_u64(&dynamic, 0);
 
         /* ---- Assemble RX segment content ---- */
@@ -1512,8 +2722,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                 exit_call = code_vaddr + plt_entry_off[exit_ext_idx];
             else if (exit_static_addr)
                 exit_call = exit_static_addr;
-            gen_start(&rx, base + start_offset, main_addr, exit_call,
-                      init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
+            StartInfo sti;
+            memset(&sti, 0, sizeof(sti));
+            sti.call_vaddr = base + start_offset;
+            sti.main_vaddr = main_addr;
+            sti.exit_plt_vaddr = exit_call;
+            sti.have_tls = init_tls_in_start;
+            sti.tls_vaddr = tls_vaddr;
+            sti.tcb_vaddr = tcb_vaddr;
+            sti.tls_memsize = tls_memsize;
+            sti.tdata_len = tdata.len;
+            gen_start(&rx, &sti);
         }
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
@@ -1538,6 +2757,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             buf_u64(&got, code_vaddr + plt_entry_off[i] + 6); /* push $i addr */
         for (int j = 0; j < num_data_ext; j++)
             buf_u64(&got, data_got_external[j] ? 0 : data_got_addr[j]);
+        for (int j = 0; j < num_tls_ie; j++)
+            buf_u64(&got, is_shared ? 0 : tls_ie_tpoff[j]);
+        for (int k = 0; k < num_ifunc; k++)
+            buf_u64(&got, 0);
+        if (tlsld_got_pair) {
+            buf_u64(&got, 0);
+            buf_u64(&got, 0);
+        }
 
         /* ---- Build ELF ---- */
         /* NOTE: phnum computed AFTER buffer_init() to avoid a codegen
@@ -1547,9 +2774,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         buffer_init(&elf);
         uint16_t phnum;
         if (is_shared)
-            phnum = have_tls ? 4 : 3; /* RX, RW, DYNAMIC, [TLS] */
+            phnum = have_tls ? 5 : 4; /* RX, RW, DYNAMIC, GNU_STACK, [TLS] */
         else
-            phnum = have_tls ? 5 : 4; /* RX, RW, INTERP, DYNAMIC, [TLS] */
+            phnum = have_tls ? 6 : 5; /* RX, RW, INTERP, DYNAMIC, GNU_STACK, [TLS] */
         write_ehdr(&elf, is_shared ? ET_DYN : ET_EXEC, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base, rx_filesz, rx_filesz, PAGE_SIZE);
         write_phdr(&elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr,
@@ -1563,8 +2790,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                    dynamic.len, dynamic.len, 8);
         if (have_tls) {
             write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
-                       tls_filesize, tls_memsize, 8);
+                       tls_filesize, tls_memsize, tls_p_align);
         }
+        write_phdr(&elf, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 16);
         buf_bytes(&elf, rx.data, rx.len);
         while (elf.len < data_file_offset) buf_u8(&elf, 0);
         buf_bytes(&elf, data.data, data.len);
@@ -1578,7 +2806,16 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
             buf_bytes(&elf, tdata.data, tdata.len);
         }
+        if (initarr.len > 0) {
+            while (elf.len < initarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, initarr.data, initarr.len);
+        }
+        if (finiarr.len > 0) {
+            while (elf.len < finiarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, finiarr.data, finiarr.len);
+        }
         SectionLayout lay;
+        memset(&lay, 0, sizeof(lay));
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
         lay.bss_vaddr = bss_vaddr;
@@ -1596,6 +2833,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         lay.tls_file_offset = tls_file_offset_base;
         lay.tls_filesize = tls_filesize;
         lay.tls_memsize = tls_memsize;
+        lay.have_initarr = initarr.len > 0;
+        lay.initarr_vaddr = initarr_vaddr;
+        lay.initarr_file_offset = initarr_file_offset;
+        lay.initarr_size = initarr.len;
+        lay.have_finiarr = finiarr.len > 0;
+        lay.finiarr_vaddr = finiarr_vaddr;
+        lay.finiarr_file_offset = finiarr_file_offset;
+        lay.finiarr_size = finiarr.len;
         /* RX content is written right after the program headers (file offset
          * hdr_size), so each dynamic section's file offset is hdr_size + its
          * offset inside the rx buffer.  vaddrs already include base+rx_base. */
@@ -1633,8 +2878,24 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         uint64_t entry = base + start_offset;
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr, exit_static_addr,
-                  init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
+        StartInfo sti;
+        memset(&sti, 0, sizeof(sti));
+        sti.call_vaddr = base + start_offset;
+        sti.main_vaddr = main_addr;
+        sti.exit_plt_vaddr = exit_static_addr;
+        sti.have_tls = init_tls_in_start;
+        sti.tls_vaddr = tls_vaddr;
+        sti.tcb_vaddr = tcb_vaddr;
+        sti.tls_memsize = tls_memsize;
+        sti.tdata_len = tdata.len;
+        sti.init_start = run_ctors ? initarr_vaddr : 0;
+        sti.init_count = run_ctors ? (uint64_t)(initarr.len / 8) : 0;
+        sti.fini_start = run_dtors ? finiarr_vaddr : 0;
+        sti.fini_count = run_dtors ? (uint64_t)(finiarr.len / 8) : 0;
+        sti.irel_got = run_irel
+            ? (got_vaddr + (uint64_t)(3 + num_data_ext + num_tls_ie) * 8) : 0;
+        sti.irel_count = run_irel ? (uint64_t)num_ifunc : 0;
+        gen_start(&rx, &sti);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
 
@@ -1642,20 +2903,27 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         size_t got_bytes = 0;
         Buffer got;
         buffer_init(&got);
-        if (num_data_ext > 0) {
-            got_bytes = (size_t)(3 + num_data_ext) * 8;
+        if (num_data_ext > 0 || num_tls_ie > 0 || num_ifunc > 0) {
+            got_bytes = (size_t)(3 + num_data_ext + num_tls_ie + num_ifunc) * 8;
             buf_u64(&got, 0);
             buf_u64(&got, 0);
             buf_u64(&got, 0);
             for (int j = 0; j < num_data_ext; j++)
                 buf_u64(&got, data_got_addr[j]);
+            for (int j = 0; j < num_tls_ie; j++)
+                buf_u64(&got, tls_ie_tpoff[j]);
+            for (int k = 0; k < num_ifunc; k++)
+                buf_u64(&got, sym_addr[ifunc_gsi[k]]);
         }
 
         Buffer elf;
         buffer_init(&elf);
-        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0 || (have_tls && tdata.len > 0));
+        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0
+                      || (have_tls && tdata.len > 0) || initarr.len > 0
+                      || finiarr.len > 0);
         uint16_t phnum = has_rw ? 2 : 1;
         if (have_tls) phnum++;
+        phnum++; /* PT_GNU_STACK */
         write_ehdr(&elf, ET_EXEC, entry, ELF64_EHDR_SIZE, phnum);
         write_phdr(&elf, PT_LOAD, PF_R | PF_X, 0, base,
                    rx_filesz, rx_filesz, PAGE_SIZE);
@@ -1665,8 +2933,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         }
         if (have_tls) {
             write_phdr(&elf, PT_TLS, PF_R, tls_file_offset_base, tls_vaddr,
-                       tls_filesize, tls_memsize, 8);
+                       tls_filesize, tls_memsize, tls_p_align);
         }
+        write_phdr(&elf, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 16);
         while (elf.len < hdr_size)
             buf_u8(&elf, 0);
         buf_bytes(&elf, rx.data, rx.len);
@@ -1681,7 +2950,16 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
             while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
             buf_bytes(&elf, tdata.data, tdata.len);
         }
+        if (initarr.len > 0) {
+            while (elf.len < initarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, initarr.data, initarr.len);
+        }
+        if (finiarr.len > 0) {
+            while (elf.len < finiarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, finiarr.data, finiarr.len);
+        }
         SectionLayout lay;
+        memset(&lay, 0, sizeof(lay));
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
         lay.bss_vaddr = bss_vaddr;
@@ -1699,6 +2977,14 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         lay.tls_file_offset = tls_file_offset_base;
         lay.tls_filesize = tls_filesize;
         lay.tls_memsize = tls_memsize;
+        lay.have_initarr = initarr.len > 0;
+        lay.initarr_vaddr = initarr_vaddr;
+        lay.initarr_file_offset = initarr_file_offset;
+        lay.initarr_size = initarr.len;
+        lay.have_finiarr = finiarr.len > 0;
+        lay.finiarr_vaddr = finiarr_vaddr;
+        lay.finiarr_file_offset = finiarr_file_offset;
+        lay.finiarr_size = finiarr.len;
         lay.have_dynamic = 0;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
@@ -1725,10 +3011,29 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     free(exports);
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
     buffer_free(&tdata);
+    buffer_free(&initarr);
+    buffer_free(&finiarr);
+    free(concat_init_prio); free(concat_fini_prio);
+    free(init_remap); free(fini_remap);
     free(mod_text_off); free(mod_rodata_off); free(mod_data_off); free(mod_bss_off);
-    free(mod_tdata_off); free(mod_tbss_off);
+    free(mod_tdata_off); free(mod_tbss_off); free(mod_init_off); free(mod_fini_off);
     free(mod_sym_base); free(sym_addr); free(sinfo); free(reloc_ext_idx);
-    free(reloc_data_got_idx);
+    free(commons);
+    free(reloc_data_abs_idx); free(reloc_data_got_idx);
+    free(reloc_tls_ie_idx); free(tls_ie_gsi); free(tls_ie_name); free(tls_ie_tpoff);
+    free(tls_ie_is_undef); free(tls_ie_und_idx);
+    for (int t = 0; t < num_tls_und; t++) free(tls_und_list[t]);
+    free(tls_und_list);
+    free(tls_und_weak);
+    free(ifunc_gsi); free(ifunc_name); free(ifunc_thunk_off); free(ifunc_got_fixup);
+    free(reloc_copy_idx); free(copy_size); free(copy_off);
+    for (int c = 0; c < num_copy; c++) free(copy_list[c]);
+    free(copy_list);
+    for (int a = 0; a < num_abs_ext; a++) free(abs_ext_list[a]);
+    free(abs_ext_list);
     free(plt_entry_off); free(plt_got_fixup);
     free(data_got_addr); free(data_got_external);
+    free(rel_roff); free(rel_add);
+    free(tpoff_roff); free(tpoff_add); free(tpoff_info);
+    free(abs64_roff); free(abs64_add); free(abs64_info);
 }

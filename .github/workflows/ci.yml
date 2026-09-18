@@ -66,11 +66,9 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  # Wall-clock of this job is dominated by self-hosted e2e (~28 min) and
-  # difftest (~30 min), each run twice (-O0 then -O1) on one runner.  Each
-  # suite already saturates nproc, so overlapping them on the same VM does
-  # not help; splitting across runners does.  Recent master: ~62 min serial
-  # vs ~stage2 + max(one suite) ≈ 18 min after the split.
+  # Wall-clock of this job is dominated by self-hosted e2e and difftest
+  # (each run twice, -O0 then -O1).  -O0 finishes around 33 min; -O1 needs
+  # the 75-minute job budget (40 min cancelled the -O1 legs).
   bootstrap:
     name: bootstrap (fixed point)
     runs-on: ubuntu-latest
@@ -81,20 +79,20 @@ jobs:
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
 
-      # -O2 only speeds Stage 0 (gcc-built fakecc compiling v0/*.c).  It does
-      # not change fakecc-1's codegen, so the fixed-point comparison is the
-      # same as an unoptimized Stage 0.
-      # Force CC=gcc so we pick up the GCC 16 installed above (PATH via
-      # GITHUB_PATH).  Without this, cmake finds /usr/bin/cc → GCC 13, which
-      # has miscompiled Stage 0 at -O2 after the -shared linker work and
-      # broken the fixed point.
+      # Stage 0 is unoptimized on purpose.  The fixed point compares two
+      # fakecc-built binaries (fakecc-1 vs fakecc-2); -O2 only speeds the
+      # gcc-built Stage 0 and must not change that comparison.  Ubuntu's
+      # toolchain-test GCC 16 snapshot (16-20260315) miscompiles Stage 0
+      # at -O2 — rbp displacements in the emitted compiler differ by 32
+      # bytes from a correctly compiled Stage 0 (local GCC 16.2.0 is fine).
+      # Pin gcc-16 by name so cmake does not pick /usr/bin/gcc → GCC 13.
       - name: Build stage 0
         run: |
-          cmake -S . -B build -DCMAKE_C_FLAGS="-O2"
+          gcc-16 --version
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=gcc-16 \
+            -DCMAKE_CXX_COMPILER=g++-16
           cmake --build build --parallel
-        env:
-          CC: gcc
-          CXX: g++
 
       # Stage 0 compiles and links fakecc; that fakecc compiles and links
       # fakecc again.  Both stages must produce byte-identical binaries,
@@ -111,6 +109,17 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Upload mismatch binaries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-mismatch
+          path: |
+            v0/fakecc-1
+            v0/fakecc-2
+          if-no-files-found: ignore
+          retention-days: 3
+
   # A fixed point alone does not prove correctness — a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
   # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are
@@ -119,7 +128,7 @@ jobs:
     name: bootstrap · ${{ matrix.label }}
     needs: bootstrap
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:

@@ -3,8 +3,7 @@ package runtime;
 
 void exit(int code) {
     __rt_stdio_init();
-    fflush(stdout);
-    fflush(stderr);
+    fflush(0);
     __syscall(231, (long)code);
 }
 
@@ -16,9 +15,24 @@ int abs(int x) { return x < 0 ? -x : x; }
 long labs(long x) { return x < 0 ? -x : x; }
 long long llabs(long long x) { return x < 0 ? -x : x; }
 
-double fabs(double x) { return x < 0.0 ? -x : x; }
-float fabsf(float x) { return x < 0.0f ? -x : x; }
-long double fabsl(long double x) { return x < 0.0L ? -x : x; }
+double fabs(double x) {
+    union { double d; unsigned long long u; } ux;
+    ux.d = x;
+    ux.u = ux.u & 0x7fffffffffffffffULL;
+    return ux.d;
+}
+float fabsf(float x) {
+    union { float f; unsigned int u; } ux;
+    ux.f = x;
+    ux.u = ux.u & 0x7fffffffU;
+    return ux.f;
+}
+long double fabsl(long double x) {
+    union { long double ld; unsigned long long u[2]; } ux;
+    ux.ld = x;
+    ux.u[1] = ux.u[1] & ~0x8000ULL;
+    return ux.ld;
+}
 
 double copysign(double x, double y) {
     union { double d; unsigned long long u; } ux, uy;
@@ -37,13 +51,19 @@ float copysignf(float x, float y) {
 }
 
 long double copysignl(long double x, long double y) {
-    return (long double)copysign((double)x, (double)y);
+    union { long double ld; unsigned long long u[2]; } ux, uy;
+    ux.ld = x;
+    uy.ld = y;
+    /* 80-bit sign is bit 15 of the exponent word (the low 16 bits of u[1]). */
+    ux.u[1] = (ux.u[1] & ~0x8000ULL) | (uy.u[1] & 0x8000ULL);
+    return ux.ld;
 }
 
 double floor(double x) {
     if (x != x) return x;
+    if (x == 0.0) return x; /* preserve ±0 */
     if (x >= 9223372036854775807.0 || x <= -9223372036854775807.0) return x;
-    if (x >= 0.0) return (double)(long long)x;
+    if (x > 0.0) return (double)(long long)x;
     long long i = (long long)x;
     if ((double)i == x) return (double)i;
     return (double)(i - 1);
@@ -51,13 +71,30 @@ double floor(double x) {
 float floorf(float x) { return (float)floor((double)x); }
 
 double ceil(double x) {
+    if (x != x) return x;
+    if (x == 0.0) return x; /* preserve ±0 */
     double f = floor(x);
     if (f == x) return f;
-    return f + 1.0;
+    double r = f + 1.0;
+    /* Annex F: ceil of a value in (−1, 0) is −0, not +0 from (−1)+1. */
+    if (x < 0.0 && r == 0.0) {
+        union { double d; unsigned long long u; } nz;
+        nz.u = 0x8000000000000000ULL;
+        return nz.d;
+    }
+    return r;
 }
 
 double sqrt(double x) {
-    if (x <= 0.0) return 0.0;
+    if (x != x) return x;
+    if (x < 0.0) {
+        union { double d; unsigned long long u; } nanv;
+        nanv.u = 0x7ff8000000000000ULL;
+        return nanv.d;
+    }
+    /* +Inf stays +Inf; ±0 keeps its sign (Annex F). */
+    if (x > 1.7976931348623157e308) return x;
+    if (x == 0.0) return x;
     double g = x;
     int n = 0;
     while (n < 40) {
@@ -71,10 +108,23 @@ double sin(double x) {
     if (x == 0.0 || x != x) return x;
     double pi2 = 6.28318530717958647692;
     double pi = 3.14159265358979323846;
-    long long k = (long long)(x / pi2);
-    x = x - (double)k * pi2;
-    while (x > pi) x = x - pi2;
-    while (x < -pi) x = x + pi2;
+    /* ±Inf: Annex F returns NaN.  Also avoid (long long)(Inf / 2π) UB and
+     * a non-terminating range-reduction loop for huge finite args. */
+    if (x > 1.7976931348623157e308 || x < -1.7976931348623157e308) {
+        union { double d; unsigned long long u; } nanv;
+        nanv.u = 0x7ff8000000000000ULL;
+        return nanv.d;
+    }
+    double n = floor(x / pi2);
+    x = x - n * pi2;
+    if (x != x) {
+        union { double d; unsigned long long u; } nanv;
+        nanv.u = 0x7ff8000000000000ULL;
+        return nanv.d;
+    }
+    int guard = 0;
+    while (x > pi && guard < 8) { x = x - pi2; guard = guard + 1; }
+    while (x < -pi && guard < 8) { x = x + pi2; guard = guard + 1; }
     if (x == 0.0) return x;
     double term = x;
     double sum = x;
@@ -162,12 +212,13 @@ static unsigned long long strtou_body(const char *s, char **end, int base,
         return 0;
     }
     if (base == 0) {
-        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X') && isxdigit((unsigned char)s[2])) {
             base = 16;
             s = s + 2;
         } else if (s[0] == '0') base = 8;
         else base = 10;
-    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')
+               && isxdigit((unsigned char)s[2])) {
         s = s + 2;
     }
     unsigned long long v = 0;
@@ -282,7 +333,65 @@ static long double strtofp_body(const char *s, char **end) {
         s = s + 1;
     }
 
+    /* INF / INFINITY / NAN (C99).  Case-insensitive.  Never read past NUL. */
+    {
+        char c0 = s[0];
+        char c1 = c0 ? s[1] : 0;
+        char c2 = c1 ? s[2] : 0;
+        if (c0 >= 'A' && c0 <= 'Z') c0 = (char)(c0 - 'A' + 'a');
+        if (c1 >= 'A' && c1 <= 'Z') c1 = (char)(c1 - 'A' + 'a');
+        if (c2 >= 'A' && c2 <= 'Z') c2 = (char)(c2 - 'A' + 'a');
+        if (c0 == 'i' && c1 == 'n' && c2 == 'f') {
+            s = s + 3;
+            /* optional "inity" */
+            char w0 = s[0];
+            char w1 = w0 ? s[1] : 0;
+            char w2 = w1 ? s[2] : 0;
+            char w3 = w2 ? s[3] : 0;
+            char w4 = w3 ? s[4] : 0;
+            if (w0 >= 'A' && w0 <= 'Z') w0 = (char)(w0 - 'A' + 'a');
+            if (w1 >= 'A' && w1 <= 'Z') w1 = (char)(w1 - 'A' + 'a');
+            if (w2 >= 'A' && w2 <= 'Z') w2 = (char)(w2 - 'A' + 'a');
+            if (w3 >= 'A' && w3 <= 'Z') w3 = (char)(w3 - 'A' + 'a');
+            if (w4 >= 'A' && w4 <= 'Z') w4 = (char)(w4 - 'A' + 'a');
+            if (w0 == 'i' && w1 == 'n' && w2 == 'i' && w3 == 't' && w4 == 'y')
+                s = s + 5;
+            if (end) *end = (char *)s;
+            union { long double ld; unsigned long long u[2]; } infv;
+            infv.u[0] = 0;
+            infv.u[1] = 0;
+            infv.ld = 0.0L;
+            /* 80-bit +inf: exponent all-ones, mantissa 1<<63 */
+            infv.u[0] = 0x8000000000000000ULL;
+            infv.u[1] = 0x7fff;
+            if (neg) infv.u[1] = infv.u[1] | 0x8000;
+            return infv.ld;
+        }
+        if (c0 == 'n' && c1 == 'a' && c2 == 'n') {
+            s = s + 3;
+            if (*s == '(') {
+                const char *p = s + 1;
+                while (*p && *p != ')') p = p + 1;
+                if (*p == ')') s = p + 1;
+                /* else leave s at '(' so endptr is after "nan", matching C99 */
+            }
+            if (end) *end = (char *)s;
+            union { long double ld; unsigned long long u[2]; } nanv;
+            nanv.u[0] = 0xc000000000000000ULL;
+            nanv.u[1] = 0x7fff;
+            if (neg) nanv.u[1] = nanv.u[1] | 0x8000;
+            return nanv.ld;
+        }
+    }
+
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        const char *h = s + 2;
+        int hex_ok = 0;
+        if (hex_char_val(*h) >= 0) hex_ok = 1;
+        else if (*h == '.' && hex_char_val(h[1]) >= 0) hex_ok = 1;
+        if (!hex_ok) {
+            /* "0x" without a hex digit is a decimal 0, remainder at 'x'. */
+        } else {
         s = s + 2;
         long double mant = 0.0L;
         int any = 0;
@@ -349,15 +458,18 @@ static long double strtofp_body(const char *s, char **end) {
         }
         if (neg) mant = -mant;
         return mant;
+        }
     }
 
     long double mant = 0.0L;
     int any = 0;
-    int ndig = 0;   /* digits folded into mant; 19 exceeds the mantissa */
+    int ndig = 0;   /* digits folded into mant; 80-bit ld is exact to 2^64 */
     int dexp = 0;   /* power of ten still to apply to mant */
     while (isdigit((unsigned char)*s)) {
         any = 1;
-        if (ndig < 19) {
+        /* Cap at 21 digits (not 19): 2^64 is 20 digits and must stay exact.
+         * Extra digits beyond that become a power of ten, like rounding zeros. */
+        if (ndig < 21) {
             mant = mant * 10.0L + (long double)(*s - '0');
             ndig = ndig + 1;
         } else {
@@ -369,7 +481,7 @@ static long double strtofp_body(const char *s, char **end) {
         s = s + 1;
         while (isdigit((unsigned char)*s)) {
             any = 1;
-            if (ndig < 19) {
+            if (ndig < 21) {
                 mant = mant * 10.0L + (long double)(*s - '0');
                 ndig = ndig + 1;
                 dexp = dexp - 1;

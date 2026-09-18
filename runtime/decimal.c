@@ -338,6 +338,16 @@ static struct Dfp dfp_add_finite(struct Dfp a, struct Dfp b, int width) {
     return r;
 }
 
+static unsigned long long add_limb(unsigned long long *x, unsigned long long y,
+                                   unsigned long long cin) {
+    unsigned long long s = *x + y;
+    unsigned long long c1 = (s < *x) ? 1ULL : 0ULL;
+    unsigned long long s2 = s + cin;
+    unsigned long long c2 = (s2 < s) ? 1ULL : 0ULL;
+    *x = s2;
+    return c1 + c2;
+}
+
 static struct Dfp dfp_mul_finite(struct Dfp a, struct Dfp b, int width) {
     struct Dfp r;
     r.cls = DFP_FINITE;
@@ -350,18 +360,80 @@ static struct Dfp dfp_mul_finite(struct Dfp a, struct Dfp b, int width) {
         r.sign = a.sign ^ b.sign;
         return r;
     }
-    unsigned long long p00l, p00h, p01l, p01h, p10l, p10h;
+    unsigned long long p00l, p00h, p01l, p01h, p10l, p10h, p11l, p11h;
     mul64(a.c_lo, b.c_lo, &p00l, &p00h);
     mul64(a.c_lo, b.c_hi, &p01l, &p01h);
     mul64(a.c_hi, b.c_lo, &p10l, &p10h);
-    r.c_lo = p00l;
-    r.c_hi = p00h;
-    u128_add(&r.c_hi, &p01h, p01l, 0ULL);
-    u128_add(&r.c_hi, &p10h, p10l, 0ULL);
+    mul64(a.c_hi, b.c_hi, &p11l, &p11h);
+    unsigned long long r0 = p00l;
+    unsigned long long r1 = p00h;
+    unsigned long long r2 = 0;
+    unsigned long long r3 = 0;
+    unsigned long long c;
+    c = add_limb(&r1, p01l, 0);
+    c = add_limb(&r2, p01h, c);
+    r3 = r3 + c;
+    c = add_limb(&r1, p10l, 0);
+    c = add_limb(&r2, p10h, c);
+    r3 = r3 + c;
+    c = add_limb(&r2, p11l, 0);
+    r3 = r3 + p11h + c;
+    /* Fold extra high limbs into the 128-bit coefficient by dividing by 10. */
+    while (r2 != 0 || r3 != 0) {
+        unsigned int w0 = (unsigned int)r0;
+        unsigned int w1 = (unsigned int)(r0 >> 32);
+        unsigned int w2 = (unsigned int)r1;
+        unsigned int w3 = (unsigned int)(r1 >> 32);
+        unsigned int w4 = (unsigned int)r2;
+        unsigned int w5 = (unsigned int)(r2 >> 32);
+        unsigned int w6 = (unsigned int)r3;
+        unsigned int w7 = (unsigned int)(r3 >> 32);
+        unsigned long long q7 = w7 / 10u;
+        unsigned long long rem = w7 % 10u;
+        unsigned long long q6 = (rem << 32 | w6) / 10u;
+        rem = (rem << 32 | w6) % 10u;
+        unsigned long long q5 = (rem << 32 | w5) / 10u;
+        rem = (rem << 32 | w5) % 10u;
+        unsigned long long q4 = (rem << 32 | w4) / 10u;
+        rem = (rem << 32 | w4) % 10u;
+        unsigned long long q3 = (rem << 32 | w3) / 10u;
+        rem = (rem << 32 | w3) % 10u;
+        unsigned long long q2 = (rem << 32 | w2) / 10u;
+        rem = (rem << 32 | w2) % 10u;
+        unsigned long long q1 = (rem << 32 | w1) / 10u;
+        rem = (rem << 32 | w1) % 10u;
+        unsigned long long q0 = (rem << 32 | w0) / 10u;
+        r0 = q0 | (q1 << 32);
+        r1 = q2 | (q3 << 32);
+        r2 = q4 | (q5 << 32);
+        r3 = q6 | (q7 << 32);
+        r.exp = r.exp + 1;
+    }
+    r.c_lo = r0;
+    r.c_hi = r1;
     (void)p01h;
     (void)p10h;
     dfp_quantize(&r, width);
     return r;
+}
+
+static void u256_mul_u64(unsigned long long n[4], unsigned long long m) {
+    unsigned long long c = 0;
+    int i = 0;
+    while (i < 4) {
+        unsigned long long plo, phi;
+        mul64(n[i], m, &plo, &phi);
+        unsigned long long s = plo + c;
+        unsigned long long cry = (s < plo) ? 1ULL : 0ULL;
+        n[i] = s;
+        c = phi + cry;
+        i = i + 1;
+    }
+}
+
+static unsigned long long u256_bit(unsigned long long n[4], int bit) {
+    if (bit < 0 || bit > 255) return 0;
+    return (n[bit / 64] >> (bit % 64)) & 1ULL;
 }
 
 static struct Dfp dfp_div_finite(struct Dfp a, struct Dfp b, int width) {
@@ -379,28 +451,40 @@ static struct Dfp dfp_div_finite(struct Dfp a, struct Dfp b, int width) {
     int p = dfp_p(width);
     int k = p + 4 - dfp_ndigits(a.c_lo, a.c_hi) + dfp_ndigits(b.c_lo, b.c_hi);
     if (k < p + 2) k = p + 2;
-    struct Dfp num = a;
-    dfp_shift10(&num, k);
-    /* restoring division of 128/128 → 128 */
-    unsigned long long qlo = 0;
-    unsigned long long qhi = 0;
+    /* a * 10^k can exceed 128 bits (d128: up to ~72 digits).  Divide in 256. */
+    unsigned long long num[4];
+    num[0] = a.c_lo;
+    num[1] = a.c_hi;
+    num[2] = 0;
+    num[3] = 0;
+    int si = 0;
+    while (si < k) {
+        u256_mul_u64(num, 10ULL);
+        si = si + 1;
+    }
+    unsigned long long q0 = 0, q1 = 0, q2 = 0, q3 = 0;
     unsigned long long rlo = 0;
     unsigned long long rhi = 0;
-    int bit = 127;
+    int bit = 255;
     while (bit >= 0) {
+        int carry = (int)(rhi >> 63);
         rhi = (rhi << 1) | (rlo >> 63);
         rlo = rlo << 1;
-        unsigned long long nb;
-        if (bit >= 64) nb = (num.c_hi >> (bit - 64)) & 1ULL;
-        else nb = (num.c_lo >> bit) & 1ULL;
-        rlo = rlo | nb;
-        if (u128_ge(rlo, rhi, b.c_lo, b.c_hi)) {
+        rlo = rlo | u256_bit(num, bit);
+        if (carry || u128_ge(rlo, rhi, b.c_lo, b.c_hi)) {
             u128_sub(&rlo, &rhi, b.c_lo, b.c_hi);
-            if (bit >= 64) qhi = qhi | (1ULL << (bit - 64));
-            else qlo = qlo | (1ULL << bit);
+            if (bit >= 192) q3 = q3 | (1ULL << (bit - 192));
+            else if (bit >= 128) q2 = q2 | (1ULL << (bit - 128));
+            else if (bit >= 64) q1 = q1 | (1ULL << (bit - 64));
+            else q0 = q0 | (1ULL << bit);
         }
         bit = bit - 1;
     }
+    /* Quotient is ~p+4 digits; high 128 bits should be zero. */
+    unsigned long long qlo = q0;
+    unsigned long long qhi = q1;
+    (void)q2;
+    (void)q3;
     if (rlo != 0 || rhi != 0) {
         if ((qlo & 1ULL) == 0)
             u128_add(&qlo, &qhi, 1ULL, 0ULL);
@@ -469,7 +553,7 @@ static struct Dfp dfp_binop(int op, struct Dfp a, struct Dfp b, int width) {
     return r;
 }
 
-static int dfp_cmp(struct Dfp a, struct Dfp b) {
+static int dfp_cmp(struct Dfp a, struct Dfp b, int width) {
     if (a.cls == DFP_NAN || b.cls == DFP_NAN) return 2;
     if (a.cls == DFP_INF || b.cls == DFP_INF) {
         if (a.cls == DFP_INF && b.cls == DFP_INF) {
@@ -485,13 +569,14 @@ static int dfp_cmp(struct Dfp a, struct Dfp b) {
     if (a.sign != b.sign) return a.sign ? -1 : 1;
     struct Dfp x = a;
     struct Dfp y = b;
+    int lim = dfp_p(width) + 3;
     if (x.exp < y.exp) {
         int s = y.exp - x.exp;
-        if (s > 40) return a.sign ? 1 : -1;
+        if (s > lim) return a.sign ? 1 : -1;
         dfp_shift10(&y, s);
     } else if (y.exp < x.exp) {
         int s = x.exp - y.exp;
-        if (s > 40) return a.sign ? -1 : 1;
+        if (s > lim) return a.sign ? -1 : 1;
         dfp_shift10(&x, s);
     }
     int mag;
@@ -520,7 +605,7 @@ static int dfp_cmp64(int width, unsigned long long a, unsigned long long b) {
     struct Dfp db;
     dfp_decode(width, a, 0, &da);
     dfp_decode(width, b, 0, &db);
-    return dfp_cmp(da, db);
+    return dfp_cmp(da, db, width);
 }
 
 unsigned int __bid_addsd3(unsigned int a, unsigned int b) {
@@ -864,7 +949,7 @@ int __fakecc_cmptd2(unsigned long long alo, unsigned long long ahi,
     struct Dfp b;
     dfp_decode(16, alo, ahi, &a);
     dfp_decode(16, blo, bhi, &b);
-    return dfp_cmp(a, b);
+    return dfp_cmp(a, b, 16);
 }
 
 unsigned long long __bid_extendddtd2_lo(unsigned long long a) {

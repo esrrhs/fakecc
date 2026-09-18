@@ -209,6 +209,89 @@ static void test_sib_local_index(void) {
     emit_module_free(&em);
 }
 
+/* 0F 10/11 without F2/F3/66 is movups — required to move a 16-byte vector
+ * through one XMM.  Scalar float uses F2/F3 prefixes (movsd/movss). */
+static int text_has_unprefixed_0f(const EmitModule *em, unsigned char op) {
+    for (size_t i = 0; i + 1 < em->text.len; i++) {
+        if ((unsigned char)em->text.data[i] != 0x0F) continue;
+        if ((unsigned char)em->text.data[i + 1] != op) continue;
+        int pref = 0;
+        if (i > 0) {
+            unsigned char p = (unsigned char)em->text.data[i - 1];
+            if (p == 0xF2 || p == 0xF3 || p == 0x66) pref = 1;
+            if (!pref && i > 1 && (p & 0xF0) == 0x40) {
+                unsigned char p2 = (unsigned char)em->text.data[i - 2];
+                if (p2 == 0xF2 || p2 == 0xF3 || p2 == 0x66) pref = 1;
+            }
+        }
+        if (!pref) return 1;
+    }
+    return 0;
+}
+
+static void test_vector16_uses_movups(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef double V __attribute__((vector_size(16)));"
+        "V id(V v) { return v; }"
+        "int main(void) { V a = { 1.0, 2.0 }; V b = id(a); return (int)b[0]; }");
+    T_ASSERT(find_sym(&em, "id") != NULL);
+    T_ASSERT(text_has_unprefixed_0f(&em, 0x10)
+             || text_has_unprefixed_0f(&em, 0x11));
+    emit_module_free(&em);
+}
+
+static void test_constructor_init_array(void) {
+    EmitModule em = compile_to_code(
+        "package main;"
+        "int g;"
+        "__attribute__((constructor)) void ctor(void) { g = 7; }"
+        "int main(void) { return g; }");
+    T_ASSERT(find_sym(&em, "ctor") != NULL);
+    T_ASSERT_EQ_INT((int)em.init_array.len, 8);
+    T_ASSERT(em.num_data_relocs >= 1);
+    int saw = 0;
+    for (size_t i = 0; i < em.num_data_relocs; i++) {
+        if (em.data_relocs[i].shndx == SECT_INIT_ARRAY
+            && em.data_relocs[i].type == R_X86_64_64)
+            saw = 1;
+    }
+    T_ASSERT(saw);
+    emit_module_free(&em);
+}
+
+static void test_destructor_fini_array(void) {
+    EmitModule em = compile_to_code(
+        "package main;"
+        "int g;"
+        "__attribute__((destructor)) void dtor(void) { g = 1; }"
+        "int main(void) { return g; }");
+    T_ASSERT(find_sym(&em, "dtor") != NULL);
+    T_ASSERT_EQ_INT((int)em.fini_array.len, 8);
+    int saw = 0;
+    for (size_t i = 0; i < em.num_data_relocs; i++) {
+        if (em.data_relocs[i].shndx == SECT_FINI_ARRAY
+            && em.data_relocs[i].type == R_X86_64_64)
+            saw = 1;
+    }
+    T_ASSERT(saw);
+    emit_module_free(&em);
+}
+
+static void test_constructor_priority_slots(void) {
+    EmitModule em = compile_to_code(
+        "package main;"
+        "int g;"
+        "__attribute__((constructor(200))) void ctor_b(void) { g = 2; }"
+        "__attribute__((constructor(101))) void ctor_a(void) { g = 1; }"
+        "int main(void) { return g; }");
+    T_ASSERT_EQ_INT((int)em.init_array.len, 16);
+    T_ASSERT(em.init_prio != NULL);
+    T_ASSERT_EQ_INT(em.init_prio[0], 200);
+    T_ASSERT_EQ_INT(em.init_prio[1], 101);
+    emit_module_free(&em);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -223,5 +306,9 @@ int main(void) {
     test_bitfield_codegen();
     test_sib_global_index();
     test_sib_local_index();
+    test_vector16_uses_movups();
+    test_constructor_init_array();
+    test_destructor_fini_array();
+    test_constructor_priority_slots();
     return t_finalize();
 }

@@ -54,6 +54,19 @@ int i128_float(void) {
     if ((__int128)3.7f != 3) fail = fail + 1;
     a = 42;
     if ((__int128)(long double)a != 42) fail = fail + 1;
+    /* libgcc __fixunsdfti of a negative value with |x| < 2^64: high=0,
+     * low = 2^64 - trunc(|x|).  Not the 128-bit two's complement. */
+    {
+        unsigned __int128 un = (unsigned __int128)(-1.0);
+        if ((unsigned long long)un != 0xffffffffffffffffULL) fail = fail + 1;
+        if ((unsigned long long)(un >> 64) != 0ULL) fail = fail + 1;
+        un = (unsigned __int128)(-2.5);
+        if ((unsigned long long)un != 0xfffffffffffffffeULL) fail = fail + 1;
+        if ((unsigned long long)(un >> 64) != 0ULL) fail = fail + 1;
+        un = (unsigned __int128)(-0.5);
+        if ((unsigned long long)un != 0ULL) fail = fail + 1;
+        if ((unsigned long long)(un >> 64) != 0ULL) fail = fail + 1;
+    }
     return fail;
 }
 
