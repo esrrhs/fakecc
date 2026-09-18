@@ -200,9 +200,55 @@ static void test_pkg_die_at(void) {
     T_ASSERT(child_dies(do_parse_sema));
 }
 
+static void test_pkg_typedef_enum(void) {
+    char tmpl[] = "/tmp/fakecc_pkg_XXXXXX";
+    char *root = mkdtemp(tmpl);
+    T_ASSERT(root != NULL);
+
+    char pkgdir[256];
+    snprintf(pkgdir, sizeof pkgdir, "%s/util", root);
+    T_ASSERT(mkdir(pkgdir, 0755) == 0);
+
+    char *p1 = write_file(pkgdir, "a.c",
+        "package util;\n"
+        "struct Node { int v; };\n"
+        "typedef struct Node NodeT;\n"
+        "typedef struct Node *NodeP;\n"
+        "enum Color { RED = 1, BLUE = 2 };\n");
+    char *p2 = write_file(pkgdir, "z.c",
+        "package util;\n"
+        "NodeP gp;\n"
+        "NodeT gt;\n"
+        "int n = RED;\n");
+
+    PkgContext ctx;
+    pkg_ctx_init(&ctx);
+    pkg_ctx_add_path(&ctx, root);
+
+    SourceLoc loc = {0};
+    Package *pkg = pkg_load(&ctx, "util", loc);
+    T_ASSERT(pkg != NULL);
+    T_ASSERT(pkg_find_enum(pkg, "Color") != NULL);
+    T_ASSERT(pkg_find_typedef(pkg, "NodeT") != NULL);
+    T_ASSERT(pkg_find_typedef(pkg, "NodeP") != NULL);
+
+    TranslationUnit tu;
+    tu_init(&tu);
+    typedef_registry_add(&tu.typedefs, "NodeT", type_make_int(4, 0));
+    pkg_import_typedef(&tu, "NodeT", pkg_find_typedef(pkg, "NodeT"), pkg);
+    pkg_import_typedef(&tu, "NodeP", pkg_find_typedef(pkg, "NodeP"), pkg);
+    T_ASSERT(typedef_registry_find(&tu.typedefs, "NodeP") != NULL);
+    tu_free(&tu);
+
+    pkg_ctx_free(&ctx);
+    free(p1);
+    free(p2);
+}
+
 int main(void) {
     test_load_and_export();
     test_cycle_detected();
     test_pkg_die_at();
+    test_pkg_typedef_enum();
     return t_finalize();
 }

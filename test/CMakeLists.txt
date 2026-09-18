@@ -86,6 +86,10 @@ add_executable(test_die_at unit/test_die_at.c)
 target_link_libraries(test_die_at PRIVATE fakecc_core test_framework)
 add_test(NAME test_die_at COMMAND test_die_at)
 
+add_executable(test_rare unit/test_rare.c)
+target_link_libraries(test_rare PRIVATE fakecc_core test_framework)
+add_test(NAME test_rare COMMAND test_rare)
+
 # --- app_ports tests ---
 # Each application port runs once per optimization level to cover both the
 # -O0 (scalars in memory) and -O1 (SSA) compiler paths.
