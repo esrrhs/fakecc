@@ -1,6 +1,5 @@
 // expect: 0
-// 64-byte vectors are one ZMM when AVX-512F is available; otherwise
-// MEMORY with 64-byte stack alignment.  Either path must round-trip.
+// Default: vector_size(64) is MEMORY (64-byte stack).  -mavx512f uses one ZMM.
 package main;
 typedef int V __attribute__((vector_size(64)));
 __attribute__((noinline)) V id(V v) { return v; }
