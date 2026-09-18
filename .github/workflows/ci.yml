@@ -111,22 +111,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install host GCC 16
-        run: bash tools/ci_install_host_gcc.sh
-
-      # Stage 0 is unoptimized on purpose.  The fixed point compares two
-      # fakecc-built binaries (fakecc-1 vs fakecc-2); -O2 only speeds the
-      # gcc-built Stage 0 and must not change that comparison.  Ubuntu's
-      # toolchain-test GCC 16 snapshot (16-20260315) miscompiles Stage 0
-      # at -O2 — rbp displacements in the emitted compiler differ by 32
-      # bytes from a correctly compiled Stage 0 (local GCC 16.2.0 is fine).
-      # Pin gcc-16 by name so cmake does not pick /usr/bin/gcc → GCC 13.
+      # Stage 0 must be a correctly compiled host fakecc; the fixed point
+      # then compares two fakecc-built binaries (fakecc-1 vs fakecc-2).
+      # Ubuntu's toolchain-test GCC 16 snapshot (16-20260315) miscompiles
+      # Stage 0 even without -O2: emitted rbp displacements differ by 32
+      # bytes (seen in runtime tan()), so fakecc-1 and fakecc-2 match in
+      # size but not bytes.  Local GCC 16.2.0 is fine; the PPA snapshot
+      # is not.  clang already builds a correct fakecc in the matrix jobs,
+      # and gcc-16 stays the difftest oracle in bootstrap-suite.
       - name: Build stage 0
         run: |
-          gcc-16 --version
+          clang --version
           cmake -S . -B build \
-            -DCMAKE_C_COMPILER=gcc-16 \
-            -DCMAKE_CXX_COMPILER=g++-16
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_C_FLAGS="-O0"
           cmake --build build --parallel
 
       # Stage 0 compiles and links fakecc; that fakecc compiles and links
