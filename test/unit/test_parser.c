@@ -342,6 +342,28 @@ static void test_typeof_expr(void) {
     tu_free(&tu);
 }
 
+static int parse_dies(const char *src) {
+    int pid = fork();
+    if (pid == 0) {
+        lex_parse(src);
+        _exit(0);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) != 0;
+}
+
+static void test_parse_error_paths(void) {
+    T_ASSERT(parse_dies("package main; struct S { int x; }; struct S { int y; }; int main() { return 0; }"));
+    T_ASSERT(parse_dies("package main; union U { int x; }; union U { int y; }; int main() { return 0; }"));
+    T_ASSERT(parse_dies("package main; int restrict x; int main() { return 0; }"));
+    T_ASSERT(parse_dies("package main; int main() { return (1; }"));
+    T_ASSERT(parse_dies("package main; int main() { return 1uu; }"));
+    T_ASSERT(parse_dies("package main; int main() { struct S { int x; } s; s. = 1; return 0; }"));
+    T_ASSERT(parse_dies("package main; int main() { &&1; return 0; }"));
+    T_ASSERT(parse_dies("package main; int main() { int a = { . = 1 }; return 0; }"));
+}
+
 static void test_wide_string_escapes(void) {
     TranslationUnit tu = lex_parse(
         "package main; int main() { void *p = L\"\\x41\\101\"; return 0; }");
@@ -384,5 +406,6 @@ int main(void) {
     test_stmt_expr();
     test_typeof_expr();
     test_wide_string_escapes();
+    test_parse_error_paths();
     return t_finalize();
 }

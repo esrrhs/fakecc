@@ -70,6 +70,18 @@ add_executable(test_pkg unit/test_pkg.c)
 target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
 add_test(NAME test_pkg COMMAND test_pkg)
 
+add_executable(test_dfp unit/test_dfp.c)
+target_link_libraries(test_dfp PRIVATE fakecc_core test_framework)
+add_test(NAME test_dfp COMMAND test_dfp)
+
+add_executable(test_common unit/test_common.c)
+target_link_libraries(test_common PRIVATE fakecc_core test_framework)
+add_test(NAME test_common COMMAND test_common)
+
+add_executable(test_ast unit/test_ast.c)
+target_link_libraries(test_ast PRIVATE fakecc_core test_framework)
+add_test(NAME test_ast COMMAND test_ast)
+
 # --- app_ports tests ---
 # Each application port runs once per optimization level to cover both the
 # -O0 (scalars in memory) and -O1 (SSA) compiler paths.
@@ -115,4 +127,8 @@ endforeach()
 # expected answers differ between them.  Skipped gracefully if gdb is absent.
 add_test(NAME e2e_gdb
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_gdb_e2e.sh $<TARGET_FILE:fakecc>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_test(NAME e2e_cli
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_cli_e2e.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

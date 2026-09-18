@@ -703,6 +703,18 @@ static void test_loclist_section_present(void) {
     unlink(path);
 }
 
+static void test_bitfield_and_anon_struct_debug(void) {
+    const char *path = "/tmp/fakecc_test_debug_bitfield";
+    compile_and_link_at(
+        "package main;\n"
+        "struct B { unsigned a : 3; unsigned : 0; unsigned b : 5; int c; };\n"
+        "struct B g = {1, 2, 3};\n"
+        "int main(void) { struct B f; f.a = 1; f.b = 2; f.c = 3; return (int)f.a + (int)f.b + f.c + (int)g.a; }\n",
+        path, 1, 1);
+    T_ASSERT(elf_has_section(path, ".debug_info"));
+    unlink(path);
+}
+
 int main(void) {
     test_symtab_without_g();
     test_dwarf_with_g();
@@ -721,5 +733,6 @@ int main(void) {
     test_all_vars_present();
     test_link_rebases_loclists();
     test_loclist_section_present();
+    test_bitfield_and_anon_struct_debug();
     return t_finalize();
 }
