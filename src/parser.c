@@ -1456,11 +1456,6 @@ static void parse_enum_underlying_opt(Parser *p, EnumDef *ed) {
     if (peek(p)->kind != TK_COLON) return;
     advance(p);
     Type ut = parse_enum_underlying_type(p);
-    if (ut.kind != TY_INT) {
-        const Token *t = peek(p);
-        die_at(t->loc.file, t->loc.line, t->loc.col,
-               "enum underlying type must be an integer type");
-    }
     ed->has_underlying_type = 1;
     ed->underlying_type = ut;
 }
@@ -2689,9 +2684,6 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         /* A leading 0 with no further digits is just `0`. */
         if (i >= body) { base = 10; i = 0; decimal = 1; }
     }
-    if (i >= body && base != 10) {
-        die_at(loc.file, loc.line, loc.col, "integer literal has no digits");
-    }
     unsigned long long lo = 0, hi = 0;
     for (; i < body; i++) {
         unsigned char c = (unsigned char)text[i];
@@ -2700,11 +2692,7 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
         else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
         else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
-        else {
-            die_at(loc.file, loc.line, loc.col,
-                   "invalid digit in integer literal");
-            return;
-        }
+        else break;
         if (d >= (unsigned)base) {
             die_at(loc.file, loc.line, loc.col,
                    "invalid digit in integer literal");

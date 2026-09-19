@@ -475,10 +475,6 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
 
     size_t nnames = 0;
     char **names = list_c_files(dir, &nnames);
-    if (nnames == 0) {
-        die_at(loc.file, loc.line, loc.col,
-               "package '%s' directory '%s' has no .c files", name, dir);
-    }
 
     Package *pkg = xmalloc(sizeof(Package));
     memset(pkg, 0, sizeof(*pkg));

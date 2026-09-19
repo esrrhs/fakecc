@@ -114,6 +114,30 @@ static void test_string_literal(void) {
     token_array_free(&a);
 }
 
+static void test_multiline_string(void) {
+    TokenArray a = lex_str("\"hello\nworld\"");
+    T_ASSERT_EQ_INT((int)a.len, 2);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_STRING_LITERAL);
+    T_ASSERT(strchr(a.data[0].text, '\n') != NULL);
+    token_array_free(&a);
+}
+
+static void test_leading_dot_decimal(void) {
+    TokenArray a = lex_str(".5 .5e10 .5dd .5df .5dl");
+    T_ASSERT_EQ_INT((int)a.len, 6);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_FLOAT_LITERAL);
+    T_ASSERT_STR_EQ(a.data[0].text, ".5");
+    T_ASSERT_EQ_INT((int)a.data[1].kind, (int)TK_FLOAT_LITERAL);
+    T_ASSERT_STR_EQ(a.data[1].text, ".5e10");
+    T_ASSERT_EQ_INT((int)a.data[2].kind, (int)TK_FLOAT_LITERAL);
+    T_ASSERT_STR_EQ(a.data[2].text, ".5dd");
+    T_ASSERT_EQ_INT((int)a.data[3].kind, (int)TK_FLOAT_LITERAL);
+    T_ASSERT_STR_EQ(a.data[3].text, ".5df");
+    T_ASSERT_EQ_INT((int)a.data[4].kind, (int)TK_FLOAT_LITERAL);
+    T_ASSERT_STR_EQ(a.data[4].text, ".5dl");
+    token_array_free(&a);
+}
+
 static void test_char_literal_simple(void) {
     TokenArray a = lex_str("'A'");
     T_ASSERT_EQ_INT((int)a.len, 2);
@@ -517,6 +541,8 @@ int main(void) {
     test_block_comment();
     test_position_tracking();
     test_string_literal();
+    test_multiline_string();
+    test_leading_dot_decimal();
     test_char_literal_simple();
     test_char_literal_escape_n();
     test_char_literal_escape_backslash();

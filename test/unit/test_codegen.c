@@ -292,6 +292,65 @@ static void test_constructor_priority_slots(void) {
     emit_module_free(&em);
 }
 
+static IRModule compile_src_to_ir(const char *src) {
+    TokenArray arr;
+    token_array_init(&arr);
+    lex(src, "test.c", &arr);
+
+    TranslationUnit tu;
+    tu_init(&tu);
+    parse(&arr, &tu);
+    sema_check(&tu, 1);
+
+    IRModule ir;
+    ir_module_init(&ir);
+    ir_generate(&tu, &ir, 0);
+
+    token_array_free(&arr);
+    tu_free(&tu);
+    return ir;
+}
+
+static void test_rol8_encoding(void) {
+    IRModule ir = compile_src_to_ir(
+        "package main; unsigned rot(unsigned x, unsigned n) {"
+        "  return (x << n) | (x >> (32u - n)); }"
+        "int main() { return (int)rot(1u, 1u); }");
+    int found = 0;
+    for (size_t f = 0; f < ir.functions.len; f++) {
+        IRFunction *fn = &ir.functions.data[f];
+        for (size_t i = 0; i < fn->insts.len; i++) {
+            if (fn->insts.data[i].op == IR_ROL) {
+                fn->insts.data[i].width = 1;
+                found = 1;
+            }
+        }
+    }
+    T_ASSERT(found);
+    EmitModule em;
+    emit_module_init(&em);
+    codegen(&ir, &em, 0);
+    int saw_d2 = 0;
+    for (size_t i = 0; i < em.text.len; i++) {
+        if ((unsigned char)em.text.data[i] == 0xD2) saw_d2 = 1;
+    }
+    T_ASSERT(saw_d2);
+    emit_module_free(&em);
+    ir_module_free(&ir);
+}
+
+static void test_builtin_return_codegen(void) {
+    EmitModule em = compile_to_code(
+        "package main; int add1(int x) { return x + 1; }"
+        "int wrap(int x) {"
+        "  void *args = __builtin_apply_args();"
+        "  __builtin_return(__builtin_apply((void (*)())add1, args, 16));"
+        "} int main() { return wrap(41); }");
+    T_ASSERT(find_sym(&em, "wrap") != NULL);
+    T_ASSERT(find_sym(&em, "wrap")->size > 0);
+    emit_module_free(&em);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -310,5 +369,7 @@ int main(void) {
     test_constructor_init_array();
     test_destructor_fini_array();
     test_constructor_priority_slots();
+    test_rol8_encoding();
+    test_builtin_return_codegen();
     return t_finalize();
 }
