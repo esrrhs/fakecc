@@ -261,6 +261,17 @@ static char *find_rt_dir(const char *argv0) {
         }
         free(cand);
     }
+    {
+        char *cand = path_join(basedir, "../share/fakecc/runtime");
+        char *probe = path_join(cand, "string.c");
+        int ok = file_readable(probe);
+        free(probe);
+        if (ok) {
+            free(basedir);
+            return cand;
+        }
+        free(cand);
+    }
     free(basedir);
     return NULL;
 }
