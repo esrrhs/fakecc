@@ -3630,10 +3630,12 @@ static Expr *parse_init_list(Parser *p) {
                 const EnumConstant *ec =
                     enum_registry_find_constant(&p->tu->enums, ix->text);
                 if (ec) { idx = ec->value; advance(p); }
-                else die_at(ix->loc.file, ix->loc.line, ix->loc.col,
-                       "expected integer constant in designator but got '%s'",
-                       ix->text);
-                return ((void*)0);
+                else {
+                    die_at(ix->loc.file, ix->loc.line, ix->loc.col,
+                    "expected integer constant in designator but got '%s'",
+                    ix->text);
+                    return ((void*)0);
+                }
             } else {
                 die_at(ix->loc.file, ix->loc.line, ix->loc.col,
                        "expected integer constant in designator but got '%s'",
@@ -3650,9 +3652,11 @@ static Expr *parse_init_list(Parser *p) {
                     const EnumConstant *ec =
                         enum_registry_find_constant(&p->tu->enums, eix->text);
                     if (ec) { end_idx = ec->value; advance(p); }
-                    else die_at(eix->loc.file, eix->loc.line, eix->loc.col,
-                           "expected integer constant after '...' in designator");
-                    return ((void*)0);
+                    else {
+                        die_at(eix->loc.file, eix->loc.line, eix->loc.col,
+                        "expected integer constant after '...' in designator");
+                        return ((void*)0);
+                    }
                 } else {
                     die_at(eix->loc.file, eix->loc.line, eix->loc.col,
                            "expected integer constant after '...' in designator");

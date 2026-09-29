@@ -1014,13 +1014,22 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
         if (!struct_registry_find(&pkg->structs, sd->tag))
             pkg_clone_struct_into(&pkg->structs, sd);
     }
-    EnumDef *anon_bucket = enum_registry_find(&pkg->enums, "__pkg_anon");
+    size_t anon_idx = (size_t)-1;
+    for (size_t i = 0; i < pkg->enums.len; i++) {
+        if (pkg->enums.data[i].tag && runtime.strcmp(pkg->enums.data[i].tag, "__pkg_anon") == 0) {
+            anon_idx = i;
+            break;
+        }
+    }
     for (size_t i = 0; i < tu->enums.len; i++) {
         EnumDef *ed = &tu->enums.data[i];
         int is_anon = !ed->tag || runtime.strncmp(ed->tag, "__anon_", 7) == 0;
         if (is_anon) {
-            if (!anon_bucket)
-                anon_bucket = enum_registry_add(&pkg->enums, "__pkg_anon", ed->loc);
+            if (anon_idx == (size_t)-1) {
+                enum_registry_add(&pkg->enums, "__pkg_anon", ed->loc);
+                anon_idx = pkg->enums.len - 1;
+            }
+            EnumDef *anon_bucket = &pkg->enums.data[anon_idx];
             for (int c = 0; c < ed->num_constants; c++) {
                 if (!pkg_find_enum_const(pkg, ed->constants[c].name))
                     enum_def_push_constant(anon_bucket, ed->constants[c].name, 1,

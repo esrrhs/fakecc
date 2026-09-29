@@ -411,14 +411,27 @@ static void add_tu_exports(Package *pkg, TranslationUnit *tu) {
     /* Tagged enums keep their tag so `enum pkg.Tag` / `pkg_find_enum` work.
      * Anonymous enums (`enum { A = 1 }`, stored as `__anon_N`) still export
      * their constants — `pkg.A` looks them up by name, not tag.  Two files
-     * both using `__anon_0` must not drop the second file's constants. */
-    EnumDef *anon_bucket = enum_registry_find(&pkg->enums, "__pkg_anon");
+     * both using `__anon_0` must not drop the second file's constants.
+     *
+     * Store the bucket by index: enum_registry_add may realloc pkg->enums.data
+     * when later tagged enums are inserted, which would invalidate a cached
+     * EnumDef* into that array. */
+    size_t anon_idx = (size_t)-1;
+    for (size_t i = 0; i < pkg->enums.len; i++) {
+        if (pkg->enums.data[i].tag && strcmp(pkg->enums.data[i].tag, "__pkg_anon") == 0) {
+            anon_idx = i;
+            break;
+        }
+    }
     for (size_t i = 0; i < tu->enums.len; i++) {
         EnumDef *ed = &tu->enums.data[i];
         int is_anon = !ed->tag || strncmp(ed->tag, "__anon_", 7) == 0;
         if (is_anon) {
-            if (!anon_bucket)
-                anon_bucket = enum_registry_add(&pkg->enums, "__pkg_anon", ed->loc);
+            if (anon_idx == (size_t)-1) {
+                enum_registry_add(&pkg->enums, "__pkg_anon", ed->loc);
+                anon_idx = pkg->enums.len - 1;
+            }
+            EnumDef *anon_bucket = &pkg->enums.data[anon_idx];
             for (int c = 0; c < ed->num_constants; c++) {
                 if (!pkg_find_enum_const(pkg, ed->constants[c].name))
                     enum_def_push_constant(anon_bucket, ed->constants[c].name, 1,
