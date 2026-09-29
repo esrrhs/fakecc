@@ -142,21 +142,15 @@ int die_at(const char *file, int line, int col, const char *fmt, ...) {
     if (g_err_code != FAKECC_OK) {
         return FAKECC_ERR;
     }
-    va_list ap;
-    va_start(ap, fmt);
     g_err_loc.file = file;
     g_err_loc.line = line;
     g_err_loc.col = col;
     g_err_code = FAKECC_ERR;
-    {
-        va_list ap_msg;
-        __fakecc_va_copy((ap_msg), (ap));
-        runtime.vsnprintf(g_err_msg, sizeof(g_err_msg), fmt, ap_msg);
-        va_end(ap_msg);
-    }
+    va_list ap_msg;
+    va_start(ap_msg, fmt);
+    runtime.vsnprintf(g_err_msg, sizeof(g_err_msg), fmt, ap_msg);
+    va_end(ap_msg);
     runtime.fprintf(runtime.stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
-    runtime.vfprintf(runtime.stderr, fmt, ap);
-    runtime.fprintf(runtime.stderr, "\n");
-    va_end(ap);
+    runtime.fprintf(runtime.stderr, "%s\n", g_err_msg);
     return FAKECC_ERR;
 }

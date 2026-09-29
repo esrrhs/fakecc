@@ -143,25 +143,23 @@ int die_at(const char *file, int line, int col, const char *fmt, ...) {
         return FAKECC_ERR;
     }
 
-    va_list ap;
-    va_start(ap, fmt);
-
     g_err_loc.file = file;
     g_err_loc.line = line;
     g_err_loc.col = col;
     g_err_code = FAKECC_ERR;
 
-    /* Format the message body (without the location prefix). */
-    {
-        va_list ap_msg;
-        va_copy(ap_msg, ap);
-        vsnprintf(g_err_msg, sizeof(g_err_msg), fmt, ap_msg);
-        va_end(ap_msg);
-    }
+    /* A single va_start pass feeds vsnprintf, and stderr gets the already
+     * formatted message.  No va_copy: the self-hosted dialect has no libc
+     * va_copy, and the copy-through-a-pointer pattern miscompiles under
+     * fakecc-1 (the bootstrap compiler) — the copied va_list reaches
+     * vsnprintf corrupted and segfaults while formatting the "import
+     * cycle" diagnostic. */
+    va_list ap_msg;
+    va_start(ap_msg, fmt);
+    vsnprintf(g_err_msg, sizeof(g_err_msg), fmt, ap_msg);
+    va_end(ap_msg);
 
     fprintf(stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    va_end(ap);
+    fprintf(stderr, "%s\n", g_err_msg);
     return FAKECC_ERR;
 }
