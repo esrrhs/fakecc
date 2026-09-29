@@ -213,16 +213,15 @@ jobs:
           echo 'package cycC; import cycA; int c_func(void) { return cycA.a_func(); }' > $T/pkg/cycC/c.c
           echo 'package main; import cycA; int main(void) { return cycA.a_func(); }' > $T/cyc_main.c
           FAKECC_PKG="$T/pkg" timeout -k 5 -s ABRT 20 \
-            strace -f -e trace=openat,getdents64,close,write -o $T/cyc.strace \
+            strace -f -e trace=open,openat,getdents64,close,brk,mmap,write -o $T/cyc.strace \
             ./v0/fakecc-1 $T/cyc_main.c -o $T/cyc -O0 || true
-          echo "=== syscall counts ==="
-          for s in openat getdents64 write; do
-            echo "$s: $(grep -c " $s(" $T/cyc.strace || true)"
-          done
-          echo "=== last 40 syscalls ==="
-          tail -40 $T/cyc.strace
-          echo "=== distinct opened cyc paths ==="
-          grep openat $T/cyc.strace | grep -oE '"[^"]*cyc[^"]*"' | sort | uniq -c | head -20
+          echo "=== total lines: $(wc -l < $T/cyc.strace) ==="
+          echo "=== open paths (counted) ==="
+          grep -E "open[a-z]*\(" $T/cyc.strace | grep -oE '"[^"]*"' | sort | uniq -c | sort -rn | head -20
+          echo "=== first 25 traced syscalls ==="
+          head -25 $T/cyc.strace
+          echo "=== last 60 syscalls ==="
+          tail -60 $T/cyc.strace
 
       - name: Run suite
         env:
