@@ -194,7 +194,42 @@ In your C/C++ code:
 // or
 #include <fakecc/fakecc.h>
 // or individual modular headers
+#include <fakecc/compiler.h>
 #include <fakecc/parser.h>
+```
+
+#### High-Level Compiler C API
+
+FakeCC provides easy-to-use C APIs to compile code strings or files into `.so` shared libraries, standalone executables, or `.o` object files directly:
+
+```c
+#include "fakecc.h"
+
+// 1. Compile C source string directly to an ELF shared library (.so):
+fakecc_compile_string_to_so(
+    "package main;\nint add(int a, int b) { return a + b; }\n",
+    "libadd.so",
+    NULL /* default options: -O1 */
+);
+
+// 2. Compile C source string to a standalone executable:
+fakecc_compile_string_to_executable(
+    "package main;\nint main(void) { return 42; }\n",
+    "my_program",
+    NULL
+);
+
+// 3. Compile source files:
+fakecc_compile_file_to_so("math_plugin.c", "libmath.so", NULL);
+fakecc_compile_file_to_executable("entry.c", "app", NULL);
+fakecc_compile_string_to_obj("int f() { return 0; }", "obj.o", NULL);
+
+// Optional customization:
+FakeccOptions opts;
+fakecc_options_init(&opts);
+opts.opt_level = 0;   // -O0
+opts.want_debug = 1;  // emit DWARF debug symbols
+fakecc_compile_file_to_so("plugin.c", "libplugin.so", &opts);
 ```
 
 FakeCC also installs `fakecc.pc` for `pkg-config` consumers.

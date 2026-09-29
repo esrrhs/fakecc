@@ -23,6 +23,7 @@ extern "C" {
 #include "fakecc/debug.h"
 #include "fakecc/emit.h"
 #include "fakecc/pkg.h"
+#include "fakecc/compiler.h"
 
 #ifdef __cplusplus
 }
