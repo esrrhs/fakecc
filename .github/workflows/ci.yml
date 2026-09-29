@@ -201,10 +201,10 @@ jobs:
           name: fakecc-1
           path: v0
 
-      - name: DEBUG cyc strace (temporary)
+      - name: DEBUG cyc gdb (temporary)
         if: matrix.suite == 'misc'
         run: |
-          sudo apt-get install -y strace
+          sudo apt-get install -y gdb
           chmod +x v0/fakecc-1
           T=$(mktemp -d)
           mkdir -p $T/pkg/cycA $T/pkg/cycB $T/pkg/cycC
@@ -212,16 +212,10 @@ jobs:
           echo 'package cycB; import cycC; int b_func(void) { return cycC.c_func(); }' > $T/pkg/cycB/b.c
           echo 'package cycC; import cycA; int c_func(void) { return cycA.a_func(); }' > $T/pkg/cycC/c.c
           echo 'package main; import cycA; int main(void) { return cycA.a_func(); }' > $T/cyc_main.c
-          FAKECC_PKG="$T/pkg" timeout -k 5 -s ABRT 20 \
-            strace -f -e trace=open,openat,getdents64,close,brk,mmap,write -o $T/cyc.strace \
-            ./v0/fakecc-1 $T/cyc_main.c -o $T/cyc -O0 || true
-          echo "=== total lines: $(wc -l < $T/cyc.strace) ==="
-          echo "=== open paths (counted) ==="
-          grep -E "open[a-z]*\(" $T/cyc.strace | grep -oE '"[^"]*"' | sort | uniq -c | sort -rn | head -20
-          echo "=== first 25 traced syscalls ==="
-          head -25 $T/cyc.strace
-          echo "=== last 60 syscalls ==="
-          tail -60 $T/cyc.strace
+          FAKECC_PKG="$T/pkg" timeout -k 5 -s ABRT 60 \
+            gdb -batch -ex "run" -ex "bt 15" -ex "info registers rdi rsi" \
+            -ex "x/8gx \$_siginfo._sifields._sigfault.si_addr" \
+            --args ./v0/fakecc-1 $T/cyc_main.c -o $T/cyc -O0 2>&1 | tail -40 || true
 
       - name: Run suite
         env:
