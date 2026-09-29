@@ -201,22 +201,6 @@ jobs:
           name: fakecc-1
           path: v0
 
-      - name: DEBUG cyc gdb (temporary)
-        if: matrix.suite == 'misc'
-        run: |
-          sudo apt-get install -y gdb
-          chmod +x v0/fakecc-1
-          T=$(mktemp -d)
-          mkdir -p $T/pkg/cycA $T/pkg/cycB $T/pkg/cycC
-          echo 'package cycA; import cycB; int a_func(void) { return cycB.b_func(); }' > $T/pkg/cycA/a.c
-          echo 'package cycB; import cycC; int b_func(void) { return cycC.c_func(); }' > $T/pkg/cycB/b.c
-          echo 'package cycC; import cycA; int c_func(void) { return cycA.a_func(); }' > $T/pkg/cycC/c.c
-          echo 'package main; import cycA; int main(void) { return cycA.a_func(); }' > $T/cyc_main.c
-          FAKECC_PKG="$T/pkg" timeout -k 5 -s ABRT 60 \
-            gdb -batch -ex "run" -ex "bt 15" -ex "info registers rdi rsi" \
-            -ex "x/8gx \$_siginfo._sifields._sigfault.si_addr" \
-            --args ./v0/fakecc-1 $T/cyc_main.c -o $T/cyc -O0 2>&1 | tail -40 || true
-
       - name: Run suite
         env:
           SUITE: ${{ matrix.suite }}
