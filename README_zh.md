@@ -194,7 +194,42 @@ target_link_libraries(my_project PRIVATE fakecc::fakecc)
 // 或者使用带目录前缀的形式：
 // #include <fakecc/fakecc.h>
 // 或者引用各个模块独立头文件：
+// #include <fakecc/compiler.h>
 // #include <fakecc/parser.h>
+```
+
+#### 高层编译器 C API
+
+FakeCC 提供了开箱即用的一键式 C API，支持直接在内存中将 C 源码字符串或文件编译为 `.so` 动态库、独立可执行文件或 `.o` 目标文件：
+
+```c
+#include "fakecc.h"
+
+// 1. 将 C 源码字符串直接编译为 ELF .so 动态链接库：
+fakecc_compile_string_to_so(
+    "package main;\nint add(int a, int b) { return a + b; }\n",
+    "libadd.so",
+    NULL /* 默认选项：-O1 优化 */
+);
+
+// 2. 将 C 源码字符串直接编译为独立可执行文件：
+fakecc_compile_string_to_executable(
+    "package main;\nint main(void) { return 42; }\n",
+    "my_program",
+    NULL
+);
+
+// 3. 编译源码文件：
+fakecc_compile_file_to_so("math_plugin.c", "libmath.so", NULL);
+fakecc_compile_file_to_executable("entry.c", "app", NULL);
+fakecc_compile_string_to_obj("int f() { return 0; }", "obj.o", NULL);
+
+// 可选的高级参数配置：
+FakeccOptions opts;
+fakecc_options_init(&opts);
+opts.opt_level = 0;   // -O0
+opts.want_debug = 1;  // 生成 DWARF 调试符号
+fakecc_compile_file_to_so("plugin.c", "libplugin.so", &opts);
 ```
 
 FakeCC 还会同时安装 `fakecc.pc`，支持通过 `pkg-config` 使用。

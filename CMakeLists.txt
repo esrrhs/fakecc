@@ -14,6 +14,10 @@ set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 add_compile_options(-Wall -Wextra -Werror -Wno-unused-parameter)
+if(APPLE)
+    add_compile_definitions(SYS_getdents64=0 _DARWIN_C_SOURCE)
+    add_compile_options(-Wno-deprecated-declarations)
+endif()
 
 option(ENABLE_ASAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(ENABLE_ASAN)
@@ -47,6 +51,7 @@ add_library(fakecc_core
     src/emit.c
     src/link.c
     src/pkg.c
+    src/compiler.c
 )
 
 target_include_directories(fakecc_core PUBLIC

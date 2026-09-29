@@ -70,6 +70,10 @@ add_executable(test_pkg unit/test_pkg.c)
 target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
 add_test(NAME test_pkg COMMAND test_pkg)
 
+add_executable(test_compiler unit/test_compiler.c)
+target_link_libraries(test_compiler PRIVATE fakecc_core test_framework)
+add_test(NAME test_compiler COMMAND test_compiler)
+
 add_executable(test_dfp unit/test_dfp.c)
 target_link_libraries(test_dfp PRIVATE fakecc_core test_framework)
 add_test(NAME test_dfp COMMAND test_dfp)
