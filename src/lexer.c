@@ -490,48 +490,51 @@ lex_loop_head:
              * tokens so they are valid constant expressions everywhere.
              * `ident` is not yet null-terminated, so build a temporary
              * null-terminated copy for the lookup. */
-            char ident_buf[64];
-            memcpy(ident_buf, source + start, len);
-            ident_buf[len] = '\0';
-            /* __INT_MIN__ / __LONG_MIN__ cannot be a single literal: the
-             * magnitude does not fit a signed type of that rank, so GCC
-             * spells them (-MAX-1).  Fold the same token sequence here. */
-            if (strcmp(ident_buf, "__INT_MIN__") == 0 ||
-                strcmp(ident_buf, "__LONG_MIN__") == 0) {
-                int is_long_min = (ident_buf[2] == 'L');
-                Token t;
-                t.loc.file = filename;
-                t.loc.line = start_line;
-                t.loc.col = start_col;
-                t.kind = TK_LPAREN; t.text = xstrdup("("); token_array_push(out, t);
-                t.kind = TK_MINUS; t.text = xstrdup("-"); token_array_push(out, t);
-                t.kind = TK_INT_LITERAL;
-                t.text = xstrdup(is_long_min ? "9223372036854775807l" : "2147483647");
-                token_array_push(out, t);
-                t.kind = TK_MINUS; t.text = xstrdup("-"); token_array_push(out, t);
-                t.kind = TK_INT_LITERAL;
-                t.text = xstrdup(is_long_min ? "1l" : "1");
-                token_array_push(out, t);
-                t.kind = TK_RPAREN; t.text = xstrdup(")"); token_array_push(out, t);
-                goto lex_loop_head;
+            if (len < 64) {
+                char ident_buf[64];
+                memcpy(ident_buf, source + start, len);
+                ident_buf[len] = '\0';
+                /* __INT_MIN__ / __LONG_MIN__ cannot be a single literal: the
+                 * magnitude does not fit a signed type of that rank, so GCC
+                 * spells them (-MAX-1).  Fold the same token sequence here. */
+                if (strcmp(ident_buf, "__INT_MIN__") == 0 ||
+                    strcmp(ident_buf, "__LONG_MIN__") == 0) {
+                    int is_long_min = (ident_buf[2] == 'L');
+                    Token t;
+                    t.loc.file = filename;
+                    t.loc.line = start_line;
+                    t.loc.col = start_col;
+                    t.kind = TK_LPAREN; t.text = xstrdup("("); token_array_push(out, t);
+                    t.kind = TK_MINUS; t.text = xstrdup("-"); token_array_push(out, t);
+                    t.kind = TK_INT_LITERAL;
+                    t.text = xstrdup(is_long_min ? "9223372036854775807l" : "2147483647");
+                    token_array_push(out, t);
+                    t.kind = TK_MINUS; t.text = xstrdup("-"); token_array_push(out, t);
+                    t.kind = TK_INT_LITERAL;
+                    t.text = xstrdup(is_long_min ? "1l" : "1");
+                    token_array_push(out, t);
+                    t.kind = TK_RPAREN; t.text = xstrdup(")"); token_array_push(out, t);
+                    goto lex_loop_head;
+                }
+                int is_float = 0;
+                const char *lit = predefined_macro_literal(ident_buf, &is_float);
+                if (lit) {
+                    Token t;
+                    t.kind = is_float ? TK_FLOAT_LITERAL : TK_INT_LITERAL;
+                    t.text = xstrdup(lit);
+                    t.loc.file = filename;
+                    t.loc.line = start_line;
+                    t.loc.col = start_col;
+                    token_array_push(out, t);
+                    goto lex_loop_head;
+                }
             }
-            int is_float = 0;
-            const char *lit = predefined_macro_literal(ident_buf, &is_float);
-            if (lit) {
-                Token t;
-                t.kind = is_float ? TK_FLOAT_LITERAL : TK_INT_LITERAL;
-                t.text = xstrdup(lit);
-                t.loc.file = filename;
-                t.loc.line = start_line;
-                t.loc.col = start_col;
-                token_array_push(out, t);
-                goto lex_loop_head;
-            }
+            char *text = malloc(len + 1);
+            memcpy(text, source + start, len);
+            text[len] = '\0';
             Token t;
-            t.kind = keyword_kind(ident_buf, len);
-            t.text = malloc(len + 1);
-            memcpy(t.text, ident_buf, len);
-            t.text[len] = '\0';
+            t.kind = (len < 64) ? keyword_kind(text, len) : TK_IDENT;
+            t.text = text;
             t.loc.file = filename;
             t.loc.line = start_line;
             t.loc.col = start_col;

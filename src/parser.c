@@ -186,6 +186,10 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                     Expr *e = parse_ternary(p);
                     long long val = 0;
                     if (fold_const_int(e, &val)) {
+                        if (val <= 0 || (val & (val - 1)) != 0) {
+                            die_at(e->loc.file, e->loc.line, e->loc.col,
+                                   "requested alignment '%lld' is not a positive power of 2", val);
+                        }
                         if (align && val > *align) *align = (int)val;
                         if (val > g_parsed_align) g_parsed_align = (int)val;
                     }
@@ -628,6 +632,8 @@ static void parse_trailing_qualifiers(Parser *p, int *is_const, int *is_volatile
         else if (peek(p)->kind == TK_IDENT
                  && (strcmp(peek(p)->text, "register") == 0
                      || strcmp(peek(p)->text, "auto") == 0)) {
+            if (storage_class && strcmp(peek(p)->text, "register") == 0)
+                *storage_class = 3;
             advance(p);
         }
         else break;
@@ -1228,6 +1234,8 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
         else if (k == TK_IDENT
                  && (strcmp(peek(p)->text, "register") == 0
                      || strcmp(peek(p)->text, "auto") == 0)) {
+            if (storage_class && strcmp(peek(p)->text, "register") == 0)
+                *storage_class = 3;
             advance(p);
         }
         else break;
@@ -1357,8 +1365,17 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                            "expected constant bitfield width but got '%s'",
                            wtok->text);
                 }
+                if (mty.kind != TY_INT && !mty.is_bool) {
+                    die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
+                           "bit-field has non-integral type");
+                }
+                if (bit_width > (int)type_size(mty) * 8) {
+                    die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
+                           "width of bit-field exceeds its type");
+                }
             }
             struct_def_push_member_aligned(sd, mname, mty, bit_width, align);
+            type_free(&mty);
             free(mname);
             if (peek(p)->kind == TK_COMMA) {
                 /* More declarators sharing this base type (`int a, b`). */
@@ -1376,7 +1393,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     if (align > sd->align) sd->align = align;
     if (packed) {
         sd->is_packed = 1;
-        sd->align = 1;
+        sd->align = (align > 0) ? align : 1;
         /* Rebuild offsets with packed alignment, preserving bitfields. */
         int n = sd->num_members;
         StructMember *old = malloc((size_t)n * sizeof(StructMember));
@@ -1391,7 +1408,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         sd->bf_unit_used = 0;
         sd->bf_unit_offset = 0;
         for (int i = 0; i < n; i++) {
-            struct_def_push_member(sd, old[i].name, old[i].type, old[i].bit_width);
+            struct_def_push_member_aligned(sd, old[i].name, old[i].type, old[i].bit_width, old[i].align);
             free(old[i].name);
             type_free(&old[i].type);
         }
@@ -1468,6 +1485,12 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
         if (cn->kind != TK_IDENT) {
             die_at(cn->loc.file, cn->loc.line, cn->loc.col,
                    "expected enum constant name but got '%s'", cn->text);
+        }
+        for (int i = 0; i < ed->num_constants; i++) {
+            if (strcmp(ed->constants[i].name, cn->text) == 0) {
+                die_at(cn->loc.file, cn->loc.line, cn->loc.col,
+                       "redeclaration of enumerator '%s'", cn->text);
+            }
         }
         advance(p);
         int has_value = 0, value = 0;
@@ -1599,15 +1622,23 @@ static long long parse_array_size_ext(Parser *p, Expr **dim_expr) {
     Expr *e = parse_expr(p);
     long long val = 0;
     if (fold_const_int(e, &val)) {
+        if (val < 0) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "size of array has negative size");
+        }
         expr_free(e);
-        return val >= 0 ? val : 1;
+        return val;
     }
     if (e->kind == EX_VAR) {
         const EnumConstant *ec =
             enum_registry_find_constant(&p->tu->enums, e->u.var.name);
         if (ec) {
+            if (ec->value < 0) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "size of array has negative size");
+            }
             expr_free(e);
-            return ec->value > 0 ? ec->value : 1;
+            return ec->value;
         }
     }
     if (dim_expr) {
@@ -3706,6 +3737,7 @@ static Stmt parse_stmt(Parser *p) {
             } else if (peek(p)->kind == TK_IDENT
                        && (strcmp(peek(p)->text, "register") == 0
                            || strcmp(peek(p)->text, "auto") == 0)) {
+                if (strcmp(peek(p)->text, "register") == 0) storage_class = 3;
                 advance(p);
             } else if (peek(p)->kind == TK_IDENT
                        && (strcmp(peek(p)->text, "__thread") == 0
@@ -3733,6 +3765,7 @@ static Stmt parse_stmt(Parser *p) {
             } else if (peek(p)->kind == TK_IDENT
                        && (strcmp(peek(p)->text, "register") == 0
                            || strcmp(peek(p)->text, "auto") == 0)) {
+                if (strcmp(peek(p)->text, "register") == 0) storage_class = 3;
                 advance(p);
             } else if (peek(p)->kind == TK_IDENT
                        && (strcmp(peek(p)->text, "__thread") == 0
@@ -4056,7 +4089,7 @@ static Stmt parse_stmt(Parser *p) {
         } else {
             Expr *ce = parse_ternary(p);
             long long folded;
-            if (!fold_const_int(ce, &folded))
+            if (ce->kind == EX_FLOAT_LIT || !fold_const_int(ce, &folded))
                 die_at(cv->loc.file, cv->loc.line, cv->loc.col,
                        "case label must be an integer constant expression");
             expr_free(ce);
@@ -4073,7 +4106,7 @@ static Stmt parse_stmt(Parser *p) {
             } else {
                 Expr *he = parse_ternary(p);
                 long long folded_h;
-                if (!fold_const_int(he, &folded_h))
+                if (he->kind == EX_FLOAT_LIT || !fold_const_int(he, &folded_h))
                     die_at(hv->loc.file, hv->loc.line, hv->loc.col,
                            "case range high value must be an integer constant expression");
                 expr_free(he);
@@ -4083,12 +4116,12 @@ static Stmt parse_stmt(Parser *p) {
         }
         expect_kind(p, TK_COLON, "':'");
         char lbl[64];
-        if (g_cur_switch) {
-            snprintf(lbl, sizeof(lbl), "__sw_%d_case_%d", g_cur_switch->switch_id, g_cur_switch->case_count++);
-            switch_push_case_range(g_cur_switch->switch_stmt, 0, value, high_value, is_range, lbl);
-        } else {
-            snprintf(lbl, sizeof(lbl), "__case_%d", p->anon_counter++);
+        if (!g_cur_switch) {
+            die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                   "'case' label not in a switch statement");
         }
+        snprintf(lbl, sizeof(lbl), "__sw_%d_case_%d", g_cur_switch->switch_id, g_cur_switch->case_count++);
+        switch_push_case_range(g_cur_switch->switch_stmt, 0, value, high_value, is_range, lbl);
         Stmt inner;
         if (peek(p)->kind == TK_RBRACE) {
             inner.kind = ST_EXPR;
@@ -4110,12 +4143,12 @@ static Stmt parse_stmt(Parser *p) {
         advance(p);
         expect_kind(p, TK_COLON, "':'");
         char lbl[64];
-        if (g_cur_switch) {
-            snprintf(lbl, sizeof(lbl), "__sw_%d_default", g_cur_switch->switch_id);
-            switch_push_case(g_cur_switch->switch_stmt, 1, 0, lbl);
-        } else {
-            snprintf(lbl, sizeof(lbl), "__default_%d", p->anon_counter++);
+        if (!g_cur_switch) {
+            die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                   "'default' label not in a switch statement");
         }
+        snprintf(lbl, sizeof(lbl), "__sw_%d_default", g_cur_switch->switch_id);
+        switch_push_case(g_cur_switch->switch_stmt, 1, 0, lbl);
         Stmt inner;
         if (peek(p)->kind == TK_RBRACE) {
             inner.kind = ST_EXPR;
