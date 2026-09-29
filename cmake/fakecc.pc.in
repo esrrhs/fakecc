@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=@CMAKE_INSTALL_FULL_LIBDIR@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: fakecc
+Description: A lightweight self-hosting C compiler and library
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lfakecc -lm
+Cflags: -I${includedir}

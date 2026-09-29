@@ -150,12 +150,54 @@ bash v0/stage2_check.sh
 
 ---
 
-## 构建
+## 构建与安装
+
+### 编译构建
 
 ```bash
 cmake -S . -B build
 cmake --build build --parallel
 ```
+
+### 安装到系统
+
+```bash
+# 安装（默认前缀：/usr/local）
+sudo cmake --install build
+# 或：cd build && sudo make install
+```
+
+### 在其他 CMake 项目中使用
+
+安装到系统后，其他 CMake 项目可以通过标准的 `find_package` 引入并链接 FakeCC：
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(my_project C)
+
+# 查找 FakeCC
+find_package(fakecc REQUIRED)
+
+add_executable(my_project main.c)
+
+# 链接 fakecc（自动引入头文件路径和链接参数）
+target_link_libraries(my_project PRIVATE fakecc::fakecc)
+# 同时兼容不带命名空间的别名或 core 写法：
+# target_link_libraries(my_project PRIVATE fakecc)
+# target_link_libraries(my_project PRIVATE fakecc::fakecc_core)
+```
+
+在 C/C++ 代码中引用头文件：
+
+```c
+#include "fakecc.h"
+// 或者使用带目录前缀的形式：
+// #include <fakecc/fakecc.h>
+// 或者引用各个模块独立头文件：
+// #include <fakecc/parser.h>
+```
+
+FakeCC 还会同时安装 `fakecc.pc`，支持通过 `pkg-config` 使用。
 
 ## 运行
 

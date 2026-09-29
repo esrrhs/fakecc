@@ -150,12 +150,54 @@ bash v0/stage2_check.sh
 
 ---
 
-## Building
+## Building & Installation
+
+### Build
 
 ```bash
 cmake -S . -B build
 cmake --build build --parallel
 ```
+
+### Install to System
+
+```bash
+# Install (default prefix: /usr/local)
+sudo cmake --install build
+# or: cd build && sudo make install
+```
+
+### Using FakeCC in Other CMake Projects
+
+After installing to your system, other CMake projects can discover and link FakeCC using standard `find_package`:
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(my_project C)
+
+# Discover FakeCC package
+find_package(fakecc REQUIRED)
+
+add_executable(my_project main.c)
+
+# Link against fakecc (automatically sets up include directories and link flags)
+target_link_libraries(my_project PRIVATE fakecc::fakecc)
+# Alternatively, the unqualified alias or core name is also supported:
+# target_link_libraries(my_project PRIVATE fakecc)
+# target_link_libraries(my_project PRIVATE fakecc::fakecc_core)
+```
+
+In your C/C++ code:
+
+```c
+#include "fakecc.h"
+// or
+#include <fakecc/fakecc.h>
+// or individual modular headers
+#include <fakecc/parser.h>
+```
+
+FakeCC also installs `fakecc.pc` for `pkg-config` consumers.
 
 ## Usage
 

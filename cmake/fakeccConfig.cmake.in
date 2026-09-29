@@ -1,0 +1,18 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/fakeccTargets.cmake")
+
+# Provide an unqualified alias `fakecc` for compatibility with projects using target_link_libraries(... fakecc)
+if(TARGET fakecc::fakecc AND NOT TARGET fakecc)
+    add_library(fakecc ALIAS fakecc::fakecc)
+endif()
+
+# Provide fakecc::fakecc_core and fakecc_core aliases for compatibility
+if(TARGET fakecc::fakecc AND NOT TARGET fakecc::fakecc_core)
+    add_library(fakecc::fakecc_core ALIAS fakecc::fakecc)
+endif()
+if(TARGET fakecc::fakecc AND NOT TARGET fakecc_core)
+    add_library(fakecc_core ALIAS fakecc::fakecc)
+endif()
+
+check_required_components(fakecc)
