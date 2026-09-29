@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -1093,6 +1094,9 @@ int sema_error_count(void);
 int sema_warning_count(void);
 typedef struct FILE FILE;
 typedef long fpos_t;
+const char *__asan_default_options(void) {
+    return "detect_leaks=0";
+}
 static char *read_file(const char *path) {
     FILE *f = runtime.fopen(path, "rb");
     if (!f) {

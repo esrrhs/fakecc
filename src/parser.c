@@ -2784,17 +2784,18 @@ static int parse_int_suffix(const char *text, size_t n, size_t *body_end,
 static void int_literal_typed(const char *text, SourceLoc loc,
                               unsigned long long *out_lo, unsigned long long *out_hi,
                               int *out_width, int *out_unsigned) {
-    if (fakecc_had_error()) return;
+    if (fakecc_had_error()) {
+        *out_lo = 0; *out_hi = 0; *out_width = 4; *out_unsigned = 0;
+        return;
+    }
     size_t n = strlen(text);
     int suffix_u = 0, suffix_l = 0;
     size_t body = n;
 
     if (!parse_int_suffix(text, n, &body, &suffix_u, &suffix_l)) {
         die_at(loc.file, loc.line, loc.col, "invalid suffix on integer constant");
+        *out_lo = 0; *out_hi = 0; *out_width = 4; *out_unsigned = 0;
         return;
-        /* Fall through with empty suffix so typing still completes. */
-        suffix_u = 0; suffix_l = 0;
-        body = n;
     }
 
     int base = 10;
@@ -2819,7 +2820,7 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         if (d >= (unsigned)base) {
             die_at(loc.file, loc.line, loc.col,
                    "invalid digit in integer literal");
-            return;
+            *out_lo = 0; *out_hi = 0; *out_width = 4; *out_unsigned = 0;
             return;
         }
         if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
