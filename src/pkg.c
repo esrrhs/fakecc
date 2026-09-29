@@ -150,6 +150,7 @@ const char *pkg_suggest_export(const PkgContext *ctx, const char *name) {
 /* ------------------------------------------------------------------ */
 
 void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src) {
+    if (fakecc_had_error()) return;
     StructDef *exist = struct_registry_find(dst, src->tag);
     if (exist) {
         if (exist->num_members == src->num_members
@@ -159,6 +160,7 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src) {
         die_at(src->loc.file, src->loc.line, src->loc.col,
                "conflicting definitions of '%s%s'",
                src->is_union ? "union " : "struct ", src->tag);
+        return;
     }
     StructDef *sd = struct_registry_add(dst, src->tag, src->loc);
     sd->is_union = src->is_union;
@@ -221,6 +223,7 @@ static char *path_join(const char *a, const char *b) {
 }
 
 static char *read_file(const char *path) {
+    if (fakecc_had_error()) return NULL;
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "fakecc: cannot open '%s'\n", path);
@@ -453,12 +456,14 @@ static void build_exports(Package *pkg) {
 /* ------------------------------------------------------------------ */
 
 Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
+    if (fakecc_had_error()) return NULL;
     /* Cycle check before cache: an in-progress package is already in the
      * cache shell (so siblings can see it), so a reverse import must die
      * here rather than returning the incomplete Package. */
     if (loading_contains(ctx, name)) {
         die_at(loc.file, loc.line, loc.col,
                "import cycle involving package '%s'", name);
+        return NULL;
     }
 
     Package *cached = pkg_find(ctx, name);
@@ -469,6 +474,7 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
         die_at(loc.file, loc.line, loc.col,
                "package '%s' not found (search path has %d entries)",
                name, ctx->npaths);
+        return NULL;
     }
 
     loading_push(ctx, name);
@@ -513,6 +519,7 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
                    pkg->files[i].package.name
                        ? pkg->files[i].package.name : "(none)",
                    name);
+            return NULL;
         }
 
         token_array_free(&all_tokens[i]);

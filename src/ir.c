@@ -83,6 +83,7 @@ const TranslationUnit *get_ir_tu(void) {
 }
 
 static const char *lookup_asm_alias(const char *name) {
+    if (fakecc_had_error()) return NULL;
     if (!g_ir_tu || !name) return NULL;
     for (size_t i = 0; i < g_ir_tu->functions.len; i++) {
         if (strcmp(g_ir_tu->functions.data[i].name, name) == 0 &&
@@ -2399,6 +2400,7 @@ static IRValue i128_cmp(IRFunction *fn, BinOp op, IRValue a, IRValue b,
 static IRValue lower_i128_binop(IRFunction *fn, IRValue la, IRValue ra,
                                Type lt, Type rt, BinOp bop, Type res_ty,
                                SourceLoc loc) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     int dst_u = type_is_i128(res_ty) ? res_ty.is_unsigned
               : (type_is_i128(lt) ? lt.is_unsigned : rt.is_unsigned);
     IRValue a = i128_as_addr(fn, la, lt, dst_u, loc);
@@ -3215,6 +3217,7 @@ static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
 }
 
 static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     const char *cn = e->u.call.callee->u.var.name;
     const Expr *size_e = e->u.call.args.data[3];
     unsigned long long size_val = ~(unsigned long long)0;
@@ -3322,6 +3325,7 @@ static int bos_eval_size_arg(IRSymTable *st, const Expr *size_e,
  * <= size. Check vsnprintf before snprintf (substring). */
 static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
                                                const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     const char *cn = e->u.call.callee->u.var.name;
     const Expr *size_e = e->u.call.args.data[3];
     unsigned long long size_val = ~(unsigned long long)0;
@@ -3569,6 +3573,7 @@ static int bos_sprintf_out_len(const Expr *fmt, const Expr **va, int nva,
  * va_list, so output length is only proven for conversion-free formats. */
 static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
                                               const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     const char *cn = e->u.call.callee->u.var.name;
     int is_v = cn && strstr(cn, "vsprintf") != 0;
     const char *plain = is_v ? "vsprintf" : "sprintf";
@@ -3629,6 +3634,7 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
  * is proven < size (NUL needs one extra byte). */
 static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
                                              const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     const char *cn = e->u.call.callee->u.var.name;
     int is_stp = cn && strstr(cn, "stpcpy") != NULL;
     const Expr *size_e = e->u.call.args.data[2];
@@ -3670,6 +3676,7 @@ static IRValue lower_fortify_stpcpy_chk_call(IRFunction *fn, IRSymTable *st,
  * lengths are known and strlen(dst)+strlen(src) < size. */
 static IRValue lower_fortify_strcat_chk_call(IRFunction *fn, IRSymTable *st,
                                              const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     const Expr *size_e = e->u.call.args.data[2];
     unsigned long long size_val = ~(unsigned long long)0;
     int size_const = bos_eval_size_arg(st, size_e, &size_val);
@@ -3714,6 +3721,7 @@ static IRValue lower_fortify_strcat_chk_call(IRFunction *fn, IRSymTable *st,
  * __strncat_chk unless dest+src lengths are proven to fit. */
 static IRValue lower_fortify_strncat_chk_call(IRFunction *fn, IRSymTable *st,
                                               const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     const Expr *size_e = e->u.call.args.data[3];
     unsigned long long size_val = ~(unsigned long long)0;
     int size_const = bos_eval_size_arg(st, size_e, &size_val);
@@ -3960,6 +3968,7 @@ static IRValue scale_rhs(IRFunction *fn, IRSymTable *st, IRValue rhs, int is_ptr
  * backing object whose scalar rvalue is then loaded. */
 static IRValue lower_compound_literal_addr(IRFunction *fn, IRSymTable *st,
                                            const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     Type target = e->u.compound.target_type;
     int total = type_size(target);
     if (total <= 0) total = 8;
@@ -3973,6 +3982,7 @@ static IRValue lower_compound_literal_addr(IRFunction *fn, IRSymTable *st,
 /* Compute the address of an lvalue expression (EX_VAR/EX_DEREF/EX_INDEX/EX_MEMBER).
  * Returns a pointer-typed SSA value. */
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     switch (e->kind) {
     case EX_VAR: {
         const IRSlot *entry = irsymtable_find(st, e->u.var.name);
@@ -4037,6 +4047,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
                                   Type lt, Type rt, BinOp bop,
                                   IRValue forced_l_addr) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     int lt_is_cplx = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
     int rt_is_cplx = (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0);
     
@@ -4356,6 +4367,7 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
 
 static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
                                   Type lt, Type rt, BinOp bop) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     Type vt = lt.is_vector ? lt : rt;
     int total_sz = type_size(vt);
     int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
@@ -4535,6 +4547,7 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
 
 static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
                                             const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     Expr *lv = e->u.comp.lvalue;
     Type vt = lv->type;
     int total_sz = type_size(vt);
@@ -4640,6 +4653,7 @@ static IRValue lower_vector_compound_assign(IRFunction *fn, IRSymTable *st,
 }
 
 static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceLoc loc) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (type_is_vla(t) && t.kind == TY_ARRAY && t.elem_type) {
         IRValue elem_sz_val = lower_sizeof_type(fn, st, *t.elem_type, loc);
         if (t.vla_dim) {
@@ -4819,8 +4833,9 @@ static void vapack_store_value(IRFunction *fn, IRSymTable *st, IRValue slot,
 
 static IRValue lower_va_arg_pack_inline(IRFunction *fn, IRSymTable *st, const Expr *e,
                                         const FunctionDecl *callee) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (g_vapack_depth >= (int)(sizeof(g_vapack_stack) / sizeof(g_vapack_stack[0]))) {
-        die_at(e->loc.file, e->loc.line, e->loc.col,
+        return die_at(e->loc.file, e->loc.line, e->loc.col,
                "too much nested __builtin_va_arg_pack inlining");
     }
     size_t nparams = callee->params.len;
@@ -5009,6 +5024,7 @@ static IRValue try_lower_rotate(IRFunction *fn, IRSymTable *st, const Expr *e) {
 /* Lower an expression to a value id, emitting instructions as needed.
  * Sema has annotated e->type; we lower operands and coerce them per UAC. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     switch (e->kind) {
     case EX_INT_LIT: {
         if (type_is_i128(e->type)) {
@@ -5955,7 +5971,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (e->u.call.args.len > 0
                 && expr_is_va_arg_pack(e->u.call.args.data[e->u.call.args.len - 1])) {
                 if (g_vapack_depth <= 0) {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                    return die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid use of __builtin_va_arg_pack ()");
                 }
                 VaArgPackFrame *fr = &g_vapack_stack[g_vapack_depth - 1];
@@ -8019,6 +8035,7 @@ static void emit_cbr(IRFunction *fn, IRValue cond, int t_label, int f_label,
 }
 
 static IRValue lower_condition(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (type_is_i128(e->type)) {
         IRValue addr = lower_expr(fn, st, e);
         return i128_nz(fn, addr, e->loc);
@@ -8402,6 +8419,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
 
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                        const FunctionDecl *cur_fd) {
+    if (fakecc_had_error()) return;
     switch (s->kind) {
     case ST_DECL: {
         Type dty = s->u.decl.type;
@@ -9163,6 +9181,7 @@ static long double int_lit_to_ld(const Expr *e) {
 }
 
 static int fold_const_float(const Expr *e, long double *out, const IRModule *ir) {
+    if (fakecc_had_error()) return 0;
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT) {
         *out = strtold(e->u.float_text, NULL);
@@ -9261,6 +9280,7 @@ static int fold_const_float(const Expr *e, long double *out, const IRModule *ir)
  * char with a known value).  `ir` may be NULL (falls back to fold_const_float). */
 
 static int fold_const_complex(const Expr *e, long double *r_out, long double *i_out) {
+    if (fakecc_had_error()) return 0;
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT) {
         *r_out = strtold(e->u.float_text, NULL);
@@ -9309,6 +9329,7 @@ static int fold_const_complex(const Expr *e, long double *r_out, long double *i_
 }
 
 static int fold_const_complex_rel(const Expr *e, long long *out) {
+    if (fakecc_had_error()) return 0;
     if (!e || e->kind != EX_BINOP) return 0;
     if (e->u.bin.op != BOP_EQ && e->u.bin.op != BOP_NE) return 0;
     long double lr = 0.0, li = 0.0, rr = 0.0, ri = 0.0;
@@ -9697,6 +9718,7 @@ static int eval_strlit_byte_offset(const Expr *e, const char **bytes, int *len, 
  * `member` within T.  GCC treats this as a compile-time integer constant.
  * Returns 1 and sets *out to the offset if e matches (casts allowed). */
 static int fold_null_offsetof(const Expr *e, long long *out) {
+    if (fakecc_had_error()) return 0;
     if (!e) return 0;
     const Expr *ce = e;
     while (ce && ce->kind == EX_CAST) ce = ce->u.cast.operand;
@@ -9760,6 +9782,7 @@ static int fold_null_offsetof(const Expr *e, long long *out) {
 /* Difference of two address constants into the same object: `&a.f - &a` is
  * an integer constant (C address-constant arithmetic / GCC offsetof-style). */
 static int fold_global_ptrdiff(const Expr *e, long long *out) {
+    if (fakecc_had_error()) return 0;
     if (!e) return 0;
     /* Strip leading casts: `(int)(ptrdiff) + N` → `(ptrdiff) + N` */
     const Expr *ce = e;
@@ -10030,8 +10053,11 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
         }
         case TY_STRUCT: {
             const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
-            if (!sd) die_at(loc.file, loc.line, loc.col,
-                            "unknown struct 'struct %s'", ty->tag);
+            if (!sd) {
+                die_at(loc.file, loc.line, loc.col,
+                       "unknown struct 'struct %s'", ty->tag);
+                return;
+            }
             int cur_idx = 0;
             for (int i = 0; i < n; i++) {
                 const StructMember *sm = NULL;
@@ -10371,6 +10397,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
     }
     die_at(loc.file, loc.line, loc.col,
            "global '%s' initializer must be a compile-time constant", ctx);
+    return;
 }
 
 /* Recursively assign concrete byte offsets for a (possibly nested) scalar
@@ -10379,6 +10406,7 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
  * the pointer value to the object; each element is stored at base+offset. */
 static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                             const Type *ty, const Expr *e, SourceLoc loc) {
+    if (fakecc_had_error()) return;
     /* Sparse array holes (NULL) and integer 0 are already the object's
      * background from emit_zero_bytes.  Do not emit a store per gap. */
     if (!e) return;
@@ -10432,8 +10460,11 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
         }
         case TY_STRUCT: {
             const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
-            if (!sd) die_at(loc.file, loc.line, loc.col,
-                            "unknown struct 'struct %s'", ty->tag);
+            if (!sd) {
+                die_at(loc.file, loc.line, loc.col,
+                       "unknown struct 'struct %s'", ty->tag);
+                return;
+            }
             int cur_idx = 0;
             for (int i = 0; i < n; i++) {
                 const StructMember *sm = NULL;
@@ -10537,7 +10568,8 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
     if (df) fn->insts.data[fn->insts.len - 1].is_float = 1;
 }
 
-void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
+int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
+    fakecc_clear_error();
     /* Publish module + reset string counter for lower_expr's use. */
     g_ir_module = ir;
     g_str_counter = 0;
@@ -11046,4 +11078,6 @@ void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         ir_func_array_push(&ir->functions, irfn);
     }
     irsymtable_free(&g_ir_globals_st);
+    if (fakecc_had_error()) return FAKECC_ERR;
+    return FAKECC_OK;
 }

@@ -346,8 +346,9 @@ void ir_module_push_alias(IRModule *m, const char *name, const char *target,
 
 #include "fakecc/ast.h"
 /* Lower AST to IR.  When `pin_locals` is set (-O0), scalar locals and params
- * keep a real stack slot instead of relying on mem2reg promotion. */
-void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
+ * keep a real stack slot instead of relying on mem2reg promotion.
+ * Returns FAKECC_OK on success, FAKECC_ERR on error (message recorded). */
+int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 
 extern int g_instrument_functions;
 extern int g_sanitize_address;

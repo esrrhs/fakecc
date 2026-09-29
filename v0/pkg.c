@@ -13,6 +13,10 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 struct SourceLoc {
     const char *file;
     int line;
@@ -30,7 +34,12 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -219,11 +228,14 @@ long long type_align(Type t);
 int type_is_complex_ldouble(Type t);
 int type_is_empty_struct(Type t);
 int type_needs_stack_align16(Type t);
+int type_stack_align(Type t);
+int host_has_avx512f(void);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
@@ -487,6 +499,10 @@ struct FunctionDecl {
     char *alias_target;
     int align;
     int no_instrument;
+    int is_constructor;
+    int is_destructor;
+    int ctor_prio;
+    int dtor_prio;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -510,6 +526,7 @@ struct StructMember {
     long long offset;
     int bit_width;
     int bit_offset;
+    int align;
 };typedef struct StructMember StructMember;
 struct StructDef {
     char *tag;
@@ -665,11 +682,11 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src);
 void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
                         const Package *pkg);
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
-void lex(const char *source, const char *filename, TokenArray *out);
+int lex(const char *source, const char *filename, TokenArray *out);
 struct PkgContext;
-void parse(const TokenArray *tokens, TranslationUnit *tu);
-void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
-                  struct PkgContext *ctx);
+int parse(const TokenArray *tokens, TranslationUnit *tu);
+int parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
+                 struct PkgContext *ctx);
 typedef struct FILE FILE;
 typedef long fpos_t;
 static long pkg_open(const char *path, long flags) {
@@ -769,6 +786,7 @@ const char *pkg_suggest_export(const PkgContext *ctx, const char *name) {
     return ((void*)0);
 }
 void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src) {
+    if (fakecc_had_error()) return;
     StructDef *exist = struct_registry_find(dst, src->tag);
     if (exist) {
         if (exist->num_members == src->num_members
@@ -778,6 +796,7 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src) {
         die_at(src->loc.file, src->loc.line, src->loc.col,
                "conflicting definitions of '%s%s'",
                src->is_union ? "union " : "struct ", src->tag);
+        return;
     }
     StructDef *sd = struct_registry_add(dst, src->tag, src->loc);
     sd->is_union = src->is_union;
@@ -785,7 +804,7 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src) {
     sd->is_big_endian = src->is_big_endian;
     for (int i = 0; i < src->num_members; i++) {
         struct_def_push_member(sd, src->members[i].name,
-                               type_clone(src->members[i].type),
+                               src->members[i].type,
                                src->members[i].bit_width);
         if (src->members[i].bit_width > 0) {
             sd->members[sd->num_members - 1].offset = src->members[i].offset;
@@ -829,6 +848,7 @@ static char *path_join(const char *a, const char *b) {
     return p;
 }
 static char *read_file(const char *path) {
+    if (fakecc_had_error()) return ((void*)0);
     FILE *f = runtime.fopen(path, "rb");
     if (!f) {
         runtime.fprintf(runtime.stderr, "fakecc: cannot open '%s'\n", path);
@@ -1031,9 +1051,11 @@ static void build_exports(Package *pkg) {
         add_tu_exports(pkg, &pkg->files[f]);
 }
 Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
+    if (fakecc_had_error()) return ((void*)0);
     if (loading_contains(ctx, name)) {
         die_at(loc.file, loc.line, loc.col,
                "import cycle involving package '%s'", name);
+        return ((void*)0);
     }
     Package *cached = pkg_find(ctx, name);
     if (cached) return cached;
@@ -1042,14 +1064,11 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
         die_at(loc.file, loc.line, loc.col,
                "package '%s' not found (search path has %d entries)",
                name, ctx->npaths);
+        return ((void*)0);
     }
     loading_push(ctx, name);
     size_t nnames = 0;
     char **names = list_c_files(dir, &nnames);
-    if (nnames == 0) {
-        die_at(loc.file, loc.line, loc.col,
-               "package '%s' directory '%s' has no .c files", name, dir);
-    }
     Package *pkg = xmalloc(sizeof(Package));
     runtime.memset(pkg, 0, sizeof(*pkg));
     pkg->name = xstrdup(name);
@@ -1080,6 +1099,7 @@ Package *pkg_load(PkgContext *ctx, const char *name, SourceLoc loc) {
                    pkg->files[i].package.name
                        ? pkg->files[i].package.name : "(none)",
                    name);
+            return ((void*)0);
         }
         token_array_free(&all_tokens[i]);
         runtime.free(names[i]);

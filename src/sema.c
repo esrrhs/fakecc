@@ -30,14 +30,17 @@ static Type g_sema_ret_type;
 static int g_sema_error_count = 0;
 
 int sema_has_errors(void) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     return g_sema_error_count > 0;
 }
 
 int sema_error_count(void) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     return g_sema_error_count;
 }
 
 static void sema_report_error(const SourceLoc *loc, const char *fmt, ...) {
+    if (fakecc_had_error()) return;
     va_list ap;
     va_start(ap, fmt);
     fprintf(stderr, "%s:%d:%d: error: ", loc->file, loc->line, loc->col);
@@ -358,12 +361,14 @@ static void collect_labels_expr(LabelSet *ls, const Expr *e) {
 /* Recursively collect every ST_LABEL name in a statement (forward goto must
  * be able to target labels that appear later in the function). */
 static void collect_labels(LabelSet *ls, const Stmt *s) {
+    if (fakecc_had_error()) return;
     if (!s) return;
     switch (s->kind) {
     case ST_LABEL:
         if (labelset_has(ls, s->u.label_s.name)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "redefinition of label '%s'", s->u.label_s.name);
+            return;
         }
         labelset_add(ls, s->u.label_s.name);
         collect_labels(ls, s->u.label_s.stmt);
@@ -689,11 +694,13 @@ static void apply_default_arg_promotions(Expr **argp) {
  * taking zero arguments — extra or missing args are errors. */
 static void check_call_arity(SourceLoc loc, const char *name,
                              int nparams, int is_variadic, size_t nargs) {
+    if (fakecc_had_error()) return;
     if (is_variadic) {
         if ((int)nargs < nparams) {
             die_at(loc.file, loc.line, loc.col,
                    "function '%s' takes at least %d argument%s but %zu given",
                    name, nparams, nparams == 1 ? "" : "s", nargs);
+            return;
         }
         return;
     }
@@ -701,16 +708,19 @@ static void check_call_arity(SourceLoc loc, const char *name,
         die_at(loc.file, loc.line, loc.col,
                "function '%s' takes %d argument%s but %zu given",
                name, nparams, nparams == 1 ? "" : "s", nargs);
+        return;
     }
 }
 
 static void check_fnptr_arity(SourceLoc loc, int nparams, int is_variadic,
                               size_t nargs) {
+    if (fakecc_had_error()) return;
     if (is_variadic) {
         if ((int)nargs < nparams) {
             die_at(loc.file, loc.line, loc.col,
                    "function pointer expects at least %d argument%s but %zu given",
                    nparams, nparams == 1 ? "" : "s", nargs);
+            return;
         }
         return;
     }
@@ -718,6 +728,7 @@ static void check_fnptr_arity(SourceLoc loc, int nparams, int is_variadic,
         die_at(loc.file, loc.line, loc.col,
                "function pointer expects %d argument%s but %zu given",
                nparams, nparams == 1 ? "" : "s", nargs);
+        return;
     }
 }
 
@@ -789,7 +800,10 @@ static void ftab_fill_extern(const FunSig *ex, const FunctionDecl *fn) {
 }
 
 /* Must stay tiny: Stage 0 miscompiles pointer stores inside huge frames. */
-static void check_set_st(SymTable *st) { g_check_st = st; }
+static void check_set_st(SymTable *st) {
+    if (fakecc_had_error()) return;
+    g_check_st = st;
+}
 
 static Type check_expr_inner(Expr *e);
 
@@ -797,10 +811,14 @@ static Type check_expr_inner(Expr *e);
  * pass a FunTable* (Stage 0 miscompiles those from large frames). */
 
 static Type check_ternary_expr(Expr *e) {
+    if (fakecc_had_error()) return type_make_void();
     Type ct = check_expr_inner(e->u.tern.cond);
     if (ct.kind != TY_INT && ct.kind != TY_FLOAT && ct.kind != TY_PTR)
-        die_at(e->loc.file, e->loc.line, e->loc.col,
+        {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
                "ternary condition must be scalar");
+            return type_make_void();
+        }
     type_free(&ct);
     Expr *th = e->u.tern.then;
     if (!th) th = e->u.tern.cond;
@@ -851,6 +869,7 @@ static Type check_ternary_expr(Expr *e) {
         die_at(e->loc.file, e->loc.line, e->loc.col,
                "ternary branches must both be arithmetic, both be pointer, "
                "or pointer with null constant");
+        return type_make_void();
     }
     type_free(&tt); type_free(&et);
     set_type(e, res);
@@ -858,6 +877,7 @@ static Type check_ternary_expr(Expr *e) {
 }
 
 static Type check_expr_inner(Expr *e) {
+    if (fakecc_had_error()) return type_make_void();
     if (!e) return type_default_int();
     const SymTable *st = g_check_st;
     switch (e->kind) {
@@ -900,25 +920,40 @@ static Type check_expr_inner(Expr *e) {
             /* Logical && / ||: both operands must be scalar (int, float, or
              * pointer).  Result is always int 0 or 1. */
             if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be scalar",
                        op == BOP_AND ? "&&" : "||");
+                    return type_make_void();
+                }
             if (rt.kind != TY_INT && rt.kind != TY_FLOAT && rt.kind != TY_PTR)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be scalar",
                        op == BOP_AND ? "&&" : "||");
+                    return type_make_void();
+                }
             res = type_make_int(4, 0);
         } else if (op >= BOP_EQ && op <= BOP_GE) {
             if (lt.kind == TY_STRUCT || rt.kind == TY_STRUCT)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid operands to binary comparison");
+                    return type_make_void();
+                }
             if (lt.kind == TY_VOID || rt.kind == TY_VOID)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid operands to binary comparison");
+                    return type_make_void();
+                }
             if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
                 (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "cannot mix operands of decimal floating and other floating types");
+                    return type_make_void();
+                }
             /* Comparison operators: warn on distinct pointer types (GCC -Wcompare-distinct-pointer-types). */
             if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
                 int func_cmp = (lt.pointee && lt.pointee->kind == TY_FUNC) ||
@@ -944,51 +979,76 @@ static Type check_expr_inner(Expr *e) {
             /* Pointer arithmetic: p+int, int+p, p-int → pointer; p-q → int. */
             if (op == BOP_ADD) {
                 if (lt.kind == TY_PTR && rt.kind == TY_PTR)
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                    {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid operands to binary + (pointer and pointer)");
+                        return type_make_void();
+                    }
                 if (lt.kind == TY_PTR && rt.kind != TY_INT)
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                    {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid operands to binary +");
+                        return type_make_void();
+                    }
                 if (rt.kind == TY_PTR && lt.kind != TY_INT)
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                    {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid operands to binary +");
+                        return type_make_void();
+                    }
                 res = type_clone(lt.kind == TY_PTR ? lt : rt);
             } else { /* op == BOP_SUB */
                 if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
                     res = type_make_int(8, 0);   /* ptrdiff — use long */
                 } else if (lt.kind == TY_PTR) {
                     if (rt.kind != TY_INT)
-                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                        {
+                            die_at(e->loc.file, e->loc.line, e->loc.col,
                                "invalid operands to binary -");
+                            return type_make_void();
+                        }
                     res = type_clone(lt);
                 } else {
                     /* integer - pointer: constraint violation! */
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid operands to binary - (integer and pointer)");
+                    return type_make_void();
                 }
             }
         } else if (op == BOP_BITAND || op == BOP_BITOR || op == BOP_BITXOR) {
             /* Bitwise & | ^: both operands must be integer; result = UAC. */
             if (lt.kind != TY_INT)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be integer",
                        op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
+                    return type_make_void();
+                }
             if (rt.kind != TY_INT)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be integer",
                        op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
+                    return type_make_void();
+                }
             res = usual_arith_conv(lt, rt);
         } else if (op == BOP_SHL || op == BOP_SHR) {
             /* Shift << >>: both operands must be integer; result type is the
              * promoted type of the LEFT operand (C §6.5.7). */
             if (lt.kind != TY_INT)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be integer",
                        op == BOP_SHL ? "<<" : ">>");
+                    return type_make_void();
+                }
             if (rt.kind != TY_INT)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be integer",
                        op == BOP_SHL ? "<<" : ">>");
+                    return type_make_void();
+                }
             /* Warn on negative shift count (GCC -Wshift-count-negative). */
             if (rt.kind == TY_INT && rt.width <= 8) {
                 long long shift_val;
@@ -1002,24 +1062,36 @@ static Type check_expr_inner(Expr *e) {
             /* ADD / SUB / MUL / DIV / MOD.  MOD requires integer operands. */
             if (op == BOP_MOD &&
                 (lt.kind != TY_INT || rt.kind != TY_INT))
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "operands of '%%' must be integer");
+                    return type_make_void();
+                }
             else if (op != BOP_MOD &&
                      (lt.kind != TY_INT && lt.kind != TY_FLOAT))
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be arithmetic",
                        op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
                        : op == BOP_MUL ? "*" : "/");
+                    return type_make_void();
+                }
             else if (op != BOP_MOD &&
                      (rt.kind != TY_INT && rt.kind != TY_FLOAT))
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be arithmetic",
                        op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
                        : op == BOP_MUL ? "*" : "/");
+                    return type_make_void();
+                }
             if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
                 (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "cannot mix operands of decimal floating and other floating types");
+                    return type_make_void();
+                }
             res = usual_arith_conv(lt, rt);
         }
         type_free(&lt); type_free(&rt);
@@ -1041,15 +1113,21 @@ static Type check_expr_inner(Expr *e) {
             return type_clone(e->type);
         }
         if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT)
-            die_at(e->loc.file, e->loc.line, e->loc.col,
+            {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
                    "bitwise NOT requires an integer operand");
+                return type_make_void();
+            }
         Type res;
         if (e->u.un.op == UOP_NOT) {
             /* Logical NOT: operand must be scalar (int, float, or pointer);
              * result is always int 0 or 1. */
             if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR)
-                die_at(e->loc.file, e->loc.line, e->loc.col,
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
                        "logical NOT requires a scalar operand");
+                    return type_make_void();
+                }
             res = type_make_int(4, 0);
         } else {
             res = integer_promote(ot);
@@ -1080,6 +1158,7 @@ static Type check_expr_inner(Expr *e) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "package '%s' has no exported symbol '%s'",
                        e->u.var.pkg, e->u.var.name);
+                return type_make_void();
             }
             if (pf) {
                 ftab_add_export(pf);
@@ -1290,14 +1369,17 @@ static Type check_expr_inner(Expr *e) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "use of undeclared '%s'; did you mean '%s.%s'?",
                            e->u.var.name, hint, e->u.var.name);
+                    return type_make_void();
                 }
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "use of undeclared '%s'; did you mean '%s.%s'? "
                        "(add 'import %s;')",
                        e->u.var.name, hint, e->u.var.name, hint);
+                return type_make_void();
             }
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "use of undeclared variable '%s'", e->u.var.name);
+            return type_make_void();
         }
     }
     case EX_ASSIGN: {
@@ -1309,24 +1391,34 @@ static Type check_expr_inner(Expr *e) {
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "expression is not assignable");
+            return type_make_void();
         }
         Type lt = check_expr_inner(e->u.assign.lvalue);
         if (lt.is_const)
-            die_at(e->u.assign.lvalue->loc.file,
+            {
+                die_at(e->u.assign.lvalue->loc.file,
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "assignment of read-only variable");
+                return type_make_void();
+            }
         if (lt.kind == TY_ARRAY)
-            die_at(e->u.assign.lvalue->loc.file,
+            {
+                die_at(e->u.assign.lvalue->loc.file,
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "assignment to expression with array type");
+                return type_make_void();
+            }
         Type rt = check_expr_inner(e->u.assign.rvalue);
         if (rt.kind == TY_VOID)
-            die_at(e->u.assign.rvalue->loc.file,
+            {
+                die_at(e->u.assign.rvalue->loc.file,
                    e->u.assign.rvalue->loc.line,
                    e->u.assign.rvalue->loc.col,
                    "void value not ignored as it ought to be");
+                return type_make_void();
+            }
         int is_lt_cplx = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
         int is_rt_cplx = (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0);
         if ((lt.kind == TY_STRUCT && !is_lt_cplx) ||
@@ -1334,6 +1426,7 @@ static Type check_expr_inner(Expr *e) {
             if (!type_is_same(&lt, &rt)) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "incompatible struct assignment");
+                return type_make_void();
             }
         }
         coerce_arg_to_param(&e->u.assign.rvalue, &lt);
@@ -1348,13 +1441,19 @@ static Type check_expr_inner(Expr *e) {
         Expr *lv = e->u.comp.lvalue;
         if (lv->kind != EX_VAR && lv->kind != EX_DEREF &&
             lv->kind != EX_INDEX && lv->kind != EX_MEMBER)
-            die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+            {
+                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                    "left operand of '%s' must be an lvalue",
                    "compound assign");
+                return type_make_void();
+            }
         Type lt = check_expr_inner(lv);
         if (lt.is_const)
-            die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+            {
+                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                    "compound assignment of read-only variable");
+                return type_make_void();
+            }
         Type rt = check_expr_inner(e->u.comp.rvalue);
         BinOp op = e->u.comp.op;
         int arith_float = (op == BOP_ADD || op == BOP_SUB || op == BOP_MUL
@@ -1364,24 +1463,36 @@ static Type check_expr_inner(Expr *e) {
         if (op == BOP_ADD || op == BOP_SUB) {
             /* Pointer arithmetic: p += n, p -= n (n must be int). */
             if (lt.kind == TY_PTR && rt.kind != TY_INT)
-                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                {
+                    die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
+                    return type_make_void();
+                }
         }
         if (lt.kind != TY_PTR && !is_complex && !is_vector
             && !(arith_float && (lt.kind == TY_FLOAT || rt.kind == TY_FLOAT))) {
             if (lt.kind != TY_INT)
-                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                {
+                    die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "left operand of '%s' must be integer",
                        "compound assign");
+                    return type_make_void();
+                }
             if (rt.kind != TY_INT)
-                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+                {
+                    die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "right operand of '%s' must be integer",
                        "compound assign");
+                    return type_make_void();
+                }
         }
         if (lt.kind == TY_FLOAT && !arith_float)
-            die_at(lv->loc.file, lv->loc.line, lv->loc.col,
+            {
+                die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                    "left operand of '%s' must be integer", "compound assign");
+                return type_make_void();
+            }
         type_free(&rt);
         set_type(e, lt);
         return type_clone(e->type);
@@ -1396,6 +1507,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 1 || e->u.call.args.len > 7) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__syscall takes 1 to 7 arguments (syscall num + up to 6 args)");
+                return type_make_void();
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
@@ -1409,6 +1521,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 6) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__clone takes 6 arguments (fn, child_stack, flags, arg, tcb, ctid)");
+                return type_make_void();
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
@@ -1428,6 +1541,7 @@ static Type check_expr_inner(Expr *e) {
                 if (e->u.call.args.len != 1) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "complex builtin takes exactly 1 argument");
+                    return type_make_void();
                 }
                 Type at = check_expr_inner(e->u.call.args.data[0]);
                 if (is_conj) {
@@ -1445,6 +1559,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 2 || e->u.call.args.len > 3) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_shuffle takes 2 or 3 arguments");
+                return type_make_void();
             }
             Type t0 = check_expr_inner(e->u.call.args.data[0]);
             for (size_t i = 1; i < e->u.call.args.len; i++) {
@@ -1462,6 +1577,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_ctzll takes exactly 1 argument");
+                return type_make_void();
             }
             Type at = check_expr_inner(e->u.call.args.data[0]);
             type_free(&at);
@@ -1478,11 +1594,13 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "atomic builtin takes at least 1 argument");
+                return type_make_void();
             }
             Type ptr_ty = check_expr_inner(e->u.call.args.data[0]);
             if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "atomic builtin first argument must be a pointer");
+                return type_make_void();
             }
             Type val_ty = type_clone(*ptr_ty.pointee);
             type_free(&ptr_ty);
@@ -1515,11 +1633,13 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__atomic builtin takes at least 1 argument");
+                return type_make_void();
             }
             Type ptr_ty = check_expr_inner(e->u.call.args.data[0]);
             if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__atomic builtin first argument must be a pointer");
+                return type_make_void();
             }
             Type val_ty = type_clone(*ptr_ty.pointee);
             type_free(&ptr_ty);
@@ -1544,6 +1664,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 0) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_apply_args takes no arguments");
+                return type_make_void();
             }
             set_type(e, type_make_ptr(type_make_void()));
             return type_clone(e->type);
@@ -1553,6 +1674,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 3) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_apply takes 3 arguments");
+                return type_make_void();
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
@@ -1566,6 +1688,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_return takes 1 argument");
+                return type_make_void();
             }
             Type at = check_expr_inner(e->u.call.args.data[0]);
             type_free(&at);
@@ -1595,12 +1718,14 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 1 || e->u.call.args.len > 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_start takes 1 or 2 arguments");
+                return type_make_void();
             }
             Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_start first argument must be a va_list");
+                return type_make_void();
             }
             type_free(&list_ty);
             if (e->u.call.args.len == 2) {
@@ -1618,12 +1743,14 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_arg takes exactly 2 arguments (va_list, type)");
+                return type_make_void();
             }
             Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_arg first argument must be a va_list");
+                return type_make_void();
             }
             type_free(&list_ty);
             if (e->va_arg_type.kind == TY_VOID && e->va_arg_type.width == 0
@@ -1633,6 +1760,7 @@ static Type check_expr_inner(Expr *e) {
                  * test pr48767.c matches this diagnostic. */
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "second argument to 'va_arg' is of incomplete type 'void'");
+                return type_make_void();
             }
             set_type(e, type_clone(e->va_arg_type));
             return type_clone(e->type);
@@ -1643,12 +1771,14 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_end takes exactly 1 argument (va_list)");
+                return type_make_void();
             }
             Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_end argument must be a va_list");
+                return type_make_void();
             }
             type_free(&list_ty);
             set_type(e, type_make_void());
@@ -1660,6 +1790,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_copy takes exactly 2 arguments (dst, src)");
+                return type_make_void();
             }
             for (int i = 0; i < 2; i++) {
                 Type list_ty = check_expr_inner(e->u.call.args.data[i]);
@@ -1667,6 +1798,7 @@ static Type check_expr_inner(Expr *e) {
                     type_free(&list_ty);
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "va_copy arguments must be va_list");
+                    return type_make_void();
                 }
                 type_free(&list_ty);
             }
@@ -1776,6 +1908,7 @@ static Type check_expr_inner(Expr *e) {
         } else {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "call to non-function (callee type must be a function or function pointer)");
+            return type_make_void();
         }
         /* Empty-parens `T (*)()` is unprototyped in the grammar but FakeCC
          * treats it as taking zero arguments, same as a named `T foo()`. */
@@ -1814,16 +1947,19 @@ static Type check_expr_inner(Expr *e) {
             && ok != EX_COMPOUND_LITERAL) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "cannot take address of rvalue");
+            return type_make_void();
         }
         if (e->u.addr.operand->kind == EX_MEMBER && ot.bitfield_width > 0) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "cannot take address of bitfield member");
+            return type_make_void();
         }
         if (e->u.addr.operand->kind == EX_VAR) {
             const Sym *sy = symtable_find(st, e->u.addr.operand->u.var.name);
             if (sy && sy->is_register) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "address of register variable requested");
+                return type_make_void();
             }
         }
         /* `&function` is a no-op in C -- the result is the same function
@@ -1846,6 +1982,7 @@ static Type check_expr_inner(Expr *e) {
         if (ot.kind != TY_PTR) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "cannot dereference non-pointer");
+            return type_make_void();
         }
         Type res = type_clone(*ot.pointee);
         type_free(&ot);
@@ -1869,6 +2006,7 @@ static Type check_expr_inner(Expr *e) {
         if (it.kind != TY_INT) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "array subscript is not an integer");
+            return type_make_void();
         }
         type_free(&it);
         if (at.is_vector && at.elem_type) {
@@ -1888,6 +2026,7 @@ static Type check_expr_inner(Expr *e) {
         if (base.kind != TY_PTR) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "subscript on non-pointer/non-array");
+            return type_make_void();
         }
         Type res = type_clone(*base.pointee);
         type_free(&base);
@@ -1916,17 +2055,20 @@ static Type check_expr_inner(Expr *e) {
         if (ot.kind != TY_STRUCT) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "member access '.%s' on non-struct", e->u.member.name);
+            return type_make_void();
         }
         const StructDef *sd = struct_registry_find_c(g_sema_structs, ot.tag);
         if (!sd) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "unknown struct 'struct %s'", ot.tag);
+            return type_make_void();
         }
         const StructMember *m = struct_lookup_member(g_sema_structs, sd,
                                                      e->u.member.name, NULL);
         if (!m) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "struct '%s' has no member '%s'", ot.tag, e->u.member.name);
+            return type_make_void();
         }
         type_free(&ot);
         Type mt = type_clone(m->type);
@@ -1948,17 +2090,26 @@ static Type check_expr_inner(Expr *e) {
         Expr *op = e->u.incdec.operand;
         if (op->kind != EX_VAR && op->kind != EX_DEREF &&
             op->kind != EX_INDEX && op->kind != EX_MEMBER)
-            die_at(op->loc.file, op->loc.line, op->loc.col,
+            {
+                die_at(op->loc.file, op->loc.line, op->loc.col,
                    "operand of '%s' must be an lvalue",
                    e->u.incdec.is_inc ? "++" : "--");
+                return type_make_void();
+            }
         Type ot = check_expr_inner(op);
         if (ot.is_const)
-            die_at(op->loc.file, op->loc.line, op->loc.col,
+            {
+                die_at(op->loc.file, op->loc.line, op->loc.col,
                    "cannot increment/decrement a read-only variable");
+                return type_make_void();
+            }
         if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR)
-            die_at(op->loc.file, op->loc.line, op->loc.col,
+            {
+                die_at(op->loc.file, op->loc.line, op->loc.col,
                    "operand of '%s' must be arithmetic or pointer",
                    e->u.incdec.is_inc ? "++" : "--");
+                return type_make_void();
+            }
         type_free(&ot);
         /* Result type is the operand type (before increment). For both prefix
          * and postfix, e->type is the same as the operand's declared type. */
@@ -1996,6 +2147,7 @@ static Type check_expr_inner(Expr *e) {
             if (!is_cplx && !struct_registry_find_c(g_sema_structs, t->tag)) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid application of 'sizeof' to incomplete type 'struct %s'", t->tag);
+                return type_make_void();
             }
         }
         while (t && t->kind == TY_ARRAY) {
@@ -2013,12 +2165,14 @@ static Type check_expr_inner(Expr *e) {
         if (ot.bitfield_width > 0) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "invalid application of 'sizeof' to bit-field");
+            return type_make_void();
         }
         if (ot.kind == TY_STRUCT && ot.tag) {
             int is_cplx = (strncmp(ot.tag, "__complex_", 10) == 0);
             if (!is_cplx && !struct_registry_find_c(g_sema_structs, ot.tag)) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid application of 'sizeof' to incomplete type 'struct %s'", ot.tag);
+                return type_make_void();
             }
         }
         type_free(&ot);
@@ -2032,6 +2186,7 @@ static Type check_expr_inner(Expr *e) {
             if (!is_cplx && !struct_registry_find_c(g_sema_structs, t->tag)) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid application of 'alignof' to incomplete type 'struct %s'", t->tag);
+                return type_make_void();
             }
         }
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
@@ -2124,6 +2279,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return);
 static int g_sema_loop_depth = 0;
 
 static void check_stmt_list(StmtArray *body, int *has_return) {
+    if (fakecc_had_error()) return;
     SymTable *st = g_check_st;
     size_t mark = symtable_enter_scope(st);
     for (size_t i = 0; i < body->len; i++)
@@ -2377,6 +2533,7 @@ static void overlay_init_list(Type *target, Expr *dst, Expr *src, SourceLoc loc)
 }
 
 static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_nested) {
+    if (fakecc_had_error()) return;
     int n = list->u.init_list.num_elements;
     /* 1. Infer array length for an empty `[]` declarator. */
     if (target->kind == TY_ARRAY && target->length < 0 && !target->vla_dim) {
@@ -2414,8 +2571,11 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     case TY_STRUCT:
         sd = struct_registry_find_c(g_sema_structs, target->tag);
         if (!sd)
-            die_at(loc.file, loc.line, loc.col,
+            {
+                die_at(loc.file, loc.line, loc.col,
                    "unknown struct 'struct %s'", target->tag);
+                return;
+            }
         N = sd->is_union ? 1 : sd->num_members;
         break;
     default:
@@ -2432,6 +2592,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         if (target->length >= 0 && list->u.init_list.elements[0]->u.str.len > target->length) {
             die_at(loc.file, loc.line, loc.col,
                    "initializer-string for array of chars is too long");
+            return;
         }
         return;
     }
@@ -2440,17 +2601,26 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         int kind = list->u.init_list.desig_kind[i];
         if (kind == 0) {  /* [index] */
             if (target->kind != TY_ARRAY && !target->is_vector)
-                die_at(loc.file, loc.line, loc.col,
+                {
+                    die_at(loc.file, loc.line, loc.col,
                        "array index designator used on a non-array type");
+                    return;
+                }
             int idx = list->u.init_list.desig_index[i];
             if (idx < 0 || idx >= N)
-                die_at(loc.file, loc.line, loc.col,
+                {
+                    die_at(loc.file, loc.line, loc.col,
                        "designator index %d out of range for array of length %d",
                        idx, N);
+                    return;
+                }
         } else if (kind == 1) {  /* .member */
             if (target->kind != TY_STRUCT)
-                die_at(loc.file, loc.line, loc.col,
+                {
+                    die_at(loc.file, loc.line, loc.col,
                        "member designator used on a non-struct type");
+                    return;
+                }
         }
     }
     /* 3. Build the dense array of N initialized elements.
@@ -2482,9 +2652,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             const char *name = list->u.init_list.desig_member[i];
             pos = designator_member_index(sd, name);
             if (pos < 0)
-                die_at(loc.file, loc.line, loc.col,
+                {
+                    die_at(loc.file, loc.line, loc.col,
                        "struct '%s' has no member named '%s'",
                        target->tag, name);
+                    return;
+                }
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
         } else {
@@ -2502,6 +2675,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         if (pos < 0 || pos >= N) {
             die_at(loc.file, loc.line, loc.col,
                    "excess elements in initializer");
+            return;
         }
         Expr *elem = list->u.init_list.elements[i];
         if (list->u.init_list.desig_kind[i] == 1 && sd && member_idx >= 0) {
@@ -2666,6 +2840,7 @@ static void try_fold_vla_type(Type *t) {
 }
 
 static void check_decl_type(Stmt *s) {
+    if (fakecc_had_error()) return;
     if (s->kind != ST_DECL) return;
     try_fold_vla_type(&s->u.decl.type);
     const Type *t = &s->u.decl.type;
@@ -2675,6 +2850,7 @@ static void check_decl_type(Stmt *s) {
             if (s->u.decl.storage_class == 1 && elem->vla_dim) {
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "variable length array declaration cannot have 'static' storage duration");
+                return;
             }
             elem = elem->elem_type;
         }
@@ -2682,16 +2858,19 @@ static void check_decl_type(Stmt *s) {
             if (elem->kind == TY_VOID) {
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "array type has incomplete element type 'void'");
+                return;
             }
             if (elem->kind == TY_FUNC) {
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "'%s' declared as array of functions", s->u.decl.name);
+                return;
             }
             if (elem->kind == TY_STRUCT && elem->tag) {
                 int is_cplx = (strncmp(elem->tag, "__complex_", 10) == 0);
                 if (!is_cplx && !struct_registry_find_c(g_sema_structs, elem->tag)) {
                     die_at(s->loc.file, s->loc.line, s->loc.col,
                            "array type has incomplete element type 'struct %s'", elem->tag);
+                    return;
                 }
             }
         }
@@ -2703,12 +2882,14 @@ static void check_decl_type(Stmt *s) {
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "variable '%s' has incomplete type 'struct %s'",
                        s->u.decl.name, t->tag);
+                return;
             }
         }
     }
 }
 
 static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
+    if (fakecc_had_error()) return;
     SymTable *st = g_check_st;
     Type discard;
     switch (s->kind) {
@@ -2716,13 +2897,17 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         if (symtable_has_since(st, s->u.decl.name, scope_mark)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "redeclaration of '%s'", s->u.decl.name);
+            return;
         }
         /* A variable may not have type `void` (but `void*` is fine — that is a
          * pointer, TY_PTR). */
         if (s->u.decl.type.kind == TY_VOID)
-            die_at(s->loc.file, s->loc.line, s->loc.col,
+            {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
                    "cannot declare variable '%s' of type void",
                    s->u.decl.name ? s->u.decl.name : "(null)");
+                return;
+            }
         check_decl_type(s);
         /* Block-scope `extern` (e.g. `extern void foo();`) or block-scope function
          * declaration (e.g. `float fx();`) is a declaration referring to a file-scope
@@ -2762,6 +2947,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
             if (target_len >= 0 && str_len > target_len) {
                 die_at(str->loc.file, str->loc.line, str->loc.col,
                        "initializer-string for array of chars is too long");
+                return;
             }
             int n = str_len + 1;
             if (target_len >= 0 && n > target_len) {
@@ -2789,6 +2975,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
             if (discard.kind == TY_VOID) {
                 die_at(s->u.decl.init->loc.file, s->u.decl.init->loc.line, s->u.decl.init->loc.col,
                        "void value not ignored as it ought to be");
+                return;
             }
             type_free(&discard);
             if (s->u.decl.init->kind != EX_INIT_LIST)
@@ -2808,14 +2995,20 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
          * void (e.g. `return f();` where f returns void). */
         if (s->u.value == NULL) {
             if (g_sema_ret_type.kind != TY_VOID)
-                die_at(s->loc.file, s->loc.line, s->loc.col,
+                {
+                    die_at(s->loc.file, s->loc.line, s->loc.col,
                        "non-void function must return a value");
+                    return;
+                }
         } else {
             discard = check_expr_inner(s->u.value);
             if (g_sema_ret_type.kind == TY_VOID) {
                 if (discard.kind != TY_VOID)
-                    die_at(s->loc.file, s->loc.line, s->loc.col,
+                    {
+                        die_at(s->loc.file, s->loc.line, s->loc.col,
                            "void function cannot return a value");
+                        return;
+                    }
             } else {
                 if (!type_is_same(&g_sema_ret_type, &discard)) {
                     int is_ret_cplx = (g_sema_ret_type.kind == TY_STRUCT && g_sema_ret_type.tag && strncmp(g_sema_ret_type.tag, "__complex_", 10) == 0);
@@ -2823,11 +3016,13 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
                     if (discard.kind == TY_VOID) {
                         die_at(s->loc.file, s->loc.line, s->loc.col,
                                "void value not ignored as it ought to be");
+                        return;
                     }
                     if ((g_sema_ret_type.kind == TY_STRUCT && !is_ret_cplx) ||
                         (discard.kind == TY_STRUCT && !is_val_cplx)) {
                         die_at(s->loc.file, s->loc.line, s->loc.col,
                                "returning incompatible struct type");
+                        return;
                     }
                     if ((g_sema_ret_type.kind != TY_STRUCT && discard.kind != TY_STRUCT) ||
                         is_ret_cplx || is_val_cplx ||
@@ -2851,6 +3046,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         } else if (!type_is_scalar(discard)) {
             die_at(s->u.if_s.cond->loc.file, s->u.if_s.cond->loc.line, s->u.if_s.cond->loc.col,
                    "statement requires expression of scalar type");
+            return;
         }
         type_free(&discard);
         check_stmt(s->u.if_s.then_s, scope_mark, has_return);
@@ -2861,6 +3057,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         if (!type_is_scalar(discard)) {
             die_at(s->u.while_s.cond->loc.file, s->u.while_s.cond->loc.line, s->u.while_s.cond->loc.col,
                    "statement requires expression of scalar type");
+            return;
         }
         type_free(&discard);
         g_sema_loop_depth++;
@@ -2871,8 +3068,11 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         /* Condition must be scalar (int, pointer, or float). */
         discard = check_expr_inner(s->u.do_s.cond);
         if (!type_is_scalar(discard))
-            die_at(s->loc.file, s->loc.line, s->loc.col,
+            {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
                    "statement requires expression of scalar type");
+                return;
+            }
         type_free(&discard);
         g_sema_loop_depth++;
         check_stmt(s->u.do_s.body, scope_mark, has_return);
@@ -2886,6 +3086,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         } else if (!labelset_has(g_sema_labels, s->u.goto_s.target)) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "use of undeclared label '%s'", s->u.goto_s.target);
+            return;
         }
         break;
     case ST_LABEL:
@@ -2897,10 +3098,13 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         /* Condition must be integer. */
         Type ct = check_expr_inner(s->u.switch_s.cond);
         if (ct.kind != TY_INT)
-            die_at(s->u.switch_s.cond->loc.file,
+            {
+                die_at(s->u.switch_s.cond->loc.file,
                    s->u.switch_s.cond->loc.line,
                    s->u.switch_s.cond->loc.col,
                    "switch condition must be integer");
+                return;
+            }
         type_free(&ct);
         /* Switch introduces a breakable scope. */
         g_sema_loop_depth++;
@@ -2935,6 +3139,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
             if (!type_is_scalar(discard)) {
                 die_at(s->u.for_s.cond->loc.file, s->u.for_s.cond->loc.line, s->u.for_s.cond->loc.col,
                        "statement requires expression of scalar type");
+                return;
             }
             type_free(&discard);
         }
@@ -2956,6 +3161,7 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         if (g_sema_loop_depth == 0) {
             die_at(s->loc.file, s->loc.line, s->loc.col,
                    "'%s' outside of loop", s->kind == ST_BREAK ? "break" : "continue");
+            return;
         }
         break;
     case ST_BLOCK:
@@ -2964,8 +3170,10 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
     }
 }
 
-void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
+int sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                        PkgContext *ctx) {
+    fakecc_clear_error();
+    g_sema_error_count = 0;
     TranslationUnit *tu = (TranslationUnit *)tu_const;
     g_sema_structs = &tu->structs;
     g_sema_pkg = ctx;
@@ -2993,14 +3201,14 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                 if (strcmp(fn->name, "main") == 0) has_main = 1;
                 continue;
             }
-            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+            return die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "redefinition of function '%s'", fn->name);
         }
         ftab_add(fn);
         if (strcmp(fn->name, "main") == 0 && !fn->is_extern) has_main = 1;
     }
     if (!has_main && require_main) {
-        die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
+        return die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
                "no 'main' function defined");
     }
 
@@ -3047,11 +3255,11 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             }
             if (prev) {
                 if (prev->u.decl.init && s->u.decl.init) {
-                    die_at(s->loc.file, s->loc.line, s->loc.col,
+                    return die_at(s->loc.file, s->loc.line, s->loc.col,
                            "redefinition of global '%s'", s->u.decl.name);
                 }
                 if (!types_compatible_globals(&prev->u.decl.type, &s->u.decl.type)) {
-                    die_at(s->loc.file, s->loc.line, s->loc.col,
+                    return die_at(s->loc.file, s->loc.line, s->loc.col,
                            "conflicting types for '%s'", s->u.decl.name);
                 }
                 /* C99 6.2.2: a file-scope `static` after a non-static
@@ -3061,12 +3269,12 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                     int prev_sc = prev->u.decl.storage_class;
                     int new_sc = s->u.decl.storage_class;
                     if (new_sc == 1 && prev_sc != 1) {
-                        die_at(s->loc.file, s->loc.line, s->loc.col,
+                        return die_at(s->loc.file, s->loc.line, s->loc.col,
                                "static declaration of '%s' follows non-static declaration",
                                s->u.decl.name);
                     }
                     if (prev_sc == 1 && new_sc == 0) {
-                        die_at(s->loc.file, s->loc.line, s->loc.col,
+                        return die_at(s->loc.file, s->loc.line, s->loc.col,
                                "non-static declaration of '%s' follows static declaration",
                                s->u.decl.name);
                     }
@@ -3103,9 +3311,11 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                     if (prev->u.decl.init && prev->u.decl.init->kind == EX_INIT_LIST)
                         normalize_init_list(&prev->u.decl.type, prev->u.decl.init, prev->loc, 0);
                     if (!is_const_init(prev->u.decl.init, &globals))
-                        die_at(prev->loc.file, prev->loc.line, prev->loc.col,
+                        {
+                            return die_at(prev->loc.file, prev->loc.line, prev->loc.col,
                                "global '%s' initializer must be a compile-time constant",
                                prev->u.decl.name);
+                        }
                 }
                 s->kind = ST_EXPR;
                 s->u.expr = NULL;
@@ -3131,7 +3341,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
                 s->u.expr = NULL;
                 continue;
             }
-            die_at(s->loc.file, s->loc.line, s->loc.col,
+            return die_at(s->loc.file, s->loc.line, s->loc.col,
                    "global '%s' conflicts with a function of the same name",
                    s->u.decl.name);
         }
@@ -3153,7 +3363,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             if (s->u.decl.type.length < 0) {
                 s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
             } else if (s->u.decl.init->u.str.len > s->u.decl.type.length) {
-                die_at(s->u.decl.init->loc.file, s->u.decl.init->loc.line, s->u.decl.init->loc.col,
+                return die_at(s->u.decl.init->loc.file, s->u.decl.init->loc.line, s->u.decl.init->loc.col,
                        "initializer-string for array of chars is too long");
             }
         }
@@ -3166,8 +3376,10 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         if (s->u.decl.init) {
             /* A global's initializer must be a compile-time constant. */
             if (!is_const_init(s->u.decl.init, &globals))
-                die_at(s->loc.file, s->loc.line, s->loc.col,
+                {
+                    return die_at(s->loc.file, s->loc.line, s->loc.col,
                        "global initializer must be a constant");
+                }
             Type dt = check_expr_inner(s->u.decl.init);
             type_free(&dt);
             if (s->u.decl.init->kind != EX_INIT_LIST)
@@ -3196,7 +3408,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
         for (size_t j = 0; j < fn->params.len; j++) {
             if (fn->params.data[j].name && fn->params.data[j].name[0] != '\0') {
                 if (symtable_has_since(&st, fn->params.data[j].name, mark)) {
-                    die_at(fn->params.data[j].loc.file,
+                    return die_at(fn->params.data[j].loc.file,
                            fn->params.data[j].loc.line,
                            fn->params.data[j].loc.col,
                            "duplicate parameter name '%s'",
@@ -3213,7 +3425,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
             if (pty.kind == TY_STRUCT && pty.tag) {
                 int is_cplx = (strncmp(pty.tag, "__complex_", 10) == 0);
                 if (!is_cplx && !struct_registry_find_c(g_sema_structs, pty.tag)) {
-                    die_at(fn->params.data[j].loc.file,
+                    return die_at(fn->params.data[j].loc.file,
                            fn->params.data[j].loc.line,
                            fn->params.data[j].loc.col,
                            "parameter has incomplete type 'struct %s'", pty.tag);
@@ -3258,7 +3470,7 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
          * zero if the function does not end in IR_RETURN. */
         if (!has_return && strcmp(fn->name, "main") == 0
             && fn->ret_type.kind != TY_VOID) {
-            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+            return die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "non-void function must return a value");
         }
     }
@@ -3268,8 +3480,10 @@ void sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
     g_sema_pkg = NULL;
     g_sema_tu = NULL;
     g_sema_structs = NULL;
+    if (fakecc_had_error() || g_sema_error_count > 0) return FAKECC_ERR;
+    return FAKECC_OK;
 }
 
-void sema_check(const TranslationUnit *tu, int require_main) {
-    sema_check_in_pkg(tu, require_main, NULL);
+int sema_check(const TranslationUnit *tu, int require_main) {
+    return sema_check_in_pkg(tu, require_main, NULL);
 }

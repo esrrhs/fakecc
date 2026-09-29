@@ -1,6 +1,5 @@
-#define _POSIX_C_SOURCE 200809L
-
 #include "fakecc/ast.h"
+#include "fakecc/common.h"
 #include "fakecc/ir.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
@@ -23,34 +22,55 @@ typedef struct {
     const char *src;
 } DieCase;
 
-static void run_stage(Stage st, const char *src) {
+/* Run one pipeline stage; return 1 if that stage reported an error. */
+static int stage_errors(Stage st, const char *src) {
+    fakecc_clear_error();
     TokenArray arr;
     token_array_init(&arr);
-    lex(src, "t.c", &arr);
+    int rc = lex(src, "t.c", &arr);
     if (st == ST_LEX) {
         token_array_free(&arr);
-        return;
+        return rc != FAKECC_OK || fakecc_had_error();
+    }
+    if (rc != FAKECC_OK) {
+        token_array_free(&arr);
+        return 1;
     }
     TranslationUnit tu;
     tu_init(&tu);
-    parse(&arr, &tu);
+    rc = parse(&arr, &tu);
     token_array_free(&arr);
     if (st == ST_PARSE) {
-        tu_free(&tu);
-        return;
+        int err = rc != FAKECC_OK || fakecc_had_error();
+        /* Skip tu_free on error — partial ASTs may not be safe to free. */
+        if (!err) tu_free(&tu);
+        return err;
     }
-    sema_check(&tu, 1);
+    if (rc != FAKECC_OK) {
+        return 1;
+    }
+    rc = sema_check(&tu, 1);
     if (st == ST_SEMA) {
-        tu_free(&tu);
-        return;
+        int err = rc != FAKECC_OK || fakecc_had_error() || sema_has_errors();
+        if (!err) tu_free(&tu);
+        return err;
+    }
+    if (rc != FAKECC_OK) {
+        return 1;
     }
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(&tu, &ir, 0);
-    ir_module_free(&ir);
-    tu_free(&tu);
+    rc = ir_generate(&tu, &ir, 0);
+    int err = rc != FAKECC_OK || fakecc_had_error();
+    if (!err) {
+        ir_module_free(&ir);
+        tu_free(&tu);
+    }
+    return err;
 }
 
+/* Fork so a crash/abort on a partial AST cannot take down the suite.
+ * The child exits non-zero iff the stage reported an error. */
 static int dies(Stage st, const char *src) {
     int pid = fork();
     if (pid == 0) {
@@ -59,8 +79,8 @@ static int dies(Stage st, const char *src) {
             dup2(nulfd, STDERR_FILENO);
             close(nulfd);
         }
-        run_stage(st, src);
-        _exit(0);
+        int err = stage_errors(st, src);
+        _exit(err ? 1 : 0);
     }
     int status;
     waitpid(pid, &status, 0);

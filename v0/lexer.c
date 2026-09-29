@@ -13,6 +13,10 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 struct SourceLoc {
     const char *file;
     int line;
@@ -30,7 +34,12 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -138,16 +147,14 @@ struct TokenArray {
 void token_array_init(TokenArray *a);
 void token_array_free(TokenArray *a);
 void token_array_push(TokenArray *a, Token t);
-void lex(const char *source, const char *filename, TokenArray *out);
+int lex(const char *source, const char *filename, TokenArray *out);
 typedef struct FILE FILE;
 typedef long fpos_t;
 static const char *predefined_macro_literal(const char *text, int *out_is_float) {
     *out_is_float = 0;
     if (runtime.strcmp(text, "__INT_MAX__") == 0) return "2147483647";
-    if (runtime.strcmp(text, "__INT_MIN__") == 0) return "-2147483648";
     if (runtime.strcmp(text, "__UINT_MAX__") == 0) return "4294967295u";
     if (runtime.strcmp(text, "__LONG_MAX__") == 0) return "9223372036854775807l";
-    if (runtime.strcmp(text, "__LONG_MIN__") == 0) return "-9223372036854775807l";
     if (runtime.strcmp(text, "__ULONG_MAX__") == 0) return "18446744073709551615ul";
     if (runtime.strcmp(text, "__CHAR_BIT__") == 0) return "8";
     if (runtime.strcmp(text, "__SIZEOF_INT__") == 0) return "4";
@@ -285,7 +292,8 @@ static TokenKind keyword_kind(const char *s, size_t len) {
     }
     return TK_IDENT;
 }
-void lex(const char *source, const char *filename, TokenArray *out) {
+int lex(const char *source, const char *filename, TokenArray *out) {
+    fakecc_clear_error();
     size_t pos = 0;
     int line = 1;
     int col = 1;
@@ -338,7 +346,7 @@ lex_loop_head:
         if (c == '#' && line_start) {
             int start_line = line;
             int start_col = col;
-            die_at(filename, start_line, start_col,
+            return die_at(filename, start_line, start_col,
                    "preprocessor directives are not supported in FakeCC");
         }
         line_start = 0;
@@ -349,7 +357,7 @@ lex_loop_head:
             pos++;
             col++;
             if (source[pos] == '\0' || source[pos] == '\n') {
-                die_at(filename, start_line, start_col,
+                return die_at(filename, start_line, start_col,
                        "unterminated character literal");
             }
             while (source[pos] != '\'' && source[pos] != '\0' && source[pos] != '\n') {
@@ -359,8 +367,10 @@ lex_loop_head:
                     if (source[pos] == 'x' || source[pos] == 'X') {
                         pos++; col++;
                         if (!runtime.isxdigit((unsigned char)source[pos]))
-                            die_at(filename, start_line, start_col,
+                            {
+                                return die_at(filename, start_line, start_col,
                                    "hex escape \\x with no digits");
+                            }
                         while (runtime.isxdigit((unsigned char)source[pos])) { pos++; col++; }
                     } else if (source[pos] >= '0' && source[pos] <= '7') {
                         int n = 0;
@@ -375,7 +385,7 @@ lex_loop_head:
                 }
             }
             if (source[pos] != '\'') {
-                die_at(filename, start_line, start_col,
+                return die_at(filename, start_line, start_col,
                        "missing closing quote in character literal");
             }
             pos++; col++;
@@ -437,8 +447,10 @@ lex_loop_head:
                 pos += 2;
                 col += 2;
                 if (!runtime.isxdigit((unsigned char)source[pos]))
-                    die_at(filename, start_line, start_col,
+                    {
+                        return die_at(filename, start_line, start_col,
                            "hex literal has no digits");
+                    }
                 while (runtime.isxdigit((unsigned char)source[pos])) { pos++; col++; }
                 if (source[pos] == '.') {
                     is_float = 1;
@@ -450,7 +462,7 @@ lex_loop_head:
                     pos++; col++;
                     if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
                     if (!runtime.isdigit((unsigned char)source[pos])) {
-                        die_at(filename, line, col, "hex float exponent has no digits");
+                        return die_at(filename, line, col, "hex float exponent has no digits");
                     }
                     while (runtime.isdigit((unsigned char)source[pos])) { pos++; col++; }
                 }
@@ -467,7 +479,7 @@ lex_loop_head:
                 pos++; col++;
                 if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
                 if (!runtime.isdigit((unsigned char)source[pos])) {
-                    die_at(filename, line, col,
+                    return die_at(filename, line, col,
                            "exponent has no digits");
                 }
                 while (runtime.isdigit((unsigned char)source[pos])) { pos++; col++; }
@@ -511,7 +523,7 @@ lex_loop_head:
                 pos++; col++;
                 if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
                 if (!runtime.isdigit((unsigned char)source[pos])) {
-                    die_at(filename, line, col, "exponent has no digits");
+                    return die_at(filename, line, col, "exponent has no digits");
                 }
                 while (runtime.isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
@@ -549,26 +561,48 @@ lex_loop_head:
                 col++;
             }
             size_t len = pos - start;
-            char ident_buf[64];
-            runtime.memcpy(ident_buf, source + start, len);
-            ident_buf[len] = '\0';
-            int is_float = 0;
-            const char *lit = predefined_macro_literal(ident_buf, &is_float);
-            if (lit) {
-                Token t;
-                t.kind = is_float ? TK_FLOAT_LITERAL : TK_INT_LITERAL;
-                t.text = xstrdup(lit);
-                t.loc.file = filename;
-                t.loc.line = start_line;
-                t.loc.col = start_col;
-                token_array_push(out, t);
-                goto lex_loop_head;
+            if (len < 64) {
+                char ident_buf[64];
+                runtime.memcpy(ident_buf, source + start, len);
+                ident_buf[len] = '\0';
+                if (runtime.strcmp(ident_buf, "__INT_MIN__") == 0 ||
+                    runtime.strcmp(ident_buf, "__LONG_MIN__") == 0) {
+                    int is_long_min = (ident_buf[2] == 'L');
+                    Token t;
+                    t.loc.file = filename;
+                    t.loc.line = start_line;
+                    t.loc.col = start_col;
+                    t.kind = TK_LPAREN; t.text = xstrdup("("); token_array_push(out, t);
+                    t.kind = TK_MINUS; t.text = xstrdup("-"); token_array_push(out, t);
+                    t.kind = TK_INT_LITERAL;
+                    t.text = xstrdup(is_long_min ? "9223372036854775807l" : "2147483647");
+                    token_array_push(out, t);
+                    t.kind = TK_MINUS; t.text = xstrdup("-"); token_array_push(out, t);
+                    t.kind = TK_INT_LITERAL;
+                    t.text = xstrdup(is_long_min ? "1l" : "1");
+                    token_array_push(out, t);
+                    t.kind = TK_RPAREN; t.text = xstrdup(")"); token_array_push(out, t);
+                    goto lex_loop_head;
+                }
+                int is_float = 0;
+                const char *lit = predefined_macro_literal(ident_buf, &is_float);
+                if (lit) {
+                    Token t;
+                    t.kind = is_float ? TK_FLOAT_LITERAL : TK_INT_LITERAL;
+                    t.text = xstrdup(lit);
+                    t.loc.file = filename;
+                    t.loc.line = start_line;
+                    t.loc.col = start_col;
+                    token_array_push(out, t);
+                    goto lex_loop_head;
+                }
             }
+            char *text = runtime.malloc(len + 1);
+            runtime.memcpy(text, source + start, len);
+            text[len] = '\0';
             Token t;
-            t.kind = keyword_kind(ident_buf, len);
-            t.text = runtime.malloc(len + 1);
-            runtime.memcpy(t.text, ident_buf, len);
-            t.text[len] = '\0';
+            t.kind = (len < 64) ? keyword_kind(text, len) : TK_IDENT;
+            t.text = text;
             t.loc.file = filename;
             t.loc.line = start_line;
             t.loc.col = start_col;
@@ -851,7 +885,7 @@ lex_loop_head:
         default:
             break;
         }
-        die_at(filename, line, col, "unexpected character '%c'", c);
+        return die_at(filename, line, col, "unexpected character '%c'", c);
     }
     Token eof;
     eof.kind = TK_EOF;
@@ -861,4 +895,5 @@ lex_loop_head:
     eof.loc.line = line;
     eof.loc.col = col;
     token_array_push(out, eof);
+    return FAKECC_OK;
 }

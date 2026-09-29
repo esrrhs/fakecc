@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "fakecc/ast.h"
+#include "fakecc/common.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/pkg.h"
@@ -79,12 +80,14 @@ static void test_cycle_detected(void) {
 
     int pid = fork();
     if (pid == 0) {
+        fakecc_clear_error();
         PkgContext ctx;
         pkg_ctx_init(&ctx);
         pkg_ctx_add_path(&ctx, root);
         SourceLoc loc = {0};
-        pkg_load(&ctx, "pa", loc); /* should die on cycle */
-        _exit(0);
+        Package *pkg = pkg_load(&ctx, "pa", loc); /* should error on cycle */
+        int err = pkg == NULL || fakecc_had_error();
+        _exit(err ? 1 : 0);
     }
     int status;
     waitpid(pid, &status, 0);
@@ -99,8 +102,9 @@ static int child_dies(void (*fn)(void)) {
             dup2(nulfd, STDERR_FILENO);
             close(nulfd);
         }
+        fakecc_clear_error();
         fn();
-        _exit(0);
+        _exit(fakecc_had_error() ? 1 : 0);
     }
     int status;
     waitpid(pid, &status, 0);

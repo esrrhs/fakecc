@@ -796,11 +796,13 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
 }
 
 void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align) {
+    if (fakecc_had_error()) return;
     if (name && name[0] != '\0') {
         for (int i = 0; i < sd->num_members; i++) {
             if (sd->members[i].name && strcmp(sd->members[i].name, name) == 0) {
                 die_at(sd->loc.file, sd->loc.line, sd->loc.col,
                        "duplicate member '%s'", name);
+                return;
             }
         }
     }
@@ -809,6 +811,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
         if (prev->type.kind == TY_ARRAY && prev->type.length < 0 && !prev->type.vla_dim && prev->type.elem_type) {
             die_at(sd->loc.file, sd->loc.line, sd->loc.col,
                    "flexible array member not at end of struct");
+            return;
         }
     }
     if (sd->num_members >= sd->cap_members) {
@@ -950,11 +953,13 @@ void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
 /* ------------------------------------------------------------------ */
 
 void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name) {
+    if (fakecc_had_error()) return;
     if (is_default) {
         for (int i = 0; i < s->u.switch_s.num_cases; i++) {
             if (s->u.switch_s.cases[i].is_default) {
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "multiple default labels in one switch");
+                return;
             }
         }
     } else {
@@ -968,6 +973,7 @@ void switch_push_case_range(Stmt *s, int is_default, long long value, long long 
             if (lo <= shi && hi >= slo) {
                 die_at(s->loc.file, s->loc.line, s->loc.col,
                        "duplicate case value");
+                return;
             }
         }
     }
@@ -1789,6 +1795,7 @@ static int sizeof_operand_needs_sema(const Expr *op) {
 }
 
 static int fold_sizeof_types_ready(void) {
+    if (fakecc_had_error()) return 0;
     return get_sema_tu() != NULL || get_ir_tu() != NULL;
 }
 
@@ -1799,6 +1806,7 @@ static int fold_sizeof_types_ready(void) {
  * Used by sema (global-init constness check) and ir (pack_init) so that
  * constant expressions are accepted and emitted exactly like literals. */
 int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (!e) return 0;
     if (e->kind == EX_INT_LIT) {
         *lo = (unsigned long long)e->u.int_val;
@@ -1914,17 +1922,20 @@ int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long 
 
 /* Integer-promote a type for UAC: rank below int becomes signed int. */
 static void fold_int_promote(int *width, int *is_unsigned) {
+    if (fakecc_had_error()) return;
     if (*width < 4) { *width = 4; *is_unsigned = 0; }
     if (*width <= 0) *width = 4;
 }
 
 static unsigned long long fold_width_mask(int width) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (width >= 8) return ~0ULL;
     if (width <= 0) width = 4;
     return (1ULL << (width * 8)) - 1ULL;
 }
 
 static long long fold_trunc_int(long long v, int width, int is_unsigned) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (width >= 8) return v;
     unsigned long long mask = fold_width_mask(width);
     unsigned long long u = (unsigned long long)v & mask;
@@ -1938,6 +1949,7 @@ static long long fold_trunc_int(long long v, int width, int is_unsigned) {
 /* Usual arithmetic conversions on two integer operands: 1 if the common
  * type is unsigned. */
 static int fold_uac_unsigned(const Expr *l, const Expr *r) {
+    if (fakecc_had_error()) return 0;
     int lw = (l && l->type.kind == TY_INT && l->type.width) ? (int)l->type.width : 4;
     int rw = (r && r->type.kind == TY_INT && r->type.width) ? (int)r->type.width : 4;
     int lu = (l && l->type.kind == TY_INT) ? l->type.is_unsigned : 0;
@@ -1953,6 +1965,7 @@ static int fold_uac_unsigned(const Expr *l, const Expr *r) {
 }
 
 static int fold_binop_unsigned(const Expr *e) {
+    if (fakecc_had_error()) return 0;
     BinOp op = e->u.bin.op;
     if (op == BOP_SHL || op == BOP_SHR) {
         const Expr *l = e->u.bin.l;
@@ -1965,6 +1978,7 @@ static int fold_binop_unsigned(const Expr *e) {
 }
 
 static int fold_binop_width(const Expr *e) {
+    if (fakecc_had_error()) return 0;
     if (e->u.bin.op >= BOP_EQ && e->u.bin.op <= BOP_GE) {
         int lw = (e->u.bin.l && e->u.bin.l->type.width) ? (int)e->u.bin.l->type.width : 4;
         int rw = (e->u.bin.r && e->u.bin.r->type.width) ? (int)e->u.bin.r->type.width : 4;
@@ -1982,6 +1996,7 @@ static int fold_binop_width(const Expr *e) {
 }
 
 int fold_const_int(const Expr *e, long long *out) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT && e->u.float_text) {
         /* Integer conversion of a floating constant: truncate toward zero. */

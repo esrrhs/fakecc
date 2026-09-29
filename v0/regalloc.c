@@ -13,6 +13,10 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 struct SourceLoc {
     const char *file;
     int line;
@@ -30,7 +34,12 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -126,6 +135,7 @@ struct IRInst {
     int align16;
     int x87_pair;
     unsigned char *call_arg_on_stack;
+    int *call_arg_nbytes;
     int alloca_bytes;
     int is_volatile;
 };typedef struct IRInst IRInst;
@@ -189,8 +199,13 @@ struct IRFunction {
     int ret_reg_cls[2];
     int ret_is_bool;
     int ret_is_complex_ld;
+    int ret_x87_bytes;
     int is_variadic;
     int is_static;
+    int is_constructor;
+    int is_destructor;
+    int ctor_prio;
+    int dtor_prio;
     int has_dyn_alloca;
     int needs_apply_args;
     int needs_apply;
@@ -216,6 +231,7 @@ struct IRGlobal {
     int is_readonly;
     int is_static;
     int is_tls;
+    int align;
     SourceLoc loc;
     GlobalFixup *fixups;
     int num_fixups;
@@ -434,11 +450,14 @@ long long type_align(Type t);
 int type_is_complex_ldouble(Type t);
 int type_is_empty_struct(Type t);
 int type_needs_stack_align16(Type t);
+int type_stack_align(Type t);
+int host_has_avx512f(void);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
@@ -702,6 +721,10 @@ struct FunctionDecl {
     char *alias_target;
     int align;
     int no_instrument;
+    int is_constructor;
+    int is_destructor;
+    int ctor_prio;
+    int dtor_prio;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -725,6 +748,7 @@ struct StructMember {
     long long offset;
     int bit_width;
     int bit_offset;
+    int align;
 };typedef struct StructMember StructMember;
 struct StructDef {
     char *tag;
@@ -819,7 +843,7 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
+int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
@@ -908,6 +932,7 @@ static int value_is_ld(const IRFunction *fn, int v) {
     if (!value_is_float_class(fn, v)) return 0;
     if (!fn->value_width || fn->value_meta_cap <= 0) return 0;
     if (v >= fn->value_meta_cap) return 0;
+    if (fn->value_is_float[v] == 4) return 0;
     return fn->value_width[v] == 16;
 }
 static int value_is_xmm_float(const IRFunction *fn, int v) {
@@ -1559,9 +1584,13 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     ra->spill_slot = spill_slots;
     ra->num_spill_slots = num_spills;
     ra->num_values = nv;
-    int slots = num_spills;
-    if (slots % 2 != 0) slots++;
-    ra->stack_size = 8 * slots;
+    if (float_class)
+        ra->stack_size = (host_has_avx512f() ? 64 : 32) * num_spills;
+    else {
+        int slots = num_spills;
+        if (slots % 2 != 0) slots++;
+        ra->stack_size = 8 * slots;
+    }
     runtime.free(order);
     ig_free(&g);
     liv_free(liv, nv);

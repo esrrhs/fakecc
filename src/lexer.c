@@ -179,7 +179,8 @@ static TokenKind keyword_kind(const char *s, size_t len) {
 /* Lexer implementation                                                */
 /* ------------------------------------------------------------------ */
 
-void lex(const char *source, const char *filename, TokenArray *out) {
+int lex(const char *source, const char *filename, TokenArray *out) {
+    fakecc_clear_error();
     size_t pos = 0;
     int line = 1;
     int col = 1;
@@ -245,7 +246,7 @@ lex_loop_head:
         if (c == '#' && line_start) {
             int start_line = line;
             int start_col = col;
-            die_at(filename, start_line, start_col,
+            return die_at(filename, start_line, start_col,
                    "preprocessor directives are not supported in FakeCC");
         }
 
@@ -261,7 +262,7 @@ lex_loop_head:
 
             /* must have at least one char (body or escape) */
             if (source[pos] == '\0' || source[pos] == '\n') {
-                die_at(filename, start_line, start_col,
+                return die_at(filename, start_line, start_col,
                        "unterminated character literal");
             }
 
@@ -272,8 +273,10 @@ lex_loop_head:
                     if (source[pos] == 'x' || source[pos] == 'X') {
                         pos++; col++;
                         if (!isxdigit((unsigned char)source[pos]))
-                            die_at(filename, start_line, start_col,
+                            {
+                                return die_at(filename, start_line, start_col,
                                    "hex escape \\x with no digits");
+                            }
                         while (isxdigit((unsigned char)source[pos])) { pos++; col++; }
                     } else if (source[pos] >= '0' && source[pos] <= '7') {
                         int n = 0;
@@ -290,7 +293,7 @@ lex_loop_head:
 
             /* closing quote */
             if (source[pos] != '\'') {
-                die_at(filename, start_line, start_col,
+                return die_at(filename, start_line, start_col,
                        "missing closing quote in character literal");
             }
             pos++; col++;  /* skip closing quote */
@@ -364,8 +367,10 @@ lex_loop_head:
                 pos += 2;  /* "0x" */
                 col += 2;
                 if (!isxdigit((unsigned char)source[pos]))
-                    die_at(filename, start_line, start_col,
+                    {
+                        return die_at(filename, start_line, start_col,
                            "hex literal has no digits");
+                    }
                 while (isxdigit((unsigned char)source[pos])) { pos++; col++; }
                 /* Hex float: 0x1.fp1 / 0x1p1 (binary exponent). */
                 if (source[pos] == '.') {
@@ -378,7 +383,7 @@ lex_loop_head:
                     pos++; col++;
                     if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
                     if (!isdigit((unsigned char)source[pos])) {
-                        die_at(filename, line, col, "hex float exponent has no digits");
+                        return die_at(filename, line, col, "hex float exponent has no digits");
                     }
                     while (isdigit((unsigned char)source[pos])) { pos++; col++; }
                 }
@@ -398,7 +403,7 @@ lex_loop_head:
                 pos++; col++;
                 if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
                 if (!isdigit((unsigned char)source[pos])) {
-                    die_at(filename, line, col,
+                    return die_at(filename, line, col,
                            "exponent has no digits");
                 }
                 while (isdigit((unsigned char)source[pos])) { pos++; col++; }
@@ -446,7 +451,7 @@ lex_loop_head:
                 pos++; col++;
                 if (source[pos] == '+' || source[pos] == '-') { pos++; col++; }
                 if (!isdigit((unsigned char)source[pos])) {
-                    die_at(filename, line, col, "exponent has no digits");
+                    return die_at(filename, line, col, "exponent has no digits");
                 }
                 while (isdigit((unsigned char)source[pos])) { pos++; col++; }
             }
@@ -826,7 +831,7 @@ lex_loop_head:
         }
 
         /* unknown character */
-        die_at(filename, line, col, "unexpected character '%c'", c);
+        return die_at(filename, line, col, "unexpected character '%c'", c);
     }
 
     /* emit EOF */
@@ -838,4 +843,5 @@ lex_loop_head:
     eof.loc.line = line;
     eof.loc.col = col;
     token_array_push(out, eof);
+    return FAKECC_OK;
 }

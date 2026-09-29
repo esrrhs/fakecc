@@ -13,6 +13,10 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 struct SourceLoc {
     const char *file;
     int line;
@@ -30,7 +34,12 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -219,11 +228,14 @@ long long type_align(Type t);
 int type_is_complex_ldouble(Type t);
 int type_is_empty_struct(Type t);
 int type_needs_stack_align16(Type t);
+int type_stack_align(Type t);
+int host_has_avx512f(void);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
@@ -487,6 +499,10 @@ struct FunctionDecl {
     char *alias_target;
     int align;
     int no_instrument;
+    int is_constructor;
+    int is_destructor;
+    int ctor_prio;
+    int dtor_prio;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -510,6 +526,7 @@ struct StructMember {
     long long offset;
     int bit_width;
     int bit_offset;
+    int align;
 };typedef struct StructMember StructMember;
 struct StructDef {
     char *tag;
@@ -727,7 +744,7 @@ int type_is_empty_struct(Type t) {
     if (!reg) reg = get_parser_structs();
     if (t.tag && reg) {
         const StructDef *sd = struct_registry_find_c(reg, t.tag);
-        if (sd) return sd->num_members == 0;
+        if (sd) return sd->size <= 0 || sd->num_members == 0;
     }
     return type_size(t) <= 0;
 }
@@ -736,6 +753,16 @@ int type_needs_stack_align16(Type t) {
     if (t.kind == TY_INT && t.width == 16 && !t.is_vector) return 1;
     if (type_is_complex_ldouble(t)) return 1;
     return type_align(t) >= 16;
+}
+int type_stack_align(Type t) {
+    long long a = type_align(t);
+    if (t.kind == TY_FLOAT && t.width == 16 && !t.is_vector) return 16;
+    if (t.kind == TY_INT && t.width == 16 && !t.is_vector) return 16;
+    if (type_is_complex_ldouble(t)) return 16;
+    if (a >= 64) return 64;
+    if (a >= 32) return 32;
+    if (a >= 16) return 16;
+    return 0;
 }
 Type type_make_vector(Type elem, long long vec_size) {
     Type t = elem;
@@ -988,10 +1015,10 @@ static long long align_up(long long x, long long align) {
     return (x + align - 1) & ~(align - 1);
 }
 long long type_align(Type t) {
-    if (t.is_vector) return t.width > 16 ? 16 : (t.width > 0 ? t.width : 1);
+    if (t.is_vector) return t.width > 0 ? t.width : 1;
     const Type *p = &t;
     while (p->kind == TY_ARRAY && p->elem_type) p = p->elem_type;
-    if (p->is_vector) return p->width > 16 ? 16 : (p->width > 0 ? p->width : 1);
+    if (p->is_vector) return p->width > 0 ? p->width : 1;
     switch (p->kind) {
     case TY_VOID: return 1;
     case TY_INT: return p->width;
@@ -1022,7 +1049,7 @@ int type_is_vla(Type t) {
     }
     return 0;
 }
-enum { SV_NO = 0, SV_INT = 1, SV_SSE = 2, SV_MEM = 3 };
+enum { SV_NO = 0, SV_INT = 1, SV_SSE = 2, SV_MEM = 3, SV_SSEUP = 4 };
 static int sysv_merge(int a, int b) {
     if (a == b) return a;
     if (a == SV_NO) return b;
@@ -1043,24 +1070,25 @@ static int sysv_field_class(Type t) {
         return SV_MEM;
     }
 }
-static int sysv_paint(Type t, int offset, int eight[2]) {
+static int sysv_paint(Type t, int offset, int eight[8]) {
     if (t.is_vector) {
-        int fc = SV_SSE;
         int end = offset + (int)t.width;
-        for (int eb = 0; eb < 2; eb++) {
+        for (int eb = 0; eb < 8; eb++) {
             int lo = eb * 8, hi = lo + 8;
             if (end <= lo || offset >= hi) continue;
+            int fc = (t.width >= 16 && lo >= offset + 8) ? SV_SSEUP : SV_SSE;
             eight[eb] = sysv_merge(eight[eb], fc);
             if (eight[eb] == SV_MEM) return 1;
         }
         return 0;
     }
-    if (t.kind == TY_ARRAY && t.elem_type && t.length > 0) {
+    if (t.kind == TY_ARRAY && t.elem_type) {
+        if (t.length <= 0) return 0;
         int esz = type_size(*t.elem_type);
         if (esz <= 0) return 0;
         for (long long i = 0; i < t.length; i++) {
             int eoff = offset + (int)(i * esz);
-            if (eoff >= 16) break;
+            if (eoff >= 64) break;
             if (sysv_paint(*t.elem_type, eoff, eight)) return 1;
         }
         return 0;
@@ -1071,7 +1099,7 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
         if (!sd) {
             int sz = type_size(t);
             int end = offset + (sz > 0 ? sz : 0);
-            for (int eb = 0; eb < 2; eb++) {
+            for (int eb = 0; eb < 8; eb++) {
                 int lo = eb * 8, hi = lo + 8;
                 if (end <= lo || offset >= hi) continue;
                 eight[eb] = sysv_merge(eight[eb], SV_INT);
@@ -1080,11 +1108,12 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
         }
         for (int mi = 0; mi < sd->num_members; mi++) {
             const StructMember *m = &sd->members[mi];
+            if (m->bit_width == 0) continue;
+            if (sd->is_union && m->type.kind == TY_ARRAY && m->type.length < 0
+                && !m->type.vla_dim)
+                return 1;
             int moff = offset + m->offset;
-            int msz = m->bit_width > 0
-                      ? (m->bit_width <= 8 ? 1 : m->bit_width <= 16 ? 2
-                         : m->bit_width <= 32 ? 4 : 8)
-                      : type_size(m->type);
+            int msz = m->bit_width > 0 ? 0 : type_size(m->type);
             if (msz <= 0 && m->bit_width <= 0) {
                 if (m->type.kind == TY_ARRAY || m->type.kind == TY_STRUCT
                     || m->type.is_vector) {
@@ -1097,10 +1126,13 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
                 if (ma > 1 && (m->offset % ma) != 0) return 1;
             }
             if (m->bit_width > 0) {
-                int end = moff + msz;
-                for (int eb = 0; eb < 2; eb++) {
+                int start_bit = moff * 8 + m->bit_offset;
+                int last_bit = start_bit + m->bit_width - 1;
+                int start_byte = start_bit / 8;
+                int last_byte = last_bit / 8;
+                for (int eb = 0; eb < 8; eb++) {
                     int lo = eb * 8, hi = lo + 8;
-                    if (end <= lo || moff >= hi) continue;
+                    if (last_byte + 1 <= lo || start_byte >= hi) continue;
                     eight[eb] = sysv_merge(eight[eb], SV_INT);
                     if (eight[eb] == SV_MEM) return 1;
                 }
@@ -1111,7 +1143,7 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
                 int fc = sysv_field_class(m->type);
                 if (fc == SV_MEM) return 1;
                 int end = moff + msz;
-                for (int eb = 0; eb < 2; eb++) {
+                for (int eb = 0; eb < 8; eb++) {
                     int lo = eb * 8, hi = lo + 8;
                     if (end <= lo || moff >= hi) continue;
                     eight[eb] = sysv_merge(eight[eb], fc);
@@ -1126,7 +1158,7 @@ static int sysv_paint(Type t, int offset, int eight[2]) {
     int sz = type_size(t);
     if (sz <= 0) sz = (int)t.width;
     int end = offset + sz;
-    for (int eb = 0; eb < 2; eb++) {
+    for (int eb = 0; eb < 8; eb++) {
         int lo = eb * 8, hi = lo + 8;
         if (end <= lo || offset >= hi) continue;
         eight[eb] = sysv_merge(eight[eb], fc);
@@ -1138,10 +1170,14 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     cls[0] = SYSV_CLS_INTEGER;
     cls[1] = SYSV_CLS_INTEGER;
     if (t.is_vector) {
+        if (t.width == 32) {
+            if (g_no_avx) return 0;
+            cls[0] = SYSV_CLS_SSE;
+            return 1;
+        }
         if (t.width == 16) {
             cls[0] = SYSV_CLS_SSE;
-            cls[1] = SYSV_CLS_SSE;
-            return 2;
+            return 1;
         }
         if (t.width == 8) {
             cls[0] = SYSV_CLS_SSE;
@@ -1151,37 +1187,95 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
             cls[0] = (t.kind == TY_FLOAT) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
             return 1;
         }
+        if (t.width == 64 && host_has_avx512f()) {
+            cls[0] = SYSV_CLS_SSE;
+            return 1;
+        }
         return 0;
     }
     if (t.kind != TY_STRUCT || !t.tag) return 0;
     int sz = type_size(t);
-    if (sz <= 0 || sz > 16) return 0;
+    if (sz <= 0 || sz > 64) return 0;
     const StructRegistry *reg = get_ir_structs();
     const StructDef *sd = ((void*)0);
     if (reg) sd = struct_registry_find_c(reg, t.tag);
     if (!sd) {
+        if (sz > 16) return 0;
         int n = (sz + 7) / 8;
         cls[0] = SYSV_CLS_INTEGER;
         if (n > 1) cls[1] = SYSV_CLS_INTEGER;
         return n;
     }
-    int eight[2] = { SV_NO, SV_NO };
+    int eight[8] = { SV_NO, SV_NO, SV_NO, SV_NO, SV_NO, SV_NO, SV_NO, SV_NO };
     if (sysv_paint(t, 0, eight)) return 0;
     int n = (sz + 7) / 8;
     if (n < 1) n = 1;
-    if (n > 2) return 0;
+    if (n > 8) return 0;
+    if (n > 1 && eight[1] == SV_SSEUP && eight[0] != SV_SSE)
+        eight[1] = SV_SSE;
+    if (n > 2) {
+        if (g_no_avx && sz >= 32) return 0;
+        if (eight[0] != SV_SSE) return 0;
+        for (int i = 1; i < n; i++) {
+            if (eight[i] != SV_SSEUP) return 0;
+        }
+        if (sz == 32 || (sz == 64 && host_has_avx512f())) {
+            cls[0] = SYSV_CLS_SSE;
+            return 1;
+        }
+        return 0;
+    }
+    if (n == 2 && eight[0] == SV_SSE && eight[1] == SV_SSEUP) {
+        cls[0] = SYSV_CLS_SSE;
+        return 1;
+    }
+    while (n > 1 && eight[n - 1] == SV_NO) n--;
     for (int i = 0; i < n; i++) {
         int c = eight[i] == SV_NO ? SV_INT : eight[i];
         if (c == SV_MEM) return 0;
-        cls[i] = (c == SV_SSE) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
+        cls[i] = (c == SV_SSE || c == SV_SSEUP) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
     }
     return n;
 }
+static int type_is_pure_x87(Type t) {
+    if (t.is_vector) return 0;
+    if (t.kind == TY_FLOAT && t.width == 16) return 1;
+    if (t.kind == TY_ARRAY && t.elem_type) {
+        if (t.length <= 0) return 1;
+        return type_is_pure_x87(*t.elem_type);
+    }
+    if (t.kind != TY_STRUCT || !t.tag) return 0;
+    const StructRegistry *reg = get_ir_structs();
+    if (!reg) reg = get_sema_structs();
+    if (!reg) reg = get_parser_structs();
+    const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : ((void*)0);
+    if (!sd) return 0;
+    int any = 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        if (sd->members[i].bit_width == 0) continue;
+        Type mt = sd->members[i].type;
+        if (mt.kind == TY_ARRAY && mt.length <= 0 && !mt.vla_dim) continue;
+        if (!type_is_pure_x87(mt)) return 0;
+        any = 1;
+    }
+    return any;
+}
+int sysv_agg_ret_x87(Type t) {
+    if (type_is_complex_ldouble(t)) return 0;
+    if (t.kind != TY_STRUCT) return 0;
+    if (type_size(t) != 16) return 0;
+    SysVRegClass cls[2];
+    if (sysv_classify_agg(t, cls) != 0) return 0;
+    return type_is_pure_x87(t);
+}
 int sysv_memory_pass_as_pointer(Type t) {
-    if (t.kind == TY_STRUCT && t.tag && runtime.strcmp(t.tag, "__va_list_tag") == 0)
-        return 1;
-    int sz = type_size(t);
-    return sz > 128;
+    return t.kind == TY_STRUCT && t.tag
+        && runtime.strcmp(t.tag, "__va_list_tag") == 0;
+}
+int g_no_avx = 0;
+int g_avx512f = 0;
+int host_has_avx512f(void) {
+    return g_avx512f && !g_no_avx;
 }
 static void close_bitfield_run(StructDef *sd) {
     if (!sd || sd->bf_unit_type == 0) return;
@@ -1196,6 +1290,24 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
     struct_def_push_member_aligned(sd, name, ty, bit_width, 0);
 }
 void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align) {
+    if (fakecc_had_error()) return;
+    if (name && name[0] != '\0') {
+        for (int i = 0; i < sd->num_members; i++) {
+            if (sd->members[i].name && runtime.strcmp(sd->members[i].name, name) == 0) {
+                die_at(sd->loc.file, sd->loc.line, sd->loc.col,
+                       "duplicate member '%s'", name);
+                return;
+            }
+        }
+    }
+    if (sd->num_members > 0 && !sd->is_union) {
+        const StructMember *prev = &sd->members[sd->num_members - 1];
+        if (prev->type.kind == TY_ARRAY && prev->type.length < 0 && !prev->type.vla_dim && prev->type.elem_type) {
+            die_at(sd->loc.file, sd->loc.line, sd->loc.col,
+                   "flexible array member not at end of struct");
+            return;
+        }
+    }
     if (sd->num_members >= sd->cap_members) {
         int nc = sd->cap_members ? sd->cap_members * 2 : 4;
         sd->members = runtime.realloc(sd->members, nc * sizeof(StructMember));
@@ -1203,9 +1315,10 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
         sd->cap_members = nc;
     }
     long long a = sd->is_packed ? 1 : type_align(ty);
-    if (!sd->is_packed && align > a) a = align;
+    if (align > a) a = align;
     long long sz = type_size(ty);
-    if (!sd->is_packed && a > sd->align) sd->align = a;
+    if (sz < 0) sz = 0;
+    if (a > sd->align) sd->align = a;
     long long off;
     if (sd->is_union) {
         off = 0;
@@ -1218,6 +1331,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
             sd->members[sd->num_members].offset = sd->size;
             sd->members[sd->num_members].bit_width = 0;
             sd->members[sd->num_members].bit_offset = 0;
+            sd->members[sd->num_members].align = align;
             sd->num_members++;
             return;
         }
@@ -1259,6 +1373,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
         sd->members[sd->num_members].bit_width = bit_width;
         sd->members[sd->num_members].name = xstrdup(name);
         sd->members[sd->num_members].type = type_clone(ty);
+        sd->members[sd->num_members].align = align;
         sd->num_members++;
         return;
     } else {
@@ -1270,6 +1385,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
     sd->members[sd->num_members].offset = off;
     sd->members[sd->num_members].bit_width = bit_width;
     sd->members[sd->num_members].bit_offset = 0;
+    sd->members[sd->num_members].align = align;
     sd->num_members++;
     if (sd->is_union) {
         if (sz > sd->size) sd->size = sz;
@@ -1278,7 +1394,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
     }
 }
 void struct_def_finish(StructDef *sd) {
-    if (sd->is_packed) sd->align = 1;
+    if (sd->is_packed && sd->align < 1) sd->align = 1;
     sd->size = align_up(sd->size, sd->align);
 }
 void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
@@ -1299,6 +1415,30 @@ void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
     }
 }
 void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name) {
+    if (fakecc_had_error()) return;
+    if (is_default) {
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            if (s->u.switch_s.cases[i].is_default) {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "multiple default labels in one switch");
+                return;
+            }
+        }
+    } else {
+        long long lo = value;
+        long long hi = is_range ? high_value : value;
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            const SwitchCase *sc = &s->u.switch_s.cases[i];
+            if (sc->is_default) continue;
+            long long slo = sc->value;
+            long long shi = sc->is_range ? sc->high_value : sc->value;
+            if (lo <= shi && hi >= slo) {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "duplicate case value");
+                return;
+            }
+        }
+    }
     if (s->u.switch_s.num_cases >= s->u.switch_s.cap_cases) {
         int nc = s->u.switch_s.cap_cases ? s->u.switch_s.cap_cases * 2 : 4;
         s->u.switch_s.cases = runtime.realloc(s->u.switch_s.cases,
@@ -2033,9 +2173,11 @@ static int sizeof_operand_needs_sema(const Expr *op) {
     }
 }
 static int fold_sizeof_types_ready(void) {
+    if (fakecc_had_error()) return 0;
     return get_sema_tu() != ((void*)0) || get_ir_tu() != ((void*)0);
 }
 int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (!e) return 0;
     if (e->kind == EX_INT_LIT) {
         *lo = (unsigned long long)e->u.int_val;
@@ -2153,15 +2295,18 @@ unsigned long long rhi;
     return 0;
 }
 static void fold_int_promote(int *width, int *is_unsigned) {
+    if (fakecc_had_error()) return;
     if (*width < 4) { *width = 4; *is_unsigned = 0; }
     if (*width <= 0) *width = 4;
 }
 static unsigned long long fold_width_mask(int width) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (width >= 8) return ~0ULL;
     if (width <= 0) width = 4;
     return (1ULL << (width * 8)) - 1ULL;
 }
 static long long fold_trunc_int(long long v, int width, int is_unsigned) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (width >= 8) return v;
     unsigned long long mask = fold_width_mask(width);
     unsigned long long u = (unsigned long long)v & mask;
@@ -2172,6 +2317,7 @@ static long long fold_trunc_int(long long v, int width, int is_unsigned) {
     return (long long)u;
 }
 static int fold_uac_unsigned(const Expr *l, const Expr *r) {
+    if (fakecc_had_error()) return 0;
     int lw = (l && l->type.kind == TY_INT && l->type.width) ? (int)l->type.width : 4;
     int rw = (r && r->type.kind == TY_INT && r->type.width) ? (int)r->type.width : 4;
     int lu = (l && l->type.kind == TY_INT) ? l->type.is_unsigned : 0;
@@ -2186,6 +2332,7 @@ static int fold_uac_unsigned(const Expr *l, const Expr *r) {
     return 1;
 }
 static int fold_binop_unsigned(const Expr *e) {
+    if (fakecc_had_error()) return 0;
     BinOp op = e->u.bin.op;
     if (op == BOP_SHL || op == BOP_SHR) {
         const Expr *l = e->u.bin.l;
@@ -2197,6 +2344,7 @@ static int fold_binop_unsigned(const Expr *e) {
     return e->type.kind == TY_INT && e->type.is_unsigned;
 }
 static int fold_binop_width(const Expr *e) {
+    if (fakecc_had_error()) return 0;
     if (e->u.bin.op >= BOP_EQ && e->u.bin.op <= BOP_GE) {
         int lw = (e->u.bin.l && e->u.bin.l->type.width) ? (int)e->u.bin.l->type.width : 4;
         int rw = (e->u.bin.r && e->u.bin.r->type.width) ? (int)e->u.bin.r->type.width : 4;
@@ -2213,6 +2361,7 @@ static int fold_binop_width(const Expr *e) {
     return 4;
 }
 int fold_const_int(const Expr *e, long long *out) {
+    if (fakecc_had_error()) return FAKECC_ERR;
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT && e->u.float_text) {
         *out = (long long)runtime.strtold(e->u.float_text, ((void*)0));
