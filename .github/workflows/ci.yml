@@ -201,6 +201,28 @@ jobs:
           name: fakecc-1
           path: v0
 
+      - name: DEBUG cyc strace (temporary)
+        if: matrix.suite == 'misc'
+        run: |
+          sudo apt-get install -y strace
+          T=$(mktemp -d)
+          mkdir -p $T/pkg/cycA $T/pkg/cycB $T/pkg/cycC
+          echo 'package cycA; import cycB; int a_func(void) { return cycB.b_func(); }' > $T/pkg/cycA/a.c
+          echo 'package cycB; import cycC; int b_func(void) { return cycC.c_func(); }' > $T/pkg/cycB/b.c
+          echo 'package cycC; import cycA; int c_func(void) { return cycA.a_func(); }' > $T/pkg/cycC/c.c
+          echo 'package main; import cycA; int main(void) { return cycA.a_func(); }' > $T/cyc_main.c
+          FAKECC_PKG="$T/pkg" timeout -s ABRT 25 \
+            strace -f -e trace=openat,getdents64,close,write -o $T/cyc.strace \
+            ./v0/fakecc-1 $T/cyc_main.c -o $T/cyc -O0 || true
+          echo "=== syscall counts ==="
+          for s in openat getdents64 write; do
+            echo "$s: $(grep -c " $s(" $T/cyc.strace || true)"
+          done
+          echo "=== last 40 syscalls ==="
+          tail -40 $T/cyc.strace
+          echo "=== distinct opened cyc paths ==="
+          grep openat $T/cyc.strace | grep -oE '"[^"]*cyc[^"]*"' | sort | uniq -c | head -20
+
       - name: Run suite
         env:
           SUITE: ${{ matrix.suite }}
