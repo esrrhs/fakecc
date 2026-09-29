@@ -796,6 +796,21 @@ void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_wi
 }
 
 void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align) {
+    if (name && name[0] != '\0') {
+        for (int i = 0; i < sd->num_members; i++) {
+            if (sd->members[i].name && strcmp(sd->members[i].name, name) == 0) {
+                die_at(sd->loc.file, sd->loc.line, sd->loc.col,
+                       "duplicate member '%s'", name);
+            }
+        }
+    }
+    if (sd->num_members > 0 && !sd->is_union) {
+        const StructMember *prev = &sd->members[sd->num_members - 1];
+        if (prev->type.kind == TY_ARRAY && prev->type.length < 0 && !prev->type.vla_dim && prev->type.elem_type) {
+            die_at(sd->loc.file, sd->loc.line, sd->loc.col,
+                   "flexible array member not at end of struct");
+        }
+    }
     if (sd->num_members >= sd->cap_members) {
         int nc = sd->cap_members ? sd->cap_members * 2 : 4;
         sd->members = realloc(sd->members, nc * sizeof(StructMember));
@@ -803,12 +818,12 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
         sd->cap_members = nc;
     }
     long long a = sd->is_packed ? 1 : type_align(ty);
-    if (!sd->is_packed && align > a) a = align;
+    if (align > a) a = align;
     long long sz = type_size(ty);
     /* FAM / incomplete array: no allocated bytes; `[0]` is already 0. */
     if (sz < 0) sz = 0;
     /* Track the max member alignment for final struct alignment. */
-    if (!sd->is_packed && a > sd->align) sd->align = a;
+    if (a > sd->align) sd->align = a;
     long long off;
     if (sd->is_union) {
         /* Union members all start at offset 0; total size is the max. */
@@ -824,6 +839,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
             sd->members[sd->num_members].offset = sd->size;
             sd->members[sd->num_members].bit_width = 0;
             sd->members[sd->num_members].bit_offset = 0;
+            sd->members[sd->num_members].align = align;
             sd->num_members++;
             return;
         }
@@ -871,6 +887,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
         sd->members[sd->num_members].bit_width = bit_width;
         sd->members[sd->num_members].name = xstrdup(name);
         sd->members[sd->num_members].type = type_clone(ty);
+        sd->members[sd->num_members].align = align;
         sd->num_members++;
         return;
     } else {
@@ -885,6 +902,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
     sd->members[sd->num_members].offset = off;
     sd->members[sd->num_members].bit_width = bit_width;
     sd->members[sd->num_members].bit_offset = 0;
+    sd->members[sd->num_members].align = align;
     sd->num_members++;
     if (sd->is_union) {
         /* Size grows to the largest member.  Final alignment is applied once
@@ -905,7 +923,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
  * is pushed.  Applying this per-member would prematurely pad the struct and
  * break trailing-member packing. */
 void struct_def_finish(StructDef *sd) {
-    if (sd->is_packed) sd->align = 1;
+    if (sd->is_packed && sd->align < 1) sd->align = 1;
     sd->size = align_up(sd->size, sd->align);
 }
 
@@ -932,6 +950,27 @@ void struct_def_apply_sso(StructDef *sd, int is_big_endian) {
 /* ------------------------------------------------------------------ */
 
 void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name) {
+    if (is_default) {
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            if (s->u.switch_s.cases[i].is_default) {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "multiple default labels in one switch");
+            }
+        }
+    } else {
+        long long lo = value;
+        long long hi = is_range ? high_value : value;
+        for (int i = 0; i < s->u.switch_s.num_cases; i++) {
+            const SwitchCase *sc = &s->u.switch_s.cases[i];
+            if (sc->is_default) continue;
+            long long slo = sc->value;
+            long long shi = sc->is_range ? sc->high_value : sc->value;
+            if (lo <= shi && hi >= slo) {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "duplicate case value");
+            }
+        }
+    }
     if (s->u.switch_s.num_cases >= s->u.switch_s.cap_cases) {
         int nc = s->u.switch_s.cap_cases ? s->u.switch_s.cap_cases * 2 : 4;
         s->u.switch_s.cases = realloc(s->u.switch_s.cases,

@@ -479,6 +479,17 @@ static void test_int_min_macro_tokens(void) {
     token_array_free(&b);
 }
 
+static void test_long_identifier(void) {
+    char buf[128];
+    memset(buf, 'a', 100);
+    buf[100] = '\0';
+    TokenArray a = lex_str(buf);
+    T_ASSERT_EQ_INT((int)a.len, 2);
+    T_ASSERT_EQ_INT((int)a.data[0].kind, (int)TK_IDENT);
+    T_ASSERT_STR_EQ(a.data[0].text, buf);
+    token_array_free(&a);
+}
+
 static void test_inc_dec_tokens(void) {
     /* "a++ + ++b" → IDENT INC PLUS INC IDENT EOF */
     TokenArray a = lex_str("a++ + ++b");
@@ -575,5 +586,6 @@ int main(void) {
     test_shift_compound_tokens();
     test_compound_not_confused();
     test_int_min_macro_tokens();
+    test_long_identifier();
     return t_finalize();
 }

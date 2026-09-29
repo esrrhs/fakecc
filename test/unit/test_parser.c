@@ -381,9 +381,28 @@ static void test_wide_string_escapes(void) {
     tu_free(&tu);
 }
 
+static void test_packed_member_align(void) {
+    TranslationUnit tu = lex_parse(
+        "package main;\n"
+        "struct __attribute__((packed)) S {\n"
+        "    char c;\n"
+        "    int x __attribute__((aligned(8)));\n"
+        "    char d;\n"
+        "};\n"
+        "int main() { return 0; }\n"
+    );
+    const StructDef *sd = struct_registry_find_c(&tu.structs, "S");
+    T_ASSERT(sd != NULL);
+    T_ASSERT_EQ_INT((int)sd->size, 16);
+    T_ASSERT_EQ_INT((int)sd->members[1].offset, 8);
+    T_ASSERT_EQ_INT((int)sd->members[2].offset, 12);
+    tu_free(&tu);
+}
+
 /* ---- main ---- */
 
 int main(void) {
+    test_packed_member_align();
     test_valid_program();
     test_return_zero();
     test_return_255();

@@ -440,6 +440,7 @@ typedef struct {
     int  bit_width;     /* -1 = normal member, 0 = zero-width bitfield, else bits */
     int  bit_offset;    /* bit position within the unit (0 = LSB); valid when
                          * bit_width > 0. */
+    int  align;         /* explicit member alignment, or 0 */
 } StructMember;
 
 typedef struct {
