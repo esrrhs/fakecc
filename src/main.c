@@ -40,30 +40,38 @@ static char *read_file(const char *path) {
     return buf;
 }
 
-/* Lex + parse one source file into `tu` (sema/codegen happen later). */
-static void parse_source(const char *source, const char *filename,
-                         TranslationUnit *tu, PkgContext *pkg) {
+/* Lex + parse one source file into `tu` (sema/codegen happen later).
+ * Returns FAKECC_OK / FAKECC_ERR; on error the CLI should exit. */
+static int parse_source(const char *source, const char *filename,
+                        TranslationUnit *tu, PkgContext *pkg) {
     TokenArray tokens;
     token_array_init(&tokens);
-    lex(source, filename, &tokens);
+    if (lex(source, filename, &tokens) != FAKECC_OK) {
+        token_array_free(&tokens);
+        return FAKECC_ERR;
+    }
     tu_init(tu);
-    parse_in_pkg(&tokens, tu, pkg);
+    int rc = parse_in_pkg(&tokens, tu, pkg);
     token_array_free(&tokens);
+    return rc;
 }
 
 /* Sema → IR → opt → codegen for an already-parsed TU. */
-static void lower_tu(TranslationUnit *tu, const char *filename,
-                     EmitModule *out, int opt_level, int want_debug,
-                     PkgContext *pkg) {
-    sema_check_in_pkg(tu, 0, pkg);
+static int lower_tu(TranslationUnit *tu, const char *filename,
+                    EmitModule *out, int opt_level, int want_debug,
+                    PkgContext *pkg) {
+    if (sema_check_in_pkg(tu, 0, pkg) != FAKECC_OK)
+        return FAKECC_ERR;
 
-    if (sema_has_errors()) {
-        exit(1);
-    }
+    if (sema_has_errors())
+        return FAKECC_ERR;
 
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(tu, &ir, opt_level == 0);
+    if (ir_generate(tu, &ir, opt_level == 0) != FAKECC_OK) {
+        ir_module_free(&ir);
+        return FAKECC_ERR;
+    }
 
     opt(&ir, opt_level, want_debug);
 
@@ -73,6 +81,7 @@ static void lower_tu(TranslationUnit *tu, const char *filename,
     codegen(&ir, out, want_debug);
 
     ir_module_free(&ir);
+    return FAKECC_OK;
 }
 
 static void module_free(EmitModule *m) {
@@ -410,10 +419,16 @@ int main(int argc, char **argv) {
         }
         TranslationUnit tu;
         char *src = read_file(inputs[0]);
-        parse_source(src, inputs[0], &tu, &pkg);
+        if (parse_source(src, inputs[0], &tu, &pkg) != FAKECC_OK) {
+            free(src);
+            exit(1);
+        }
         free(src);
         EmitModule em;
-        lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+        if (lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg) != FAKECC_OK) {
+            tu_free(&tu);
+            exit(1);
+        }
         tu_free(&tu);
         emit_obj(&em, output_path);
         module_free(&em);
@@ -469,7 +484,10 @@ int main(int argc, char **argv) {
         } else {
             char *src = read_file(inputs[i]);
             token_array_init(&user_tokens[i]);
-            lex(src, inputs[i], &user_tokens[i]);
+            if (lex(src, inputs[i], &user_tokens[i]) != FAKECC_OK) {
+                free(src);
+                exit(1);
+            }
             free(src);
         }
     }
@@ -480,7 +498,8 @@ int main(int argc, char **argv) {
             /* .o inputs have no TU; mark package.name NULL as a sentinel. */
             memset(&user_tus[i], 0, sizeof(user_tus[i]));
         } else {
-            parse_in_pkg(&user_tokens[i], &user_tus[i], &pkg);
+            if (parse_in_pkg(&user_tokens[i], &user_tus[i], &pkg) != FAKECC_OK)
+                exit(1);
             if (user_tus[i].package.name) {
                 TranslationUnit *one = &user_tus[i];
                 pkg_register_tus(&pkg, user_tus[i].package.name, &one, 1);
@@ -518,7 +537,8 @@ int main(int argc, char **argv) {
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
             if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
         } else {
-            lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg);
+            if (lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg) != FAKECC_OK)
+                exit(1);
             tu_free(&user_tus[i]);
         }
         mod_ptrs[i] = &mods[i];
@@ -534,7 +554,8 @@ int main(int argc, char **argv) {
         if (!pp->owns_files) continue;
         for (size_t f = 0; f < pp->nfiles; f++) {
             char *fake = path_join(pp->dir, "_.c");
-            lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg);
+            if (lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK)
+                exit(1);
             free(fake);
             mod_ptrs[mi] = &mods[mi];
             mi++;

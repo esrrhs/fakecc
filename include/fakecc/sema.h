@@ -9,10 +9,11 @@ struct PkgContext;
  * function (single-file mode).  When compiling one TU of a multi-file
  * program, pass 0 and let the linker verify main globally.
  * `sema_check_in_pkg` resolves qualified names and same-package fallbacks
- * via `ctx` (may be NULL). */
-void sema_check(const TranslationUnit *tu, int require_main);
-void sema_check_in_pkg(const TranslationUnit *tu, int require_main,
-                       struct PkgContext *ctx);
+ * via `ctx` (may be NULL).
+ * Returns FAKECC_OK on success, FAKECC_ERR on error (message recorded). */
+int sema_check(const TranslationUnit *tu, int require_main);
+int sema_check_in_pkg(const TranslationUnit *tu, int require_main,
+                      struct PkgContext *ctx);
 
 /* Check if the last sema_check run produced errors/warnings. */
 int sema_has_errors(void);

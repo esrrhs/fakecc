@@ -183,33 +183,27 @@ static void test_keyword_import(void) {
 }
 
 static void test_unknown_char_dies(void) {
-    /* unknown character '@' should cause die_at and exit */
-    int pid = fork();
-    if (pid == 0) {
-        TokenArray a;
-        token_array_init(&a);
-        lex("@", "test.c", &a);
-        token_array_free(&a);
-        _exit(0);
-    }
-    int status;
-    waitpid(pid, &status, 0);
-    T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
+    /* unknown character '@' should record an error and return FAKECC_ERR */
+    TokenArray a;
+    token_array_init(&a);
+    fakecc_clear_error();
+    int rc = lex("@", "test.c", &a);
+    T_ASSERT_EQ_INT(rc, FAKECC_ERR);
+    T_ASSERT(fakecc_had_error());
+    token_array_free(&a);
+    fakecc_clear_error();
 }
 
 static void test_preprocessor_rejected(void) {
-    /* #include <stdio.h> should be rejected with specific error */
-    int pid = fork();
-    if (pid == 0) {
-        TokenArray a;
-        token_array_init(&a);
-        lex("#include <stdio.h>", "test.c", &a);
-        token_array_free(&a);
-        _exit(0);
-    }
-    int status;
-    waitpid(pid, &status, 0);
-    T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
+    /* #include <stdio.h> should be rejected with a recorded error */
+    TokenArray a;
+    token_array_init(&a);
+    fakecc_clear_error();
+    int rc = lex("#include <stdio.h>", "test.c", &a);
+    T_ASSERT_EQ_INT(rc, FAKECC_ERR);
+    T_ASSERT(fakecc_had_error());
+    token_array_free(&a);
+    fakecc_clear_error();
 }
 
 /* ---- Slice 2: arithmetic operators ---- */

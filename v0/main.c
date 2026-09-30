@@ -13,6 +13,10 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 struct SourceLoc {
     const char *file;
     int line;
@@ -30,7 +34,13 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -53,6 +63,7 @@ struct EmitReloc {
     uint32_t type;
     uint32_t sym;
     int32_t addend;
+    uint16_t shndx;
 };typedef struct EmitReloc EmitReloc;
 enum DebugVarKind {
     DBG_VAR_PARAM = 0,
@@ -156,6 +167,18 @@ struct EmitModule {
     size_t bss_size;
     Buffer tdata;
     size_t tbss_size;
+    size_t text_align;
+    size_t rodata_align;
+    size_t data_align;
+    size_t bss_align;
+    size_t tdata_align;
+    size_t tbss_align;
+    Buffer init_array;
+    size_t init_array_align;
+    int *init_prio;
+    Buffer fini_array;
+    size_t fini_array_align;
+    int *fini_prio;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -183,6 +206,8 @@ int emit_module_add_symbol(EmitModule *m, const char *name,
                             uint16_t shndx, size_t value, size_t size);
 int emit_module_find_symbol(EmitModule *m, const char *name);
 int emit_module_add_undefined(EmitModule *m, const char *name);
+int emit_module_add_undefined_type(EmitModule *m, const char *name,
+                                   uint8_t st_type);
 void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
@@ -280,6 +305,7 @@ struct IRInst {
     int align16;
     int x87_pair;
     unsigned char *call_arg_on_stack;
+    int *call_arg_nbytes;
     int alloca_bytes;
     int is_volatile;
 };typedef struct IRInst IRInst;
@@ -343,8 +369,13 @@ struct IRFunction {
     int ret_reg_cls[2];
     int ret_is_bool;
     int ret_is_complex_ld;
+    int ret_x87_bytes;
     int is_variadic;
     int is_static;
+    int is_constructor;
+    int is_destructor;
+    int ctor_prio;
+    int dtor_prio;
     int has_dyn_alloca;
     int needs_apply_args;
     int needs_apply;
@@ -370,6 +401,7 @@ struct IRGlobal {
     int is_readonly;
     int is_static;
     int is_tls;
+    int align;
     SourceLoc loc;
     GlobalFixup *fixups;
     int num_fixups;
@@ -588,11 +620,14 @@ long long type_align(Type t);
 int type_is_complex_ldouble(Type t);
 int type_is_empty_struct(Type t);
 int type_needs_stack_align16(Type t);
+int type_stack_align(Type t);
+int host_has_avx512f(void);
 enum SysVRegClass {
     SYSV_CLS_INTEGER = 1,
     SYSV_CLS_SSE = 2
 };typedef enum SysVRegClass SysVRegClass;
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
@@ -856,6 +891,10 @@ struct FunctionDecl {
     char *alias_target;
     int align;
     int no_instrument;
+    int is_constructor;
+    int is_destructor;
+    int ctor_prio;
+    int dtor_prio;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -879,6 +918,7 @@ struct StructMember {
     long long offset;
     int bit_width;
     int bit_offset;
+    int align;
 };typedef struct StructMember StructMember;
 struct StructDef {
     char *tag;
@@ -973,17 +1013,17 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-void ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
+int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
-void lex(const char *source, const char *filename, TokenArray *out);
+int lex(const char *source, const char *filename, TokenArray *out);
 void opt(IRModule *ir, int opt_level, int want_debug);
 struct PkgContext;
-void parse(const TokenArray *tokens, TranslationUnit *tu);
-void parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
-                  struct PkgContext *ctx);
+int parse(const TokenArray *tokens, TranslationUnit *tu);
+int parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
+                 struct PkgContext *ctx);
 typedef struct Package Package;
 typedef struct PkgContext PkgContext;
 struct PkgFuncExport {
@@ -1046,9 +1086,9 @@ void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
                         const Package *pkg);
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
 struct PkgContext;
-void sema_check(const TranslationUnit *tu, int require_main);
-void sema_check_in_pkg(const TranslationUnit *tu, int require_main,
-                       struct PkgContext *ctx);
+int sema_check(const TranslationUnit *tu, int require_main);
+int sema_check_in_pkg(const TranslationUnit *tu, int require_main,
+                      struct PkgContext *ctx);
 int sema_has_errors(void);
 int sema_error_count(void);
 int sema_warning_count(void);
@@ -1076,38 +1116,47 @@ static char *read_file(const char *path) {
     runtime.fclose(f);
     return buf;
 }
-static void parse_source(const char *source, const char *filename,
-                         TranslationUnit *tu, PkgContext *pkg) {
+static int parse_source(const char *source, const char *filename,
+                        TranslationUnit *tu, PkgContext *pkg) {
     TokenArray tokens;
     token_array_init(&tokens);
-    lex(source, filename, &tokens);
-    tu_init(tu);
-    parse_in_pkg(&tokens, tu, pkg);
-    token_array_free(&tokens);
-}
-static void lower_tu(TranslationUnit *tu, const char *filename,
-                     EmitModule *out, int opt_level, int want_debug,
-                     PkgContext *pkg) {
-    sema_check_in_pkg(tu, 0, pkg);
-    if (sema_has_errors()) {
-        runtime.exit(1);
+    if (lex(source, filename, &tokens) != FAKECC_OK) {
+        token_array_free(&tokens);
+        return FAKECC_ERR;
     }
+    tu_init(tu);
+    int rc = parse_in_pkg(&tokens, tu, pkg);
+    token_array_free(&tokens);
+    return rc;
+}
+static int lower_tu(TranslationUnit *tu, const char *filename,
+                    EmitModule *out, int opt_level, int want_debug,
+                    PkgContext *pkg) {
+    if (sema_check_in_pkg(tu, 0, pkg) != FAKECC_OK)
+        return FAKECC_ERR;
+    if (sema_has_errors())
+        return FAKECC_ERR;
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(tu, &ir, opt_level == 0);
+    if (ir_generate(tu, &ir, opt_level == 0) != FAKECC_OK) {
+        ir_module_free(&ir);
+        return FAKECC_ERR;
+    }
     opt(&ir, opt_level, want_debug);
     emit_module_init(out);
     if (want_debug)
         out->dbg_tu_name = xstrdup(filename);
     codegen(&ir, out, want_debug);
     ir_module_free(&ir);
+    return FAKECC_OK;
 }
 static void module_free(EmitModule *m) {
     emit_module_free(m);
 }
 static void usage(void) {
     runtime.fprintf(runtime.stderr,
-            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-nostdlib] [-nodefaultlibs]\n"
+            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
+            "              [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
             "  -shared         produce a shared object (.so) library\n"
@@ -1115,6 +1164,10 @@ static void usage(void) {
             "                  independent of -O, never changes generated code\n"
             "  -O0             keep locals in memory (skip SSA promotion)\n"
             "  -O1             default: SSA promotion + folding + DCE\n"
+            "  -mno-avx        pass 32-byte vectors in memory (gcc -mno-avx)\n"
+            "  -mavx           default: 32-byte vectors in one YMM\n"
+            "  -mavx512f       pass 64-byte vectors in one ZMM (gcc -mavx512f)\n"
+            "  -mno-avx512f    default: 64-byte vectors in memory\n"
             "  -nostdlib       do not link builtin runtime/; use -l for system libs\n"
             "  -lLIB           link against libLIB.so (DT_NEEDED; optional interop)\n"
             "  -l:SONAME       link against exact soname SONAME\n"
@@ -1261,6 +1314,17 @@ static char *find_rt_dir(const char *argv0) {
         }
         runtime.free(cand);
     }
+    {
+        char *cand = path_join(basedir, "../share/fakecc/runtime");
+        char *probe = path_join(cand, "string.c");
+        int ok = file_readable(probe);
+        runtime.free(probe);
+        if (ok) {
+            runtime.free(basedir);
+            return cand;
+        }
+        runtime.free(cand);
+    }
     runtime.free(basedir);
     return ((void*)0);
 }
@@ -1311,6 +1375,16 @@ int main(int argc, char **argv) {
             if (runtime.strstr(argv[i], "address")) g_sanitize_address = 1;
         } else if (runtime.strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
+        } else if (runtime.strcmp(argv[i], "-mno-avx") == 0) {
+            g_no_avx = 1;
+            g_avx512f = 0;
+        } else if (runtime.strcmp(argv[i], "-mavx") == 0) {
+            g_no_avx = 0;
+        } else if (runtime.strcmp(argv[i], "-mno-avx512f") == 0) {
+            g_avx512f = 0;
+        } else if (runtime.strcmp(argv[i], "-mavx512f") == 0) {
+            g_avx512f = 1;
+            g_no_avx = 0;
         } else if (runtime.strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
@@ -1376,10 +1450,16 @@ int main(int argc, char **argv) {
         }
         TranslationUnit tu;
         char *src = read_file(inputs[0]);
-        parse_source(src, inputs[0], &tu, &pkg);
+        if (parse_source(src, inputs[0], &tu, &pkg) != FAKECC_OK) {
+            runtime.free(src);
+            runtime.exit(1);
+        }
         runtime.free(src);
         EmitModule em;
-        lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+        if (lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg) != FAKECC_OK) {
+            tu_free(&tu);
+            runtime.exit(1);
+        }
         tu_free(&tu);
         emit_obj(&em, output_path);
         module_free(&em);
@@ -1422,7 +1502,10 @@ int main(int argc, char **argv) {
         } else {
             char *src = read_file(inputs[i]);
             token_array_init(&user_tokens[i]);
-            lex(src, inputs[i], &user_tokens[i]);
+            if (lex(src, inputs[i], &user_tokens[i]) != FAKECC_OK) {
+                runtime.free(src);
+                runtime.exit(1);
+            }
             runtime.free(src);
         }
     }
@@ -1431,7 +1514,8 @@ int main(int argc, char **argv) {
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
             runtime.memset(&user_tus[i], 0, sizeof(user_tus[i]));
         } else {
-            parse_in_pkg(&user_tokens[i], &user_tus[i], &pkg);
+            if (parse_in_pkg(&user_tokens[i], &user_tus[i], &pkg) != FAKECC_OK)
+                runtime.exit(1);
             if (user_tus[i].package.name) {
                 TranslationUnit *one = &user_tus[i];
                 pkg_register_tus(&pkg, user_tus[i].package.name, &one, 1);
@@ -1458,7 +1542,8 @@ int main(int argc, char **argv) {
         if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
             if (emit_obj_read(inputs[i], &mods[i]) != 0) runtime.exit(1);
         } else {
-            lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg);
+            if (lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg) != FAKECC_OK)
+                runtime.exit(1);
             tu_free(&user_tus[i]);
         }
         mod_ptrs[i] = &mods[i];
@@ -1470,7 +1555,8 @@ int main(int argc, char **argv) {
         if (!pp->owns_files) continue;
         for (size_t f = 0; f < pp->nfiles; f++) {
             char *fake = path_join(pp->dir, "_.c");
-            lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg);
+            if (lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK)
+                runtime.exit(1);
             runtime.free(fake);
             mod_ptrs[mi] = &mods[mi];
             mi++;

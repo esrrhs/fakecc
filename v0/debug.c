@@ -13,6 +13,10 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 struct SourceLoc {
     const char *file;
     int line;
@@ -30,7 +34,13 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -53,6 +63,7 @@ struct EmitReloc {
     uint32_t type;
     uint32_t sym;
     int32_t addend;
+    uint16_t shndx;
 };typedef struct EmitReloc EmitReloc;
 enum DebugVarKind {
     DBG_VAR_PARAM = 0,
@@ -156,6 +167,18 @@ struct EmitModule {
     size_t bss_size;
     Buffer tdata;
     size_t tbss_size;
+    size_t text_align;
+    size_t rodata_align;
+    size_t data_align;
+    size_t bss_align;
+    size_t tdata_align;
+    size_t tbss_align;
+    Buffer init_array;
+    size_t init_array_align;
+    int *init_prio;
+    Buffer fini_array;
+    size_t fini_array_align;
+    int *fini_prio;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -183,6 +206,8 @@ int emit_module_add_symbol(EmitModule *m, const char *name,
                             uint16_t shndx, size_t value, size_t size);
 int emit_module_find_symbol(EmitModule *m, const char *name);
 int emit_module_add_undefined(EmitModule *m, const char *name);
+int emit_module_add_undefined_type(EmitModule *m, const char *name,
+                                   uint8_t st_type);
 void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,

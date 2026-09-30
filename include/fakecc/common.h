@@ -11,12 +11,11 @@
  * do not embed [MAX_PARAMS]-sized arrays in hot IR/codegen structs. */
 #define MAX_PARAMS 1024
 
-/* noreturn attribute for compilers that don't recognize C11 <stdnoreturn.h> */
-#if defined(__GNUC__) || defined(__clang__)
-#define FAKECC_NORETURN __attribute__((noreturn))
-#else
-#define FAKECC_NORETURN
-#endif
+/* Error codes returned by die_at and compiler pipeline entry points. */
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 
 /* Source location — shared by tokens, AST, IR, and error reporting */
 typedef struct {
@@ -44,8 +43,16 @@ char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
 
-/* Error reporting — prints to stderr and exits with code 1 (never returns) */
-void die_at(const char *file, int line, int col, const char *fmt, ...)
-    FAKECC_NORETURN;
+/* Error reporting — records the error, prints to stderr, and returns
+ * FAKECC_ERR.  Does not abort the process: callers must propagate the
+ * error upward.  The fakecc CLI checks at the top level and exits. */
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+
+/* Last-error state for library callers and pipeline layers. */
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
 
 #endif /* FAKECC_COMMON_H */

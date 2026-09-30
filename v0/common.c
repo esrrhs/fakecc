@@ -13,6 +13,10 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 struct SourceLoc {
     const char *file;
     int line;
@@ -30,7 +34,13 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
+
 
 typedef struct FILE FILE;
 typedef long fpos_t;
@@ -106,12 +116,41 @@ char *xstrdup(const char *s) {
     runtime.memcpy(d, s, len);
     return d;
 }
-void die_at(const char *file, int line, int col, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
+static int g_err_code = FAKECC_OK;
+static SourceLoc g_err_loc;
+static char g_err_msg[2048];
+void fakecc_clear_error(void) {
+    g_err_code = FAKECC_OK;
+    g_err_loc.file = ((void*)0);
+    g_err_loc.line = 0;
+    g_err_loc.col = 0;
+    g_err_msg[0] = '\0';
+}
+int fakecc_had_error(void) {
+    return g_err_code != FAKECC_OK;
+}
+int fakecc_error_code(void) {
+    return g_err_code;
+}
+const char *fakecc_error_message(void) {
+    return g_err_msg;
+}
+SourceLoc fakecc_error_loc(void) {
+    return g_err_loc;
+}
+int die_at(const char *file, int line, int col, const char *fmt, ...) {
+    if (g_err_code != FAKECC_OK) {
+        return FAKECC_ERR;
+    }
+    g_err_loc.file = file;
+    g_err_loc.line = line;
+    g_err_loc.col = col;
+    g_err_code = FAKECC_ERR;
+    va_list ap_msg;
+    va_start(ap_msg, fmt);
+    runtime.vsnprintf(g_err_msg, sizeof(g_err_msg), fmt, ap_msg);
+    va_end(ap_msg);
     runtime.fprintf(runtime.stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
-    runtime.vfprintf(runtime.stderr, fmt, ap);
-    runtime.fprintf(runtime.stderr, "\n");
-    va_end(ap);
-    runtime.exit(1);
+    runtime.fprintf(runtime.stderr, "%s\n", g_err_msg);
+    return FAKECC_ERR;
 }

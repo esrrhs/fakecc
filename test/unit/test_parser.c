@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "fakecc/ast.h"
+#include "fakecc/common.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
@@ -15,6 +16,7 @@
 
 /* ---- helper: lex + parse ---- */
 static TranslationUnit lex_parse(const char *src) {
+    fakecc_clear_error();
     TokenArray arr;
     token_array_init(&arr);
     lex(src, "test.c", &arr);
@@ -25,6 +27,25 @@ static TranslationUnit lex_parse(const char *src) {
 
     token_array_free(&arr);
     return tu;
+}
+
+/* Run lex+parse; return 1 if an error was recorded. */
+static int lex_parse_errors(const char *src) {
+    fakecc_clear_error();
+    TokenArray arr;
+    token_array_init(&arr);
+    int rc = lex(src, "test.c", &arr);
+    if (rc != FAKECC_OK || fakecc_had_error()) {
+        token_array_free(&arr);
+        return 1;
+    }
+    TranslationUnit tu;
+    tu_init(&tu);
+    rc = parse(&arr, &tu);
+    token_array_free(&arr);
+    int err = rc != FAKECC_OK || fakecc_had_error();
+    if (!err) tu_free(&tu);
+    return err;
 }
 
 /* ---- tests ---- */
@@ -61,17 +82,14 @@ static void test_different_package_name(void) {
     tu_free(&tu);
 }
 
-/* Error-path tests use fork to catch die_at exit.
- * Slice 1 spec says error paths only need e2e coverage,
- * but we add a few fork-based unit tests for convenience. */
+/* Error-path tests: die_at records an error and returns errcode (no longer
+ * aborts the process).  Fork so a crash on a partial AST cannot take down
+ * the suite; the child exits non-zero iff an error was reported. */
 
 static void test_missing_package_dies(void) {
-    /* "int main() { return 0; }" — no package decl */
     int pid = fork();
-    if (pid == 0) {
-        lex_parse("int main() { return 0; }");
-        _exit(0);
-    }
+    if (pid == 0)
+        _exit(lex_parse_errors("int main() { return 0; }") ? 1 : 0);
     int status;
     waitpid(pid, &status, 0);
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
@@ -79,10 +97,8 @@ static void test_missing_package_dies(void) {
 
 static void test_import_dies(void) {
     int pid = fork();
-    if (pid == 0) {
-        lex_parse("package main; import \"foo\"; int main() { return 0; }");
-        _exit(0);
-    }
+    if (pid == 0)
+        _exit(lex_parse_errors("package main; import \"foo\"; int main() { return 0; }") ? 1 : 0);
     int status;
     waitpid(pid, &status, 0);
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
@@ -90,10 +106,8 @@ static void test_import_dies(void) {
 
 static void test_missing_semicolon_dies(void) {
     int pid = fork();
-    if (pid == 0) {
-        lex_parse("package main int main() { return 0; }");
-        _exit(0);
-    }
+    if (pid == 0)
+        _exit(lex_parse_errors("package main int main() { return 0; }") ? 1 : 0);
     int status;
     waitpid(pid, &status, 0);
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
@@ -102,26 +116,26 @@ static void test_missing_semicolon_dies(void) {
 static void test_return_without_int_dies(void) {
     /* A bare `return;` is syntactically valid (the parser accepts it and
      * produces ST_RETURN with value==NULL); sema rejects it for a non-void
-     * function.  We verify the parser accepts it and sema then dies. */
+     * function.  We verify the parser accepts it and sema then errors. */
     int pid = fork();
-    if (pid == 0) {
-        lex_parse("package main; int main() { return ; }");
-        _exit(0);
-    }
+    if (pid == 0)
+        _exit(lex_parse_errors("package main; int main() { return ; }") ? 1 : 0);
     int status;
     waitpid(pid, &status, 0);
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
     pid = fork();
     if (pid == 0) {
+        fakecc_clear_error();
         TokenArray arr;
         token_array_init(&arr);
         lex("package main; int main() { return ; }", "test.c", &arr);
         TranslationUnit tu;
         tu_init(&tu);
         parse(&arr, &tu);
-        sema_check(&tu, 1);
-        _exit(0);
+        int rc = sema_check(&tu, 1);
+        int err = rc != FAKECC_OK || fakecc_had_error() || sema_has_errors();
+        _exit(err ? 1 : 0);
     }
     waitpid(pid, &status, 0);
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) != 0);
@@ -271,21 +285,18 @@ static void test_decl_with_init(void) {
 
 static void test_nested_function(void) {
     /* Nested function definitions are not supported by FakeCC; the parser
-     * rejects them with `die_at()` (which exits).  Run in a subprocess so
-     * the parent test runner survives the exit. */
+     * rejects them with die_at() (records error + returns). */
     int p[2];
     T_ASSERT_EQ_INT(pipe(p), 0);
     pid_t pid = fork();
     T_ASSERT(pid >= 0);
     if (pid == 0) {
-        /* child: redirect stderr to parent via pipe, then run the parser */
         close(p[0]);
         dup2(p[1], 2);
         close(p[1]);
-        TranslationUnit tu = lex_parse(
+        int err = lex_parse_errors(
             "package main; int main() { int nested(int x) { return x * 2; } return nested(21); }");
-        tu_free(&tu);
-        _exit(0);
+        _exit(err ? 1 : 0);
     }
     close(p[1]);
     char buf[4096];
@@ -344,10 +355,8 @@ static void test_typeof_expr(void) {
 
 static int parse_dies(const char *src) {
     int pid = fork();
-    if (pid == 0) {
-        lex_parse(src);
-        _exit(0);
-    }
+    if (pid == 0)
+        _exit(lex_parse_errors(src) ? 1 : 0);
     int status;
     waitpid(pid, &status, 0);
     return WIFEXITED(status) && WEXITSTATUS(status) != 0;

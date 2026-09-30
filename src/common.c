@@ -108,12 +108,58 @@ char *xstrdup(const char *s) {
 /* Error reporting                                                     */
 /* ------------------------------------------------------------------ */
 
-void die_at(const char *file, int line, int col, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
+static int g_err_code = FAKECC_OK;
+static SourceLoc g_err_loc;
+static char g_err_msg[2048];
+
+void fakecc_clear_error(void) {
+    g_err_code = FAKECC_OK;
+    g_err_loc.file = NULL;
+    g_err_loc.line = 0;
+    g_err_loc.col = 0;
+    g_err_msg[0] = '\0';
+}
+
+int fakecc_had_error(void) {
+    return g_err_code != FAKECC_OK;
+}
+
+int fakecc_error_code(void) {
+    return g_err_code;
+}
+
+const char *fakecc_error_message(void) {
+    return g_err_msg;
+}
+
+SourceLoc fakecc_error_loc(void) {
+    return g_err_loc;
+}
+
+int die_at(const char *file, int line, int col, const char *fmt, ...) {
+    /* Already recorded a fatal error — keep the first message and let
+     * callers keep propagating FAKECC_ERR without flooding stderr. */
+    if (g_err_code != FAKECC_OK) {
+        return FAKECC_ERR;
+    }
+
+    g_err_loc.file = file;
+    g_err_loc.line = line;
+    g_err_loc.col = col;
+    g_err_code = FAKECC_ERR;
+
+    /* A single va_start pass feeds vsnprintf, and stderr gets the already
+     * formatted message.  No va_copy: the self-hosted dialect has no libc
+     * va_copy, and the copy-through-a-pointer pattern miscompiles under
+     * fakecc-1 (the bootstrap compiler) — the copied va_list reaches
+     * vsnprintf corrupted and segfaults while formatting the "import
+     * cycle" diagnostic. */
+    va_list ap_msg;
+    va_start(ap_msg, fmt);
+    vsnprintf(g_err_msg, sizeof(g_err_msg), fmt, ap_msg);
+    va_end(ap_msg);
+
     fprintf(stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    va_end(ap);
-    exit(1);
+    fprintf(stderr, "%s\n", g_err_msg);
+    return FAKECC_ERR;
 }

@@ -1,4 +1,5 @@
 #include "fakecc/ast.h"
+#include "fakecc/common.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
@@ -10,29 +11,36 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* ---- helper: lex + parse + sema_check ---- */
-static void lex_parse_sema(const char *src) {
+/* ---- helper: lex + parse + sema_check; returns 1 on error ---- */
+static int lex_parse_sema_errors(const char *src) {
+    fakecc_clear_error();
     TokenArray arr;
     token_array_init(&arr);
-    lex(src, "test.c", &arr);
+    if (lex(src, "test.c", &arr) != FAKECC_OK || fakecc_had_error()) {
+        token_array_free(&arr);
+        return 1;
+    }
 
     TranslationUnit tu;
     tu_init(&tu);
-    parse(&arr, &tu);
-
-    sema_check(&tu, 1);
-
-    tu_free(&tu);
+    if (parse(&arr, &tu) != FAKECC_OK || fakecc_had_error()) {
+        token_array_free(&arr);
+        return 1;
+    }
     token_array_free(&arr);
+
+    int rc = sema_check(&tu, 1);
+    int err = rc != FAKECC_OK || fakecc_had_error() || sema_has_errors();
+    if (!err) tu_free(&tu);
+    return err;
 }
+
 
 /* ---- helper: run in fork, expect non-zero exit ---- */
 static int fork_dies(const char *src) {
     int pid = fork();
-    if (pid == 0) {
-        lex_parse_sema(src);
-        _exit(0);
-    }
+    if (pid == 0)
+        _exit(lex_parse_sema_errors(src) ? 1 : 0);
     int status;
     waitpid(pid, &status, 0);
     return WIFEXITED(status) && WEXITSTATUS(status) != 0;
@@ -41,10 +49,8 @@ static int fork_dies(const char *src) {
 /* ---- helper: run in fork, expect success (exit 0) ---- */
 static int fork_ok(const char *src) {
     int pid = fork();
-    if (pid == 0) {
-        lex_parse_sema(src);
-        _exit(0);
-    }
+    if (pid == 0)
+        _exit(lex_parse_sema_errors(src) ? 1 : 0);
     int status;
     waitpid(pid, &status, 0);
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;

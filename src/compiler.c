@@ -97,17 +97,23 @@ static int ends_with(const char *s, const char *suffix) {
     return strcmp(s + slen - suflen, suffix) == 0;
 }
 
-static void lower_one_tu(TranslationUnit *tu, const char *filename,
-                         EmitModule *out, int opt_level, int want_debug,
-                         PkgContext *pkg) {
+static int lower_one_tu(TranslationUnit *tu, const char *filename,
+                        EmitModule *out, int opt_level, int want_debug,
+                        PkgContext *pkg) {
+    int rc;
     if (pkg)
-        sema_check_in_pkg(tu, 0, pkg);
+        rc = sema_check_in_pkg(tu, 0, pkg);
     else
-        sema_check(tu, 0);
+        rc = sema_check(tu, 0);
+    if (rc != FAKECC_OK || sema_has_errors())
+        return FAKECC_ERR;
 
     IRModule ir;
     ir_module_init(&ir);
-    ir_generate(tu, &ir, opt_level == 0);
+    if (ir_generate(tu, &ir, opt_level == 0) != FAKECC_OK) {
+        ir_module_free(&ir);
+        return FAKECC_ERR;
+    }
 
     opt(&ir, opt_level, want_debug);
 
@@ -116,6 +122,22 @@ static void lower_one_tu(TranslationUnit *tu, const char *filename,
     codegen(&ir, out, want_debug);
 
     ir_module_free(&ir);
+    return FAKECC_OK;
+}
+
+/* Lex + parse a source string. Returns FAKECC_OK / FAKECC_ERR. */
+static int compile_parse_string(const char *source, const char *filename,
+                                TranslationUnit *tu, PkgContext *pkg) {
+    TokenArray tokens;
+    token_array_init(&tokens);
+    if (lex(source, filename, &tokens) != FAKECC_OK) {
+        token_array_free(&tokens);
+        return FAKECC_ERR;
+    }
+    tu_init(tu);
+    int rc = pkg ? parse_in_pkg(&tokens, tu, pkg) : parse(&tokens, tu);
+    token_array_free(&tokens);
+    return rc;
 }
 
 void fakecc_options_init(FakeccOptions *opts) {
@@ -131,22 +153,20 @@ int fakecc_compile_string_to_obj(const char *source,
     int opt_level = opts ? opts->opt_level : 1;
     int want_debug = opts ? opts->want_debug : 0;
 
-    TokenArray tokens;
-    token_array_init(&tokens);
-    lex(source, "input.c", &tokens);
-
     TranslationUnit tu;
-    tu_init(&tu);
-    parse(&tokens, &tu);
-    token_array_free(&tokens);
+    if (compile_parse_string(source, "input.c", &tu, NULL) != FAKECC_OK)
+        return FAKECC_ERR;
 
     EmitModule em;
-    lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, NULL);
+    if (lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, NULL) != FAKECC_OK) {
+        tu_free(&tu);
+        return FAKECC_ERR;
+    }
     tu_free(&tu);
 
     emit_obj(&em, output_obj_path);
     emit_module_free(&em);
-    return 0;
+    return FAKECC_OK;
 }
 
 int fakecc_compile_string_to_so(const char *source,
@@ -156,17 +176,15 @@ int fakecc_compile_string_to_so(const char *source,
     int opt_level = opts ? opts->opt_level : 1;
     int want_debug = opts ? opts->want_debug : 0;
 
-    TokenArray tokens;
-    token_array_init(&tokens);
-    lex(source, "input.c", &tokens);
-
     TranslationUnit tu;
-    tu_init(&tu);
-    parse(&tokens, &tu);
-    token_array_free(&tokens);
+    if (compile_parse_string(source, "input.c", &tu, NULL) != FAKECC_OK)
+        return FAKECC_ERR;
 
     EmitModule em;
-    lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, NULL);
+    if (lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, NULL) != FAKECC_OK) {
+        tu_free(&tu);
+        return FAKECC_ERR;
+    }
     tu_free(&tu);
 
     EmitModule *mods[1];
@@ -183,7 +201,7 @@ int fakecc_compile_string_to_so(const char *source,
               want_debug, 1);
 
     emit_module_free(&em);
-    return 0;
+    return FAKECC_OK;
 }
 
 int fakecc_compile_string_to_executable(const char *source,
@@ -200,17 +218,15 @@ int fakecc_compile_string_to_executable(const char *source,
     size_t num_lib_paths = opts ? opts->num_lib_paths : 0;
 
     if (nostdlib) {
-        TokenArray tokens;
-        token_array_init(&tokens);
-        lex(source, "input.c", &tokens);
-
         TranslationUnit tu;
-        tu_init(&tu);
-        parse(&tokens, &tu);
-        token_array_free(&tokens);
+        if (compile_parse_string(source, "input.c", &tu, NULL) != FAKECC_OK)
+            return FAKECC_ERR;
 
         EmitModule em;
-        lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, NULL);
+        if (lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, NULL) != FAKECC_OK) {
+            tu_free(&tu);
+            return FAKECC_ERR;
+        }
         tu_free(&tu);
 
         EmitModule *mods[1];
@@ -221,7 +237,7 @@ int fakecc_compile_string_to_executable(const char *source,
                   want_debug, 0);
 
         emit_module_free(&em);
-        return 0;
+        return FAKECC_OK;
     }
 
     char *rt_dir = find_runtime_dir(opts ? opts->rt_dir : NULL);
@@ -240,14 +256,11 @@ int fakecc_compile_string_to_executable(const char *source,
     SourceLoc zloc = {0};
     pkg_load(&pkg, "runtime", zloc);
 
-    TokenArray tokens;
-    token_array_init(&tokens);
-    lex(source, "input.c", &tokens);
-
     TranslationUnit tu;
-    tu_init(&tu);
-    parse_in_pkg(&tokens, &tu, &pkg);
-    token_array_free(&tokens);
+    if (compile_parse_string(source, "input.c", &tu, &pkg) != FAKECC_OK) {
+        pkg_ctx_free(&pkg);
+        return FAKECC_ERR;
+    }
 
     int nlinked = 0;
     for (size_t p = 0; p < pkg.npkgs; p++) {
@@ -266,7 +279,7 @@ int fakecc_compile_string_to_executable(const char *source,
         return -1;
     }
 
-    lower_one_tu(&tu, "input.c", &all_mods[0], opt_level, want_debug, &pkg);
+    if (lower_one_tu(&tu, "input.c", &all_mods[0], opt_level, want_debug, &pkg) != FAKECC_OK) return FAKECC_ERR;
     tu_free(&tu);
     mod_ptrs[0] = &all_mods[0];
 
@@ -276,7 +289,7 @@ int fakecc_compile_string_to_executable(const char *source,
         if (!pp->owns_files) continue;
         for (size_t f = 0; f < pp->nfiles; f++) {
             char *fake = path_join(pp->dir, "_.c");
-            lower_one_tu(&pp->files[f], fake, &all_mods[mi], opt_level, want_debug, &pkg);
+            if (lower_one_tu(&pp->files[f], fake, &all_mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK) return FAKECC_ERR;
             free(fake);
             mod_ptrs[mi] = &all_mods[mi];
             mi++;
@@ -377,10 +390,23 @@ int fakecc_compile_files(const char **input_paths,
             }
             TokenArray arr;
             token_array_init(&arr);
-            lex(src, input_paths[i], &arr);
+            if (lex(src, input_paths[i], &arr) != FAKECC_OK) {
+                free(src);
+                token_array_free(&arr);
+                for (size_t j = 0; j <= i; j++) tu_free(&user_tus[j]);
+                free(user_tus);
+                pkg_ctx_free(&pkg);
+                return FAKECC_ERR;
+            }
             free(src);
 
-            parse_in_pkg(&arr, &user_tus[i], &pkg);
+            if (parse_in_pkg(&arr, &user_tus[i], &pkg) != FAKECC_OK) {
+                token_array_free(&arr);
+                for (size_t j = 0; j <= i; j++) tu_free(&user_tus[j]);
+                free(user_tus);
+                pkg_ctx_free(&pkg);
+                return FAKECC_ERR;
+            }
             token_array_free(&arr);
 
             if (user_tus[i].package.name) {
@@ -420,7 +446,7 @@ int fakecc_compile_files(const char **input_paths,
                 return -1;
             }
         } else {
-            lower_one_tu(&user_tus[i], input_paths[i], &mods[i], opt_level, want_debug, &pkg);
+            if (lower_one_tu(&user_tus[i], input_paths[i], &mods[i], opt_level, want_debug, &pkg) != FAKECC_OK) return FAKECC_ERR;
             tu_free(&user_tus[i]);
         }
         mod_ptrs[i] = &mods[i];
@@ -433,7 +459,7 @@ int fakecc_compile_files(const char **input_paths,
         if (!pp->owns_files) continue;
         for (size_t f = 0; f < pp->nfiles; f++) {
             char *fake = path_join(pp->dir, "_.c");
-            lower_one_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg);
+            if (lower_one_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK) return FAKECC_ERR;
             free(fake);
             mod_ptrs[mi] = &mods[mi];
             mi++;

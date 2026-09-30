@@ -13,6 +13,10 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
+enum {
+    FAKECC_OK = 0,
+    FAKECC_ERR = 1
+};
 struct SourceLoc {
     const char *file;
     int line;
@@ -30,7 +34,13 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
-void die_at(const char *file, int line, int col, const char *fmt, ...);
+int die_at(const char *file, int line, int col, const char *fmt, ...);
+void fakecc_clear_error(void);
+int fakecc_had_error(void);
+int fakecc_error_code(void);
+const char *fakecc_error_message(void);
+SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -53,6 +63,7 @@ struct EmitReloc {
     uint32_t type;
     uint32_t sym;
     int32_t addend;
+    uint16_t shndx;
 };typedef struct EmitReloc EmitReloc;
 enum DebugVarKind {
     DBG_VAR_PARAM = 0,
@@ -156,6 +167,18 @@ struct EmitModule {
     size_t bss_size;
     Buffer tdata;
     size_t tbss_size;
+    size_t text_align;
+    size_t rodata_align;
+    size_t data_align;
+    size_t bss_align;
+    size_t tdata_align;
+    size_t tbss_align;
+    Buffer init_array;
+    size_t init_array_align;
+    int *init_prio;
+    Buffer fini_array;
+    size_t fini_array_align;
+    int *fini_prio;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -183,6 +206,8 @@ int emit_module_add_symbol(EmitModule *m, const char *name,
                             uint16_t shndx, size_t value, size_t size);
 int emit_module_find_symbol(EmitModule *m, const char *name);
 int emit_module_add_undefined(EmitModule *m, const char *name);
+int emit_module_add_undefined_type(EmitModule *m, const char *name,
+                                   uint8_t st_type);
 void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
@@ -194,6 +219,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
+
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
                       Buffer *debug_str, Buffer *debug_line,
@@ -217,9 +243,175 @@ void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
 typedef struct FILE FILE;
 typedef long fpos_t;
+struct CommonEnt { const char *name; size_t align, size, off; };
+typedef struct CommonEnt CommonEnt;
+static int reloc_is_tls_gd(uint32_t t) {
+    return t == 19;
+}
+static int reloc_is_tls_ld(uint32_t t) {
+    return t == 20;
+}
+static int reloc_is_copy_kind(uint32_t t) {
+    return t == 2 || t == 10 || t == 11
+        || t == 1;
+}
+static int reloc_is_gotpcrel(uint32_t t) {
+    return t == 9
+        || t == 41
+        || t == 42;
+}
+static int reloc_is_pc(uint32_t t) {
+    return t == 2 || t == 4 || t == 24;
+}
+static int reloc_is_abs32(uint32_t t) {
+    return t == 10 || t == 11;
+}
+static int reloc_width(uint32_t t) {
+    if (t == 1 || t == 24) return 8;
+    return 4;
+}
+static void pad_buf_to(Buffer *b, size_t align) {
+    if (align < 1) align = 1;
+    while (b->len % align) {
+        char z = 0;
+        buffer_append(b, &z, 1);
+    }
+}
+static size_t pad_size_to(size_t n, size_t align) {
+    if (align < 1) align = 1;
+    return (n + align - 1) / align * align;
+}
+static size_t so_symbol_lookup(const char **lib_paths, size_t npaths,
+                               const char **needed, size_t nneeded,
+                               const char *name, uint8_t *out_type,
+                               size_t *out_align) {
+    if (out_type) *out_type = 0;
+    if (out_align) *out_align = 8;
+    if (!name || !name[0]) return 0;
+    for (size_t ni = 0; ni < nneeded; ni++) {
+        const char *soname = needed[ni];
+        for (size_t d = 0; d <= npaths; d++) {
+            char path[512];
+            if (d < npaths)
+                runtime.snprintf(path, sizeof path, "%s/%s", lib_paths[d], soname);
+            else
+                runtime.snprintf(path, sizeof path, "/lib64/%s", soname);
+            FILE *f = runtime.fopen(path, "rb");
+            if (!f) continue;
+            unsigned char ehdr[64];
+            if (runtime.fread(ehdr, 1, 64, f) != 64) { runtime.fclose(f); continue; }
+            if (ehdr[0] != 0x7f) { runtime.fclose(f); continue; }
+            uint64_t shoff = 0;
+            runtime.memcpy(&shoff, ehdr + 40, 8);
+            uint16_t shentsize = 0, shnum = 0, shstrndx = 0;
+            runtime.memcpy(&shentsize, ehdr + 58, 2);
+            runtime.memcpy(&shnum, ehdr + 60, 2);
+            runtime.memcpy(&shstrndx, ehdr + 62, 2);
+            if (shentsize < 64 || shnum == 0) { runtime.fclose(f); continue; }
+            unsigned char *shdrs = runtime.malloc((size_t)shnum * shentsize);
+            if (!shdrs) { runtime.fclose(f); continue; }
+            if (runtime.fseek(f, (long)shoff, 0) != 0
+                || runtime.fread(shdrs, shentsize, shnum, f) != shnum) {
+                runtime.free(shdrs); runtime.fclose(f); continue;
+            }
+            int dynsym = -1, dynstr = -1;
+            for (int s = 0; s < shnum; s++) {
+                uint32_t type = 0;
+                runtime.memcpy(&type, shdrs + (size_t)s * shentsize + 4, 4);
+                if (type == 11) dynsym = s;
+                if (type == 3 && dynstr < 0) dynstr = s;
+            }
+            if (dynsym >= 0) {
+                uint32_t link = 0;
+                runtime.memcpy(&link, shdrs + (size_t)dynsym * shentsize + 40, 4);
+                if (link > 0 && link < shnum) dynstr = (int)link;
+            }
+            size_t found_sz = 0;
+            if (dynsym >= 0 && dynstr >= 0) {
+                uint64_t symoff = 0, symsz = 0, stroff = 0, strsz = 0;
+                runtime.memcpy(&symoff, shdrs + (size_t)dynsym * shentsize + 24, 8);
+                runtime.memcpy(&symsz, shdrs + (size_t)dynsym * shentsize + 32, 8);
+                runtime.memcpy(&stroff, shdrs + (size_t)dynstr * shentsize + 24, 8);
+                runtime.memcpy(&strsz, shdrs + (size_t)dynstr * shentsize + 32, 8);
+                unsigned char *syms = runtime.malloc(symsz ? symsz : 1);
+                unsigned char *strs = runtime.malloc(strsz ? strsz : 1);
+                if (syms && strs
+                    && runtime.fseek(f, (long)symoff, 0) == 0
+                    && runtime.fread(syms, 1, (size_t)symsz, f) == (size_t)symsz
+                    && runtime.fseek(f, (long)stroff, 0) == 0
+                    && runtime.fread(strs, 1, (size_t)strsz, f) == (size_t)strsz) {
+                    size_t nsym = (size_t)symsz / 24;
+                    int found = 0;
+                    for (size_t k = 0; k < nsym; k++) {
+                        uint32_t noff = 0;
+                        runtime.memcpy(&noff, syms + k * 24, 4);
+                        if (noff >= strsz) continue;
+                        if (runtime.strcmp((char *)strs + noff, name) == 0) {
+                            uint8_t info = 0;
+                            runtime.memcpy(&info, syms + k * 24 + 4, 1);
+                            if (out_type) *out_type = info & 0xf;
+                            runtime.memcpy(&found_sz, syms + k * 24 + 16, 8);
+                            uint16_t shn = 0;
+                            runtime.memcpy(&shn, syms + k * 24 + 6, 2);
+                            uint64_t stv = 0;
+                            runtime.memcpy(&stv, syms + k * 24 + 8, 8);
+                            size_t al = 1;
+                            if (shn > 0 && shn < shnum) {
+                                runtime.memcpy(&al, shdrs + (size_t)shn * shentsize + 48, 8);
+                                if (al < 1) al = 1;
+                            }
+                            if (stv) {
+                                size_t low = (size_t)stv & -(size_t)stv;
+                                if (low > al) al = low;
+                            }
+                            if (al > 4096) al = 4096;
+                            if (out_align) *out_align = al;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (found) {
+                        runtime.free(syms); runtime.free(strs);
+                        runtime.free(shdrs); runtime.fclose(f);
+                        return found_sz;
+                    }
+                }
+                runtime.free(syms); runtime.free(strs);
+            }
+            runtime.free(shdrs); runtime.fclose(f);
+        }
+    }
+    return 0;
+}
+struct LinkSymInfo { int defined; int shndx; size_t value; uint8_t binding; uint8_t type; };typedef struct LinkSymInfo LinkSymInfo;
+static size_t find_export_gsi(EmitModule **mods, size_t n, const size_t *mod_sym_base,
+                              const LinkSymInfo *sinfo, const char *nm) {
+    size_t best_g = (size_t)-1, best_w = (size_t)-1, best_c = (size_t)-1;
+    if (!nm || !nm[0]) return (size_t)-1;
+    for (size_t mi = 0; mi < n; mi++) {
+        EmitModule *om = mods[mi];
+        for (size_t mj = 0; mj < om->num_syms; mj++) {
+            size_t ogsi = mod_sym_base[mi] + mj;
+            if (!sinfo[ogsi].defined || !om->syms[mj].name) continue;
+            if (runtime.strcmp(om->syms[mj].name, nm) != 0) continue;
+            int sh = sinfo[ogsi].shndx;
+            uint8_t b = sinfo[ogsi].binding;
+            if (sh == 0xfff2) {
+                if (best_c == (size_t)-1) best_c = ogsi;
+                continue;
+            }
+            if (b == 1) {
+                if (best_g == (size_t)-1) best_g = ogsi;
+            } else if (b == 2) {
+                if (best_w == (size_t)-1) best_w = ogsi;
+            }
+        }
+    }
+    if (best_g != (size_t)-1) return best_g;
+    if (best_w != (size_t)-1) return best_w;
+    return best_c;
+}
 static const char INTERP_PATH[] = "/lib64/ld-linux-x86-64.so.2";
-struct SymInfo { int defined; int shndx; size_t value; uint8_t binding; };
-typedef struct SymInfo SymInfo;
 static void emit_byte(Buffer *b, uint8_t v) { buffer_append(b, (const char *)&v, 1); }
 static void emit_int32(Buffer *b, int32_t v) { buffer_append(b, (const char *)&v, 4); }
 static void *xcalloc(size_t nmemb, size_t size) {
@@ -336,6 +528,14 @@ struct SectionLayout {
     uint64_t rela_plt_vaddr;
     uint64_t rela_dyn_vaddr;
     uint64_t dynamic_vaddr;
+    uint64_t initarr_vaddr;
+    uint64_t finiarr_vaddr;
+    size_t initarr_file_offset;
+    size_t initarr_size;
+    size_t finiarr_file_offset;
+    size_t finiarr_size;
+    int have_initarr;
+    int have_finiarr;
 };typedef struct SectionLayout SectionLayout;
 static void finalize_sections(
     Buffer *elf, EmitModule **mods, size_t n,
@@ -459,6 +659,12 @@ Buffer debug_frame;
         shname_tdata = append_string(&shstrtab, ".tdata");
         shname_tbss = append_string(&shstrtab, ".tbss");
     }
+    uint32_t shname_init_array = 0;
+    if (lay->have_initarr)
+        shname_init_array = append_string(&shstrtab, ".init_array");
+    uint32_t shname_fini_array = 0;
+    if (lay->have_finiarr)
+        shname_fini_array = append_string(&shstrtab, ".fini_array");
     uint32_t shname_symtab = append_string(&shstrtab, ".symtab");
     uint32_t shname_strtab = append_string(&shstrtab, ".strtab");
     uint32_t shname_shstrtab = append_string(&shstrtab, ".shstrtab");
@@ -534,13 +740,28 @@ Buffer debug_frame;
                             tbss_bytes, 0, 0, 8, 0);
         }
     }
+    int array_sections = 0;
+    if (lay->have_initarr && lay->initarr_size > 0) {
+        write_shdr_exec(elf, shname_init_array, 14,
+                        0x2 | 0x1,
+                        lay->initarr_vaddr, lay->initarr_file_offset,
+                        lay->initarr_size, 0, 0, 8, 8);
+        array_sections++;
+    }
+    if (lay->have_finiarr && lay->finiarr_size > 0) {
+        write_shdr_exec(elf, shname_fini_array, 15,
+                        0x2 | 0x1,
+                        lay->finiarr_vaddr, lay->finiarr_file_offset,
+                        lay->finiarr_size, 0, 0, 8, 8);
+        array_sections++;
+    }
     int tls_sections = 0;
     if (lay->have_tls) {
         if (lay->tls_filesize > 0) tls_sections++;
         if (lay->tls_memsize > lay->tls_filesize) tls_sections++;
     }
     write_shdr_exec(elf, shname_symtab, 2, 0, 0, off_symtab,
-                    symtab.len, 6 + tls_sections, first_global, 8, 24);
+                    symtab.len, 6 + tls_sections + array_sections, first_global, 8, 24);
     write_shdr_exec(elf, shname_strtab, 3, 0, 0, off_strtab,
                     strtab.len, 0, 0, 1, 0);
     write_shdr_exec(elf, shname_shstrtab, 3, 0, 0, off_shstrtab,
@@ -559,7 +780,7 @@ Buffer debug_frame;
         write_shdr_exec(elf, shname_debug_loc, 1, 0, 0,
                         off_debug_loc, debug_loc.len, 0, 0, 1, 0);
     }
-    int dyn_base = (have_dbg ? 14 : 8) + tls_sections;
+    int dyn_base = (have_dbg ? 14 : 8) + tls_sections + array_sections;
     if (lay->have_dynamic) {
         write_shdr_exec(elf, shname_dynstr, 3, 0x2,
                         lay->dynstr_vaddr, lay->dynstr_off, lay->dynstr_size,
@@ -581,8 +802,9 @@ Buffer debug_frame;
                         lay->dynamic_off, lay->dynamic_size,
                         dyn_base + 0, 0, 8, 16);
     }
-    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + tls_sections + (lay->have_dynamic ? 6 : 0));
-    uint16_t shstrndx = (uint16_t)(7 + tls_sections);
+    uint16_t shnum = (uint16_t)(8 + (have_dbg ? 6 : 0) + tls_sections + array_sections
+                               + (lay->have_dynamic ? 6 : 0));
+    uint16_t shstrndx = (uint16_t)(7 + tls_sections + array_sections);
     runtime.memcpy(elf->data + 40, &shoff, sizeof(shoff));
     runtime.memcpy(elf->data + 60, &shnum, sizeof(shnum));
     runtime.memcpy(elf->data + 62, &shstrndx, sizeof(shstrndx));
@@ -595,10 +817,37 @@ Buffer debug_frame;
     buffer_free(&debug_str); buffer_free(&debug_line);
     buffer_free(&debug_frame); buffer_free(&debug_loc);
 }
-static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
-                      uint64_t exit_plt_vaddr, int have_tls,
-                      uint64_t tls_vaddr, uint64_t tcb_vaddr,
-                      size_t tls_memsize, size_t tdata_len) {
+struct StartInfo {
+    uint64_t call_vaddr;
+    uint64_t main_vaddr;
+    uint64_t exit_plt_vaddr;
+    uint64_t tls_vaddr;
+    uint64_t tcb_vaddr;
+    uint64_t tls_memsize;
+    uint64_t tdata_len;
+    uint64_t init_start;
+    uint64_t init_count;
+    uint64_t fini_start;
+    uint64_t fini_count;
+    uint64_t irel_got;
+    uint64_t irel_count;
+    int have_tls;
+};typedef struct StartInfo StartInfo;
+static void gen_start(Buffer *code, const StartInfo *st) {
+    uint64_t call_vaddr = st->call_vaddr;
+    uint64_t main_vaddr = st->main_vaddr;
+    uint64_t exit_plt_vaddr = st->exit_plt_vaddr;
+    int have_tls = st->have_tls;
+    uint64_t tls_vaddr = st->tls_vaddr;
+    uint64_t tcb_vaddr = st->tcb_vaddr;
+    size_t tls_memsize = st->tls_memsize;
+    size_t tdata_len = st->tdata_len;
+    uint64_t init_start = st->init_start;
+    uint64_t init_count = st->init_count;
+    uint64_t fini_start = st->fini_start;
+    uint64_t fini_count = st->fini_count;
+    uint64_t irel_got = st->irel_got;
+    uint64_t irel_count = st->irel_count;
     size_t prefix_len = 0;
     if (have_tls) {
         if (tdata_len > 0) {
@@ -630,6 +879,52 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
         uint8_t sysc[2] = {0x0f, 0x05};
         buffer_append(code, (const char *)sysc, 2);
     }
+    if (irel_count > 0) {
+        prefix_len += 42;
+        uint8_t m_rbx[2] = {0x48, 0xbb};
+        buffer_append(code, (const char *)m_rbx, 2);
+        buffer_append(code, (const char *)&irel_got, 8);
+        uint8_t m_r12[2] = {0x49, 0xbc};
+        buffer_append(code, (const char *)m_r12, 2);
+        buffer_append(code, (const char *)&irel_count, 8);
+        uint8_t test_r12[3] = {0x4d, 0x85, 0xe4};
+        buffer_append(code, (const char *)test_r12, 3);
+        uint8_t jz[2] = {0x74, 0x11};
+        buffer_append(code, (const char *)jz, 2);
+        uint8_t ld_rax[3] = {0x48, 0x8b, 0x03};
+        buffer_append(code, (const char *)ld_rax, 3);
+        uint8_t call_rax[2] = {0xff, 0xd0};
+        buffer_append(code, (const char *)call_rax, 2);
+        uint8_t st_rax[3] = {0x48, 0x89, 0x03};
+        buffer_append(code, (const char *)st_rax, 3);
+        uint8_t add_rbx[4] = {0x48, 0x83, 0xc3, 0x08};
+        buffer_append(code, (const char *)add_rbx, 4);
+        uint8_t dec_r12[3] = {0x49, 0xff, 0xcc};
+        buffer_append(code, (const char *)dec_r12, 3);
+        uint8_t jnz[2] = {0x75, 0xef};
+        buffer_append(code, (const char *)jnz, 2);
+    }
+    if (init_count > 0) {
+        prefix_len += 36;
+        uint8_t m_rbx[2] = {0x48, 0xbb};
+        buffer_append(code, (const char *)m_rbx, 2);
+        buffer_append(code, (const char *)&init_start, 8);
+        uint8_t m_r12[2] = {0x49, 0xbc};
+        buffer_append(code, (const char *)m_r12, 2);
+        buffer_append(code, (const char *)&init_count, 8);
+        uint8_t test_r12[3] = {0x4d, 0x85, 0xe4};
+        buffer_append(code, (const char *)test_r12, 3);
+        uint8_t jz[2] = {0x74, 0x0b};
+        buffer_append(code, (const char *)jz, 2);
+        uint8_t call_ind[2] = {0xff, 0x13};
+        buffer_append(code, (const char *)call_ind, 2);
+        uint8_t add_rbx[4] = {0x48, 0x83, 0xc3, 0x08};
+        buffer_append(code, (const char *)add_rbx, 4);
+        uint8_t dec_r12[3] = {0x49, 0xff, 0xcc};
+        buffer_append(code, (const char *)dec_r12, 3);
+        uint8_t jnz[2] = {0x75, 0xf5};
+        buffer_append(code, (const char *)jnz, 2);
+    }
     uint8_t mov_edi[] = {0x8b, 0x3c, 0x24};
     buffer_append(code, (const char *)mov_edi, 3);
     uint8_t lea_rsi[] = {0x48, 0x8d, 0x74, 0x24, 0x08};
@@ -638,12 +933,40 @@ static void gen_start(Buffer *code, uint64_t call_vaddr, uint64_t main_vaddr,
     buffer_append(code, (const char *)&call_opcode, 1);
     int32_t rel = (int32_t)(main_vaddr - (call_vaddr + prefix_len + 3 + 5 + 5));
     buffer_append(code, (const char *)&rel, 4);
-    uint8_t mov_reg[] = {0x89, 0xc7};
-    buffer_append(code, (const char *)mov_reg, 2);
+    if (fini_count > 0) {
+        uint8_t save[3] = {0x41, 0x89, 0xc5};
+        buffer_append(code, (const char *)save, 3);
+        uint64_t last = fini_start + (fini_count - 1) * 8;
+        uint8_t m_rbx[2] = {0x48, 0xbb};
+        buffer_append(code, (const char *)m_rbx, 2);
+        buffer_append(code, (const char *)&last, 8);
+        uint8_t m_r12[2] = {0x49, 0xbc};
+        buffer_append(code, (const char *)m_r12, 2);
+        buffer_append(code, (const char *)&fini_count, 8);
+        uint8_t test_r12[3] = {0x4d, 0x85, 0xe4};
+        buffer_append(code, (const char *)test_r12, 3);
+        uint8_t jz[2] = {0x74, 0x0b};
+        buffer_append(code, (const char *)jz, 2);
+        uint8_t call_ind[2] = {0xff, 0x13};
+        buffer_append(code, (const char *)call_ind, 2);
+        uint8_t sub_rbx[4] = {0x48, 0x83, 0xeb, 0x08};
+        buffer_append(code, (const char *)sub_rbx, 4);
+        uint8_t dec_r12[3] = {0x49, 0xff, 0xcc};
+        buffer_append(code, (const char *)dec_r12, 3);
+        uint8_t jnz[2] = {0x75, 0xf5};
+        buffer_append(code, (const char *)jnz, 2);
+        uint8_t restore[3] = {0x44, 0x89, 0xef};
+        buffer_append(code, (const char *)restore, 3);
+    } else {
+        uint8_t mov_reg[] = {0x89, 0xc7};
+        buffer_append(code, (const char *)mov_reg, 2);
+    }
     if (exit_plt_vaddr != 0) {
         buffer_append(code, (const char *)&call_opcode, 1);
+        size_t after_main = prefix_len + 3 + 5 + 5
+            + (fini_count > 0 ? (size_t)42 : 2);
         int32_t erel = (int32_t)(exit_plt_vaddr -
-                                 (call_vaddr + prefix_len + 3 + 5 + 5 + 2 + 5));
+                                 (call_vaddr + after_main + 5));
         buffer_append(code, (const char *)&erel, 4);
         uint8_t ud2[] = {0x0f, 0x0b};
         buffer_append(code, (const char *)ud2, 2);
@@ -690,6 +1013,43 @@ static size_t emit_plt_entry(Buffer *code, size_t idx, size_t plt0_off,
     runtime.memcpy(code->data + pjmp, &rel, 4);
     return start;
 }
+struct ArrSlotOrd { int prio; size_t idx; };typedef struct ArrSlotOrd ArrSlotOrd;
+static void sort_array_slots(Buffer *arr, int *prio, size_t **remap) {
+    size_t nslots = arr->len / 8;
+    *remap = ((void*)0);
+    if (nslots == 0) return;
+    *remap = xcalloc(nslots, sizeof(size_t));
+    ArrSlotOrd *ord = xcalloc(nslots, sizeof(ArrSlotOrd));
+    for (size_t i = 0; i < nslots; i++) {
+        ord[i].idx = i;
+        ord[i].prio = prio ? prio[i] : 65535;
+    }
+    for (size_t i = 1; i < nslots; i++) {
+        ArrSlotOrd key = ord[i];
+        size_t j = i;
+        while (j > 0) {
+            int cmp = (ord[j - 1].prio > key.prio) - (ord[j - 1].prio < key.prio);
+            if (cmp == 0)
+                cmp = (ord[j - 1].idx > key.idx) - (ord[j - 1].idx < key.idx);
+            if (cmp <= 0) break;
+            ord[j] = ord[j - 1];
+            j--;
+        }
+        ord[j] = key;
+    }
+    char *tmp = runtime.malloc(arr->len ? arr->len : 1);
+    int *ptmp = runtime.malloc(nslots * sizeof(int));
+    if (!tmp || !ptmp) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    for (size_t ni = 0; ni < nslots; ni++) {
+        size_t oi = ord[ni].idx;
+        runtime.memcpy(tmp + ni * 8, arr->data + oi * 8, 8);
+        ptmp[ni] = ord[ni].prio;
+        (*remap)[oi] = ni * 8;
+    }
+    runtime.memcpy(arr->data, tmp, arr->len);
+    if (prio) runtime.memcpy(prio, ptmp, nslots * sizeof(int));
+    runtime.free(tmp); runtime.free(ptmp); runtime.free(ord);
+}
 static int ext_find_or_add(char ***ext, int *num_ext, const char *name) {
     for (int e = 0; e < *num_ext; e++)
         if (runtime.strcmp((*ext)[e], name) == 0) return e;
@@ -712,8 +1072,12 @@ Buffer text;
 Buffer rodata;
 Buffer data;
 Buffer tdata;
+Buffer initarr;
+Buffer finiarr;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
     buffer_init(&tdata);
+    buffer_init(&initarr);
+    buffer_init(&finiarr);
     size_t bss_size = 0;
     size_t tbss_size = 0;
     size_t *mod_text_off = xcalloc(n, sizeof(size_t));
@@ -722,32 +1086,83 @@ Buffer tdata;
     size_t *mod_bss_off = xcalloc(n, sizeof(size_t));
     size_t *mod_tdata_off = xcalloc(n, sizeof(size_t));
     size_t *mod_tbss_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_init_off = xcalloc(n, sizeof(size_t));
+    size_t *mod_fini_off = xcalloc(n, sizeof(size_t));
+    int *concat_init_prio = ((void*)0);
+    int *concat_fini_prio = ((void*)0);
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
-        while (text.len & 15) { char z = 0; buffer_append(&text, &z, 1); }
+        size_t ta = m->text_align > 16 ? m->text_align : 16;
+        pad_buf_to(&text, ta);
         mod_text_off[i] = text.len;
         buffer_append(&text, m->text.data, m->text.len);
-        while (rodata.len & 7) { char z = 0; buffer_append(&rodata, &z, 1); }
+        pad_buf_to(&rodata, m->rodata_align ? m->rodata_align : 8);
         mod_rodata_off[i] = rodata.len;
         buffer_append(&rodata, m->rodata.data, m->rodata.len);
-        while (data.len & 7) { char z = 0; buffer_append(&data, &z, 1); }
+        pad_buf_to(&data, m->data_align ? m->data_align : 8);
         mod_data_off[i] = data.len;
         buffer_append(&data, m->data.data, m->data.len);
-        while (bss_size & 7) bss_size++;
+        bss_size = pad_size_to(bss_size, m->bss_align ? m->bss_align : 8);
         mod_bss_off[i] = bss_size;
         bss_size += m->bss_size;
-        while (tdata.len & 7) { char z = 0; buffer_append(&tdata, &z, 1); }
+        pad_buf_to(&tdata, m->tdata_align ? m->tdata_align : 8);
         mod_tdata_off[i] = tdata.len;
         buffer_append(&tdata, m->tdata.data, m->tdata.len);
-        while (tbss_size & 7) tbss_size++;
+        tbss_size = pad_size_to(tbss_size, m->tbss_align ? m->tbss_align : 8);
         mod_tbss_off[i] = tbss_size;
         tbss_size += m->tbss_size;
+        pad_buf_to(&initarr, m->init_array_align ? m->init_array_align : 8);
+        mod_init_off[i] = initarr.len;
+        {
+            size_t before = initarr.len;
+            buffer_append(&initarr, m->init_array.data, m->init_array.len);
+            size_t nnew = initarr.len / 8;
+            size_t nold = before / 8;
+            if (nnew > 0) {
+                concat_init_prio = runtime.realloc(concat_init_prio, nnew * sizeof(int));
+                if (!concat_init_prio) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                for (size_t s = nold; s < nnew; s++)
+                    concat_init_prio[s] = 65535;
+                if (m->init_prio) {
+                    size_t ms = m->init_array.len / 8;
+                    runtime.memcpy(concat_init_prio + nold, m->init_prio, ms * sizeof(int));
+                }
+            }
+        }
+        pad_buf_to(&finiarr, m->fini_array_align ? m->fini_array_align : 8);
+        mod_fini_off[i] = finiarr.len;
+        {
+            size_t before = finiarr.len;
+            buffer_append(&finiarr, m->fini_array.data, m->fini_array.len);
+            size_t nnew = finiarr.len / 8;
+            size_t nold = before / 8;
+            if (nnew > 0) {
+                concat_fini_prio = runtime.realloc(concat_fini_prio, nnew * sizeof(int));
+                if (!concat_fini_prio) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                for (size_t s = nold; s < nnew; s++)
+                    concat_fini_prio[s] = 65535;
+                if (m->fini_prio) {
+                    size_t ms = m->fini_array.len / 8;
+                    runtime.memcpy(concat_fini_prio + nold, m->fini_prio, ms * sizeof(int));
+                }
+            }
+        }
+    }
+    size_t *init_remap = ((void*)0), *fini_remap = ((void*)0);
+    sort_array_slots(&initarr, concat_init_prio, &init_remap);
+    sort_array_slots(&finiarr, concat_fini_prio, &fini_remap);
+    size_t max_ro_align = 8, max_bss_align = 8, max_td_align = 8, max_tbss_align = 8;
+    for (size_t i = 0; i < n; i++) {
+        if (mods[i]->rodata_align > max_ro_align) max_ro_align = mods[i]->rodata_align;
+        if (mods[i]->bss_align > max_bss_align) max_bss_align = mods[i]->bss_align;
+        if (mods[i]->tdata_align > max_td_align) max_td_align = mods[i]->tdata_align;
+        if (mods[i]->tbss_align > max_tbss_align) max_tbss_align = mods[i]->tbss_align;
     }
     size_t *mod_sym_base = xcalloc(n + 1, sizeof(size_t));
     for (size_t i = 0; i < n; i++)
         mod_sym_base[i + 1] = mod_sym_base[i] + mods[i]->num_syms;
     size_t total_syms = mod_sym_base[n];
-    SymInfo *sinfo = xcalloc(total_syms, sizeof(SymInfo));
+    LinkSymInfo *sinfo = xcalloc(total_syms, sizeof(LinkSymInfo));
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -755,35 +1170,95 @@ Buffer tdata;
             sinfo[gsi].shndx = m->syms[j].shndx;
             sinfo[gsi].value = m->syms[j].value;
             sinfo[gsi].binding = m->syms[j].binding;
+            sinfo[gsi].type = m->syms[j].type;
             sinfo[gsi].defined = (m->syms[j].shndx != 0);
         }
+    }
+    CommonEnt *commons = ((void*)0);
+    int n_commons = 0, cap_commons = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            if (m->syms[j].shndx != 0xfff2 || !m->syms[j].name) continue;
+            const char *nm = m->syms[j].name;
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win != (size_t)-1 && sinfo[win].shndx != 0xfff2) continue;
+            int found = -1;
+            for (int c = 0; c < n_commons; c++)
+                if (runtime.strcmp(commons[c].name, nm) == 0) { found = c; break; }
+            size_t al = m->syms[j].value ? m->syms[j].value : 1;
+            size_t sz = m->syms[j].size ? m->syms[j].size : al;
+            if (found < 0) {
+                if (n_commons >= cap_commons) {
+                    cap_commons = cap_commons ? cap_commons * 2 : 4;
+                    commons = runtime.realloc(commons, (size_t)cap_commons * sizeof(CommonEnt));
+                    if (!commons) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                }
+                commons[n_commons].name = nm;
+                commons[n_commons].align = al;
+                commons[n_commons].size = sz;
+                commons[n_commons].off = 0;
+                n_commons++;
+            } else {
+                if (al > commons[found].align) commons[found].align = al;
+                if (sz > commons[found].size) commons[found].size = sz;
+            }
+        }
+    }
+    for (int c = 0; c < n_commons; c++) {
+        if (commons[c].align > max_bss_align) max_bss_align = commons[c].align;
+        bss_size = pad_size_to(bss_size, commons[c].align);
+        commons[c].off = bss_size;
+        bss_size += commons[c].size;
     }
     char **ext_list = ((void*)0);
     int num_ext = 0;
     int *reloc_ext_idx = xcalloc(total_syms, sizeof(int));
-    for (size_t i = 0; i < total_syms; i++) reloc_ext_idx[i] = -1;
+    int *reloc_data_abs_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) {
+        reloc_ext_idx[i] = -1;
+        reloc_data_abs_idx[i] = -1;
+    }
+    char **abs_ext_list = ((void*)0);
+    int num_abs_ext = 0;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
-            if (m->relocs[r].type == 9) continue;
+            if (reloc_is_gotpcrel(m->relocs[r].type)) continue;
+            if (m->relocs[r].type == 22) continue;
+            if (reloc_is_tls_gd(m->relocs[r].type)) continue;
+            if (reloc_is_tls_ld(m->relocs[r].type)) continue;
+            if (m->relocs[r].type == 21) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (sinfo[gsi].defined) continue;
             const char *nm = m->syms[m->relocs[r].sym].name
                              ? m->syms[m->relocs[r].sym].name : "";
-            int resolved = 0;
-            for (size_t mi = 0; mi < n && !resolved; mi++) {
-                EmitModule *om = mods[mi];
-                for (size_t mj = 0; mj < om->num_syms; mj++) {
-                    size_t ogsi = mod_sym_base[mi] + mj;
-                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                        && om->syms[mj].name
-                        && runtime.strcmp(om->syms[mj].name, nm) == 0) {
-                        resolved = 1;
+            if (m->relocs[r].type == 4
+                && runtime.strcmp(nm, "__tls_get_addr") == 0) {
+                int pair_skip = 0;
+                for (size_t r2 = 0; r2 < m->num_relocs; r2++) {
+                    if (m->relocs[r2].type == 19
+                        && m->relocs[r2].offset + 8 == m->relocs[r].offset) {
+                        pair_skip = 1;
+                        break;
+                    }
+                    if (!is_shared && m->relocs[r2].type == 20
+                        && m->relocs[r2].offset + 5 == m->relocs[r].offset) {
+                        pair_skip = 1;
                         break;
                     }
                 }
+                if (pair_skip) continue;
             }
-            if (!resolved)
+            uint8_t stt = m->syms[m->relocs[r].sym].type;
+            if (reloc_is_copy_kind(m->relocs[r].type)
+                && m->relocs[r].type != 4
+                && stt != 2
+                && stt != 6
+                && find_export_gsi(mods, n, mod_sym_base, sinfo, nm) == (size_t)-1) {
+                continue;
+            }
+            if (find_export_gsi(mods, n, mod_sym_base, sinfo, nm) == (size_t)-1)
                 reloc_ext_idx[gsi] = ext_find_or_add(&ext_list, &num_ext, nm);
         }
         for (size_t r = 0; r < m->num_data_relocs; r++) {
@@ -797,8 +1272,7 @@ Buffer tdata;
                 EmitModule *om = mods[mi];
                 for (size_t mj = 0; mj < om->num_syms; mj++) {
                     size_t ogsi = mod_sym_base[mi] + mj;
-                    if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                        && om->syms[mj].name
+                    if (sinfo[ogsi].defined && om->syms[mj].name
                         && runtime.strcmp(om->syms[mj].name, nm) == 0) {
                         resolved = 1;
                         break;
@@ -816,7 +1290,7 @@ Buffer tdata;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_relocs; r++) {
-            if (m->relocs[r].type != 9) continue;
+            if (!reloc_is_gotpcrel(m->relocs[r].type)) continue;
             size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
             if (reloc_data_got_idx[gsi] >= 0) continue;
             const char *nm = m->syms[m->relocs[r].sym].name
@@ -828,28 +1302,202 @@ Buffer tdata;
     int num_true_data_ext = 0;
     for (int j = 0; j < num_data_ext; j++) {
         const char *nm = data_ext_list[j];
-        int found = 0;
-        for (size_t mi = 0; mi < n && !found; mi++) {
-            EmitModule *om = mods[mi];
-            for (size_t mj = 0; mj < om->num_syms; mj++) {
-                size_t ogsi = mod_sym_base[mi] + mj;
-                if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                    && om->syms[mj].name
-                    && runtime.strcmp(om->syms[mj].name, nm) == 0) {
-                    found = 1;
-                    break;
-                }
-            }
-        }
+        int found = find_export_gsi(mods, n, mod_sym_base, sinfo, nm) != (size_t)-1;
         data_got_external[j] = !found;
         if (!found) num_true_data_ext++;
     }
-    int need_dynamic = is_shared || (num_ext > 0 || num_true_data_ext > 0);
+    int *reloc_tls_ie_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) reloc_tls_ie_idx[i] = -1;
+    int *tls_ie_gsi = ((void*)0);
+    const char **tls_ie_name = ((void*)0);
+    int num_tls_ie = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            if (reloc_is_tls_ld(m->relocs[r].type)) continue;
+            if (m->relocs[r].type != 22
+                && !reloc_is_tls_gd(m->relocs[r].type)) continue;
+            size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
+            if (reloc_tls_ie_idx[gsi] >= 0) continue;
+            const char *nm = m->syms[m->relocs[r].sym].name
+                             ? m->syms[m->relocs[r].sym].name : "";
+            int is_local = sinfo[gsi].defined && sinfo[gsi].binding == 0;
+            int slot = -1;
+            if (!is_local && nm[0]) {
+                for (int j = 0; j < num_tls_ie; j++) {
+                    if (tls_ie_name[j] && runtime.strcmp(tls_ie_name[j], nm) == 0) {
+                        slot = j;
+                        break;
+                    }
+                }
+            }
+            if (slot < 0) {
+                slot = num_tls_ie++;
+                tls_ie_gsi = runtime.realloc(tls_ie_gsi, (size_t)num_tls_ie * sizeof(int));
+                tls_ie_name = runtime.realloc(tls_ie_name, (size_t)num_tls_ie * sizeof(char *));
+                if (!tls_ie_gsi || !tls_ie_name) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                tls_ie_gsi[slot] = (int)gsi;
+                tls_ie_name[slot] = is_local ? ((void*)0) : nm;
+            }
+            reloc_tls_ie_idx[gsi] = slot;
+        }
+    }
+    char **copy_list = ((void*)0);
+    int num_copy = 0;
+    int *reloc_copy_idx = xcalloc(total_syms, sizeof(int));
+    for (size_t i = 0; i < total_syms; i++) reloc_copy_idx[i] = -1;
+    for (size_t i = 0; i < n && !is_shared; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            uint32_t rt = m->relocs[r].type;
+            if (!reloc_is_copy_kind(rt) || rt == 4) continue;
+            size_t gsi = mod_sym_base[i] + m->relocs[r].sym;
+            if (sinfo[gsi].defined || reloc_copy_idx[gsi] >= 0) continue;
+            if (reloc_ext_idx[gsi] >= 0) continue;
+            uint8_t stt = m->syms[m->relocs[r].sym].type;
+            if (stt == 2 || stt == 6) continue;
+            const char *nm = m->syms[m->relocs[r].sym].name
+                             ? m->syms[m->relocs[r].sym].name : "";
+            if (find_export_gsi(mods, n, mod_sym_base, sinfo, nm) != (size_t)-1)
+                continue;
+            reloc_copy_idx[gsi] = ext_find_or_add(&copy_list, &num_copy, nm);
+        }
+        for (size_t r = 0; r < m->num_data_relocs; r++) {
+            if (m->data_relocs[r].type != 1) continue;
+            size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+            if (sinfo[gsi].defined || reloc_copy_idx[gsi] >= 0) continue;
+            if (reloc_ext_idx[gsi] >= 0) continue;
+            uint8_t stt = m->syms[m->data_relocs[r].sym].type;
+            if (stt != 1) continue;
+            const char *nm = m->syms[m->data_relocs[r].sym].name
+                             ? m->syms[m->data_relocs[r].sym].name : "";
+            if (find_export_gsi(mods, n, mod_sym_base, sinfo, nm) != (size_t)-1)
+                continue;
+            reloc_copy_idx[gsi] = ext_find_or_add(&copy_list, &num_copy, nm);
+        }
+    }
+    int *tls_ie_is_undef = num_tls_ie ? xcalloc((size_t)num_tls_ie, sizeof(int)) : ((void*)0);
+    char **tls_und_list = ((void*)0);
+    int num_tls_und = 0;
+    int *tls_ie_und_idx = num_tls_ie ? xcalloc((size_t)num_tls_ie, sizeof(int)) : ((void*)0);
+    for (int j = 0; j < num_tls_ie; j++) {
+        if (tls_ie_und_idx) tls_ie_und_idx[j] = -1;
+        size_t gsi = (size_t)tls_ie_gsi[j];
+        int defined = 0;
+        if (sinfo[gsi].defined
+            && (sinfo[gsi].shndx == 5 || sinfo[gsi].shndx == 6))
+            defined = 1;
+        else {
+            const char *nm = tls_ie_name[j] ? tls_ie_name[j] : "";
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win != (size_t)-1
+                && (sinfo[win].shndx == 5 || sinfo[win].shndx == 6))
+                defined = 1;
+        }
+        if (!defined) {
+            tls_ie_is_undef[j] = 1;
+            const char *nm = tls_ie_name[j] ? tls_ie_name[j] : "";
+            tls_ie_und_idx[j] = ext_find_or_add(&tls_und_list, &num_tls_und, nm);
+        }
+    }
+    int *tls_und_weak = num_tls_und ? xcalloc((size_t)num_tls_und, sizeof(int)) : ((void*)0);
+    for (int t = 0; t < num_tls_und; t++) {
+        int any = 0, strong = 0;
+        const char *nm = tls_und_list[t];
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t j = 0; j < m->num_syms; j++) {
+                if (!m->syms[j].name || runtime.strcmp(m->syms[j].name, nm) != 0) continue;
+                if (sinfo[mod_sym_base[i] + j].defined) continue;
+                any = 1;
+                if (m->syms[j].binding != 2) strong = 1;
+            }
+        }
+        tls_und_weak[t] = any && !strong;
+    }
+    int need_dynamic = is_shared
+        || (num_ext > 0 || num_true_data_ext > 0 || num_abs_ext > 0
+            || num_copy > 0 || num_tls_und > 0);
     char **needed = ((void*)0);
     int num_needed = 0;
     for (size_t i = 0; i < num_needed_in; i++)
         needed_add(&needed, &num_needed, needed_in[i]);
     (void)nodefaultlibs;
+    size_t *copy_size = num_copy ? xcalloc((size_t)num_copy, sizeof(size_t)) : ((void*)0);
+    size_t *copy_off = num_copy ? xcalloc((size_t)num_copy, sizeof(size_t)) : ((void*)0);
+    {
+        int w = 0;
+        for (int j = 0; j < num_copy; j++) {
+            uint8_t ty = 0;
+            size_t al = 8;
+            size_t sz = so_symbol_lookup((const char **)lib_paths, num_lib_paths,
+                                         (const char **)needed, (size_t)num_needed,
+                                         copy_list[j], &ty, &al);
+            if (ty != 1) {
+                int eidx = ext_find_or_add(&ext_list, &num_ext, copy_list[j]);
+                for (size_t gsi = 0; gsi < total_syms; gsi++) {
+                    if (reloc_copy_idx[gsi] == j) {
+                        reloc_copy_idx[gsi] = -1;
+                        reloc_ext_idx[gsi] = eidx;
+                    }
+                }
+                runtime.free(copy_list[j]);
+                continue;
+            }
+            if (sz < 1) sz = 8;
+            if (al < 1) al = 8;
+            if (w != j) {
+                for (size_t gsi = 0; gsi < total_syms; gsi++)
+                    if (reloc_copy_idx[gsi] == j) reloc_copy_idx[gsi] = w;
+                copy_list[w] = copy_list[j];
+            }
+            copy_size[w] = sz;
+            bss_size = pad_size_to(bss_size, al);
+            copy_off[w] = bss_size;
+            bss_size += sz;
+            if (al > max_bss_align) max_bss_align = al;
+            w++;
+        }
+        num_copy = w;
+    }
+    int have_tlsld = 0;
+    for (size_t i = 0; i < n && !have_tlsld; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_relocs; r++) {
+            if (reloc_is_tls_ld(m->relocs[r].type)) { have_tlsld = 1; break; }
+        }
+    }
+    int tlsld_got_pair = is_shared && have_tlsld;
+    int num_ifunc = 0;
+    size_t *ifunc_gsi = ((void*)0);
+    const char **ifunc_name = ((void*)0);
+    size_t *ifunc_thunk_off = ((void*)0);
+    size_t *ifunc_got_fixup = ((void*)0);
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            size_t gsi = mod_sym_base[i] + j;
+            if (!sinfo[gsi].defined || sinfo[gsi].shndx != 1) continue;
+            if (m->syms[j].type != 10) continue;
+            const char *nm = m->syms[j].name ? m->syms[j].name : "";
+            int dup = 0;
+            if (nm[0] && sinfo[gsi].binding != 0) {
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_name[k] && runtime.strcmp(ifunc_name[k], nm) == 0) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (dup) continue;
+            ifunc_gsi = runtime.realloc(ifunc_gsi, ((size_t)num_ifunc + 1) * sizeof(size_t));
+            ifunc_name = runtime.realloc(ifunc_name, ((size_t)num_ifunc + 1) * sizeof(char *));
+            if (!ifunc_gsi || !ifunc_name) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            ifunc_gsi[num_ifunc] = gsi;
+            ifunc_name[num_ifunc] = nm[0] ? nm : ((void*)0);
+            num_ifunc++;
+        }
+    }
     char *soname = ((void*)0);
     if (is_shared && path) {
         const char *base = runtime.strrchr(path, '/');
@@ -921,6 +1569,14 @@ Buffer tdata;
         for (int e = 0; e < num_ext; e++)
             plt_entry_off[e] = emit_plt_entry(&text, e, plt0_off, &plt_got_fixup[e]);
     }
+    ifunc_thunk_off = num_ifunc ? xcalloc((size_t)num_ifunc, sizeof(size_t)) : ((void*)0);
+    ifunc_got_fixup = num_ifunc ? xcalloc((size_t)num_ifunc, sizeof(size_t)) : ((void*)0);
+    for (int k = 0; k < num_ifunc; k++) {
+        ifunc_thunk_off[k] = text.len;
+        emit_byte(&text, 0xFF); emit_byte(&text, 0x25);
+        ifunc_got_fixup[k] = text.len;
+        emit_int32(&text, 0);
+    }
 Buffer dynstr;
 Buffer dynsym;
 Buffer hash;
@@ -930,13 +1586,58 @@ Buffer dynamic;
     buffer_init(&dynstr); buffer_init(&dynsym); buffer_init(&hash);
     buffer_init(&rela_plt); buffer_init(&rela_dyn); buffer_init(&dynamic);
     size_t interp_len = (need_dynamic && !is_shared) ? sizeof(INTERP_PATH) : 0;
-    int num_dynsym_ext = num_ext + num_true_data_ext + num_exports;
+    int num_abs64_relocs = 0;
+    int num_tpoff_dyn = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t r = 0; r < m->num_data_relocs; r++) {
+            size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+            if (reloc_data_abs_idx[gsi] >= 0) num_abs64_relocs++;
+        }
+    }
+    num_tpoff_dyn = is_shared ? num_tls_ie : num_tls_und;
+    int num_dynsym_ext = num_ext + num_true_data_ext + num_abs_ext
+        + num_tls_und + num_copy + num_exports;
+    int dyn_tls_und0 = 1 + num_ext + num_true_data_ext + num_abs_ext;
+    int dyn_copy0 = dyn_tls_und0 + num_tls_und;
+    int dyn_export0 = dyn_copy0 + num_copy;
     size_t needed_str_bytes = 0;
     size_t soname_str_bytes = 0;
     size_t soname_dynstr_off = 0;
     size_t runpath_str_bytes = 0;
     size_t runpath_dynstr_off = 0;
-    int num_relative = is_shared ? 1 : 0;
+    int num_data_ptr_rel = 0;
+    int num_internal_got = 0;
+    int tls_image_rel = 0;
+    if (is_shared) {
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t r = 0; r < m->num_data_relocs; r++) {
+                size_t gsi = mod_sym_base[i] + m->data_relocs[r].sym;
+                if (reloc_data_abs_idx[gsi] >= 0) continue;
+                uint32_t rt = m->data_relocs[r].type;
+                if (reloc_is_pc(rt) || reloc_is_abs32(rt)) continue;
+                num_data_ptr_rel++;
+            }
+        }
+        for (int j = 0; j < num_data_ext; j++)
+            if (!data_got_external[j]) num_internal_got++;
+        if (tdata.len > 0 || tbss_size > 0) {
+size_t mi;
+size_t mj;
+            for (mi = 0; mi < n && !tls_image_rel; mi++) {
+                EmitModule *m = mods[mi];
+                for (mj = 0; mj < m->num_syms; mj++) {
+                    if (m->syms[mj].name
+                        && runtime.strcmp(m->syms[mj].name, "__fakecc_tls_image") == 0) {
+                        tls_image_rel = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    int num_relative = is_shared ? (1 + num_data_ptr_rel + num_internal_got + tls_image_rel) : 0;
     if (need_dynamic) {
         buf_u8(&dynstr, 0);
         for (int i = 0; i < num_needed; i++) {
@@ -959,16 +1660,39 @@ Buffer dynamic;
             if (!data_got_external[j]) continue;
             buf_bytes(&dynstr, data_ext_list[j], runtime.strlen(data_ext_list[j]) + 1);
         }
+        for (int a = 0; a < num_abs_ext; a++)
+            buf_bytes(&dynstr, abs_ext_list[a], runtime.strlen(abs_ext_list[a]) + 1);
+        for (int t = 0; t < num_tls_und; t++)
+            buf_bytes(&dynstr, tls_und_list[t], runtime.strlen(tls_und_list[t]) + 1);
+        for (int c = 0; c < num_copy; c++)
+            buf_bytes(&dynstr, copy_list[c], runtime.strlen(copy_list[c]) + 1);
         for (int e = 0; e < num_exports; e++)
             buf_bytes(&dynstr, exports[e].name, runtime.strlen(exports[e].name) + 1);
         buf_pad(&dynsym, 24);
-        for (int k = 0; k < num_ext + num_true_data_ext; k++) {
+        for (int k = 0; k < num_ext + num_true_data_ext + num_abs_ext; k++) {
             buf_u32(&dynsym, 0);
             buf_u8(&dynsym, 1 << 4);
             buf_u8(&dynsym, 0);
             buf_u16(&dynsym, 0);
             buf_u64(&dynsym, 0);
             buf_u64(&dynsym, 0);
+        }
+        for (int t = 0; t < num_tls_und; t++) {
+            buf_u32(&dynsym, 0);
+            uint8_t bind = (tls_und_weak && tls_und_weak[t]) ? 2 : 1;
+            buf_u8(&dynsym, (uint8_t)((bind << 4) | 6));
+            buf_u8(&dynsym, 0);
+            buf_u16(&dynsym, 0);
+            buf_u64(&dynsym, 0);
+            buf_u64(&dynsym, 0);
+        }
+        for (int c = 0; c < num_copy; c++) {
+            buf_u32(&dynsym, 0);
+            buf_u8(&dynsym, (uint8_t)((1 << 4) | 1));
+            buf_u8(&dynsym, 0);
+            buf_u16(&dynsym, 4);
+            buf_u64(&dynsym, 0);
+            buf_u64(&dynsym, copy_size[c]);
         }
         for (int e = 0; e < num_exports; e++) {
             buf_u32(&dynsym, 0);
@@ -997,7 +1721,17 @@ Buffer dynamic;
                             seen++;
                         }
                     } else {
-                        nm = exports[want - num_true_data_ext].name;
+                        want -= num_true_data_ext;
+                        if (want < num_abs_ext) nm = abs_ext_list[want];
+                        else {
+                            want -= num_abs_ext;
+                            if (want < num_tls_und) nm = tls_und_list[want];
+                            else {
+                                want -= num_tls_und;
+                                if (want < num_copy) nm = copy_list[want];
+                                else nm = exports[want - num_copy].name;
+                            }
+                        }
                     }
                 }
             }
@@ -1024,31 +1758,73 @@ Buffer dynamic;
                 buf_u64(&rela_dyn, 0);
                 dyn_sym_i++;
             }
+            dyn_sym_i = 1 + num_ext + num_true_data_ext;
+            for (int a = 0; a < num_abs64_relocs; a++) {
+                buf_u64(&rela_dyn, 0);
+                buf_u64(&rela_dyn, 1);
+                buf_u64(&rela_dyn, 0);
+            }
+            (void)dyn_sym_i;
         }
         for (int r = 0; r < num_relative; r++) {
             buf_u64(&rela_dyn, 0);
             buf_u64(&rela_dyn, 8);
             buf_u64(&rela_dyn, 0);
         }
+        for (int t = 0; t < num_tpoff_dyn; t++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, 18);
+            buf_u64(&rela_dyn, 0);
+        }
+        for (int c = 0; c < num_copy; c++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, ((uint64_t)(dyn_copy0 + c) << 32) | 5);
+            buf_u64(&rela_dyn, 0);
+        }
+        for (int k = 0; k < num_ifunc; k++) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, 37);
+            buf_u64(&rela_dyn, 0);
+        }
+        if (tlsld_got_pair) {
+            buf_u64(&rela_dyn, 0);
+            buf_u64(&rela_dyn, 16);
+            buf_u64(&rela_dyn, 0);
+        }
     }
     int have_tls = (tdata.len > 0 || tbss_size > 0);
     int init_tls_in_start = have_tls && !need_dynamic;
+    int run_ctors = !is_shared && !need_dynamic && initarr.len >= 8;
+    int run_dtors = !is_shared && !need_dynamic && finiarr.len >= 8;
+    int run_irel = !is_shared && !need_dynamic && num_ifunc > 0;
     size_t start_size = 0;
-    if (!is_shared)
+    if (!is_shared) {
         start_size = init_tls_in_start ? (22 + 25 + (tdata.len > 0 ? 27 : 0)) : 22;
+        if (run_ctors) start_size += 36;
+        if (run_dtors) start_size += (size_t)42 - 2;
+        if (run_irel) start_size += 42;
+    }
     uint16_t phnum_max;
     if (is_shared)
-        phnum_max = have_tls ? 4 : 3;
-    else
         phnum_max = have_tls ? 5 : 4;
+    else
+        phnum_max = have_tls ? 6 : 5;
     size_t hdr_size = 64 + 56 * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
     size_t dynamic_size = 0;
     if (need_dynamic) {
-        int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0);
+        int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0
+                             || num_abs64_relocs > 0 || num_tpoff_dyn > 0
+                             || num_copy > 0 || num_ifunc > 0 || tlsld_got_pair);
+        int have_dt_flags = is_shared && num_tls_ie > 0;
+        int have_dt_init = initarr.len > 0;
+        int have_dt_fini = finiarr.len > 0;
         dynamic_size = (size_t)(num_needed + 10 + (runpath ? 1 : 0) + (soname ? 1 : 0)
-                                + (have_rela_dyn ? 3 : 0)) * 16;
+                                + (have_rela_dyn ? 3 : 0)
+                                + (have_dt_flags ? 1 : 0)
+                                + (have_dt_init ? 2 : 0)
+                                + (have_dt_fini ? 2 : 0)) * 16;
     }
     size_t dyn_sections_len = interp_len + dynstr.len + dynsym.len + hash.len
         + rela_plt.len + rela_dyn.len;
@@ -1064,8 +1840,10 @@ Buffer dynamic;
     while (got_data_off & 7) got_data_off++;
     uint64_t got_vaddr = data_vaddr + got_data_off;
     size_t layout_got_bytes = need_dynamic
-        ? (size_t)(3 + num_ext + num_data_ext) * 8
-        : (num_data_ext > 0 ? (size_t)(3 + num_data_ext) * 8 : 0);
+        ? (size_t)(3 + num_ext + num_data_ext + num_tls_ie + num_ifunc) * 8
+            + (tlsld_got_pair ? 16 : 0)
+        : ((num_data_ext + num_tls_ie + num_ifunc) > 0
+               ? (size_t)(3 + num_data_ext + num_tls_ie + num_ifunc) * 8 : 0);
     size_t got_end_off = layout_got_bytes
         ? got_data_off + layout_got_bytes : data.len;
     size_t dynamic_data_off = got_end_off;
@@ -1075,28 +1853,54 @@ Buffer dynamic;
     size_t dynamic_rw_end = (is_shared && need_dynamic)
         ? dynamic_data_off + dynamic_size : got_end_off;
     size_t tdata_data_off = dynamic_rw_end;
-    if (have_tls) while (tdata_data_off & 7) tdata_data_off++;
+    size_t tls_p_align = 16;
+    if (max_td_align > tls_p_align) tls_p_align = max_td_align;
+    if (max_tbss_align > tls_p_align) tls_p_align = max_tbss_align;
+    if (have_tls) tdata_data_off = pad_size_to(tdata_data_off, tls_p_align);
     uint64_t tls_vaddr = data_vaddr + tdata_data_off;
     size_t tls_file_offset_base = data_file_offset + tdata_data_off;
     size_t rw_filesz = tdata_data_off + (have_tls ? tdata.len : 0);
+    size_t initarr_data_off = pad_size_to(rw_filesz, 8);
+    uint64_t initarr_vaddr = data_vaddr + initarr_data_off;
+    size_t initarr_file_offset = data_file_offset + initarr_data_off;
+    if (initarr.len > 0)
+        rw_filesz = initarr_data_off + initarr.len;
+    size_t finiarr_data_off = pad_size_to(rw_filesz, 8);
+    uint64_t finiarr_vaddr = data_vaddr + finiarr_data_off;
+    size_t finiarr_file_offset = data_file_offset + finiarr_data_off;
+    if (finiarr.len > 0)
+        rw_filesz = finiarr_data_off + finiarr.len;
     size_t bss_data_off = rw_filesz;
-    while (bss_data_off & 7) bss_data_off++;
+    bss_data_off = pad_size_to(bss_data_off, max_bss_align);
     uint64_t bss_vaddr = data_vaddr + bss_data_off;
     size_t bss_file_offset = data_file_offset + bss_data_off;
     uint64_t code_vaddr = base + text_offset;
+    {
+        size_t ro_va = (size_t)(code_vaddr + text.len);
+        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
+        while (extra--) {
+            char z = 0;
+            buffer_append(&text, &z, 1);
+        }
+    }
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));
     size_t tls_filesize = tdata.len;
-    size_t tls_memsize = tdata.len + tbss_size;
+    size_t tbss_tls_off = tdata.len;
+    if (tbss_size > 0)
+        tbss_tls_off = pad_size_to(tdata.len, max_tbss_align);
+    size_t tls_memsize = tbss_tls_off + tbss_size;
     size_t tls_bss_alloc_off = 0;
     if (have_tls) {
-        while (bss_size & 15) bss_size++;
-        tls_bss_alloc_off = bss_size;
-        bss_size += tls_memsize + 16;
+        size_t start = pad_size_to(bss_size, tls_p_align);
+        size_t mis = (size_t)((bss_vaddr + start) % tls_p_align);
+        if (mis) start += tls_p_align - mis;
+        tls_bss_alloc_off = start;
+        bss_size = start + tls_memsize + 16;
     }
     uint64_t tcb_vaddr = bss_vaddr + tls_bss_alloc_off + tls_memsize;
-    uint64_t tls_end_vaddr = tls_vaddr + tdata.len + tbss_size;
+    uint64_t tls_end_vaddr = tls_vaddr + tls_memsize;
     uint64_t tdata_vaddr = tls_vaddr;
-    uint64_t tbss_vaddr = tls_vaddr + tdata.len;
+    uint64_t tbss_vaddr = tls_vaddr + tbss_tls_off;
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t j = 0; j < m->num_syms; j++) {
@@ -1117,27 +1921,110 @@ Buffer dynamic;
             case 6:
                 sym_addr[gsi] = tbss_vaddr + mod_tbss_off[i] + sym->value; break;
             default:
-                sym_addr[gsi] = sym->value; break;
+                if (sym->shndx == 0xfff2) {
+                    const char *nm = sym->name ? sym->name : "";
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win != (size_t)-1 && sinfo[win].shndx != 0xfff2)
+                        break;
+                    int ci;
+                    for (ci = 0; ci < n_commons; ci++)
+                        if (runtime.strcmp(commons[ci].name, nm) == 0) break;
+                    if (ci < n_commons)
+                        sym_addr[gsi] = bss_vaddr + commons[ci].off;
+                } else {
+                    sym_addr[gsi] = sym->value;
+                }
+                break;
             }
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t j = 0; j < m->num_syms; j++) {
+            size_t gsi = mod_sym_base[i] + j;
+            if (m->syms[j].shndx != 0xfff2 || sym_addr[gsi] != 0) continue;
+            const char *nm = m->syms[j].name ? m->syms[j].name : "";
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win != (size_t)-1)
+                sym_addr[gsi] = sym_addr[win];
         }
     }
     size_t *data_got_addr = num_data_ext ? xcalloc(num_data_ext, sizeof(size_t)) : ((void*)0);
     for (int j = 0; j < num_data_ext; j++) {
         if (data_got_external[j]) continue;
         const char *nm = data_ext_list[j];
-        for (size_t mi = 0; mi < n; mi++) {
-            EmitModule *om = mods[mi];
-            for (size_t mj = 0; mj < om->num_syms; mj++) {
-                size_t ogsi = mod_sym_base[mi] + mj;
-                if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                    && om->syms[mj].name
-                    && runtime.strcmp(om->syms[mj].name, nm) == 0) {
-                    data_got_addr[j] = sym_addr[ogsi];
-                    break;
+        size_t ogsi = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+        if (ogsi != (size_t)-1)
+            data_got_addr[j] = sym_addr[ogsi];
+    }
+    uint64_t *tls_ie_tpoff = num_tls_ie ? xcalloc((size_t)num_tls_ie, sizeof(uint64_t)) : ((void*)0);
+    uint64_t *tpoff_roff = ((void*)0), *tpoff_add = ((void*)0), *tpoff_info = ((void*)0);
+    int tpoff_fill = 0;
+    if (num_tpoff_dyn > 0) {
+        tpoff_roff = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+        tpoff_add = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+        tpoff_info = xcalloc((size_t)num_tpoff_dyn, sizeof(uint64_t));
+    }
+    for (int j = 0; j < num_tls_ie; j++) {
+        size_t gsi = (size_t)tls_ie_gsi[j];
+        uint64_t S = 0;
+        if (sinfo[gsi].defined
+            && (sinfo[gsi].shndx == 5 || sinfo[gsi].shndx == 6)) {
+            S = sym_addr[gsi];
+        } else {
+            const char *nm = tls_ie_name[j] ? tls_ie_name[j] : "";
+            size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+            if (win == (size_t)-1
+                || (sinfo[win].shndx != 5
+                    && sinfo[win].shndx != 6)) {
+                tls_ie_tpoff[j] = 0;
+                if (tpoff_fill < num_tpoff_dyn) {
+                    uint32_t dyn_sym = 0;
+                    if (tls_ie_und_idx && tls_ie_und_idx[j] >= 0)
+                        dyn_sym = (uint32_t)(dyn_tls_und0 + tls_ie_und_idx[j]);
+                    tpoff_roff[tpoff_fill] = got_vaddr
+                        + (uint64_t)(3 + num_ext + num_data_ext + j) * 8;
+                    tpoff_add[tpoff_fill] = 0;
+                    tpoff_info[tpoff_fill] =
+                        ((uint64_t)dyn_sym << 32) | (uint64_t)18;
+                    tpoff_fill++;
+                }
+                continue;
+            }
+            S = sym_addr[win];
+        }
+        tls_ie_tpoff[j] = (uint64_t)((int64_t)S - (int64_t)tls_end_vaddr);
+        if (is_shared && tpoff_fill < num_tpoff_dyn) {
+            uint32_t dyn_sym = 0;
+            uint64_t addend = 0;
+            const char *nm = tls_ie_name[j];
+            if (nm) {
+                for (int e = 0; e < num_exports; e++) {
+                    if (runtime.strcmp(exports[e].name, nm) == 0) {
+                        dyn_sym = (uint32_t)(dyn_export0 + e);
+                        break;
+                    }
                 }
             }
+            if (dyn_sym == 0)
+                addend = S - tls_vaddr;
+            tpoff_roff[tpoff_fill] = got_vaddr
+                + (uint64_t)(3 + num_ext + num_data_ext + j) * 8;
+            tpoff_add[tpoff_fill] = addend;
+            tpoff_info[tpoff_fill] =
+                ((uint64_t)dyn_sym << 32) | (uint64_t)18;
+            tpoff_fill++;
         }
     }
+    uint64_t *abs64_roff = ((void*)0), *abs64_add = ((void*)0), *abs64_info = ((void*)0);
+    int abs64_fill = 0;
+    if (num_abs64_relocs > 0) {
+        abs64_roff = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+        abs64_add = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+        abs64_info = xcalloc((size_t)num_abs64_relocs, sizeof(uint64_t));
+    }
+    size_t tls_image_doff = (size_t)-1;
+    uint64_t tls_image_val = 0;
     for (size_t mi = 0; mi < n; mi++) {
         EmitModule *om = mods[mi];
         for (size_t mj = 0; mj < om->num_syms; mj++) {
@@ -1149,13 +2036,15 @@ Buffer dynamic;
                 uint64_t val = have_tls ? tdata.len : 0;
                 runtime.memcpy(data.data + doff, &val, 8);
             } else if (runtime.strcmp(nm, "__fakecc_tls_memsz") == 0) {
-                uint64_t val = have_tls ? (tdata.len + tbss_size) : 0;
+                uint64_t val = have_tls ? tls_memsize : 0;
                 runtime.memcpy(data.data + doff, &val, 8);
             } else if (runtime.strcmp(nm, "__fakecc_tls_image") == 0) {
                 uint64_t val = have_tls ? tls_vaddr : 0;
                 runtime.memcpy(data.data + doff, &val, 8);
+                tls_image_doff = doff;
+                tls_image_val = val;
             } else if (runtime.strcmp(nm, "__fakecc_tls_align") == 0) {
-                uint64_t val = 16;
+                uint64_t val = have_tls ? tls_p_align : 16;
                 runtime.memcpy(data.data + doff, &val, 8);
             }
         }
@@ -1166,7 +2055,7 @@ Buffer dynamic;
             const EmitReloc *rel = &m->relocs[r];
             size_t patch_in_text = mod_text_off[i] + rel->offset;
             uint64_t P = code_vaddr + patch_in_text;
-            if (rel->type == 9) {
+            if (reloc_is_gotpcrel(rel->type)) {
                 size_t gsi = mod_sym_base[i] + rel->sym;
                 int dgidx = reloc_data_got_idx[gsi];
                 uint64_t got_slot_vaddr = got_vaddr + (3 + num_ext + dgidx) * 8;
@@ -1174,8 +2063,83 @@ Buffer dynamic;
                 runtime.memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
+            if (rel->type == 22) {
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                int ieidx = reloc_tls_ie_idx[gsi];
+                uint64_t got_slot_vaddr = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + ieidx) * 8;
+                int32_t disp = (int32_t)(got_slot_vaddr - (P + 4));
+                runtime.memcpy(text.data + patch_in_text, &disp, 4);
+                continue;
+            }
+            if (reloc_is_tls_gd(rel->type) || reloc_is_tls_ld(rel->type)) {
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                int ieidx = reloc_tls_ie_idx[gsi];
+                uint64_t got_slot_vaddr = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + ieidx) * 8;
+                if (rel->type == 19 && patch_in_text >= 4
+                    && patch_in_text - 4 + 16 <= text.len) {
+                    size_t seq = patch_in_text - 4;
+                    static const uint8_t ie[12] = {
+                        0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+                        0x48, 0x03, 0x05
+                    };
+                    runtime.memcpy(text.data + seq, ie, 12);
+                    uint64_t Pdisp = code_vaddr + seq + 16;
+                    int32_t disp = (int32_t)(got_slot_vaddr - Pdisp);
+                    runtime.memcpy(text.data + seq + 12, &disp, 4);
+                } else if (rel->type == 20 && patch_in_text >= 3
+                           && patch_in_text - 3 + 12 <= text.len) {
+                    if (!is_shared) {
+                        static const uint8_t le[12] = {
+                            0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25,
+                            0x00, 0x00, 0x00, 0x00
+                        };
+                        runtime.memcpy(text.data + patch_in_text - 3, le, 12);
+                    } else {
+                        uint64_t pair = got_vaddr
+                            + (uint64_t)(3 + num_ext + num_data_ext
+                                         + num_tls_ie + num_ifunc) * 8;
+                        int32_t disp = (int32_t)(pair - (P + 4));
+                        runtime.memcpy(text.data + patch_in_text, &disp, 4);
+                    }
+                }
+                continue;
+            }
+            if (rel->type == 21) {
+                size_t gsi = mod_sym_base[i] + rel->sym;
+                uint64_t S = 0;
+                if (sinfo[gsi].defined
+                    && (sinfo[gsi].shndx == 5
+                        || sinfo[gsi].shndx == 6)) {
+                    S = sym_addr[gsi];
+                } else {
+                    const char *nm = m->syms[rel->sym].name
+                                     ? m->syms[rel->sym].name : "";
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win != (size_t)-1
+                        && (sinfo[win].shndx == 5
+                            || sinfo[win].shndx == 6))
+                        S = sym_addr[win];
+                    else if (sinfo[gsi].defined)
+                        S = sym_addr[gsi];
+                    else
+                        S = tls_vaddr;
+                }
+                int32_t disp = is_shared
+                    ? (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_vaddr)
+                    : (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_end_vaddr);
+                runtime.memcpy(text.data + patch_in_text, &disp, 4);
+                continue;
+            }
             if (rel->type == 23) {
                 size_t gsi = mod_sym_base[i] + rel->sym;
+                if (is_shared) {
+                    runtime.fprintf(runtime.stderr,
+                            "fakecc: R_X86_64_TPOFF32 cannot be used in a "
+                            "shared object (need Initial-Exec GOTTPOFF)\n");
+                    runtime.exit(1);
+                }
                 uint64_t S;
                 if (sinfo[gsi].defined
                     && (sinfo[gsi].shndx == 5
@@ -1184,109 +2148,204 @@ Buffer dynamic;
                 } else {
                     const char *nm = m->syms[rel->sym].name
                                      ? m->syms[rel->sym].name : "";
-                    size_t found = (size_t)-1;
-                    for (size_t mi = 0; mi < n && found == (size_t)-1; mi++) {
-                        EmitModule *om = mods[mi];
-                        for (size_t mj = 0; mj < om->num_syms; mj++) {
-                            size_t ogsi = mod_sym_base[mi] + mj;
-                            if (sinfo[ogsi].defined
-                                && sinfo[ogsi].binding == 1
-                                && (sinfo[ogsi].shndx == 5
-                                    || sinfo[ogsi].shndx == 6)
-                                && om->syms[mj].name
-                                && runtime.strcmp(om->syms[mj].name, nm) == 0) {
-                                found = sym_addr[ogsi];
-                                break;
-                            }
-                        }
-                    }
-                    if (found == (size_t)-1) {
+                    size_t win = find_export_gsi(mods, n, mod_sym_base, sinfo, nm);
+                    if (win == (size_t)-1
+                        || (sinfo[win].shndx != 5
+                            && sinfo[win].shndx != 6)) {
                         runtime.fprintf(runtime.stderr,
                                 "fakecc: undefined TLS symbol '%s' "
                                 "(Local-Exec needs the variable to be defined "
                                 "in the same link unit)\n", nm);
                         runtime.exit(1);
                     }
-                    S = found;
+                    S = sym_addr[win];
                 }
                 int32_t disp = (int32_t)((int64_t)(S + rel->addend) - (int64_t)tls_end_vaddr);
                 runtime.memcpy(text.data + patch_in_text, &disp, 4);
                 continue;
             }
-            size_t gsi = mod_sym_base[i] + rel->sym;
-            uint64_t S;
-            if (sinfo[gsi].defined) {
-                S = sym_addr[gsi];
-            } else {
-                const char *nm = m->syms[rel->sym].name
-                                 ? m->syms[rel->sym].name : "";
-                size_t global_addr = (size_t)-1;
-                for (size_t mi = 0; mi < n && global_addr == (size_t)-1; mi++) {
-                    EmitModule *om = mods[mi];
-                    for (size_t mj = 0; mj < om->num_syms; mj++) {
-                        size_t ogsi = mod_sym_base[mi] + mj;
-                        if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                            && om->syms[mj].name
-                            && runtime.strcmp(om->syms[mj].name, nm) == 0) {
-                            global_addr = sym_addr[ogsi];
-                            break;
-                        }
+            if (rel->type == 4) {
+                int skip_gd_call = 0;
+                for (size_t r2 = 0; r2 < m->num_relocs; r2++) {
+                    if (m->relocs[r2].type == 19
+                        && m->relocs[r2].offset + 8 == rel->offset) {
+                        skip_gd_call = 1;
+                        break;
+                    }
+                    if (!is_shared && m->relocs[r2].type == 20
+                        && m->relocs[r2].offset + 5 == rel->offset) {
+                        skip_gd_call = 1;
+                        break;
                     }
                 }
-                if (global_addr != (size_t)-1) {
-                    S = global_addr;
-                } else {
-                    int eidx = reloc_ext_idx[gsi];
-                    S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
-                }
+                if (skip_gd_call) continue;
             }
-            int32_t disp = (int32_t)(S + rel->addend - P);
-            runtime.memcpy(text.data + patch_in_text, &disp, 4);
+            size_t gsi = mod_sym_base[i] + rel->sym;
+            uint64_t S;
+            const char *rnm = m->syms[rel->sym].name
+                              ? m->syms[rel->sym].name : "";
+            size_t found = find_export_gsi(mods, n, mod_sym_base, sinfo, rnm);
+            int local_strong = sinfo[gsi].defined
+                && sinfo[gsi].binding == 1
+                && sinfo[gsi].shndx != 0xfff2;
+            if (local_strong) {
+                S = sym_addr[gsi];
+            } else if (found != (size_t)-1) {
+                S = sym_addr[found];
+            } else if (sinfo[gsi].defined) {
+                S = sym_addr[gsi];
+            } else if (reloc_copy_idx[gsi] >= 0) {
+                S = bss_vaddr + copy_off[reloc_copy_idx[gsi]];
+            } else {
+                int eidx = reloc_ext_idx[gsi];
+                S = code_vaddr + (eidx >= 0 ? plt_entry_off[eidx] : plt0_off);
+            }
+            {
+                int ik = -1;
+                const char *inm = rnm;
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_gsi[k] == gsi) { ik = k; break; }
+                    if (inm && ifunc_name[k] && runtime.strcmp(ifunc_name[k], inm) == 0) {
+                        ik = k; break;
+                    }
+                }
+                if (ik >= 0)
+                    S = code_vaddr + ifunc_thunk_off[ik];
+            }
+            if (rel->type == 1) {
+                uint64_t abs64 = S + (uint64_t)(int64_t)rel->addend;
+                runtime.memcpy(text.data + patch_in_text, &abs64, 8);
+            } else if (rel->type == 24) {
+                uint64_t disp64 = S + (uint64_t)(int64_t)rel->addend - P;
+                runtime.memcpy(text.data + patch_in_text, &disp64, 8);
+            } else if (rel->type == 10 || rel->type == 11) {
+                int32_t abs32 = (int32_t)(S + rel->addend);
+                runtime.memcpy(text.data + patch_in_text, &abs32, 4);
+            } else {
+                int32_t disp = (int32_t)(S + rel->addend - P);
+                runtime.memcpy(text.data + patch_in_text, &disp, 4);
+            }
         }
+    }
+    uint64_t *rel_roff = ((void*)0);
+    uint64_t *rel_add = ((void*)0);
+    int rel_fill = 0;
+    if (is_shared && num_relative > 0) {
+        rel_roff = xcalloc((size_t)num_relative, sizeof(uint64_t));
+        rel_add = xcalloc((size_t)num_relative, sizeof(uint64_t));
     }
     for (size_t i = 0; i < n; i++) {
         EmitModule *m = mods[i];
         for (size_t r = 0; r < m->num_data_relocs; r++) {
             const EmitReloc *rel = &m->data_relocs[r];
-            size_t patch_in_data = mod_data_off[i] + rel->offset;
+            int in_tdata = (rel->shndx == 5);
+            int in_rodata = (rel->shndx == 2);
+            int in_init = (rel->shndx == 7);
+            int in_fini = (rel->shndx == 8);
+            size_t patch_in_sec = (in_tdata ? mod_tdata_off[i]
+                                  : in_rodata ? mod_rodata_off[i]
+                                  : in_init ? mod_init_off[i]
+                                  : in_fini ? mod_fini_off[i]
+                                  : mod_data_off[i])
+                                  + rel->offset;
+            if (in_init && init_remap && (patch_in_sec / 8) < (initarr.len / 8))
+                patch_in_sec = init_remap[patch_in_sec / 8];
+            if (in_fini && fini_remap && (patch_in_sec / 8) < (finiarr.len / 8))
+                patch_in_sec = fini_remap[patch_in_sec / 8];
             size_t gsi = mod_sym_base[i] + rel->sym;
             uint64_t S;
-            if (sinfo[gsi].defined) {
+            int abs64 = 0;
+            int aidx = reloc_data_abs_idx[gsi];
+            const char *dnm = m->syms[rel->sym].name
+                              ? m->syms[rel->sym].name : "";
+            size_t dfound = find_export_gsi(mods, n, mod_sym_base, sinfo, dnm);
+            int local_keep = sinfo[gsi].defined
+                && sinfo[gsi].shndx != 0xfff2
+                && sinfo[gsi].binding != 2;
+            if (local_keep) {
                 S = sym_addr[gsi];
+            } else if (dfound != (size_t)-1) {
+                S = sym_addr[dfound];
+            } else if (sinfo[gsi].defined) {
+                S = sym_addr[gsi];
+            } else if (reloc_copy_idx[gsi] >= 0) {
+                S = bss_vaddr + copy_off[reloc_copy_idx[gsi]];
+            } else if (reloc_ext_idx[gsi] >= 0) {
+                S = code_vaddr + plt_entry_off[reloc_ext_idx[gsi]];
+            } else if (aidx >= 0) {
+                S = 0;
+                abs64 = 1;
             } else {
-                const char *nm = m->syms[rel->sym].name
-                                 ? m->syms[rel->sym].name : "";
-                size_t global_addr = (size_t)-1;
-                for (size_t mi = 0; mi < n && global_addr == (size_t)-1; mi++) {
-                    EmitModule *om = mods[mi];
-                    for (size_t mj = 0; mj < om->num_syms; mj++) {
-                        size_t ogsi = mod_sym_base[mi] + mj;
-                        if (sinfo[ogsi].defined && sinfo[ogsi].binding == 1
-                            && om->syms[mj].name
-                            && runtime.strcmp(om->syms[mj].name, nm) == 0) {
-                            global_addr = sym_addr[ogsi];
-                            break;
-                        }
-                    }
-                }
-                if (global_addr != (size_t)-1) {
-                    S = global_addr;
-                } else {
-                    int eidx = reloc_ext_idx[gsi];
-                    if (eidx < 0) {
-                        const char *nm = m->syms[rel->sym].name
-                                         ? m->syms[rel->sym].name : "";
-                        runtime.fprintf(runtime.stderr,
-                                "fakecc: data reloc against undefined '%s' "
-                                "has no PLT slot\n", nm);
-                        runtime.exit(1);
-                    }
-                    S = code_vaddr + plt_entry_off[eidx];
-                }
+                runtime.fprintf(runtime.stderr,
+                        "fakecc: data reloc against undefined '%s' "
+                        "has no PLT or GLOB_DAT slot\n", dnm);
+                runtime.exit(1);
             }
-            uint64_t value = S + rel->addend;
-            runtime.memcpy(data.data + patch_in_data, &value, 8);
+            {
+                int ik = -1;
+                for (int k = 0; k < num_ifunc; k++) {
+                    if (ifunc_gsi[k] == gsi) { ik = k; break; }
+                    if (dnm && ifunc_name[k] && runtime.strcmp(ifunc_name[k], dnm) == 0) {
+                        ik = k; break;
+                    }
+                }
+                if (ik >= 0)
+                    S = code_vaddr + ifunc_thunk_off[ik];
+            }
+            uint64_t A = (uint64_t)(int64_t)rel->addend;
+            uint8_t *dst;
+            size_t dst_len;
+            uint64_t P;
+            if (in_tdata) {
+                dst = (uint8_t *)tdata.data;
+                dst_len = tdata.len;
+                P = tls_vaddr + patch_in_sec;
+            } else if (in_rodata) {
+                dst = (uint8_t *)rodata.data;
+                dst_len = rodata.len;
+                P = code_vaddr + text.len + patch_in_sec;
+            } else if (in_init) {
+                dst = (uint8_t *)initarr.data;
+                dst_len = initarr.len;
+                P = initarr_vaddr + patch_in_sec;
+            } else if (in_fini) {
+                dst = (uint8_t *)finiarr.data;
+                dst_len = finiarr.len;
+                P = finiarr_vaddr + patch_in_sec;
+            } else {
+                dst = (uint8_t *)data.data;
+                dst_len = data.len;
+                P = data_vaddr + patch_in_sec;
+            }
+            uint64_t value;
+            int width = reloc_width(rel->type);
+            if (reloc_is_pc(rel->type))
+                value = S + A - P;
+            else
+                value = S + A;
+            if (patch_in_sec + (size_t)width <= dst_len)
+                runtime.memcpy(dst + patch_in_sec, &value, (size_t)width);
+            uint64_t site_va = P;
+            if (abs64 && abs64_fill < num_abs64_relocs) {
+                abs64_roff[abs64_fill] = site_va;
+                abs64_add[abs64_fill] = A;
+                abs64_info[abs64_fill] =
+                    ((uint64_t)(1 + num_ext + num_true_data_ext + aidx) << 32)
+                    | 1;
+                abs64_fill++;
+            } else if (is_shared && rel_fill < num_relative
+                       && !reloc_is_pc(rel->type) && !reloc_is_abs32(rel->type)) {
+                rel_roff[rel_fill] = site_va;
+                rel_add[rel_fill] = value;
+                rel_fill++;
+            }
         }
+    }
+    if (is_shared && tls_image_rel && tls_image_doff != (size_t)-1
+        && rel_fill < num_relative) {
+        rel_roff[rel_fill] = data_vaddr + tls_image_doff;
+        rel_add[rel_fill] = tls_image_val;
+        rel_fill++;
     }
     if (num_ext > 0) {
         for (int f = 0; f < 2; f++) {
@@ -1301,6 +2360,13 @@ Buffer dynamic;
             int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
             runtime.memcpy(text.data + plt_got_fixup[e], &disp, 4);
         }
+    }
+    for (int k = 0; k < num_ifunc; k++) {
+        uint64_t target = got_vaddr
+            + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + k) * 8;
+        uint64_t rip_next = code_vaddr + ifunc_got_fixup[k] + 4;
+        int32_t disp = (int32_t)((int64_t)target - (int64_t)rip_next);
+        runtime.memcpy(text.data + ifunc_got_fixup[k], &disp, 4);
     }
     uint64_t main_addr = 0;
     uint64_t exit_static_addr = 0;
@@ -1341,11 +2407,33 @@ Buffer dynamic;
                 acc += runtime.strlen(data_ext_list[j]) + 1;
                 k++;
             }
+            for (int a = 0; a < num_abs_ext; a++, k++) {
+                uint32_t noff = (uint32_t)acc;
+                runtime.memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                acc += runtime.strlen(abs_ext_list[a]) + 1;
+            }
+            for (int t = 0; t < num_tls_und; t++, k++) {
+                uint32_t noff = (uint32_t)acc;
+                runtime.memcpy(dynsym.data + 24 + (size_t)k * 24, &noff, 4);
+                acc += runtime.strlen(tls_und_list[t]) + 1;
+            }
+            for (int c = 0; c < num_copy; c++, k++) {
+                uint32_t noff = (uint32_t)acc;
+                size_t ent = 24 + (size_t)k * 24;
+                runtime.memcpy(dynsym.data + ent, &noff, 4);
+                uint64_t val = bss_vaddr + copy_off[c];
+                runtime.memcpy(dynsym.data + ent + 8, &val, 8);
+                acc += runtime.strlen(copy_list[c]) + 1;
+            }
             for (int e = 0; e < num_exports; e++, k++) {
                 uint32_t noff = (uint32_t)acc;
                 size_t ent = 24 + (size_t)k * 24;
                 runtime.memcpy(dynsym.data + ent, &noff, 4);
                 uint64_t val = sym_addr[exports[e].gsi];
+                if (exports[e].type == 6
+                    || exports[e].shndx == 5
+                    || exports[e].shndx == 6)
+                    val = val - tls_vaddr;
                 runtime.memcpy(dynsym.data + ent + 8, &val, 8);
                 acc += runtime.strlen(exports[e].name) + 1;
             }
@@ -1362,15 +2450,65 @@ Buffer dynamic;
                 runtime.memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
                 rdj++;
             }
-            if (num_relative > 0) {
+            for (int a = 0; a < abs64_fill; a++, rdj++) {
+                size_t ent = (size_t)rdj * 24;
+                runtime.memcpy(rela_dyn.data + ent, &abs64_roff[a], 8);
+                runtime.memcpy(rela_dyn.data + ent + 8, &abs64_info[a], 8);
+                runtime.memcpy(rela_dyn.data + ent + 16, &abs64_add[a], 8);
+            }
+            if (num_relative > 0 && rel_roff) {
+                for (int j = 0; j < num_data_ext; j++) {
+                    if (data_got_external[j]) continue;
+                    if (rel_fill < num_relative) {
+                        rel_roff[rel_fill] = got_vaddr + (3 + num_ext + j) * 8;
+                        rel_add[rel_fill] = data_got_addr[j];
+                        rel_fill++;
+                    }
+                }
                 uint64_t dyn_vaddr = is_shared
                     ? (data_vaddr + dynamic_data_off)
                     : (base + hdr_size + start_size + text.len + rodata.len + interp_len
                        + dynstr.len + dynsym.len + hash.len + rela_plt.len + rela_dyn.len);
-                uint64_t roff = got_vaddr;
+                if (rel_fill < num_relative) {
+                    rel_roff[rel_fill] = got_vaddr;
+                    rel_add[rel_fill] = dyn_vaddr;
+                    rel_fill++;
+                }
+                for (int r = 0; r < rel_fill; r++) {
+                    size_t ent = (size_t)(rdj + r) * 24;
+                    runtime.memcpy(rela_dyn.data + ent, &rel_roff[r], 8);
+                    runtime.memcpy(rela_dyn.data + ent + 16, &rel_add[r], 8);
+                }
+                for (int r = rel_fill; r < num_relative; r++) {
+                    size_t ent = (size_t)(rdj + r) * 24;
+                    uint64_t none = 0;
+                    runtime.memcpy(rela_dyn.data + ent + 8, &none, 8);
+                }
+                rdj += num_relative;
+            }
+            for (int t = 0; t < tpoff_fill; t++, rdj++) {
                 size_t ent = (size_t)rdj * 24;
+                runtime.memcpy(rela_dyn.data + ent, &tpoff_roff[t], 8);
+                runtime.memcpy(rela_dyn.data + ent + 8, &tpoff_info[t], 8);
+                runtime.memcpy(rela_dyn.data + ent + 16, &tpoff_add[t], 8);
+            }
+            for (int c = 0; c < num_copy; c++, rdj++) {
+                uint64_t roff = bss_vaddr + copy_off[c];
+                runtime.memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
+            }
+            for (int k = 0; k < num_ifunc; k++, rdj++) {
+                size_t ent = (size_t)rdj * 24;
+                uint64_t roff = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + k) * 8;
+                uint64_t add = sym_addr[ifunc_gsi[k]];
                 runtime.memcpy(rela_dyn.data + ent, &roff, 8);
-                runtime.memcpy(rela_dyn.data + ent + 16, &dyn_vaddr, 8);
+                runtime.memcpy(rela_dyn.data + ent + 16, &add, 8);
+            }
+            if (tlsld_got_pair) {
+                uint64_t roff = got_vaddr
+                    + (uint64_t)(3 + num_ext + num_data_ext + num_tls_ie + num_ifunc) * 8;
+                runtime.memcpy(rela_dyn.data + (size_t)rdj * 24, &roff, 8);
+                rdj++;
             }
         }
         size_t rx_base_vaddr = base + hdr_size;
@@ -1416,6 +2554,22 @@ Buffer dynamic;
             buf_u64(&dynamic, 8); buf_u64(&dynamic, rela_dyn.len);
             buf_u64(&dynamic, 9); buf_u64(&dynamic, 24);
         }
+        if (is_shared && num_tls_ie > 0) {
+            buf_u64(&dynamic, 30);
+            buf_u64(&dynamic, 0x10);
+        }
+        if (initarr.len > 0) {
+            buf_u64(&dynamic, 25);
+            buf_u64(&dynamic, initarr_vaddr);
+            buf_u64(&dynamic, 27);
+            buf_u64(&dynamic, initarr.len);
+        }
+        if (finiarr.len > 0) {
+            buf_u64(&dynamic, 26);
+            buf_u64(&dynamic, finiarr_vaddr);
+            buf_u64(&dynamic, 28);
+            buf_u64(&dynamic, finiarr.len);
+        }
         buf_u64(&dynamic, 0); buf_u64(&dynamic, 0);
         Buffer rx;
         buffer_init(&rx);
@@ -1425,8 +2579,17 @@ Buffer dynamic;
                 exit_call = code_vaddr + plt_entry_off[exit_ext_idx];
             else if (exit_static_addr)
                 exit_call = exit_static_addr;
-            gen_start(&rx, base + start_offset, main_addr, exit_call,
-                      init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
+            StartInfo sti;
+            runtime.memset(&sti, 0, sizeof(sti));
+            sti.call_vaddr = base + start_offset;
+            sti.main_vaddr = main_addr;
+            sti.exit_plt_vaddr = exit_call;
+            sti.have_tls = init_tls_in_start;
+            sti.tls_vaddr = tls_vaddr;
+            sti.tcb_vaddr = tcb_vaddr;
+            sti.tls_memsize = tls_memsize;
+            sti.tdata_len = tdata.len;
+            gen_start(&rx, &sti);
         }
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
@@ -1450,13 +2613,21 @@ Buffer dynamic;
             buf_u64(&got, code_vaddr + plt_entry_off[i] + 6);
         for (int j = 0; j < num_data_ext; j++)
             buf_u64(&got, data_got_external[j] ? 0 : data_got_addr[j]);
+        for (int j = 0; j < num_tls_ie; j++)
+            buf_u64(&got, is_shared ? 0 : tls_ie_tpoff[j]);
+        for (int k = 0; k < num_ifunc; k++)
+            buf_u64(&got, 0);
+        if (tlsld_got_pair) {
+            buf_u64(&got, 0);
+            buf_u64(&got, 0);
+        }
         Buffer elf;
         buffer_init(&elf);
         uint16_t phnum;
         if (is_shared)
-            phnum = have_tls ? 4 : 3;
-        else
             phnum = have_tls ? 5 : 4;
+        else
+            phnum = have_tls ? 6 : 5;
         write_ehdr(&elf, is_shared ? 3 : 2, entry, 64, phnum);
         write_phdr(&elf, 1, 4 | 1, 0, base, rx_filesz, rx_filesz, 0x1000);
         write_phdr(&elf, 1, 4 | 2, data_file_offset, data_vaddr,
@@ -1470,8 +2641,9 @@ Buffer dynamic;
                    dynamic.len, dynamic.len, 8);
         if (have_tls) {
             write_phdr(&elf, 7, 4, tls_file_offset_base, tls_vaddr,
-                       tls_filesize, tls_memsize, 8);
+                       tls_filesize, tls_memsize, tls_p_align);
         }
+        write_phdr(&elf, 0x6474e551, 4 | 2, 0, 0, 0, 0, 16);
         buf_bytes(&elf, rx.data, rx.len);
         while (elf.len < data_file_offset) buf_u8(&elf, 0);
         buf_bytes(&elf, data.data, data.len);
@@ -1485,7 +2657,16 @@ Buffer dynamic;
             while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
             buf_bytes(&elf, tdata.data, tdata.len);
         }
+        if (initarr.len > 0) {
+            while (elf.len < initarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, initarr.data, initarr.len);
+        }
+        if (finiarr.len > 0) {
+            while (elf.len < finiarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, finiarr.data, finiarr.len);
+        }
         SectionLayout lay;
+        runtime.memset(&lay, 0, sizeof(lay));
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
         lay.bss_vaddr = bss_vaddr;
@@ -1503,6 +2684,14 @@ Buffer dynamic;
         lay.tls_file_offset = tls_file_offset_base;
         lay.tls_filesize = tls_filesize;
         lay.tls_memsize = tls_memsize;
+        lay.have_initarr = initarr.len > 0;
+        lay.initarr_vaddr = initarr_vaddr;
+        lay.initarr_file_offset = initarr_file_offset;
+        lay.initarr_size = initarr.len;
+        lay.have_finiarr = finiarr.len > 0;
+        lay.finiarr_vaddr = finiarr_vaddr;
+        lay.finiarr_file_offset = finiarr_file_offset;
+        lay.finiarr_size = finiarr.len;
         lay.have_dynamic = 1;
         lay.dynstr_off = hdr_size + dynstr_off;
         lay.dynsym_off = hdr_size + dynsym_off;
@@ -1534,26 +2723,49 @@ Buffer dynamic;
         uint64_t entry = base + start_offset;
         Buffer rx;
         buffer_init(&rx);
-        gen_start(&rx, base + start_offset, main_addr, exit_static_addr,
-                  init_tls_in_start, tls_vaddr, tcb_vaddr, tls_memsize, tdata.len);
+        StartInfo sti;
+        runtime.memset(&sti, 0, sizeof(sti));
+        sti.call_vaddr = base + start_offset;
+        sti.main_vaddr = main_addr;
+        sti.exit_plt_vaddr = exit_static_addr;
+        sti.have_tls = init_tls_in_start;
+        sti.tls_vaddr = tls_vaddr;
+        sti.tcb_vaddr = tcb_vaddr;
+        sti.tls_memsize = tls_memsize;
+        sti.tdata_len = tdata.len;
+        sti.init_start = run_ctors ? initarr_vaddr : 0;
+        sti.init_count = run_ctors ? (uint64_t)(initarr.len / 8) : 0;
+        sti.fini_start = run_dtors ? finiarr_vaddr : 0;
+        sti.fini_count = run_dtors ? (uint64_t)(finiarr.len / 8) : 0;
+        sti.irel_got = run_irel
+            ? (got_vaddr + (uint64_t)(3 + num_data_ext + num_tls_ie) * 8) : 0;
+        sti.irel_count = run_irel ? (uint64_t)num_ifunc : 0;
+        gen_start(&rx, &sti);
         buf_bytes(&rx, text.data, text.len);
         buf_bytes(&rx, rodata.data, rodata.len);
         size_t got_bytes = 0;
         Buffer got;
         buffer_init(&got);
-        if (num_data_ext > 0) {
-            got_bytes = (size_t)(3 + num_data_ext) * 8;
+        if (num_data_ext > 0 || num_tls_ie > 0 || num_ifunc > 0) {
+            got_bytes = (size_t)(3 + num_data_ext + num_tls_ie + num_ifunc) * 8;
             buf_u64(&got, 0);
             buf_u64(&got, 0);
             buf_u64(&got, 0);
             for (int j = 0; j < num_data_ext; j++)
                 buf_u64(&got, data_got_addr[j]);
+            for (int j = 0; j < num_tls_ie; j++)
+                buf_u64(&got, tls_ie_tpoff[j]);
+            for (int k = 0; k < num_ifunc; k++)
+                buf_u64(&got, sym_addr[ifunc_gsi[k]]);
         }
         Buffer elf;
         buffer_init(&elf);
-        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0 || (have_tls && tdata.len > 0));
+        int has_rw = (data.len > 0 || bss_size > 0 || got_bytes > 0
+                      || (have_tls && tdata.len > 0) || initarr.len > 0
+                      || finiarr.len > 0);
         uint16_t phnum = has_rw ? 2 : 1;
         if (have_tls) phnum++;
+        phnum++;
         write_ehdr(&elf, 2, entry, 64, phnum);
         write_phdr(&elf, 1, 4 | 1, 0, base,
                    rx_filesz, rx_filesz, 0x1000);
@@ -1563,8 +2775,9 @@ Buffer dynamic;
         }
         if (have_tls) {
             write_phdr(&elf, 7, 4, tls_file_offset_base, tls_vaddr,
-                       tls_filesize, tls_memsize, 8);
+                       tls_filesize, tls_memsize, tls_p_align);
         }
+        write_phdr(&elf, 0x6474e551, 4 | 2, 0, 0, 0, 0, 16);
         while (elf.len < hdr_size)
             buf_u8(&elf, 0);
         buf_bytes(&elf, rx.data, rx.len);
@@ -1579,7 +2792,16 @@ Buffer dynamic;
             while (elf.len < tls_file_offset_base) buf_u8(&elf, 0);
             buf_bytes(&elf, tdata.data, tdata.len);
         }
+        if (initarr.len > 0) {
+            while (elf.len < initarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, initarr.data, initarr.len);
+        }
+        if (finiarr.len > 0) {
+            while (elf.len < finiarr_file_offset) buf_u8(&elf, 0);
+            buf_bytes(&elf, finiarr.data, finiarr.len);
+        }
         SectionLayout lay;
+        runtime.memset(&lay, 0, sizeof(lay));
         lay.code_vaddr = code_vaddr;
         lay.data_vaddr = data_vaddr;
         lay.bss_vaddr = bss_vaddr;
@@ -1597,6 +2819,14 @@ Buffer dynamic;
         lay.tls_file_offset = tls_file_offset_base;
         lay.tls_filesize = tls_filesize;
         lay.tls_memsize = tls_memsize;
+        lay.have_initarr = initarr.len > 0;
+        lay.initarr_vaddr = initarr_vaddr;
+        lay.initarr_file_offset = initarr_file_offset;
+        lay.initarr_size = initarr.len;
+        lay.have_finiarr = finiarr.len > 0;
+        lay.finiarr_vaddr = finiarr_vaddr;
+        lay.finiarr_file_offset = finiarr_file_offset;
+        lay.finiarr_size = finiarr.len;
         lay.have_dynamic = 0;
         finalize_sections(&elf, mods, n, mod_text_off, mod_sym_base, sym_addr,
                           &lay, entry, want_debug);
@@ -1620,10 +2850,29 @@ Buffer dynamic;
     runtime.free(exports);
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
     buffer_free(&tdata);
+    buffer_free(&initarr);
+    buffer_free(&finiarr);
+    runtime.free(concat_init_prio); runtime.free(concat_fini_prio);
+    runtime.free(init_remap); runtime.free(fini_remap);
     runtime.free(mod_text_off); runtime.free(mod_rodata_off); runtime.free(mod_data_off); runtime.free(mod_bss_off);
-    runtime.free(mod_tdata_off); runtime.free(mod_tbss_off);
+    runtime.free(mod_tdata_off); runtime.free(mod_tbss_off); runtime.free(mod_init_off); runtime.free(mod_fini_off);
     runtime.free(mod_sym_base); runtime.free(sym_addr); runtime.free(sinfo); runtime.free(reloc_ext_idx);
-    runtime.free(reloc_data_got_idx);
+    runtime.free(commons);
+    runtime.free(reloc_data_abs_idx); runtime.free(reloc_data_got_idx);
+    runtime.free(reloc_tls_ie_idx); runtime.free(tls_ie_gsi); runtime.free(tls_ie_name); runtime.free(tls_ie_tpoff);
+    runtime.free(tls_ie_is_undef); runtime.free(tls_ie_und_idx);
+    for (int t = 0; t < num_tls_und; t++) runtime.free(tls_und_list[t]);
+    runtime.free(tls_und_list);
+    runtime.free(tls_und_weak);
+    runtime.free(ifunc_gsi); runtime.free(ifunc_name); runtime.free(ifunc_thunk_off); runtime.free(ifunc_got_fixup);
+    runtime.free(reloc_copy_idx); runtime.free(copy_size); runtime.free(copy_off);
+    for (int c = 0; c < num_copy; c++) runtime.free(copy_list[c]);
+    runtime.free(copy_list);
+    for (int a = 0; a < num_abs_ext; a++) runtime.free(abs_ext_list[a]);
+    runtime.free(abs_ext_list);
     runtime.free(plt_entry_off); runtime.free(plt_got_fixup);
     runtime.free(data_got_addr); runtime.free(data_got_external);
+    runtime.free(rel_roff); runtime.free(rel_add);
+    runtime.free(tpoff_roff); runtime.free(tpoff_add); runtime.free(tpoff_info);
+    runtime.free(abs64_roff); runtime.free(abs64_add); runtime.free(abs64_info);
 }
