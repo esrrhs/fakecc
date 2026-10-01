@@ -1844,22 +1844,34 @@ static Type check_expr_inner(Expr *e) {
                 return type_clone(e->type);
             }
             if (sig) {
+                /* Snapshot the signature before checking arguments: a nested
+                 * package-qualified call inside an argument expression can
+                 * lazily grow (realloc) the function table via
+                 * ftab_push_export(), which would otherwise leave `sig`
+                 * dangling. param_types is a separately heap-allocated array
+                 * and ret_type's nested Type pointers are owned elsewhere, so
+                 * these shallow copies stay valid across the realloc. */
+                int sig_arity = sig->arity;
+                int sig_variadic = sig->is_variadic;
+                int sig_unprototyped = sig->is_unprototyped;
+                Type *sig_param_types = sig->param_types;
+                Type sig_ret = sig->ret_type;
                 type_free(&callee_ty);
                 check_call_arity(e->loc, e->u.call.callee->u.var.name,
-                                 sig->arity, sig->is_variadic,
+                                 sig_arity, sig_variadic,
                                  e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if ((int)i < sig->arity && !sig->is_unprototyped)
+                    if ((int)i < sig_arity && !sig_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
-                                            &sig->param_types[i]);
-                    else if (sig->is_variadic)
+                                            &sig_param_types[i]);
+                    else if (sig_variadic)
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
-                    else if (sig->is_unprototyped)
+                    else if (sig_unprototyped)
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
-                set_type(e, type_clone(sig->ret_type));
+                set_type(e, type_clone(sig_ret));
                 return type_clone(e->type);
             }
             /* Not in function table — check the symbol table for an extern

@@ -5141,7 +5141,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     char *node_xmm = xmalloc((size_t)(nn > 0 ? nn : 1));
                     int *node_val  = xmalloc((size_t)(nn > 0 ? nn : 1) * sizeof(int));
                     /* home: >=0 register, -1 spilled (reload into target),
-                     * -2 pushed by cycle break (pop into target), -3 done. */
+                     * -2 pushed by cycle break (pop into target), -3 done.
+                     * The allocator marks spills with a negative color (-2,
+                     * not just REG_NONE), so normalize anything <0 to -1. */
                     int *node_home = xmalloc((size_t)(nn > 0 ? nn : 1) * sizeof(int));
                     int n = 0;
                     for (int k = 0; k < nargs; k++) {
@@ -5149,12 +5151,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         node_tgt[n] = target_reg[k];
                         node_xmm[n] = (char)target_is_xmm[k];
                         node_val[n] = inst->call_args[k];
-                        if (target_is_xmm[k])
-                            node_home[n] = (ra_xmm && inst->call_args[k] >= 0
-                                            && inst->call_args[k] < ra_xmm->num_values)
-                                           ? ra_xmm->reg[inst->call_args[k]] : -1;
-                        else
+                        if (target_is_xmm[k]) {
+                            int h = (ra_xmm && inst->call_args[k] >= 0
+                                     && inst->call_args[k] < ra_xmm->num_values)
+                                    ? ra_xmm->reg[inst->call_args[k]] : -1;
+                            node_home[n] = (h >= 0 && h < 16) ? h : -1;
+                        } else {
                             node_home[n] = gp_home(ra, inst->call_args[k]);
+                        }
                         n++;
                     }
                     if (has_callee) {
