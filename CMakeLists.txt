@@ -15,7 +15,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 add_compile_options(-Wall -Wextra -Werror -Wno-unused-parameter)
 if(APPLE)
-    add_compile_definitions(SYS_getdents64=0 _DARWIN_C_SOURCE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
     add_compile_options(-Wno-deprecated-declarations)
 endif()
 

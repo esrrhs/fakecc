@@ -8,9 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Directory listing: Stage0 (gcc) uses libc open/getdents; the self-hosted
- * dialect has no libc, so translate.py defines FAKECC_SELFHOST and we go
- * through __syscall. */
+/* Directory listing: Stage0 (gcc/clang) uses portable libc <dirent.h>;
+ * the self-hosted dialect has no libc, so translate.py defines
+ * FAKECC_SELFHOST and we go through raw Linux __syscall. */
 #ifdef FAKECC_SELFHOST
 #define PKG_O_RDONLY    0
 #define PKG_O_DIRECTORY 65536
@@ -21,23 +21,6 @@ static long pkg_close(long fd) { return __syscall(3, fd); }
 static long pkg_getdents(long fd, void *buf, long n) {
     return __syscall(217, fd, (long)buf, n);
 }
-#else
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/syscall.h>
-#ifndef O_DIRECTORY
-#define O_DIRECTORY 65536
-#endif
-#define PKG_O_RDONLY    O_RDONLY
-#define PKG_O_DIRECTORY O_DIRECTORY
-static long pkg_open(const char *path, long flags) {
-    return (long)open(path, (int)flags);
-}
-static long pkg_close(long fd) { return (long)close((int)fd); }
-static long pkg_getdents(long fd, void *buf, long n) {
-    return syscall(SYS_getdents64, (int)fd, buf, (unsigned long)n);
-}
-#endif
 
 /* Linux dirent64 layout (getdents64). d_name is a flexible trailing field;
  * we declare [1] so both gcc and the FakeCC dialect accept the type. */
@@ -48,6 +31,9 @@ struct pkg_dirent64 {
     unsigned char d_type;
     char d_name[1];
 };
+#else
+#include <dirent.h>
+#endif
 /* ------------------------------------------------------------------ */
 /* Context lifetime                                                    */
 /* ------------------------------------------------------------------ */
@@ -245,12 +231,20 @@ static int ends_with_c(const char *name) {
 }
 
 static int is_dir(const char *path) {
+#ifdef FAKECC_SELFHOST
     long fd = pkg_open(path, PKG_O_RDONLY | PKG_O_DIRECTORY);
     if (fd < 0) return 0;
     pkg_close(fd);
     return 1;
+#else
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    closedir(d);
+    return 1;
+#endif
 }
 
+#ifdef FAKECC_SELFHOST
 /* True if dir contains at least one *.c file. */
 static int dir_has_c(const char *dir) {
     long fd = pkg_open(dir, PKG_O_RDONLY | PKG_O_DIRECTORY);
@@ -271,6 +265,20 @@ static int dir_has_c(const char *dir) {
     pkg_close(fd);
     return found;
 }
+#else
+/* True if dir contains at least one *.c file. */
+static int dir_has_c(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int found = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (ends_with_c(e->d_name)) { found = 1; break; }
+    }
+    closedir(d);
+    return found;
+}
+#endif
 
 /* Find <search>/name/ that contains at least one .c file. Caller frees. */
 static char *find_pkg_dir(PkgContext *ctx, const char *name) {
@@ -312,13 +320,14 @@ static void pkgs_push(PkgContext *ctx, Package *p) {
 
 /* Collect *.c basenames in dir, sorted. Caller frees names and the array. */
 static char **list_c_files(const char *dir, size_t *nout) {
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+#ifdef FAKECC_SELFHOST
     long fd = pkg_open(dir, PKG_O_RDONLY | PKG_O_DIRECTORY);
     if (fd < 0) {
         fprintf(stderr, "fakecc: cannot open package directory '%s'\n", dir);
         exit(1);
     }
-    char **names = NULL;
-    size_t n = 0, cap = 0;
     char buf[2048];
     for (;;) {
         long nread = pkg_getdents(fd, buf, (long)sizeof buf);
@@ -337,6 +346,24 @@ static char **list_c_files(const char *dir, size_t *nout) {
         }
     }
     pkg_close(fd);
+#else
+    DIR *d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "fakecc: cannot open package directory '%s'\n", dir);
+        exit(1);
+    }
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (ends_with_c(e->d_name)) {
+            if (n >= cap) {
+                cap = cap ? cap * 2 : 4;
+                names = xrealloc(names, cap * sizeof(char *));
+            }
+            names[n++] = xstrdup(e->d_name);
+        }
+    }
+    closedir(d);
+#endif
     /* Insertion sort — packages are tiny. */
     for (size_t i = 1; i < n; i++) {
         char *key = names[i];
