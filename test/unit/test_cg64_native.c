@@ -26,7 +26,10 @@
 
 #if defined(__APPLE__) && defined(__aarch64__)
 
-static int compile_and_run(const char *source) {
+/* Compile and run.  extra_argv are appended after the program name;
+ * when out != NULL child stdout is piped into out[0..outcap-1]. */
+static int compile_and_run_ex(const char *source, char *const extra_argv[],
+                              char *out, size_t outcap) {
     TokenArray tokens;
     token_array_init(&tokens);
     if (lex(source, "<case>", &tokens) != FAKECC_OK) return -1001;
@@ -51,15 +54,46 @@ static int compile_and_run(const char *source) {
     token_array_free(&tokens);
     if (macho_codesign(path) != 0) return -1006;
 
+    int pipefd[2] = {-1, -1};
+    if (out && pipe(pipefd) != 0) return -1009;
+
     pid_t pid = fork();
     if (pid < 0) return -1007;
     if (pid == 0) {
-        execl(path, path, (char *)NULL);
+        if (out) {
+            dup2(pipefd[1], 1);
+            close(pipefd[0]); close(pipefd[1]);
+        }
+        /* Build argv: program name then extras (NULL terminated). */
+        int n = 0;
+        while (extra_argv && extra_argv[n]) n++;
+        char **av = malloc((size_t)(n + 2) * sizeof(char *));
+        av[0] = (char *)path;
+        for (int i = 0; i < n; i++) av[i + 1] = extra_argv[i];
+        av[n + 1] = NULL;
+        execv(path, av);
         _exit(127);
+    }
+    if (out) {
+        close(pipefd[1]);
+        size_t total = 0;
+        for (;;) {
+            ssize_t r = read(pipefd[0], out + total,
+                             outcap - 1 - total < 4096 ? outcap - 1 - total : 4096);
+            if (r <= 0) break;
+            total += (size_t)r;
+            if (total >= outcap - 1) break;
+        }
+        out[total] = 0;
+        close(pipefd[0]);
     }
     int st;
     waitpid(pid, &st, 0);
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1008;
+}
+
+static int compile_and_run(const char *source) {
+    return compile_and_run_ex(source, NULL, NULL, 0);
 }
 
 static void expect(const char *name, const char *src, int want) {
@@ -186,6 +220,103 @@ static void test_deep_calls(void) {
         (11 * 28) % 256);
 }
 
+/* T7: process entry ABI — argc/argv/envp handed through the stub. */
+static void test_entry_abi(void) {
+    const char *src =
+        "package main;\n"
+        "int main(int argc, char **argv) {\n"
+        " if (argc != 3) return 1;\n"
+        " if (argv[1][0]!='a'||argv[1][1]!='b'||argv[1][2]!=0) return 2;\n"
+        " if (argv[2][0]!='z'||argv[2][1]!=0) return 3;\n"
+        " return 0; }\n";
+    char *av[] = { "ab", "z", NULL };
+    T_ASSERT_EQ_INT(compile_and_run_ex(src, av, NULL, 0), 0);
+
+    /* TR-7.2: envp is walkable; locate PATH and write its value to stdout
+     * via the raw Darwin write syscall (freestanding, no libc yet). */
+    const char *env_src =
+        "package main;\n"
+        "int main(int argc, char **argv, char **envp) {\n"
+        " int i = 0;\n"
+        " while (envp[i]) {\n"
+        "  char *e = envp[i];\n"
+        "  if (e[0]=='P'&&e[1]=='A'&&e[2]=='T'&&e[3]=='H'&&e[4]=='=') {\n"
+        "   char *v = e+5; int len=0; while (v[len]) len++;\n"
+        "   __syscall(4, 1, v, len);\n"
+        "   return 0; }\n"
+        "  i++; }\n"
+        " return 5; }\n";
+    char out[4096];
+    int rc = compile_and_run_ex(env_src, NULL, out, sizeof out);
+    T_ASSERT_EQ_INT(rc, 0);
+    const char *path = getenv("PATH");
+    if (!path) path = "";
+    if (strcmp(out, path) != 0) {
+        fprintf(stderr, "  envp PATH mismatch: got '%s' want '%s'\n", out, path);
+        T_ASSERT_EQ_INT(1, 0);
+    }
+    T_ASSERT(strlen(out) > 0);
+}
+
+/* T7: constructors/destructors run from the entry stub, ordered by
+ * priority.  Observed through raw exit syscalls (globals arrive in T8). */
+static void test_ctor_dtor(void) {
+    expect("ctor_priority_order",
+        "package main;\n"
+        "__attribute__((constructor(200))) void late(void){ __syscall(1,21); }\n"
+        "__attribute__((constructor(100))) void early(void){ __syscall(1,11); }\n"
+        "int main(){ return 0; }", 11);
+    expect("ctor_default_prio",
+        "package main;\n"
+        "__attribute__((constructor)) void c(void){ __syscall(1,77); }\n"
+        "int main(){ return 0; }", 77);
+    /* Destructors walk the priority list backwards (highest first), and
+     * run AFTER main (main's own return 9 must not be observed). */
+    expect("dtor_reverse_order",
+        "package main;\n"
+        "__attribute__((destructor(100))) void a(void){ __syscall(1,31); }\n"
+        "__attribute__((destructor(200))) void b(void){ __syscall(1,32); }\n"
+        "int main(){ return 9; }", 32);
+    expect("no_ctor_main_runs",
+        "package main;\nint main(){ return 42; }", 42);
+}
+
+/* T7: mixed-width parameters beyond x0..x7 travel on the stack under
+ * the AAPCS sign/zero-extension rules. */
+static void test_mixed_width_stack(void) {
+    expect("signed_narrow_stack",
+        "package main;\n"
+        "long f(long a,long b,long c,long d,long e,long g,long h,long i,\n"
+        "       char j, short k, int l, long m){\n"
+        " return a+b+c+d+e+g+h+i+j+k+l+m; }\n"
+        "int main(){ return (int)(f(1,2,3,4,5,6,7,8,-9,-10,-11,-12)%256); }",
+        250);
+    expect("unsigned_narrow_stack",
+        "package main;\n"
+        "long f(long a,long b,long c,long d,long e,long g,long h,long i,\n"
+        "       unsigned char j, unsigned short k, unsigned int l,\n"
+        "       unsigned long m) {\n"
+        " return a+b+c+d+e+g+h+i+j+k+l+m; }\n"
+        "int main(){ return (int)(f(1,2,3,4,5,6,7,8,9,10,11,12)%256); }",
+        (int)((36 + 42) % 256));
+    expect("all_mixed_12",
+        "package main;\n"
+        "long f(char a, short b, int c, long d, unsigned char e,\n"
+        "       unsigned short g, unsigned int h, unsigned long i,\n"
+        "       char j, short k, int l, long m){\n"
+        " return a+b+c+d+e+g+h+i+j+k+l+m; }\n"
+        "int main(){ return (int)(f(-1,-2,-3,-4,5,6,7,8,-9,-10,-11,-12)%256); }",
+        230);
+}
+
+/* T7: deep recursion stress (many frames + callee-saved pressure). */
+static void test_recursion_deep(void) {
+    expect("deep_recursion",
+        "package main;\n"
+        "int rec(int n){ return n ? 1 + rec(n-1) : 0; }\n"
+        "int main(){ int v = rec(10000); return v==10000 ? 0 : 1; }", 0);
+}
+
 int main(void) {
     target_set_current(target_arm64_macos());
     test_divmod_edgecases();
@@ -193,6 +324,10 @@ int main(void) {
     test_switch_shapes();
     test_trunc_ext();
     test_deep_calls();
+    test_entry_abi();
+    test_ctor_dtor();
+    test_mixed_width_stack();
+    test_recursion_deep();
     return t_finalize();
 }
 

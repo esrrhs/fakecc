@@ -117,13 +117,19 @@
   - `rule` TR-6.2: 新增 arm64 codegen 单元测试覆盖除模（含 INT_MIN/-1、除零边界用例行为对齐）、移位 ≥位宽、switch 稀疏/密集两类（证据：单测）。
 
 ## Task 7: 函数调用 ABI 与进程入口
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: T6
+- **Completion Evidence**（2026-10-02）:
+  - 入口 stub 重写（[src/cg64.c](file:///Users/mingming/project/fakecc/src/cg64.c) codegen64）：48 字节帧（x29/x30 + x19..x22 保存），dyld 给的 x0=argc/x1=argv/x2=envp 先移入 x19/x20/x21 保存 → 按优先级升序 BL 构造函数（稳定插入排序，默认 65535，与 link.c sort_array_slots 一致）→ 恢复 x0/x1/x2 后 BL main → w22 保存 main 返回值 → 析构按优先级**逆序** BL（对齐 ELF _start 的 fini 反向遍历）→ x0=main 值，Darwin exit(x16=1; svc #0x80)。单模块阶段构造/析构用直接 BL（T14/T15 多模块时改为合并指针表）。**踩坑**：stub 里曾用 `a64_mov_reg(x29, sp)`，ORR 编码把寄存器号 31 解释成 XZR（x29 被置 0，后续 [x29+16] 保存直接段错误）；必须用 ADD 形式（mov_sp_like）。
+  - `__syscall` 内建最小切片从 T13 前移（emit_syscall）：x16=号、call_args[1..6]→x0..x5（x17 做换环 scratch 的周期安全搬移，号最后入 x16）、svc #0x80、x0 返回。**踩坑 2**：__syscall 分流必须在 emit_call 通用参数搬移**之前**——否则通用块先把参数写进 x0..x7，覆盖 syscall 降级要重读的源 home（实测 write 的 buf 值 home=x3，被写成常数 3 后 x1=x3 传了错指针，稳定返回 EFAULT 14）。errno/carry 约定留 T13。
+  - TR-7.1（pass，全部本机真机）：test_cg64_native 29/29，新增——argc/argv 经 stub 传参（带 2 个自定义参数 execv 校验）、构造函数优先级顺序（100 先于 200，用 exit(11)/exit(21) 观测）、默认优先级 ctor、析构逆序且在 main 之后（main 返回 9 不可见，dtor(200) exit 32）、无 ctor 时 main 正常（42）、signed/unsigned/混合窄类型 12 参栈传（250/78/230）、函数指针表+间接调用（T6 已有）、10000 层深递归。-O1 档下 ctor 顺序与 argc/argv 同样正确（mem2reg 路径整体仍归 T9）。
+  - TR-7.2（pass，超出要求）：main(int,char**,char**) 遍历 envp 找到 PATH=，用原始 write(4) 系统调用把值写到 stdout，测试进程通过管道捕获并与 `getenv("PATH")` **逐字节相等**（非空），不依赖任何 libc/runtime。
+  - BL 26 位越界：单模块单 TU 远小于 ±128MB；超出时 a64_resolve 已有明确诊断（"fakecc: a64 b/bl out of range" → codegen64 die，绝不出错码）。自动 veneer/trampoline 推迟到 T14（多模块链接会重新设计跨对象调用）。IR 无独立尾调用算子（尾调用即普通 call），深递归行为与 x86 一致（10000 层实测）。
+  - 回归：ctest 单元 24/26（唯二仍是 test_emit/test_link 的 5 个 macOS 执行 x86 ELF 环境断言）；零编译警告；x86 r42.o/hello4 对 T1 基线仍逐字节一致（仅动 arm64 路径）。
 - **Description**:
-  - bl 调用 + 26 位越界长尾（veneer/trampoline 或寄存器间接）；x0-x7 参数编排、第 9+ 参数栈传递（16B 对齐槽）、x0/x1 返回；callee-saved（x19-x28、v8-v15 低部）在被使用函数 prologue 保存；调用点 SP 对齐保证。
-  - LC_MAIN 入口 stub：x0=argc/x1=argv/x2=envp 入栈保存，调用 init_array 构造函数（PIE 下指针重定位），call main，main 返回后 exit(返回值)（Darwin exit syscall）。
-  - 尾调用/递归深栈行为与 x86 后端一致。
+  - bl 调用 + 26 位越界长尾（veneer/trampoline 或寄存器间接）；x0-x7 参数编排、第 9+ 参数栈传递（16B 对齐槽）、callee-saved（x19-x28、v8-v15 低部）在被使用函数 prologue 保存；调用点 SP 对齐保证。
+  - LC_MAIN 入口 stub：x0=argc/x1=argv/x2=envp 入栈保存，调用 init_array 构造函数（PIE 下指针重定位），构造数组遍历，call main，main 返回后 atexit 注册路径（fini 经 atexit 式注册；析构数组逆序）；Darwin exit(返回值)（无 exit_group，class 0x2000000 无，exit=1）。
 - **Acceptance Criteria Addressed**: FR-2, FR-5, AC-2, AC-3
 - **Test Requirements**:
   - `rule` TR-7.1: 多参数（含 >8 参、混合宽度）、深递归、函数指针、构造/析构数组用例本机通过；main 可读取 argc/argv（证据：运行对照 clang）。

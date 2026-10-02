@@ -220,9 +220,21 @@ static int find_function(const IRModule *ir, const char *name, int *idx_out) {
     return -1;
 }
 
+static void emit_syscall(C64 *c, const IRInst *s);
+
 static void emit_call(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
     int n = s->call_nargs;
+
+    /* The raw-syscall intrinsic has its own x16/x0..x5 convention;
+     * dispatch BEFORE the generic argument shuffle below, which would
+     * move the number/arguments into x0..x7 and clobber source homes
+     * that the syscall lowering needs to re-read. */
+    if (s->call_name && strcmp(s->call_name, "__syscall") == 0) {
+        emit_syscall(c, s);
+        return;
+    }
+
     int nreg = n < 8 ? n : 8;
     int nstack = n > 8 ? n - 8 : 0;
 
@@ -314,6 +326,88 @@ static void emit_call(C64 *c, const IRInst *s) {
         int d = dst_reg(c, s->dst);
         if (d != A64_X0)
             a64_mov_reg(c->as, d, A64_X0, s->width == 8);
+        commit(c, s->dst, d);
+    }
+}
+
+/* Raw Darwin syscall: number in x16, arguments in x0..x5, svc #0x80,
+ * result in x0.  The IR shape mirrors the x86 backend's __syscall
+ * intrinsic: call_args[0] is the number, call_args[1..6] the arguments.
+ * (errno/carry handling arrives with the T13 builtin pass; this slice
+ * exists so freestanding code can do write/exit without libSystem.) */
+static void emit_syscall(C64 *c, const IRInst *s) {
+    A64Asm *a = c->as;
+    int n = s->call_nargs;
+    if (n < 1) c64_die(c, s, "__syscall without number");
+    int nreg = n - 1;
+    if (nreg > 6) nreg = 6;
+
+    /* Cycle-safe moves of args[1..] into x0..x5.  x17 is the only
+     * scratch (x16 is reserved for the number); mirrors emit_call's
+     * permutation algorithm. */
+    int src[6], kind[6], done[6];
+    for (int i = 0; i < nreg; i++) {
+        IRValue av = s->call_args[1 + i];
+        const IRInst *d = &c->fn->insts.data[c->def[av]];
+        int r = d->op == IR_CONST ? -1 : home_reg(c, av);
+        if (r >= 0) { kind[i] = 0; src[i] = r; }
+        else { kind[i] = 1; src[i] = -1; }
+        done[i] = 0;
+    }
+    int remaining = nreg;
+    while (remaining > 0) {
+        int picked = -1;
+        for (int i = 0; i < nreg; i++) {
+            if (done[i]) continue;
+            int blocked = 0;
+            for (int j = 0; j < nreg; j++)
+                if (!done[j] && j != i && kind[j] == 0 &&
+                    src[j] == A64_X0 + i) { blocked = 1; break; }
+            if (!blocked) { picked = i; break; }
+        }
+        if (picked < 0) {
+            for (int i = 0; i < nreg; i++)
+                if (!done[i] && kind[i] == 0) {
+                    a64_mov_reg(c->as, SCR1, src[i], 1);
+                    src[i] = SCR1;
+                    break;
+                }
+            continue;
+        }
+        int i = picked;
+        IRValue av = s->call_args[1 + i];
+        int is64 = vw(c, av) == 8;
+        if (kind[i] == 0) {
+            if (src[i] != A64_X0 + i)
+                a64_mov_reg(c->as, A64_X0 + i, src[i], is64);
+        } else {
+            const IRInst *d = &c->fn->insts.data[c->def[av]];
+            if (d->op == IR_CONST) {
+                emit_mov_imm_w(c->as, A64_X0 + i, d->imm, is64);
+            } else {
+                int so = spill_off(c, av);
+                frame_load(c, A64_X0 + i, so, is64 ? 8 : 4, is64 ? 1 : 0);
+            }
+        }
+        done[i] = 1;
+        remaining--;
+    }
+
+    /* Number last so the argument moves can use x16 as scratch freely. */
+    IRValue nv = s->call_args[0];
+    const IRInst *nd = &c->fn->insts.data[c->def[nv]];
+    if (nd->op == IR_CONST) {
+        emit_mov_imm_w(a, A64_X16, nd->imm, 1);
+    } else {
+        int sr = load_op(c, nv, SCR0);
+        a64_mov_reg(a, A64_X16, sr, 1);
+    }
+    a64_svc(a, 0x80);
+
+    if (s->dst >= 0) {
+        int d = dst_reg(c, s->dst);
+        if (d != A64_X0)
+            a64_mov_reg(a, d, A64_X0, s->width == 8);
         commit(c, s->dst, d);
     }
 }
@@ -854,12 +948,74 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     for (size_t i = 0; i < ir->functions.len; i++)
         c.fn_label[i] = a64_new_label(&a);
 
-    /* LC_MAIN entry stub: dyld gives x0=argc,x1=argv,x2=envp (kept in
-     * place for main); call main; Darwin exit(main's return value). */
-    a64_stp64(&a, A64_FP, A64_LR, A64_SP, -16, A64_PAIR_PRE);
+    /* Constructor/destructor order (matches the ELF _start walk in
+     * link.c): constructors ascending by priority, source order as the
+     * stable tiebreak; destructors are the ascending list walked
+     * backwards.  Single-module stage: calls are direct BLs to local
+     * function labels.  T14/T15 replaces this with a merged pointer
+     * table once multi-module linking lands. */
+    int *ctors = xmalloc(ir->functions.len * sizeof(int));
+    int *dtors = xmalloc(ir->functions.len * sizeof(int));
+    int nctors = 0, ndtors = 0;
+    for (size_t i = 0; i < ir->functions.len; i++) {
+        const IRFunction *fn = &ir->functions.data[i];
+        if (fn->is_constructor) {
+            int prio = fn->ctor_prio ? fn->ctor_prio : INIT_PRIO_DEFAULT;
+            int pos = nctors++;
+            while (pos > 0) {
+                const IRFunction *prev = &ir->functions.data[ctors[pos - 1]];
+                int pp = prev->ctor_prio ? prev->ctor_prio : INIT_PRIO_DEFAULT;
+                if (pp <= prio) break;
+                ctors[pos] = ctors[pos - 1];
+                pos--;
+            }
+            ctors[pos] = (int)i;
+        }
+        if (fn->is_destructor) {
+            int prio = fn->dtor_prio ? fn->dtor_prio : INIT_PRIO_DEFAULT;
+            int pos = ndtors++;
+            while (pos > 0) {
+                const IRFunction *prev = &ir->functions.data[dtors[pos - 1]];
+                int pp = prev->dtor_prio ? prev->dtor_prio : INIT_PRIO_DEFAULT;
+                if (pp <= prio) break;
+                dtors[pos] = dtors[pos - 1];
+                pos--;
+            }
+            dtors[pos] = (int)i;
+        }
+    }
+
+    /* LC_MAIN entry stub.  dyld hands us x0=argc, x1=argv, x2=envp; keep
+     * them in callee-saved registers across the constructor calls, call
+     * main, run destructors in reverse, then Darwin exit(main's value).
+     * The stub owns x19..x22 outright (process entry has no caller whose
+     * values matter) but saves them anyway to keep the frame ABI-clean. */
+    a64_stp64(&a, A64_FP, A64_LR, A64_SP, -48, A64_PAIR_PRE);
+    mov_sp_like(&a, A64_FP, A64_SP);   /* ADD, not ORR (x31==SP vs XZR) */
+    a64_stp64(&a, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);
+    a64_stp64(&a, A64_X21, A64_X22, A64_FP, 32, A64_PAIR_OFFSET);
+    a64_mov_reg(&a, A64_X19, A64_X0, 1);
+    a64_mov_reg(&a, A64_X20, A64_X1, 1);
+    a64_mov_reg(&a, A64_X21, A64_X2, 1);
+    for (int i = 0; i < nctors; i++)
+        a64_bl(&a, c.fn_label[ctors[i]]);
+    a64_mov_reg(&a, A64_X0, A64_X19, 1);
+    a64_mov_reg(&a, A64_X1, A64_X20, 1);
+    a64_mov_reg(&a, A64_X2, A64_X21, 1);
     a64_bl(&a, c.fn_label[main_id]);
-    a64_movz(&a, A64_X16, 1, 0, 1);            /* exit */
+    a64_mov_reg(&a, A64_X22, A64_X0, 1);          /* save main's result */
+    for (int i = ndtors - 1; i >= 0; i--)
+        a64_bl(&a, c.fn_label[dtors[i]]);
+    a64_mov_reg(&a, A64_X0, A64_X22, 1);
+    a64_movz(&a, A64_X16, 1, 0, 1);              /* exit */
     a64_svc(&a, 0x80);
+    /* Unreachable, but keep a valid epilogue for disassembly/tools. */
+    a64_ldp64(&a, A64_X21, A64_X22, A64_FP, 32, A64_PAIR_OFFSET);
+    a64_ldp64(&a, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);
+    a64_ldp64(&a, A64_FP, A64_LR, A64_SP, 48, A64_PAIR_POST);
+    a64_ret(&a, A64_LR);
+    free(ctors);
+    free(dtors);
 
     for (size_t i = 0; i < ir->functions.len; i++) {
         c.fn = &ir->functions.data[i];
