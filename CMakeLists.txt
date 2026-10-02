@@ -45,11 +45,16 @@ add_library(fakecc_core
     src/mem2reg.c
     src/scalar_opt.c
     src/regalloc.c
+    src/reg_arm64.c
     src/opt.c
+    src/target.c
+    src/a64.c
     src/codegen.c
+    src/cg64.c
     src/debug.c
     src/emit.c
     src/link.c
+    src/macho.c
     src/pkg.c
     src/compiler.c
 )

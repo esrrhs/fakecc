@@ -1,6 +1,7 @@
 #include "fakecc/emit.h"
 #include "fakecc/common.h"
 #include "fakecc/debug.h"
+#include "fakecc/target.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -304,6 +305,14 @@ static uint32_t append_array_shname(Buffer *shstrtab, const char *base,
 /* ------------------------------------------------------------------ */
 
 void emit_obj(const EmitModule *m, const char *path) {
+    /* Object-writer dispatch: the body below is the ELF ET_REL writer;
+     * the Mach-O writer branches by object format here when it lands. */
+    if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
+        fprintf(stderr,
+                "fakecc: object emission for target '%s' is not implemented yet\n",
+                target_current()->triple);
+        exit(1);
+    }
     /* Section layout: .text, .rodata, .data, .bss, .symtab, .strtab,
      * .shstrtab, .rela.text.  We build the section data first, then the
      * section headers, then patch e_shoff + e_shstrndx into the ehdr. */
@@ -692,6 +701,14 @@ static void prio_fill_slots(int **prio, size_t byte_off, size_t byte_sz, int p) 
 }
 
 int emit_obj_read(const char *path, EmitModule *m) {
+    /* Object-reader dispatch: the body below parses ELF ET_REL; the
+     * Mach-O reader branches here when it lands. */
+    if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
+        fprintf(stderr,
+                "fakecc: object reading for target '%s' is not implemented yet\n",
+                target_current()->triple);
+        return -1;
+    }
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "fakecc: cannot open '%s'\n", path); return -1; }
     fseek(f, 0, SEEK_END);

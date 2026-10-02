@@ -7,6 +7,7 @@
 #include "fakecc/parser.h"
 #include "fakecc/pkg.h"
 #include "fakecc/sema.h"
+#include "fakecc/target.h"
 #include "fakecc/token.h"
 
 #include <stdio.h>
@@ -109,6 +110,9 @@ static void usage(void) {
             "  -LDIR           add DIR to the shared-library search path\n"
             "                  (link-time check for -l; also DT_RUNPATH)\n"
             "  -nodefaultlibs  accepted for compatibility (default already skips libc)\n"
+            "  --target=T      code generation target: x86_64-linux (default on\n"
+            "                  Linux hosts) or arm64-macos (default on Apple Silicon;\n"
+            "                  accepted spellings: x86_64-linux, arm64-apple-darwin, ...)\n"
             "  FAKECC_RT       override path to the runtime/ directory\n"
             "  FAKECC_PKG      colon-separated package search path\n");
     exit(1);
@@ -315,6 +319,8 @@ int main(int argc, char **argv) {
     int num_needed = 0;
     char **lib_paths = NULL;
     int num_lib_paths = 0;
+    const char *target_arg = NULL;   /* explicit --target value, or host default */
+    int x86_vec_enable = 0;          /* -mavx / -mavx512f explicitly requested */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0) {
@@ -341,11 +347,21 @@ int main(int argc, char **argv) {
             g_avx512f = 0;
         } else if (strcmp(argv[i], "-mavx") == 0) {
             g_no_avx = 0;
+            x86_vec_enable = 1;
         } else if (strcmp(argv[i], "-mno-avx512f") == 0) {
             g_avx512f = 0;
         } else if (strcmp(argv[i], "-mavx512f") == 0) {
             g_avx512f = 1;
             g_no_avx = 0;
+            x86_vec_enable = 1;
+        } else if (strcmp(argv[i], "--target") == 0 ||
+                   strcmp(argv[i], "-target") == 0) {
+            if (i + 1 >= argc) usage();
+            target_arg = argv[++i];
+        } else if (strncmp(argv[i], "--target=", 9) == 0) {
+            target_arg = argv[i] + 9;
+        } else if (strncmp(argv[i], "-target=", 8) == 0) {
+            target_arg = argv[i] + 8;
         } else if (strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
@@ -387,6 +403,42 @@ int main(int argc, char **argv) {
     }
 
     if (ninputs == 0 || output_path == NULL) usage();
+
+    /* Resolve the compilation target (explicit --target or host default)
+     * before any real work starts. */
+    const TargetDesc *target;
+    if (target_arg) {
+        target = target_parse(target_arg);
+        if (!target) {
+            fprintf(stderr,
+                    "fakecc: unrecognized target triple '%s' "
+                    "(supported: x86_64-linux, arm64-macos)\n",
+                    target_arg);
+            exit(1);
+        }
+    } else {
+        target = target_default();
+    }
+    target_set_current(target);
+
+    /* x86-only vector-width switches: arm64 always passes 16-byte NEON
+     * vectors; -mavx/-mavx512f are meaningless there.  The -mno-* forms
+     * are accepted as no-ops (gcc-like). */
+    if (target->arch == TARGET_ARCH_ARM64 && x86_vec_enable) {
+        fprintf(stderr,
+                "fakecc: -mavx/-mavx512f apply only to the x86-64 target; "
+                "arm64 always uses 16-byte NEON vectors\n");
+        exit(1);
+    }
+
+    /* Fail early while the arm64/Mach-O backend is being built out, rather
+     * than emitting an ELF file under the wrong assumption. */
+    if (!target_backend_ready(target)) {
+        fprintf(stderr,
+                "fakecc: target '%s' is not supported by this build yet\n",
+                target->triple);
+        exit(1);
+    }
 
     PkgContext pkg;
     pkg_ctx_init(&pkg);
@@ -522,6 +574,10 @@ int main(int argc, char **argv) {
         if (!pp->owns_files) continue;
         nlinked_files += (int)pp->nfiles;
     }
+    /* The arm64 backend links freestanding user code until the Darwin
+     * runtime platform layer lands (tasks T16+); skip builtin packages. */
+    if (target_current()->arch == TARGET_ARCH_ARM64)
+        nlinked_files = 0;
 
     int nmods = ninputs + nlinked_files;
     EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
@@ -545,6 +601,12 @@ int main(int argc, char **argv) {
     }
     free(user_tus);
 
+    /* The arm64 backend links freestanding user code only while the
+     * Darwin runtime platform layer is being built (tasks T16+); do not
+     * codegen the (still Linux-syscall) builtin runtime package for it. */
+    int arm64_freestanding =
+        target_current()->arch == TARGET_ARCH_ARM64 && !nostdlib;
+
     /* Phase 3: codegen already-parsed package files (builtin rt + any package
      * pulled in by `import`).  The user's own package is skipped: it has
      * owns_files == 0 (its TUs were the CLI inputs, codegen'd in Phase 2). */
@@ -553,6 +615,7 @@ int main(int argc, char **argv) {
         Package *pp = pkg.pkgs[p];
         if (!pp->owns_files) continue;
         for (size_t f = 0; f < pp->nfiles; f++) {
+            if (arm64_freestanding) break;     /* runtime ported in T16+ */
             char *fake = path_join(pp->dir, "_.c");
             if (lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK)
                 exit(1);

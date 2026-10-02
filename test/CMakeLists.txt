@@ -94,6 +94,22 @@ add_executable(test_rare unit/test_rare.c)
 target_link_libraries(test_rare PRIVATE fakecc_core test_framework)
 add_test(NAME test_rare COMMAND test_rare)
 
+add_executable(test_target unit/test_target.c)
+target_link_libraries(test_target PRIVATE fakecc_core test_framework)
+add_test(NAME test_target COMMAND test_target)
+
+add_executable(test_a64 unit/test_a64.c)
+target_link_libraries(test_a64 PRIVATE fakecc_core test_framework)
+add_test(NAME test_a64 COMMAND test_a64)
+
+add_executable(test_macho unit/test_macho.c)
+target_link_libraries(test_macho PRIVATE fakecc_core test_framework)
+add_test(NAME test_macho COMMAND test_macho)
+
+add_executable(test_cg64_native unit/test_cg64_native.c)
+target_link_libraries(test_cg64_native PRIVATE fakecc_core test_framework)
+add_test(NAME test_cg64_native COMMAND test_cg64_native)
+
 # --- app_ports tests ---
 # Each application port runs once per optimization level to cover both the
 # -O0 (scalars in memory) and -O1 (SSA) compiler paths.

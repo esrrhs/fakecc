@@ -6,6 +6,7 @@
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
+#include "fakecc/target.h"
 #include "fakecc/token.h"
 #include "test_framework.h"
 
@@ -125,6 +126,9 @@ static void test_run_return_255(void) {
 /* ---- main ---- */
 
 int main(void) {
+    /* Pins the x86-64 ELF backend; the run-execution cases only succeed on a
+     * Linux host (the emitted artifacts are x86-64 ELF by design here). */
+    target_set_current(target_x86_64_linux());
     test_elf_magic();
     test_elf_machine();
     test_run_return_0();

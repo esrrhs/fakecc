@@ -93,12 +93,37 @@ static const int XMM_ALLOCATABLE_REGS[REG_XMM_ALLOCATABLE] = {
 
 typedef struct {
     int *reg;              /* reg[v] = allocated register, or REG_NONE if spilled */
-    int *spill_slot;       /* spill[v] = spill slot index (0, 1, ...), meaningful
+    int *spill_slot;       /* spill slot index (0, 1, ...), meaningful
                               only when reg[v] == REG_NONE */
     int num_spill_slots;   /* total number of spill slots needed */
     int num_values;        /* fn->next_value_id — number of SSA values */
     int stack_size;        /* total stack allocation (16-byte aligned) for spills */
 } RAResult;
+
+/* ------------------------------------------------------------------ */
+/* Target register-class configuration                                  */
+/*                                                                      */
+/* The allocation algorithm is architecture neutral; each backend       */
+/* supplies the physical register file through this descriptor.         */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const int *regs;        /* native register codes, color 0..nregs-1 */
+    int         nregs;      /* allocatable registers; must be <= 32 */
+    unsigned    caller_saved; /* bitmask of caller-saved colors */
+    int         spill_bytes;  /* spill slot size for one value of this class */
+    int         exclude_16byte_ld; /* 1 = width-16 float-class values live on a
+                                    * special stack path (x86 x87 long double)
+                                    * and must NOT take a SIMD color */
+} RaRegClass;
+
+typedef struct {
+    RaRegClass gp;
+    RaRegClass simd;
+} RaRegClasses;
+
+/* GP/SIMD register classes for the current compilation target. */
+const RaRegClasses *ra_classes_current(void);
 
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */

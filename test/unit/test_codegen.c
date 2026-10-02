@@ -6,6 +6,7 @@
 #include "fakecc/lexer.h"
 #include "fakecc/opt.h"
 #include "fakecc/parser.h"
+#include "fakecc/target.h"
 #include "fakecc/sema.h"
 #include "fakecc/token.h"
 #include "test_framework.h"
@@ -354,6 +355,9 @@ static void test_builtin_return_codegen(void) {
 /* ---- main ---- */
 
 int main(void) {
+    /* These cases pin the x86-64 ELF backend; a parallel arm64 suite will
+     * select the arm64-macos target once that backend exists. */
+    target_set_current(target_x86_64_linux());
     test_return_zero();
     test_return_42();
     test_return_255();

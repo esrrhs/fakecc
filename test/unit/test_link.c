@@ -7,6 +7,7 @@
 #include "fakecc/opt.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
+#include "fakecc/target.h"
 #include "fakecc/token.h"
 #include "test_framework.h"
 
@@ -130,6 +131,9 @@ static void test_link_static_no_collision(void) {
 }
 
 int main(void) {
+    /* Pins the x86-64 ELF backend; linked artifacts run natively only on
+     * Linux (they are x86-64 ELF). */
+    target_set_current(target_x86_64_linux());
     test_obj_roundtrip();
     test_link_two_modules();
     test_link_rejects_no_main();

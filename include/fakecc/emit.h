@@ -180,7 +180,7 @@ typedef struct {
 /* Object module — the in-memory representation of one compiled TU     */
 /* ------------------------------------------------------------------ */
 
-typedef struct {
+typedef struct EmitModule {
     Buffer   text;     /* .text */
     Buffer   rodata;   /* .rodata (string literals, long double constants) */
     Buffer   data;     /* .data (mutable globals) */

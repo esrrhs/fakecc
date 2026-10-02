@@ -1,9 +1,11 @@
 #include "fakecc/codegen.h"
+#include "fakecc/cg64.h"
 #include "fakecc/common.h"
 #include "fakecc/debug.h"
 #include "fakecc/emit.h"
 #include "fakecc/ir.h"
 #include "fakecc/regalloc.h"
+#include "fakecc/target.h"
 #include "fakecc/ast.h"
 
 #include <stdint.h>
@@ -3090,6 +3092,12 @@ static char *codegen_needed_regs(const IRFunction *fn, const int *def,
 }
 
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
+    /* Backend dispatch point: everything below this function is the
+     * x86-64 instruction selector; the arm64 selector is codegen64(). */
+    if (target_current()->arch == TARGET_ARCH_ARM64) {
+        codegen64(ir, out, want_debug);
+        return;
+    }
     /* Emit globals into the appropriate section (.rodata for read-only,
      * .data for initialized mutable, .bss for zero-initialized) and register
      * each as a defined symbol with its linkage binding. */

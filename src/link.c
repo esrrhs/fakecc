@@ -1,6 +1,8 @@
 #include "fakecc/emit.h"
 #include "fakecc/common.h"
 #include "fakecc/debug.h"
+#include "fakecc/target.h"
+#include "fakecc/macho.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -1043,6 +1045,19 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed_in, size_t num_needed_in, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared) {
+    /* Linker dispatch: the arm64-macos backend emits an ad-hoc signed
+     * Mach-O PIE; everything below is the ELF executable/DSO linker. */
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
+        /* Stage-1 (T5): one linear __text stream per code generation pass,
+         * entry stub at offset 0.  Cross-object references are not merged
+         * yet (T14 adds the object/relocation layer). */
+        /* Stage-1 links one module (driver compiles a single translation
+         * unit for arm64); its sections become the Mach-O segments. */
+        int rc = macho_write_exec(mods[0], macho_text_offset(), path);
+        if (rc != 0) exit(1);
+        if (macho_codesign(path) != 0) exit(1);
+        return;
+    }
     /* ---- Merge sections ---- */
     Buffer text, rodata, data, tdata, initarr, finiarr;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
