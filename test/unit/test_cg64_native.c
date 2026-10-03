@@ -2617,6 +2617,26 @@ static void test_fat(void) {
         "  return 0; }", 0);
 }
 
+static void test_fxchg(void) {
+    expect("fxchg",
+        "package main;\n"
+        "int main(void) {\n"
+        "  float f = -1.5f;\n"
+        "  float old = __atomic_exchange_n(&f, 4.5f, 5);\n"
+        "  if (*(int *)&old != 0xbfc00000) return 1;\n"
+        "  if (*(int *)&f != 0x40900000) return 2;\n"
+        "  float neu = 1.0f;\n"
+        "  float got = 0;\n"
+        "  __atomic_exchange(&f, &neu, &got, 2);\n"
+        "  if (*(int *)&got != 0x40900000) return 3;\n"
+        "  if (*(int *)&f != 0x3f800000) return 4;\n"
+        "  double d = -2.25;\n"
+        "  double od = __atomic_exchange_n(&d, 2.5, 0);\n"
+        "  if (*(long long *)&od != 0xc002000000000000LL) return 5;\n"
+        "  if (*(long long *)&d != 0x4004000000000000LL) return 6;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2695,6 +2715,7 @@ int main(void) {
     test_sync();
     test_scas();
     test_fat();
+    test_fxchg();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

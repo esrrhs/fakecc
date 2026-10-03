@@ -2131,6 +2131,37 @@ static void emit_call(C64 *c, const IRInst *s) {
                    "arm64 backend: atomic exchange width must be 1, 2, 4, or 8");
             return;
         }
+        if ((w == 4 || w == 8) && s->call_args[1] >= 0
+            && scalar_fp_val(c, s->call_args[1])) {
+            /* SWP has no scalar-fp form.  Move the bits through GPRs. */
+            int isd = w == 8;
+            int fv = load_fp(c, s->call_args[1], -1);
+            int bits = SCR0;
+            a64_fmov_gp(a, bits, fv, 0, isd);
+            int p = load_ptrv(c, s->call_args[0], bits);
+            if (p == bits) {
+                int t = safe_tmp(bits, -1, -1, -1);
+                a64_mov_reg(a, t, bits, 1);
+                bits = t;
+                p = load_ptrv(c, s->call_args[0], bits);
+            }
+            int old = safe_tmp(p, bits, -1, -1);
+            uint32_t base = isd ? 0xF8208000u : 0xB8208000u;
+            int kind = (int)s->imm;
+            if (kind < 0 || kind > 3) kind = 3;
+            if (kind & 1) base |= 1u << 23;
+            if (kind & 2) base |= 1u << 22;
+            a64_word(a, base | ((uint32_t)(bits & 31) << 16)
+                           | ((uint32_t)(p & 31) << 5)
+                           | (uint32_t)(old & 31));
+            if (s->dst >= 0) {
+                int h = fp_home(c, s->dst);
+                int d = h >= 0 ? h : FSCR;
+                a64_fmov_gp(a, d, old, 1, isd);
+                if (h < 0) commit_fp(c, s->dst, d);
+            }
+            return;
+        }
         int p = load_ptrv(c, s->call_args[0], -1);
         int v = load_op(c, s->call_args[1], p);
         int d = s->dst >= 0 ? dst_reg(c, s->dst) : SCR0;

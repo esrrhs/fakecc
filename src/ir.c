@@ -6527,9 +6527,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     lower_expr(fn, st, e->u.call.args.data[2]);
                     fold_const_int(e->u.call.args.data[2], &ord);
                 }
-                /* Float and oversized objects stay a plain pair.  Integer
-                 * 1/2/4/8 use one SWP so the read and write cannot tear. */
-                if (is_f || (sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
+                /* Oversized objects stay a plain pair.  Integer 1/2/4/8 and
+                 * float/double use one SWP so the read and write cannot tear. */
+                if ((is_f && sz != 4 && sz != 8) ||
+                    (!is_f && sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
                     IRValue oldv = new_value(fn);
                     emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
                     set_value_type(fn, oldv, sz, is_u);
@@ -6542,7 +6543,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 if (ord == 0) kind = 0;
                 else if (ord == 1 || ord == 2) kind = 1;
                 else if (ord == 3) kind = 2;
-                return emit_fakecc_swp(fn, addr, val, kind, sz, is_u, e->loc);
+                IRValue oldv = emit_fakecc_swp(fn, addr, val, kind, sz, is_u, e->loc);
+                if (is_f) set_value_float(fn, oldv, 1);
+                return oldv;
             }
             if (strcmp(sname, "__atomic_load") == 0) {
                 if (e->u.call.args.len < 2) return -1;
@@ -6596,7 +6599,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 emit_inst_w(fn, IR_LOAD_PTR, val, vp, -1, 0, sz, is_u, e->loc);
                 set_value_type(fn, val, sz, is_u);
                 if (is_f) set_value_float(fn, val, 1);
-                if (is_f || (sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
+                if ((is_f && sz != 4 && sz != 8) ||
+                    (!is_f && sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
                     IRValue oldv = new_value(fn);
                     emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
                     set_value_type(fn, oldv, sz, is_u);
@@ -6610,6 +6614,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 else if (ord == 1 || ord == 2) kind = 1;
                 else if (ord == 3) kind = 2;
                 IRValue oldv = emit_fakecc_swp(fn, addr, val, kind, sz, is_u, e->loc);
+                if (is_f) set_value_float(fn, oldv, 1);
                 emit_inst_w(fn, IR_STORE_PTR, -1, retp, oldv, 0, sz, is_u, e->loc);
                 return -1;
             }

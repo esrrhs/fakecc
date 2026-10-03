@@ -548,6 +548,31 @@ static void emit_movq_xmm_gp(Buffer *b, int xmm, int gp) {
     emit_modrm(b, 3, xmm & 7, gp & 7);
 }
 
+/* movd/movq the other way: GP gets the low 4 or 8 bytes of an XMM. */
+static void emit_movd_xmm_gp(Buffer *b, int xmm, int gp) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, xmm, gp);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x6E);
+    emit_modrm(b, 3, xmm & 7, gp & 7);
+}
+
+static void emit_movd_gp_xmm(Buffer *b, int gp, int xmm) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, xmm, gp);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x7E);
+    emit_modrm(b, 3, xmm & 7, gp & 7);
+}
+
+static void emit_movq_gp_xmm(Buffer *b, int gp, int xmm) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 1, xmm, gp);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x7E);
+    emit_modrm(b, 3, xmm & 7, gp & 7);
+}
+
 /* mov %reg, [rsp+off]  →  REX.W 89 [mod reg rm=4 SIB=0x24] disp.  off must be
  * non-negative (the save area sits at/below rsp). */
 static void emit_store_rsp_off(Buffer *b, int reg, int off) {
@@ -4709,6 +4734,30 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     && inst->call_nargs >= 2) {
                     int w = inst->width;
                     if (w != 1 && w != 2 && w != 4 && w != 8) w = 4;
+                    int fp = (w == 4 || w == 8) && inst->call_args[1] >= 0
+                             && value_is_float_class(fn, inst->call_args[1]) == 1;
+                    if (fp) {
+                        ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                        emit_push_r(&out->text, REG_RCX);
+                        ensure_reg_xmm(&out->text, inst->call_args[1], 0,
+                                       ra_xmm, gp_spill_area);
+                        if (w == 8) emit_movq_gp_xmm(&out->text, REG_RDX, 0);
+                        else emit_movd_gp_xmm(&out->text, REG_RDX, 0);
+                        emit_pop_r(&out->text, REG_RCX);
+                        emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
+                        emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
+                        if (w == 8) emit_movq_xmm_gp(&out->text, 0, REG_RAX);
+                        else emit_movd_xmm_gp(&out->text, 0, REG_RAX);
+                        if (inst->dst >= 0 && value_is_float_class(fn, inst->dst) == 1) {
+                            int nbytes = w;
+                            if (dr >= 0 && dr != 0)
+                                emit_xmm_copy(&out->text, dr, 0, nbytes);
+                            else if (dr < 0)
+                                spill_if_needed_xmm(&out->text, inst->dst, 0,
+                                                    ra_xmm, gp_spill_area);
+                        }
+                        break;
+                    }
                     ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
                     emit_push_r(&out->text, REG_RCX);
                     ensure_reg(&out->text, inst->call_args[1], REG_RAX, ra);
