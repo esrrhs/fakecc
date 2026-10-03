@@ -2204,6 +2204,12 @@ static void test_trap(void) {
     expect("trap_skip",
         "package main;\n"
         "int main(void) { if (0) __builtin_trap(); return 7; }", 7);
+    expect("debugtrap",
+        "package main;\n"
+        "int main(void) { __builtin_debugtrap(); return 7; }", 133);
+    expect("debugtrap_skip",
+        "package main;\n"
+        "int main(void) { if (0) __builtin_debugtrap(); return 7; }", 7);
 }
 
 static void test_int128(void) {

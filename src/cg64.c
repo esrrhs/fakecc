@@ -1994,10 +1994,13 @@ static void emit_fp_builtin(C64 *c, const IRInst *s, int kind) {
 }
 
 /* __builtin_trap and __builtin_abort both arrive as a call named abort.
- * __builtin_unreachable keeps the stripped name.  brk #1 is what clang
- * emits; the kernel reports SIGTRAP.  A user-defined function wins. */
+ * __builtin_unreachable and __builtin_debugtrap keep the stripped name.
+ * brk #1 is what clang emits; the kernel reports SIGTRAP.  debugtrap is
+ * not noreturn, so the instructions after it stay in the function.
+ * A user-defined function wins. */
 static int emit_trap_builtin(C64 *c, const char *name) {
-    if (!name || (strcmp(name, "abort") != 0 && strcmp(name, "unreachable") != 0))
+    if (!name || (strcmp(name, "abort") != 0 && strcmp(name, "unreachable") != 0
+                  && strcmp(name, "debugtrap") != 0))
         return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
