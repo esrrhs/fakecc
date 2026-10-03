@@ -1217,6 +1217,76 @@ static int emit_stdc_builtin(C64 *c, const IRInst *s) {
     return 1;
 }
 
+/* __builtin_clzg/ctzg/clrsbg/ffsg/popcountg/parityg.  The width is the
+ * argument's, and clzg/ctzg take an optional value to return for zero. */
+static int bitg_kind(const char *n) {
+    if (!n) return 0;
+    if (strcmp(n, "__builtin_clzg") == 0) return 1;
+    if (strcmp(n, "__builtin_ctzg") == 0) return 2;
+    if (strcmp(n, "__builtin_clrsbg") == 0) return 3;
+    if (strcmp(n, "__builtin_ffsg") == 0) return 4;
+    if (strcmp(n, "__builtin_popcountg") == 0) return 5;
+    if (strcmp(n, "__builtin_parityg") == 0) return 6;
+    return 0;
+}
+
+static void emit_bitg_builtin(C64 *c, const IRInst *s) {
+    int kind = bitg_kind(s->call_name);
+    if (!kind || s->dst < 0 || s->call_nargs < 1) return;
+    A64Asm *a = c->as;
+    int bits = vw(c, s->call_args[0]) * 8;
+    if (bits <= 0) bits = 32;
+    int is64 = bits >= 64;
+    int dst = dst_reg(c, s->dst);
+    int src = load_op(c, s->call_args[0], dst);
+    int fb = -1;
+    if ((kind == 1 || kind == 2) && s->call_nargs >= 2)
+        fb = load_op(c, s->call_args[1], dst);
+    int tmp = safe_tmp(src, dst, fb, -1);
+    stdc_mask(a, tmp, src, bits);
+    if ((kind == 1 || kind == 2) && s->call_nargs >= 2) {
+        int Lnz = a64_new_label(a);
+        int Lend = a64_new_label(a);
+        a64_cbnz(a, tmp, Lnz, is64);
+        if (fb != dst) a64_mov_reg(a, dst, fb, 0);
+        a64_b(a, Lend);
+        a64_bind(a, Lnz);
+        if (kind == 1) stdc_lz(a, dst, tmp, bits);
+        else stdc_tz(a, dst, tmp, bits);
+        a64_bind(a, Lend);
+    } else if (kind == 1) {
+        stdc_lz(a, dst, tmp, bits);
+    } else if (kind == 2) {
+        stdc_tz(a, dst, tmp, bits);
+    } else if (kind == 3) {
+        if (bits >= 64) {
+            bit1(a, 0xDAC01400u, dst, tmp);
+        } else if (bits >= 32) {
+            bit1(a, 0x5AC01400u, dst, tmp);
+        } else {
+            int Lend = a64_new_label(a);
+            a64_lsl_imm(a, dst, tmp, (unsigned)(32 - bits), 0);
+            bit1(a, 0x5AC01400u, dst, dst);
+            a64_cmp_imm12(a, dst, (unsigned)(bits - 1), 0, 0);
+            a64_bcond(a, A64_LS, Lend);
+            a64_movz(a, dst, (unsigned)(bits - 1), 0, 0);
+            a64_bind(a, Lend);
+        }
+    } else if (kind == 4) {
+        uint32_t rbit = is64 ? 0xDAC00000u : 0x5AC00000u;
+        uint32_t clz = is64 ? 0xDAC01000u : 0x5AC01000u;
+        int t2 = safe_tmp(src, dst, tmp, fb);
+        bit1(a, rbit, t2, tmp);
+        bit1(a, clz, t2, t2);
+        a64_cmp_imm12(a, tmp, 0, 0, is64);
+        a64_word(a, 0x1A8007E0u | ((uint32_t)(t2 & 31) << 16) | (uint32_t)(dst & 31));
+    } else {
+        emit_popc(a, dst, tmp, is64);
+        if (kind == 6) a64_and_imm(a, dst, dst, 1, 0);
+    }
+    commit(c, s->dst, dst);
+}
+
 static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
     if (!s->call_nargs) return s->align16 == A64_MARK_SRET ? 16 : 0;
     if (s->call_name && strcmp(s->call_name, "__syscall") == 0) return 0;
@@ -1691,6 +1761,13 @@ static void emit_call(C64 *c, const IRInst *s) {
     if (is_va_builtin(s->call_name)) {
         emit_va(c, s);
         return;
+    }
+    if (bitg_kind(s->call_name)) {
+        int defined = 0;
+        if (find_function(c->ir, s->call_name, &defined) != 0) {
+            emit_bitg_builtin(c, s);
+            return;
+        }
     }
     if (is_bit_builtin(s->call_name)) {
         emit_bit_builtin(c, s);

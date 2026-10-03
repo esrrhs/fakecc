@@ -1984,6 +1984,41 @@ static void test_stdc(void) {
         "  return 0; }", 0);
 }
 
+static void test_bitg(void) {
+    expect("bitg",
+        "package main;\n"
+        "int main(void) {\n"
+        "  unsigned char c = 1;\n"
+        "  unsigned char z = 0;\n"
+        "  unsigned char h = 0x80;\n"
+        "  unsigned char ff = 0xff;\n"
+        "  if (__builtin_clzg(c) != 7) return 1;\n"
+        "  if (__builtin_clzg(z) != 8) return 2;\n"
+        "  if (__builtin_clzg(z, 99) != 99) return 3;\n"
+        "  if (__builtin_clzg(c, 99) != 7) return 4;\n"
+        "  if (__builtin_ctzg(h) != 7) return 5;\n"
+        "  if (__builtin_ctzg(z) != 8) return 6;\n"
+        "  if (__builtin_ctzg(z, 3) != 3) return 7;\n"
+        "  if (__builtin_clzg(1ull) != 63) return 8;\n"
+        "  if (__builtin_clzg(0ull) != 64) return 9;\n"
+        "  if (__builtin_clzg(0ull, 5) != 5) return 10;\n"
+        "  if (__builtin_clrsbg(h) != 0) return 11;\n"
+        "  if (__builtin_clrsbg(z) != 7) return 12;\n"
+        "  int n = -1;\n"
+        "  if (__builtin_clrsbg(n) != 31) return 13;\n"
+        "  if (__builtin_clrsbg(1) != 30) return 14;\n"
+        "  if (__builtin_ffsg(h) != 8) return 15;\n"
+        "  if (__builtin_ffsg(0) != 0) return 16;\n"
+        "  if (__builtin_popcountg(ff) != 8) return 17;\n"
+        "  if (__builtin_parityg(ff) != 0) return 18;\n"
+        "  if (__builtin_parityg(c) != 1) return 19;\n"
+        "  unsigned short s = 1;\n"
+        "  if (__builtin_clzg(s) != 15) return 20;\n"
+        "  if (__builtin_ctzg(0x80000000u) != 31) return 21;\n"
+        "  if (__builtin_ctzg(1ull << 40) != 40) return 22;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -2082,6 +2117,7 @@ int main(void) {
     test_class();
     test_next();
     test_stdc();
+    test_bitg();
     test_trap();
     test_syscall();
     test_frame_addr();

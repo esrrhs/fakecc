@@ -41,6 +41,22 @@ int sema_error_count(void) {
 
 /* libm-style builtins the arm64 backend lowers directly.  Width is 4
  * (f), 8, or long double (l).  *nargs is 1, 2, or 3.  -1 if unrelated. */
+/* GCC __builtin_*g forms are type-generic.  clzg/ctzg may take a
+ * second argument, returned when the value is zero. */
+static int bitg_builtin_info(const char *name, int *max_args) {
+    if (!name) return 0;
+    if (strcmp(name, "__builtin_clzg") == 0 || strcmp(name, "__builtin_ctzg") == 0) {
+        *max_args = 2;
+        return 1;
+    }
+    if (strcmp(name, "__builtin_clrsbg") == 0 || strcmp(name, "__builtin_ffsg") == 0
+        || strcmp(name, "__builtin_popcountg") == 0 || strcmp(name, "__builtin_parityg") == 0) {
+        *max_args = 1;
+        return 1;
+    }
+    return 0;
+}
+
 /* C23 stdc_* are type-generic.  same_ty means the result type is the
  * argument type (bit_floor, bit_ceil, rotate); the rest return unsigned int. */
 static int stdc_builtin_info(const char *name, int *same_ty, int *nargs) {
@@ -1961,6 +1977,43 @@ static Type check_expr_inner(Expr *e) {
             }
             set_type(e, type_make_void());
             return type_clone(e->type);
+        }
+        /* __builtin_*g keeps the argument width.  Promoting unsigned
+         * long long or unsigned char would count the wrong number of bits. */
+        if (e->u.call.callee->kind == EX_VAR) {
+            int max_args = 0;
+            if (bitg_builtin_info(e->u.call.callee->u.var.name, &max_args)) {
+                int n = (int)e->u.call.args.len;
+                if (n < 1 || n > max_args) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s takes 1 argument%s",
+                           e->u.call.callee->u.var.name,
+                           max_args == 2 ? " or 2" : "");
+                    return type_make_void();
+                }
+                Type at = check_expr_inner(e->u.call.args.data[0]);
+                if (at.kind != TY_INT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s argument must be an integer",
+                           e->u.call.callee->u.var.name);
+                    return type_make_void();
+                }
+                type_free(&at);
+                if (n == 2) {
+                    Type ft = check_expr_inner(e->u.call.args.data[1]);
+                    if (ft.kind != TY_INT) {
+                        type_free(&ft);
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "%s fallback must be an integer",
+                               e->u.call.callee->u.var.name);
+                        return type_make_void();
+                    }
+                    type_free(&ft);
+                }
+                set_type(e, type_make_int(4, 0));
+                return type_clone(e->type);
+            }
         }
         /* __builtin_stdc_* keep the argument width.  Promoting an
          * unsigned char to int would report 24 extra leading zeros. */
