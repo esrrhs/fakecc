@@ -2457,6 +2457,37 @@ static void test_fadd(void) {
         "  return 0; }", 0);
 }
 
+static void test_bitrmw(void) {
+    expect("bitrmw",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 15;\n"
+        "  if (__atomic_fetch_and(&x, 51, 0) != 15) return 1;\n"
+        "  if (x != 3) return 2;\n"
+        "  if (__atomic_fetch_or(&x, 16, 2) != 3) return 3;\n"
+        "  if (x != 19) return 4;\n"
+        "  if (__atomic_or_fetch(&x, 4, 0) != 23) return 5;\n"
+        "  if (__atomic_fetch_xor(&x, 7, 3) != 23) return 6;\n"
+        "  if (x != 16) return 7;\n"
+        "  if (__atomic_xor_fetch(&x, 1, 5) != 17) return 8;\n"
+        "  x = -1;\n"
+        "  if (__atomic_and_fetch(&x, 15, 5) != 15) return 9;\n"
+        "  unsigned char c = 255;\n"
+        "  if (__atomic_fetch_and(&c, 15, 5) != 255) return 10;\n"
+        "  if (c != 15) return 11;\n"
+        "  if (__atomic_or_fetch(&c, 240, 0) != 255) return 12;\n"
+        "  signed char sc = -1;\n"
+        "  if (__atomic_fetch_xor(&sc, 1, 5) != -1) return 13;\n"
+        "  if (sc != -2) return 14;\n"
+        "  unsigned short h = 255;\n"
+        "  if (__atomic_fetch_or(&h, 3840, 3) != 255) return 15;\n"
+        "  if (h != 4095) return 16;\n"
+        "  long long y = 1;\n"
+        "  if (__atomic_fetch_xor(&y, 3, 2) != 1) return 17;\n"
+        "  if (y != 2) return 18;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2529,6 +2560,7 @@ int main(void) {
     test_xchg();
     test_xchgp();
     test_fadd();
+    test_bitrmw();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

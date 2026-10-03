@@ -4727,8 +4727,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 /* Arm64 uses LDADD.  x86 adds in a register and stores the low bytes. */
-                if (inst->call_name && strcmp(inst->call_name, "__fakecc_ldadd") == 0
-                    && inst->call_nargs >= 2) {
+                if (inst->call_name && inst->call_nargs >= 2 &&
+                    (strcmp(inst->call_name, "__fakecc_ldadd") == 0 ||
+                     strcmp(inst->call_name, "__fakecc_ldclr") == 0 ||
+                     strcmp(inst->call_name, "__fakecc_ldeor") == 0 ||
+                     strcmp(inst->call_name, "__fakecc_ldset") == 0)) {
                     int w = inst->width;
                     if (w != 1 && w != 2 && w != 4 && w != 8) w = 4;
                     ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
@@ -4738,7 +4741,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_pop_r(&out->text, REG_RDX);
                     emit_pop_r(&out->text, REG_RCX);
                     emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, inst->is_unsigned);
-                    emit_add_rr(&out->text, REG_RDX, REG_RAX);
+                    if (strcmp(inst->call_name, "__fakecc_ldclr") == 0)
+                        emit_and_rr(&out->text, REG_RDX, REG_RAX);
+                    else if (strcmp(inst->call_name, "__fakecc_ldeor") == 0)
+                        emit_bitxor_rr(&out->text, REG_RDX, REG_RAX);
+                    else if (strcmp(inst->call_name, "__fakecc_ldset") == 0)
+                        emit_or_rr(&out->text, REG_RDX, REG_RAX);
+                    else
+                        emit_add_rr(&out->text, REG_RDX, REG_RAX);
                     emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
                     if (inst->dst >= 0) {
                         if (dr >= 0) {

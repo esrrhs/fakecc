@@ -2158,8 +2158,12 @@ static void emit_call(C64 *c, const IRInst *s) {
         if (s->dst >= 0) commit(c, s->dst, d);
         return;
     }
-    if (s->call_name && strcmp(s->call_name, "__fakecc_ldadd") == 0) {
-        /* LDADD Rs, Rt, [Rn].  Same register rules and ordering bits as SWP. */
+    if (s->call_name && (strcmp(s->call_name, "__fakecc_ldadd") == 0 ||
+                         strcmp(s->call_name, "__fakecc_ldclr") == 0 ||
+                         strcmp(s->call_name, "__fakecc_ldeor") == 0 ||
+                         strcmp(s->call_name, "__fakecc_ldset") == 0)) {
+        /* LDADD/LDCLR/LDEOR/LDSET.  LDCLR clears the bits of Rs, so the
+         * mask is inverted here; the IR still passes the original mask. */
         if (s->call_nargs < 2) return;
         int w = s->width;
         if (w != 1 && w != 2 && w != 4 && w != 8) {
@@ -2181,8 +2185,17 @@ static void emit_call(C64 *c, const IRInst *s) {
             a64_mov_reg(a, t, v, 1);
             v = t;
         }
+        int opc = strcmp(s->call_name, "__fakecc_ldclr") == 0 ? 1
+                : strcmp(s->call_name, "__fakecc_ldeor") == 0 ? 2
+                : strcmp(s->call_name, "__fakecc_ldset") == 0 ? 3 : 0;
+        if (opc == 1) {
+            int inv = safe_tmp(p, v, d, -1);
+            a64_mvn(a, inv, v, w == 8);
+            v = inv;
+        }
         uint32_t base = w == 1 ? 0x38200000u : w == 2 ? 0x78200000u
                       : w == 4 ? 0xB8200000u : 0xF8200000u;
+        base |= (uint32_t)opc << 12;
         int kind = (int)s->imm;
         if (kind < 0 || kind > 3) kind = 3;
         if (kind & 1) base |= 1u << 23;

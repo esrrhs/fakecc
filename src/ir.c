@@ -397,8 +397,8 @@ static IRValue emit_fakecc_swp(IRFunction *fn, IRValue addr, IRValue val,
 
 /* Atomic add of `val` into *addr.  Returns the previous value.
  * kind matches SWP: 0 relaxed, 1 acquire, 2 release, 3 acq_rel. */
-static IRValue emit_fakecc_ldadd(IRFunction *fn, IRValue addr, IRValue val,
-                                 int kind, int width, int is_unsigned, SourceLoc loc) {
+static IRValue emit_fakecc_lse(IRFunction *fn, const char *name, IRValue addr, IRValue val,
+                               int kind, int width, int is_unsigned, SourceLoc loc) {
     IRValue dst = new_value(fn);
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
@@ -410,7 +410,7 @@ static IRValue emit_fakecc_ldadd(IRFunction *fn, IRValue addr, IRValue val,
     inst.loc = loc;
     inst.width = width;
     inst.is_unsigned = is_unsigned;
-    inst.call_name = xstrdup("__fakecc_ldadd");
+    inst.call_name = xstrdup(name);
     inst.call_callee = -1;
     ir_call_reserve_args(&inst, 2);
     inst.call_args[0] = addr;
@@ -425,9 +425,9 @@ static IRValue emit_fakecc_ldadd(IRFunction *fn, IRValue addr, IRValue val,
  * compare would treat that as a different value. */
 static IRValue emit_bin_w(IRFunction *fn, IROpcode op, IRValue a, IRValue b,
                           int width, int is_unsigned, SourceLoc loc);
-static IRValue atomic_add_result(IRFunction *fn, IRValue old, IRValue delta,
+static IRValue atomic_add_result(IRFunction *fn, IROpcode op, IRValue old, IRValue delta,
                                  int sz, int is_u, SourceLoc loc) {
-    IRValue sum = emit_bin_w(fn, IR_ADD, old, delta, sz, is_u, loc);
+    IRValue sum = emit_bin_w(fn, op, old, delta, sz, is_u, loc);
     if (sz >= 8 || (is_u && sz == 4)) return sum;
     IRValue n = new_value(fn);
     emit_inst_w(fn, is_u ? IR_ZEXT : IR_SEXT, n, sum, -1, 0, 8, is_u, loc);
@@ -6586,26 +6586,38 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                         lower_expr(fn, st, e->u.call.args.data[2]);
                         fold_const_int(e->u.call.args.data[2], &ord);
                     }
-                    /* Add and sub are one LDADD.  Sub adds the negation.
-                     * and/or/xor/nand stay a plain pair until they get
-                     * their own LSE op. */
-                    if (!is_f && !is_nand && (opc == IR_ADD || opc == IR_SUB)
-                        && (sz == 1 || sz == 2 || sz == 4 || sz == 8)) {
-                        IRValue operand = delta;
+                    /* Add/sub are LDADD (sub adds the negation).  and is
+                     * LDCLR of the inverted mask, or is LDSET, xor is LDEOR.
+                     * nand has no single LSE op and stays a plain pair. */
+                    if (!is_f && !is_nand && (sz == 1 || sz == 2 || sz == 4 || sz == 8)
+                        && (opc == IR_ADD || opc == IR_SUB || opc == IR_BAND
+                            || opc == IR_BOR || opc == IR_BXOR)) {
+                        const char *lse = "__fakecc_ldadd";
+                        IRValue mem_op = delta;
+                        IROpcode rop = opc;
+                        IRValue rval = delta;
                         if (opc == IR_SUB) {
-                            operand = new_value(fn);
-                            emit_inst_w(fn, IR_NEG, operand, delta, -1, 0,
+                            mem_op = new_value(fn);
+                            emit_inst_w(fn, IR_NEG, mem_op, delta, -1, 0,
                                         sz == 8 ? 8 : 4, 0, e->loc);
-                            set_value_type(fn, operand, sz == 8 ? 8 : 4, 0);
+                            set_value_type(fn, mem_op, sz == 8 ? 8 : 4, 0);
+                            rop = IR_ADD;
+                            rval = mem_op;
+                        } else if (opc == IR_BAND) {
+                            lse = "__fakecc_ldclr";
+                        } else if (opc == IR_BOR) {
+                            lse = "__fakecc_ldset";
+                        } else if (opc == IR_BXOR) {
+                            lse = "__fakecc_ldeor";
                         }
                         int kind = 3;
                         if (ord == 0) kind = 0;
                         else if (ord == 1 || ord == 2) kind = 1;
                         else if (ord == 3) kind = 2;
-                        IRValue oldv = emit_fakecc_ldadd(fn, addr, operand, kind,
-                                                         sz, is_u, e->loc);
+                        IRValue oldv = emit_fakecc_lse(fn, lse, addr, mem_op, kind,
+                                                       sz, is_u, e->loc);
                         if (fetch_old) return oldv;
-                        return atomic_add_result(fn, oldv, operand, sz, is_u, e->loc);
+                        return atomic_add_result(fn, rop, oldv, rval, sz, is_u, e->loc);
                     }
                     IRValue oldv = new_value(fn);
                     emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
