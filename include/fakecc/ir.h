@@ -307,6 +307,7 @@ typedef struct {
 typedef struct {
     int   offset;       /* byte offset within the global's init_bytes */
     char *sym;          /* xstrdup'd target symbol name */
+    char *sub;          /* if set, the slot is sym - sub + addend */
     int   addend;       /* addend for relocation (e.g. &g + addend) */
 } GlobalFixup;
 

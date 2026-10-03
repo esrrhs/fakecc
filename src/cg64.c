@@ -50,6 +50,7 @@ typedef struct {
         int         gidx;
         int         slot_off;
         const char *sym;
+        const char *sub;
         int         addend;
     }                *pfix;
     size_t            npfix, cappfix;
@@ -4298,6 +4299,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                 c.pfix[c.npfix].gidx = (int)gi;
                 c.pfix[c.npfix].slot_off = g->fixups[fi].offset;
                 c.pfix[c.npfix].sym = g->fixups[fi].sym;
+                c.pfix[c.npfix].sub = g->fixups[fi].sub;
                 c.pfix[c.npfix].addend = g->fixups[fi].addend;
                 c.npfix++;
             }
@@ -4439,6 +4441,26 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             uint64_t gbase = c.gsect[gi] == G_RO ? ro_off
                            : c.gsect[gi] == G_DATA ? data_off : bss_off;
             uint64_t slot = gbase + c.goff[gi] + (uint64_t)c.pfix[i].slot_off;
+            if (c.pfix[i].sub) {
+                int pgi = find_global_idx(ir, c.pfix[i].sym);
+                int ngi = find_global_idx(ir, c.pfix[i].sub);
+                if (pgi < 0 || ngi < 0) {
+                    die_at(g->loc.file ? g->loc.file : "<arm64>", g->loc.line, 0,
+                           "arm64 backend: symbol difference is not local");
+                    continue;
+                }
+                uint64_t pb = c.gsect[pgi] == G_RO ? ro_off
+                            : c.gsect[pgi] == G_DATA ? data_off : bss_off;
+                uint64_t nb = c.gsect[ngi] == G_RO ? ro_off
+                            : c.gsect[ngi] == G_DATA ? data_off : bss_off;
+                int64_t diff = (int64_t)(pb + c.goff[pgi])
+                             - (int64_t)(nb + c.goff[ngi])
+                             + c.pfix[i].addend;
+                size_t raw = c.goff[gi] + (size_t)c.pfix[i].slot_off;
+                if (raw + 8 <= out->data.len)
+                    memcpy(out->data.data + raw, &diff, 8);
+                continue;
+            }
             int tgi = find_global_idx(ir, c.pfix[i].sym);
             int64_t tgt;
             if (tgi >= 0) {
@@ -4569,6 +4591,10 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             if (off + 8 <= out->data.len) {
                 int64_t add = c.pfix[i].addend;
                 memcpy(out->data.data + off, &add, 8);
+            }
+            if (c.pfix[i].sub) {
+                int subi = c64_undef_sym(out, ir, c.pfix[i].sub);
+                emit_module_add_data_reloc(out, off, 1 /* SUBTRACTOR */, subi, 0);
             }
             emit_module_add_data_reloc(out, off, 0 /* UNSIGNED */, si,
                                        c.pfix[i].addend);

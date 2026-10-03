@@ -1539,6 +1539,30 @@ static void test_used(void) {
     emit_module_free(&m);
 }
 
+static void test_subtractor(void) {
+    const char *obj = "/tmp/fakecc_arm64_sub.o";
+    const char *outp = "/tmp/fakecc_arm64_sub_out";
+    const char *err = "/tmp/fakecc_arm64_sub_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int aaa = 1;\n"
+        "int bbb = 2;\n"
+        "long gap = (long)&bbb - (long)&aaa;\n"
+        "int main(void) { return (int)gap; }\n",
+        obj, NULL), 0);
+    EmitModule m;
+    T_ASSERT_EQ_INT(emit_obj_read(obj, &m), 0);
+    int saw = 0;
+    for (size_t i = 0; i < m.num_data_relocs; i++)
+        if (m.data_relocs[i].type == 1) saw = 1;
+    T_ASSERT(saw);
+    EmitModule *mods[1] = { &m };
+    T_ASSERT_EQ_INT(link_capturing(mods, 1, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 4);
+    emit_module_free(&m);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3208,6 +3232,7 @@ int main(void) {
     test_hidden();
     test_addend();
     test_used();
+    test_subtractor();
     test_macho_link();
     return t_finalize();
 }

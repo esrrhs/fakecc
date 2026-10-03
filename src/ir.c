@@ -185,8 +185,10 @@ void ir_module_free(IRModule *m) {
     for (size_t i = 0; i < m->globals.len; i++) {
         free(m->globals.data[i].name);
         free(m->globals.data[i].init_bytes);
-        for (int f = 0; f < m->globals.data[i].num_fixups; f++)
+        for (int f = 0; f < m->globals.data[i].num_fixups; f++) {
             free(m->globals.data[i].fixups[f].sym);
+            free(m->globals.data[i].fixups[f].sub);
+        }
         free(m->globals.data[i].fixups);
     }
     free(m->globals.data);
@@ -289,6 +291,7 @@ static void add_global_fixup(IRGlobal *g, int offset, const char *sym, int adden
     }
     g->fixups[g->num_fixups].offset = offset;
     g->fixups[g->num_fixups].sym = xstrdup(sym);
+    g->fixups[g->num_fixups].sub = NULL;
     g->fixups[g->num_fixups].addend = addend;
     g->num_fixups++;
 }
@@ -10824,6 +10827,29 @@ static int fold_global_ptrdiff(const Expr *e, long long *out) {
     return 1;
 }
 
+/* `&b - &a` for two different symbols.  The Mach-O linker writes
+ * address(pos) - address(neg) + addend.  Same-symbol diffs are constants. */
+static int split_global_ptrdiff(const Expr *e, const char **pos, const char **neg,
+                                int *addend) {
+    if (!e) return 0;
+    const Expr *ce = e;
+    while (ce && ce->kind == EX_CAST) ce = ce->u.cast.operand;
+    if (!ce || ce->kind != EX_BINOP || ce->u.bin.op != BOP_SUB) return 0;
+    const char *s1 = NULL, *s2 = NULL;
+    int o1 = 0, o2 = 0;
+    if (!eval_global_addr_offset(ce->u.bin.l, &s1, &o1)) return 0;
+    if (!eval_global_addr_offset(ce->u.bin.r, &s2, &o2)) return 0;
+    if (!s1 || !s2 || strcmp(s1, s2) == 0) return 0;
+    int esz = 1;
+    if (ce->u.bin.l->type.kind == TY_PTR && ce->u.bin.l->type.pointee)
+        esz = type_size(*ce->u.bin.l->type.pointee);
+    if (esz != 1) return 0;
+    *pos = s1;
+    *neg = s2;
+    *addend = o1 - o2;
+    return 1;
+}
+
 /* If `e` is an address-constant expression whose root object is a file-scope
  * compound literal (e.g. `&((T){...})`, `&((T){...}).m`, `&((int[]){})[i]`),
  * return that literal and set *out_off to the byte offset of the referenced
@@ -11365,6 +11391,15 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             for (int b = 1; b < sz; b++) bytes[b] = 0;
             return;
         }
+    }
+    const char *dpos = NULL, *dneg = NULL;
+    int dadd = 0;
+    if (g && ty->kind == TY_INT && (ty->width == 8 || ty->width == 4)
+        && split_global_ptrdiff(e, &dpos, &dneg, &dadd)) {
+        add_global_fixup(g, (int)(bytes - g->init_bytes), dpos, dadd);
+        g->fixups[g->num_fixups - 1].sub = xstrdup(dneg);
+        memset(bytes, 0, sz);
+        return;
     }
     die_at(loc.file, loc.line, loc.col,
            "global '%s' initializer must be a compile-time constant", ctx);

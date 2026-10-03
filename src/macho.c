@@ -786,7 +786,7 @@ static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
                           ? ((uint32_t)r->addend & 0xFFFFFFu)
                           : ((uint32_t)sym & 0xFFFFFFu);
         uint32_t pcrel = (r->type == 2 || r->type == 3) ? 1u : 0u;
-        uint32_t length = r->type == 0 ? 3u : 2u; /* UNSIGNED is 8 bytes */
+        uint32_t length = (r->type == 0 || r->type == 1) ? 3u : 2u; /* 8-byte slots */
         uint32_t word = symfield
                       | (pcrel << 24)
                       | (length << 25)
@@ -1742,7 +1742,9 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
         size_t lens[2] = { m->num_relocs, m->num_data_relocs };
         int is_data[2] = { 0, 1 };
         for (int pass = 0; pass < 2 && rc == 0; pass++) {
+            int skip_pair = 0;
             for (size_t ri = 0; ri < lens[pass]; ri++) {
+                if (skip_pair) { skip_pair = 0; continue; }
                 EmitReloc *r = &lists[pass][ri];
                 if (r->sym >= m->num_syms) { rc = -1; break; }
                 EmitSymbol *es = &m->syms[r->sym];
@@ -1836,6 +1838,62 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                         break;
                     }
                     memcpy(out.text.data + site, &w, 4);
+                } else if (r->type == 1) {
+                    if (ri + 1 >= lens[pass]) {
+                        fprintf(stderr, "fakecc: subtractor reloc is not paired\n");
+                        rc = -1;
+                        break;
+                    }
+                    EmitReloc *n = &lists[pass][ri + 1];
+                    if (n->type != 0 || n->offset != r->offset || n->sym >= m->num_syms) {
+                        fprintf(stderr, "fakecc: subtractor reloc is not paired\n");
+                        rc = -1;
+                        break;
+                    }
+                    EmitSymbol *ns = &m->syms[n->sym];
+                    uint16_t nsh = 0;
+                    size_t noff = 0;
+                    int nfound = 0;
+                    int nlocal = adj[i][n->sym].defined && ns->binding != 2;
+                    if (nlocal) {
+                        nsh = adj[i][n->sym].sh;
+                        noff = adj[i][n->sym].off;
+                        nfound = 1;
+                    } else {
+                        for (size_t g = 0; g < ng; g++) {
+                            if (ns->name && strcmp(gdefs[g].name, ns->name) == 0) {
+                                nsh = gdefs[g].sh;
+                                noff = gdefs[g].off;
+                                nfound = 1;
+                                break;
+                            }
+                        }
+                        if (!nfound && adj[i][n->sym].defined) {
+                            nsh = adj[i][n->sym].sh;
+                            noff = adj[i][n->sym].off;
+                            nfound = 1;
+                        }
+                    }
+                    if (!nfound) {
+                        fprintf(stderr, "fakecc: undefined symbol '%s'\n",
+                                ns->name ? ns->name : "?");
+                        rc = -1;
+                        break;
+                    }
+                    uint64_t nbase = nsh == SECT_TEXT ? macho_text_offset()
+                                   : nsh == SECT_RODATA ? ro_off
+                                   : nsh == SECT_DATA ? data_off
+                                   : bss_off;
+                    int64_t diff = (int64_t)(nbase + noff + (uint64_t)(int64_t)n->addend)
+                                 - (int64_t)(base + off);
+                    size_t raw = data_base[i] + r->offset;
+                    if (raw + 8 > out.data.len) {
+                        fprintf(stderr, "fakecc: data reloc past end of section\n");
+                        rc = -1;
+                        break;
+                    }
+                    memcpy(out.data.data + raw, &diff, 8);
+                    skip_pair = 1;
                 } else if (r->type == 0) {
                     uint64_t slot = data_off + data_base[i] + r->offset;
                     emit_module_add_rebase(&out, slot, tgt);
