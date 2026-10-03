@@ -1042,6 +1042,64 @@ static void ldr_q(A64Asm *a, int rt, int rn, int byte_off) {
              | ((rn & 31) << 5) | (rt & 31));
 }
 
+/* dst = a op b, all three are pointers to 16-byte vectors.
+ * imm is the element size, width is the vector size, is_float selects
+ * NEON scalar-FP rather than integer.  v30/v31 are the only scratches. */
+static void emit_vec(C64 *c, const IRInst *s) {
+    A64Asm *a = c->as;
+    int esz = (int)s->imm;
+    if (s->width != 16 || (esz != 1 && esz != 2 && esz != 4 && esz != 8)) {
+        c64_die(c, s, "vector wider than 16");
+        return;
+    }
+    int pa = load_ptrv(c, s->a, -1);
+    ldr_q(a, A64_V30, pa, 0);
+    int pb = load_ptrv(c, s->b, -1);
+    ldr_q(a, A64_V31, pb, 0);
+
+    int sz = esz == 1 ? 0 : esz == 2 ? 1 : esz == 4 ? 2 : 3;
+    uint32_t base = 0;
+    if (s->is_float) {
+        if (esz != 4 && esz != 8) {
+            c64_die(c, s, "vector float element");
+            return;
+        }
+        uint32_t bit = (esz == 8) ? (1u << 22) : 0;
+        switch (s->op) {
+        case IR_VADD: base = 0x4E20D400u | bit; break;
+        case IR_VSUB: base = 0x4EA0D400u | bit; break;
+        case IR_VMUL: base = 0x6E20DC00u | bit; break;
+        case IR_VDIV: base = 0x6E20FC00u | bit; break;
+        case IR_VBAND: base = 0x4E201C00u; break;
+        case IR_VBOR:  base = 0x4EA01C00u; break;
+        case IR_VBXOR: base = 0x6E201C00u; break;
+        default: c64_die(c, s, "vector op"); return;
+        }
+    } else {
+        switch (s->op) {
+        case IR_VADD: base = 0x4E208400u | ((uint32_t)sz << 22); break;
+        case IR_VSUB: base = 0x6E208400u | ((uint32_t)sz << 22); break;
+        case IR_VBAND: base = 0x4E201C00u; break;
+        case IR_VBOR:  base = 0x4EA01C00u; break;
+        case IR_VBXOR: base = 0x6E201C00u; break;
+        case IR_VMUL:
+            if (esz != 2 && esz != 4) {
+                c64_die(c, s, "vector integer multiply");
+                return;
+            }
+            base = 0x4E209C00u | ((uint32_t)sz << 22);
+            break;
+        default:
+            c64_die(c, s, "vector integer divide");
+            return;
+        }
+    }
+    a64_word(a, base | ((uint32_t)A64_V31 << 16) | ((uint32_t)A64_V30 << 5)
+                  | (uint32_t)A64_V30);
+    int pd = load_ptrv(c, s->dst, -1);
+    str_q(a, A64_V30, pd, 0);
+}
+
 static void emit_function(C64 *c, int fi) {
     const IRFunction *fn = c->fn;
     A64Asm *a = c->as;
@@ -1485,6 +1543,11 @@ static void emit_function(C64 *c, int fi) {
         case IR_EQ: case IR_NE: case IR_LT: case IR_LE: case IR_GT:
         case IR_GE:
             emit_binop(c, s);
+            break;
+
+        case IR_VADD: case IR_VSUB: case IR_VMUL: case IR_VDIV:
+        case IR_VBAND: case IR_VBOR: case IR_VBXOR:
+            emit_vec(c, s);
             break;
 
         case IR_ALLOCA:

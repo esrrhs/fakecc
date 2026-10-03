@@ -915,6 +915,53 @@ static void test_vec16(void) {
         "int main(void) {\n"
         "  V a = { 1, 2, 3, 4 };\n"
         "  return f(10, a); }", 15);
+    expect("vadd",
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(16)));\n"
+        "__attribute__((noinline)) int after(int n, V r) {\n"
+        "  if (r[0] != 6) return 10;\n"
+        "  if (r[1] != 8) return 11;\n"
+        "  if (r[2] != 10) return 12;\n"
+        "  if (r[3] != 12) return 13;\n"
+        "  return n; }\n"
+        "int main(void) {\n"
+        "  int n = 7;\n"
+        "  V a = { 1, 2, 3, 4 };\n"
+        "  V b = { 5, 6, 7, 8 };\n"
+        "  V r = a + b;\n"
+        "  n = n + 1;\n"
+        "  if (after(n, r) != 8) return 1;\n"
+        "  return 0; }", 0);
+    expect("vsubmul",
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(16)));\n"
+        "int main(void) {\n"
+        "  V a = { 9, 8, 7, 6 };\n"
+        "  V b = { 1, 2, 3, 4 };\n"
+        "  V s = a - b;\n"
+        "  V m = b * b;\n"
+        "  return s[0] + s[3] + m[1] + m[2]; }", 23);
+    expect("vbit",
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(16)));\n"
+        "int main(void) {\n"
+        "  V a = { 0x0f, 0xf0, 0xff, 0x11 };\n"
+        "  V b = { 0x33, 0x0f, 0x0f, 0x22 };\n"
+        "  V u = a & b;\n"
+        "  V o = a | b;\n"
+        "  V x = a ^ b;\n"
+        "  if (u[0] != 3) return 1;\n"
+        "  if (o[1] != 255) return 2;\n"
+        "  if (x[3] != 0x33) return 3;\n"
+        "  return 0; }", 0);
+    expect("vfadd",
+        "package main;\n"
+        "typedef double V __attribute__((vector_size(16)));\n"
+        "int main(void) {\n"
+        "  V a = { 1.5, 2.5 };\n"
+        "  V b = { 2.5, 1.5 };\n"
+        "  V r = a + b;\n"
+        "  return (int)r[0] + (int)r[1]; }", 8);
 }
 
 int main(void) {
