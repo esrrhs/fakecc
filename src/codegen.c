@@ -2987,27 +2987,33 @@ static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
     }
 }
 
-static void mark_ssa_needed(char *needed, int nv, IRValue v) {
-    if (v >= 0 && v < nv) needed[v] = 1;
+static void mark_reg(char *needed, int *uses, int nv, IRValue v) {
+    if (v >= 0 && v < nv) {
+        needed[v] = 1;
+        uses[v]++;
+    }
 }
 
-static void mark_inst_uses_needed(const IRInst *inst, char *needed, int nv) {
+static void mark_inst_uses_needed(const IRInst *inst, char *needed,
+                                int *uses, int nv) {
     if (inst->op == IR_LABEL || inst->op == IR_BR || inst->op == IR_DBG_VALUE) return;
     if (inst->op == IR_ADDR) return; /* alloca id in `a` is not an SSA value use */
-    mark_ssa_needed(needed, nv, inst->a);
+    mark_reg(needed, uses, nv, inst->a);
     if (inst->op != IR_CBR && inst->op != IR_CALL)
-        mark_ssa_needed(needed, nv, inst->b);
+        mark_reg(needed, uses, nv, inst->b);
     if (inst->op == IR_CALL) {
-        if (inst->call_callee >= 0) mark_ssa_needed(needed, nv, inst->call_callee);
+        if (inst->call_callee >= 0) mark_reg(needed, uses, nv, inst->call_callee);
         for (int k = 0; k < inst->call_nargs; k++)
-            mark_ssa_needed(needed, nv, inst->call_args[k]);
+            mark_reg(needed, uses, nv, inst->call_args[k]);
     }
 }
 
 /* Mark the SSA operands one instruction actually requires at -O0, taking
  * addressing-mode folds into account (a folded dereference needs base/index,
  * not the intermediate address/Gep value). */
-static void codegen_mark_inst_roots(char *needed, int nv, const IRFunction *fn,
+static void codegen_mark_inst_roots(char *needed, int *uses,
+                                    const int *raw_uses, int nv,
+                                    const IRFunction *fn,
                                     const int *def, const int *alloca_off,
                                     const IRInst *inst, size_t ii) {
     int dummy;
@@ -3017,56 +3023,63 @@ static void codegen_mark_inst_roots(char *needed, int nv, const IRFunction *fn,
             if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
                 return;
             /* Fold a fresh GEP only when the address ADD is immediately
-             * before the dereference: with no instruction in between its
-             * operands' register homes cannot have been recycled. */
+             * before the dereference AND the address value is not used
+             * anywhere else: a dereference folded into [base+index*s]
+             * relies on base/index registers surviving the materialized
+             * ADD; if another instruction (e.g. the matching STORE_PTR
+             * of a pre-increment) also uses the address, the ADD is
+             * emitted and coalesces with its base register, so folding
+             * would read [addr+idx] twice. */
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
+            int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
             if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                 && (inst->width == 1 || inst->width == 2 || inst->width == 4
                     || inst->width == 8)
-                && adjacent
+                && adjacent && sole_use
                 && classify_ptr_addr(fn, def, alloca_off, inst->a,
                                      &ab, &ai, &asc, &adisp) != AF_NONE) {
-            if (ab >= 0) mark_ssa_needed(needed, nv, ab);
-            if (ai >= 0) mark_ssa_needed(needed, nv, ai);
+            if (ab >= 0) mark_reg(needed, uses, nv, ab);
+            if (ai >= 0) mark_reg(needed, uses, nv, ai);
             return;
         }
-        mark_ssa_needed(needed, nv, inst->a);
+        mark_reg(needed, uses, nv, inst->a);
         return;
     }
     if (inst->op == IR_STORE_PTR) {
             IRValue ab = -1, ai = -1;
             int asc = 0, adisp = 0;
             if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0)) {
-                mark_ssa_needed(needed, nv, inst->b);
+                mark_reg(needed, uses, nv, inst->b);
                 return;
             }
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
+            int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
             if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                 && (inst->width == 1 || inst->width == 2 || inst->width == 4
                     || inst->width == 8)
-                && adjacent
+                && adjacent && sole_use
                 && classify_ptr_addr(fn, def, alloca_off, inst->a,
                                      &ab, &ai, &asc, &adisp) != AF_NONE) {
-            if (ab >= 0) mark_ssa_needed(needed, nv, ab);
-            if (ai >= 0) mark_ssa_needed(needed, nv, ai);
-            mark_ssa_needed(needed, nv, inst->b);
+            if (ab >= 0) mark_reg(needed, uses, nv, ab);
+            if (ai >= 0) mark_reg(needed, uses, nv, ai);
+            mark_reg(needed, uses, nv, inst->b);
             return;
         }
-        mark_ssa_needed(needed, nv, inst->a);
-        mark_ssa_needed(needed, nv, inst->b);
+        mark_reg(needed, uses, nv, inst->a);
+        mark_reg(needed, uses, nv, inst->b);
         return;
     }
     if (alu_folds_imm(inst, 1, fn, def)) {
-        mark_ssa_needed(needed, nv, inst->a);
+        mark_reg(needed, uses, nv, inst->a);
         return;
     }
     if (alu_folds_imm(inst, 0, fn, def)) {
-        mark_ssa_needed(needed, nv, inst->b);
+        mark_reg(needed, uses, nv, inst->b);
         return;
     }
-    mark_inst_uses_needed(inst, needed, nv);
+    mark_inst_uses_needed(inst, needed, uses, nv);
 }
 
 /* Values that must materialize in a register (escaped pointers, arithmetic
@@ -3078,17 +3091,16 @@ static void codegen_mark_inst_roots(char *needed, int nv, const IRFunction *fn,
  * use-def closure: post-mem2reg IR is not strictly SSA — a value id can be
  * defined more than once (loop variables), so def[id] only names the last
  * definition and a closure would drop the operands of the earlier ones. */
-static char *codegen_needed_regs(const IRFunction *fn, const int *def,
-                                 const int *alloca_off, const char *skip_body) {
+static void codegen_mark_needed_and_uses(const IRFunction *fn, const int *def,
+                                 const int *alloca_off, const char *skip_body,
+                                 char *needed, int *ssa_uses,
+                                 const int *raw_uses) {
     int nv = fn->next_value_id > 0 ? fn->next_value_id : 1;
-    char *needed = xmalloc((size_t)nv);
-    memset(needed, 0, (size_t)nv);
     for (size_t i = 0; i < fn->insts.len; i++) {
         if (skip_body && skip_body[i]) continue;
-        codegen_mark_inst_roots(needed, nv, fn, def, alloca_off,
-                                &fn->insts.data[i], i);
+        codegen_mark_inst_roots(needed, ssa_uses, raw_uses, nv, fn, def,
+                                alloca_off, &fn->insts.data[i], i);
     }
-    return needed;
 }
 
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
@@ -3475,7 +3487,37 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             param_home_off[p] = off;
             skip_body[store_i] = 1;
         }
-        char *needed = codegen_needed_regs(fn, ssa_def, alloca_off, skip_body);
+        int nvals_f = fn->next_value_id > 0 ? fn->next_value_id : 1;
+        int *ssa_uses_f = xmalloc((size_t)nvals_f * sizeof(int));
+        memset(ssa_uses_f, 0, (size_t)nvals_f * sizeof(int));
+        char *needed = xmalloc((size_t)nvals_f);
+        memset(needed, 0, (size_t)nvals_f);
+        /* Raw-IR operand use counts (no addressing folds): gates whether a
+         * materialized address can be re-folded into [base+index] at the
+         * only adjacent dereference. */
+        int *raw_uses = xmalloc((size_t)nvals_f * sizeof(int));
+        memset(raw_uses, 0, (size_t)nvals_f * sizeof(int));
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj]) continue;
+            const IRInst *u = &fn->insts.data[uj];
+            if (u->op == IR_LABEL || u->op == IR_BR || u->op == IR_DBG_VALUE)
+                continue;
+            if (u->op != IR_ADDR && u->a >= 0)
+                raw_uses[u->a]++;
+            if (u->op != IR_CBR && u->op != IR_CALL && u->b >= 0)
+                raw_uses[u->b]++;
+            if (u->op == IR_CALL) {
+                if (u->call_callee >= 0) raw_uses[u->call_callee]++;
+                for (int uk = 0; uk < u->call_nargs; uk++)
+                    if (u->call_args[uk] >= 0) raw_uses[u->call_args[uk]]++;
+            }
+        }
+        /* Single root-marking pass: fills both the "must have a register"
+         * set and last-use counts, taking addressing-mode folds into account
+         * (a folded dereference reuses base/index SSA roots, not the
+         * intermediate address value). */
+        codegen_mark_needed_and_uses(fn, ssa_def, alloca_off, skip_body,
+                                    needed, ssa_uses_f, raw_uses);
 
         /* ---- Fused integer-compare → conditional branch ----
          * gcc -O0 emits `cmp; j<cc>` for `if (a < b)`.  Without fusion the
@@ -3483,24 +3525,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
          * CBR tests that value.  When the compare feeds ONLY the adjacent
          * branch (optionally through one ==0 / !=0 wrapper, i.e. `!(a<b)`),
          * skip both value-materializing instructions and branch on flags. */
-        int nvals_f = fn->next_value_id > 0 ? fn->next_value_id : 1;
-        int *ssa_uses_f = xmalloc((size_t)nvals_f * sizeof(int));
-        memset(ssa_uses_f, 0, (size_t)nvals_f * sizeof(int));
-        for (size_t uj = 0; uj < fn->insts.len; uj++) {
-            if (skip_body[uj]) continue;
-            const IRInst *u = &fn->insts.data[uj];
-            if (u->op == IR_LABEL || u->op == IR_BR || u->op == IR_DBG_VALUE)
-                continue;
-            if (u->op != IR_ADDR && u->a >= 0)
-                ssa_uses_f[u->a]++;
-            if (u->op != IR_CBR && u->op != IR_CALL && u->b >= 0)
-                ssa_uses_f[u->b]++;
-            if (u->op == IR_CALL) {
-                if (u->call_callee >= 0) ssa_uses_f[u->call_callee]++;
-                for (int uk = 0; uk < u->call_nargs; uk++)
-                    if (u->call_args[uk] >= 0) ssa_uses_f[u->call_args[uk]]++;
-            }
-        }
         size_t ninst_f = fn->insts.len ? fn->insts.len : 1;
         char *fused_skip = xmalloc(ninst_f);
         int *fused_cmp_at = xmalloc(ninst_f * sizeof(int));
@@ -3543,10 +3567,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             fused_inv_at[uj] = (char)invert;
             fused_skip[ci] = 1;
             if (wi != ci) fused_skip[wi] = 1;
-            mark_ssa_needed(needed, nvals_f, cmp->a);
+            mark_reg(needed, ssa_uses_f, nvals_f, cmp->a);
             int64_t cimm;
             if (!(ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)))
-                mark_ssa_needed(needed, nvals_f, cmp->b);
+                mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
         }
 
         /* Variadic: compute the initial va_list field values.  The named args
@@ -4341,7 +4365,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
                 int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
                              && ssa_def[inst->a] >= 0
-                             && (size_t)ssa_def[inst->a] + 1 == j;
+                             && (size_t)ssa_def[inst->a] + 1 == j
+                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
                 if (!folded && af_adj
                     && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
@@ -4429,7 +4454,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
                 int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
                              && ssa_def[inst->a] >= 0
-                             && (size_t)ssa_def[inst->a] + 1 == j;
+                             && (size_t)ssa_def[inst->a] + 1 == j
+                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
                 if (!folded && af_adj
                     && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
