@@ -4726,6 +4726,29 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     break;
                 }
+                /* Arm64 uses LDADD.  x86 adds in a register and stores the low bytes. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_ldadd") == 0
+                    && inst->call_nargs >= 2) {
+                    int w = inst->width;
+                    if (w != 1 && w != 2 && w != 4 && w != 8) w = 4;
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg(&out->text, inst->call_args[1], REG_RAX, ra);
+                    emit_push_r(&out->text, REG_RAX);
+                    emit_pop_r(&out->text, REG_RDX);
+                    emit_pop_r(&out->text, REG_RCX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, inst->is_unsigned);
+                    emit_add_rr(&out->text, REG_RDX, REG_RAX);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                    }
+                    break;
+                }
                 /* __syscall(num, a0..a5) — emit a raw `syscall` instruction.
                  * Linux x86-64 syscall ABI: rax = num, args in rdi/rsi/rdx/r10/r8/r9.
                  * We use the same push-then-pop dance to load args safely. */

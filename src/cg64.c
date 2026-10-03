@@ -2158,6 +2158,43 @@ static void emit_call(C64 *c, const IRInst *s) {
         if (s->dst >= 0) commit(c, s->dst, d);
         return;
     }
+    if (s->call_name && strcmp(s->call_name, "__fakecc_ldadd") == 0) {
+        /* LDADD Rs, Rt, [Rn].  Same register rules and ordering bits as SWP. */
+        if (s->call_nargs < 2) return;
+        int w = s->width;
+        if (w != 1 && w != 2 && w != 4 && w != 8) {
+            die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
+                   s->loc.line, s->loc.col,
+                   "arm64 backend: atomic add width must be 1, 2, 4, or 8");
+            return;
+        }
+        int p = load_ptrv(c, s->call_args[0], -1);
+        int v = load_op(c, s->call_args[1], p);
+        int d = s->dst >= 0 ? dst_reg(c, s->dst) : SCR0;
+        if (p == d || p == v) {
+            int t = safe_tmp(d, v, p == d ? -1 : p, -1);
+            a64_mov_reg(a, t, p, 1);
+            p = t;
+        }
+        if (v == d || v == p) {
+            int t = safe_tmp(d, p, -1, -1);
+            a64_mov_reg(a, t, v, 1);
+            v = t;
+        }
+        uint32_t base = w == 1 ? 0x38200000u : w == 2 ? 0x78200000u
+                      : w == 4 ? 0xB8200000u : 0xF8200000u;
+        int kind = (int)s->imm;
+        if (kind < 0 || kind > 3) kind = 3;
+        if (kind & 1) base |= 1u << 23;
+        if (kind & 2) base |= 1u << 22;
+        a64_word(a, base | ((uint32_t)(v & 31) << 16)
+                       | ((uint32_t)(p & 31) << 5)
+                       | (uint32_t)(d & 31));
+        if (!s->is_unsigned && w < 8)
+            a64_sxt(a, d, d, (unsigned)w, 1);
+        if (s->dst >= 0) commit(c, s->dst, d);
+        return;
+    }
     if (is_va_builtin(s->call_name)) {
         emit_va(c, s);
         return;

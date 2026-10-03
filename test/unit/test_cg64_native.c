@@ -2427,6 +2427,36 @@ static void test_xchgp(void) {
         "  return 0; }", 0);
 }
 
+static void test_fadd(void) {
+    expect("fadd",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 9;\n"
+        "  if (__atomic_fetch_add(&x, 4, 0) != 9) return 1;\n"
+        "  if (x != 13) return 2;\n"
+        "  if (__atomic_fetch_add(&x, 1, 2) != 13) return 3;\n"
+        "  if (__atomic_add_fetch(&x, 2, 3) != 16) return 4;\n"
+        "  if (__atomic_fetch_sub(&x, 6, 5) != 16) return 5;\n"
+        "  if (x != 10) return 6;\n"
+        "  x = -3;\n"
+        "  if (__atomic_add_fetch(&x, 1, 0) != -2) return 7;\n"
+        "  long long y = 3;\n"
+        "  if (__atomic_fetch_add(&y, 8, 2) != 3) return 8;\n"
+        "  if (y != 11) return 9;\n"
+        "  unsigned char c = 250;\n"
+        "  if (__atomic_fetch_add(&c, 10, 5) != 250) return 10;\n"
+        "  if (c != 4) return 11;\n"
+        "  c = 200;\n"
+        "  if (__atomic_add_fetch(&c, 100, 0) != 44) return 12;\n"
+        "  unsigned short h = 2;\n"
+        "  if (__atomic_fetch_sub(&h, 3, 3) != 2) return 13;\n"
+        "  if (h != 65535) return 14;\n"
+        "  signed char sc = 127;\n"
+        "  if (__atomic_add_fetch(&sc, 1, 5) != -128) return 15;\n"
+        "  if (__atomic_sub_fetch(&sc, 1, 0) != 127) return 16;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2498,6 +2528,7 @@ int main(void) {
     test_aptr();
     test_xchg();
     test_xchgp();
+    test_fadd();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
