@@ -842,7 +842,8 @@ int abi_indirect_agg(Type t) {
     /* Darwin: a non-HFA aggregate larger than 16 bytes is passed and
      * returned through a pointer.  HFAs use V registers instead. */
     if (!abi_is_arm64()) return 0;
-    if (t.is_vector) return 0;
+    /* Darwin has no YMM/ZMM.  A vector wider than 16 bytes is a pointer. */
+    if (t.is_vector) return type_size(t) > 16;
     if (t.kind != TY_STRUCT) return 0;
     if (abi_is_hfa(t)) return 0;
     return type_size(t) > 16;

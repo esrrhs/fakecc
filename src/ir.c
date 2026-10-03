@@ -1567,9 +1567,13 @@ static void abi_adjust_cls(Type t, SysVRegClass *cls, int *nreg, SourceLoc loc) 
                    "arm64 HFA wider than two eightbytes is not supported yet");
         return;
     }
-    /* vector_size(16) is one Q register on Darwin, same SSE class SysV uses
-     * for a 16-byte XMM.  Wider vectors are still rewritten below. */
+    /* vector_size(16) is one Q register on Darwin.  Wider vectors have no
+     * YMM/ZMM, so they travel as a pointer (argument in a GP, result in x8). */
     if (t.is_vector && type_size(t) == 16) return;
+    if (t.is_vector && type_size(t) > 16) {
+        *nreg = 0;
+        return;
+    }
     for (int i = 0; i < *nreg && i < 2; i++)
         if (cls[i] == SYSV_CLS_SSE) cls[i] = SYSV_CLS_INTEGER;
 }

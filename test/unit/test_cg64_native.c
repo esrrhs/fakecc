@@ -992,6 +992,28 @@ static void test_vec16(void) {
         "  V b = { 3, 4 };\n"
         "  V r = a * b;\n"
         "  return (int)(r[0] + r[1]); }", 88);
+    expect("v32id",
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(32)));\n"
+        "__attribute__((noinline)) V id(V v) { return v; }\n"
+        "int main(void) {\n"
+        "  V a = { 1, 2, 3, 4, 5, 6, 7, 8 };\n"
+        "  V b = id(a);\n"
+        "  if (b[0] != 1) return 1;\n"
+        "  if (b[3] != 4) return 2;\n"
+        "  if (b[7] != 8) return 3;\n"
+        "  return 0; }", 0);
+    expect("v64id",
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(64)));\n"
+        "__attribute__((noinline)) V id(V v) { return v; }\n"
+        "int main(void) {\n"
+        "  V a = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };\n"
+        "  V b = id(a);\n"
+        "  if (b[0] != 1) return 1;\n"
+        "  if (b[7] != 8) return 2;\n"
+        "  if (b[15] != 16) return 3;\n"
+        "  return 0; }", 0);
 }
 
 int main(void) {
