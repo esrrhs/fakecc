@@ -471,6 +471,62 @@ static int emit_mem_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* memcmp/strcmp/strlen/strncmp.  Same reason as memcpy: the Darwin
+ * runtime is not linked yet, and a user definition still wins.
+ * Arguments are already in x0/x1(/x2).  The signed byte difference
+ * (or the length) is left in x0.  x3/x4 are caller-saved. */
+static int emit_scan_builtin(C64 *c, const char *name) {
+    int is_memcmp = strcmp(name, "memcmp") == 0 || strcmp(name, "bcmp") == 0;
+    int is_strcmp = strcmp(name, "strcmp") == 0;
+    int is_strncmp = strcmp(name, "strncmp") == 0;
+    int is_strlen = strcmp(name, "strlen") == 0;
+    if (!is_memcmp && !is_strcmp && !is_strncmp && !is_strlen) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+
+    A64Asm *a = c->as;
+    int Lloop = a64_new_label(a);
+    int Ldiff = a64_new_label(a);
+    int Lzero = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+
+    if (is_strlen) {
+        a64_mov_reg(a, A64_X1, A64_X0, 1);
+        a64_bind(a, Lloop);
+        a64_ldr8(a, A64_X2, A64_X0, 0);
+        a64_cbz(a, A64_X2, Ldone, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_b(a, Lloop);
+        a64_bind(a, Ldone);
+        a64_sub_reg(a, A64_X0, A64_X0, A64_X1, A64_LSL, 0, 1, 0);
+        return 1;
+    }
+
+    a64_bind(a, Lloop);
+    if (is_memcmp || is_strncmp)
+        a64_cbz(a, A64_X2, Lzero, 1);
+    a64_ldr8(a, A64_X3, A64_X0, 0);
+    a64_ldr8(a, A64_X4, A64_X1, 0);
+    a64_cmp_reg(a, A64_X3, A64_X4, 0);
+    a64_bcond(a, A64_NE, Ldiff);
+    if (is_strcmp || is_strncmp)
+        a64_cbz(a, A64_X3, Lzero, 0);
+    a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+    if (is_memcmp || is_strncmp)
+        a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+    a64_b(a, Lloop);
+    a64_bind(a, Lzero);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_b(a, Ldone);
+    a64_bind(a, Ldiff);
+    /* Unsigned bytes.  Sign-extend so a 64-bit compare still sees < 0. */
+    a64_sub_reg(a, A64_X0, A64_X3, A64_X4, A64_LSL, 0, 0, 0);
+    a64_sxt(a, A64_X0, A64_X0, 4, 1);
+    a64_bind(a, Ldone);
+    return 1;
+}
+
 /* Bytes of outgoing stack traffic for one call: 8 per stack slot, plus
  * 16 when call_args[0] must be stashed before it is written to x8. */
 static int is_va_builtin(const char *name) {
@@ -1051,7 +1107,8 @@ static void emit_call(C64 *c, const IRInst *s) {
         if (c->udiv_label < 0)
             c->udiv_label = a64_new_label(a);
         a64_bl(a, c->udiv_label);
-    } else if (!(s->call_name && emit_mem_builtin(c, s->call_name))) {
+    } else if (!(s->call_name && (emit_mem_builtin(c, s->call_name)
+                                 || emit_scan_builtin(c, s->call_name)))) {
         int fi = 0;
         if (find_function(c->ir, s->call_name, &fi) != 0) {
             if (!emit_object_mode())

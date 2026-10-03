@@ -1572,6 +1572,27 @@ static void test_fpmath(void) {
         "  return 0; }", 0);
 }
 
+static void test_scan(void) {
+    expect("scan",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char a[] = {'h','i',0};\n"
+        "  char b[] = {'h','i',0};\n"
+        "  char c[] = {'h','j',0};\n"
+        "  char d[] = {'h','i','!',0};\n"
+        "  if (__builtin_strlen(a) != 2) return 1;\n"
+        "  if (__builtin_strlen(\"\") != 0) return 2;\n"
+        "  if (__builtin_memcmp(a, b, 3) != 0) return 3;\n"
+        "  if (__builtin_memcmp(a, c, 2) >= 0) return 4;\n"
+        "  if (__builtin_memcmp(a, b, 0) != 0) return 5;\n"
+        "  if (__builtin_strcmp(a, b) != 0) return 6;\n"
+        "  if (__builtin_strcmp(a, c) >= 0) return 7;\n"
+        "  if (__builtin_strcmp(d, a) <= 0) return 8;\n"
+        "  if (__builtin_strncmp(a, c, 1) != 0) return 9;\n"
+        "  if (__builtin_strncmp(a, c, 2) >= 0) return 10;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -1610,6 +1631,7 @@ int main(void) {
     test_setjmp();
     test_bitops();
     test_fpmath();
+    test_scan();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
