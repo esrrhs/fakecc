@@ -950,6 +950,61 @@ static void emit_bit_builtin(C64 *c, const IRInst *s) {
     commit(c, s->dst, dst);
 }
 
+/* rotateleftN / rotaterightN arrive with the __builtin_ prefix stripped.
+ * 32- and 64-bit counts are masked by RORV.  8- and 16-bit rotates are
+ * built from shifts so the high bits of a W register stay out of it. */
+static int rotate_width(const char *bn) {
+    if (!bn) return 0;
+    int left = strncmp(bn, "rotateleft", 10) == 0;
+    int right = strncmp(bn, "rotateright", 11) == 0;
+    if (!left && !right) return 0;
+    const char *p = bn + (left ? 10 : 11);
+    if (strcmp(p, "8") == 0) return 8;
+    if (strcmp(p, "16") == 0) return 16;
+    if (strcmp(p, "32") == 0) return 32;
+    if (strcmp(p, "64") == 0) return 64;
+    return 0;
+}
+
+static void emit_rotate_builtin(C64 *c, const IRInst *s, int width) {
+    if (s->dst < 0 || s->call_nargs < 2) return;
+    A64Asm *a = c->as;
+    int right = strstr(s->call_name, "right") != NULL;
+    int is64 = width == 64;
+    int dst = dst_reg(c, s->dst);
+    int src = load_op(c, s->call_args[0], dst);
+    int sh = load_op(c, s->call_args[1], src);
+    if (width >= 32) {
+        if (right) {
+            a64_rorv(a, dst, src, sh, is64);
+        } else {
+            int nreg = safe_tmp(src, sh, dst, -1);
+            a64_neg(a, nreg, sh, is64);
+            a64_rorv(a, dst, src, nreg, is64);
+        }
+        commit(c, s->dst, dst);
+        return;
+    }
+    uint64_t mask = width == 8 ? 0xffu : 0xffffu;
+    int vreg = safe_tmp(src, sh, dst, -1);
+    int nreg = safe_tmp(src, sh, dst, vreg);
+    a64_and_imm(a, vreg, src, mask, 0);
+    a64_and_imm(a, nreg, sh, (uint64_t)(width - 1), 0);
+    int wreg = safe_tmp(vreg, nreg, dst, -1);
+    a64_movz(a, wreg, (unsigned)width, 0, 0);
+    a64_sub_reg(a, wreg, wreg, nreg, A64_LSL, 0, 0, 0);
+    if (right) {
+        a64_lsrv(a, dst, vreg, nreg, 0);
+        a64_lslv(a, vreg, vreg, wreg, 0);
+    } else {
+        a64_lslv(a, dst, vreg, nreg, 0);
+        a64_lsrv(a, vreg, vreg, wreg, 0);
+    }
+    a64_or_reg(a, dst, dst, vreg, 0);
+    a64_and_imm(a, dst, dst, mask, 0);
+    commit(c, s->dst, dst);
+}
+
 static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
     if (!s->call_nargs) return s->align16 == A64_MARK_SRET ? 16 : 0;
     if (s->call_name && strcmp(s->call_name, "__syscall") == 0) return 0;
@@ -1258,6 +1313,16 @@ static void emit_call(C64 *c, const IRInst *s) {
     if (is_bit_builtin(s->call_name)) {
         emit_bit_builtin(c, s);
         return;
+    }
+    {
+        int rw = rotate_width(s->call_name);
+        if (rw && s->call_nargs >= 2) {
+            int defined = 0;
+            if (find_function(c->ir, s->call_name, &defined) != 0) {
+                emit_rotate_builtin(c, s, rw);
+                return;
+            }
+        }
     }
     {
         int fp_narg = 0;

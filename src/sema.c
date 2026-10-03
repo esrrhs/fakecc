@@ -1323,6 +1323,14 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_int(4, 1);
             else if (strcmp(bname, "__builtin_bswap16") == 0)
                 ret = type_make_int(2, 1);
+            else if (strcmp(bname, "__builtin_rotateleft64") == 0 || strcmp(bname, "__builtin_rotateright64") == 0)
+                ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_rotateleft32") == 0 || strcmp(bname, "__builtin_rotateright32") == 0)
+                ret = type_make_int(4, 1);
+            else if (strcmp(bname, "__builtin_rotateleft16") == 0 || strcmp(bname, "__builtin_rotateright16") == 0)
+                ret = type_make_int(2, 1);
+            else if (strcmp(bname, "__builtin_rotateleft8") == 0 || strcmp(bname, "__builtin_rotateright8") == 0)
+                ret = type_make_int(1, 1);
             else if (strcmp(bname, "__builtin_classify_type") == 0)
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_signbit") == 0 || strcmp(bname, "__builtin_signbitf") == 0 || strcmp(bname, "__builtin_signbitl") == 0 || strcmp(bname, "signbit") == 0)

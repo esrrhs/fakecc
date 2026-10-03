@@ -1777,6 +1777,23 @@ static void test_rfind(void) {
         "  return 0; }", 0);
 }
 
+static void test_rotate(void) {
+    expect("rotate",
+        "package main;\n"
+        "int main(void) {\n"
+        "  if ((unsigned)__builtin_rotateleft8(0x81, 1) != 0x03) return 1;\n"
+        "  if ((unsigned)__builtin_rotateleft8(0x81, 0) != 0x81) return 2;\n"
+        "  if ((unsigned)__builtin_rotateright8(0x81, 1) != 0xc0) return 3;\n"
+        "  if ((unsigned)__builtin_rotateleft16(0x8001, 1) != 3) return 4;\n"
+        "  if ((unsigned)__builtin_rotateright16(0x8001, 1) != 0xc000) return 5;\n"
+        "  if (__builtin_rotateleft32(0x80000000u, 1) != 1u) return 6;\n"
+        "  if (__builtin_rotateright32(1u, 1) != 0x80000000u) return 7;\n"
+        "  unsigned long long h = 1ull << 63;\n"
+        "  if (__builtin_rotateleft64(h, 1) != 1ull) return 8;\n"
+        "  if (__builtin_rotateright64(1ull, 1) != h) return 9;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1868,6 +1885,7 @@ int main(void) {
     test_case();
     test_stop();
     test_rfind();
+    test_rotate();
     test_trap();
     test_syscall();
     test_frame_addr();
