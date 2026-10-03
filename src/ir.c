@@ -6317,7 +6317,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 }
                 IRValue zero = new_value(fn);
                 emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, sz, is_u, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, 0, sz, is_u, e->loc);
+                /* Release store.  stlr covers 1/2/4/8; other sizes stay plain. */
+                int ak = (sz == 1 || sz == 2 || sz == 4 || sz == 8) ? 3 : 0;
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, ak, sz, is_u, e->loc);
                 return -1;
             }
             if (strcmp(sname, "__sync_bool_compare_and_swap") == 0 ||
@@ -6350,6 +6352,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
             if (strcmp(sname, "__sync_lock_test_and_set") == 0) {
                 IRValue new_val = lower_expr(fn, st, e->u.call.args.data[1]);
+                /* Acquire exchange.  Odd sizes stay a plain pair. */
+                if (sz == 1 || sz == 2 || sz == 4 || sz == 8)
+                    return emit_fakecc_swp(fn, addr, new_val, 1, sz, is_u, e->loc);
                 IRValue old_val = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, old_val, addr, -1, 0, sz, is_u, e->loc);
                 set_value_type(fn, old_val, sz, is_u);
@@ -6357,22 +6362,50 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 return old_val;
             }
             IRValue delta = lower_expr(fn, st, e->u.call.args.data[1]);
+            int op = IR_ADD;
+            int is_nand = strstr(sname, "nand") != NULL;
+            if (!is_nand) {
+                if (strstr(sname, "_sub_") || strstr(sname, "fetch_and_sub")) op = IR_SUB;
+                else if (strstr(sname, "_and_and_") || strstr(sname, "fetch_and_and")) op = IR_BAND;
+                else if (strstr(sname, "_or_and_") || strstr(sname, "fetch_and_or")) op = IR_BOR;
+                else if (strstr(sname, "_xor_and_") || strstr(sname, "fetch_and_xor")) op = IR_BXOR;
+                else if (strstr(sname, "_add_") || strstr(sname, "fetch_and_add")) op = IR_ADD;
+            }
+            int fetch_old = strncmp(sname, "__sync_fetch_", 13) == 0;
+            /* __sync_* is a full barrier, so the LSE op is the seq_cst form.
+             * nand has no single instruction and stays a plain pair. */
+            if (!is_nand && (sz == 1 || sz == 2 || sz == 4 || sz == 8)
+                && (op == IR_ADD || op == IR_SUB || op == IR_BAND
+                    || op == IR_BOR || op == IR_BXOR)) {
+                const char *lse = "__fakecc_ldadd";
+                IRValue mem_op = delta;
+                IROpcode rop = op;
+                IRValue rval = delta;
+                if (op == IR_SUB) {
+                    mem_op = new_value(fn);
+                    emit_inst_w(fn, IR_NEG, mem_op, delta, -1, 0,
+                                sz == 8 ? 8 : 4, 0, e->loc);
+                    set_value_type(fn, mem_op, sz == 8 ? 8 : 4, 0);
+                    rop = IR_ADD;
+                    rval = mem_op;
+                } else if (op == IR_BAND) {
+                    lse = "__fakecc_ldclr";
+                } else if (op == IR_BOR) {
+                    lse = "__fakecc_ldset";
+                } else if (op == IR_BXOR) {
+                    lse = "__fakecc_ldeor";
+                }
+                IRValue oldv = emit_fakecc_lse(fn, lse, addr, mem_op, 3, sz, is_u, e->loc);
+                if (fetch_old) return oldv;
+                return atomic_add_result(fn, rop, oldv, rval, sz, is_u, e->loc);
+            }
             IRValue old_val = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, old_val, addr, -1, 0, sz, is_u, e->loc);
             set_value_type(fn, old_val, sz, is_u);
-            int op = IR_ADD;
-            if (strstr(sname, "_sub_") || strstr(sname, "fetch_and_sub")) op = IR_SUB;
-            else if (strstr(sname, "_and_and_") || strstr(sname, "fetch_and_and")) op = IR_BAND;
-            else if (strstr(sname, "_or_and_") || strstr(sname, "fetch_and_or")) op = IR_BOR;
-            else if (strstr(sname, "_xor_and_") || strstr(sname, "fetch_and_xor")) op = IR_BXOR;
-            else if (strstr(sname, "_add_") || strstr(sname, "fetch_and_add")) op = IR_ADD;
             IRValue res = emit_bin_w(fn, op, old_val, delta, sz, is_u, e->loc);
             emit_inst_w(fn, IR_STORE_PTR, -1, addr, res, 0, sz, is_u, e->loc);
-            if (strncmp(sname, "__sync_fetch_", 13) == 0) {
-                return old_val;
-            } else {
-                return res;
-            }
+            if (fetch_old) return old_val;
+            return res;
         }
         /* Same model as __sync_*: plain loads and stores.  Darwin images
          * do not link libatomic, and a missing call name used to crash
@@ -6531,26 +6564,35 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 return -1;
             }
             if (strcmp(sname, "__atomic_clear") == 0) {
-                if (e->u.call.args.len > 1)
+                long long ord = 5;
+                if (e->u.call.args.len > 1) {
                     lower_expr(fn, st, e->u.call.args.data[1]);
+                    fold_const_int(e->u.call.args.data[1], &ord);
+                }
+                /* The flag is one byte.  Release and stronger use stlrb. */
                 IRValue zero = new_value(fn);
-                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, sz, is_u, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, 0, sz, is_u, e->loc);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 1, 1, e->loc);
+                int ak = (ord == 3 || ord == 4 || ord >= 5) ? 3 : 0;
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, ak, 1, 1, e->loc);
                 return -1;
             }
             if (strcmp(sname, "__atomic_test_and_set") == 0) {
-                if (e->u.call.args.len > 1)
+                long long ord = 5;
+                if (e->u.call.args.len > 1) {
                     lower_expr(fn, st, e->u.call.args.data[1]);
-                IRValue oldv = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, 1, 1, e->loc);
-                set_value_type(fn, oldv, 1, 1);
+                    fold_const_int(e->u.call.args.data[1], &ord);
+                }
+                /* Swap the byte with 1.  The result is a bool: nonzero → 1. */
                 IRValue one = new_value(fn);
                 emit_inst_w(fn, IR_CONST, one, -1, -1, 1, 1, 1, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, one, 0, 1, 1, e->loc);
-                IRValue wide = new_value(fn);
-                emit_inst_w(fn, IR_ZEXT, wide, oldv, -1, 0, 4, 0, e->loc);
-                set_value_type(fn, wide, 4, 0);
-                return wide;
+                int kind = 3;
+                if (ord == 0) kind = 0;
+                else if (ord == 1 || ord == 2) kind = 1;
+                else if (ord == 3) kind = 2;
+                IRValue oldv = emit_fakecc_swp(fn, addr, one, kind, 1, 1, e->loc);
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
+                return emit_bin_w(fn, IR_NE, oldv, zero, 4, 0, e->loc);
             }
             if (strcmp(sname, "__atomic_compare_exchange_n") == 0 ||
                 strcmp(sname, "__atomic_compare_exchange") == 0) {

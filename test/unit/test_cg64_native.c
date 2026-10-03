@@ -2527,6 +2527,50 @@ static void test_cas(void) {
         "  return 0; }", 0);
 }
 
+static void test_tas(void) {
+    expect("tas",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char b = 0;\n"
+        "  if (__atomic_test_and_set(&b, 0) != 0 || b != 1) return 1;\n"
+        "  if (__atomic_test_and_set(&b, 2) != 1) return 2;\n"
+        "  __atomic_clear(&b, 0);\n"
+        "  if (b != 0) return 3;\n"
+        "  b = 2;\n"
+        "  if (__atomic_test_and_set(&b, 5) != 1 || b != 1) return 4;\n"
+        "  __atomic_clear(&b, 3);\n"
+        "  if (b != 0) return 5;\n"
+        "  __atomic_clear(&b, 5);\n"
+        "  if (b != 0) return 6;\n"
+        "  if (__atomic_test_and_set(&b, 3) != 0 || b != 1) return 7;\n"
+        "  return 0; }", 0);
+}
+
+static void test_sync(void) {
+    expect("sync",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 9;\n"
+        "  if (__sync_fetch_and_add(&x, 4) != 9 || x != 13) return 1;\n"
+        "  if (__sync_add_and_fetch(&x, 1) != 14) return 2;\n"
+        "  if (__sync_fetch_and_sub(&x, 4) != 14 || x != 10) return 3;\n"
+        "  if (__sync_fetch_and_and(&x, 7) != 10 || x != 2) return 4;\n"
+        "  if (__sync_fetch_and_or(&x, 8) != 2 || x != 10) return 5;\n"
+        "  if (__sync_xor_and_fetch(&x, 1) != 11) return 6;\n"
+        "  if (__sync_lock_test_and_set(&x, 3) != 11 || x != 3) return 7;\n"
+        "  __sync_lock_release(&x);\n"
+        "  if (x != 0) return 8;\n"
+        "  unsigned char c = 250;\n"
+        "  if (__sync_fetch_and_add(&c, 10) != 250 || c != 4) return 9;\n"
+        "  signed char sc = 127;\n"
+        "  if (__sync_add_and_fetch(&sc, 1) != -128) return 10;\n"
+        "  long long y = 1;\n"
+        "  if (__sync_fetch_and_xor(&y, 3) != 1 || y != 2) return 11;\n"
+        "  __sync_lock_release(&y);\n"
+        "  if (y != 0) return 12;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2601,6 +2645,8 @@ int main(void) {
     test_fadd();
     test_bitrmw();
     test_cas();
+    test_tas();
+    test_sync();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
