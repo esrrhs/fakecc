@@ -309,6 +309,109 @@ static void test_mixed_width_stack(void) {
         230);
 }
 
+/* T8: globals, strings, aggregates, and PIE pointer initializers. */
+static void test_globals_and_aggregates(void) {
+    expect("global_bss_const",
+        "package main;\n"
+        "int g = 40;\n"
+        "int z;\n"
+        "const int c = 2;\n"
+        "int main(){ z = 1; return g + z + c - 1; }", 42);
+    expect("string_literal",
+        "package main;\n"
+        "int main(){ char *p = \"hi\";\n"
+        " return p[0]=='h' && p[1]=='i' && p[2]==0; }", 1);
+    expect("static_local",
+        "package main;\n"
+        "int bump(void){ static int n = 4; n = n + 1; return n; }\n"
+        "int main(){ return bump() + bump(); }", 11);
+    expect("struct_copy_fields",
+        "package main;\n"
+        "struct S { int a; char b; int c; };\n"
+        "int main(){ struct S x; x.a=1; x.b=2; x.c=3;\n"
+        " struct S y; y = x; return y.a + y.b + y.c; }", 6);
+    expect("array_2d",
+        "package main;\n"
+        "int a[3][2];\n"
+        "int main(){ a[1][1] = 7; a[2][0] = 5;\n"
+        " int *p = &a[0][0]; return a[1][1] + *(p+4); }", 12);
+    expect("bitfield",
+        "package main;\n"
+        "struct B { int x:3; unsigned y:5; int z:10; };\n"
+        "int main(){ struct B b; b.x=-1; b.y=17; b.z=100;\n"
+        " return (b.x==-1) + (b.y==17) + (b.z==100); }", 3);
+    expect("union_le",
+        "package main;\n"
+        "union U { int i; char c[4]; };\n"
+        "int main(){ union U u; u.i = 0x01020304; return u.c[0]; }", 4);
+    expect("ptr_cmp",
+        "package main;\n"
+        "int g = 10;\n"
+        "int main(){ int *p = &g; int *q = &g;\n"
+        " return (*p == 10) && (p == q); }", 1);
+    /* >64-byte assignment lowers to memcpy; the backend inlines it. */
+    expect("struct_copy_memcpy",
+        "package main;\n"
+        "struct Big { char b[80]; };\n"
+        "int main(){\n"
+        " struct Big a; struct Big c; int i; int s;\n"
+        " i = 0; while (i < 80) { a.b[i] = i; i = i + 1; }\n"
+        " c = a;\n"
+        " i = 0; s = 0; while (i < 80) { s = s + c.b[i]; i = i + 1; }\n"
+        " return s == 3160; }", 1);
+    expect("builtin_memset",
+        "package main;\n"
+        "int main(){\n"
+        " char b[16]; int i; int s;\n"
+        " i = 0; while (i < 16) { b[i] = 1; i = i + 1; }\n"
+        " __builtin_memset(b, 7, 16);\n"
+        " i = 0; s = 0; while (i < 16) { s = s + b[i]; i = i + 1; }\n"
+        " return s; }", 112);
+    expect("global_fnptr_and_ptr",
+        "package main;\n"
+        "int add(int a, int b){ return a + b; }\n"
+        "int sub(int a, int b){ return a - b; }\n"
+        "int (*ft[2])(int, int) = { add, sub };\n"
+        "int g = 40;\n"
+        "int arr[4] = { 1, 2, 3, 4 };\n"
+        "int *p = &arr[2];\n"
+        "char *s = \"ok\";\n"
+        "int main(){ return ft[0](1, 1) + ft[1](10, 3) + *p + (s[0]=='o'); }",
+        2 + 7 + 3 + 1);
+}
+
+/* TR-8.2: the same image, loaded twice, yields the same result, and
+ * dyld reports a chained rebase.  `dyld_info -fixups` also walks the
+ * symbol table to name targets; that table arrives in T14, so the
+ * chain dump (`-fixup_chains`) is the check that works today. */
+static void test_pie_rebase(void) {
+    const char *src =
+        "package main;\n"
+        "int g = 7;\n"
+        "int *p = &g;\n"
+        "int main(){ return *p; }\n";
+    T_ASSERT_EQ_INT(compile_and_run(src), 7);
+    FILE *fp = popen("/usr/bin/dyld_info -fixup_chains /tmp/fakecc_cg64_native_test", "r");
+    T_ASSERT(fp != NULL);
+    char buf[2048];
+    size_t n = fread(buf, 1, sizeof buf - 1, fp);
+    buf[n] = 0;
+    pclose(fp);
+    if (!strstr(buf, "DYLD_CHAINED_PTR_64_OFFSET") || !strstr(buf, "start[")) {
+        fprintf(stderr, "  dyld_info missing chained rebase:\n%s\n", buf);
+        T_ASSERT(0);
+    }
+    pid_t pid = fork();
+    T_ASSERT(pid >= 0);
+    if (pid == 0) {
+        execl("/tmp/fakecc_cg64_native_test", "t", (char *)NULL);
+        _exit(127);
+    }
+    int st;
+    waitpid(pid, &st, 0);
+    T_ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 7);
+}
+
 /* T7: deep recursion stress (many frames + callee-saved pressure). */
 static void test_recursion_deep(void) {
     expect("deep_recursion",
@@ -328,6 +431,8 @@ int main(void) {
     test_ctor_dtor();
     test_mixed_width_stack();
     test_recursion_deep();
+    test_globals_and_aggregates();
+    test_pie_rebase();
     return t_finalize();
 }
 

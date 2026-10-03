@@ -122,6 +122,10 @@ static int lower_one_tu(TranslationUnit *tu, const char *filename,
     codegen(&ir, out, want_debug);
 
     ir_module_free(&ir);
+    /* Codegen reports unsupported IR via die_at(); the CLI must not
+     * still emit and sign that image. */
+    if (fakecc_had_error())
+        return FAKECC_ERR;
     return FAKECC_OK;
 }
 

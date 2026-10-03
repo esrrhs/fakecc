@@ -148,15 +148,176 @@ typedef struct __attribute__((packed)) {
     char     name[];      /* offset 24, NUL terminated */
 } dylib_command;
 
+typedef struct __attribute__((packed)) {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint32_t dataoff;
+    uint32_t datasize;
+} linkedit_data_command;
+
 
 /* pad to a multiple of 8 for load-command sizes */
 static uint32_t align8(uint32_t n) { return (n + 7u) & ~7u; }
+
+static void put_u16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); }
+static void put_u32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+static void put_u64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); }
+
+static int rebase_cmp(const void *a, const void *b) {
+    const EmitRebase *x = a;
+    const EmitRebase *y = b;
+    if (x->slot < y->slot) return -1;
+    if (x->slot > y->slot) return 1;
+    return 0;
+}
+
+/* DYLD_CHAINED_PTR_64_OFFSET (pointer format 6).  `target` is the vm
+ * offset from the mach header; dyld adds the actual load address.
+ * Bit layout is dyld_chained_ptr_64_rebase (mach-o/fixup-chains.h):
+ *   target 36 | high8 8 | reserved 7 | next 12 | bind 1
+ * `next` counts 4-byte steps to the following pointer on the same page.
+ * Checked against an ld64 binary on this OS: format 6, page_start is
+ * the byte offset of the first pointer in the 16 KiB page. */
+static uint64_t encode_chain_ptr(uint64_t target, uint32_t next) {
+    return (target & 0xFFFFFFFFFull) | ((uint64_t)(next & 0xFFFu) << 51);
+}
+
+/* Encode em->rebases into __data and build the LC_DYLD_CHAINED_FIXUPS
+ * payload plus an empty exports trie.  Only __DATA is chained; const
+ * data that contains pointers is placed there by codegen64. */
+static int macho_build_fixups(const EmitModule *em, uint64_t data_page,
+                              uint64_t data_file, char **data_img_out,
+                              Buffer *fixblob, Buffer *trie) {
+    if (!em->data.len || data_file == 0) {
+        fprintf(stderr, "fakecc: rebase with empty __data\n");
+        return -1;
+    }
+    uint32_t page_count = (uint32_t)(data_file / MACHO_PAGE_SIZE);
+    if (page_count == 0 || page_count > 0xFFFFu) {
+        fprintf(stderr, "fakecc: __data page count out of range\n");
+        return -1;
+    }
+
+    EmitRebase *r = xmalloc(em->num_rebases * sizeof *r);
+    memcpy(r, em->rebases, em->num_rebases * sizeof *r);
+    qsort(r, em->num_rebases, sizeof *r, rebase_cmp);
+
+    char *img = xmalloc(em->data.len);
+    memcpy(img, em->data.data, em->data.len);
+
+    for (size_t i = 0; i < em->num_rebases; i++) {
+        if (r[i].slot < data_page ||
+            r[i].slot + 8 > data_page + em->data.len) {
+            fprintf(stderr, "fakecc: rebase slot %#llx outside __data\n",
+                    (unsigned long long)r[i].slot);
+            free(r);
+            free(img);
+            return -1;
+        }
+        uint64_t off = r[i].slot - data_page;
+        if ((off & 7) || (off % MACHO_PAGE_SIZE) + 8 > MACHO_PAGE_SIZE) {
+            fprintf(stderr, "fakecc: rebase slot %#llx is not an in-page "
+                    "8-byte pointer\n", (unsigned long long)r[i].slot);
+            free(r);
+            free(img);
+            return -1;
+        }
+        if (r[i].target > 0xFFFFFFFFFull) {
+            fprintf(stderr, "fakecc: rebase target exceeds 36 bits\n");
+            free(r);
+            free(img);
+            return -1;
+        }
+        uint32_t next = 0;
+        if (i + 1 < em->num_rebases) {
+            uint64_t off2 = r[i + 1].slot - data_page;
+            if ((off / MACHO_PAGE_SIZE) == (off2 / MACHO_PAGE_SIZE)) {
+                uint64_t dist = r[i + 1].slot - r[i].slot;
+                if (dist == 0 || (dist & 3) || dist / 4 > 0xFFF) {
+                    fprintf(stderr, "fakecc: rebase chain stride out of range\n");
+                    free(r);
+                    free(img);
+                    return -1;
+                }
+                next = (uint32_t)(dist / 4);
+            }
+        }
+        uint64_t enc = encode_chain_ptr(r[i].target, next);
+        memcpy(img + (size_t)off, &enc, 8);
+    }
+
+    /* header (28) padded to 32, then starts-in-image for the four
+     * segments.  Segment info is 8-aligned, so it begins at starts+24
+     * (ld64 does the same).  imports_count is 0; the trailing 8 zero
+     * bytes match the ld64 blob. */
+    uint32_t starts_off = 32;
+    uint32_t seg_at = 56;
+    uint32_t raw = 22u + 2u * page_count;
+    uint32_t seg_size = (raw + 7u) & ~7u;
+    uint32_t imports_off = seg_at + seg_size;
+    uint32_t blob_size = imports_off + 8;
+    uint8_t *blob = xmalloc(blob_size);
+    memset(blob, 0, blob_size);
+    put_u32(blob + 4, starts_off);
+    put_u32(blob + 8, imports_off);
+    put_u32(blob + 12, imports_off);
+    put_u32(blob + 20, 1);                         /* DYLD_CHAINED_IMPORT */
+    put_u32(blob + starts_off, 4);                 /* seg_count */
+    put_u32(blob + starts_off + 12, 24);           /* seg_info_offset[2] */
+    put_u32(blob + seg_at, seg_size);
+    put_u16(blob + seg_at + 4, (uint16_t)MACHO_PAGE_SIZE);
+    put_u16(blob + seg_at + 6, 6);                 /* PTR_64_OFFSET */
+    put_u64(blob + seg_at + 8, data_page);
+    put_u16(blob + seg_at + 20, (uint16_t)page_count);
+    for (uint32_t p = 0; p < page_count; p++)
+        put_u16(blob + seg_at + 22 + 2u * p, 0xFFFF);
+    for (size_t i = 0; i < em->num_rebases; i++) {
+        uint64_t off = r[i].slot - data_page;
+        uint32_t pg = (uint32_t)(off / MACHO_PAGE_SIZE);
+        uint16_t cur = 0;
+        memcpy(&cur, blob + seg_at + 22 + 2u * pg, 2);
+        if (cur == 0xFFFF)
+            put_u16(blob + seg_at + 22 + 2u * pg,
+                    (uint16_t)(off % MACHO_PAGE_SIZE));
+    }
+    buffer_append(fixblob, (const char *)blob, blob_size);
+    free(blob);
+    free(r);
+
+    char empty_trie[2] = {0, 0};
+    buffer_append(trie, empty_trie, 2);
+    *data_img_out = img;
+    return 0;
+}
 
 /* mach_header_64 (32) + load commands, then __text at MACHO_TEXT_OFF.
  * 1024 leaves ample room for codesign's injected LC_CODE_SIGNATURE. */
 #define MACHO_TEXT_OFF 1024u
 
 uint32_t macho_text_offset(void) { return MACHO_TEXT_OFF; }
+
+/* Must stay in lock-step with the layout block in macho_write_exec. */
+void macho_section_offsets(const EmitModule *em, size_t text_len,
+                           uint64_t *ro_out, uint64_t *data_out,
+                           uint64_t *bss_out) {
+    uint64_t ro_off = 0;
+    if (em->rodata.len) {
+        ro_off = MACHO_TEXT_OFF + (uint64_t)text_len;
+        size_t al = em->rodata_align > 16 ? em->rodata_align : 16;
+        while (ro_off % al) ro_off++;
+    }
+    uint64_t text_used = ro_off ? ro_off + em->rodata.len
+                                : (uint64_t)MACHO_TEXT_OFF + text_len;
+    uint64_t text_pages = (text_used + MACHO_PAGE_SIZE - 1)
+                          & ~(uint64_t)(MACHO_PAGE_SIZE - 1);
+    uint64_t data_file = em->data.len
+        ? ((uint64_t)em->data.len + MACHO_PAGE_SIZE - 1)
+          & ~(uint64_t)(MACHO_PAGE_SIZE - 1)
+        : 0;
+    if (ro_out) *ro_out = ro_off;
+    if (data_out) *data_out = em->data.len ? text_pages : 0;
+    if (bss_out) *bss_out = em->bss_size ? text_pages + data_file : 0;
+}
 
 int macho_write_exec_text(const Buffer *text, uint64_t entry_off,
                           const char *path) {
@@ -206,6 +367,21 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
                        & ~(uint64_t)(MACHO_PAGE_SIZE - 1))
         : text_pages;
 
+    char *data_img = NULL;
+    Buffer fixblob, trieblob;
+    buffer_init(&fixblob);
+    buffer_init(&trieblob);
+    int has_fix = em->num_rebases > 0;
+    if (has_fix &&
+        macho_build_fixups(em, data_page, data_file, &data_img,
+                           &fixblob, &trieblob) != 0) {
+        buffer_free(&fixblob);
+        buffer_free(&trieblob);
+        return -1;
+    }
+    uint64_t linkedit_payload = has_fix
+        ? (uint64_t)fixblob.len + (uint64_t)trieblob.len : 0;
+
     /* ── Load command sizes ── */
     /* dyld rejects zero-size sections (their null addr sorts before the
      * segment), so each section — and the whole __DATA segment — is
@@ -234,18 +410,24 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         align8(dylib_name_off + (uint32_t)strlen(LIBSYSTEM_PATH) + 1);
 
     /* PAGEZERO, __TEXT, [__DATA], __LINKEDIT + the five non-segment
-     * commands (build version, uuid, main, dylinker, dylib). */
-    const uint32_t ncmds = (data_present ? 4u : 3u) + 5u;
+     * commands (build version, uuid, main, dylinker, dylib).
+     * Pointer initializers add LC_DYLD_CHAINED_FIXUPS and an empty
+     * LC_DYLD_EXPORTS_TRIE (dyld wants the pair). */
+    const uint32_t ncmds = (data_present ? 4u : 3u) + 5u + (has_fix ? 2u : 0u);
     const uint32_t uuid_cmd = 24;
     const uint32_t sizeofcmds =
         seg_plain_cmd + seg_text_cmd + seg_data_cmd + seg_plain_cmd
         + build_cmd + uuid_cmd + main_cmd
-        + dylinker_cmdsz + dylib_cmdsz;
+        + dylinker_cmdsz + dylib_cmdsz
+        + (has_fix ? 32u : 0u);
 
     const uint32_t cmds_end = (uint32_t)sizeof(mach_header_64) + sizeofcmds;
     if (cmds_end > MACHO_TEXT_OFF) {
         fprintf(stderr, "fakecc: Mach-O commands (%u) overflow header pad\n",
                 cmds_end);
+        free(data_img);
+        buffer_free(&fixblob);
+        buffer_free(&trieblob);
         return -1;
     }
 
@@ -372,11 +554,29 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     memcpy(le.segname, "__LINKEDIT", 10);
     le.vmaddr = MACHO_BASE_VA + link_off;
     le.vmsize = MACHO_PAGE_SIZE;
+    /* Leave room for the ad-hoc signature codesign appends after the
+     * chained-fixup payload. */
+    if (linkedit_payload + 8192 > le.vmsize)
+        le.vmsize = (linkedit_payload + 8192 + MACHO_PAGE_SIZE - 1)
+                    & ~(uint64_t)(MACHO_PAGE_SIZE - 1);
     le.fileoff = link_off;
-    le.filesize = 0;
+    le.filesize = linkedit_payload;
     le.maxprot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC;
     le.initprot = VM_PROT_READ;
     APPEND_BYTES(&le, sizeof le);
+
+    if (has_fix) {
+        linkedit_data_command fx = {
+            LC_DYLD_CHAINED_FIXUPS, 16,
+            (uint32_t)link_off, (uint32_t)fixblob.len,
+        };
+        linkedit_data_command tr = {
+            LC_DYLD_EXPORTS_TRIE, 16,
+            (uint32_t)(link_off + fixblob.len), (uint32_t)trieblob.len,
+        };
+        APPEND_BYTES(&fx, sizeof fx);
+        APPEND_BYTES(&tr, sizeof tr);
+    }
 
     /* ── LC_BUILD_VERSION (macOS 11.0, no tool entries) ── */
     build_version_command bv = {
@@ -429,15 +629,23 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
      * page so codesign can append its signature at link_off.  __bss has
      * no file bytes; the kernel zero-fills the vm tail. ── */
     if (data_present) {
-        buffer_append(&out, data->data, data->len);
+        buffer_append(&out, data_img ? data_img : data->data, data->len);
         while ((uint64_t)out.len < link_off)
             APPEND_ZERO((size_t)(link_off - out.len));
     }
+    if (has_fix) {
+        buffer_append(&out, fixblob.data, fixblob.len);
+        buffer_append(&out, trieblob.data, trieblob.len);
+    }
+    free(data_img);
+    buffer_free(&fixblob);
+    buffer_free(&trieblob);
+    data_img = NULL;
 
 #undef APPEND_BYTES
 #undef APPEND_ZERO
 
-    size_t total_size = (size_t)link_off;
+    size_t total_size = out.len;
 
     FILE *f = fopen(path, "wb");
     if (!f) {

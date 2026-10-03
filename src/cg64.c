@@ -34,7 +34,25 @@ typedef struct {
     int               frame_locals;
     int               call_area;
     int               save_total;  /* fp/lr + callee-saved saves bytes  */
+    /* Module globals: section (G_RO/G_DATA/G_BSS) and in-section offset. */
+    int              *gsect;
+    size_t           *goff;
+    /* ADRP+ADD pairs targeting globals; patched once the final section
+     * placement (which depends on the total text length) is known. */
+    struct GFix { uint32_t at; int gidx; } *gfix;
+    size_t            ngfix, capgfix;
+    /* Pointer slots inside global initializers.  Resolved into dyld
+     * rebases once every section base is known. */
+    struct PFix {
+        int         gidx;
+        int         slot_off;
+        const char *sym;
+        int         addend;
+    }                *pfix;
+    size_t            npfix, cappfix;
 } C64;
+
+enum { G_RO = 1, G_DATA = 2, G_BSS = 3 };
 
 static void c64_die(C64 *c, const IRInst *s, const char *what) {
     const char *f = c->fn->loc.file ? c->fn->loc.file : "<arm64>";
@@ -223,6 +241,13 @@ static void emit_store(C64 *c, int rt, int base, int width) {
 
 /* ── Calls ────────────────────────────────────────────────────────── */
 
+static int find_global_idx(const IRModule *ir, const char *name) {
+    for (size_t k = 0; k < ir->globals.len; k++)
+        if (strcmp(ir->globals.data[k].name, name) == 0)
+            return (int)k;
+    return -1;
+}
+
 static int find_function(const IRModule *ir, const char *name, int *idx_out) {
     for (size_t i = 0; i < ir->functions.len; i++)
         if (strcmp(ir->functions.data[i].name, name) == 0) {
@@ -233,6 +258,61 @@ static int find_function(const IRModule *ir, const char *name, int *idx_out) {
 }
 
 static void emit_syscall(C64 *c, const IRInst *s);
+
+/* Freestanding memcpy/memmove/memset.  Struct assignment above 64 bytes
+ * lowers to a call, and the Darwin runtime is not linked yet (T16).
+ * A user-defined function of the same name still wins.  The three
+ * arguments are already in x0/x1/x2; the original destination is
+ * returned in x0.  Byte loops stay correct for odd sizes and (for
+ * memmove) overlapping ranges. */
+static int emit_mem_builtin(C64 *c, const char *name) {
+    int is_memcpy = strcmp(name, "memcpy") == 0;
+    int is_memmove = strcmp(name, "memmove") == 0;
+    int is_memset = strcmp(name, "memset") == 0;
+    if (!is_memcpy && !is_memmove && !is_memset) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+
+    A64Asm *a = c->as;
+    int Lfwd = a64_new_label(a);
+    int Lback = a64_new_label(a);
+    int Lback_loop = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+
+    a64_mov_reg(a, SCR1, A64_X0, 1);                 /* remember dst */
+    if (is_memmove) {
+        a64_cmp_reg(a, A64_X0, A64_X1, 1);
+        a64_bcond(a, A64_CS, Lback);                 /* dst >= src: backward */
+    }
+    a64_bind(a, Lfwd);
+    a64_cbz(a, A64_X2, Ldone, 1);
+    if (is_memset) {
+        a64_str8(a, A64_X1, A64_X0, 0);
+    } else {
+        a64_ldr8(a, SCR0, A64_X1, 0);
+        a64_str8(a, SCR0, A64_X0, 0);
+        a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+    }
+    a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+    a64_b(a, Lfwd);
+    if (is_memmove) {
+        a64_bind(a, Lback);
+        a64_add_reg(a, A64_X0, A64_X0, A64_X2, A64_LSL, 0, 1, 0);
+        a64_add_reg(a, A64_X1, A64_X1, A64_X2, A64_LSL, 0, 1, 0);
+        a64_bind(a, Lback_loop);
+        a64_cbz(a, A64_X2, Ldone, 1);
+        a64_sub_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_sub_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+        a64_ldr8(a, SCR0, A64_X1, 0);
+        a64_str8(a, SCR0, A64_X0, 0);
+        a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+        a64_b(a, Lback_loop);
+    }
+    a64_bind(a, Ldone);
+    a64_mov_reg(a, A64_X0, SCR1, 1);
+    return 1;
+}
 
 static void emit_call(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
@@ -324,7 +404,7 @@ static void emit_call(C64 *c, const IRInst *s) {
 
     if (tgt >= 0) {
         a64_blr(c->as, tgt);
-    } else {
+    } else if (!(s->call_name && emit_mem_builtin(c, s->call_name))) {
         int fi = 0;
         if (find_function(c->ir, s->call_name, &fi) != 0)
             die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
@@ -903,8 +983,28 @@ static void emit_function(C64 *c, int fi) {
             }
             break;
         }
-        case IR_GADDR: case IR_GADDR_TLS:
-            c64_die(c, s, "global variable");
+        case IR_GADDR: {
+            int gi = find_global_idx(c->ir, s->call_name);
+            if (gi < 0) c64_die(c, s, "external global variable");
+            int d = dst_reg(c, s->dst);
+            /* adrp d, page ; add d, d, #pageoff — both words patched in
+             * codegen64 once __const/__data/__bss placement is final. */
+            if (c->ngfix == c->capgfix) {
+                c->capgfix = c->capgfix ? c->capgfix * 2 : 64;
+                c->gfix = realloc(c->gfix, c->capgfix * sizeof *c->gfix);
+                if (!c->gfix) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
+            c->gfix[c->ngfix].at = (uint32_t)a->code.len;
+            c->gfix[c->ngfix].gidx = gi;
+            c->ngfix++;
+            a64_word(a, 0x90000000u | (uint32_t)(d & 31));
+            a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
+                                    | (uint32_t)(d & 31));
+            commit(c, s->dst, d);
+            break;
+        }
+        case IR_GADDR_TLS:
+            c64_die(c, s, "thread-local variable");
             break;
         case IR_FADDR: {
             int fi = 0;
@@ -959,6 +1059,62 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     c.fn_label = xmalloc(ir->functions.len * sizeof(int));
     for (size_t i = 0; i < ir->functions.len; i++)
         c.fn_label[i] = a64_new_label(&a);
+
+    /* Lay globals out into __const / __data / __bss (same placement rules
+     * as the x86 path).  Their image addresses depend on the final text
+     * length, so ADRP+ADD references are patched after resolve. */
+    if (ir->globals.len) {
+        c.gsect = xmalloc(ir->globals.len * sizeof(int));
+        c.goff = xmalloc(ir->globals.len * sizeof(size_t));
+    }
+    for (size_t gi = 0; gi < ir->globals.len; gi++) {
+        const IRGlobal *g = &ir->globals.data[gi];
+        size_t al = g->align > 0 ? (size_t)g->align : 8;
+        if (g->is_tls)
+            die_at(g->loc.file ? g->loc.file : "<arm64>", g->loc.line, 0,
+                   "arm64 backend: thread-local variable not supported yet");
+        /* A readonly global that contains a pointer must live in __DATA:
+         * dyld chained fixups are applied to writable pages, and
+         * __TEXT,__const is mapped read-only/execute. */
+        if (g->is_readonly && !g->num_fixups) {
+            while (out->rodata.len % al) { char z = 0; buffer_append(&out->rodata, &z, 1); }
+            c.gsect[gi] = G_RO;
+            c.goff[gi] = out->rodata.len;
+            if (g->init_bytes) {
+                buffer_append(&out->rodata, g->init_bytes, g->size);
+            } else {
+                for (int k = 0; k < g->size; k++) { char z = 0; buffer_append(&out->rodata, &z, 1); }
+            }
+            if (al > out->rodata_align) out->rodata_align = al;
+        } else if (g->init_bytes || g->num_fixups) {
+            while (out->data.len % al) { char z = 0; buffer_append(&out->data, &z, 1); }
+            c.gsect[gi] = G_DATA;
+            c.goff[gi] = out->data.len;
+            if (g->init_bytes) {
+                buffer_append(&out->data, g->init_bytes, g->size);
+            } else {
+                for (int k = 0; k < g->size; k++) { char z = 0; buffer_append(&out->data, &z, 1); }
+            }
+            if (al > out->data_align) out->data_align = al;
+            for (int fi = 0; fi < g->num_fixups; fi++) {
+                if (c.npfix == c.cappfix) {
+                    c.cappfix = c.cappfix ? c.cappfix * 2 : 16;
+                    c.pfix = xrealloc(c.pfix, c.cappfix * sizeof *c.pfix);
+                }
+                c.pfix[c.npfix].gidx = (int)gi;
+                c.pfix[c.npfix].slot_off = g->fixups[fi].offset;
+                c.pfix[c.npfix].sym = g->fixups[fi].sym;
+                c.pfix[c.npfix].addend = g->fixups[fi].addend;
+                c.npfix++;
+            }
+        } else {
+            while (out->bss_size % al) out->bss_size++;
+            c.gsect[gi] = G_BSS;
+            c.goff[gi] = out->bss_size;
+            out->bss_size += g->size;
+            if (al > out->bss_align) out->bss_align = al;
+        }
+    }
 
     /* Constructor/destructor order (matches the ELF _start walk in
      * link.c): constructors ascending by priority, source order as the
@@ -1048,6 +1204,65 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     out->text.cap = a.code.cap;
     out->text_align = 4;
     memset(&a.code, 0, sizeof(a.code));
+
+    /* Patch ADRP+ADD pairs and record dyld rebases for pointer
+     * initializers now that text length (and so section placement) is
+     * known. */
+    if (c.ngfix || c.npfix) {
+        uint64_t ro_off, data_off, bss_off;
+        macho_section_offsets(out, out->text.len, &ro_off, &data_off, &bss_off);
+        for (size_t i = 0; i < c.ngfix; i++) {
+            int gi = c.gfix[i].gidx;
+            uint64_t base = c.gsect[gi] == G_RO ? ro_off
+                          : c.gsect[gi] == G_DATA ? data_off : bss_off;
+            uint64_t tgt = base + c.goff[gi];
+            uint64_t pc = (uint64_t)macho_text_offset() + c.gfix[i].at;
+            int64_t pages = (int64_t)((tgt & ~(uint64_t)0xFFF)
+                                      - (pc & ~(uint64_t)0xFFF)) >> 12;
+            uint32_t w0, w1;
+            memcpy(&w0, out->text.data + c.gfix[i].at, 4);
+            memcpy(&w1, out->text.data + c.gfix[i].at + 4, 4);
+            w0 |= (uint32_t)((pages & 3) << 29)
+                | (uint32_t)(((pages >> 2) & 0x7FFFF) << 5);
+            w1 |= (uint32_t)(tgt & 0xFFF) << 10;
+            memcpy(out->text.data + c.gfix[i].at, &w0, 4);
+            memcpy(out->text.data + c.gfix[i].at + 4, &w1, 4);
+        }
+        for (size_t i = 0; i < c.npfix; i++) {
+            int gi = c.pfix[i].gidx;
+            const IRGlobal *g = &ir->globals.data[gi];
+            uint64_t gbase = c.gsect[gi] == G_RO ? ro_off
+                           : c.gsect[gi] == G_DATA ? data_off : bss_off;
+            uint64_t slot = gbase + c.goff[gi] + (uint64_t)c.pfix[i].slot_off;
+            int tgi = find_global_idx(ir, c.pfix[i].sym);
+            int64_t tgt;
+            if (tgi >= 0) {
+                uint64_t tb = c.gsect[tgi] == G_RO ? ro_off
+                            : c.gsect[tgi] == G_DATA ? data_off : bss_off;
+                tgt = (int64_t)(tb + c.goff[tgi]) + c.pfix[i].addend;
+            } else {
+                int fi = 0;
+                if (find_function(ir, c.pfix[i].sym, &fi) != 0 ||
+                    !a.labels[c.fn_label[fi]].bound) {
+                    die_at(g->loc.file ? g->loc.file : "<arm64>",
+                           g->loc.line, 0,
+                           "arm64 backend: external symbol '%s' in "
+                           "global initializer", c.pfix[i].sym);
+                }
+                tgt = (int64_t)macho_text_offset()
+                    + (int64_t)a.labels[c.fn_label[fi]].pos
+                    + c.pfix[i].addend;
+            }
+            if (tgt < 0 || gbase == 0)
+                die_at(g->loc.file ? g->loc.file : "<arm64>", g->loc.line, 0,
+                       "arm64 backend: bad pointer initializer");
+            emit_module_add_rebase(out, slot, (uint64_t)tgt);
+        }
+    }
+    free(c.gfix);
+    free(c.pfix);
+    free(c.gsect);
+    free(c.goff);
     a64_free(&a);
     free(c.fn_label);
 }

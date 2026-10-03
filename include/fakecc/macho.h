@@ -7,9 +7,9 @@
  * segment (__text section, which may embed read-only string data after
  * the code), one LC_MAIN entrypoint, dyld + a libSystem load command,
  * and an empty __LINKEDIT segment filled in by ad-hoc codesigning.
- * There is intentionally no nlist/reloc/bind machinery yet — freestanding
- * code needs no imports; the symbol table, external binds and dylib
- * support arrive in T14/T19. */
+ * Pointer-valued initializers are dyld chained fixups
+ * (LC_DYLD_CHAINED_FIXUPS, DYLD_CHAINED_PTR_64_OFFSET) in __DATA.
+ * External binds, the symbol table and dylibs arrive in T14/T19. */
 
 #include "fakecc/common.h"
 
@@ -30,6 +30,14 @@ int macho_write_exec_text(const Buffer *text, uint64_t entry_off,
 
 /* File offset at which the __text section starts (mach header + cmds). */
 uint32_t macho_text_offset(void);
+
+/* Image offsets (relative to the Mach-O base VA == file offsets for
+ * __TEXT/__DATA file-backed content) at which __const, __data and __bss
+ * land, given the final __text length.  Same layout macho_write_exec
+ * uses.  An absent section yields 0. */
+void macho_section_offsets(const struct EmitModule *em, size_t text_len,
+                           uint64_t *ro_off, uint64_t *data_off,
+                           uint64_t *bss_off);
 
 /* Apply an ad-hoc code signature in place via /usr/bin/codesign.
  * Required: arm64 macOS refuses to launch unsigned static(-ish) images.

@@ -136,9 +136,17 @@
   - `rule` TR-7.2: 入口环境：`envp` 可经平台层读取到至少一个已知变量（证据：打印 PATH 的测试程序输出非空）。
 
 ## Task 8: 全局数据、字符串、聚合内存与 PIE 寻址
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: T7
+- **Completion Evidence**（2026-10-03）:
+  - 全局/静态/字符串/只读常量进 `__TEXT,__const`，已初始化可变对象进 `__DATA,__data`，零初始化进 `__DATA,__bss`。`IR_GADDR` 用 ADRP+ADD，在最终 text 长度确定后按镜像内偏移回填（与 `macho_section_offsets` / `macho_write_exec` 同一布局）。
+  - 含指针的初值（含本应只读的函数指针表、`char *s = "..."`、`&arr[n]`）放在可写 `__DATA`：dyld 不能改 `__TEXT`。槽位编码为 `DYLD_CHAINED_PTR_64_OFFSET`（format 6，target 为 mach header 相对偏移），并写入 `LC_DYLD_CHAINED_FIXUPS` + 空 `LC_DYLD_EXPORTS_TRIE`。blob 与同形态 ld64 产物逐字节一致。`dyld_info -fixup_chains` 可见链；`dyld_info -fixups` 会在符号化时因尚无 nlist（T14）崩溃，故测试用 `-fixup_chains`。
+  - 大于 64 字节的结构体赋值在 IR 里是 `memcpy`。运行时库要到 T16 才链接，因此本模块未定义 `memcpy`/`memmove`/`memset` 时由 cg64 内联字节循环（用户若自己定义同名函数则仍走 BL）。
+  - TLS（`IR_GADDR_TLS`）与外部全局仍明确报错，且 `lower_one_tu` 在 codegen `die_at` 之后不再写出二进制。
+  - TR-8.1：`test_cg64_native`（-O0）44/44（含全局/bss/常量、字符串、static local、结构体拷贝、二维数组、位域、union、指针比较、80 字节 memcpy、`__builtin_memset`、函数指针表+指针初值）。另用驱动默认 -O1 扫了 `test/e2e/cases/{aggregates,pointers,chars_strings}` 里无 `import` 的用例：227 通过 / 33 失败。失败集中在后续任务：结构体按值传参与返回（T10）、向量（T12）、浮点 union（T12）、`__thread`（T17）、varargs（T11），以及一条与全局无关的 64 位除法边界（`divconst-2`，改成局部数组同样失败）。
+  - TR-8.2：`int *p = &g` 连续两次执行均返回 7（ASLR 下地址不同、结果相同）；`dyld_info -fixup_chains` 报告 `pointer_format 6` 与 `start[0]`。
+  - 回归：`test_macho` 12/12。无指针初值的镜像不增加 load command。
 - **Description**:
   - 全局/静态变量、字符串字面量、const 数据、零填充公共符号（__common/__bss）；ADRP+ADD（页地址）、ADRP+LDR（GOT 风格绝对槽，PIE）、PAGEOFF12 数据读写；GEP/数组/多维数组/结构体/位域/union/offsetof；memcpy/memset 结构体块拷贝；取地址与指针比较。
   - 数据段内部指针 fixup 的 arm64 重定位（指向内部函数/数据的指针表、构造数组、跳转表）。

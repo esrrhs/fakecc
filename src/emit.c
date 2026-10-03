@@ -35,6 +35,7 @@ void emit_module_init(EmitModule *m) {
     m->syms = NULL; m->num_syms = 0; m->cap_syms = 0;
     m->relocs = NULL; m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = NULL; m->num_data_relocs = 0; m->cap_data_relocs = 0;
+    m->rebases = NULL; m->num_rebases = 0; m->cap_rebases = 0;
     m->dbg_tu_name = NULL;
     m->dbg_lines = NULL; m->num_dbg_lines = 0; m->cap_dbg_lines = 0;
     m->dbg_funcs = NULL; m->num_dbg_funcs = 0; m->cap_dbg_funcs = 0;
@@ -50,6 +51,7 @@ void emit_module_free(EmitModule *m) {
     free(m->syms);
     free(m->relocs);
     free(m->data_relocs);
+    free(m->rebases);
     buffer_free(&m->text);
     buffer_free(&m->rodata);
     buffer_free(&m->data);
@@ -187,6 +189,18 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
     r->sym = (uint32_t)sym;
     r->addend = addend;
     r->shndx = SECT_DATA;
+}
+
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target) {
+    if (m->num_rebases >= m->cap_rebases) {
+        size_t nc = m->cap_rebases ? m->cap_rebases * 2 : 8;
+        m->rebases = realloc(m->rebases, nc * sizeof(EmitRebase));
+        if (!m->rebases) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_rebases = nc;
+    }
+    m->rebases[m->num_rebases].slot = slot;
+    m->rebases[m->num_rebases].target = target;
+    m->num_rebases++;
 }
 
 /* ------------------------------------------------------------------ */

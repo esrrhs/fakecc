@@ -82,6 +82,8 @@ static int lower_tu(TranslationUnit *tu, const char *filename,
     codegen(&ir, out, want_debug);
 
     ir_module_free(&ir);
+    if (fakecc_had_error())
+        return FAKECC_ERR;
     return FAKECC_OK;
 }
 

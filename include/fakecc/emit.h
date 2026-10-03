@@ -24,6 +24,14 @@
 /* Symbol table entry                                                  */
 /* ------------------------------------------------------------------ */
 
+/* arm64 Mach-O internal rebase.  `slot` and `target` are offsets from
+ * the mach header.  dyld's chained fixups add the load slide so the
+ * slot holds the runtime address.  The ELF path leaves this empty. */
+typedef struct {
+    uint64_t slot;
+    uint64_t target;
+} EmitRebase;
+
 typedef struct {
     char *name;        /* symbol name (NULL for section symbols) */
     uint8_t binding;   /* STB_LOCAL (0) / STB_GLOBAL (1) */
@@ -208,6 +216,9 @@ typedef struct EmitModule {
     size_t num_relocs, cap_relocs;
     EmitReloc  *data_relocs; /* relocations within .data (pointer fixups) */
     size_t num_data_relocs, cap_data_relocs;
+    /* Pointer slots dyld must rebase (arm64 Mach-O PIE). */
+    EmitRebase *rebases;
+    size_t num_rebases, cap_rebases;
 
     /* Debug info (-g).  Empty when compiled without -g. */
     char *dbg_tu_name;           /* primary source file name */
@@ -251,6 +262,8 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
+/* Record one arm64 image-relative pointer rebase (see EmitRebase). */
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
 
 /* ------------------------------------------------------------------ */
 /* Output                                                              */
