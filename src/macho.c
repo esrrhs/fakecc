@@ -792,6 +792,15 @@ static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
     free(sorted);
 }
 
+/* Mach-O section align is a power-of-two exponent.  Keep the historical
+ * minimum so ordinary objects do not get a weaker alignment. */
+static uint32_t macho_align_log(size_t al, uint32_t min_log) {
+    uint32_t log = min_log;
+    if (al < 1) al = 1;
+    while (((size_t)1 << log) < al && log < 15) log++;
+    return log;
+}
+
 static uint64_t align_up_u64(uint64_t v, uint64_t a) {
     if (a <= 1) return v;
     return (v + a - 1) & ~(a - 1);
@@ -948,7 +957,7 @@ int macho_write_object(const EmitModule *em, const char *path) {
     sec.addr = 0;
     sec.size = em->text.len;
     sec.offset = (uint32_t)text_off;
-    sec.align = 2;
+    sec.align = macho_align_log(em->text_align, 2);
     sec.reloff = nreloc ? (uint32_t)reloff : 0;
     sec.nreloc = (uint32_t)nreloc;
     sec.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
@@ -960,7 +969,7 @@ int macho_write_object(const EmitModule *em, const char *path) {
         sec.addr = sect_addr[SECT_RODATA];
         sec.size = em->rodata.len;
         sec.offset = (uint32_t)ro_off;
-        sec.align = 3;
+        sec.align = macho_align_log(em->rodata_align, 3);
         buffer_append(&out, (const char *)&sec, sizeof sec);
     }
     if (has_data) {
@@ -970,7 +979,7 @@ int macho_write_object(const EmitModule *em, const char *path) {
         sec.addr = sect_addr[SECT_DATA];
         sec.size = em->data.len;
         sec.offset = (uint32_t)data_off;
-        sec.align = 3;
+        sec.align = macho_align_log(em->data_align, 3);
         sec.reloff = nreloc_data ? (uint32_t)data_reloff : 0;
         sec.nreloc = (uint32_t)nreloc_data;
         buffer_append(&out, (const char *)&sec, sizeof sec);
@@ -981,7 +990,7 @@ int macho_write_object(const EmitModule *em, const char *path) {
         memcpy(sec.segname, "__DATA", 6);
         sec.addr = sect_addr[SECT_BSS];
         sec.size = em->bss_size;
-        sec.align = 3;
+        sec.align = macho_align_log(em->bss_align, 3);
         sec.flags = S_ZEROFILL;
         buffer_append(&out, (const char *)&sec, sizeof sec);
     }
@@ -1193,7 +1202,7 @@ int macho_read_object(const char *path, EmitModule *em) {
         char     sect[16];
         char     seg[16];
         uint64_t addr, size;
-        uint32_t offset, reloff, nreloc, flags;
+        uint32_t offset, reloff, nreloc, flags, align;
         uint16_t shndx;
     } RSec;
     RSec secs[16];
@@ -1227,6 +1236,7 @@ int macho_read_object(const char *path, EmitModule *em) {
                 rs->reloff = sec.reloff;
                 rs->nreloc = sec.nreloc;
                 rs->flags = sec.flags;
+                rs->align = sec.align;
                 rs->shndx = 0;
                 if (strcmp(rs->sect, "__text") == 0) rs->shndx = SECT_TEXT;
                 else if (strcmp(rs->sect, "__const") == 0) rs->shndx = SECT_RODATA;
@@ -1289,6 +1299,16 @@ int macho_read_object(const char *path, EmitModule *em) {
     for (int i = 0; i < nsec; i++) {
         if (secs[i].shndx == SECT_BSS)
             em->bss_size = (size_t)secs[i].size;
+        if (secs[i].align >= 16) continue;
+        size_t al = (size_t)1 << secs[i].align;
+        if (secs[i].shndx == SECT_TEXT && al > em->text_align)
+            em->text_align = al;
+        else if (secs[i].shndx == SECT_RODATA && al > em->rodata_align)
+            em->rodata_align = al;
+        else if (secs[i].shndx == SECT_DATA && al > em->data_align)
+            em->data_align = al;
+        else if (secs[i].shndx == SECT_BSS && al > em->bss_align)
+            em->bss_align = al;
     }
 
     if ((uint64_t)symoff + (uint64_t)nsyms * sizeof(nlist_64) > (uint64_t)fsize ||
@@ -1509,6 +1529,12 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
         while (out.bss_size % bal) out.bss_size++;
         bss_base[i] = out.bss_size;
         out.bss_size += mods[i]->bss_size;
+        if (mods[i]->rodata_align > out.rodata_align)
+            out.rodata_align = mods[i]->rodata_align;
+        if (mods[i]->data_align > out.data_align)
+            out.data_align = mods[i]->data_align;
+        if (mods[i]->bss_align > out.bss_align)
+            out.bss_align = mods[i]->bss_align;
     }
 
     typedef struct { char *name; uint16_t sh; size_t off; } GDef;

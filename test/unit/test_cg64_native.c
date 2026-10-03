@@ -1388,6 +1388,39 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(run_bin(outp), 42);
     emit_module_free(&mfa);
     emit_module_free(&mfb);
+
+    const char *aa = "/tmp/fakecc_arm64_link_aa.o";
+    const char *ab = "/tmp/fakecc_arm64_link_ab.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int small = 1;\n"
+        "const int sc = 3;\n",
+        aa, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern int small;\n"
+        "extern const int sc;\n"
+        "int g __attribute__((aligned(64))) = 1;\n"
+        "const int c __attribute__((aligned(64))) = 2;\n"
+        "static int zb __attribute__((aligned(64)));\n"
+        "int main(void) {\n"
+        "  if (((unsigned long)&g) & 63) return 1;\n"
+        "  if (((unsigned long)&c) & 63) return 2;\n"
+        "  if (((unsigned long)&zb) & 63) return 3;\n"
+        "  zb = 4;\n"
+        "  if (zb != 4 || small != 1 || sc != 3) return 5;\n"
+        "  return 7;\n"
+        "}\n",
+        ab, NULL), 0);
+    EmitModule maa, mab;
+    T_ASSERT_EQ_INT(emit_obj_read(aa, &maa), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(ab, &mab), 0);
+    EmitModule *am[2] = { &maa, &mab };
+    T_ASSERT_EQ_INT(macho_link_objects(am, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    emit_module_free(&maa);
+    emit_module_free(&mab);
 }
 
 static void test_frame_addr(void) {
