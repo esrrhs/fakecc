@@ -325,7 +325,7 @@ static void emit_call(C64 *c, const IRInst *s) {
     if (tgt >= 0) {
         a64_blr(c->as, tgt);
     } else {
-        int fi;
+        int fi = 0;
         if (find_function(c->ir, s->call_name, &fi) != 0)
             die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
                    s->loc.line, s->loc.col,
@@ -907,7 +907,7 @@ static void emit_function(C64 *c, int fi) {
             c64_die(c, s, "global variable");
             break;
         case IR_FADDR: {
-            int fi;
+            int fi = 0;
             if (find_function(c->ir, s->call_name, &fi) != 0)
                 c64_die(c, s, "external function address");
             int d = dst_reg(c, s->dst);
