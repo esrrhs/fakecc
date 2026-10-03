@@ -22,10 +22,31 @@ typedef struct {
     unsigned   caller_saved;   /* bitmask over regs[] indices */
 } RegClass;
 
+/* -O1 reserves R11 so the inline va_arg sequence cannot clobber a
+ * mem2reg-promoted pointer that stays live across the builtin. */
+static int ra_reserve_va_scratch = 0;
+
+void ra_set_reserve_va_scratch(int on) {
+    ra_reserve_va_scratch = on ? 1 : 0;
+}
+
 static const RegClass GP_CLASS = {
     .regs = ALLOCATABLE_REGS,
     .nregs = REG_ALLOCATABLE,
     .caller_saved = GP_CALLER_SAVED_MASK,
+};
+
+/* GP set without R11 (index 5 in ALLOCATABLE_REGS).  Caller-saved mask
+ * covers RSI/RDI/R8/R9/R10 only. */
+static const int GP_NO_R11_REGS[] = {
+    REG_RSI, REG_RDI,
+    REG_R8,  REG_R9,  REG_R10,
+    REG_RBX, REG_R12, REG_R13
+};
+static const RegClass GP_CLASS_NO_R11 = {
+    .regs = GP_NO_R11_REGS,
+    .nregs = 8,
+    .caller_saved = 0x1Fu,
 };
 
 static const RegClass XMM_CLASS = {
@@ -587,6 +608,28 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         }
     }
 
+    /* Pass 1b: Propagate forbid_mask through IR_COPY (phi-elim merges).
+     * Only when -O1 reserved the va_arg scratch: that is the path where
+     * mem2reg emits loop-carried COPYs that must share call-survival
+     * constraints.  Skipping at -O0 keeps that code stream unchanged. */
+    if (ra_reserve_va_scratch) {
+        int changed = 1;
+        while (changed) {
+            changed = 0;
+            for (size_t i = 0; i < fn->insts.len; i++) {
+                const IRInst *inst = &fn->insts.data[i];
+                if (inst->op != IR_COPY) continue;
+                int d = inst->dst, a = inst->a;
+                if (d < 0 || d >= nv || a < 0 || a >= nv) continue;
+                if (!value_in_class(fn, d, float_class)) continue;
+                if (!value_in_class(fn, a, float_class)) continue;
+                int m = forbid_mask[d] | forbid_mask[a];
+                if (forbid_mask[d] != m) { forbid_mask[d] = m; changed = 1; }
+                if (forbid_mask[a] != m) { forbid_mask[a] = m; changed = 1; }
+            }
+        }
+    }
+
     /* Pass 2: Build interference graph by walking instructions backwards. */
     for (size_t bi = 0; bi < cfg->num; bi++) {
         const CFGBlock *blk = &cfg->blocks[bi];
@@ -1011,7 +1054,8 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
 /* ================================================================== */
 
 RAResult *reg_alloc(const IRFunction *fn) {
-    return ra_alloc_class(fn, 0, &GP_CLASS);
+    return ra_alloc_class(fn, 0,
+                          ra_reserve_va_scratch ? &GP_CLASS_NO_R11 : &GP_CLASS);
 }
 
 RAResult *reg_alloc_xmm(const IRFunction *fn) {
