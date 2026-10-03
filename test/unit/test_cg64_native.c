@@ -2239,6 +2239,17 @@ static void test_cache(void) {
         "  return 7; }", 7);
 }
 
+static void test_cycle(void) {
+    expect("cycle",
+        "package main;\n"
+        "int main(void) {\n"
+        "  unsigned long long a = __builtin_readcyclecounter();\n"
+        "  unsigned long long b = __builtin_readcyclecounter();\n"
+        "  if (a == 0) return 1;\n"
+        "  if (b < a) return 2;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2303,6 +2314,7 @@ int main(void) {
     test_trap();
     test_hint();
     test_cache();
+    test_cycle();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

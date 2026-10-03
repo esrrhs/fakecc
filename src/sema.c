@@ -1370,6 +1370,8 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_float(type_long_double_width());
             else if (strcmp(bname, "__builtin_bswap64") == 0)
                 ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_readcyclecounter") == 0)
+                ret = type_make_int(8, 1);
             else if (strcmp(bname, "__builtin_bswap32") == 0)
                 ret = type_make_int(4, 1);
             else if (strcmp(bname, "__builtin_bswap16") == 0)

@@ -2138,6 +2138,17 @@ static void emit_call(C64 *c, const IRInst *s) {
             return;
         }
     }
+    if (s->call_name && strcmp(s->call_name, "readcyclecounter") == 0) {
+        int defined = 0;
+        if (find_function(c->ir, s->call_name, &defined) != 0) {
+            /* CNTVCT_EL0 is readable here. CTR_EL0 is not, so this is
+             * a different system register from the cache-line one. */
+            int dst = s->dst >= 0 ? dst_reg(c, s->dst) : A64_X0;
+            a64_word(c->as, 0xD53BE040u | (uint32_t)(dst & 31));
+            if (s->dst >= 0) commit(c, s->dst, dst);
+            return;
+        }
+    }
     if (is_bit_builtin(s->call_name)) {
         emit_bit_builtin(c, s);
         return;
