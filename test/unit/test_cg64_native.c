@@ -962,6 +962,36 @@ static void test_vec16(void) {
         "  V b = { 2.5, 1.5 };\n"
         "  V r = a + b;\n"
         "  return (int)r[0] + (int)r[1]; }", 8);
+    expect("v16stk",
+        "package main;\n"
+        "typedef double V __attribute__((vector_size(16)));\n"
+        "__attribute__((noinline)) V last(V a, V b, V c, V d, V e, V f, V g, V h, V i) {\n"
+        "  (void)a; (void)b; (void)c; (void)d;\n"
+        "  (void)e; (void)f; (void)g; (void)h;\n"
+        "  return i; }\n"
+        "int main(void) {\n"
+        "  V z = { 0.0, 0.0 };\n"
+        "  V x = { 3.0, 4.0 };\n"
+        "  V r = last(z, z, z, z, z, z, z, z, x);\n"
+        "  if (r[0] != 3.0) return 1;\n"
+        "  if (r[1] != 4.0) return 2;\n"
+        "  return 0; }", 0);
+    expect("vmul8",
+        "package main;\n"
+        "typedef unsigned char V __attribute__((vector_size(16)));\n"
+        "int main(void) {\n"
+        "  V a = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 };\n"
+        "  V b = { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };\n"
+        "  V r = a * b;\n"
+        "  return r[0] + r[15]; }", 42);
+    expect("vmul64",
+        "package main;\n"
+        "typedef long long V __attribute__((vector_size(16)));\n"
+        "int main(void) {\n"
+        "  V a = { 20, 7 };\n"
+        "  V b = { 3, 4 };\n"
+        "  V r = a * b;\n"
+        "  return (int)(r[0] + r[1]); }", 88);
 }
 
 int main(void) {

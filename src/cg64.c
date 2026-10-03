@@ -442,12 +442,18 @@ static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
             fp++;
             continue;
         }
-        if ((f & CALL_ARG_STACK) || (f & CALL_ARG_BLOB) || gp >= 8 || scalar || qv)
-            st++;
-        else
+        if ((f & CALL_ARG_STACK) || (f & CALL_ARG_BLOB) || gp >= 8 || scalar || qv) {
+            if (qv) {
+                if (st & 15) st = (st + 15) & ~15;
+                st += 16;
+            } else {
+                st += 8;
+            }
+        } else {
             gp++;
+        }
     }
-    int bytes = st * 8;
+    int bytes = st;
     if (s->align16 == A64_MARK_SRET) bytes += 16;
     return bytes;
 }
@@ -602,15 +608,15 @@ static void emit_call(C64 *c, const IRInst *s) {
     int hfa_at[8], hfa_v[8], hfa_n = 0;
     int fp_at[8], fp_vn[8], fp_n = 0;
     int stk_at[IR_CALL_MAX_ARGS];
+    int stk_off[IR_CALL_MAX_ARGS];
     int stk_n = 0;
+    int stk_bytes = 0;
     for (int i = start; i < n; i++) {
         unsigned f = s->call_arg_on_stack ? s->call_arg_on_stack[i] : 0;
         int scalar = scalar_fp_val(c, s->call_args[i]);
         int qv = vec16_val(c, s->call_args[i]);
         if (f & CALL_ARG_BLOB)
             c64_die(c, s, "aggregate stack blob");
-        if (qv && ((f & CALL_ARG_STACK) || fp_used >= 8))
-            c64_die(c, s, "vector stack argument");
         if ((scalar || qv) && !(f & CALL_ARG_STACK) && fp_used < 8) {
             fp_at[fp_n] = i;
             fp_vn[fp_n] = fp_used++;
@@ -620,7 +626,12 @@ static void emit_call(C64 *c, const IRInst *s) {
             hfa_v[hfa_n] = fp_used++;
             hfa_n++;
         } else if ((f & CALL_ARG_STACK) || gp_used >= 8 || scalar || qv) {
-            stk_at[stk_n++] = i;
+            if (qv && (stk_bytes & 15))
+                stk_bytes = (stk_bytes + 15) & ~15;
+            stk_at[stk_n] = i;
+            stk_off[stk_n] = stk_bytes;
+            stk_bytes += qv ? 16 : 8;
+            stk_n++;
             st_used++;
         } else {
             gp_at[gp_n++] = i;
@@ -630,16 +641,21 @@ static void emit_call(C64 *c, const IRInst *s) {
     (void)st_used;
 
     /* Stack slots first: they read homes that the GP shuffle will
-     * overwrite.  The area sits at [sp+0 ..). */
+     * overwrite.  The area sits at [sp+0 ..).  A 16-byte vector occupies
+     * one aligned Q slot once v0–v7 are full. */
     for (int i = 0; i < stk_n; i++) {
         IRValue av = s->call_args[stk_at[i]];
-        if (scalar_fp_val(c, av)) {
+        int off = stk_off[i];
+        if (vec16_val(c, av)) {
+            int r = load_q(c, av, -1);
+            str_q(a, r, A64_SP, off);
+        } else if (scalar_fp_val(c, av)) {
             int r = load_fp(c, av, -1);
-            if (vw(c, av) == 8) a64_str_d(a, r, A64_SP, 8 * i);
-            else a64_str_s(a, r, A64_SP, 8 * i);
+            if (vw(c, av) == 8) a64_str_d(a, r, A64_SP, off);
+            else a64_str_s(a, r, A64_SP, off);
         } else {
             int r = load_op(c, av, -1);
-            a64_str64(a, r, A64_SP, 8 * i);
+            a64_str64(a, r, A64_SP, off);
         }
     }
     /* Scalar float/double arguments.  A home in v1 moving to v0 must
@@ -1042,6 +1058,26 @@ static void ldr_q(A64Asm *a, int rt, int rn, int byte_off) {
              | ((rn & 31) << 5) | (rt & 31));
 }
 
+/* imm5 for UMOV/INS: index shifted above the size marker bit. */
+static int elem_imm5(int esz, int index) {
+    int shift = esz == 1 ? 1 : esz == 2 ? 2 : esz == 4 ? 3 : 4;
+    int marker = esz == 1 ? 1 : esz == 2 ? 2 : esz == 4 ? 4 : 8;
+    return (index << shift) | marker;
+}
+
+static void umov_elem(A64Asm *a, int rd, int vn, int esz, int index) {
+    int imm5 = elem_imm5(esz, index);
+    uint32_t base = (esz == 8) ? 0x4E003C00u : 0x0E003C00u;
+    a64_word(a, base | ((uint32_t)imm5 << 16) | ((uint32_t)(vn & 31) << 5)
+                  | (uint32_t)(rd & 31));
+}
+
+static void ins_elem(A64Asm *a, int vd, int rn, int esz, int index) {
+    int imm5 = elem_imm5(esz, index);
+    a64_word(a, 0x4E001C00u | ((uint32_t)imm5 << 16) | ((uint32_t)(rn & 31) << 5)
+                            | (uint32_t)(vd & 31));
+}
+
 /* dst = a op b, all three are pointers to 16-byte vectors.
  * imm is the element size, width is the vector size, is_float selects
  * NEON scalar-FP rather than integer.  v30/v31 are the only scratches. */
@@ -1059,6 +1095,7 @@ static void emit_vec(C64 *c, const IRInst *s) {
 
     int sz = esz == 1 ? 0 : esz == 2 ? 1 : esz == 4 ? 2 : 3;
     uint32_t base = 0;
+    int lane = 0;
     if (s->is_float) {
         if (esz != 4 && esz != 8) {
             c64_die(c, s, "vector float element");
@@ -1083,9 +1120,11 @@ static void emit_vec(C64 *c, const IRInst *s) {
         case IR_VBOR:  base = 0x4EA01C00u; break;
         case IR_VBXOR: base = 0x6E201C00u; break;
         case IR_VMUL:
+            /* NEON has no 8-bit or 64-bit integer MUL.  Those lanes go
+             * through scalar MUL; the low esz bits match either signedness. */
             if (esz != 2 && esz != 4) {
-                c64_die(c, s, "vector integer multiply");
-                return;
+                lane = 1;
+                break;
             }
             base = 0x4E209C00u | ((uint32_t)sz << 22);
             break;
@@ -1094,8 +1133,18 @@ static void emit_vec(C64 *c, const IRInst *s) {
             return;
         }
     }
-    a64_word(a, base | ((uint32_t)A64_V31 << 16) | ((uint32_t)A64_V30 << 5)
-                  | (uint32_t)A64_V30);
+    if (lane) {
+        int n = 16 / esz;
+        for (int i = 0; i < n; i++) {
+            umov_elem(a, SCR0, A64_V30, esz, i);
+            umov_elem(a, SCR1, A64_V31, esz, i);
+            a64_mul(a, SCR0, SCR0, SCR1, esz == 8);
+            ins_elem(a, A64_V30, SCR0, esz, i);
+        }
+    } else {
+        a64_word(a, base | ((uint32_t)A64_V31 << 16) | ((uint32_t)A64_V30 << 5)
+                      | (uint32_t)A64_V30);
+    }
     int pd = load_ptrv(c, s->dst, -1);
     str_q(a, A64_V30, pd, 0);
 }
@@ -1253,9 +1302,19 @@ static void emit_function(C64 *c, int fi) {
             c64_die(c, s, "aggregate stack blob");
         int is_sret = fn->sret_value >= 0 && s->dst == fn->sret_value;
         if (vec16_val(c, s->dst)) {
-            if (s->force_stack || fp_idx >= 8)
-                c64_die(c, s, "vector stack argument");
-            int srcv = fp_idx++;
+            int from_stack = s->force_stack || fp_idx >= 8;
+            int srcv;
+            if (from_stack) {
+                int byte = 8 * stack_arg_idx;
+                if (byte & 15) {
+                    stack_arg_idx++;
+                    byte += 8;
+                }
+                srcv = save_total + byte;
+                stack_arg_idx += 2;
+            } else {
+                srcv = fp_idx++;
+            }
             mv[p].done = 1;
             mv[p].src_reg = -1;
             mv[p].src_vec = -1;
@@ -1267,7 +1326,7 @@ static void emit_function(C64 *c, int fi) {
                 fin[nfin].dst = dh;
                 fin[nfin].spill = dh < 0 ? fp_spill(c, s->dst) : 0;
                 fin[nfin].isd = 2;
-                fin[nfin].stack = 0;
+                fin[nfin].stack = from_stack;
                 fin[nfin].done = 0;
                 nfin++;
             }
@@ -1345,7 +1404,8 @@ static void emit_function(C64 *c, int fi) {
             int tmp = m->dst >= 0 ? m->dst : A64_V30;
             if (m->stack) {
                 emit_fp_addr(c, SCR0, m->src);
-                if (m->isd) a64_ldr_d(a, tmp, SCR0, 0);
+                if (m->isd == 2) ldr_q(a, tmp, SCR0, 0);
+                else if (m->isd) a64_ldr_d(a, tmp, SCR0, 0);
                 else a64_ldr_s(a, tmp, SCR0, 0);
             } else if (m->isd == 2) {
                 fmov_q(a, tmp, m->src);
