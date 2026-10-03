@@ -428,12 +428,21 @@ static int emit_mem_builtin(C64 *c, const char *name) {
     int is_memset = strcmp(name, "memset") == 0;
     int is_bzero = strcmp(name, "bzero") == 0;
     int is_mempcpy = strcmp(name, "mempcpy") == 0;
-    if (!is_memcpy && !is_memmove && !is_memset && !is_bzero && !is_mempcpy)
+    int is_bcopy = strcmp(name, "bcopy") == 0;
+    if (!is_memcpy && !is_memmove && !is_memset && !is_bzero && !is_mempcpy
+        && !is_bcopy)
         return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
 
     A64Asm *a = c->as;
+    if (is_bcopy) {
+        /* bcopy(src, dst, n): opposite of memmove, and overlap-safe. */
+        a64_mov_reg(a, SCR0, A64_X0, 1);
+        a64_mov_reg(a, A64_X0, A64_X1, 1);
+        a64_mov_reg(a, A64_X1, SCR0, 1);
+        is_memmove = 1;
+    }
     if (is_bzero) {
         /* bzero(dst, n): the count arrives in x1, the fill byte is 0. */
         a64_mov_reg(a, A64_X2, A64_X1, 1);
@@ -543,8 +552,8 @@ static int emit_scan_builtin(C64 *c, const char *name) {
  * The searched byte is masked to 8 bits.  x3/x4 are caller-saved. */
 static int emit_find_builtin(C64 *c, const char *name) {
     int is_memchr = strcmp(name, "memchr") == 0;
-    int is_strchr = strcmp(name, "strchr") == 0;
-    int is_strrchr = strcmp(name, "strrchr") == 0;
+    int is_strchr = strcmp(name, "strchr") == 0 || strcmp(name, "index") == 0;
+    int is_strrchr = strcmp(name, "strrchr") == 0 || strcmp(name, "rindex") == 0;
     int is_strnlen = strcmp(name, "strnlen") == 0;
     if (!is_memchr && !is_strchr && !is_strrchr && !is_strnlen) return 0;
     int defined = 0;

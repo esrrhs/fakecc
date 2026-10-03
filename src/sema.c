@@ -1295,7 +1295,7 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_ptr(type_make_int(1, 0));
             else if (strcmp(bname, "__builtin_strlen") == 0 || strcmp(bname, "__builtin_strnlen") == 0 || strcmp(bname, "__builtin_strspn") == 0 || strcmp(bname, "__builtin_strcspn") == 0 || strcmp(bname, "__builtin_object_size") == 0)
                 ret = type_make_int(8, 1);
-            else if (strcmp(bname, "__builtin_memchr") == 0 || strcmp(bname, "__builtin_strchr") == 0 || strcmp(bname, "__builtin_strrchr") == 0 || strcmp(bname, "__builtin_strstr") == 0)
+            else if (strcmp(bname, "__builtin_memchr") == 0 || strcmp(bname, "__builtin_strchr") == 0 || strcmp(bname, "__builtin_strrchr") == 0 || strcmp(bname, "__builtin_index") == 0 || strcmp(bname, "__builtin_rindex") == 0 || strcmp(bname, "__builtin_strstr") == 0)
                 ret = type_make_ptr(type_make_int(1, 0));
             else if (strcmp(bname, "__builtin_fabs") == 0)
                 ret = type_make_float(8);

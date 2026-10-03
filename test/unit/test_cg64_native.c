@@ -1702,6 +1702,26 @@ static void test_alloca_align(void) {
         "  return 0; }", 0);
 }
 
+static void test_bsd(void) {
+    expect("bsd",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char buf[4]; buf[0] = 1; buf[1] = 2; buf[2] = 3; buf[3] = 4;\n"
+        "  __builtin_bcopy(buf, buf + 1, 3);\n"
+        "  if (buf[0] != 1 || buf[1] != 1 || buf[2] != 2 || buf[3] != 3) return 1;\n"
+        "  char s[3]; s[0] = 5; s[1] = 6; s[2] = 7;\n"
+        "  char d[3];\n"
+        "  __builtin_bcopy(s, d, 3);\n"
+        "  if (d[0] != 5 || d[2] != 7) return 2;\n"
+        "  char *p = __builtin_index(\"hello\", 108);\n"
+        "  if (!p || p[0] != 108 || p[1] != 108) return 3;\n"
+        "  if (__builtin_index(\"hello\", 122)) return 4;\n"
+        "  char *q = __builtin_rindex(\"hello\", 108);\n"
+        "  if (!q || q[0] != 108 || q[1] != 111) return 5;\n"
+        "  if (__builtin_rindex(\"hello\", 122)) return 6;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1789,6 +1809,7 @@ int main(void) {
     test_span();
     test_atomic();
     test_alloca_align();
+    test_bsd();
     test_trap();
     test_syscall();
     test_frame_addr();
