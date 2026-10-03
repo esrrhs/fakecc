@@ -643,6 +643,40 @@ static void test_abi_cross(void) {
     free(text);
 }
 
+static void test_float(void) {
+    expect("fadd",
+        "package main;\n"
+        "int main(){ double a=1.5; double b=2.5; return (int)(a+b); }", 4);
+    expect("fsub_mul_div",
+        "package main;\n"
+        "int main(){ double a=7.5; double b=2.5;\n"
+        " return (int)((a-b) + (a/b) + (b*b)); }", 14);
+    expect("f32_add",
+        "package main;\n"
+        "int main(){ float a=1.5f; float b=2.25f; return (int)(a+b); }", 3);
+    expect("fcmp_ord",
+        "package main;\n"
+        "int main(){ double a=1.5; double b=2.5;\n"
+        " return (a<b) + (a<=a) + (b>a) + (a>=a) + (a==a) + (a!=b); }", 6);
+    expect("fcmp_nan",
+        "package main;\n"
+        "int main(){ double n=0.0/0.0;\n"
+        " return (n!=0.0) && !(n==0.0) && !(n<1.0) && !(n<=1.0)\n"
+        "     && !(n>1.0) && !(n>=1.0); }", 1);
+    expect("fcvt_int",
+        "package main;\n"
+        "int main(){ double d=(double)3 + 0.9; float f=(float)d;\n"
+        " unsigned u=4000000000u; double ud=(double)u;\n"
+        " return ((int)d==3) && ((int)f==3) && (ud>3999999999.0); }", 1);
+    expect("fparam",
+        "package main;\n"
+        "double add(double a, double b){ return a+b; }\n"
+        "int main(){ return (int)add(1.25, 2.75); }", 4);
+    expect("fneg",
+        "package main;\n"
+        "int main(){ double a=2.5; return (int)(-a + 5.0); }", 2);
+}
+
 static void test_varargs(void) {
     /* Darwin puts every anonymous argument in an 8-byte stack slot.
      * va_list is the cursor, not a register-save area. */
@@ -871,6 +905,7 @@ int main(void) {
     test_struct_abi();
     test_abi_cross();
     test_varargs();
+    test_float();
     return t_finalize();
 }
 

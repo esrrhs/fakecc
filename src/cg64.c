@@ -26,9 +26,11 @@ typedef struct {
     const IRModule   *ir;
     const IRFunction *fn;
     const RAResult   *ra;
+    const RAResult   *ra_fp;     /* SIMD homes for scalar float/double */
     int              *def;         /* SSA value -> defining inst index  */
     int              *alloca_off;  /* ALLOCA SSA id -> fp-relative off  */
     int              *spill_off;   /* spill slot -> fp-relative offset  */
+    int              *fp_spill_off; /* SIMD spill slot -> fp-relative    */
     int              *vlabels;     /* IR label id -> a64 label id       */
     int              *fn_label;    /* function index -> a64 label id    */
     int               frame_locals;
@@ -94,6 +96,8 @@ static void emit_load(C64 *c, int rt, int base, int width, int uns);
 static void emit_store(C64 *c, int rt, int base, int width);
 static void frame_load(C64 *c, int rt, int off, int width, int uns);
 static void frame_store(C64 *c, int valrt, int off, int width);
+static void emit_fp_addr(C64 *c, int rd, int off);
+static void emit_mov_imm_w(A64Asm *a, int rd, int64_t imm, int is64);
 
 /* Destination register for v: its home, or SCR0 when spilled. */
 static int dst_reg(C64 *c, IRValue v) {
@@ -104,6 +108,70 @@ static int dst_reg(C64 *c, IRValue v) {
 static void commit(C64 *c, IRValue v, int srcreg) {
     if (home_reg(c, v) >= 0) return;
     frame_store(c, srcreg, spill_off(c, v), 8);
+}
+
+/* IEEE scalar float/double (value_is_float == 1, width 4 or 8).
+ * long double, decimal and NEON vectors stay out of this path. */
+static int scalar_fp_val(const C64 *c, IRValue v) {
+    const IRFunction *fn = c->fn;
+    if (!fn || v < 0 || !fn->value_is_float || v >= fn->value_meta_cap)
+        return 0;
+    if (fn->value_is_float[v] != 1) return 0;
+    int w = (fn->value_width && v < fn->next_value_id && fn->value_width[v])
+            ? fn->value_width[v] : 8;
+    return w == 4 || w == 8;
+}
+
+static int fp_home(const C64 *c, IRValue v) {
+    if (!c->ra_fp || v < 0 || v >= c->ra_fp->num_values) return -1;
+    int hw = c->ra_fp->reg[v];
+    return hw >= 0 ? hw : -1;
+}
+
+static int fp_spill(const C64 *c, IRValue v) {
+    if (!c->ra_fp || v < 0 || v >= c->ra_fp->num_values || c->ra_fp->reg[v] >= 0)
+        return 0;
+    return c->fp_spill_off[c->ra_fp->spill_slot[v]];
+}
+
+/* v30/v31 are outside the allocatable set. */
+#define FSCR A64_V31
+
+static void fp_frame(C64 *c, int vt, int off, int is_double, int store) {
+    emit_fp_addr(c, SCR1, off);
+    if (store) {
+        if (is_double) a64_str_d(c->as, vt, SCR1, 0);
+        else a64_str_s(c->as, vt, SCR1, 0);
+    } else {
+        if (is_double) a64_ldr_d(c->as, vt, SCR1, 0);
+        else a64_ldr_s(c->as, vt, SCR1, 0);
+    }
+}
+
+static void commit_fp(C64 *c, IRValue v, int src) {
+    int h = fp_home(c, v);
+    if (h >= 0) {
+        if (h != src) a64_fmov_reg(c->as, h, src, vw(c, v) == 8);
+        return;
+    }
+    fp_frame(c, src, fp_spill(c, v), vw(c, v) == 8, 1);
+}
+
+/* Materialize v into a V register.  `avoid` is a V reg that must stay intact. */
+static int load_fp(C64 *c, IRValue v, int avoid) {
+    int h = fp_home(c, v);
+    if (h >= 0) return h;
+    int tmp = (avoid == FSCR) ? A64_V30 : FSCR;
+    const IRInst *d = (v >= 0 && c->def && c->def[v] >= 0)
+                      ? &c->fn->insts.data[c->def[v]] : NULL;
+    if (d && d->op == IR_CONST) {
+        int isd = vw(c, v) == 8;
+        emit_mov_imm_w(c->as, SCR0, d->float_imm, isd);
+        a64_fmov_gp(c->as, tmp, SCR0, 1, isd);
+        return tmp;
+    }
+    fp_frame(c, tmp, fp_spill(c, v), vw(c, v) == 8, 0);
+    return tmp;
 }
 
 static void emit_mov_imm_w(A64Asm *a, int rd, int64_t imm, int is64) {
@@ -324,7 +392,7 @@ static int is_va_builtin(const char *name) {
                     || strcmp(name, "va_end") == 0);
 }
 
-static int outgoing_stack_bytes(const IRInst *s) {
+static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
     if (!s->call_nargs) return s->align16 == A64_MARK_SRET ? 16 : 0;
     if (s->call_name && strcmp(s->call_name, "__syscall") == 0) return 0;
     if (is_va_builtin(s->call_name)) return 0;
@@ -332,11 +400,16 @@ static int outgoing_stack_bytes(const IRInst *s) {
     int gp = 0, fp = 0, st = 0;
     for (int i = start; i < s->call_nargs; i++) {
         unsigned f = s->call_arg_on_stack ? s->call_arg_on_stack[i] : 0;
+        int scalar = scalar_fp_val(c, s->call_args[i]);
+        if (scalar && !(f & CALL_ARG_STACK) && fp < 8) {
+            fp++;
+            continue;
+        }
         if ((f & CALL_ARG_HFA) && !(f & CALL_ARG_STACK) && fp < 8) {
             fp++;
             continue;
         }
-        if ((f & CALL_ARG_STACK) || (f & CALL_ARG_BLOB) || gp >= 8)
+        if ((f & CALL_ARG_STACK) || (f & CALL_ARG_BLOB) || gp >= 8 || scalar)
             st++;
         else
             gp++;
@@ -494,17 +567,23 @@ static void emit_call(C64 *c, const IRInst *s) {
     int start = sret ? 1 : 0;
     int gp_at[8], gp_n = 0, gp_used = 0, fp_used = 0, st_used = 0;
     int hfa_at[8], hfa_v[8], hfa_n = 0;
+    int fp_at[8], fp_vn[8], fp_n = 0;
     int stk_at[IR_CALL_MAX_ARGS];
     int stk_n = 0;
     for (int i = start; i < n; i++) {
         unsigned f = s->call_arg_on_stack ? s->call_arg_on_stack[i] : 0;
+        int scalar = scalar_fp_val(c, s->call_args[i]);
         if (f & CALL_ARG_BLOB)
             c64_die(c, s, "aggregate stack blob");
-        if ((f & CALL_ARG_HFA) && !(f & CALL_ARG_STACK) && fp_used < 8) {
+        if (scalar && !(f & CALL_ARG_STACK) && fp_used < 8) {
+            fp_at[fp_n] = i;
+            fp_vn[fp_n] = fp_used++;
+            fp_n++;
+        } else if ((f & CALL_ARG_HFA) && !(f & CALL_ARG_STACK) && fp_used < 8) {
             hfa_at[hfa_n] = i;
             hfa_v[hfa_n] = fp_used++;
             hfa_n++;
-        } else if ((f & CALL_ARG_STACK) || gp_used >= 8) {
+        } else if ((f & CALL_ARG_STACK) || gp_used >= 8 || scalar) {
             stk_at[stk_n++] = i;
             st_used++;
         } else {
@@ -518,8 +597,59 @@ static void emit_call(C64 *c, const IRInst *s) {
      * overwrite.  The area sits at [sp+0 ..). */
     for (int i = 0; i < stk_n; i++) {
         IRValue av = s->call_args[stk_at[i]];
-        int r = load_op(c, av, -1);
-        a64_str64(a, r, A64_SP, 8 * i);
+        if (scalar_fp_val(c, av)) {
+            int r = load_fp(c, av, -1);
+            if (vw(c, av) == 8) a64_str_d(a, r, A64_SP, 8 * i);
+            else a64_str_s(a, r, A64_SP, 8 * i);
+        } else {
+            int r = load_op(c, av, -1);
+            a64_str64(a, r, A64_SP, 8 * i);
+        }
+    }
+    /* Scalar float/double arguments.  A home in v1 moving to v0 must
+     * not run before the value that still lives in v0. */
+    {
+        int fsrc[8], fdst[8], fisd[8], fdone[8], fhome[8];
+        IRValue fav[8];
+        for (int i = 0; i < fp_n; i++) {
+            fav[i] = s->call_args[fp_at[i]];
+            fsrc[i] = fp_home(c, fav[i]);
+            fhome[i] = fsrc[i] >= 0;
+            fdst[i] = fp_vn[i];
+            fisd[i] = vw(c, fav[i]) == 8;
+            fdone[i] = fhome[i] && fsrc[i] == fdst[i];
+        }
+        int nleft = fp_n;
+        for (int i = 0; i < fp_n; i++) nleft -= fdone[i];
+        while (nleft > 0) {
+            int picked = -1;
+            for (int i = 0; i < fp_n; i++)
+                if (!fdone[i] && fsrc[i] == FSCR) { picked = i; break; }
+            for (int i = 0; picked < 0 && i < fp_n; i++) {
+                if (fdone[i]) continue;
+                int blocked = 0;
+                if (fhome[i])
+                    for (int j = 0; j < fp_n; j++)
+                        if (!fdone[j] && j != i && fhome[j] && fsrc[j] == fdst[i])
+                            blocked = 1;
+                if (!blocked) { picked = i; break; }
+            }
+            if (picked < 0) {
+                for (int i = 0; i < fp_n; i++)
+                    if (!fdone[i] && fhome[i]) {
+                        a64_fmov_reg(a, FSCR, fsrc[i], fisd[i]);
+                        fsrc[i] = FSCR;
+                        fhome[i] = 0;
+                        break;
+                    }
+                continue;
+            }
+            int r = fhome[picked] ? fsrc[picked] : load_fp(c, fav[picked], fdst[picked]);
+            if (r != fdst[picked])
+                a64_fmov_reg(a, fdst[picked], r, fisd[picked]);
+            fdone[picked] = 1;
+            nleft--;
+        }
     }
     /* HFA eightbytes: integer bits → dN/sN, before GP moves. */
     for (int i = 0; i < hfa_n; i++) {
@@ -617,6 +747,11 @@ static void emit_call(C64 *c, const IRInst *s) {
         if (s->b >= 0)
             a64_fmov_gp(a, r1, A64_V1, 0, 1);
         place_pair(c, s->dst, s->b, r0, r1);
+    } else if (s->dst >= 0 && scalar_fp_val(c, s->dst)) {
+        int h = fp_home(c, s->dst);
+        int isd = vw(c, s->dst) == 8 || s->width == 8;
+        if (h < 0) commit_fp(c, s->dst, A64_V0);
+        else if (h != A64_V0) a64_fmov_reg(a, h, A64_V0, isd);
     } else if (s->dst >= 0 && s->b >= 0) {
         place_pair(c, s->dst, s->b, A64_X0, A64_X1);
     } else if (s->dst >= 0) {
@@ -835,6 +970,27 @@ static void sub_sp_bytes(A64Asm *a, unsigned bytes) {
         a64_sub_imm12(a, A64_SP, A64_SP, bytes, 0, 1, 0);
 }
 
+static void stp_q(A64Asm *a, int rt, int rt2, int rn, int byte_off) {
+    int imm = byte_off / 16;
+    a64_word(a, 0xAD000000u | ((imm & 0x7f) << 15)
+             | ((rt2 & 31) << 10) | ((rn & 31) << 5) | (rt & 31));
+}
+static void ldp_q(A64Asm *a, int rt, int rt2, int rn, int byte_off) {
+    int imm = byte_off / 16;
+    a64_word(a, 0xAD400000u | ((imm & 0x7f) << 15)
+             | ((rt2 & 31) << 10) | ((rn & 31) << 5) | (rt & 31));
+}
+static void str_q(A64Asm *a, int rt, int rn, int byte_off) {
+    int imm = byte_off / 16;
+    a64_word(a, 0x3D800000u | ((imm & 0xfff) << 10)
+             | ((rn & 31) << 5) | (rt & 31));
+}
+static void ldr_q(A64Asm *a, int rt, int rn, int byte_off) {
+    int imm = byte_off / 16;
+    a64_word(a, 0x3DC00000u | ((imm & 0xfff) << 10)
+             | ((rn & 31) << 5) | (rt & 31));
+}
+
 static void emit_function(C64 *c, int fi) {
     const IRFunction *fn = c->fn;
     A64Asm *a = c->as;
@@ -842,6 +998,7 @@ static void emit_function(C64 *c, int fi) {
 
     const RAResult *ra = (const RAResult *)fn->ra;
     c->ra = ra;
+    c->ra_fp = (const RAResult *)fn->ra_xmm;
     int nv = fn->next_value_id;
 
     /* ---- Frame plan ---- */
@@ -868,12 +1025,24 @@ static void emit_function(C64 *c, int fi) {
         }
     }
 
-    /* GP spill slots, placed below the pinned area. */
+    /* GP spill slots, placed below the pinned area.  SIMD spills
+     * follow, 16 bytes each and 16-aligned. */
     int spill_area = ra ? ra->stack_size : 0;
     if (ra && ra->num_spill_slots > 0) {
         c->spill_off = xmalloc((size_t)ra->num_spill_slots * sizeof(int));
         for (int s2 = 0; s2 < ra->num_spill_slots; s2++)
             c->spill_off[s2] = -(pinned + (s2 + 1) * 8);
+    }
+    int fp_bytes = 0;
+    c->fp_spill_off = NULL;
+    if (c->ra_fp && c->ra_fp->num_spill_slots > 0) {
+        int base = pinned + spill_area;
+        if (base % 16) base += 16 - (base % 16);
+        int nfp = c->ra_fp->num_spill_slots;
+        c->fp_spill_off = xmalloc((size_t)nfp * sizeof(int));
+        for (int s2 = 0; s2 < nfp; s2++)
+            c->fp_spill_off[s2] = -(base + (s2 + 1) * 16);
+        fp_bytes = (base - pinned - spill_area) + nfp * 16;
     }
 
     /* Outgoing stack-argument area (max over calls in this function). */
@@ -881,14 +1050,14 @@ static void emit_function(C64 *c, int fi) {
     for (size_t j = 0; j < fn->insts.len; j++) {
         const IRInst *s = &fn->insts.data[j];
         if (s->op == IR_CALL) {
-            int bytes = outgoing_stack_bytes(s);
+            int bytes = outgoing_stack_bytes(c, s);
             if (bytes > call_area) call_area = bytes;
         }
     }
     if (call_area % 16) call_area += 16 - (call_area % 16);
     c->call_area = call_area;
 
-    int locals = pinned + spill_area + call_area;
+    int locals = pinned + spill_area + fp_bytes + call_area;
     if (locals % 16) locals += 16 - (locals % 16);
     c->frame_locals = locals;
 
@@ -909,7 +1078,23 @@ static void emit_function(C64 *c, int fi) {
             if (cs[j] < cs[i]) { int t = cs[i]; cs[i] = cs[j]; cs[j] = t; }
     int cs_pairs = (ncs + 1) / 2;
     int cs_area = cs_pairs * 16;
-    int save_total = 16 + cs_area;
+    /* v8..v15 are callee-saved (the full 128 bits). */
+    int vcs[8], nvcs = 0;
+    if (c->ra_fp)
+        for (int v = 0; v < nv; v++) {
+            int hw = c->ra_fp->reg[v];
+            if (hw < A64_V8 || hw > A64_V15) continue;
+            int present = 0;
+            for (int k = 0; k < nvcs; k++) if (vcs[k] == hw) present = 1;
+            if (!present) vcs[nvcs++] = hw;
+        }
+    for (int i = 0; i < nvcs; i++)
+        for (int j = i + 1; j < nvcs; j++)
+            if (vcs[j] < vcs[i]) { int t = vcs[i]; vcs[i] = vcs[j]; vcs[j] = t; }
+    int vcs_pairs = (nvcs + 1) / 2;
+    int vcs_area = vcs_pairs * 32;
+    if (nvcs & 1) vcs_area -= 16; /* a lone Q is 16 bytes, not a 32-byte pair */
+    int save_total = 16 + cs_area + vcs_area;
     c->save_total = save_total;
 
     /* IR label table. */
@@ -923,6 +1108,13 @@ static void emit_function(C64 *c, int fi) {
         a64_stp64(a, cs[2*p], cs[2*p+1], A64_FP, 16 + 16*p, A64_PAIR_OFFSET);
     if (ncs & 1)
         a64_str64(a, cs[ncs-1], A64_FP, 16 + 16*cs_pairs - 8);
+    {
+        int qbase = 16 + cs_area;
+        for (int p = 0; p < nvcs / 2; p++)
+            stp_q(a, vcs[2 * p], vcs[2 * p + 1], A64_FP, qbase + 32 * p);
+        if (nvcs & 1)
+            str_q(a, vcs[nvcs - 1], A64_FP, qbase + 32 * (nvcs / 2));
+    }
     if (locals)
         sub_sp_bytes(a, (unsigned)locals);
 
@@ -939,6 +1131,9 @@ static void emit_function(C64 *c, int fi) {
                     int dst_reg; int dst_mem;   /* -1, or fp spill offset */
                     int is64; int done; } PMove;
     PMove *mv = xmalloc((size_t)(nparams > 0 ? nparams : 1) * sizeof(PMove));
+    typedef struct { int src; int dst; int spill; int isd; int stack; int done; } FIn;
+    FIn fin[16];
+    int nfin = 0;
     int gp_idx = 0, fp_idx = 0, stack_arg_idx = 0;
     for (int p = 0; p < nparams; p++) {
         const IRInst *s = &fn->insts.data[p];
@@ -948,6 +1143,27 @@ static void emit_function(C64 *c, int fi) {
         if (s->force_stack && s->alloca_bytes > 8)
             c64_die(c, s, "aggregate stack blob");
         int is_sret = fn->sret_value >= 0 && s->dst == fn->sret_value;
+        if (scalar_fp_val(c, s->dst)) {
+            int isd = s->width == 8;
+            int from_stack = s->force_stack || fp_idx >= 8;
+            int srcv = from_stack ? save_total + 8 * stack_arg_idx++ : fp_idx++;
+            mv[p].done = 1;
+            mv[p].src_reg = -1;
+            mv[p].src_vec = -1;
+            mv[p].dst_reg = -1;
+            mv[p].src_mem = -1;
+            if (param_is_used(fn, s->dst)) {
+                int dh = fp_home(c, s->dst);
+                fin[nfin].src = srcv;
+                fin[nfin].dst = dh;
+                fin[nfin].spill = dh < 0 ? fp_spill(c, s->dst) : 0;
+                fin[nfin].isd = isd;
+                fin[nfin].stack = from_stack;
+                fin[nfin].done = 0;
+                nfin++;
+            }
+            continue;
+        }
         if (s->is_float && !s->force_stack) {
             /* HFA eightbyte: bits arrive in the next V register. */
             mv[p].src_vec = fp_idx++;
@@ -968,6 +1184,45 @@ static void emit_function(C64 *c, int fi) {
             mv[p].done = 1;
         else
             mv[p].done = (mv[p].src_reg >= 0 && mv[p].dst_reg == mv[p].src_reg);
+    }
+    /* Incoming V-reg parameters can be homed in v0..v7, so place them
+     * before the GP shuffle and break cycles through v31. */
+    {
+        int nleft = nfin;
+        while (nleft > 0) {
+            int picked = -1;
+            for (int i = 0; i < nfin; i++) {
+                if (fin[i].done) continue;
+                int blocked = 0;
+                if (fin[i].dst >= 0)
+                    for (int j = 0; j < nfin; j++) {
+                        if (fin[j].done || j == i || fin[j].stack) continue;
+                        if (fin[j].src == fin[i].dst) { blocked = 1; break; }
+                    }
+                if (!blocked) { picked = i; break; }
+            }
+            if (picked < 0) {
+                for (int i = 0; i < nfin; i++)
+                    if (!fin[i].done && !fin[i].stack) {
+                        a64_fmov_reg(a, FSCR, fin[i].src, fin[i].isd);
+                        fin[i].src = FSCR;
+                        break;
+                    }
+                continue;
+            }
+            FIn *m = &fin[picked];
+            int tmp = m->dst >= 0 ? m->dst : A64_V30;
+            if (m->stack) {
+                emit_fp_addr(c, SCR0, m->src);
+                if (m->isd) a64_ldr_d(a, tmp, SCR0, 0);
+                else a64_ldr_s(a, tmp, SCR0, 0);
+            } else if (tmp != m->src) {
+                a64_fmov_reg(a, tmp, m->src, m->isd);
+            }
+            if (m->dst < 0) fp_frame(c, tmp, m->spill, m->isd, 1);
+            m->done = 1;
+            nleft--;
+        }
     }
     int remaining = 0;
     for (int p = 0; p < nparams; p++) remaining += !mv[p].done;
@@ -1062,6 +1317,17 @@ static void emit_function(C64 *c, int fi) {
         const IRInst *s = &fn->insts.data[j];
         switch (s->op) {
         case IR_CONST: {
+            if (scalar_fp_val(c, s->dst) || s->is_float) {
+                if (s->width != 4 && s->width != 8)
+                    c64_die(c, s, "long double");
+                int isd = s->width == 8;
+                int h = fp_home(c, s->dst);
+                int tmp = h >= 0 ? h : FSCR;
+                emit_mov_imm_w(a, SCR0, s->float_imm, isd);
+                a64_fmov_gp(a, tmp, SCR0, 1, isd);
+                if (h < 0) commit_fp(c, s->dst, tmp);
+                break;
+            }
             int d = dst_reg(c, s->dst);
             emit_mov_imm_w(a, d, s->imm, s->width == 8);
             commit(c, s->dst, d);
@@ -1069,6 +1335,11 @@ static void emit_function(C64 *c, int fi) {
         }
         case IR_COPY:
         case IR_TRUNC: {
+            if (scalar_fp_val(c, s->dst) || scalar_fp_val(c, s->a)) {
+                int r = load_fp(c, s->a, -1);
+                commit_fp(c, s->dst, r);
+                break;
+            }
             int ra = load_op(c, s->a, -1);
             int d = dst_reg(c, s->dst);
             if (d != ra) a64_mov_reg(a, d, ra, s->width == 8);
@@ -1098,6 +1369,16 @@ static void emit_function(C64 *c, int fi) {
             break;
         }
         case IR_NEG: {
+            if (scalar_fp_val(c, s->a) || scalar_fp_val(c, s->dst)) {
+                int r = load_fp(c, s->a, -1);
+                int h = fp_home(c, s->dst);
+                int d = h >= 0 ? h : FSCR;
+                int isd = vw(c, s->a) == 8;
+                a64_word(a, (isd ? 0x1E614000u : 0x1E214000u)
+                          | ((r & 31) << 5) | (d & 31));
+                if (h < 0) commit_fp(c, s->dst, d);
+                break;
+            }
             int ra = load_op(c, s->a, -1);
             int d = dst_reg(c, s->dst);
             a64_neg(a, d, ra, s->width == 8);
@@ -1130,12 +1411,29 @@ static void emit_function(C64 *c, int fi) {
             break;
         }
         case IR_STORE_PTR: {
+            if (scalar_fp_val(c, s->b)) {
+                /* Float materialization uses x16; load the address after it. */
+                int v = load_fp(c, s->b, -1);
+                int p = load_ptrv(c, s->a, SCR0);
+                if (vw(c, s->b) == 8) a64_str_d(a, v, p, 0);
+                else a64_str_s(a, v, p, 0);
+                break;
+            }
             int p = load_ptrv(c, s->a, -1);
             int v = load_op(c, s->b, p);
             emit_store(c, v, p, s->width);
             break;
         }
         case IR_LOAD_PTR: {
+            if (scalar_fp_val(c, s->dst)) {
+                int p = load_ptrv(c, s->a, -1);
+                int h = fp_home(c, s->dst);
+                int d = h >= 0 ? h : FSCR;
+                if (vw(c, s->dst) == 8) a64_ldr_d(a, d, p, 0);
+                else a64_ldr_s(a, d, p, 0);
+                if (h < 0) commit_fp(c, s->dst, d);
+                break;
+            }
             int p = load_ptrv(c, s->a, -1);
             int d = dst_reg(c, s->dst);
             emit_load(c, d, p, s->width, s->is_unsigned);
@@ -1172,6 +1470,13 @@ static void emit_function(C64 *c, int fi) {
             break;
 
         case IR_RETURN: {
+            if (s->a >= 0 && scalar_fp_val(c, s->a)) {
+                int r = load_fp(c, s->a, -1);
+                int isd = vw(c, s->a) == 8;
+                if (r != A64_V0) a64_fmov_reg(a, A64_V0, r, isd);
+                a64_b(a, epilog);
+                break;
+            }
             if (s->align16 == A64_MARK_HFA && s->a >= 0) {
                 int r0 = load_op(c, s->a, -1);
                 int r1 = s->b >= 0 ? load_op(c, s->b, r0) : -1;
@@ -1242,9 +1547,121 @@ static void emit_function(C64 *c, int fi) {
         case IR_DBG_VALUE:
             break;
 
+        case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: {
+            int isd = s->width == 8;
+            int ra = load_fp(c, s->a, -1);
+            int rb = load_fp(c, s->b, ra);
+            int h = fp_home(c, s->dst);
+            int d = h >= 0 ? h : FSCR;
+            if (s->op == IR_FADD) a64_fadd(a, d, ra, rb, isd);
+            else if (s->op == IR_FSUB) a64_fsub(a, d, ra, rb, isd);
+            else if (s->op == IR_FMUL) a64_fmul(a, d, ra, rb, isd);
+            else a64_fdiv(a, d, ra, rb, isd);
+            if (h < 0) commit_fp(c, s->dst, d);
+            break;
+        }
+        case IR_FCMP: {
+            int isd = vw(c, s->a) == 8;
+            int ra = load_fp(c, s->a, -1);
+            int rb = load_fp(c, s->b, ra);
+            a64_fcmp(a, ra, rb, isd);
+            int d = dst_reg(c, s->dst);
+            /* FCMP sets NZCV.  Ordered LE is EQ|LT; the single LE
+             * condition is true for NaN, which C does not want. */
+            if (s->is_unsigned == 1) {
+                int tmp = (d == SCR0) ? SCR1 : SCR0;
+                a64_cset(a, d, A64_EQ, 0);
+                a64_cset(a, tmp, A64_MI, 0);
+                a64_or_reg(a, d, d, tmp, 0);
+            } else {
+                int cond = A64_MI;
+                switch (s->is_unsigned) {
+                case 0: cond = A64_MI; break;
+                case 2: cond = A64_GT; break;
+                case 3: cond = A64_GE; break;
+                case 4: cond = A64_EQ; break;
+                default: cond = A64_NE; break;
+                }
+                a64_cset(a, d, cond, 0);
+            }
+            commit(c, s->dst, d);
+            break;
+        }
+        case IR_SITOFP: {
+            int src_w = s->imm ? (int)s->imm : 4;
+            int src_u = s->is_unsigned;
+            int isd = s->width == 8;
+            int gp = load_op(c, s->a, -1);
+            if (src_w < 4) {
+                int tmp = (gp == SCR0) ? SCR1 : SCR0;
+                if (src_u) a64_uxt(a, tmp, gp, (unsigned)src_w, 0);
+                else a64_sxt(a, tmp, gp, (unsigned)src_w, 0);
+                gp = tmp;
+                src_w = 4;
+            }
+            int from64 = src_w >= 8;
+            uint32_t base;
+            if (isd && from64) base = src_u ? 0x9E630000u : 0x9E620000u;
+            else if (isd) base = src_u ? 0x1E630000u : 0x1E620000u;
+            else if (from64) base = src_u ? 0x9E230000u : 0x9E220000u;
+            else base = src_u ? 0x1E230000u : 0x1E220000u;
+            int h = fp_home(c, s->dst);
+            int d = h >= 0 ? h : FSCR;
+            a64_word(a, base | ((gp & 31) << 5) | (d & 31));
+            if (h < 0) commit_fp(c, s->dst, d);
+            break;
+        }
+        case IR_FPTOSI: {
+            int isd = vw(c, s->a) == 8;
+            int fs = load_fp(c, s->a, -1);
+            int to64 = s->width >= 8;
+            int un = s->is_unsigned;
+            uint32_t base;
+            if (isd && to64) base = un ? 0x9E790000u : 0x9E780000u;
+            else if (isd) base = un ? 0x1E790000u : 0x1E780000u;
+            else if (to64) base = un ? 0x9E390000u : 0x9E380000u;
+            else base = un ? 0x1E390000u : 0x1E380000u;
+            int d = dst_reg(c, s->dst);
+            a64_word(a, base | ((fs & 31) << 5) | (d & 31));
+            if (s->width < 4) {
+                /* Keep the low bytes.  The convert wrote a W or X. */
+                if (s->width == 1) a64_uxt(a, d, d, 1, 0);
+                else if (s->width == 2) a64_uxt(a, d, d, 2, 0);
+            }
+            commit(c, s->dst, d);
+            break;
+        }
+        case IR_FPEXT: case IR_FPTRUNC: {
+            int src_d = vw(c, s->a) == 8;
+            int dst_d = s->width == 8;
+            int r = load_fp(c, s->a, -1);
+            int h = fp_home(c, s->dst);
+            int d = h >= 0 ? h : FSCR;
+            if (src_d == dst_d) {
+                if (d != r) a64_fmov_reg(a, d, r, dst_d);
+            } else {
+                uint32_t base = dst_d ? 0x1E22C000u : 0x1E624000u;
+                a64_word(a, base | ((r & 31) << 5) | (d & 31));
+            }
+            if (h < 0) commit_fp(c, s->dst, d);
+            break;
+        }
         case IR_LOAD: {
             /* At -O0 a is a pinned-alloca slot (ternary/short-circuit
              * temps).  The unpinned SSA form (-O1) is a plain copy. */
+            if (scalar_fp_val(c, s->dst)) {
+                int off = (s->a >= 0 && s->a < nv) ? c->alloca_off[s->a] : 0;
+                int h = fp_home(c, s->dst);
+                int d = h >= 0 ? h : FSCR;
+                if (off != 0) {
+                    fp_frame(c, d, off, vw(c, s->dst) == 8, 0);
+                } else {
+                    int r = load_fp(c, s->a, d == FSCR ? -1 : d);
+                    if (d != r) a64_fmov_reg(a, d, r, vw(c, s->dst) == 8);
+                }
+                if (h < 0) commit_fp(c, s->dst, d);
+                break;
+            }
             int off = (s->a >= 0 && s->a < nv) ? c->alloca_off[s->a] : 0;
             int d = dst_reg(c, s->dst);
             if (off != 0) {
@@ -1257,6 +1674,13 @@ static void emit_function(C64 *c, int fi) {
             break;
         }
         case IR_STORE: {
+            if (scalar_fp_val(c, s->b)) {
+                int off = (s->a >= 0 && s->a < nv) ? c->alloca_off[s->a] : 0;
+                int v = load_fp(c, s->b, -1);
+                if (off != 0) fp_frame(c, v, off, vw(c, s->b) == 8, 1);
+                else commit_fp(c, s->a, v);
+                break;
+            }
             int off = (s->a >= 0 && s->a < nv) ? c->alloca_off[s->a] : 0;
             int v = load_op(c, s->b, -1);
             if (off != 0) {
@@ -1315,12 +1739,20 @@ static void emit_function(C64 *c, int fi) {
         a64_ldp64(a, cs[2*p], cs[2*p+1], A64_FP, 16 + 16*p, A64_PAIR_OFFSET);
     if (ncs & 1)
         a64_ldr64(a, cs[ncs-1], A64_FP, 16 + 16*cs_pairs - 8);
+    {
+        int qbase = 16 + cs_area;
+        for (int p = 0; p < nvcs / 2; p++)
+            ldp_q(a, vcs[2 * p], vcs[2 * p + 1], A64_FP, qbase + 32 * p);
+        if (nvcs & 1)
+            ldr_q(a, vcs[nvcs - 1], A64_FP, qbase + 32 * (nvcs / 2));
+    }
     a64_ldp64(a, A64_FP, A64_LR, A64_SP, save_total, A64_PAIR_POST);
     a64_ret(a, A64_LR);
 
     free(c->def);
     free(c->alloca_off);
     free(c->spill_off);
+    free(c->fp_spill_off);
     free(c->vlabels);
     c->ra = NULL;
 }

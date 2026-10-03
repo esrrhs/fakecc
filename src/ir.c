@@ -7162,6 +7162,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             arg_on_stack[nargs] = 0;
             if (get_value_is_float(fn, av)) {
                 if (call_used_xmm < 8) call_used_xmm++;
+                else if (!abi_sret_uses_gp())
+                    arg_on_stack[nargs] = CALL_ARG_STACK;
             } else {
                 if (call_used_gp < abi_gp_nregs()) call_used_gp++;
             }
@@ -11016,6 +11018,8 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     set_value_float(&irfn, param_ebs[p][0], pty.is_decimal ? 2 : 1);
                     /* long double is stack-only (codegen keys off value_is_ld). */
                     if (pty.width != 16 && used_xmm < 8) used_xmm++;
+                    else if (pty.width != 16 && !abi_sret_uses_gp())
+                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
                 } else {
                     if (used_gp < abi_gp_nregs()) used_gp++;
                 }
