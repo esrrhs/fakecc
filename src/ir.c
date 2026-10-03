@@ -1506,7 +1506,9 @@ static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
  *   - a non-HFA SSE eightbyte (mixed int/float) travels in a GP register
  *     holding the raw bits, not a V register;
  *   - an HFA keeps its SSE classes so the backend uses v0..v7, but the
- *     SSA values stay integer bit patterns (see CALL_ARG_HFA).
+ *     SSA values stay integer bit patterns (see CALL_ARG_HFA);
+ *   - a 16-byte vector stays one SSE class: Darwin passes it in a single
+ *     Q register (q0..q7), not as an 8-byte GP.
  * An HFA that does not fit in two eightbytes (3–4 doubles) is not
  * representable in the current IR and is rejected. */
 /* Sema marks a builtin that has no recorded prototype (memset, memcpy,
@@ -1565,6 +1567,9 @@ static void abi_adjust_cls(Type t, SysVRegClass *cls, int *nreg, SourceLoc loc) 
                    "arm64 HFA wider than two eightbytes is not supported yet");
         return;
     }
+    /* vector_size(16) is one Q register on Darwin, same SSE class SysV uses
+     * for a 16-byte XMM.  Wider vectors are still rewritten below. */
+    if (t.is_vector && type_size(t) == 16) return;
     for (int i = 0; i < *nreg && i < 2; i++)
         if (cls[i] == SYSV_CLS_SSE) cls[i] = SYSV_CLS_INTEGER;
 }

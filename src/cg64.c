@@ -98,6 +98,9 @@ static void frame_load(C64 *c, int rt, int off, int width, int uns);
 static void frame_store(C64 *c, int valrt, int off, int width);
 static void emit_fp_addr(C64 *c, int rd, int off);
 static void emit_mov_imm_w(A64Asm *a, int rd, int64_t imm, int is64);
+static void fmov_q(A64Asm *a, int rd, int rn);
+static void str_q(A64Asm *a, int rt, int rn, int byte_off);
+static void ldr_q(A64Asm *a, int rt, int rn, int byte_off);
 
 /* Destination register for v: its home, or SCR0 when spilled. */
 static int dst_reg(C64 *c, IRValue v) {
@@ -120,6 +123,16 @@ static int scalar_fp_val(const C64 *c, IRValue v) {
     int w = (fn->value_width && v < fn->next_value_id && fn->value_width[v])
             ? fn->value_width[v] : 8;
     return w == 4 || w == 8;
+}
+
+/* Darwin vector_size(16): one Q register (value_is_float == 4, width 16). */
+static int vec16_val(const C64 *c, IRValue v) {
+    const IRFunction *fn = c->fn;
+    if (!fn || v < 0 || !fn->value_is_float || v >= fn->value_meta_cap)
+        return 0;
+    if (fn->value_is_float[v] != 4) return 0;
+    int w = (fn->value_width && v < fn->next_value_id) ? fn->value_width[v] : 0;
+    return w == 16;
 }
 
 static int fp_home(const C64 *c, IRValue v) {
@@ -171,6 +184,25 @@ static int load_fp(C64 *c, IRValue v, int avoid) {
         return tmp;
     }
     fp_frame(c, tmp, fp_spill(c, v), vw(c, v) == 8, 0);
+    return tmp;
+}
+
+static void commit_q(C64 *c, IRValue v, int src) {
+    int h = fp_home(c, v);
+    if (h >= 0) {
+        fmov_q(c->as, h, src);
+        return;
+    }
+    emit_fp_addr(c, SCR1, fp_spill(c, v));
+    str_q(c->as, src, SCR1, 0);
+}
+
+static int load_q(C64 *c, IRValue v, int avoid) {
+    int h = fp_home(c, v);
+    if (h >= 0) return h;
+    int tmp = (avoid == FSCR) ? A64_V30 : FSCR;
+    emit_fp_addr(c, SCR1, fp_spill(c, v));
+    ldr_q(c->as, tmp, SCR1, 0);
     return tmp;
 }
 
@@ -401,7 +433,8 @@ static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
     for (int i = start; i < s->call_nargs; i++) {
         unsigned f = s->call_arg_on_stack ? s->call_arg_on_stack[i] : 0;
         int scalar = scalar_fp_val(c, s->call_args[i]);
-        if (scalar && !(f & CALL_ARG_STACK) && fp < 8) {
+        int qv = vec16_val(c, s->call_args[i]);
+        if ((scalar || qv) && !(f & CALL_ARG_STACK) && fp < 8) {
             fp++;
             continue;
         }
@@ -409,7 +442,7 @@ static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
             fp++;
             continue;
         }
-        if ((f & CALL_ARG_STACK) || (f & CALL_ARG_BLOB) || gp >= 8 || scalar)
+        if ((f & CALL_ARG_STACK) || (f & CALL_ARG_BLOB) || gp >= 8 || scalar || qv)
             st++;
         else
             gp++;
@@ -573,9 +606,12 @@ static void emit_call(C64 *c, const IRInst *s) {
     for (int i = start; i < n; i++) {
         unsigned f = s->call_arg_on_stack ? s->call_arg_on_stack[i] : 0;
         int scalar = scalar_fp_val(c, s->call_args[i]);
+        int qv = vec16_val(c, s->call_args[i]);
         if (f & CALL_ARG_BLOB)
             c64_die(c, s, "aggregate stack blob");
-        if (scalar && !(f & CALL_ARG_STACK) && fp_used < 8) {
+        if (qv && ((f & CALL_ARG_STACK) || fp_used >= 8))
+            c64_die(c, s, "vector stack argument");
+        if ((scalar || qv) && !(f & CALL_ARG_STACK) && fp_used < 8) {
             fp_at[fp_n] = i;
             fp_vn[fp_n] = fp_used++;
             fp_n++;
@@ -583,7 +619,7 @@ static void emit_call(C64 *c, const IRInst *s) {
             hfa_at[hfa_n] = i;
             hfa_v[hfa_n] = fp_used++;
             hfa_n++;
-        } else if ((f & CALL_ARG_STACK) || gp_used >= 8 || scalar) {
+        } else if ((f & CALL_ARG_STACK) || gp_used >= 8 || scalar || qv) {
             stk_at[stk_n++] = i;
             st_used++;
         } else {
@@ -616,7 +652,7 @@ static void emit_call(C64 *c, const IRInst *s) {
             fsrc[i] = fp_home(c, fav[i]);
             fhome[i] = fsrc[i] >= 0;
             fdst[i] = fp_vn[i];
-            fisd[i] = vw(c, fav[i]) == 8;
+            fisd[i] = vec16_val(c, fav[i]) ? 2 : (vw(c, fav[i]) == 8);
             fdone[i] = fhome[i] && fsrc[i] == fdst[i];
         }
         int nleft = fp_n;
@@ -637,16 +673,21 @@ static void emit_call(C64 *c, const IRInst *s) {
             if (picked < 0) {
                 for (int i = 0; i < fp_n; i++)
                     if (!fdone[i] && fhome[i]) {
-                        a64_fmov_reg(a, FSCR, fsrc[i], fisd[i]);
+                        if (fisd[i] == 2) fmov_q(a, FSCR, fsrc[i]);
+                        else a64_fmov_reg(a, FSCR, fsrc[i], fisd[i]);
                         fsrc[i] = FSCR;
                         fhome[i] = 0;
                         break;
                     }
                 continue;
             }
-            int r = fhome[picked] ? fsrc[picked] : load_fp(c, fav[picked], fdst[picked]);
-            if (r != fdst[picked])
-                a64_fmov_reg(a, fdst[picked], r, fisd[picked]);
+            int r = fhome[picked] ? fsrc[picked]
+                    : (fisd[picked] == 2 ? load_q(c, fav[picked], fdst[picked])
+                                         : load_fp(c, fav[picked], fdst[picked]));
+            if (r != fdst[picked]) {
+                if (fisd[picked] == 2) fmov_q(a, fdst[picked], r);
+                else a64_fmov_reg(a, fdst[picked], r, fisd[picked]);
+            }
             fdone[picked] = 1;
             nleft--;
         }
@@ -747,6 +788,10 @@ static void emit_call(C64 *c, const IRInst *s) {
         if (s->b >= 0)
             a64_fmov_gp(a, r1, A64_V1, 0, 1);
         place_pair(c, s->dst, s->b, r0, r1);
+    } else if (s->dst >= 0 && vec16_val(c, s->dst)) {
+        int h = fp_home(c, s->dst);
+        if (h < 0) commit_q(c, s->dst, A64_V0);
+        else fmov_q(c->as, h, A64_V0);
     } else if (s->dst >= 0 && scalar_fp_val(c, s->dst)) {
         int h = fp_home(c, s->dst);
         int isd = vw(c, s->dst) == 8 || s->width == 8;
@@ -985,6 +1030,12 @@ static void str_q(A64Asm *a, int rt, int rn, int byte_off) {
     a64_word(a, 0x3D800000u | ((imm & 0xfff) << 10)
              | ((rn & 31) << 5) | (rt & 31));
 }
+/* MOV Vd.16B, Vn.16B — full Q, not a scalar FMOV. */
+static void fmov_q(A64Asm *a, int rd, int rn) {
+    if (rd == rn) return;
+    a64_word(a, 0x4EA01C00u | ((unsigned)(rn & 31) << 16)
+             | ((unsigned)(rn & 31) << 5) | (unsigned)(rd & 31));
+}
 static void ldr_q(A64Asm *a, int rt, int rn, int byte_off) {
     int imm = byte_off / 16;
     a64_word(a, 0x3DC00000u | ((imm & 0xfff) << 10)
@@ -1143,6 +1194,27 @@ static void emit_function(C64 *c, int fi) {
         if (s->force_stack && s->alloca_bytes > 8)
             c64_die(c, s, "aggregate stack blob");
         int is_sret = fn->sret_value >= 0 && s->dst == fn->sret_value;
+        if (vec16_val(c, s->dst)) {
+            if (s->force_stack || fp_idx >= 8)
+                c64_die(c, s, "vector stack argument");
+            int srcv = fp_idx++;
+            mv[p].done = 1;
+            mv[p].src_reg = -1;
+            mv[p].src_vec = -1;
+            mv[p].dst_reg = -1;
+            mv[p].src_mem = -1;
+            if (param_is_used(fn, s->dst)) {
+                int dh = fp_home(c, s->dst);
+                fin[nfin].src = srcv;
+                fin[nfin].dst = dh;
+                fin[nfin].spill = dh < 0 ? fp_spill(c, s->dst) : 0;
+                fin[nfin].isd = 2;
+                fin[nfin].stack = 0;
+                fin[nfin].done = 0;
+                nfin++;
+            }
+            continue;
+        }
         if (scalar_fp_val(c, s->dst)) {
             int isd = s->width == 8;
             int from_stack = s->force_stack || fp_idx >= 8;
@@ -1204,7 +1276,8 @@ static void emit_function(C64 *c, int fi) {
             if (picked < 0) {
                 for (int i = 0; i < nfin; i++)
                     if (!fin[i].done && !fin[i].stack) {
-                        a64_fmov_reg(a, FSCR, fin[i].src, fin[i].isd);
+                        if (fin[i].isd == 2) fmov_q(a, FSCR, fin[i].src);
+                        else a64_fmov_reg(a, FSCR, fin[i].src, fin[i].isd);
                         fin[i].src = FSCR;
                         break;
                     }
@@ -1216,10 +1289,19 @@ static void emit_function(C64 *c, int fi) {
                 emit_fp_addr(c, SCR0, m->src);
                 if (m->isd) a64_ldr_d(a, tmp, SCR0, 0);
                 else a64_ldr_s(a, tmp, SCR0, 0);
+            } else if (m->isd == 2) {
+                fmov_q(a, tmp, m->src);
             } else if (tmp != m->src) {
                 a64_fmov_reg(a, tmp, m->src, m->isd);
             }
-            if (m->dst < 0) fp_frame(c, tmp, m->spill, m->isd, 1);
+            if (m->dst < 0) {
+                if (m->isd == 2) {
+                    emit_fp_addr(c, SCR1, m->spill);
+                    str_q(a, tmp, SCR1, 0);
+                } else {
+                    fp_frame(c, tmp, m->spill, m->isd, 1);
+                }
+            }
             m->done = 1;
             nleft--;
         }
@@ -1335,6 +1417,11 @@ static void emit_function(C64 *c, int fi) {
         }
         case IR_COPY:
         case IR_TRUNC: {
+            if (vec16_val(c, s->dst) || vec16_val(c, s->a)) {
+                int r = load_q(c, s->a, -1);
+                commit_q(c, s->dst, r);
+                break;
+            }
             if (scalar_fp_val(c, s->dst) || scalar_fp_val(c, s->a)) {
                 int r = load_fp(c, s->a, -1);
                 commit_fp(c, s->dst, r);
@@ -1411,6 +1498,12 @@ static void emit_function(C64 *c, int fi) {
             break;
         }
         case IR_STORE_PTR: {
+            if (vec16_val(c, s->b)) {
+                int v = load_q(c, s->b, -1);
+                int p = load_ptrv(c, s->a, SCR0);
+                str_q(a, v, p, 0);
+                break;
+            }
             if (scalar_fp_val(c, s->b)) {
                 /* Float materialization uses x16; load the address after it. */
                 int v = load_fp(c, s->b, -1);
@@ -1425,6 +1518,14 @@ static void emit_function(C64 *c, int fi) {
             break;
         }
         case IR_LOAD_PTR: {
+            if (vec16_val(c, s->dst)) {
+                int p = load_ptrv(c, s->a, -1);
+                int h = fp_home(c, s->dst);
+                int d = h >= 0 ? h : FSCR;
+                ldr_q(a, d, p, 0);
+                if (h < 0) commit_q(c, s->dst, d);
+                break;
+            }
             if (scalar_fp_val(c, s->dst)) {
                 int p = load_ptrv(c, s->a, -1);
                 int h = fp_home(c, s->dst);
@@ -1470,6 +1571,12 @@ static void emit_function(C64 *c, int fi) {
             break;
 
         case IR_RETURN: {
+            if (s->a >= 0 && vec16_val(c, s->a)) {
+                int r = load_q(c, s->a, -1);
+                fmov_q(a, A64_V0, r);
+                a64_b(a, epilog);
+                break;
+            }
             if (s->a >= 0 && scalar_fp_val(c, s->a)) {
                 int r = load_fp(c, s->a, -1);
                 int isd = vw(c, s->a) == 8;

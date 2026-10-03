@@ -889,6 +889,34 @@ static void test_struct_abi(void) {
         " s.a=7; p=(unsigned long long *)&s.b; *p=4; return f(s); }", 11);
 }
 
+static void test_vec16(void) {
+    expect("v16d",
+        "package main;\n"
+        "typedef double V __attribute__((vector_size(16)));\n"
+        "V id(V v) { return v; }\n"
+        "int main(void) {\n"
+        "  V a = { 1.0, 2.0 };\n"
+        "  V b = id(a);\n"
+        "  if (b[0] != 1.0) return 1;\n"
+        "  if (b[1] != 2.0) return 2;\n"
+        "  return 0; }", 0);
+    expect("v16i",
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(16)));\n"
+        "V id(V v) { return v; }\n"
+        "int main(void) {\n"
+        "  V a = { 1, 2, 3, 4 };\n"
+        "  V b = id(a);\n"
+        "  return b[0] + b[1] + b[2] + b[3]; }", 10);
+    expect("v16mix",
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(16)));\n"
+        "int f(int n, V v) { return n + v[0] + v[3]; }\n"
+        "int main(void) {\n"
+        "  V a = { 1, 2, 3, 4 };\n"
+        "  return f(10, a); }", 15);
+}
+
 int main(void) {
     target_set_current(target_arm64_macos());
     test_divmod_edgecases();
@@ -906,6 +934,7 @@ int main(void) {
     test_abi_cross();
     test_varargs();
     test_float();
+    test_vec16();
     return t_finalize();
 }
 
