@@ -590,6 +590,118 @@ static int emit_find_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* strcpy/stpcpy/strncpy/strcat/strncat/strstr.  Result pointer in x0.
+ * x3–x5 are caller-saved.  A user definition of the same name still wins. */
+static int emit_copy_builtin(C64 *c, const char *name) {
+    int is_strcpy = strcmp(name, "strcpy") == 0;
+    int is_stpcpy = strcmp(name, "stpcpy") == 0;
+    int is_strncpy = strcmp(name, "strncpy") == 0;
+    int is_strcat = strcmp(name, "strcat") == 0;
+    int is_strncat = strcmp(name, "strncat") == 0;
+    int is_strstr = strcmp(name, "strstr") == 0;
+    if (!is_strcpy && !is_stpcpy && !is_strncpy && !is_strcat && !is_strncat
+        && !is_strstr)
+        return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+
+    A64Asm *a = c->as;
+    if (is_strstr) {
+        int Louter = a64_new_label(a);
+        int Linner = a64_new_label(a);
+        int Lnext = a64_new_label(a);
+        int Lmiss = a64_new_label(a);
+        int Ldone = a64_new_label(a);
+        a64_ldr8(a, A64_X2, A64_X1, 0);
+        a64_cbz(a, A64_X2, Ldone, 0);
+        a64_bind(a, Louter);
+        a64_ldr8(a, A64_X3, A64_X0, 0);
+        a64_cbz(a, A64_X3, Lmiss, 0);
+        a64_mov_reg(a, A64_X4, A64_X0, 1);
+        a64_mov_reg(a, A64_X5, A64_X1, 1);
+        a64_bind(a, Linner);
+        a64_ldr8(a, A64_X2, A64_X5, 0);
+        a64_cbz(a, A64_X2, Ldone, 0);
+        a64_ldr8(a, A64_X3, A64_X4, 0);
+        a64_cmp_reg(a, A64_X2, A64_X3, 0);
+        a64_bcond(a, A64_NE, Lnext);
+        a64_add_imm12(a, A64_X4, A64_X4, 1, 0, 1, 0);
+        a64_add_imm12(a, A64_X5, A64_X5, 1, 0, 1, 0);
+        a64_b(a, Linner);
+        a64_bind(a, Lnext);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_b(a, Louter);
+        a64_bind(a, Lmiss);
+        a64_movz(a, A64_X0, 0, 0, 1);
+        a64_bind(a, Ldone);
+        return 1;
+    }
+
+    if (is_strncpy) {
+        int Lloop = a64_new_label(a);
+        int Lpad = a64_new_label(a);
+        int Ldone = a64_new_label(a);
+        a64_mov_reg(a, A64_X4, A64_X0, 1);
+        a64_bind(a, Lloop);
+        a64_cbz(a, A64_X2, Ldone, 1);
+        a64_ldr8(a, A64_X3, A64_X1, 0);
+        a64_str8(a, A64_X3, A64_X0, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+        a64_cbz(a, A64_X3, Lpad, 0);
+        a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+        a64_b(a, Lloop);
+        a64_bind(a, Lpad);
+        a64_cbz(a, A64_X2, Ldone, 1);
+        a64_str8(a, 31, A64_X0, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+        a64_b(a, Lpad);
+        a64_bind(a, Ldone);
+        a64_mov_reg(a, A64_X0, A64_X4, 1);
+        return 1;
+    }
+
+    int Lfind = a64_new_label(a);
+    int Lcopy = a64_new_label(a);
+    int Lterm = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+    a64_mov_reg(a, A64_X4, A64_X0, 1);
+    if (is_strcat || is_strncat) {
+        a64_bind(a, Lfind);
+        a64_ldr8(a, A64_X3, A64_X0, 0);
+        a64_cbz(a, A64_X3, Lcopy, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_b(a, Lfind);
+    }
+    a64_bind(a, Lcopy);
+    if (is_strncat) {
+        a64_cbz(a, A64_X2, Lterm, 1);
+        a64_ldr8(a, A64_X3, A64_X1, 0);
+        a64_cbz(a, A64_X3, Lterm, 0);
+        a64_str8(a, A64_X3, A64_X0, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+        a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+        a64_b(a, Lcopy);
+        a64_bind(a, Lterm);
+        a64_str8(a, 31, A64_X0, 0);
+        a64_mov_reg(a, A64_X0, A64_X4, 1);
+        return 1;
+    }
+    a64_ldr8(a, A64_X3, A64_X1, 0);
+    a64_str8(a, A64_X3, A64_X0, 0);
+    a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+    a64_cbnz(a, A64_X3, Lcopy, 0);
+    a64_bind(a, Ldone);
+    if (is_stpcpy)
+        a64_sub_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    else
+        a64_mov_reg(a, A64_X0, A64_X4, 1);
+    return 1;
+}
+
 /* Bytes of outgoing stack traffic for one call: 8 per stack slot, plus
  * 16 when call_args[0] must be stashed before it is written to x8. */
 static int is_va_builtin(const char *name) {
@@ -1185,7 +1297,8 @@ static void emit_call(C64 *c, const IRInst *s) {
         a64_bl(a, c->udiv_label);
     } else if (!(s->call_name && (emit_mem_builtin(c, s->call_name)
                                  || emit_scan_builtin(c, s->call_name)
-                                 || emit_find_builtin(c, s->call_name)))) {
+                                 || emit_find_builtin(c, s->call_name)
+                                 || emit_copy_builtin(c, s->call_name)))) {
         int fi = 0;
         if (find_function(c->ir, s->call_name, &fi) != 0) {
             if (!emit_object_mode())

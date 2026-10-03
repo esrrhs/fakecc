@@ -1617,6 +1617,35 @@ static void test_find(void) {
         "  return 0; }", 0);
 }
 
+static void test_copy(void) {
+    expect("copy",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char d[8];\n"
+        "  char *p = __builtin_strcpy(d, \"hi\");\n"
+        "  if (p != d || d[0] != 104 || d[1] != 105 || d[2] != 0) return 1;\n"
+        "  p = __builtin_stpcpy(d, \"ab\");\n"
+        "  if (p != d + 2 || d[2] != 0) return 2;\n"
+        "  char e[4]; e[0] = 9; e[1] = 9; e[2] = 9; e[3] = 9;\n"
+        "  __builtin_strncpy(e, \"ab\", 4);\n"
+        "  if (e[0] != 97 || e[1] != 98 || e[2] != 0 || e[3] != 0) return 3;\n"
+        "  e[0] = 9; e[1] = 9; e[2] = 9; e[3] = 9;\n"
+        "  __builtin_strncpy(e, \"abcd\", 3);\n"
+        "  if (e[0] != 97 || e[1] != 98 || e[2] != 99 || e[3] != 9) return 4;\n"
+        "  char g[8]; g[0] = 120; g[1] = 0;\n"
+        "  p = __builtin_strcat(g, \"yz\");\n"
+        "  if (p != g || g[0] != 120 || g[1] != 121 || g[2] != 122 || g[3] != 0)\n"
+        "    return 5;\n"
+        "  g[0] = 120; g[1] = 0;\n"
+        "  __builtin_strncat(g, \"yz\", 1);\n"
+        "  if (g[0] != 120 || g[1] != 121 || g[2] != 0) return 6;\n"
+        "  char s[] = {97, 98, 99, 100, 0};\n"
+        "  if (__builtin_strstr(s, \"cd\") != s + 2) return 7;\n"
+        "  if (__builtin_strstr(s, \"z\")) return 8;\n"
+        "  if (__builtin_strstr(s, \"\") != s) return 9;\n"
+        "  return 0; }", 0);
+}
+
 static void test_trap(void) {
     /* brk #1 → SIGTRAP, same status clang produces. */
     expect("trap",
@@ -1670,6 +1699,7 @@ int main(void) {
     test_fpmath();
     test_scan();
     test_find();
+    test_copy();
     test_trap();
     test_syscall();
     test_frame_addr();
