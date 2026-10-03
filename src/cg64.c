@@ -3444,6 +3444,22 @@ static void emit_function(C64 *c, int fi) {
         case IR_STORE_PTR: {
             /* imm 3: release or seq_cst store.  x86 ignores imm and keeps
              * a plain store, which is what that backend already emitted. */
+            if (s->imm == 3 && !vec16_val(c, s->b) && scalar_fp_val(c, s->b)) {
+                /* stlr has no scalar-fp form.  Move the bits through a GPR. */
+                int isd = vw(c, s->b) == 8;
+                int fv = load_fp(c, s->b, -1);
+                int bits = SCR0;
+                a64_fmov_gp(a, bits, fv, 0, isd);
+                int p = load_ptrv(c, s->a, bits);
+                if (p == bits) {
+                    a64_mov_reg(a, SCR1, bits, 1);
+                    bits = SCR1;
+                    p = load_ptrv(c, s->a, bits);
+                }
+                uint32_t base = isd ? 0xC89FFC00u : 0x889FFC00u;
+                a64_word(a, base | ((uint32_t)(p & 31) << 5) | (uint32_t)(bits & 31));
+                break;
+            }
             if (s->imm == 3 && !vec16_val(c, s->b) && !scalar_fp_val(c, s->b)) {
                 int p = load_ptrv(c, s->a, -1);
                 int v = load_op(c, s->b, p);
@@ -3475,6 +3491,22 @@ static void emit_function(C64 *c, int fi) {
         }
         case IR_LOAD_PTR: {
             /* imm 1: acquire/consume (ldapr).  imm 2: seq_cst (ldar). */
+            if ((s->imm == 1 || s->imm == 2) && scalar_fp_val(c, s->dst)) {
+                /* ldapr/ldar write a GPR.  Move the bits into the float dest. */
+                int isd = vw(c, s->dst) == 8;
+                int p = load_ptrv(c, s->a, -1);
+                int bits = (p == SCR0) ? SCR1 : SCR0;
+                int w = isd ? 8 : 4;
+                uint32_t base = s->imm == 2
+                    ? (w == 4 ? 0x88DFFC00u : 0xC8DFFC00u)
+                    : (w == 4 ? 0xB8BFC000u : 0xF8BFC000u);
+                a64_word(a, base | ((uint32_t)(p & 31) << 5) | (uint32_t)(bits & 31));
+                int h = fp_home(c, s->dst);
+                int d = h >= 0 ? h : FSCR;
+                a64_fmov_gp(a, d, bits, 1, isd);
+                if (h < 0) commit_fp(c, s->dst, d);
+                break;
+            }
             if ((s->imm == 1 || s->imm == 2) && !vec16_val(c, s->dst)
                 && !scalar_fp_val(c, s->dst)) {
                 int p = load_ptrv(c, s->a, -1);

@@ -2594,6 +2594,29 @@ static void test_scas(void) {
         "  return 0; }", 0);
 }
 
+static void test_fat(void) {
+    expect("fat",
+        "package main;\n"
+        "int main(void) {\n"
+        "  float f = 0;\n"
+        "  __atomic_store_n(&f, -1.5f, 5);\n"
+        "  if (*(int *)&f != 0xbfc00000) return 1;\n"
+        "  if (__atomic_load_n(&f, 5) != -1.5f) return 2;\n"
+        "  __atomic_store_n(&f, 3.0f, 0);\n"
+        "  if (__atomic_load_n(&f, 0) != 3.0f) return 3;\n"
+        "  float out = 0;\n"
+        "  __atomic_load(&f, &out, 2);\n"
+        "  if (out != 3.0f) return 4;\n"
+        "  float in = 4.5f;\n"
+        "  __atomic_store(&f, &in, 3);\n"
+        "  if (*(int *)&f != 0x40900000) return 5;\n"
+        "  double d = 0;\n"
+        "  __atomic_store_n(&d, -2.25, 5);\n"
+        "  if (*(long long *)&d != 0xc002000000000000LL) return 6;\n"
+        "  if (__atomic_load_n(&d, 2) != -2.25) return 7;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2671,6 +2694,7 @@ int main(void) {
     test_tas();
     test_sync();
     test_scas();
+    test_fat();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
