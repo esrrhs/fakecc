@@ -42,7 +42,7 @@ typedef struct {
     size_t           *goff;
     /* ADRP+ADD pairs targeting globals; patched once the final section
      * placement (which depends on the total text length) is known. */
-    struct GFix { uint32_t at; int gidx; } *gfix;
+    struct GFix { uint32_t at; int gidx; const char *name; } *gfix;
     size_t            ngfix, capgfix;
     /* Pointer slots inside global initializers.  Resolved into dyld
      * rebases once every section base is known. */
@@ -1982,7 +1982,12 @@ static void emit_function(C64 *c, int fi) {
         }
         case IR_GADDR: {
             int gi = find_global_idx(c->ir, s->call_name);
-            if (gi < 0) c64_die(c, s, "external global variable");
+            /* A single TU executable has nowhere to find this symbol.
+             * An object file records a page reloc and the linker resolves it. */
+            if (gi < 0 && !emit_object_mode()) {
+                c64_die(c, s, "external global variable");
+                break;
+            }
             int d = dst_reg(c, s->dst);
             /* adrp d, page ; add d, d, #pageoff — both words patched in
              * codegen64 once __const/__data/__bss placement is final. */
@@ -1993,6 +1998,7 @@ static void emit_function(C64 *c, int fi) {
             }
             c->gfix[c->ngfix].at = (uint32_t)a->code.len;
             c->gfix[c->ngfix].gidx = gi;
+            c->gfix[c->ngfix].name = gi < 0 ? s->call_name : NULL;
             c->ngfix++;
             a64_word(a, 0x90000000u | (uint32_t)(d & 31));
             a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
@@ -2422,6 +2428,11 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
         for (size_t i = 0; i < c.ngfix; i++) {
             int gi = c.gfix[i].gidx;
             int si = (gsym && gi >= 0) ? gsym[gi] : -1;
+            if (si < 0 && c.gfix[i].name) {
+                si = emit_module_find_symbol(out, c.gfix[i].name);
+                if (si < 0)
+                    si = emit_module_add_undefined(out, c.gfix[i].name);
+            }
             if (si < 0) {
                 die_at("<arm64>", 0, 0,
                        "arm64 object file: global has no symbol");

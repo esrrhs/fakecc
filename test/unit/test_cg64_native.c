@@ -1290,6 +1290,33 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(run_bin(outp), 32);
     emit_module_free(&mca);
     emit_module_free(&mcb);
+
+    const char *ea = "/tmp/fakecc_arm64_link_ea.o";
+    const char *eb = "/tmp/fakecc_arm64_link_eb.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern const int c;\n"
+        "extern int a[4];\n"
+        "int *p = &a[1];\n"
+        "int main(void) { return c + *p; }\n",
+        ea, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "const int c = 3;\n"
+        "int a[4] = {1, 2, 3, 4};\n",
+        eb, NULL), 0);
+    EmitModule mea, meb;
+    T_ASSERT_EQ_INT(emit_obj_read(ea, &mea), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(eb, &meb), 0);
+    int cu = emit_module_find_symbol(&mea, "c");
+    T_ASSERT(cu >= 0);
+    T_ASSERT_EQ_INT(mea.syms[cu].shndx, 0);
+    EmitModule *em[2] = { &mea, &meb };
+    T_ASSERT_EQ_INT(macho_link_objects(em, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 5);
+    emit_module_free(&mea);
+    emit_module_free(&meb);
 }
 
 static void test_frame_addr(void) {
