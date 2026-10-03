@@ -2292,9 +2292,9 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     /* Patch ADRP+ADD pairs and record dyld rebases for pointer
      * initializers now that text length (and so section placement) is
      * known.  An object file cannot bake in the executable layout. */
-    if (emit_object_mode() && (c.ngfix || c.npfix))
+    if (emit_object_mode() && c.npfix)
         die_at("<arm64>", 0, 0,
-               "arm64 object file: global relocations are not supported yet");
+               "arm64 object file: pointer initializers are not supported yet");
     if (!emit_object_mode() && (c.ngfix || c.npfix)) {
         uint64_t ro_off, data_off, bss_off;
         macho_section_offsets(out, out->text.len, &ro_off, &data_off, &bss_off);
@@ -2361,16 +2361,36 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                                    fn->is_static ? 0 : 1, 2 /* STT_FUNC */,
                                    (uint16_t)SECT_TEXT, start, end - start);
         }
+        int *gsym = NULL;
+        if (ir->globals.len)
+            gsym = xmalloc(ir->globals.len * sizeof(int));
         for (size_t gi = 0; gi < ir->globals.len; gi++) {
             const IRGlobal *g = &ir->globals.data[gi];
+            if (gsym) gsym[gi] = -1;
             if (!g->name || !c.gsect) continue;
             uint16_t sh = c.gsect[gi] == G_RO ? (uint16_t)SECT_RODATA
                         : c.gsect[gi] == G_DATA ? (uint16_t)SECT_DATA
                         : (uint16_t)SECT_BSS;
-            emit_module_add_symbol(out, g->name, g->is_static ? 0 : 1,
-                                   1 /* STT_OBJECT */, sh, c.goff[gi],
-                                   (size_t)g->size);
+            gsym[gi] = emit_module_add_symbol(out, g->name,
+                                              g->is_static ? 0 : 1,
+                                              1 /* STT_OBJECT */, sh,
+                                              c.goff[gi], (size_t)g->size);
         }
+        /* ADRP + ADD against the global symbol.  The linker fills the
+         * page and page-offset immediates (ARM64_RELOC_PAGE21 / PAGEOFF12). */
+        for (size_t i = 0; i < c.ngfix; i++) {
+            int gi = c.gfix[i].gidx;
+            int si = (gsym && gi >= 0) ? gsym[gi] : -1;
+            if (si < 0) {
+                die_at("<arm64>", 0, 0,
+                       "arm64 object file: global has no symbol");
+                continue;
+            }
+            emit_module_add_reloc(out, c.gfix[i].at, 3 /* PAGE21 */, si, 0);
+            emit_module_add_reloc(out, c.gfix[i].at + 4, 4 /* PAGEOFF12 */,
+                                  si, 0);
+        }
+        free(gsym);
     }
     free(c.gfix);
     free(c.pfix);

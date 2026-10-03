@@ -1067,6 +1067,23 @@ static void test_macho_obj(void) {
     T_ASSERT(memmem(buf, (size_t)n, "_add", 4) != NULL);
     T_ASSERT(memmem(buf, (size_t)n, "_hidden", 7) != NULL);
     free(buf);
+
+    const char *gpath = "/tmp/fakecc_arm64_gobj.o";
+    rc = fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int g = 7;\n"
+        "int get(void) { return g; }\n",
+        gpath, NULL);
+    T_ASSERT_EQ_INT(rc, 0);
+    f = fopen(gpath, "rb");
+    T_ASSERT(f != NULL);
+    unsigned char sec[80];
+    T_ASSERT_EQ_INT((int)fseek(f, 32 + 72, SEEK_SET), 0);
+    T_ASSERT_EQ_INT((int)fread(sec, 1, 80, f), 80);
+    fclose(f);
+    uint32_t nreloc = 0;
+    memcpy(&nreloc, sec + 60, 4);
+    T_ASSERT_EQ_INT((int)nreloc, 2);
 }
 
 static void test_frame_addr(void) {
