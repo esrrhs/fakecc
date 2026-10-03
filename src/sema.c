@@ -1400,6 +1400,8 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_isinf") == 0 || strcmp(bname, "__builtin_isinff") == 0 || strcmp(bname, "__builtin_isinfl") == 0 || strcmp(bname, "isinf") == 0)
                 ret = type_make_int(4, 0);
+            else if (strcmp(bname, "__builtin_isnormal") == 0 || strcmp(bname, "__builtin_isnormalf") == 0 || strcmp(bname, "__builtin_isnormall") == 0 || strcmp(bname, "isnormal") == 0)
+                ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_isgreater") == 0 || strcmp(bname, "__builtin_isgreaterequal") == 0 ||
                      strcmp(bname, "__builtin_isless") == 0 || strcmp(bname, "__builtin_islessequal") == 0 ||
                      strcmp(bname, "__builtin_islessgreater") == 0 || strcmp(bname, "__builtin_isunordered") == 0)
@@ -2054,6 +2056,30 @@ static Type check_expr_inner(Expr *e) {
                 type_free(&at);
                 return type_clone(e->type);
             }
+        }
+        /* __builtin_isnormal is type-generic.  Promoting float to double
+         * would turn a float subnormal into a normal double. */
+        if (e->u.call.callee->kind == EX_VAR
+            && (strcmp(e->u.call.callee->u.var.name, "__builtin_isnormal") == 0
+                || strcmp(e->u.call.callee->u.var.name, "__builtin_isnormalf") == 0
+                || strcmp(e->u.call.callee->u.var.name, "__builtin_isnormall") == 0
+                || strcmp(e->u.call.callee->u.var.name, "isnormal") == 0)) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes 1 argument", e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            if (at.kind != TY_FLOAT) {
+                type_free(&at);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s argument must be a floating type",
+                       e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            type_free(&at);
+            set_type(e, type_make_int(4, 0));
+            return type_clone(e->type);
         }
         /* __builtin_fpclassify is type-generic in its last argument. A
          * variadic prototype would promote float to double and hide a

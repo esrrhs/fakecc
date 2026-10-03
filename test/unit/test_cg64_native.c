@@ -2056,6 +2056,32 @@ static void test_lcpy(void) {
         "  return 0; }", 0);
 }
 
+static void test_normal(void) {
+    expect("normal",
+        "package main;\n"
+        "int main(void) {\n"
+        "  if (!__builtin_isnormal(1.0)) return 1;\n"
+        "  if (__builtin_isnormal(0.0)) return 2;\n"
+        "  if (!__builtin_isnormal(-2.0)) return 3;\n"
+        "  if (__builtin_isnormal(__builtin_inf())) return 4;\n"
+        "  if (__builtin_isnormal(__builtin_nan(\"\"))) return 5;\n"
+        "  unsigned long long b = 1;\n"
+        "  double sub;\n"
+        "  __builtin_memcpy(&sub, &b, 8);\n"
+        "  if (__builtin_isnormal(sub)) return 6;\n"
+        "  float f = 1.0f;\n"
+        "  if (!__builtin_isnormal(f)) return 7;\n"
+        "  float zf = 0.0f;\n"
+        "  if (__builtin_isnormal(zf)) return 8;\n"
+        "  unsigned fb = 1;\n"
+        "  float fsub;\n"
+        "  __builtin_memcpy(&fsub, &fb, 4);\n"
+        "  if (__builtin_isnormal(fsub)) return 9;\n"
+        "  if (!__builtin_isnormalf(f)) return 10;\n"
+        "  if (!__builtin_isnormall(-2.0)) return 11;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -2156,6 +2182,7 @@ int main(void) {
     test_stdc();
     test_bitg();
     test_lcpy();
+    test_normal();
     test_trap();
     test_syscall();
     test_frame_addr();

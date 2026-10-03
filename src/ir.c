@@ -6730,6 +6730,42 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
         }
         if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_isnormal") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_isnormalf") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_isnormall") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "isnormal") == 0) &&
+            e->u.call.args.len > 0) {
+            /* Normal means the exponent is neither zero nor all-ones, so
+             * zero, subnormal, infinity, and NaN are rejected together. */
+            Expr *a0 = e->u.call.args.data[0];
+            Type aty = a0->type;
+            if (aty.kind == TY_FLOAT && (aty.width == 4 || aty.width == 8)) {
+                IRValue fv = lower_expr(fn, st, a0);
+                int w = (int)aty.width;
+                IRValue slot = emit_alloca(fn, w, w, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, fv, 0, w, 1, e->loc);
+                IRValue ival = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, ival, addr, -1, 0, w, 1, e->loc);
+                int shamt = w == 4 ? 23 : 52;
+                int expmask = w == 4 ? 0xff : 0x7ff;
+                IRValue shc = new_value(fn);
+                emit_inst_w(fn, IR_CONST, shc, -1, -1, shamt, w, 1, e->loc);
+                IRValue shifted = emit_bin_w(fn, IR_SHR, ival, shc, w, 1, e->loc);
+                IRValue mask = new_value(fn);
+                emit_inst_w(fn, IR_CONST, mask, -1, -1, expmask, w, 1, e->loc);
+                IRValue exp = emit_bin_w(fn, IR_BAND, shifted, mask, w, 1, e->loc);
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, w, 1, e->loc);
+                IRValue nz = emit_bin_w(fn, IR_NE, exp, zero, w, 1, e->loc);
+                IRValue maxc = new_value(fn);
+                emit_inst_w(fn, IR_CONST, maxc, -1, -1, expmask, w, 1, e->loc);
+                IRValue nall = emit_bin_w(fn, IR_NE, exp, maxc, w, 1, e->loc);
+                IRValue both = emit_bin_w(fn, IR_BAND, nz, nall, w, 1, e->loc);
+                return coerce(fn, both, w, 1, 4, 0, e->loc);
+            }
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
             (strcmp(e->u.call.callee->u.var.name, "__builtin_add_overflow") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_add_overflow_p") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_sadd_overflow") == 0 ||
