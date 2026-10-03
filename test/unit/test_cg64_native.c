@@ -643,6 +643,121 @@ static void test_abi_cross(void) {
     free(text);
 }
 
+static void test_varargs(void) {
+    /* Darwin puts every anonymous argument in an 8-byte stack slot.
+     * va_list is the cursor, not a register-save area. */
+    expect("va_one",
+        "package main;\n"
+        "int first(int n, ...){ va_list ap; va_start(ap, n);\n"
+        " int x=va_arg(ap, int); va_end(ap); return x; }\n"
+        "int main(){ return first(1, 5); }", 5);
+    expect("va_neg",
+        "package main;\n"
+        "int first(int n, ...){ va_list ap; va_start(ap, n);\n"
+        " int x=va_arg(ap, int); va_end(ap); return x; }\n"
+        "int main(){ return first(1, -3); }", (unsigned char)-3);
+    expect("va_sum10",
+        "package main;\n"
+        "int sum(int n, ...){ va_list ap; va_start(ap, n); int s=0;\n"
+        " s=s+va_arg(ap, int); s=s+va_arg(ap, int); s=s+va_arg(ap, int);\n"
+        " s=s+va_arg(ap, int); s=s+va_arg(ap, int); s=s+va_arg(ap, int);\n"
+        " s=s+va_arg(ap, int); s=s+va_arg(ap, int); s=s+va_arg(ap, int);\n"
+        " s=s+va_arg(ap, int); va_end(ap); return s; }\n"
+        "int main(){ return sum(10, 1,2,3,4,5,6,7,8,9,10); }", 55);
+    expect("va_after8",
+        "package main;\n"
+        "int many(int a,int b,int c,int d,int e,int f,int g,int h, ...){\n"
+        " va_list ap; va_start(ap, h);\n"
+        " int x=va_arg(ap, int); int y=va_arg(ap, int); va_end(ap);\n"
+        " return a+x+y; }\n"
+        "int main(){ return many(1,2,3,4,5,6,7,8, 9, 10); }", 20);
+    expect("va_copy_same",
+        "package main;\n"
+        "int both(int n, ...){ va_list ap, bp; va_start(ap, n);\n"
+        " va_copy(bp, ap);\n"
+        " int a=va_arg(ap, int); int b=va_arg(bp, int);\n"
+        " va_end(ap); va_end(bp); return a+b; }\n"
+        "int main(){ return both(1, 10, 20); }", 20);
+    expect("va_s16",
+        "package main;\n"
+        "struct s16 { long a; long b; };\n"
+        "int f(int n, ...){ va_list ap; va_start(ap, n);\n"
+        " struct s16 s; s=va_arg(ap, struct s16); int x=va_arg(ap, int);\n"
+        " va_end(ap); return (int)(s.a+s.b+x); }\n"
+        "int main(){ struct s16 s; s.a=10; s.b=20; return f(1, s, 3); }", 33);
+    expect("va_s32",
+        "package main;\n"
+        "struct s32 { long a,b,c,d; };\n"
+        "int f(int n, ...){ va_list ap; va_start(ap, n);\n"
+        " struct s32 s; s=va_arg(ap, struct s32); va_end(ap);\n"
+        " return (int)(s.a+s.b+s.c+s.d); }\n"
+        "int main(){ struct s32 s; s.a=1; s.b=2; s.c=3; s.d=4; return f(0, s); }",
+        10);
+    expect("va_mixed",
+        "package main;\n"
+        "int f(int n, ...){ va_list ap; va_start(ap, n);\n"
+        " int a=va_arg(ap, int);\n"
+        " void *p=va_arg(ap, void *);\n"
+        " unsigned long long bits=va_arg(ap, unsigned long long);\n"
+        " int b=va_arg(ap, int); va_end(ap);\n"
+        " if (p!=(void *)2) return 10;\n"
+        " if ((bits>>32)!=0x3ff00000u) return 11;\n"
+        " return a+b; }\n"
+        "int main(){ return f(0, 1, (void *)2, 1.0, 3); }", 4);
+
+    /* clang calls fakecc's sum3, then fakecc's check calls clang's sum3. */
+    const char *src =
+        "package main;\n"
+        "int sum3(int n, ...){ va_list ap; va_start(ap, n);\n"
+        " int a=va_arg(ap, int); int b=va_arg(ap, int); int c=va_arg(ap, int);\n"
+        " va_end(ap); return a+b+c; }\n"
+        "int check(void){ return sum3(3, 10, 20, 30); }\n"
+        "int main(){ return 0; }\n";
+    T_ASSERT(compile_image(src) == 0);
+    unsigned char *text = NULL; size_t tn = 0;
+    T_ASSERT(read_macho_text("/tmp/fakecc_cg64_native_test", &text, &tn) == 0);
+    const unsigned char *sum3 = NULL, *check = NULL;
+    size_t sum3n = 0, checkn = 0;
+    T_ASSERT(nth_func(text, tn, 1, &sum3, &sum3n) == 0);
+    T_ASSERT(nth_func(text, tn, 2, &check, &checkn) == 0);
+    FILE *fp = fopen("/tmp/fakecc_abi_fn.s", "w");
+    T_ASSERT(fp != NULL);
+    fputs(".text\n", fp);
+    write_sym(fp, "sum3", sum3, sum3n);
+    fclose(fp);
+    T_ASSERT_EQ_INT(clang_exit(
+        "#include <stdarg.h>\n"
+        "int sum3(int n, ...);\n"
+        "int main(void){ return sum3(3, 10, 20, 30); }\n"), 60);
+
+    fp = fopen("/tmp/clang_id.c", "w");
+    T_ASSERT(fp != NULL);
+    fputs("#include <stdarg.h>\n"
+          "int sum3(int n, ...){ va_list ap; va_start(ap, n);\n"
+          " int a=va_arg(ap, int); int b=va_arg(ap, int); int c=va_arg(ap, int);\n"
+          " va_end(ap); return a+b+c; }\n", fp);
+    fclose(fp);
+    T_ASSERT(system("clang -arch arm64 -O0 -c /tmp/clang_id.c -o /tmp/clang_id.o") == 0);
+    unsigned char *ct = NULL; size_t cn = 0;
+    T_ASSERT(read_macho_text("/tmp/clang_id.o", &ct, &cn) == 0);
+    const unsigned char *cid = NULL; size_t cidn = 0;
+    T_ASSERT(nth_func(ct, cn, 0, &cid, &cidn) == 0);
+    unsigned char *checkb = malloc(checkn);
+    T_ASSERT(checkb != NULL);
+    memcpy(checkb, check, checkn);
+    retarget_bl(checkb, checkn);
+    fp = fopen("/tmp/fakecc_abi_fn.s", "w");
+    T_ASSERT(fp != NULL);
+    fputs(".text\n", fp);
+    write_sym(fp, "check", checkb, checkn);
+    write_sym(fp, "sum3", cid, cidn);
+    fclose(fp);
+    T_ASSERT_EQ_INT(clang_exit("int check(void);\nint main(void){ return check(); }\n"), 60);
+    free(checkb);
+    free(ct);
+    free(text);
+}
+
 static void test_struct_abi(void) {
     /* Sizes 1/2/3/7/8/9/16/17/32, nested, and a struct between ints.
      * Same source under clang must return the same code: both compilers
@@ -755,6 +870,7 @@ int main(void) {
     test_pie_rebase();
     test_struct_abi();
     test_abi_cross();
+    test_varargs();
     return t_finalize();
 }
 

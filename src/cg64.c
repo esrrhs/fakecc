@@ -34,6 +34,7 @@ typedef struct {
     int               frame_locals;
     int               call_area;
     int               save_total;  /* fp/lr + callee-saved saves bytes  */
+    int               vararg_off;  /* fp offset of the first anonymous arg */
     /* Module globals: section (G_RO/G_DATA/G_BSS) and in-section offset. */
     int              *gsect;
     size_t           *goff;
@@ -318,9 +319,15 @@ static int emit_mem_builtin(C64 *c, const char *name) {
 
 /* Bytes of outgoing stack traffic for one call: 8 per stack slot, plus
  * 16 when call_args[0] must be stashed before it is written to x8. */
+static int is_va_builtin(const char *name) {
+    return name && (strcmp(name, "va_start") == 0 || strcmp(name, "va_arg") == 0
+                    || strcmp(name, "va_end") == 0);
+}
+
 static int outgoing_stack_bytes(const IRInst *s) {
     if (!s->call_nargs) return s->align16 == A64_MARK_SRET ? 16 : 0;
     if (s->call_name && strcmp(s->call_name, "__syscall") == 0) return 0;
+    if (is_va_builtin(s->call_name)) return 0;
     int start = s->align16 == A64_MARK_SRET ? 1 : 0;
     int gp = 0, fp = 0, st = 0;
     for (int i = start; i < s->call_nargs; i++) {
@@ -381,6 +388,91 @@ static void place_pair(C64 *c, IRValue lo, IRValue hi, int s0, int s1) {
     }
 }
 
+/* Copy `sz` bytes from src to dest.  Both addresses are advanced.
+ * x0/x1 are not allocatable, so one of them can hold the chunk. */
+static void copy_bytes(C64 *c, int dest, int src, int sz) {
+    A64Asm *a = c->as;
+    int data = A64_X0;
+    if (data == dest || data == src) data = A64_X1;
+    if (data == dest || data == src) data = SCR0;
+    int off = 0;
+    while (off < sz) {
+        int left = sz - off;
+        int w = 1;
+        if (left >= 8 && (off & 7) == 0) w = 8;
+        else if (left >= 4 && (off & 3) == 0) w = 4;
+        else if (left >= 2 && (off & 1) == 0) w = 2;
+        emit_load(c, data, src, w, 1);
+        emit_store(c, data, dest, w);
+        off += w;
+        if (off < sz) {
+            a64_add_imm12(a, src, src, (unsigned)w, 0, 1, 0);
+            a64_add_imm12(a, dest, dest, (unsigned)w, 0, 1, 0);
+        }
+    }
+}
+
+/* Darwin va_list is one pointer.  va_start stores the address of the
+ * first anonymous stack slot; va_arg reads 8-byte slots and advances. */
+static void emit_va(C64 *c, const IRInst *s) {
+    A64Asm *a = c->as;
+    if (strcmp(s->call_name, "va_end") == 0) return;
+
+    int ap_home = home_reg(c, s->call_args[0]);
+    int ap = ap_home >= 0 ? ap_home : SCR0;
+    if (ap_home < 0)
+        frame_load(c, ap, spill_off(c, s->call_args[0]), 8, 1);
+
+    if (strcmp(s->call_name, "va_start") == 0) {
+        int cur = (ap == SCR1) ? A64_X0 : SCR1;
+        emit_fp_addr(c, cur, c->vararg_off);
+        a64_str64(a, cur, ap, 0);
+        return;
+    }
+
+    int cur = (ap == SCR1) ? A64_X0 : SCR1;
+    a64_ldr64(a, cur, ap, 0);
+    int sz = s->imm > 0 ? (int)s->imm : 0;
+    int indirect = sz > 16 || s->force_stack;
+    int adv = (sz == 0 || indirect) ? 8 : ((sz + 7) & ~7);
+    int nxt = A64_X0;
+    if (nxt == cur || nxt == ap) nxt = A64_X1;
+    if (nxt == cur || nxt == ap) nxt = SCR0;
+    a64_add_imm12(a, nxt, cur, (unsigned)adv, 0, 1, 0);
+    a64_str64(a, nxt, ap, 0);
+
+    if (sz == 0) {
+        int w = s->width ? (int)s->width : 8;
+        if (w != 1 && w != 2 && w != 4 && w != 8) w = 8;
+        int d = dst_reg(c, s->dst);
+        int tmp = d;
+        if (tmp == cur || tmp == ap)
+            tmp = safe_tmp(cur, ap, -1, -1);
+        emit_load(c, tmp, cur, w, s->is_unsigned);
+        if (tmp != d) a64_mov_reg(a, d, tmp, w == 8);
+        commit(c, s->dst, d);
+        return;
+    }
+
+    if (indirect)
+        a64_ldr64(a, cur, cur, 0);
+    int dest_home = s->call_nargs >= 2 ? home_reg(c, s->call_args[1]) : -1;
+    int base;
+    if (dest_home >= 0 && dest_home != cur && dest_home != nxt)
+        base = dest_home;
+    else {
+        base = safe_tmp(cur, ap, nxt, dest_home);
+        if (dest_home >= 0)
+            a64_mov_reg(a, base, dest_home, 1);
+        else if (s->call_nargs >= 2)
+            frame_load(c, base, spill_off(c, s->call_args[1]), 8, 1);
+    }
+    /* nxt is free once *ap has been stored, and it is not `base`. */
+    a64_mov_reg(a, nxt, base, 1);
+    copy_bytes(c, nxt, cur, sz);
+    place_from(c, s->dst, base);
+}
+
 static void emit_call(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
     int n = s->call_nargs;
@@ -391,6 +483,10 @@ static void emit_call(C64 *c, const IRInst *s) {
      * that the syscall lowering needs to re-read. */
     if (s->call_name && strcmp(s->call_name, "__syscall") == 0) {
         emit_syscall(c, s);
+        return;
+    }
+    if (is_va_builtin(s->call_name)) {
+        emit_va(c, s);
         return;
     }
 
@@ -958,6 +1054,7 @@ static void emit_function(C64 *c, int fi) {
     }
     free(mv);
 #undef PM_EMIT
+    c->vararg_off = save_total + 8 * stack_arg_idx;
 
     /* ---- Body ---- */
     int epilog = a64_new_label(a);

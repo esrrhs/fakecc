@@ -764,10 +764,14 @@ int sysv_agg_ret_x87(Type t) {
     return type_is_pure_x87(t);
 }
 
+static int abi_is_arm64(void);
+
 int sysv_memory_pass_as_pointer(Type t) {
     /* SysV MEMORY arguments are copied onto the outgoing stack.  GCC's
      * `__va_list_tag` (array-of-1) is the exception: it decays to a
-     * pointer, matching libc. */
+     * pointer, matching libc.  Darwin's va_list is an 8-byte cursor and
+     * travels in a GP register like any other small aggregate. */
+    if (abi_is_arm64()) return 0;
     return t.kind == TY_STRUCT && t.tag
         && strcmp(t.tag, "__va_list_tag") == 0;
 }
@@ -1756,14 +1760,22 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_init(&tu->typedefs);
 
     /* Predeclare the `va_list` type used by the va_start/va_arg/va_end
-     * builtins. It mirrors the SysV AMD64 va_list layout so sizeof and field
-     * layout resolve, even though user code never constructs one directly. */
+     * builtins.  SysV AMD64 is the 24-byte four-field struct.  Darwin
+     * arm64 (clang) is an 8-byte cursor: anonymous arguments live on the
+     * stack, and va_list is just the pointer to the next one. */
     SourceLoc vloc = {0};
     StructDef *va = struct_registry_add(&tu->structs, "__va_list_tag", vloc);
-    struct_def_push_member(va, "gp_offset", type_make_int(4, 1), -1);
-    struct_def_push_member(va, "fp_offset", type_make_int(4, 1), -1);
-    struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()), -1);
-    struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()), -1);
+    if (abi_is_arm64()) {
+        struct_def_push_member(va, "overflow_arg_area",
+                               type_make_ptr(type_make_void()), -1);
+    } else {
+        struct_def_push_member(va, "gp_offset", type_make_int(4, 1), -1);
+        struct_def_push_member(va, "fp_offset", type_make_int(4, 1), -1);
+        struct_def_push_member(va, "overflow_arg_area",
+                               type_make_ptr(type_make_void()), -1);
+        struct_def_push_member(va, "reg_save_area",
+                               type_make_ptr(type_make_void()), -1);
+    }
     struct_def_finish(va);
     Type va_type = type_make_struct("__va_list_tag", va->size);
     typedef_registry_add(&tu->typedefs, "va_list", va_type);

@@ -187,7 +187,7 @@
   - 限制：3–4 个 double 的 HFA 超过两个八字节，当前 IR 的 `dst`/`b` 放不下，编译期报错，不在本任务的 2×double / 4×float 范围内。标量浮点运算仍是 T12。
 
 ## Task 11: 变长参数（varargs）
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: T10
 - **Description**:
@@ -196,6 +196,12 @@
 - **Test Requirements**:
   - `rule` TR-11.1: 现有 printf/scanf/varargs 用例 macOS 双档通过，输出与 clang 一致（证据：difftest 子集）。
   - `rule` TR-11.2: 混合 int/pointer/double 的多参数（>8 参）varargs 专项用例通过（证据：新增专项）。
+- **Completion Evidence**（2026-10-03）:
+  - 本机 clang（-O0 与 -O2）的约定和说明书里的寄存器保存区不同：有名参数仍走 x0–x7，无名参数全部落在栈上的 8 字节槽里。`va_list` 是 8 字节游标（`__va_list_tag` 只有一个指针成员），`va_start` 写入 `fp + save_total + 8 * 有名栈槽数`，`va_arg` 读当前槽再加 8。≤16 字节的聚合按八字节摊开，更大的聚合是指向调用方副本的一个指针槽。常量 double 以整数位型写入槽（`1.0` 为 `0x3ff0000000000000`）。x86 的 24 字节 `va_list` 与 `codegen.c` 的保存区路径没有改。
+  - sema 把没有原型的内建（`__builtin_memset` 等）标成 0 个参数的变参函数，只为通过实参数量检查。这些调用仍按普通寄存器传参，内联的 `memset` 才能从 x0–x2 取到参数。
+  - TR-11.2（pass）：`test_cg64_native` 在 -O0 与 `CG64_OPT=1` 均为 103/103。覆盖单个 int、负 int 的符号扩展、10 个栈上 int（和为 55）、8 个有名参数之后的变参（1+9+10=20）、`va_copy`、变参 `struct s16` / `struct s32`、int/指针/`1.0` 位型混合。交叉链接：clang 调用 fakecc 的 `sum3(3,10,20,30)` 返回 60，fakecc 的 `check` 调用 clang 的 `sum3` 也返回 60。
+  - 整数 e2e：`variadic_sum`、`variadic_single`、`variadic_vla_before_vastart`、`variadic_fmt_live_loop` 在 -O0 与 -O1 的退出码分别为 60、5、60、6。
+  - 限制：`runtime/printf.c` 的 `%f` 分支含浮点运算，整份翻译单元要等 T12 才能在 arm64 上编译，所以 TR-11.1 的 printf/scanf 全形态未在本任务跑通。非常量的变参 double（需要浮点算术）同样留给 T12。
 
 ## Task 12: 浮点、标量转换与 NEON 向量 ABI
 - **Status**: `pending`

@@ -1509,6 +1509,54 @@ static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
  *     SSA values stay integer bit patterns (see CALL_ARG_HFA).
  * An HFA that does not fit in two eightbytes (3–4 doubles) is not
  * representable in the current IR and is rejected. */
+/* Sema marks a builtin that has no recorded prototype (memset, memcpy,
+ * …) as variadic with zero parameters so the arity check accepts the
+ * call.  That is not a Darwin varargs function: the arguments use the
+ * normal registers.  A real `f(...)` has a user name and does use the
+ * stack convention. */
+static int prototype_less_builtin(const char *name) {
+    if (!name) return 0;
+    if (strncmp(name, "__builtin_", 10) == 0) return 1;
+    return strcmp(name, "memset") == 0 || strcmp(name, "memcpy") == 0
+        || strcmp(name, "memmove") == 0 || strcmp(name, "mempcpy") == 0
+        || strcmp(name, "alloca") == 0;
+}
+
+/* Darwin passes every anonymous argument on the stack, in 8-byte
+ * slots.  Named parameters keep the normal register convention. */
+static int darwin_unnamed_va(int variadic, int index, int nparams, int fake) {
+    if (fake) return 0;
+    return !abi_sret_uses_gp() && variadic && index >= nparams;
+}
+
+/* A variadic double/float constant becomes the integer bit pattern clang
+ * stores in the stack slot.  A computed float still needs T12. */
+static IRValue va_float_bits(IRFunction *fn, IRValue v, SourceLoc loc) {
+    if (!get_value_is_float(fn, v)) return v;
+    IRValue cur = v;
+    for (int hop = 0; hop < 8; hop++) {
+        const IRInst *def = NULL;
+        for (size_t i = 0; i < fn->insts.len; i++) {
+            const IRInst *d = &fn->insts.data[i];
+            if (d->dst == cur) def = d;
+        }
+        if (def && def->op == IR_CONST) {
+            IRValue bits = new_value(fn);
+            emit_inst_w(fn, IR_CONST, bits, -1, -1, def->float_imm, 8, 1, loc);
+            return bits;
+        }
+        if (def && (def->op == IR_COPY || def->op == IR_TRUNC) && def->a >= 0) {
+            cur = def->a;
+            if (!get_value_is_float(fn, cur)) return cur;
+            continue;
+        }
+        break;
+    }
+    die_at(loc.file ? loc.file : "<arm64>", loc.line, loc.col,
+           "arm64 variadic non-constant float is not supported yet");
+    return v;
+}
+
 static void abi_adjust_cls(Type t, SysVRegClass *cls, int *nreg, SourceLoc loc) {
     if (abi_sret_uses_gp()) return;
     if (abi_is_hfa(t)) {
@@ -6624,7 +6672,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 || strcmp(cname, "__builtin_va_copy") == 0) {
                 IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
                 IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
-                emit_struct_copy(fn, dst, src, 24, e->loc);
+                emit_struct_copy(fn, dst, src, abi_sret_uses_gp() ? 24 : 8, e->loc);
                 return -1;
             }
             if (strcmp(cname, "__builtin_shuffle") == 0) {
@@ -6942,7 +6990,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             callee_ty = *callee_ty.pointee;
         int call_variadic = callee_ty.kind == TY_FUNC
             && (callee_ty.func_is_variadic || callee_ty.func_is_unprototyped);
+        /* Darwin puts anonymous args on the stack only for a real
+         * variadic callee.  An unprototyped call still uses registers. */
+        int call_real_variadic = callee_ty.kind == TY_FUNC
+            && callee_ty.func_is_variadic;
         int call_nparams = callee_ty.kind == TY_FUNC ? callee_ty.func_nparams : 0;
+        const char *callee_name = NULL;
+        if (e->u.call.callee && e->u.call.callee->kind == EX_VAR)
+            callee_name = e->u.call.callee->u.var.name;
+        int call_fake_variadic = prototype_less_builtin(callee_name);
         for (int i = 0; i < (int)e->u.call.args.len; i++) {
             Expr *arg = e->u.call.args.data[i];
             IRValue av = lower_expr(fn, st, arg);
@@ -6969,6 +7025,43 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 }
                 if (type_is_empty_struct(arg->type)) {
                     /* GNU empty structs occupy no argument slots. */
+                    continue;
+                }
+                if (darwin_unnamed_va(call_real_variadic, i, call_nparams, call_fake_variadic)) {
+                    /* Anonymous Darwin argument: 8-byte stack slots.  An
+                     * aggregate larger than 16 bytes is one pointer slot;
+                     * a smaller one is its eightbytes, in order. */
+                    if (is_memory || asz > 16) {
+                        int copy_sz = asz > 0 ? asz : 1;
+                        IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
+                        IRValue tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1,
+                                                      8, 1, e->loc);
+                        emit_struct_copy(fn, tmp_addr, av, asz > 0 ? asz : 1, e->loc);
+                        if (nargs >= arg_limit) {
+                            fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                                    IR_CALL_MAX_ARGS);
+                            exit(1);
+                        }
+                        arg_vals[nargs] = tmp_addr;
+                        arg_on_stack[nargs] = CALL_ARG_STACK;
+                        nargs++;
+                        continue;
+                    }
+                    SysVRegClass icls[2] = { SYSV_CLS_INTEGER, SYSV_CLS_INTEGER };
+                    IRValue *ebs = malloc((size_t)(nreg > 0 ? nreg : 1) * sizeof(IRValue));
+                    if (!ebs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                    load_agg_regs(fn, av, asz, nreg, icls, ebs, e->loc);
+                    for (int k = 0; k < nreg; k++) {
+                        if (nargs >= arg_limit) {
+                            fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                                    IR_CALL_MAX_ARGS);
+                            exit(1);
+                        }
+                        arg_vals[nargs] = ebs[k];
+                        arg_on_stack[nargs] = CALL_ARG_STACK;
+                        nargs++;
+                    }
+                    free(ebs);
                     continue;
                 }
                 if (is_memory && (sysv_memory_pass_as_pointer(arg->type)
@@ -7058,6 +7151,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
                         IR_CALL_MAX_ARGS);
                 exit(1);
+            }
+            if (darwin_unnamed_va(call_real_variadic, i, call_nparams, call_fake_variadic)) {
+                arg_vals[nargs] = va_float_bits(fn, av, e->loc);
+                arg_on_stack[nargs] = CALL_ARG_STACK;
+                nargs++;
+                continue;
             }
             arg_vals[nargs] = av;
             arg_on_stack[nargs] = 0;
