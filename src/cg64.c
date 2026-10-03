@@ -986,10 +986,9 @@ static void emit_bitrev_builtin(C64 *c, const IRInst *s, int bits) {
     commit(c, s->dst, dst);
 }
 
-static void emit_rotate_builtin(C64 *c, const IRInst *s, int width) {
+static void emit_rotate_n(C64 *c, const IRInst *s, int width, int right) {
     if (s->dst < 0 || s->call_nargs < 2) return;
     A64Asm *a = c->as;
-    int right = strstr(s->call_name, "right") != NULL;
     int is64 = width == 64;
     int dst = dst_reg(c, s->dst);
     int src = load_op(c, s->call_args[0], dst);
@@ -1023,6 +1022,199 @@ static void emit_rotate_builtin(C64 *c, const IRInst *s, int width) {
     a64_or_reg(a, dst, dst, vreg, 0);
     a64_and_imm(a, dst, dst, mask, 0);
     commit(c, s->dst, dst);
+}
+
+static void emit_rotate_builtin(C64 *c, const IRInst *s, int width) {
+    int right = s->call_name && strstr(s->call_name, "right") != NULL;
+    emit_rotate_n(c, s, width, right);
+}
+
+/* C23 stdc_* bit ops, names after the __builtin_ prefix is stripped.
+ * The width is the argument's width, not the register width: an
+ * unsigned char zero has 8 leading zeros, not 32. */
+static int stdc_op(const char *n) {
+    if (!n || strncmp(n, "stdc_", 5) != 0) return 0;
+    const char *p = n + 5;
+    if (strcmp(p, "leading_zeros") == 0) return 1;
+    if (strcmp(p, "leading_ones") == 0) return 2;
+    if (strcmp(p, "trailing_zeros") == 0) return 3;
+    if (strcmp(p, "trailing_ones") == 0) return 4;
+    if (strcmp(p, "first_leading_zero") == 0) return 5;
+    if (strcmp(p, "first_leading_one") == 0) return 6;
+    if (strcmp(p, "first_trailing_zero") == 0) return 7;
+    if (strcmp(p, "first_trailing_one") == 0) return 8;
+    if (strcmp(p, "count_ones") == 0) return 9;
+    if (strcmp(p, "count_zeros") == 0) return 10;
+    if (strcmp(p, "has_single_bit") == 0) return 11;
+    if (strcmp(p, "bit_width") == 0) return 12;
+    if (strcmp(p, "bit_floor") == 0) return 13;
+    if (strcmp(p, "bit_ceil") == 0) return 14;
+    if (strcmp(p, "rotate_left") == 0) return 15;
+    if (strcmp(p, "rotate_right") == 0) return 16;
+    return 0;
+}
+
+static void stdc_mask(A64Asm *a, int dst, int src, int bits) {
+    if (bits >= 32) {
+        if (dst != src) a64_mov_reg(a, dst, src, bits >= 64);
+        return;
+    }
+    a64_and_imm(a, dst, src, (1ull << bits) - 1, 0);
+}
+
+static void stdc_lz(A64Asm *a, int dst, int src, int bits) {
+    if (bits >= 64) {
+        bit1(a, 0xDAC01000u, dst, src);
+        return;
+    }
+    bit1(a, 0x5AC01000u, dst, src);
+    if (bits < 32)
+        a64_sub_imm12(a, dst, dst, (unsigned)(32 - bits), 0, 0, 0);
+}
+
+/* rbit+clz.  A zero input yields the register width (32 or 64). */
+static void stdc_tz_raw(A64Asm *a, int dst, int src, int bits) {
+    int is64 = bits >= 64;
+    bit1(a, is64 ? 0xDAC00000u : 0x5AC00000u, dst, src);
+    bit1(a, is64 ? 0xDAC01000u : 0x5AC01000u, dst, dst);
+}
+
+static void stdc_tz(A64Asm *a, int dst, int src, int bits) {
+    if (bits >= 32) {
+        stdc_tz_raw(a, dst, src, bits);
+        return;
+    }
+    int Lnz = a64_new_label(a);
+    int Lend = a64_new_label(a);
+    a64_cbnz(a, src, Lnz, 0);
+    a64_movz(a, dst, (unsigned)bits, 0, 0);
+    a64_b(a, Lend);
+    a64_bind(a, Lnz);
+    stdc_tz_raw(a, dst, src, bits);
+    a64_bind(a, Lend);
+}
+
+static void stdc_width_minus(A64Asm *a, int dst, int count, int bits) {
+    if (count == dst) {
+        int tmp = safe_tmp(dst, -1, -1, -1);
+        a64_movz(a, tmp, (unsigned)bits, 0, 0);
+        a64_sub_reg(a, dst, tmp, count, A64_LSL, 0, 0, 0);
+    } else {
+        a64_movz(a, dst, (unsigned)bits, 0, 0);
+        a64_sub_reg(a, dst, dst, count, A64_LSL, 0, 0, 0);
+    }
+}
+
+static void stdc_not_masked(A64Asm *a, int dst, int src, int bits) {
+    a64_mvn(a, dst, src, bits >= 64);
+    stdc_mask(a, dst, dst, bits);
+}
+
+static int emit_stdc_builtin(C64 *c, const IRInst *s) {
+    int op = stdc_op(s->call_name);
+    if (!op || s->dst < 0) return 0;
+    int bits = vw(c, s->call_args[0]) * 8;
+    if (bits <= 0) bits = 32;
+    if (op == 15 || op == 16) {
+        if (s->call_nargs < 2) return 0;
+        if (bits != 8 && bits != 16 && bits != 32 && bits != 64) bits = 32;
+        emit_rotate_n(c, s, bits, op == 16);
+        return 1;
+    }
+    if (s->call_nargs < 1) return 0;
+    A64Asm *a = c->as;
+    int dst = dst_reg(c, s->dst);
+    int src = load_op(c, s->call_args[0], dst);
+    int is64 = bits >= 64;
+    int tmp = safe_tmp(src, dst, -1, -1);
+    if (op == 1) {
+        stdc_mask(a, tmp, src, bits);
+        stdc_lz(a, dst, bits >= 32 ? src : tmp, bits);
+    } else if (op == 2 || op == 5) {
+        stdc_not_masked(a, tmp, src, bits);
+        stdc_lz(a, dst, tmp, bits);
+        if (op == 5) stdc_width_minus(a, dst, dst, bits);
+    } else if (op == 3) {
+        stdc_mask(a, tmp, src, bits);
+        stdc_tz(a, dst, bits >= 32 ? src : tmp, bits);
+    } else if (op == 4 || op == 7) {
+        stdc_not_masked(a, tmp, src, bits);
+        stdc_tz(a, dst, tmp, bits);
+        if (op == 7) {
+            int Ladd = a64_new_label(a);
+            int Lend = a64_new_label(a);
+            a64_cmp_imm12(a, dst, (unsigned)bits, 0, 0);
+            a64_bcond(a, A64_NE, Ladd);
+            a64_movz(a, dst, 0, 0, 0);
+            a64_b(a, Lend);
+            a64_bind(a, Ladd);
+            a64_add_imm12(a, dst, dst, 1, 0, 0, 0);
+            a64_bind(a, Lend);
+        }
+    } else if (op == 6 || op == 12) {
+        stdc_mask(a, tmp, src, bits);
+        stdc_lz(a, dst, bits >= 32 ? src : tmp, bits);
+        stdc_width_minus(a, dst, dst, bits);
+    } else if (op == 8) {
+        int Lz = a64_new_label(a);
+        int Lend = a64_new_label(a);
+        stdc_mask(a, tmp, src, bits);
+        a64_cbz(a, tmp, Lz, is64);
+        stdc_tz_raw(a, dst, tmp, bits);
+        a64_add_imm12(a, dst, dst, 1, 0, 0, 0);
+        a64_b(a, Lend);
+        a64_bind(a, Lz);
+        a64_movz(a, dst, 0, 0, 0);
+        a64_bind(a, Lend);
+    } else if (op == 9 || op == 10 || op == 11) {
+        stdc_mask(a, tmp, src, bits);
+        emit_popc(a, dst, bits >= 32 ? src : tmp, is64);
+        if (op == 10) stdc_width_minus(a, dst, dst, bits);
+        else if (op == 11) {
+            a64_cmp_imm12(a, dst, 1, 0, 0);
+            a64_cset(a, dst, A64_EQ, 0);
+        }
+    } else if (op == 13 || op == 14) {
+        /* bit_floor is 0 for a zero input.  bit_ceil(0) is 1, and a
+         * power of two that does not fit the type becomes 0. */
+        int Lz = a64_new_label(a);
+        int Lpow = a64_new_label(a);
+        int Lzero = a64_new_label(a);
+        int Lend = a64_new_label(a);
+        int sh = safe_tmp(src, dst, tmp, -1);
+        stdc_mask(a, tmp, src, bits);
+        a64_cbz(a, tmp, Lz, is64);
+        if (op == 14) {
+            a64_sub_imm12(a, sh, tmp, 1, 0, is64, 0);
+            a64_and_reg(a, sh, tmp, sh, is64);
+            a64_cbz(a, sh, Lpow, is64);
+            stdc_lz(a, dst, tmp, bits);
+            stdc_width_minus(a, sh, dst, bits);
+            a64_cmp_imm12(a, sh, (unsigned)bits, 0, 0);
+            a64_bcond(a, A64_EQ, Lzero);
+            a64_movz(a, tmp, 1, 0, is64);
+            a64_lslv(a, dst, tmp, sh, is64);
+            a64_b(a, Lend);
+            a64_bind(a, Lpow);
+            if (tmp != dst) a64_mov_reg(a, dst, tmp, is64);
+            a64_b(a, Lend);
+        } else {
+            stdc_lz(a, dst, tmp, bits);
+            stdc_width_minus(a, sh, dst, bits);
+            a64_sub_imm12(a, sh, sh, 1, 0, 0, 0);
+            a64_movz(a, tmp, 1, 0, is64);
+            a64_lslv(a, dst, tmp, sh, is64);
+            a64_b(a, Lend);
+        }
+        a64_bind(a, Lz);
+        a64_movz(a, dst, op == 14 ? 1u : 0u, 0, is64);
+        a64_b(a, Lend);
+        a64_bind(a, Lzero);
+        a64_movz(a, dst, 0, 0, is64);
+        a64_bind(a, Lend);
+    }
+    commit(c, s->dst, dst);
+    return 1;
 }
 
 static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
@@ -1514,6 +1706,12 @@ static void emit_call(C64 *c, const IRInst *s) {
                 else emit_rotate_builtin(c, s, rw);
                 return;
             }
+        }
+    }
+    if (stdc_op(s->call_name)) {
+        int defined = 0;
+        if (find_function(c->ir, s->call_name, &defined) != 0) {
+            if (emit_stdc_builtin(c, s)) return;
         }
     }
     if (s->call_name && strcmp(s->call_name, "fpclassify") == 0

@@ -1924,6 +1924,66 @@ static void test_next(void) {
         "  return 0; }", 0);
 }
 
+static void test_stdc(void) {
+    expect("stdc",
+        "package main;\n"
+        "int main(void) {\n"
+        "  unsigned char c = 1;\n"
+        "  unsigned char z = 0;\n"
+        "  if (__builtin_stdc_leading_zeros(c) != 7) return 1;\n"
+        "  if (__builtin_stdc_leading_zeros(z) != 8) return 2;\n"
+        "  unsigned char h = 0x80;\n"
+        "  if (__builtin_stdc_leading_ones(h) != 1) return 3;\n"
+        "  unsigned char ff = 0xff;\n"
+        "  if (__builtin_stdc_leading_ones(ff) != 8) return 4;\n"
+        "  if (__builtin_stdc_trailing_zeros(h) != 7) return 5;\n"
+        "  if (__builtin_stdc_trailing_zeros(z) != 8) return 6;\n"
+        "  unsigned char lo = 0x0f;\n"
+        "  if (__builtin_stdc_trailing_ones(lo) != 4) return 7;\n"
+        "  if (__builtin_stdc_trailing_ones(z) != 0) return 8;\n"
+        "  unsigned char b3 = 0x08;\n"
+        "  if (__builtin_stdc_first_leading_one(b3) != 4) return 9;\n"
+        "  if (__builtin_stdc_first_leading_one(z) != 0) return 10;\n"
+        "  unsigned char f0 = 0xf0;\n"
+        "  if (__builtin_stdc_first_leading_zero(f0) != 4) return 11;\n"
+        "  if (__builtin_stdc_first_leading_zero(ff) != 0) return 12;\n"
+        "  if (__builtin_stdc_first_trailing_zero(lo) != 5) return 13;\n"
+        "  if (__builtin_stdc_first_trailing_zero(ff) != 0) return 14;\n"
+        "  if (__builtin_stdc_first_trailing_one(b3) != 4) return 15;\n"
+        "  if (__builtin_stdc_first_trailing_one(z) != 0) return 16;\n"
+        "  unsigned char sev = 7;\n"
+        "  if (__builtin_stdc_count_ones(sev) != 3) return 17;\n"
+        "  if (__builtin_stdc_count_zeros(c) != 7) return 18;\n"
+        "  if (__builtin_stdc_has_single_bit(b3) != 1) return 19;\n"
+        "  if (__builtin_stdc_has_single_bit(sev) != 0) return 20;\n"
+        "  if (__builtin_stdc_bit_width(sev) != 3) return 21;\n"
+        "  if (__builtin_stdc_bit_width(z) != 0) return 22;\n"
+        "  if (__builtin_stdc_bit_floor(sev) != 4) return 23;\n"
+        "  if (__builtin_stdc_bit_floor(z) != 0) return 24;\n"
+        "  if (__builtin_stdc_bit_ceil(sev) != 8) return 25;\n"
+        "  if (__builtin_stdc_bit_ceil(z) != 1) return 26;\n"
+        "  if (__builtin_stdc_bit_ceil(c) != 1) return 27;\n"
+        "  unsigned char big = 0x81;\n"
+        "  if (__builtin_stdc_bit_ceil(big) != 0) return 28;\n"
+        "  if (__builtin_stdc_bit_ceil(h) != 0x80) return 29;\n"
+        "  if (__builtin_stdc_rotate_left(big, 1) != 0x03) return 30;\n"
+        "  if (__builtin_stdc_rotate_right(big, 1) != 0xc0) return 31;\n"
+        "  if (__builtin_stdc_rotate_left(big, 8) != 0x81) return 32;\n"
+        "  if (__builtin_stdc_leading_zeros(1u) != 31) return 33;\n"
+        "  if (__builtin_stdc_leading_zeros(0u) != 32) return 34;\n"
+        "  unsigned short s = 1;\n"
+        "  if (__builtin_stdc_leading_zeros(s) != 15) return 35;\n"
+        "  if (__builtin_stdc_rotate_left(0x80000000u, 1) != 1u) return 36;\n"
+        "  unsigned long long top = 1ull << 63;\n"
+        "  if (__builtin_stdc_leading_zeros(top) != 0) return 37;\n"
+        "  if (__builtin_stdc_leading_zeros(0ull) != 64) return 38;\n"
+        "  if (__builtin_stdc_trailing_zeros(top) != 63) return 39;\n"
+        "  if (__builtin_stdc_bit_floor(top) != top) return 40;\n"
+        "  if (__builtin_stdc_bit_ceil(top | 1ull) != 0ull) return 41;\n"
+        "  if (__builtin_stdc_rotate_left(top, 1) != 1ull) return 42;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -2021,6 +2081,7 @@ int main(void) {
     test_powi();
     test_class();
     test_next();
+    test_stdc();
     test_trap();
     test_syscall();
     test_frame_addr();

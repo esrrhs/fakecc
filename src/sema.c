@@ -41,6 +41,33 @@ int sema_error_count(void) {
 
 /* libm-style builtins the arm64 backend lowers directly.  Width is 4
  * (f), 8, or long double (l).  *nargs is 1, 2, or 3.  -1 if unrelated. */
+/* C23 stdc_* are type-generic.  same_ty means the result type is the
+ * argument type (bit_floor, bit_ceil, rotate); the rest return unsigned int. */
+static int stdc_builtin_info(const char *name, int *same_ty, int *nargs) {
+    if (!name || strncmp(name, "__builtin_stdc_", 15) != 0) return 0;
+    const char *op = name + 15;
+    *same_ty = 0;
+    *nargs = 1;
+    if (strcmp(op, "rotate_left") == 0 || strcmp(op, "rotate_right") == 0) {
+        *same_ty = 1;
+        *nargs = 2;
+        return 1;
+    }
+    if (strcmp(op, "bit_floor") == 0 || strcmp(op, "bit_ceil") == 0) {
+        *same_ty = 1;
+        return 1;
+    }
+    static const char *const cnt[] = {
+        "leading_zeros", "leading_ones", "trailing_zeros", "trailing_ones",
+        "first_leading_zero", "first_leading_one",
+        "first_trailing_zero", "first_trailing_one",
+        "count_ones", "count_zeros", "has_single_bit", "bit_width",
+    };
+    for (size_t i = 0; i < sizeof cnt / sizeof cnt[0]; i++)
+        if (strcmp(op, cnt[i]) == 0) return 1;
+    return 0;
+}
+
 static int math_builtin_width(const char *n, int *nargs) {
     const char *b = n;
     if (strncmp(b, "__builtin_", 10) == 0) b += 10;
@@ -1934,6 +1961,44 @@ static Type check_expr_inner(Expr *e) {
             }
             set_type(e, type_make_void());
             return type_clone(e->type);
+        }
+        /* __builtin_stdc_* keep the argument width.  Promoting an
+         * unsigned char to int would report 24 extra leading zeros. */
+        if (e->u.call.callee->kind == EX_VAR) {
+            int same_ty = 0, nargs = 0;
+            if (stdc_builtin_info(e->u.call.callee->u.var.name, &same_ty, &nargs)) {
+                if ((int)e->u.call.args.len != nargs) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s takes %d argument%s",
+                           e->u.call.callee->u.var.name, nargs,
+                           nargs == 1 ? "" : "s");
+                    return type_make_void();
+                }
+                Type at = check_expr_inner(e->u.call.args.data[0]);
+                if (at.kind != TY_INT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s argument must be an integer",
+                           e->u.call.callee->u.var.name);
+                    return type_make_void();
+                }
+                if (nargs == 2) {
+                    Type cty = check_expr_inner(e->u.call.args.data[1]);
+                    if (cty.kind != TY_INT) {
+                        type_free(&at);
+                        type_free(&cty);
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "%s count must be an integer",
+                               e->u.call.callee->u.var.name);
+                        return type_make_void();
+                    }
+                    type_free(&cty);
+                }
+                if (same_ty) set_type(e, type_clone(at));
+                else set_type(e, type_make_int(4, 1));
+                type_free(&at);
+                return type_clone(e->type);
+            }
         }
         /* __builtin_fpclassify is type-generic in its last argument. A
          * variadic prototype would promote float to double and hide a
