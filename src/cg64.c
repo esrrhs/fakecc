@@ -1211,6 +1211,7 @@ static int fp_builtin_kind(const char *n, int *nargs) {
         {"trunc", 4, 1}, {"round", 5, 1}, {"ceil", 6, 1},
         {"fabs", 7, 1}, {"sqrt", 8, 1}, {"fmin", 9, 2},
         {"fmax", 10, 2}, {"fma", 11, 3}, {"rint", 2, 1},
+        {"powi", 12, 2},
     };
     for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
         if (fp_named(n, tab[i].root)) {
@@ -1286,6 +1287,47 @@ static void emit_fp_builtin(C64 *c, const IRInst *s, int kind) {
         /* FMINNM/FMAXNM: a quiet NaN loses to the numeric operand.
          * Plain FMIN/FMAX return the NaN on this CPU. */
         fp_binop(a, kind == 9 ? 0x1E607800u : 0x1E606800u, dst, a0, a1, isd);
+        commit_fp(c, s->dst, dst);
+        return;
+    }
+    if (kind == 12) {
+        /* powi(x, n).  n == 0 yields 1, including powi(NaN, 0).  A negative
+         * exponent inverts at the end.  INT_MIN negates to itself in 32 bits
+         * and the logical shift still walks that magnitude. */
+        int nr = load_op(c, s->call_args[1], -1);
+        if (nr != A64_X0) a64_mov_reg(a, A64_X0, nr, 0);
+        int src = load_fp(c, s->call_args[0], -1);
+        a64_fmov_reg(a, A64_V1, src, isd);
+        unsigned one_hw = isd ? 0x3FF0u : 0x3F80u;
+        a64_movz(a, A64_X2, one_hw, isd ? 3 : 1, isd);
+        a64_fmov_gp(a, A64_V0, A64_X2, 1, isd);
+        int Lpos = a64_new_label(a);
+        int Lloop = a64_new_label(a);
+        int Lsq = a64_new_label(a);
+        int Linv = a64_new_label(a);
+        int Ldone = a64_new_label(a);
+        a64_movz(a, A64_X1, 0, 0, 0);
+        a64_cmp_imm12(a, A64_X0, 0, 0, 0);
+        a64_bcond(a, A64_GE, Lpos);
+        a64_movz(a, A64_X1, 1, 0, 0);
+        a64_neg(a, A64_X0, A64_X0, 0);
+        a64_bind(a, Lpos);
+        a64_bind(a, Lloop);
+        a64_cbz(a, A64_X0, Linv, 0);
+        a64_and_imm(a, A64_X3, A64_X0, 1, 0);
+        a64_cbz(a, A64_X3, Lsq, 0);
+        a64_fmul(a, A64_V0, A64_V0, A64_V1, isd);
+        a64_bind(a, Lsq);
+        a64_fmul(a, A64_V1, A64_V1, A64_V1, isd);
+        a64_lsr_imm(a, A64_X0, A64_X0, 1, 0);
+        a64_b(a, Lloop);
+        a64_bind(a, Linv);
+        a64_cbz(a, A64_X1, Ldone, 0);
+        a64_fmov_gp(a, A64_V2, A64_X2, 1, isd);
+        a64_fdiv(a, A64_V0, A64_V2, A64_V0, isd);
+        a64_bind(a, Ldone);
+        int dst = fp_result(c, s->dst, A64_V0);
+        if (dst != A64_V0) a64_fmov_reg(a, dst, A64_V0, isd);
         commit_fp(c, s->dst, dst);
         return;
     }

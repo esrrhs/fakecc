@@ -1835,6 +1835,19 @@ static void test_funnel(void) {
         "  return 0; }", 0);
 }
 
+static void test_powi(void) {
+    expect("powi",
+        "package main;\n"
+        "int main(void) {\n"
+        "  if (__builtin_powi(2.0, 3) != 8.0) return 1;\n"
+        "  if (__builtin_powi(2.0, 0) != 1.0) return 2;\n"
+        "  if (__builtin_powi(2.0, -1) != 0.5) return 3;\n"
+        "  if (__builtin_powi(2.0, 10) != 1024.0) return 4;\n"
+        "  if (__builtin_powif(3.0f, 2) != 9.0f) return 5;\n"
+        "  if (__builtin_powil(2.0L, 4) != 16.0L) return 6;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1929,6 +1942,7 @@ int main(void) {
     test_rotate();
     test_align();
     test_funnel();
+    test_powi();
     test_trap();
     test_syscall();
     test_frame_addr();

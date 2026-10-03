@@ -1303,6 +1303,12 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_fabsl") == 0)
                 ret = type_make_float(type_long_double_width());
+            else if (strcmp(bname, "__builtin_powi") == 0 || strcmp(bname, "powi") == 0)
+                ret = type_make_float(8);
+            else if (strcmp(bname, "__builtin_powif") == 0 || strcmp(bname, "powif") == 0)
+                ret = type_make_float(4);
+            else if (strcmp(bname, "__builtin_powil") == 0 || strcmp(bname, "powil") == 0)
+                ret = type_make_float(type_long_double_width());
             else if ((math_w = math_builtin_width(bname, &math_narg)) > 0)
                 ret = type_make_float(math_w);
             else if (strcmp(bname, "__builtin_copysign") == 0 || strcmp(bname, "copysign") == 0)
@@ -1393,6 +1399,21 @@ static Type check_expr_inner(Expr *e) {
                 p0 = type_make_float(type_long_double_width());
                 params[0] = &p0;
                 num_params = 1;
+            } else if (strcmp(bname, "__builtin_powif") == 0 || strcmp(bname, "powif") == 0) {
+                p0 = type_make_float(4);
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (strcmp(bname, "__builtin_powi") == 0 || strcmp(bname, "powi") == 0) {
+                p0 = type_make_float(8);
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (strcmp(bname, "__builtin_powil") == 0 || strcmp(bname, "powil") == 0) {
+                p0 = type_make_float(type_long_double_width());
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
             } else {
                 int narg = 0;
                 int w = math_builtin_width(bname, &narg);
