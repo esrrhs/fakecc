@@ -2637,6 +2637,32 @@ static void test_fxchg(void) {
         "  return 0; }", 0);
 }
 
+static void test_fcas(void) {
+    expect("fcas",
+        "package main;\n"
+        "int main(void) {\n"
+        "  float f = -1.5f;\n"
+        "  float exp = -1.5f;\n"
+        "  if (__atomic_compare_exchange_n(&f, &exp, 4.5f, 0, 5, 5) != 1) return 1;\n"
+        "  if (*(int *)&f != 0x40900000) return 2;\n"
+        "  exp = 1.0f;\n"
+        "  if (__atomic_compare_exchange_n(&f, &exp, 2.0f, 0, 5, 5) != 0) return 3;\n"
+        "  if (*(int *)&exp != 0x40900000 || *(int *)&f != 0x40900000) return 4;\n"
+        "  float neu = 1.0f;\n"
+        "  float want = 4.5f;\n"
+        "  if (__atomic_compare_exchange(&f, &want, &neu, 0, 2, 2) != 1) return 5;\n"
+        "  if (*(int *)&f != 0x3f800000) return 6;\n"
+        "  double d = -2.25;\n"
+        "  double de = 0;\n"
+        "  if (__atomic_compare_exchange_n(&d, &de, 2.5, 0, 0, 0) != 0) return 7;\n"
+        "  if (*(long long *)&de != 0xc002000000000000LL) return 8;\n"
+        "  if (*(long long *)&d != 0xc002000000000000LL) return 9;\n"
+        "  de = -2.25;\n"
+        "  if (__atomic_compare_exchange_n(&d, &de, 2.5, 0, 0, 0) != 1) return 10;\n"
+        "  if (*(long long *)&d != 0x4004000000000000LL) return 11;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2716,6 +2742,7 @@ int main(void) {
     test_scas();
     test_fat();
     test_fxchg();
+    test_fcas();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

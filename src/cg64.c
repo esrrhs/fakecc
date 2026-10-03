@@ -2250,14 +2250,26 @@ static void emit_call(C64 *c, const IRInst *s) {
                    "arm64 backend: atomic compare-exchange width must be 1, 2, 4, or 8");
             return;
         }
-        int p = load_ptrv(c, s->call_args[0], -1);
+        int fp_des = (w == 4 || w == 8) && s->call_args[2] >= 0
+                     && scalar_fp_val(c, s->call_args[2]);
+        int des = -1;
+        if (fp_des) {
+            /* CAS has no scalar-fp form.  Desired bits go through a GPR
+             * before the address registers are filled. */
+            int isd = w == 8;
+            int fv = load_fp(c, s->call_args[2], -1);
+            des = SCR0;
+            a64_fmov_gp(a, des, fv, 0, isd);
+        }
+        int p = load_ptrv(c, s->call_args[0], fp_des ? des : -1);
         int ep = load_ptrv(c, s->call_args[1], p);
         if (ep == p) {
-            int t = safe_tmp(p, -1, -1, -1);
+            int t = safe_tmp(p, des, -1, -1);
             a64_mov_reg(a, t, ep, 1);
             ep = t;
         }
-        int des = load_op(c, s->call_args[2], p);
+        if (!fp_des)
+            des = load_op(c, s->call_args[2], p);
         if (des == p || des == ep) {
             int t = safe_tmp(p, ep, -1, -1);
             a64_mov_reg(a, t, des, 1);

@@ -6667,8 +6667,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 for (size_t i = 3; i < e->u.call.args.len; i++)
                     lower_expr(fn, st, e->u.call.args.data[i]);
                 /* Success order picks cas/casa/casl/casal.  A strong CAS
-                 * is a valid weak CAS.  Float and odd sizes stay a plain pair. */
-                if (!is_f && (sz == 1 || sz == 2 || sz == 4 || sz == 8)) {
+                 * is a valid weak CAS.  Odd sizes stay a plain pair.
+                 * Float and double compare the IEEE bits. */
+                if ((!is_f && (sz == 1 || sz == 2 || sz == 4 || sz == 8))
+                    || (is_f && (sz == 4 || sz == 8))) {
                     long long succ = 5;
                     if (e->u.call.args.len > 4)
                         fold_const_int(e->u.call.args.data[4], &succ);
