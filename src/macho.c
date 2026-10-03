@@ -62,9 +62,11 @@
 #define DYLINKER_PATH "/usr/lib/dyld"
 #define LIBSYSTEM_PATH "/usr/lib/libSystem.B.dylib"
 
-#pragma pack(push, 1)
+/* Packed via per-struct attribute instead of #pragma pack: the bootstrap
+ * dialect has no preprocessor but its parser honors
+ * __attribute__((packed)) (translate.py preserves it). */
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint32_t cputype;
     uint32_t cpusubtype;
@@ -75,7 +77,7 @@ typedef struct {
     uint32_t reserved;
 } mach_header_64;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint32_t cmd;
     uint32_t cmdsize;
     char     segname[16];
@@ -89,7 +91,7 @@ typedef struct {
     uint32_t flags;
 } segment_command_64;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     char     sectname[16];
     char     segname[16];
     uint64_t addr;
@@ -104,7 +106,7 @@ typedef struct {
     uint32_t reserved3;
 } section_64;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint32_t cmd;
     uint32_t cmdsize;
     uint32_t platform;
@@ -113,34 +115,39 @@ typedef struct {
     uint32_t ntools;
 } build_version_command;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint32_t cmd;
     uint32_t cmdsize;
     uint64_t entryoff;
     uint64_t stacksize;
 } entry_point_command;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    unsigned char uuid[16];
+} uuid_command;
+
+typedef struct __attribute__((packed)) {
     uint32_t cmd;
     uint32_t cmdsize;
     uint32_t nameoff;
 } dylinker_command;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint32_t name_offset;
     uint32_t timestamp;
     uint32_t current_version;
     uint32_t compatibility_version;
 } dylib;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint32_t cmd;
     uint32_t cmdsize;
     dylib    dylib;
     char     name[];      /* offset 24, NUL terminated */
 } dylib_command;
 
-#pragma pack(pop)
 
 /* pad to a multiple of 8 for load-command sizes */
 static uint32_t align8(uint32_t n) { return (n + 7u) & ~7u; }
@@ -379,7 +386,7 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     APPEND_BYTES(&bv, sizeof bv);
 
     /* ── LC_UUID (dyld requires one; deterministic stage-1 value) ── */
-    struct { uint32_t cmd; uint32_t cmdsize; unsigned char uuid[16]; } uc;
+    uuid_command uc;
     uc.cmd = LC_UUID;
     uc.cmdsize = uuid_cmd;
     for (int i = 0; i < 16; i++)
@@ -404,7 +411,7 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     dc.cmd = LC_LOAD_DYLIB;
     dc.cmdsize = dylib_cmdsz;
     dc.dylib.name_offset = dylib_name_off;
-    APPEND_BYTES(&dc, offsetof(dylib_command, name));
+    APPEND_BYTES(&dc, 24); /* offsetof(dylib_command, name) — fakecc dialect has no offsetof */
     APPEND_BYTES(LIBSYSTEM_PATH, strlen(LIBSYSTEM_PATH) + 1);
     APPEND_ZERO(dylib_cmdsz - dylib_name_off - strlen(LIBSYSTEM_PATH) - 1);
 

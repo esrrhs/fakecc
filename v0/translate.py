@@ -75,6 +75,7 @@ def strip_attributes(text):
                 # match ((...))
                 if j+1 < len(text) and text[j+1] == "(":
                     depth = 2
+                    inner_start = j + 2
                     j += 2
                     while j < len(text) and depth > 0:
                         if text[j] == "(":
@@ -82,6 +83,11 @@ def strip_attributes(text):
                         elif text[j] == ")":
                             depth -= 1
                         j += 1
+                    # packed survives: the fakecc parser honors
+                    # __attribute__((packed)), and the compiler's own
+                    # macho.c needs packed on-disk structs after translation.
+                    if text[inner_start:j-2].strip() == "packed":
+                        out.append(text[i:j])
                     i = j
                     continue
         out.append(text[i])
