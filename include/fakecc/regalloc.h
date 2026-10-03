@@ -158,4 +158,12 @@ RAResult *reg_alloc_xmm(const IRFunction *fn);
 /* Free a RAResult returned by reg_alloc() or reg_alloc_xmm(). */
 void ra_result_free(RAResult *ra);
 
+/* When non-zero, x86-64 GP allocation reserves R11 as a pure codegen
+ * scratch (matching RAX/RCX/RDX): it is never an SSA home.  opt() turns
+ * this on for -O1 so pointers promoted by mem2reg and live across an
+ * inline va_arg sequence cannot be parked in the register emit_va_arg
+ * clobbers.  -O0 leaves it off so the allocated set (and thus -O0 code)
+ * stays unchanged. */
+void ra_set_reserve_va_scratch(int on);
+
 #endif /* FAKECC_REGALLOC_H */
