@@ -1037,6 +1037,39 @@ static void test_vec16(void) {
         "  return 0; }", 0);
 }
 
+static void test_frame_addr(void) {
+    expect("frame",
+        "package main;\n"
+        "__attribute__((noinline)) int child(void *parent) {\n"
+        "  void *f0 = __builtin_frame_address(0);\n"
+        "  void *f1 = __builtin_frame_address(1);\n"
+        "  if (f0 == 0) return 1;\n"
+        "  if (f1 != parent) return 2;\n"
+        "  if (__builtin_return_address(0) == 0) return 3;\n"
+        "  if (__builtin_return_address(1) == 0) return 4;\n"
+        "  return 0;\n"
+        "}\n"
+        "int main(void) {\n"
+        "  if (__builtin_expect(1, 0) != 1) return 5;\n"
+        "  int n = 8;\n"
+        "  char *p = __builtin_alloca(n);\n"
+        "  p[0] = 7; p[7] = 9;\n"
+        "  if (p[0] != 7 || p[7] != 9) return 6;\n"
+        "  return child(__builtin_frame_address(0));\n"
+        "}", 0);
+    expect("ovf",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int r = 0;\n"
+        "  if (!__builtin_add_overflow(2000000000, 2000000000, &r)) return 1;\n"
+        "  if (__builtin_add_overflow(2, 3, &r)) return 2;\n"
+        "  if (r != 5) return 3;\n"
+        "  unsigned u = 0;\n"
+        "  if (!__builtin_add_overflow(0xffffffffu, 1u, &u)) return 4;\n"
+        "  if (u != 0) return 5;\n"
+        "  return 0; }", 0);
+}
+
 static void test_syscall(void) {
     /* Carry set + positive errno becomes -errno.  EBADF is 9.
      * Anonymous mmap is Darwin mmap=197, PROT_READ|PROT_WRITE=3,
@@ -1094,6 +1127,7 @@ int main(void) {
     test_vec16();
     test_int128();
     test_syscall();
+    test_frame_addr();
     return t_finalize();
 }
 

@@ -1768,14 +1768,24 @@ static void emit_function(C64 *c, int fi) {
         }
 
         case IR_FRAME_ADDR: {
+            /* [fp] is the caller's frame pointer, same chain as rbp. */
             int d = dst_reg(c, s->dst);
             a64_mov_reg(a, d, A64_FP, 1);
+            int level = (int)s->imm;
+            if (level < 0) level = 0;
+            for (int i = 0; i < level; i++)
+                a64_ldr64(a, d, d, 0);
             commit(c, s->dst, d);
             break;
         }
         case IR_RETURN_ADDR: {
             int d = dst_reg(c, s->dst);
-            a64_ldr64(a, d, A64_FP, 8);
+            a64_mov_reg(a, d, A64_FP, 1);
+            int level = (int)s->imm;
+            if (level < 0) level = 0;
+            for (int i = 0; i < level; i++)
+                a64_ldr64(a, d, d, 0);
+            a64_ldr64(a, d, d, 8);
             commit(c, s->dst, d);
             break;
         }
