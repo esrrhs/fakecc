@@ -1595,6 +1595,28 @@ static void test_scan(void) {
         "  return 0; }", 0);
 }
 
+static void test_find(void) {
+    expect("find",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char a[] = {1,2,3,2,0};\n"
+        "  char *p = __builtin_memchr(a, 3, 4);\n"
+        "  if (!p || *p != 3) return 1;\n"
+        "  if (__builtin_memchr(a, 9, 4)) return 2;\n"
+        "  if (__builtin_memchr(a, 1, 0)) return 3;\n"
+        "  p = __builtin_strchr(a, 2);\n"
+        "  if (p != a + 1) return 4;\n"
+        "  if (__builtin_strchr(a, 9)) return 5;\n"
+        "  if (__builtin_strchr(a, 0) != a + 4) return 6;\n"
+        "  p = __builtin_strrchr(a, 2);\n"
+        "  if (p != a + 3) return 7;\n"
+        "  if (__builtin_strrchr(a, 0) != a + 4) return 8;\n"
+        "  if (__builtin_strnlen(a, 100) != 4) return 9;\n"
+        "  if (__builtin_strnlen(a, 2) != 2) return 10;\n"
+        "  if (__builtin_strnlen(a, 0) != 0) return 11;\n"
+        "  return 0; }", 0);
+}
+
 static void test_trap(void) {
     /* brk #1 → SIGTRAP, same status clang produces. */
     expect("trap",
@@ -1647,6 +1669,7 @@ int main(void) {
     test_bitops();
     test_fpmath();
     test_scan();
+    test_find();
     test_trap();
     test_syscall();
     test_frame_addr();

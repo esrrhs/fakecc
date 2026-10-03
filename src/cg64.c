@@ -527,6 +527,69 @@ static int emit_scan_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* memchr/strchr/strrchr/strnlen.  Pointer or length left in x0.
+ * The searched byte is masked to 8 bits.  x3/x4 are caller-saved. */
+static int emit_find_builtin(C64 *c, const char *name) {
+    int is_memchr = strcmp(name, "memchr") == 0;
+    int is_strchr = strcmp(name, "strchr") == 0;
+    int is_strrchr = strcmp(name, "strrchr") == 0;
+    int is_strnlen = strcmp(name, "strnlen") == 0;
+    if (!is_memchr && !is_strchr && !is_strrchr && !is_strnlen) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+
+    A64Asm *a = c->as;
+    int Lloop = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+    int Lmiss = a64_new_label(a);
+
+    if (is_strnlen) {
+        a64_mov_reg(a, A64_X3, A64_X0, 1);
+        a64_bind(a, Lloop);
+        a64_cbz(a, A64_X1, Ldone, 1);
+        a64_ldr8(a, A64_X4, A64_X0, 0);
+        a64_cbz(a, A64_X4, Ldone, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_sub_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+        a64_b(a, Lloop);
+        a64_bind(a, Ldone);
+        a64_sub_reg(a, A64_X0, A64_X0, A64_X3, A64_LSL, 0, 1, 0);
+        return 1;
+    }
+
+    a64_and_imm(a, A64_X1, A64_X1, 0xff, 0);
+    if (is_strrchr)
+        a64_movz(a, A64_X4, 0, 0, 1);
+    a64_bind(a, Lloop);
+    if (is_memchr)
+        a64_cbz(a, A64_X2, Lmiss, 1);
+    a64_ldr8(a, A64_X3, A64_X0, 0);
+    a64_cmp_reg(a, A64_X3, A64_X1, 0);
+    if (is_strrchr) {
+        int Lnext = a64_new_label(a);
+        a64_bcond(a, A64_NE, Lnext);
+        a64_mov_reg(a, A64_X4, A64_X0, 1);
+        a64_bind(a, Lnext);
+        a64_cbz(a, A64_X3, Ldone, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_b(a, Lloop);
+        a64_bind(a, Ldone);
+        a64_mov_reg(a, A64_X0, A64_X4, 1);
+        return 1;
+    }
+    a64_bcond(a, A64_EQ, Ldone);
+    if (!is_memchr)
+        a64_cbz(a, A64_X3, Lmiss, 0);
+    a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    if (is_memchr)
+        a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+    a64_b(a, Lloop);
+    a64_bind(a, Lmiss);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_bind(a, Ldone);
+    return 1;
+}
+
 /* Bytes of outgoing stack traffic for one call: 8 per stack slot, plus
  * 16 when call_args[0] must be stashed before it is written to x8. */
 static int is_va_builtin(const char *name) {
@@ -1121,7 +1184,8 @@ static void emit_call(C64 *c, const IRInst *s) {
             c->udiv_label = a64_new_label(a);
         a64_bl(a, c->udiv_label);
     } else if (!(s->call_name && (emit_mem_builtin(c, s->call_name)
-                                 || emit_scan_builtin(c, s->call_name)))) {
+                                 || emit_scan_builtin(c, s->call_name)
+                                 || emit_find_builtin(c, s->call_name)))) {
         int fi = 0;
         if (find_function(c->ir, s->call_name, &fi) != 0) {
             if (!emit_object_mode())

@@ -1293,8 +1293,10 @@ static Type check_expr_inner(Expr *e) {
                      strcmp(bname, "__builtin_strncat") == 0 || strcmp(bname, "__builtin___strncat_chk") == 0 ||
                      strcmp(bname, "__builtin_strncpy") == 0 || strcmp(bname, "__builtin___strncpy_chk") == 0)
                 ret = type_make_ptr(type_make_int(1, 0));
-            else if (strcmp(bname, "__builtin_strlen") == 0 || strcmp(bname, "__builtin_strspn") == 0 || strcmp(bname, "__builtin_object_size") == 0)
+            else if (strcmp(bname, "__builtin_strlen") == 0 || strcmp(bname, "__builtin_strnlen") == 0 || strcmp(bname, "__builtin_strspn") == 0 || strcmp(bname, "__builtin_object_size") == 0)
                 ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_memchr") == 0 || strcmp(bname, "__builtin_strchr") == 0 || strcmp(bname, "__builtin_strrchr") == 0)
+                ret = type_make_ptr(type_make_int(1, 0));
             else if (strcmp(bname, "__builtin_fabs") == 0)
                 ret = type_make_float(8);
             else if (strcmp(bname, "__builtin_fabsf") == 0)
