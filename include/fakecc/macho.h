@@ -29,6 +29,15 @@ int macho_write_exec(const struct EmitModule *em, uint64_t entry_off,
  * emitted yet. */
 int macho_write_object(const struct EmitModule *em, const char *path);
 
+/* Read an MH_OBJECT written by macho_write_object back into a module.
+ * Symbol names drop one leading underscore.  Returns 0 on success. */
+int macho_read_object(const char *path, struct EmitModule *em);
+
+/* Link object modules (each produced by -c) into one PIE executable.
+ * Resolves BRANCH26, PAGE21/PAGEOFF12 and UNSIGNED against defined
+ * symbols, then writes and returns 0.  The caller still ad-hoc signs. */
+int macho_link_objects(struct EmitModule **mods, size_t n, const char *path);
+
 /* Single-__text convenience used by low-level encoder tests. */
 int macho_write_exec_text(const Buffer *text, uint64_t entry_off,
                           const char *path);

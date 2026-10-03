@@ -1,5 +1,7 @@
 #include "fakecc/macho.h"
+#include "fakecc/a64.h"
 #include "fakecc/emit.h"
+#include "fakecc/reg_arm64.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -1036,6 +1038,393 @@ int macho_write_object(const EmitModule *em, const char *path) {
         return -1;
     }
     return 0;
+}
+
+int macho_read_object(const char *path, EmitModule *em) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "fakecc: cannot open '%s'\n", path);
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize < (long)sizeof(mach_header_64)) {
+        fclose(f);
+        fprintf(stderr, "fakecc: '%s' is too small for a Mach-O object\n", path);
+        return -1;
+    }
+    unsigned char *buf = xmalloc((size_t)fsize);
+    if (fread(buf, 1, (size_t)fsize, f) != (size_t)fsize) {
+        fclose(f);
+        free(buf);
+        fprintf(stderr, "fakecc: short read on '%s'\n", path);
+        return -1;
+    }
+    fclose(f);
+
+    mach_header_64 hdr;
+    memcpy(&hdr, buf, sizeof hdr);
+    if (hdr.magic != MH_MAGIC_64 || hdr.filetype != MH_OBJECT) {
+        free(buf);
+        fprintf(stderr, "fakecc: '%s' is not an arm64 Mach-O object\n", path);
+        return -1;
+    }
+
+    typedef struct {
+        char     sect[16];
+        char     seg[16];
+        uint64_t addr, size;
+        uint32_t offset, reloff, nreloc, flags;
+        uint16_t shndx;
+    } RSec;
+    RSec secs[16];
+    int nsec = 0;
+    uint32_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
+
+    const unsigned char *p = buf + sizeof hdr;
+    const unsigned char *pend = p + hdr.sizeofcmds;
+    if (pend > buf + fsize) pend = buf + fsize;
+    for (uint32_t ci = 0; ci < hdr.ncmds && p + 8 <= pend; ci++) {
+        uint32_t cmd = 0, cmdsize = 0;
+        memcpy(&cmd, p, 4);
+        memcpy(&cmdsize, p + 4, 4);
+        if (cmdsize < 8 || p + cmdsize > buf + fsize) break;
+        if (cmd == LC_SEGMENT_64 && cmdsize >= sizeof(segment_command_64)) {
+            segment_command_64 seg;
+            memcpy(&seg, p, sizeof seg);
+            const unsigned char *sp = p + sizeof seg;
+            for (uint32_t si = 0; si < seg.nsects && nsec < 16; si++) {
+                if (sp + sizeof(section_64) > p + cmdsize) break;
+                section_64 sec;
+                memcpy(&sec, sp, sizeof sec);
+                sp += sizeof sec;
+                RSec *rs = &secs[nsec++];
+                memset(rs, 0, sizeof *rs);
+                memcpy(rs->sect, sec.sectname, 16);
+                memcpy(rs->seg, sec.segname, 16);
+                rs->addr = sec.addr;
+                rs->size = sec.size;
+                rs->offset = sec.offset;
+                rs->reloff = sec.reloff;
+                rs->nreloc = sec.nreloc;
+                rs->flags = sec.flags;
+                rs->shndx = 0;
+                if (strcmp(rs->sect, "__text") == 0) rs->shndx = SECT_TEXT;
+                else if (strcmp(rs->sect, "__const") == 0) rs->shndx = SECT_RODATA;
+                else if (strcmp(rs->sect, "__data") == 0) rs->shndx = SECT_DATA;
+                else if (strcmp(rs->sect, "__bss") == 0) rs->shndx = SECT_BSS;
+            }
+        } else if (cmd == LC_SYMTAB && cmdsize >= sizeof(symtab_command)) {
+            symtab_command sy;
+            memcpy(&sy, p, sizeof sy);
+            symoff = sy.symoff;
+            nsyms = sy.nsyms;
+            stroff = sy.stroff;
+            strsize = sy.strsize;
+        }
+        p += cmdsize;
+    }
+
+    emit_module_init(em);
+    for (int i = 0; i < nsec; i++) {
+        RSec *rs = &secs[i];
+        if (rs->shndx == 0 || (rs->flags & S_ZEROFILL)) continue;
+        if ((uint64_t)rs->offset + rs->size > (uint64_t)fsize) {
+            free(buf);
+            emit_module_free(em);
+            fprintf(stderr, "fakecc: '%s' section extends past the file\n", path);
+            return -1;
+        }
+        Buffer *dst = rs->shndx == SECT_TEXT ? &em->text
+                    : rs->shndx == SECT_RODATA ? &em->rodata
+                    : &em->data;
+        buffer_append(dst, (const char *)buf + rs->offset, (size_t)rs->size);
+    }
+    for (int i = 0; i < nsec; i++) {
+        if (secs[i].shndx == SECT_BSS)
+            em->bss_size = (size_t)secs[i].size;
+    }
+
+    if ((uint64_t)symoff + (uint64_t)nsyms * sizeof(nlist_64) > (uint64_t)fsize ||
+        (uint64_t)stroff + strsize > (uint64_t)fsize) {
+        free(buf);
+        emit_module_free(em);
+        fprintf(stderr, "fakecc: '%s' symbol table is out of range\n", path);
+        return -1;
+    }
+    const char *str = (const char *)buf + stroff;
+    for (uint32_t i = 0; i < nsyms; i++) {
+        nlist_64 nl;
+        memcpy(&nl, buf + symoff + i * sizeof nl, sizeof nl);
+        const char *raw = (nl.n_strx < strsize) ? str + nl.n_strx : "";
+        if (raw[0] == '_') raw++;
+        int undef = nl.n_sect == 0;
+        if (undef) {
+            emit_module_add_undefined(em, raw[0] ? raw : NULL);
+            continue;
+        }
+        if (nl.n_sect > nsec || secs[nl.n_sect - 1].shndx == 0) {
+            free(buf);
+            emit_module_free(em);
+            fprintf(stderr, "fakecc: '%s' symbol in an unsupported section\n", path);
+            return -1;
+        }
+        RSec *rs = &secs[nl.n_sect - 1];
+        uint8_t binding = (nl.n_type & N_EXT) ? 1 : 0;
+        uint8_t ty = rs->shndx == SECT_TEXT ? 2 : 1;
+        size_t value = (size_t)(nl.n_value - rs->addr);
+        emit_module_add_symbol(em, raw[0] ? raw : NULL, binding, ty,
+                               rs->shndx, value, 0);
+    }
+
+    for (int i = 0; i < nsec; i++) {
+        RSec *rs = &secs[i];
+        if (!rs->nreloc) continue;
+        if ((uint64_t)rs->reloff + (uint64_t)rs->nreloc * 8 > (uint64_t)fsize) {
+            free(buf);
+            emit_module_free(em);
+            fprintf(stderr, "fakecc: '%s' relocations are out of range\n", path);
+            return -1;
+        }
+        for (uint32_t ri = 0; ri < rs->nreloc; ri++) {
+            int32_t addr = 0;
+            uint32_t word = 0;
+            memcpy(&addr, buf + rs->reloff + ri * 8, 4);
+            memcpy(&word, buf + rs->reloff + ri * 8 + 4, 4);
+            uint32_t sym = word & 0xFFFFFFu;
+            uint32_t type = (word >> 28) & 0xFu;
+            int32_t addend = 0;
+            if (type == 0 && rs->shndx == SECT_DATA &&
+                (size_t)addr + 8 <= em->data.len) {
+                int64_t full = 0;
+                memcpy(&full, em->data.data + addr, 8);
+                addend = (int32_t)full;
+            }
+            if (rs->shndx == SECT_DATA)
+                emit_module_add_data_reloc(em, (size_t)addr, type, (int)sym, addend);
+            else
+                emit_module_add_reloc(em, (size_t)addr, type, (int)sym, addend);
+        }
+    }
+    free(buf);
+    return 0;
+}
+
+static void patch_adrp(uint32_t *w, uint64_t pc, uint64_t tgt) {
+    int64_t pages = (int64_t)((tgt & ~(uint64_t)0xFFF)
+                              - (pc & ~(uint64_t)0xFFF)) >> 12;
+    *w |= (uint32_t)((pages & 3) << 29)
+        | (uint32_t)(((pages >> 2) & 0x7FFFF) << 5);
+}
+
+static void patch_add_pageoff(uint32_t *w, uint64_t tgt) {
+    *w |= (uint32_t)(tgt & 0xFFFu) << 10;
+}
+
+static int patch_bl(uint32_t *w, uint64_t pc, uint64_t tgt) {
+    int64_t disp = (int64_t)tgt - (int64_t)pc;
+    if ((disp & 3) || disp < -(1 << 27) || disp >= (1 << 27)) {
+        fprintf(stderr, "fakecc: branch target out of range\n");
+        return -1;
+    }
+    *w = 0x94000000u | (uint32_t)((disp >> 2) & 0x3FFFFFF);
+    return 0;
+}
+
+/* One relocating link of -c modules into a PIE image. */
+int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
+    if (!n) {
+        fprintf(stderr, "fakecc: no modules to link\n");
+        return -1;
+    }
+    EmitModule out;
+    emit_module_init(&out);
+
+    A64Asm stub;
+    a64_init(&stub);
+    a64_stp64(&stub, A64_FP, A64_LR, A64_SP, -16, A64_PAIR_PRE);
+    a64_add_imm12(&stub, A64_FP, A64_SP, 0, 0, 1, 0);
+    uint32_t bl_at = (uint32_t)stub.code.len;
+    a64_word(&stub, 0x94000000u);
+    a64_movz(&stub, A64_X16, 1, 0, 1);
+    a64_svc(&stub, 0x80);
+    buffer_append(&out.text, stub.code.data, stub.code.len);
+    a64_free(&stub);
+
+    size_t *text_base = xmalloc(n * sizeof(size_t));
+    size_t *ro_base = xmalloc(n * sizeof(size_t));
+    size_t *data_base = xmalloc(n * sizeof(size_t));
+    size_t *bss_base = xmalloc(n * sizeof(size_t));
+    for (size_t i = 0; i < n; i++) {
+        text_base[i] = out.text.len;
+        if (mods[i]->text.len)
+            buffer_append(&out.text, mods[i]->text.data, mods[i]->text.len);
+        size_t ral = mods[i]->rodata_align ? mods[i]->rodata_align : 1;
+        while (out.rodata.len % ral) { char z = 0; buffer_append(&out.rodata, &z, 1); }
+        ro_base[i] = out.rodata.len;
+        if (mods[i]->rodata.len)
+            buffer_append(&out.rodata, mods[i]->rodata.data, mods[i]->rodata.len);
+        size_t dal = mods[i]->data_align ? mods[i]->data_align : 1;
+        while (out.data.len % dal) { char z = 0; buffer_append(&out.data, &z, 1); }
+        data_base[i] = out.data.len;
+        if (mods[i]->data.len)
+            buffer_append(&out.data, mods[i]->data.data, mods[i]->data.len);
+        size_t bal = mods[i]->bss_align ? mods[i]->bss_align : 1;
+        while (out.bss_size % bal) out.bss_size++;
+        bss_base[i] = out.bss_size;
+        out.bss_size += mods[i]->bss_size;
+    }
+
+    typedef struct { char *name; uint16_t sh; size_t off; } GDef;
+    GDef *gdefs = NULL;
+    size_t ng = 0, capg = 0;
+    typedef struct { uint16_t sh; size_t off; int defined; } Adj;
+    Adj **adj = xmalloc(n * sizeof(Adj *));
+    for (size_t i = 0; i < n; i++) adj[i] = NULL;
+    int rc = 0;
+    size_t main_off = 0;
+    int have_main = 0;
+
+    for (size_t i = 0; i < n && rc == 0; i++) {
+        EmitModule *m = mods[i];
+        adj[i] = xmalloc((m->num_syms ? m->num_syms : 1) * sizeof(Adj));
+        for (size_t s = 0; s < m->num_syms; s++) {
+            EmitSymbol *es = &m->syms[s];
+            adj[i][s].defined = es->shndx != SECT_UNDEF;
+            adj[i][s].sh = es->shndx;
+            size_t base = 0;
+            if (es->shndx == SECT_TEXT) base = text_base[i];
+            else if (es->shndx == SECT_RODATA) base = ro_base[i];
+            else if (es->shndx == SECT_DATA) base = data_base[i];
+            else if (es->shndx == SECT_BSS) base = bss_base[i];
+            adj[i][s].off = base + es->value;
+            if (!adj[i][s].defined || !es->name || es->binding == 0) continue;
+            if (es->shndx == SECT_TEXT && strcmp(es->name, "main") == 0) {
+                if (have_main) {
+                    fprintf(stderr, "fakecc: duplicate symbol 'main'\n");
+                    rc = -1;
+                    break;
+                }
+                have_main = 1;
+                main_off = adj[i][s].off;
+            }
+            for (size_t g = 0; g < ng; g++) {
+                if (strcmp(gdefs[g].name, es->name) == 0) {
+                    fprintf(stderr, "fakecc: duplicate symbol '%s'\n", es->name);
+                    rc = -1;
+                    break;
+                }
+            }
+            if (rc) break;
+            if (ng == capg) {
+                capg = capg ? capg * 2 : 8;
+                gdefs = xrealloc(gdefs, capg * sizeof(GDef));
+            }
+            gdefs[ng].name = xstrdup(es->name);
+            gdefs[ng].sh = es->shndx;
+            gdefs[ng].off = adj[i][s].off;
+            ng++;
+        }
+    }
+    if (rc == 0 && !have_main) {
+        fprintf(stderr, "fakecc: no 'main' function found\n");
+        rc = -1;
+    }
+
+    uint64_t ro_off = 0, data_off = 0, bss_off = 0;
+    if (rc == 0)
+        macho_section_offsets(&out, out.text.len, &ro_off, &data_off, &bss_off);
+
+    for (size_t i = 0; i < n && rc == 0; i++) {
+        EmitModule *m = mods[i];
+        EmitReloc *lists[2] = { m->relocs, m->data_relocs };
+        size_t lens[2] = { m->num_relocs, m->num_data_relocs };
+        int is_data[2] = { 0, 1 };
+        for (int pass = 0; pass < 2 && rc == 0; pass++) {
+            for (size_t ri = 0; ri < lens[pass]; ri++) {
+                EmitReloc *r = &lists[pass][ri];
+                if (r->sym >= m->num_syms) { rc = -1; break; }
+                EmitSymbol *es = &m->syms[r->sym];
+                uint16_t sh;
+                size_t off;
+                if (adj[i][r->sym].defined) {
+                    sh = adj[i][r->sym].sh;
+                    off = adj[i][r->sym].off;
+                } else {
+                    int found = 0;
+                    sh = 0; off = 0;
+                    for (size_t g = 0; g < ng; g++) {
+                        if (es->name && strcmp(gdefs[g].name, es->name) == 0) {
+                            sh = gdefs[g].sh;
+                            off = gdefs[g].off;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        fprintf(stderr, "fakecc: undefined symbol '%s'\n",
+                                es->name ? es->name : "?");
+                        rc = -1;
+                        break;
+                    }
+                }
+                uint64_t base = sh == SECT_TEXT ? macho_text_offset()
+                              : sh == SECT_RODATA ? ro_off
+                              : sh == SECT_DATA ? data_off
+                              : bss_off;
+                uint64_t tgt = base + off + (uint64_t)(int64_t)r->addend;
+                if (!is_data[pass]) {
+                    size_t site = text_base[i] + r->offset;
+                    if (site + 4 > out.text.len) {
+                        fprintf(stderr, "fakecc: text reloc past end of section\n");
+                        rc = -1;
+                        break;
+                    }
+                    uint64_t pc = macho_text_offset() + site;
+                    uint32_t w = 0;
+                    memcpy(&w, out.text.data + site, 4);
+                    if (r->type == 2) {
+                        if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
+                    } else if (r->type == 3) patch_adrp(&w, pc, tgt);
+                    else if (r->type == 4) patch_add_pageoff(&w, tgt);
+                    else {
+                        fprintf(stderr, "fakecc: unsupported text reloc %u\n", r->type);
+                        rc = -1;
+                        break;
+                    }
+                    memcpy(out.text.data + site, &w, 4);
+                } else if (r->type == 0) {
+                    uint64_t slot = data_off + data_base[i] + r->offset;
+                    emit_module_add_rebase(&out, slot, tgt);
+                } else {
+                    fprintf(stderr, "fakecc: unsupported data reloc %u\n", r->type);
+                    rc = -1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (rc == 0) {
+        uint64_t pc = macho_text_offset() + bl_at;
+        uint64_t tgt = macho_text_offset() + main_off;
+        uint32_t w = 0;
+        if (patch_bl(&w, pc, tgt) != 0)
+            rc = -1;
+        else {
+            memcpy(out.text.data + bl_at, &w, 4);
+            rc = macho_write_exec(&out, macho_text_offset(), path);
+        }
+    }
+
+    for (size_t i = 0; i < n; i++) free(adj[i]);
+    free(adj);
+    free(text_base); free(ro_base); free(data_base); free(bss_base);
+    for (size_t g = 0; g < ng; g++) free(gdefs[g].name);
+    free(gdefs);
+    emit_module_free(&out);
+    return rc;
 }
 
 int macho_codesign(const char *path) {

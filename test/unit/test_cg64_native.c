@@ -1115,6 +1115,97 @@ static void test_macho_obj(void) {
     T_ASSERT_EQ_INT((int)fread(&xnreloc, 4, 1, f), 1);
     fclose(f);
     T_ASSERT_EQ_INT((int)xnreloc, 1);
+
+    EmitModule back;
+    T_ASSERT_EQ_INT(emit_obj_read(xpath, &back), 0);
+    T_ASSERT(back.text.len > 0);
+    T_ASSERT_EQ_INT((int)back.num_relocs, 1);
+    T_ASSERT(emit_module_find_symbol(&back, "call") >= 0);
+    int other = emit_module_find_symbol(&back, "other");
+    T_ASSERT(other >= 0);
+    T_ASSERT_EQ_INT(back.syms[other].shndx, 0);
+    T_ASSERT_EQ_INT((int)back.relocs[0].type, 2);
+    emit_module_free(&back);
+
+    T_ASSERT_EQ_INT(emit_obj_read(ppath, &back), 0);
+    T_ASSERT(back.data.len > 0);
+    T_ASSERT_EQ_INT((int)back.num_data_relocs, 1);
+    T_ASSERT(emit_module_find_symbol(&back, "g") >= 0);
+    T_ASSERT(emit_module_find_symbol(&back, "p") >= 0);
+    emit_module_free(&back);
+}
+
+static int run_bin(const char *path) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execl(path, path, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (!WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+}
+
+static void test_macho_link(void) {
+    const char *a = "/tmp/fakecc_arm64_link_a.o";
+    const char *b = "/tmp/fakecc_arm64_link_b.o";
+    const char *outp = "/tmp/fakecc_arm64_link_out";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int add(int a, int b);\n"
+        "int main(void) { return add(20, 22); }\n",
+        a, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int add(int a, int b) { return a + b; }\n",
+        b, NULL), 0);
+    EmitModule ma, mb;
+    T_ASSERT_EQ_INT(emit_obj_read(a, &ma), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(b, &mb), 0);
+    EmitModule *mods[2] = { &ma, &mb };
+    T_ASSERT_EQ_INT(macho_link_objects(mods, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 42);
+    emit_module_free(&ma);
+    emit_module_free(&mb);
+
+    const char *g = "/tmp/fakecc_arm64_link_g.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int g = 7;\n"
+        "int main(void) { return g; }\n",
+        g, NULL), 0);
+    EmitModule mg;
+    T_ASSERT_EQ_INT(emit_obj_read(g, &mg), 0);
+    EmitModule *one[1] = { &mg };
+    T_ASSERT_EQ_INT(macho_link_objects(one, 1, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    emit_module_free(&mg);
+
+    const char *pa = "/tmp/fakecc_arm64_link_pa.o";
+    const char *pb = "/tmp/fakecc_arm64_link_pb.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern int g;\n"
+        "int *p = &g;\n"
+        "int main(void) { return *p; }\n",
+        pa, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int g = 7;\n",
+        pb, NULL), 0);
+    EmitModule mpa, mpb;
+    T_ASSERT_EQ_INT(emit_obj_read(pa, &mpa), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(pb, &mpb), 0);
+    EmitModule *pm[2] = { &mpa, &mpb };
+    T_ASSERT_EQ_INT(macho_link_objects(pm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    emit_module_free(&mpa);
+    emit_module_free(&mpb);
 }
 
 static void test_frame_addr(void) {
@@ -1209,6 +1300,7 @@ int main(void) {
     test_syscall();
     test_frame_addr();
     test_macho_obj();
+    test_macho_link();
     return t_finalize();
 }
 

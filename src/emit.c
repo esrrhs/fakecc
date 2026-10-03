@@ -723,8 +723,8 @@ static void prio_fill_slots(int **prio, size_t byte_off, size_t byte_sz, int p) 
 }
 
 int emit_obj_read(const char *path, EmitModule *m) {
-    /* Object-reader dispatch: the body below parses ELF ET_REL; the
-     * Mach-O reader branches here when it lands. */
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO)
+        return macho_read_object(path, m);
     if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
         fprintf(stderr,
                 "fakecc: object reading for target '%s' is not implemented yet\n",

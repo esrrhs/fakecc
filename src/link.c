@@ -1048,12 +1048,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     /* Linker dispatch: the arm64-macos backend emits an ad-hoc signed
      * Mach-O PIE; everything below is the ELF executable/DSO linker. */
     if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
-        /* Stage-1 (T5): one linear __text stream per code generation pass,
-         * entry stub at offset 0.  Cross-object references are not merged
-         * yet (T14 adds the object/relocation layer). */
-        /* Stage-1 links one module (driver compiles a single translation
-         * unit for arm64); its sections become the Mach-O segments. */
-        int rc = macho_write_exec(mods[0], macho_text_offset(), path);
+        /* A direct -c compile records symbols.  Those modules need the
+         * relocating link.  A single freestanding TU has none: its text
+         * already starts with the LC_MAIN stub. */
+        int from_objects = 0;
+        for (size_t i = 0; i < n; i++)
+            if (mods[i]->num_syms) from_objects = 1;
+        int rc;
+        if (from_objects)
+            rc = macho_link_objects(mods, n, path);
+        else
+            rc = macho_write_exec(mods[0], macho_text_offset(), path);
         if (rc != 0) exit(1);
         if (macho_codesign(path) != 0) exit(1);
         return;
