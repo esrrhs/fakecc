@@ -1756,6 +1756,27 @@ static void test_stop(void) {
         "  return 0; }", 0);
 }
 
+static void test_rfind(void) {
+    expect("rfind",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char *p = __builtin_memrchr(\"abca\", 97, 4);\n"
+        "  if (!p || p[0] != 97 || p[-1] != 99) return 1;\n"
+        "  if (__builtin_memrchr(\"abca\", 122, 4)) return 2;\n"
+        "  if (__builtin_memrchr(\"abca\", 97, 0)) return 3;\n"
+        "  char *q = __builtin_strchrnul(\"hello\", 108);\n"
+        "  if (!q || q[0] != 108) return 4;\n"
+        "  q = __builtin_strchrnul(\"hello\", 122);\n"
+        "  if (!q || *q != 0) return 5;\n"
+        "  q = __builtin_strchrnul(\"hello\", 0);\n"
+        "  if (!q || *q != 0 || q[-1] != 111) return 6;\n"
+        "  char *r = __builtin_rawmemchr(\"abX\", 88);\n"
+        "  if (!r || r[0] != 88) return 7;\n"
+        "  r = __builtin_rawmemchr(\"ab\", 0);\n"
+        "  if (!r || *r != 0) return 8;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1846,6 +1867,7 @@ int main(void) {
     test_bsd();
     test_case();
     test_stop();
+    test_rfind();
     test_trap();
     test_syscall();
     test_frame_addr();

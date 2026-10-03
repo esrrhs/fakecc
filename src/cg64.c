@@ -595,10 +595,15 @@ static int emit_scan_builtin(C64 *c, const char *name) {
  * The searched byte is masked to 8 bits.  x3/x4 are caller-saved. */
 static int emit_find_builtin(C64 *c, const char *name) {
     int is_memchr = strcmp(name, "memchr") == 0;
+    int is_memrchr = strcmp(name, "memrchr") == 0;
     int is_strchr = strcmp(name, "strchr") == 0 || strcmp(name, "index") == 0;
     int is_strrchr = strcmp(name, "strrchr") == 0 || strcmp(name, "rindex") == 0;
     int is_strnlen = strcmp(name, "strnlen") == 0;
-    if (!is_memchr && !is_strchr && !is_strrchr && !is_strnlen) return 0;
+    int is_strchrnul = strcmp(name, "strchrnul") == 0;
+    int is_rawmemchr = strcmp(name, "rawmemchr") == 0;
+    if (!is_memchr && !is_memrchr && !is_strchr && !is_strrchr && !is_strnlen
+        && !is_strchrnul && !is_rawmemchr)
+        return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
 
@@ -606,6 +611,41 @@ static int emit_find_builtin(C64 *c, const char *name) {
     int Lloop = a64_new_label(a);
     int Ldone = a64_new_label(a);
     int Lmiss = a64_new_label(a);
+
+    if (is_memrchr) {
+        /* Walk backward from s+n.  x4 is the cursor. */
+        int Lhit = a64_new_label(a);
+        a64_and_imm(a, A64_X1, A64_X1, 0xff, 0);
+        a64_add_reg(a, A64_X4, A64_X0, A64_X2, A64_LSL, 0, 1, 0);
+        a64_bind(a, Lloop);
+        a64_cmp_reg(a, A64_X4, A64_X0, 1);
+        a64_bcond(a, A64_EQ, Lmiss);
+        a64_sub_imm12(a, A64_X4, A64_X4, 1, 0, 1, 0);
+        a64_ldr8(a, A64_X3, A64_X4, 0);
+        a64_cmp_reg(a, A64_X3, A64_X1, 0);
+        a64_bcond(a, A64_EQ, Lhit);
+        a64_b(a, Lloop);
+        a64_bind(a, Lhit);
+        a64_mov_reg(a, A64_X0, A64_X4, 1);
+        a64_b(a, Ldone);
+        a64_bind(a, Lmiss);
+        a64_movz(a, A64_X0, 0, 0, 1);
+        a64_bind(a, Ldone);
+        return 1;
+    }
+    if (is_strchrnul || is_rawmemchr) {
+        a64_and_imm(a, A64_X1, A64_X1, 0xff, 0);
+        a64_bind(a, Lloop);
+        a64_ldr8(a, A64_X3, A64_X0, 0);
+        a64_cmp_reg(a, A64_X3, A64_X1, 0);
+        a64_bcond(a, A64_EQ, Ldone);
+        if (!is_rawmemchr)
+            a64_cbz(a, A64_X3, Ldone, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_b(a, Lloop);
+        a64_bind(a, Ldone);
+        return 1;
+    }
 
     if (is_strnlen) {
         a64_mov_reg(a, A64_X3, A64_X0, 1);
