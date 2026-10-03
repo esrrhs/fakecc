@@ -314,6 +314,8 @@ typedef struct {
     int   size;         /* bytes in .data/.bss */
     char *init_bytes;   /* NULL → zero-init (bss).  Otherwise owns `size` bytes. */
     int   is_readonly;  /* 1 = string literal → rodata; 0 = mutable → data */
+    int   is_const_obj; /* 1 = C const object.  arm64 may place it in __const
+                         * when it has no pointer fixup.  x86 ignores this. */
     int   is_static;    /* 1 = `static` global — LOCAL linkage */
     int   is_tls;       /* 1 = `__thread` / `_Thread_local` global — .tdata/.tbss */
     int   align;        /* byte alignment (`aligned(N)` / natural); ≥1 */

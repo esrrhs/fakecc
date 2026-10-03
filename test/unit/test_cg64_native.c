@@ -1338,6 +1338,12 @@ static void test_macho_link(void) {
     EmitModule mea, meb;
     T_ASSERT_EQ_INT(emit_obj_read(ea, &mea), 0);
     T_ASSERT_EQ_INT(emit_obj_read(eb, &meb), 0);
+    int cdef = emit_module_find_symbol(&meb, "c");
+    int adef = emit_module_find_symbol(&meb, "a");
+    T_ASSERT(cdef >= 0);
+    T_ASSERT(adef >= 0);
+    T_ASSERT_EQ_INT(meb.syms[cdef].shndx, SECT_RODATA);
+    T_ASSERT_EQ_INT(meb.syms[adef].shndx, SECT_DATA);
     int cu = emit_module_find_symbol(&mea, "c");
     T_ASSERT(cu >= 0);
     T_ASSERT_EQ_INT(mea.syms[cu].shndx, 0);
@@ -1423,6 +1429,26 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(run_bin(outp), 7);
     emit_module_free(&maa);
     emit_module_free(&mab);
+
+    const char *pc = "/tmp/fakecc_arm64_link_pc.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "static int g = 1;\n"
+        "static int *const cp = &g;\n"
+        "static const int *pp = &g;\n"
+        "static const int k = 4;\n"
+        "int main(void) { return *cp + *pp + k; }\n",
+        pc, NULL), 0);
+    EmitModule mpc;
+    T_ASSERT_EQ_INT(emit_obj_read(pc, &mpc), 0);
+    int ksym = emit_module_find_symbol(&mpc, "k");
+    int cpsym = emit_module_find_symbol(&mpc, "cp");
+    int ppsym = emit_module_find_symbol(&mpc, "pp");
+    T_ASSERT(ksym >= 0 && cpsym >= 0 && ppsym >= 0);
+    T_ASSERT_EQ_INT(mpc.syms[ksym].shndx, SECT_RODATA);
+    T_ASSERT_EQ_INT(mpc.syms[cpsym].shndx, SECT_DATA);
+    T_ASSERT_EQ_INT(mpc.syms[ppsym].shndx, SECT_DATA);
+    emit_module_free(&mpc);
 }
 
 static void test_frame_addr(void) {

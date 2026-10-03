@@ -4170,8 +4170,10 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                    "arm64 backend: thread-local variable not supported yet");
         /* A readonly global that contains a pointer must live in __DATA:
          * dyld chained fixups are applied to writable pages, and
-         * __TEXT,__const is mapped read-only/execute. */
-        if (g->is_readonly && !g->num_fixups) {
+         * __TEXT,__const is mapped read-only/execute.  A C const object
+         * with no fixup is the same kind of bytes as a string literal. */
+        if ((g->is_readonly || (g->is_const_obj && g->init_bytes))
+            && !g->num_fixups) {
             while (out->rodata.len % al) { char z = 0; buffer_append(&out->rodata, &z, 1); }
             c.gsect[gi] = G_RO;
             c.goff[gi] = out->rodata.len;

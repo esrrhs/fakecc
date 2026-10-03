@@ -233,6 +233,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->size = size;
     g->init_bytes = init_bytes;   /* takes ownership */
     g->is_readonly = is_readonly;
+    g->is_const_obj = 0;
     g->is_static = is_static;
     g->is_tls = is_tls;
     g->align = 8;
@@ -241,6 +242,14 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->num_fixups = 0;
     g->cap_fixups = 0;
     return g;
+}
+
+/* `const int`, `const int a[]`, and deeper arrays.  A pointer to const
+ * is not a const object: the pointer itself can be reseated. */
+static int type_is_const_obj(Type t) {
+    while (t.kind == TY_ARRAY && t.elem_type)
+        t = *t.elem_type;
+    return t.is_const;
 }
 
 /* Record a pointer-slot fixup on global `g`: the slot at byte offset `offset`
@@ -9386,6 +9395,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 if (s->u.decl.align > al) al = s->u.decl.align;
                 if (al > 0) sg->align = al;
             }
+            if (type_is_const_obj(dty)) sg->is_const_obj = 1;
             if (s->u.decl.init) {
                 pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
                           s->u.decl.name, s->loc, sg);
@@ -11586,6 +11596,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             if (s->u.decl.align > al) al = s->u.decl.align;
             if (al > 0) g->align = al;
         }
+        if (type_is_const_obj(s->u.decl.type)) g->is_const_obj = 1;
         if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);
