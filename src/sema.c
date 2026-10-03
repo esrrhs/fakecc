@@ -1323,7 +1323,7 @@ static Type check_expr_inner(Expr *e) {
             const char *bname = e->u.var.name;
             int math_narg = 0, math_w = 0;
             Type ret = type_default_int();
-            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_debugtrap") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)
+            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_debugtrap") == 0 || strcmp(bname, "__builtin_assume") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)
                 ret = type_make_void();
             else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_memmove") == 0 || strcmp(bname, "__builtin_mempcpy") == 0 || strcmp(bname, "__builtin_memccpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "__builtin_alloca_with_align") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0 || strcmp(bname, "__builtin___memcpy_chk") == 0 || strcmp(bname, "__builtin___memmove_chk") == 0 || strcmp(bname, "__builtin___mempcpy_chk") == 0 || strcmp(bname, "__builtin___memset_chk") == 0)
                 ret = type_make_ptr(type_make_void());
@@ -1701,10 +1701,23 @@ static Type check_expr_inner(Expr *e) {
             return type_clone(e->type);
         }
         if (e->u.call.callee->kind == EX_VAR &&
+            strcmp(e->u.call.callee->u.var.name, "__builtin_assume") == 0) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_assume takes 1 argument");
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            type_free(&at);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
             (strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_align_down") == 0 ||
              strcmp(e->u.call.callee->u.var.name, "__builtin_assume_aligned") == 0 ||
-             strcmp(e->u.call.callee->u.var.name, "__builtin_expect_with_probability") == 0)) {
+             strcmp(e->u.call.callee->u.var.name, "__builtin_expect_with_probability") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_unpredictable") == 0)) {
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "builtin takes at least 1 argument");

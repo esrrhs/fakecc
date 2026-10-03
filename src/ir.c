@@ -6455,6 +6455,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 lower_expr(fn, st, e->u.call.args.data[i]);
             return -1;
         }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_assume") == 0) {
+            /* The condition is evaluated for its side effects.  A false
+             * condition is undefined; the freestanding image does not trap. */
+            if (e->u.call.args.len >= 1)
+                lower_expr(fn, st, e->u.call.args.data[0]);
+            return -1;
+        }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_unpredictable") == 0) {
+            if (e->u.call.args.len >= 1)
+                return lower_expr(fn, st, e->u.call.args.data[0]);
+            return -1;
+        }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_frame_address") == 0) {
             long long level = 0;
             if (e->u.call.args.len > 0) fold_const_int(e->u.call.args.data[0], &level);

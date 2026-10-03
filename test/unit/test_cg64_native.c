@@ -2212,6 +2212,22 @@ static void test_trap(void) {
         "int main(void) { if (0) __builtin_debugtrap(); return 7; }", 7);
 }
 
+static void test_hint(void) {
+    expect("hint",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 1;\n"
+        "  __builtin_assume(x = 2);\n"
+        "  if (x != 2) return 1;\n"
+        "  if (__builtin_unpredictable(7) != 7) return 2;\n"
+        "  int z = 3;\n"
+        "  if (__builtin_unpredictable(z = 4) != 4 || z != 4) return 3;\n"
+        "  char buf[4];\n"
+        "  char *p = __builtin_unpredictable(buf);\n"
+        "  if (p != buf) return 4;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2274,6 +2290,7 @@ int main(void) {
     test_sat();
     test_nans();
     test_trap();
+    test_hint();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
