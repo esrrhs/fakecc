@@ -725,6 +725,43 @@ static int macho_sym_pass(const EmitSymbol *s) {
 }
 
 static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
+                               const int *nmap, size_t nsyms);
+
+static size_t reloc_count_sh(const EmitReloc *rels, size_t n, uint16_t sh) {
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++)
+        if (rels[i].shndx == sh) c++;
+    return c;
+}
+
+/* pack_ctor stores init/fini slots as 16-byte records (pointer, priority). */
+static void macho_write_relocs_sh(Buffer *out, const EmitReloc *rels, size_t n,
+                                  uint16_t sh, const int *nmap, size_t nsyms,
+                                  int pack_ctor) {
+    size_t nt = reloc_count_sh(rels, n, sh);
+    if (!nt) return;
+    EmitReloc *tmp = xmalloc(nt * sizeof *tmp);
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (rels[i].shndx != sh) continue;
+        tmp[k] = rels[i];
+        if (pack_ctor) tmp[k].offset = (rels[i].offset / 8) * 16;
+        k++;
+    }
+    macho_write_relocs(out, tmp, nt, nmap, nsyms);
+    free(tmp);
+}
+
+static void append_hook_section(Buffer *out, const Buffer *arr, const int *prio) {
+    size_t n = arr->len / 8;
+    for (size_t i = 0; i < n; i++) {
+        buffer_append(out, arr->data + i * 8, 8);
+        int64_t p = prio ? (int64_t)prio[i] : (int64_t)INIT_PRIO_DEFAULT;
+        buffer_append(out, (const char *)&p, 8);
+    }
+}
+
+static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
                                const int *nmap, size_t nsyms) {
     size_t *sorted = n ? xmalloc(n * sizeof(size_t)) : NULL;
     for (size_t i = 0; i < n; i++) sorted[i] = i;
@@ -767,8 +804,13 @@ int macho_write_object(const EmitModule *em, const char *path) {
     int has_ro = em->rodata.len > 0;
     int has_data = em->data.len > 0;
     int has_bss = em->bss_size > 0;
+    int has_init = em->init_array.len > 0;
+    int has_fini = em->fini_array.len > 0;
+    size_t init_bytes = (em->init_array.len / 8) * 16;
+    size_t fini_bytes = (em->fini_array.len / 8) * 16;
     uint32_t nsects = 1u + (uint32_t)has_ro + (uint32_t)has_data
-                    + (uint32_t)has_bss;
+                    + (uint32_t)has_bss + (uint32_t)has_init
+                    + (uint32_t)has_fini;
     uint32_t seg_cmdsize = (uint32_t)sizeof(segment_command_64)
                          + nsects * (uint32_t)sizeof(section_64);
     uint32_t sizeofcmds = seg_cmdsize
@@ -819,6 +861,23 @@ int macho_write_object(const EmitModule *em, const char *path) {
         sect_addr[SECT_BSS] = vm;
         vm += em->bss_size;
     }
+    uint64_t init_off = 0, fini_off = 0, init_vm = 0, fini_vm = 0;
+    if (has_init) {
+        vm = align_up_u64(vm, 8);
+        file = align_up_u64(file, 8);
+        init_vm = vm;
+        init_off = file;
+        vm += init_bytes;
+        file += init_bytes;
+    }
+    if (has_fini) {
+        vm = align_up_u64(vm, 8);
+        file = align_up_u64(file, 8);
+        fini_vm = vm;
+        fini_off = file;
+        vm += fini_bytes;
+        file += fini_bytes;
+    }
     uint64_t content_end = file;
     uint64_t vm_end = vm;
 
@@ -839,12 +898,21 @@ int macho_write_object(const EmitModule *em, const char *path) {
         strsize += 1 + strlen(s->name) + 1; /* leading '_' */
     }
     size_t nreloc = em->num_relocs;
-    size_t nreloc_data = em->num_data_relocs;
+    size_t nreloc_data = reloc_count_sh(em->data_relocs, em->num_data_relocs,
+                                        SECT_DATA);
+    size_t nreloc_init = reloc_count_sh(em->data_relocs, em->num_data_relocs,
+                                        SECT_INIT_ARRAY);
+    size_t nreloc_fini = reloc_count_sh(em->data_relocs, em->num_data_relocs,
+                                        SECT_FINI_ARRAY);
     uint64_t rel_at = align_up_u64(content_end, 8);
     uint64_t reloff = nreloc ? rel_at : 0;
     rel_at += nreloc * 8;
     uint64_t data_reloff = nreloc_data ? rel_at : 0;
     rel_at += nreloc_data * 8;
+    uint64_t init_reloff = nreloc_init ? rel_at : 0;
+    rel_at += nreloc_init * 8;
+    uint64_t fini_reloff = nreloc_fini ? rel_at : 0;
+    rel_at += nreloc_fini * 8;
     uint64_t symoff = align_up_u64(rel_at, 8);
     uint64_t stroff = symoff + nsyms * sizeof(nlist_64);
 
@@ -917,6 +985,30 @@ int macho_write_object(const EmitModule *em, const char *path) {
         sec.flags = S_ZEROFILL;
         buffer_append(&out, (const char *)&sec, sizeof sec);
     }
+    if (has_init) {
+        memset(&sec, 0, sizeof sec);
+        memcpy(sec.sectname, "__init_array", 12);
+        memcpy(sec.segname, "__DATA", 6);
+        sec.addr = init_vm;
+        sec.size = init_bytes;
+        sec.offset = (uint32_t)init_off;
+        sec.align = 3;
+        sec.reloff = nreloc_init ? (uint32_t)init_reloff : 0;
+        sec.nreloc = (uint32_t)nreloc_init;
+        buffer_append(&out, (const char *)&sec, sizeof sec);
+    }
+    if (has_fini) {
+        memset(&sec, 0, sizeof sec);
+        memcpy(sec.sectname, "__fini_array", 12);
+        memcpy(sec.segname, "__DATA", 6);
+        sec.addr = fini_vm;
+        sec.size = fini_bytes;
+        sec.offset = (uint32_t)fini_off;
+        sec.align = 3;
+        sec.reloff = nreloc_fini ? (uint32_t)fini_reloff : 0;
+        sec.nreloc = (uint32_t)nreloc_fini;
+        buffer_append(&out, (const char *)&sec, sizeof sec);
+    }
 
     build_version_command bv;
     memset(&bv, 0, sizeof bv);
@@ -963,9 +1055,21 @@ int macho_write_object(const EmitModule *em, const char *path) {
         while (out.len < data_off) { char z = 0; buffer_append(&out, &z, 1); }
         buffer_append(&out, em->data.data, em->data.len);
     }
-    while (out.len < (nreloc ? reloff : (nreloc_data ? data_reloff : symoff))) {
-        char z = 0;
-        buffer_append(&out, &z, 1);
+    if (has_init) {
+        while (out.len < init_off) { char z = 0; buffer_append(&out, &z, 1); }
+        append_hook_section(&out, &em->init_array, em->init_prio);
+    }
+    if (has_fini) {
+        while (out.len < fini_off) { char z = 0; buffer_append(&out, &z, 1); }
+        append_hook_section(&out, &em->fini_array, em->fini_prio);
+    }
+    {
+        uint64_t rel_start = symoff;
+        if (nreloc) rel_start = reloff;
+        else if (nreloc_data) rel_start = data_reloff;
+        else if (nreloc_init) rel_start = init_reloff;
+        else if (nreloc_fini) rel_start = fini_reloff;
+        while (out.len < rel_start) { char z = 0; buffer_append(&out, &z, 1); }
     }
 
     /* nlist order is locals then globals.  Relocations name that index. */
@@ -984,7 +1088,12 @@ int macho_write_object(const EmitModule *em, const char *path) {
         }
     }
     macho_write_relocs(&out, em->relocs, nreloc, nmap, em->num_syms);
-    macho_write_relocs(&out, em->data_relocs, nreloc_data, nmap, em->num_syms);
+    macho_write_relocs_sh(&out, em->data_relocs, em->num_data_relocs, SECT_DATA,
+                          nmap, em->num_syms, 0);
+    macho_write_relocs_sh(&out, em->data_relocs, em->num_data_relocs,
+                          SECT_INIT_ARRAY, nmap, em->num_syms, 1);
+    macho_write_relocs_sh(&out, em->data_relocs, em->num_data_relocs,
+                          SECT_FINI_ARRAY, nmap, em->num_syms, 1);
     while (out.len < symoff) { char z = 0; buffer_append(&out, &z, 1); }
 
     /* Locals first, then globals, matching LC_DYSYMTAB.  String offsets
@@ -1123,6 +1232,10 @@ int macho_read_object(const char *path, EmitModule *em) {
                 else if (strcmp(rs->sect, "__const") == 0) rs->shndx = SECT_RODATA;
                 else if (strcmp(rs->sect, "__data") == 0) rs->shndx = SECT_DATA;
                 else if (strcmp(rs->sect, "__bss") == 0) rs->shndx = SECT_BSS;
+                else if (strcmp(rs->sect, "__init_array") == 0)
+                    rs->shndx = SECT_INIT_ARRAY;
+                else if (strcmp(rs->sect, "__fini_array") == 0)
+                    rs->shndx = SECT_FINI_ARRAY;
             }
         } else if (cmd == LC_SYMTAB && cmdsize >= sizeof(symtab_command)) {
             symtab_command sy;
@@ -1139,6 +1252,29 @@ int macho_read_object(const char *path, EmitModule *em) {
     for (int i = 0; i < nsec; i++) {
         RSec *rs = &secs[i];
         if (rs->shndx == 0 || (rs->flags & S_ZEROFILL)) continue;
+        if (rs->shndx == SECT_INIT_ARRAY || rs->shndx == SECT_FINI_ARRAY) {
+            if ((uint64_t)rs->offset + rs->size > (uint64_t)fsize) {
+                free(buf);
+                emit_module_free(em);
+                fprintf(stderr, "fakecc: '%s' section extends past the file\n", path);
+                return -1;
+            }
+            int fini = rs->shndx == SECT_FINI_ARRAY;
+            Buffer *arr = fini ? &em->fini_array : &em->init_array;
+            int **prio = fini ? &em->fini_prio : &em->init_prio;
+            const unsigned char *bytes = buf + rs->offset;
+            size_t base = arr->len / 8;
+            size_t nslot = (size_t)rs->size / 16;
+            for (size_t s = 0; s < nslot; s++) {
+                buffer_append(arr, (const char *)bytes + s * 16, 8);
+                int64_t pv = 0;
+                memcpy(&pv, bytes + s * 16 + 8, 8);
+                *prio = realloc(*prio, (base + s + 1) * sizeof(int));
+                if (!*prio) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                (*prio)[base + s] = (int)pv;
+            }
+            continue;
+        }
         if ((uint64_t)rs->offset + rs->size > (uint64_t)fsize) {
             free(buf);
             emit_module_free(em);
@@ -1217,7 +1353,11 @@ int macho_read_object(const char *path, EmitModule *em) {
                 memcpy(&full, em->data.data + addr, 8);
                 addend = (int32_t)full;
             }
-            if (rs->shndx == SECT_DATA)
+            if (rs->shndx == SECT_INIT_ARRAY || rs->shndx == SECT_FINI_ARRAY) {
+                size_t slot = ((size_t)addr / 16) * 8;
+                emit_module_add_data_reloc(em, slot, type, (int)sym, 0);
+                em->data_relocs[em->num_data_relocs - 1].shndx = rs->shndx;
+            } else if (rs->shndx == SECT_DATA)
                 emit_module_add_data_reloc(em, (size_t)addr, type, (int)sym, addend);
             else
                 emit_module_add_reloc(em, (size_t)addr, type, (int)sym, addend);
@@ -1257,14 +1397,93 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     EmitModule out;
     emit_module_init(&out);
 
+    typedef struct { int prio; size_t mod; uint32_t sym; } HookRef;
+    HookRef *ctors = NULL, *dtors = NULL;
+    size_t nctors = 0, ndtors = 0, capc = 0, capd = 0;
+    for (size_t i = 0; i < n; i++) {
+        EmitModule *m = mods[i];
+        for (size_t ri = 0; ri < m->num_data_relocs; ri++) {
+            EmitReloc *r = &m->data_relocs[ri];
+            int is_init = r->shndx == SECT_INIT_ARRAY;
+            int is_fini = r->shndx == SECT_FINI_ARRAY;
+            if (!is_init && !is_fini) continue;
+            size_t slot = r->offset / 8;
+            int prio = INIT_PRIO_DEFAULT;
+            int *pt = is_init ? m->init_prio : m->fini_prio;
+            size_t nslot = (is_init ? m->init_array.len : m->fini_array.len) / 8;
+            if (pt && slot < nslot) prio = pt[slot];
+            HookRef **arr = is_init ? &ctors : &dtors;
+            size_t *cnt = is_init ? &nctors : &ndtors;
+            size_t *cap = is_init ? &capc : &capd;
+            if (*cnt == *cap) {
+                *cap = *cap ? *cap * 2 : 4;
+                *arr = xrealloc(*arr, *cap * sizeof(HookRef));
+            }
+            (*arr)[*cnt].prio = prio;
+            (*arr)[*cnt].mod = i;
+            (*arr)[*cnt].sym = r->sym;
+            (*cnt)++;
+        }
+    }
+    for (size_t i = 1; i < nctors; i++) {
+        HookRef key = ctors[i];
+        size_t j = i;
+        while (j > 0 && ctors[j - 1].prio > key.prio) {
+            ctors[j] = ctors[j - 1];
+            j--;
+        }
+        ctors[j] = key;
+    }
+    for (size_t i = 1; i < ndtors; i++) {
+        HookRef key = dtors[i];
+        size_t j = i;
+        while (j > 0 && dtors[j - 1].prio > key.prio) {
+            dtors[j] = dtors[j - 1];
+            j--;
+        }
+        dtors[j] = key;
+    }
+
+    int *ctor_at = nctors ? xmalloc(nctors * sizeof(int)) : NULL;
+    int *dtor_at = ndtors ? xmalloc(ndtors * sizeof(int)) : NULL;
     A64Asm stub;
     a64_init(&stub);
-    a64_stp64(&stub, A64_FP, A64_LR, A64_SP, -16, A64_PAIR_PRE);
-    a64_add_imm12(&stub, A64_FP, A64_SP, 0, 0, 1, 0);
-    uint32_t bl_at = (uint32_t)stub.code.len;
-    a64_word(&stub, 0x94000000u);
-    a64_movz(&stub, A64_X16, 1, 0, 1);
-    a64_svc(&stub, 0x80);
+    int main_at;
+    if (nctors == 0 && ndtors == 0) {
+        a64_stp64(&stub, A64_FP, A64_LR, A64_SP, -16, A64_PAIR_PRE);
+        a64_add_imm12(&stub, A64_FP, A64_SP, 0, 0, 1, 0);
+        main_at = (int)stub.code.len;
+        a64_word(&stub, 0x94000000u);
+        a64_movz(&stub, A64_X16, 1, 0, 1);
+        a64_svc(&stub, 0x80);
+    } else {
+        /* Keep argc/argv/envp across constructors, and main's result
+         * across destructors.  Destructors run highest priority first. */
+        a64_stp64(&stub, A64_FP, A64_LR, A64_SP, -48, A64_PAIR_PRE);
+        a64_add_imm12(&stub, A64_FP, A64_SP, 0, 0, 1, 0);
+        a64_stp64(&stub, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);
+        a64_stp64(&stub, A64_X21, A64_X22, A64_FP, 32, A64_PAIR_OFFSET);
+        a64_mov_reg(&stub, A64_X19, A64_X0, 1);
+        a64_mov_reg(&stub, A64_X20, A64_X1, 1);
+        a64_mov_reg(&stub, A64_X21, A64_X2, 1);
+        for (size_t i = 0; i < nctors; i++) {
+            ctor_at[i] = (int)stub.code.len;
+            a64_word(&stub, 0x94000000u);
+        }
+        a64_mov_reg(&stub, A64_X0, A64_X19, 1);
+        a64_mov_reg(&stub, A64_X1, A64_X20, 1);
+        a64_mov_reg(&stub, A64_X2, A64_X21, 1);
+        main_at = (int)stub.code.len;
+        a64_word(&stub, 0x94000000u);
+        a64_mov_reg(&stub, A64_X22, A64_X0, 1);
+        for (size_t i = 0; i < ndtors; i++) {
+            dtor_at[i] = (int)stub.code.len;
+            a64_word(&stub, 0x94000000u);
+        }
+        a64_mov_reg(&stub, A64_X0, A64_X22, 1);
+        a64_movz(&stub, A64_X16, 1, 0, 1);
+        a64_svc(&stub, 0x80);
+    }
     buffer_append(&out.text, stub.code.data, stub.code.len);
     a64_free(&stub);
 
@@ -1445,6 +1664,9 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                               : sh == SECT_DATA ? data_off
                               : bss_off;
                 uint64_t tgt = base + off + (uint64_t)(int64_t)r->addend;
+                if (is_data[pass] && (r->shndx == SECT_INIT_ARRAY ||
+                                      r->shndx == SECT_FINI_ARRAY))
+                    continue;
                 if (!is_data[pass]) {
                     size_t site = text_base[i] + r->offset;
                     if (site + 4 > out.text.len) {
@@ -1478,15 +1700,45 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     }
 
     if (rc == 0) {
-        uint64_t pc = macho_text_offset() + bl_at;
-        uint64_t tgt = macho_text_offset() + main_off;
         uint32_t w = 0;
+        uint64_t pc = macho_text_offset() + (uint64_t)main_at;
+        uint64_t tgt = macho_text_offset() + main_off;
         if (patch_bl(&w, pc, tgt) != 0)
             rc = -1;
-        else {
-            memcpy(out.text.data + bl_at, &w, 4);
-            rc = macho_write_exec(&out, macho_text_offset(), path);
+        else
+            memcpy(out.text.data + main_at, &w, 4);
+        for (size_t i = 0; i < nctors && rc == 0; i++) {
+            EmitModule *m = mods[ctors[i].mod];
+            uint32_t sy = ctors[i].sym;
+            if (sy >= m->num_syms || !adj[ctors[i].mod] ||
+                !adj[ctors[i].mod][sy].defined ||
+                adj[ctors[i].mod][sy].sh != SECT_TEXT) {
+                fprintf(stderr, "fakecc: constructor is not a function\n");
+                rc = -1;
+                break;
+            }
+            pc = macho_text_offset() + (uint64_t)ctor_at[i];
+            tgt = macho_text_offset() + adj[ctors[i].mod][sy].off;
+            if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
+            memcpy(out.text.data + ctor_at[i], &w, 4);
         }
+        for (size_t i = 0; i < ndtors && rc == 0; i++) {
+            HookRef *h = &dtors[ndtors - 1 - i];
+            EmitModule *m = mods[h->mod];
+            if (h->sym >= m->num_syms || !adj[h->mod] ||
+                !adj[h->mod][h->sym].defined ||
+                adj[h->mod][h->sym].sh != SECT_TEXT) {
+                fprintf(stderr, "fakecc: destructor is not a function\n");
+                rc = -1;
+                break;
+            }
+            pc = macho_text_offset() + (uint64_t)dtor_at[i];
+            tgt = macho_text_offset() + adj[h->mod][h->sym].off;
+            if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
+            memcpy(out.text.data + dtor_at[i], &w, 4);
+        }
+        if (rc == 0)
+            rc = macho_write_exec(&out, macho_text_offset(), path);
     }
 
     for (size_t i = 0; i < n; i++) free(adj[i]);
@@ -1494,6 +1746,10 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     free(text_base); free(ro_base); free(data_base); free(bss_base);
     for (size_t g = 0; g < ng; g++) free(gdefs[g].name);
     free(gdefs);
+    free(ctors);
+    free(dtors);
+    free(ctor_at);
+    free(dtor_at);
     emit_module_free(&out);
     return rc;
 }

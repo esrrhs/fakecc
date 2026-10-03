@@ -1248,6 +1248,48 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(run_bin(outp), 4);
     emit_module_free(&mta);
     emit_module_free(&mtb);
+
+    const char *ca = "/tmp/fakecc_arm64_link_ca.o";
+    const char *cb = "/tmp/fakecc_arm64_link_cb.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "__attribute__((constructor(200))) void late(void){ __syscall(1,21); }\n"
+        "int main(void) { return 0; }\n",
+        ca, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "__attribute__((constructor(100))) void early(void){ __syscall(1,11); }\n",
+        cb, NULL), 0);
+    EmitModule mca, mcb;
+    T_ASSERT_EQ_INT(emit_obj_read(ca, &mca), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(cb, &mcb), 0);
+    T_ASSERT(mca.init_array.len == 8);
+    T_ASSERT_EQ_INT(mca.init_prio[0], 200);
+    T_ASSERT_EQ_INT(mcb.init_prio[0], 100);
+    EmitModule *cm2[2] = { &mca, &mcb };
+    T_ASSERT_EQ_INT(macho_link_objects(cm2, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 11);
+    emit_module_free(&mca);
+    emit_module_free(&mcb);
+
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "__attribute__((destructor(100))) void a(void){ __syscall(1,31); }\n"
+        "int main(void) { return 9; }\n",
+        ca, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "__attribute__((destructor(200))) void b(void){ __syscall(1,32); }\n",
+        cb, NULL), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(ca, &mca), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(cb, &mcb), 0);
+    EmitModule *dm[2] = { &mca, &mcb };
+    T_ASSERT_EQ_INT(macho_link_objects(dm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 32);
+    emit_module_free(&mca);
+    emit_module_free(&mcb);
 }
 
 static void test_frame_addr(void) {

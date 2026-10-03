@@ -2378,6 +2378,26 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_module_add_symbol(out, fn->name,
                                    fn->is_static ? 0 : 1, 2 /* STT_FUNC */,
                                    (uint16_t)SECT_TEXT, start, end - start);
+            if (fn->is_constructor || fn->is_destructor) {
+                int fsym = emit_module_find_symbol(out, fn->name);
+                Buffer *arr = fn->is_constructor ? &out->init_array
+                                                 : &out->fini_array;
+                int **prio = fn->is_constructor ? &out->init_prio
+                                                : &out->fini_prio;
+                size_t slot = arr->len;
+                uint64_t z = 0;
+                buffer_append(arr, (const char *)&z, 8);
+                emit_module_add_data_reloc(out, slot, 0 /* UNSIGNED */, fsym, 0);
+                out->data_relocs[out->num_data_relocs - 1].shndx =
+                    fn->is_constructor ? (uint16_t)SECT_INIT_ARRAY
+                                       : (uint16_t)SECT_FINI_ARRAY;
+                size_t nslot = arr->len / 8;
+                *prio = realloc(*prio, nslot * sizeof(int));
+                if (!*prio) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                (*prio)[nslot - 1] = fn->is_constructor
+                    ? (fn->ctor_prio ? fn->ctor_prio : INIT_PRIO_DEFAULT)
+                    : (fn->dtor_prio ? fn->dtor_prio : INIT_PRIO_DEFAULT);
+            }
         }
         int *gsym = NULL;
         if (ir->globals.len)
