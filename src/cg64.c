@@ -556,6 +556,14 @@ static void emit_va(C64 *c, const IRInst *s) {
     if (sz == 0) {
         int w = s->width ? (int)s->width : 8;
         if (w != 1 && w != 2 && w != 4 && w != 8) w = 8;
+        if (scalar_fp_val(c, s->dst)) {
+            int h = fp_home(c, s->dst);
+            int d = h >= 0 ? h : FSCR;
+            if (w == 8) a64_ldr_d(a, d, cur, 0);
+            else a64_ldr_s(a, d, cur, 0);
+            if (h < 0) commit_fp(c, s->dst, d);
+            return;
+        }
         int d = dst_reg(c, s->dst);
         int tmp = d;
         if (tmp == cur || tmp == ap)

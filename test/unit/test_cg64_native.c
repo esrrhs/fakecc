@@ -690,6 +690,18 @@ static void test_varargs(void) {
         "int first(int n, ...){ va_list ap; va_start(ap, n);\n"
         " int x=va_arg(ap, int); va_end(ap); return x; }\n"
         "int main(){ return first(1, -3); }", (unsigned char)-3);
+    expect("va_dbl",
+        "package main;\n"
+        "int mixed(int n, ...){ va_list ap; va_start(ap, n);\n"
+        " int a=va_arg(ap, int); double b=va_arg(ap, double);\n"
+        " va_end(ap); return a+(int)b; }\n"
+        "int main(){ double x=3.5; return mixed(2, 5, x); }", 8);
+    expect("va_dbl_const",
+        "package main;\n"
+        "int mixed(int n, ...){ va_list ap; va_start(ap, n);\n"
+        " int a=va_arg(ap, int); double b=va_arg(ap, double);\n"
+        " va_end(ap); return a+(int)b; }\n"
+        "int main(){ return mixed(2, 5, 3.5); }", 8);
     expect("va_sum10",
         "package main;\n"
         "int sum(int n, ...){ va_list ap; va_start(ap, n); int s=0;\n"

@@ -1531,8 +1531,9 @@ static int darwin_unnamed_va(int variadic, int index, int nparams, int fake) {
     return !abi_sret_uses_gp() && variadic && index >= nparams;
 }
 
-/* A variadic double/float constant becomes the integer bit pattern clang
- * stores in the stack slot.  A computed float still needs T12. */
+/* A variadic float constant is rewritten to the integer bits clang stores
+ * in the 8-byte stack slot.  A computed value stays in the V-reg file and
+ * is stored with STR S/D at the call. */
 static IRValue va_float_bits(IRFunction *fn, IRValue v, SourceLoc loc) {
     if (!get_value_is_float(fn, v)) return v;
     IRValue cur = v;
@@ -1554,8 +1555,6 @@ static IRValue va_float_bits(IRFunction *fn, IRValue v, SourceLoc loc) {
         }
         break;
     }
-    die_at(loc.file ? loc.file : "<arm64>", loc.line, loc.col,
-           "arm64 variadic non-constant float is not supported yet");
     return v;
 }
 
