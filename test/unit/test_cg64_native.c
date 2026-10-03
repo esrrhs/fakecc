@@ -1084,6 +1084,22 @@ static void test_macho_obj(void) {
     uint32_t nreloc = 0;
     memcpy(&nreloc, sec + 60, 4);
     T_ASSERT_EQ_INT((int)nreloc, 2);
+
+    const char *ppath = "/tmp/fakecc_arm64_pobj.o";
+    rc = fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int g = 1;\n"
+        "int *p = &g;\n",
+        ppath, NULL);
+    T_ASSERT_EQ_INT(rc, 0);
+    f = fopen(ppath, "rb");
+    T_ASSERT(f != NULL);
+    /* header, segment, __text, then __data. nreloc is 60 bytes in. */
+    T_ASSERT_EQ_INT((int)fseek(f, 32 + 72 + 80 + 60, SEEK_SET), 0);
+    uint32_t dnreloc = 0;
+    T_ASSERT_EQ_INT((int)fread(&dnreloc, 4, 1, f), 1);
+    fclose(f);
+    T_ASSERT_EQ_INT((int)dnreloc, 1);
 }
 
 static void test_frame_addr(void) {

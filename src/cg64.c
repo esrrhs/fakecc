@@ -2292,9 +2292,6 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     /* Patch ADRP+ADD pairs and record dyld rebases for pointer
      * initializers now that text length (and so section placement) is
      * known.  An object file cannot bake in the executable layout. */
-    if (emit_object_mode() && c.npfix)
-        die_at("<arm64>", 0, 0,
-               "arm64 object file: pointer initializers are not supported yet");
     if (!emit_object_mode() && (c.ngfix || c.npfix)) {
         uint64_t ro_off, data_off, bss_off;
         macho_section_offsets(out, out->text.len, &ro_off, &data_off, &bss_off);
@@ -2389,6 +2386,26 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_module_add_reloc(out, c.gfix[i].at, 3 /* PAGE21 */, si, 0);
             emit_module_add_reloc(out, c.gfix[i].at + 4, 4 /* PAGEOFF12 */,
                                   si, 0);
+        }
+        /* Pointer slots in __data: ARM64_RELOC_UNSIGNED, addend in the
+         * eight bytes at the slot. */
+        for (size_t i = 0; i < c.npfix; i++) {
+            int si = emit_module_find_symbol(out, c.pfix[i].sym);
+            if (si < 0)
+                si = emit_module_add_undefined(out, c.pfix[i].sym);
+            int gi = c.pfix[i].gidx;
+            if (!c.gsect || gi < 0 || c.gsect[gi] != G_DATA) {
+                die_at("<arm64>", 0, 0,
+                       "arm64 object file: pointer initializer is not in __data");
+                continue;
+            }
+            size_t off = c.goff[gi] + (size_t)c.pfix[i].slot_off;
+            if (off + 8 <= out->data.len) {
+                int64_t add = c.pfix[i].addend;
+                memcpy(out->data.data + off, &add, 8);
+            }
+            emit_module_add_data_reloc(out, off, 0 /* UNSIGNED */, si,
+                                       c.pfix[i].addend);
         }
         free(gsym);
     }

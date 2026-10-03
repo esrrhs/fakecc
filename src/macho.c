@@ -710,6 +710,49 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     return 0;
 }
 
+static int macho_sym_ok(const EmitSymbol *s, const uint8_t *sect_of) {
+    if (!s->name) return 0;
+    if (s->shndx == SECT_UNDEF) return 1;
+    return s->shndx < 9 && sect_of[s->shndx];
+}
+
+/* 0 local, 1 defined external, 2 undefined external. */
+static int macho_sym_pass(const EmitSymbol *s) {
+    if (s->shndx == SECT_UNDEF) return 2;
+    return s->binding == 0 ? 0 : 1;
+}
+
+static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
+                               const int *nmap, size_t nsyms) {
+    size_t *sorted = n ? xmalloc(n * sizeof(size_t)) : NULL;
+    for (size_t i = 0; i < n; i++) sorted[i] = i;
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = i + 1; j < n; j++) {
+            if (rels[sorted[j]].offset > rels[sorted[i]].offset) {
+                size_t t = sorted[i];
+                sorted[i] = sorted[j];
+                sorted[j] = t;
+            }
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        const EmitReloc *r = &rels[sorted[i]];
+        int sym = (nmap && r->sym < nsyms) ? nmap[r->sym] : 0;
+        if (sym < 0) sym = 0;
+        uint32_t pcrel = r->type == 3 ? 1u : 0u;
+        uint32_t length = r->type == 0 ? 3u : 2u; /* UNSIGNED is 8 bytes */
+        uint32_t word = ((uint32_t)sym & 0xFFFFFFu)
+                      | (pcrel << 24)
+                      | (length << 25)
+                      | (1u << 27)
+                      | ((r->type & 0xFu) << 28);
+        int32_t addr = (int32_t)r->offset;
+        buffer_append(out, (const char *)&addr, 4);
+        buffer_append(out, (const char *)&word, 4);
+    }
+    free(sorted);
+}
+
 static uint64_t align_up_u64(uint64_t v, uint64_t a) {
     if (a <= 1) return v;
     return (v + a - 1) & ~(a - 1);
@@ -777,23 +820,30 @@ int macho_write_object(const EmitModule *em, const char *path) {
     uint64_t content_end = file;
     uint64_t vm_end = vm;
 
-    size_t nlocal = 0, nglobal = 0;
+    size_t nlocal = 0, nglobal = 0, nundef = 0;
     for (size_t i = 0; i < em->num_syms; i++) {
         const EmitSymbol *s = &em->syms[i];
-        if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
-        if (s->binding == 0) nlocal++;
-        else nglobal++;
+        if (!macho_sym_ok(s, sect_of)) continue;
+        int pass = macho_sym_pass(s);
+        if (pass == 0) nlocal++;
+        else if (pass == 1) nglobal++;
+        else nundef++;
     }
-    size_t nsyms = nlocal + nglobal;
+    size_t nsyms = nlocal + nglobal + nundef;
     size_t strsize = 1;
     for (size_t i = 0; i < em->num_syms; i++) {
         const EmitSymbol *s = &em->syms[i];
-        if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
+        if (!macho_sym_ok(s, sect_of)) continue;
         strsize += 1 + strlen(s->name) + 1; /* leading '_' */
     }
     size_t nreloc = em->num_relocs;
-    uint64_t reloff = align_up_u64(content_end, 8);
-    uint64_t symoff = align_up_u64(reloff + nreloc * 8, 8);
+    size_t nreloc_data = em->num_data_relocs;
+    uint64_t rel_at = align_up_u64(content_end, 8);
+    uint64_t reloff = nreloc ? rel_at : 0;
+    rel_at += nreloc * 8;
+    uint64_t data_reloff = nreloc_data ? rel_at : 0;
+    rel_at += nreloc_data * 8;
+    uint64_t symoff = align_up_u64(rel_at, 8);
     uint64_t stroff = symoff + nsyms * sizeof(nlist_64);
 
     Buffer out;
@@ -851,6 +901,8 @@ int macho_write_object(const EmitModule *em, const char *path) {
         sec.size = em->data.len;
         sec.offset = (uint32_t)data_off;
         sec.align = 3;
+        sec.reloff = nreloc_data ? (uint32_t)data_reloff : 0;
+        sec.nreloc = (uint32_t)nreloc_data;
         buffer_append(&out, (const char *)&sec, sizeof sec);
     }
     if (has_bss) {
@@ -891,7 +943,8 @@ int macho_write_object(const EmitModule *em, const char *path) {
     dy.nlocalsym = (uint32_t)nlocal;
     dy.iextdefsym = (uint32_t)nlocal;
     dy.nextdefsym = (uint32_t)nglobal;
-    dy.iundefsym = (uint32_t)nsyms;
+    dy.iundefsym = (uint32_t)(nlocal + nglobal);
+    dy.nundefsym = (uint32_t)nundef;
     buffer_append(&out, (const char *)&dy, sizeof dy);
 
     while (out.len < content_off) {
@@ -908,82 +961,58 @@ int macho_write_object(const EmitModule *em, const char *path) {
         while (out.len < data_off) { char z = 0; buffer_append(&out, &z, 1); }
         buffer_append(&out, em->data.data, em->data.len);
     }
-    while (out.len < reloff) { char z = 0; buffer_append(&out, &z, 1); }
+    while (out.len < (nreloc ? reloff : (nreloc_data ? data_reloff : symoff))) {
+        char z = 0;
+        buffer_append(&out, &z, 1);
+    }
 
     /* nlist order is locals then globals.  Relocations name that index. */
     int *order = nsyms ? xmalloc(nsyms * sizeof(int)) : NULL;
     int *nmap = em->num_syms ? xmalloc(em->num_syms * sizeof(int)) : NULL;
     for (size_t i = 0; i < em->num_syms; i++) nmap[i] = -1;
     size_t ni = 0;
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0; pass < 3; pass++) {
         for (size_t i = 0; i < em->num_syms; i++) {
             const EmitSymbol *s = &em->syms[i];
-            if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
-            int local = s->binding == 0;
-            if (pass == 0 && !local) continue;
-            if (pass == 1 && local) continue;
+            if (!macho_sym_ok(s, sect_of)) continue;
+            if (macho_sym_pass(s) != pass) continue;
             if (order) order[ni] = (int)i;
             if (nmap) nmap[i] = (int)ni;
             ni++;
         }
     }
-    size_t *sorted = nreloc ? xmalloc(nreloc * sizeof(size_t)) : NULL;
-    for (size_t i = 0; i < nreloc; i++) sorted[i] = i;
-    for (size_t i = 0; i < nreloc; i++) {
-        for (size_t j = i + 1; j < nreloc; j++) {
-            if (em->relocs[sorted[j]].offset > em->relocs[sorted[i]].offset) {
-                size_t t = sorted[i];
-                sorted[i] = sorted[j];
-                sorted[j] = t;
-            }
-        }
-    }
-    for (size_t i = 0; i < nreloc; i++) {
-        const EmitReloc *r = &em->relocs[sorted[i]];
-        int sym = (nmap && r->sym < em->num_syms) ? nmap[r->sym] : 0;
-        if (sym < 0) sym = 0;
-        uint32_t pcrel = r->type == 3 ? 1u : 0u; /* PAGE21 is pc-relative */
-        uint32_t word = ((uint32_t)sym & 0xFFFFFFu)
-                      | (pcrel << 24)
-                      | (2u << 25)          /* length: 4 bytes */
-                      | (1u << 27)          /* extern */
-                      | ((r->type & 0xFu) << 28);
-        int32_t addr = (int32_t)r->offset;
-        buffer_append(&out, (const char *)&addr, 4);
-        buffer_append(&out, (const char *)&word, 4);
-    }
-    free(sorted);
+    macho_write_relocs(&out, em->relocs, nreloc, nmap, em->num_syms);
+    macho_write_relocs(&out, em->data_relocs, nreloc_data, nmap, em->num_syms);
     while (out.len < symoff) { char z = 0; buffer_append(&out, &z, 1); }
 
     /* Locals first, then globals, matching LC_DYSYMTAB.  String offsets
      * are assigned in the same order. */
     size_t str_at = 1;
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0; pass < 3; pass++) {
         for (size_t i = 0; i < em->num_syms; i++) {
             const EmitSymbol *s = &em->syms[i];
-            if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
-            int local = s->binding == 0;
-            if (pass == 0 && !local) continue;
-            if (pass == 1 && local) continue;
+            if (!macho_sym_ok(s, sect_of)) continue;
+            if (macho_sym_pass(s) != pass) continue;
+            int undef = s->shndx == SECT_UNDEF;
             nlist_64 nl;
             memset(&nl, 0, sizeof nl);
             nl.n_strx = (uint32_t)str_at;
-            nl.n_type = (uint8_t)(local ? N_SECT : (N_SECT | N_EXT));
-            nl.n_sect = sect_of[s->shndx];
-            nl.n_value = sect_addr[s->shndx] + (uint64_t)s->value;
+            nl.n_type = (uint8_t)(undef ? N_EXT
+                                : s->binding == 0 ? N_SECT : (N_SECT | N_EXT));
+            nl.n_sect = undef ? 0 : sect_of[s->shndx];
+            nl.n_value = undef ? 0
+                       : sect_addr[s->shndx] + (uint64_t)s->value;
             buffer_append(&out, (const char *)&nl, sizeof nl);
             str_at += 1 + strlen(s->name) + 1;
         }
     }
     char nul = 0;
     buffer_append(&out, &nul, 1);
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0; pass < 3; pass++) {
         for (size_t i = 0; i < em->num_syms; i++) {
             const EmitSymbol *s = &em->syms[i];
-            if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
-            int local = s->binding == 0;
-            if (pass == 0 && !local) continue;
-            if (pass == 1 && local) continue;
+            if (!macho_sym_ok(s, sect_of)) continue;
+            if (macho_sym_pass(s) != pass) continue;
             buffer_append(&out, "_", 1);
             buffer_append(&out, s->name, strlen(s->name) + 1);
         }
