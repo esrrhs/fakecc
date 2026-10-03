@@ -2834,9 +2834,32 @@ static void mark_inst_uses_needed(const IRInst *inst, char *needed, int nv) {
  * so a dead IR_ADDR can be skipped. */
 static char *codegen_needed_regs(const IRFunction *fn, const int *def,
                                  const int *alloca_off, const char *skip_body) {
-    int nv = fn->next_value_id;
-    char *needed = xmalloc((size_t)(nv > 0 ? nv : 1));
-    memset(needed, 0, (size_t)(nv > 0 ? nv : 1));
+    int nv = fn->next_value_id > 0 ? fn->next_value_id : 1;
+    char *needed = xmalloc((size_t)nv);
+    memset(needed, 0, (size_t)nv);
+    /* Raw-IR operand use counts (no addressing folds): an address that
+     * feeds more than one dereference must materialize — folding both
+     * consumers as [base+index] double-counts the index when the ADD
+     * still emits and coalesces with its base. */
+    int *raw_uses = xmalloc((size_t)nv * sizeof(int));
+    memset(raw_uses, 0, (size_t)nv * sizeof(int));
+    for (size_t uj = 0; uj < fn->insts.len; uj++) {
+        if (skip_body && skip_body[uj]) continue;
+        const IRInst *u = &fn->insts.data[uj];
+        if (u->op == IR_LABEL || u->op == IR_BR || u->op == IR_DBG_VALUE)
+            continue;
+        if (u->op != IR_ADDR && u->a >= 0 && u->a < nv) raw_uses[u->a]++;
+        if (u->op != IR_CBR && u->op != IR_CALL && u->b >= 0 && u->b < nv)
+            raw_uses[u->b]++;
+        if (u->op == IR_CALL) {
+            if (u->call_callee >= 0 && u->call_callee < nv)
+                raw_uses[u->call_callee]++;
+            for (int k = 0; k < u->call_nargs; k++) {
+                IRValue av = u->call_args[k];
+                if (av >= 0 && av < nv) raw_uses[av]++;
+            }
+        }
+    }
     for (size_t i = 0; i < fn->insts.len; i++) {
         if (skip_body && skip_body[i]) continue;
         const IRInst *inst = &fn->insts.data[i];
@@ -2846,7 +2869,9 @@ static char *codegen_needed_regs(const IRFunction *fn, const int *def,
             int off;
             if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
                 continue;
-            if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
+            int sole_use = inst->a < 0 || inst->a >= nv || raw_uses[inst->a] <= 1;
+            if (sole_use && !value_is_float_class(fn, inst->dst)
+                && !value_is_ld(fn, inst->dst)
                 && (inst->width == 1 || inst->width == 2 || inst->width == 4
                     || inst->width == 8)) {
                 if (fold_rbp_index(fn, def, alloca_off, inst->a, &off, &iv)) {
@@ -2869,7 +2894,9 @@ static char *codegen_needed_regs(const IRFunction *fn, const int *def,
                 mark_ssa_needed(needed, nv, inst->b);
                 continue;
             }
-            if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
+            int sole_use = inst->a < 0 || inst->a >= nv || raw_uses[inst->a] <= 1;
+            if (sole_use && !value_is_float_class(fn, inst->b)
+                && !value_is_ld(fn, inst->b)
                 && (inst->width == 1 || inst->width == 2 || inst->width == 4
                     || inst->width == 8)) {
                 if (fold_rbp_index(fn, def, alloca_off, inst->a, &off, &iv)) {
@@ -2898,6 +2925,7 @@ static char *codegen_needed_regs(const IRFunction *fn, const int *def,
         }
         mark_inst_uses_needed(inst, needed, nv);
     }
+    free(raw_uses);
     return needed;
 }
 
