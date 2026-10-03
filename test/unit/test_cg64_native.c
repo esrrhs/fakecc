@@ -1477,6 +1477,44 @@ static void test_syscall(void) {
         "  return 0; }", 0);
 }
 
+static void test_setjmp(void) {
+    expect("sj_same",
+        "package main;\n"
+        "int main(void) {\n"
+        "  void *buf[5];\n"
+        "  int n = 0;\n"
+        "  if (__builtin_setjmp(buf) == 0) {\n"
+        "    n = 1;\n"
+        "    __builtin_longjmp(buf, 1);\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return n == 1 ? 7 : 2; }", 7);
+    expect("sj_hop",
+        "package main;\n"
+        "void *buf[5];\n"
+        "void hop(void) { __builtin_longjmp(buf, 1); }\n"
+        "int main(void) {\n"
+        "  int x = 20;\n"
+        "  if (__builtin_setjmp(buf) == 0) {\n"
+        "    x = 22;\n"
+        "    hop();\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return x == 22 ? 7 : 2; }", 7);
+    expect("sj_alloca",
+        "package main;\n"
+        "void *buf[5];\n"
+        "void hop(void) { __builtin_longjmp(buf, 1); }\n"
+        "int main(void) {\n"
+        "  char *p = __builtin_alloca(4);\n"
+        "  p[0] = 7;\n"
+        "  if (__builtin_setjmp(buf)) return p[0] == 7 ? 7 : 3;\n"
+        "  char *q = __builtin_alloca(32);\n"
+        "  q[0] = 1;\n"
+        "  hop();\n"
+        "  return 1; }", 7);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -1512,6 +1550,7 @@ int main(void) {
     test_float();
     test_vec16();
     test_int128();
+    test_setjmp();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

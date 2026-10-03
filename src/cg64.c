@@ -1862,6 +1862,22 @@ static void emit_function(C64 *c, int fi) {
             mov_sp_like(a, A64_SP, r);
             break;
         }
+        case IR_LONGJMP: {
+            /* buf[0] = fp, buf[1] = resume pc, buf[2] = sp, matching the
+             * x86 lowering.  Read all three before writing fp or sp.
+             * x0/x1 are not allocatable; a spilled pointer arrives in x16. */
+            int buf = load_ptrv(c, s->a, -1);
+            int pc = A64_X0;
+            int spv = A64_X1;
+            if (buf == pc) pc = SCR0;
+            if (buf == spv) spv = SCR1;
+            a64_ldr64(a, pc, buf, 8);
+            a64_ldr64(a, spv, buf, 16);
+            a64_ldr64(a, A64_FP, buf, 0);
+            mov_sp_like(a, A64_SP, spv);
+            a64_br_reg(a, pc);
+            break;
+        }
         case IR_DYN_ALLOCA: {
             int r = load_op(c, s->a, -1);
             /* round size up to 16, then bump sp via a GP staging reg
