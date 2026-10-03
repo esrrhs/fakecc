@@ -602,6 +602,42 @@ static int emit_find_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* strspn/strcspn.  The span length is left in x0.  x2–x5 are caller-saved.
+ * A user definition of the same name still wins. */
+static int emit_span_builtin(C64 *c, const char *name) {
+    int is_spn = strcmp(name, "strspn") == 0;
+    int is_cspn = strcmp(name, "strcspn") == 0;
+    if (!is_spn && !is_cspn) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+
+    A64Asm *a = c->as;
+    int Louter = a64_new_label(a);
+    int Linner = a64_new_label(a);
+    int Ladvance = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+
+    a64_mov_reg(a, A64_X4, A64_X0, 1);
+    a64_bind(a, Louter);
+    a64_ldr8(a, A64_X2, A64_X0, 0);
+    a64_cbz(a, A64_X2, Ldone, 0);
+    a64_mov_reg(a, A64_X5, A64_X1, 1);
+    a64_bind(a, Linner);
+    a64_ldr8(a, A64_X3, A64_X5, 0);
+    /* strspn stops when accept runs out.  strcspn advances instead. */
+    a64_cbz(a, A64_X3, is_spn ? Ldone : Ladvance, 0);
+    a64_cmp_reg(a, A64_X2, A64_X3, 0);
+    a64_bcond(a, A64_EQ, is_spn ? Ladvance : Ldone);
+    a64_add_imm12(a, A64_X5, A64_X5, 1, 0, 1, 0);
+    a64_b(a, Linner);
+    a64_bind(a, Ladvance);
+    a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    a64_b(a, Louter);
+    a64_bind(a, Ldone);
+    a64_sub_reg(a, A64_X0, A64_X0, A64_X4, A64_LSL, 0, 1, 0);
+    return 1;
+}
+
 /* strcpy/stpcpy/strncpy/strcat/strncat/strstr.  Result pointer in x0.
  * x3–x5 are caller-saved.  A user definition of the same name still wins. */
 static int emit_copy_builtin(C64 *c, const char *name) {
@@ -1324,6 +1360,7 @@ static void emit_call(C64 *c, const IRInst *s) {
     } else if (!(s->call_name && (emit_mem_builtin(c, s->call_name)
                                  || emit_scan_builtin(c, s->call_name)
                                  || emit_find_builtin(c, s->call_name)
+                                 || emit_span_builtin(c, s->call_name)
                                  || emit_copy_builtin(c, s->call_name)))) {
         int fi = 0;
         if (find_function(c->ir, s->call_name, &fi) != 0) {

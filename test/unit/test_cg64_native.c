@@ -1638,6 +1638,23 @@ static void test_pad(void) {
         "  return 0; }", 0);
 }
 
+static void test_span(void) {
+    expect("span",
+        "package main;\n"
+        "int main(void) {\n"
+        "  if (__builtin_strspn(\"hello\", \"he\") != 2) return 1;\n"
+        "  if (__builtin_strspn(\"hello\", \"xyz\") != 0) return 2;\n"
+        "  if (__builtin_strspn(\"hello\", \"\") != 0) return 3;\n"
+        "  if (__builtin_strspn(\"\", \"abc\") != 0) return 4;\n"
+        "  if (__builtin_strspn(\"aaab\", \"a\") != 3) return 5;\n"
+        "  if (__builtin_strcspn(\"hello\", \"l\") != 2) return 6;\n"
+        "  if (__builtin_strcspn(\"hello\", \"xyz\") != 5) return 7;\n"
+        "  if (__builtin_strcspn(\"hello\", \"\") != 5) return 8;\n"
+        "  if (__builtin_strcspn(\"\", \"abc\") != 0) return 9;\n"
+        "  if (__builtin_strcspn(\"hello\", \"h\") != 0) return 10;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1722,6 +1739,7 @@ int main(void) {
     test_find();
     test_copy();
     test_pad();
+    test_span();
     test_trap();
     test_syscall();
     test_frame_addr();
