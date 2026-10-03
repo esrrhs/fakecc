@@ -1624,6 +1624,24 @@ static Type check_expr_inner(Expr *e) {
             set_type(e, t0);
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_align_down") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_assume_aligned") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_expect_with_probability") == 0)) {
+            if (e->u.call.args.len < 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "builtin takes at least 1 argument");
+                return type_make_void();
+            }
+            Type t0 = check_expr_inner(e->u.call.args.data[0]);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type ti = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&ti);
+            }
+            set_type(e, t0);
+            return type_clone(e->type);
+        }
         /* __builtin_ctzll(x) — count trailing zeros of a nonzero uint64.  The
          * surrounding code guarantees the argument is nonzero (`_w &&`), so
          * the result is well-defined (1..64).  Returns int. */

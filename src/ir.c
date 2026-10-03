@@ -6509,6 +6509,38 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             set_value_type(fn, v, 8, 0);
             return v;
         }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_expect_with_probability") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_assume_aligned") == 0)) {
+            /* Both return the first argument.  The rest are hints. */
+            for (size_t i = 1; i < e->u.call.args.len; i++)
+                lower_expr(fn, st, e->u.call.args.data[i]);
+            if (e->u.call.args.len >= 1)
+                return lower_expr(fn, st, e->u.call.args.data[0]);
+            return -1;
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_align_down") == 0)) {
+            if (e->u.call.args.len < 2) return -1;
+            int up = strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0;
+            int w = type_size(e->type);
+            if (w < 1) w = 8;
+            int uns = e->type.is_unsigned || e->type.kind == TY_PTR;
+            IRValue val = lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue al = lower_expr(fn, st, e->u.call.args.data[1]);
+            IRValue one = new_value(fn);
+            emit_inst_w(fn, IR_CONST, one, -1, -1, 1, w, uns, e->loc);
+            set_value_type(fn, one, w, uns);
+            IRValue am1 = emit_bin_w(fn, IR_SUB, al, one, w, uns, e->loc);
+            IRValue nmask = new_value(fn);
+            emit_inst_w(fn, IR_BNOT, nmask, am1, -1, 0, w, uns, e->loc);
+            set_value_type(fn, nmask, w, uns);
+            IRValue base = val;
+            if (up)
+                base = emit_bin_w(fn, IR_ADD, val, am1, w, uns, e->loc);
+            return emit_bin_w(fn, IR_BAND, base, nmask, w, uns, e->loc);
+        }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_longjmp") == 0) {
             IRValue buf_ptr = lower_expr(fn, st, e->u.call.args.data[0]);
             emit_inst_w(fn, IR_LONGJMP, -1, buf_ptr, -1, 0, 8, 1, e->loc);

@@ -1794,6 +1794,30 @@ static void test_rotate(void) {
         "  return 0; }", 0);
 }
 
+static void test_align(void) {
+    expect("align",
+        "package main;\n"
+        "int main(void) {\n"
+        "  if (__builtin_align_down(15, 8) != 8) return 1;\n"
+        "  if (__builtin_align_up(15, 8) != 16) return 2;\n"
+        "  if (__builtin_align_up(16, 8) != 16) return 3;\n"
+        "  if (__builtin_align_down(0, 8) != 0) return 4;\n"
+        "  unsigned long n = 100;\n"
+        "  if (__builtin_align_up(n, 16) != 112) return 5;\n"
+        "  char buf[32];\n"
+        "  char *p = buf + 3;\n"
+        "  char *q = __builtin_align_up(p, 8);\n"
+        "  if (((unsigned long)q & 7) != 0) return 6;\n"
+        "  if (q < p || (unsigned long)(q - p) >= 8) return 7;\n"
+        "  char *r = __builtin_align_down(p, 8);\n"
+        "  if (((unsigned long)r & 7) != 0) return 8;\n"
+        "  if ((unsigned long)(p - r) >= 8) return 9;\n"
+        "  char *a = __builtin_assume_aligned(buf, 16);\n"
+        "  if (a != buf) return 10;\n"
+        "  if (__builtin_expect_with_probability(7, 1, 0.5) != 7) return 11;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1886,6 +1910,7 @@ int main(void) {
     test_stop();
     test_rfind();
     test_rotate();
+    test_align();
     test_trap();
     test_syscall();
     test_frame_addr();
