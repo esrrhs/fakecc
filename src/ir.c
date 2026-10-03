@@ -6436,17 +6436,30 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 if (e->u.call.args.len < 3) return -1;
                 IRValue vp = lower_expr(fn, st, e->u.call.args.data[1]);
                 IRValue retp = lower_expr(fn, st, e->u.call.args.data[2]);
-                if (e->u.call.args.len > 3)
+                long long ord = 5;
+                if (e->u.call.args.len > 3) {
                     lower_expr(fn, st, e->u.call.args.data[3]);
-                IRValue oldv = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
-                set_value_type(fn, oldv, sz, is_u);
-                if (is_f) set_value_float(fn, oldv, 1);
+                    fold_const_int(e->u.call.args.data[3], &ord);
+                }
+                /* *val is a plain load.  Only the object is exchanged. */
                 IRValue val = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, val, vp, -1, 0, sz, is_u, e->loc);
                 set_value_type(fn, val, sz, is_u);
                 if (is_f) set_value_float(fn, val, 1);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                if (is_f || (sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
+                    IRValue oldv = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
+                    set_value_type(fn, oldv, sz, is_u);
+                    if (is_f) set_value_float(fn, oldv, 1);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, retp, oldv, 0, sz, is_u, e->loc);
+                    return -1;
+                }
+                int kind = 3;
+                if (ord == 0) kind = 0;
+                else if (ord == 1 || ord == 2) kind = 1;
+                else if (ord == 3) kind = 2;
+                IRValue oldv = emit_fakecc_swp(fn, addr, val, kind, sz, is_u, e->loc);
                 emit_inst_w(fn, IR_STORE_PTR, -1, retp, oldv, 0, sz, is_u, e->loc);
                 return -1;
             }

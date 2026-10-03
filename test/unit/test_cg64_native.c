@@ -2382,6 +2382,51 @@ static void test_xchg(void) {
         "  return 0; }", 0);
 }
 
+static void test_xchgp(void) {
+    expect("xchgp",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 9;\n"
+        "  int v = 4;\n"
+        "  int r = 0;\n"
+        "  __atomic_exchange(&x, &v, &r, 0);\n"
+        "  if (r != 9 || x != 4) return 1;\n"
+        "  v = 1;\n"
+        "  __atomic_exchange(&x, &v, &r, 2);\n"
+        "  if (r != 4 || x != 1) return 2;\n"
+        "  v = 6;\n"
+        "  __atomic_exchange(&x, &v, &r, 3);\n"
+        "  if (r != 1 || x != 6) return 3;\n"
+        "  v = 8;\n"
+        "  __atomic_exchange(&x, &v, &r, 5);\n"
+        "  if (r != 6 || x != 8) return 4;\n"
+        "  x = -3;\n"
+        "  v = 2;\n"
+        "  __atomic_exchange(&x, &v, &r, 5);\n"
+        "  if (r != -3 || x != 2) return 5;\n"
+        "  long long y = 3;\n"
+        "  long long vy = 8;\n"
+        "  long long ry = 0;\n"
+        "  __atomic_exchange(&y, &vy, &ry, 3);\n"
+        "  if (ry != 3 || y != 8) return 6;\n"
+        "  unsigned char c = 1;\n"
+        "  unsigned char vc = 6;\n"
+        "  unsigned char rc = 0;\n"
+        "  __atomic_exchange(&c, &vc, &rc, 2);\n"
+        "  if (rc != 1 || c != 6) return 7;\n"
+        "  unsigned short h = 2;\n"
+        "  unsigned short vh = 7;\n"
+        "  unsigned short rh = 0;\n"
+        "  __atomic_exchange(&h, &vh, &rh, 3);\n"
+        "  if (rh != 2 || h != 7) return 8;\n"
+        "  signed char sc = -5;\n"
+        "  signed char vsc = 4;\n"
+        "  signed char rsc = 0;\n"
+        "  __atomic_exchange(&sc, &vsc, &rsc, 5);\n"
+        "  if (rsc != -5 || sc != 4) return 9;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2452,6 +2497,7 @@ int main(void) {
     test_aload();
     test_aptr();
     test_xchg();
+    test_xchgp();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
