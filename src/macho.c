@@ -344,6 +344,8 @@ static int macho_build_fixups(const EmitModule *em, uint64_t data_page,
 uint32_t macho_text_offset(void) { return MACHO_TEXT_OFF; }
 
 /* Must stay in lock-step with the layout block in macho_write_exec. */
+static uint32_t macho_align_log(size_t al, uint32_t min_log);
+
 void macho_section_offsets(const EmitModule *em, size_t text_len,
                            uint64_t *ro_out, uint64_t *data_out,
                            uint64_t *bss_out) {
@@ -538,7 +540,7 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     sec.addr = MACHO_BASE_VA + text_off;
     sec.size = text->len;
     sec.offset = text_off;
-    sec.align = 3;   /* 2^3 = 8-byte instruction alignment */
+    sec.align = macho_align_log(em->text_align ? em->text_align : 8, 3);
     sec.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
     APPEND_BYTES(&sec, sizeof sec);
 
@@ -549,7 +551,7 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         csec.addr = MACHO_BASE_VA + ro_off;
         csec.size = rodata->len;
         csec.offset = ro_off;
-        csec.align = 4;   /* ro_off is aligned to at least 2^4 = 16 bytes */
+        csec.align = macho_align_log(em->rodata_align > 16 ? em->rodata_align : 16, 4);
         csec.flags = 0;                  /* S_REGULAR read-only data */
         APPEND_BYTES(&csec, sizeof csec);
     }
@@ -576,7 +578,7 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
             dsec.addr = MACHO_BASE_VA + data_page;
             dsec.size = data->len;
             dsec.offset = (uint32_t)data_page;
-            dsec.align = 3;
+            dsec.align = macho_align_log(em->data_align ? em->data_align : 8, 3);
             APPEND_BYTES(&dsec, sizeof dsec);
         }
 
@@ -588,7 +590,7 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
             bsec.addr = MACHO_BASE_VA + data_page + data_file;
             bsec.size = bss_bytes;
             bsec.offset = 0;            /* zerofill: no file bytes */
-            bsec.align = 3;
+            bsec.align = macho_align_log(em->bss_align ? em->bss_align : 8, 3);
             bsec.flags = 0x1;           /* S_ZEROFILL */
             APPEND_BYTES(&bsec, sizeof bsec);
         }

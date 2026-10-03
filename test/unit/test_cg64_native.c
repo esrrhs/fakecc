@@ -2681,6 +2681,26 @@ static void test_fpadd(void) {
         "  return 0; }", 0);
 }
 
+static void test_zfill(void) {
+    expect("zfill",
+        "package main;\n"
+        "static int z[5000];\n"
+        "static const int r[5000] = { 1, 2, 3 };\n"
+        "int g __attribute__((aligned(64)));\n"
+        "int main(void) {\n"
+        "  if (((unsigned long)&g) & 63) return 1;\n"
+        "  if (z[0] != 0 || z[4095] != 0 || z[4096] != 0 || z[4999] != 0) return 2;\n"
+        "  z[0] = 7;\n"
+        "  z[4096] = 8;\n"
+        "  z[4999] = 9;\n"
+        "  if (z[0] != 7 || z[4096] != 8 || z[4999] != 9) return 3;\n"
+        "  if (r[0] != 1 || r[1] != 2 || r[2] != 3) return 4;\n"
+        "  if (r[4096] != 0 || r[4999] != 0) return 5;\n"
+        "  g = 6;\n"
+        "  if (g != 6) return 6;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2762,6 +2782,7 @@ int main(void) {
     test_fxchg();
     test_fcas();
     test_fpadd();
+    test_zfill();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
