@@ -336,6 +336,7 @@ typedef struct {
     char *name;         /* xstrdup'd */
     char *target;       /* xstrdup'd */
     int   is_static;
+    int   is_weak;      /* 1 = weak alias; x86 ignores this */
     SourceLoc loc;
 } IRAlias;
 

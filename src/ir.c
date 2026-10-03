@@ -223,6 +223,7 @@ void ir_module_push_alias(IRModule *m, const char *name, const char *target,
     al->name = xstrdup(name);
     al->target = xstrdup(target);
     al->is_static = is_static;
+    al->is_weak = 0;
     al->loc = loc;
 }
 
@@ -11566,6 +11567,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         if (s->u.decl.alias_target) {
             ir_module_push_alias(ir, s->u.decl.name, s->u.decl.alias_target,
                                  s->u.decl.storage_class == 1, s->loc);
+            ir->aliases.data[ir->aliases.len - 1].is_weak = s->u.decl.is_weak;
             continue;
         }
         /* extern → declaration only: skip emission entirely.
@@ -11635,6 +11637,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         if (fd->alias_target) {
             ir_module_push_alias(ir, fd->name, fd->alias_target,
                                  fd->is_static, fd->loc);
+            ir->aliases.data[ir->aliases.len - 1].is_weak = fd->is_weak;
             continue;
         }
 

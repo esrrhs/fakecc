@@ -4485,6 +4485,25 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             int si = c64_undef_sym(out, ir, c.xcall[i].name);
             emit_module_add_reloc(out, c.xcall[i].at, 2 /* BRANCH26 */, si, 0);
         }
+        for (size_t ai = 0; ai < ir->aliases.len; ai++) {
+            const IRAlias *al = &ir->aliases.data[ai];
+            int tsym = emit_module_find_symbol(out, al->target);
+            if (tsym < 0) continue;
+            EmitSymbol target_sym = out->syms[tsym];
+            uint8_t bind = al->is_static ? 0 : al->is_weak ? 2 : 1;
+            int existing = emit_module_find_symbol(out, al->name);
+            if (existing >= 0 && out->syms[existing].shndx == SECT_UNDEF) {
+                out->syms[existing].binding = bind;
+                out->syms[existing].type = target_sym.type;
+                out->syms[existing].shndx = target_sym.shndx;
+                out->syms[existing].value = target_sym.value;
+                out->syms[existing].size = target_sym.size;
+            } else if (existing < 0) {
+                emit_module_add_symbol(out, al->name, bind, target_sym.type,
+                                       target_sym.shndx, target_sym.value,
+                                       target_sym.size);
+            }
+        }
         free(gsym);
     }
     free(c.gfix);

@@ -1345,6 +1345,88 @@ static void test_wref(void) {
     emit_module_free(&mgd);
 }
 
+static void test_alias(void) {
+    const char *def = "/tmp/fakecc_arm64_alias_def.o";
+    const char *call = "/tmp/fakecc_arm64_alias_main.o";
+    const char *strong = "/tmp/fakecc_arm64_alias_strong.o";
+    const char *gdef = "/tmp/fakecc_arm64_alias_g.o";
+    const char *gcall = "/tmp/fakecc_arm64_alias_gm.o";
+    const char *outp = "/tmp/fakecc_arm64_alias_out";
+    const char *err = "/tmp/fakecc_arm64_alias_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int real(void) { return 4; }\n"
+        "int alias(void) __attribute__((alias(\"real\")));\n",
+        def, NULL), 0);
+    EmitModule md;
+    T_ASSERT_EQ_INT(emit_obj_read(def, &md), 0);
+    int rs = emit_module_find_symbol(&md, "real");
+    int as = emit_module_find_symbol(&md, "alias");
+    T_ASSERT(rs >= 0 && as >= 0);
+    T_ASSERT_EQ_INT((int)md.syms[rs].value, (int)md.syms[as].value);
+    T_ASSERT_EQ_INT((int)md.syms[as].binding, 1);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int alias(void);\n"
+        "int main(void) { return alias(); }\n",
+        call, NULL), 0);
+    EmitModule mc;
+    T_ASSERT_EQ_INT(emit_obj_read(call, &mc), 0);
+    EmitModule *mods[2] = { &mc, &md };
+    T_ASSERT_EQ_INT(link_capturing(mods, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 4);
+    const char *wdef = "/tmp/fakecc_arm64_alias_w.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int real(void) { return 4; }\n"
+        "int alias(void) __attribute__((weak, alias(\"real\")));\n",
+        wdef, NULL), 0);
+    EmitModule mw;
+    T_ASSERT_EQ_INT(emit_obj_read(wdef, &mw), 0);
+    int ws = emit_module_find_symbol(&mw, "alias");
+    T_ASSERT(ws >= 0);
+    T_ASSERT_EQ_INT((int)mw.syms[ws].binding, 2);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int alias(void) { return 9; }\n",
+        strong, NULL), 0);
+    EmitModule ms;
+    T_ASSERT_EQ_INT(emit_obj_read(strong, &ms), 0);
+    EmitModule *over[3] = { &mc, &mw, &ms };
+    T_ASSERT_EQ_INT(link_capturing(over, 3, outp, err), 0);
+    T_ASSERT(!err_has(err, "duplicate symbol"));
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 9);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int real = 6;\n"
+        "int mirror __attribute__((alias(\"real\")));\n",
+        gdef, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern int mirror;\n"
+        "int main(void) { return mirror; }\n",
+        gcall, NULL), 0);
+    EmitModule mg, mgc;
+    T_ASSERT_EQ_INT(emit_obj_read(gdef, &mg), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(gcall, &mgc), 0);
+    int gr = emit_module_find_symbol(&mg, "real");
+    int gm = emit_module_find_symbol(&mg, "mirror");
+    T_ASSERT(gr >= 0 && gm >= 0);
+    T_ASSERT_EQ_INT((int)mg.syms[gr].value, (int)mg.syms[gm].value);
+    EmitModule *gmods[2] = { &mgc, &mg };
+    T_ASSERT_EQ_INT(link_capturing(gmods, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 6);
+    emit_module_free(&md);
+    emit_module_free(&mc);
+    emit_module_free(&mw);
+    emit_module_free(&ms);
+    emit_module_free(&mg);
+    emit_module_free(&mgc);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3010,6 +3092,7 @@ int main(void) {
     test_common();
     test_weak();
     test_wref();
+    test_alias();
     test_macho_link();
     return t_finalize();
 }
