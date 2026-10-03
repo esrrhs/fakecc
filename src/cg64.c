@@ -161,8 +161,11 @@ static void emit_fp_addr(C64 *c, int rd, int off) {
     }
 }
 
-/* fp-relative loads/stores: LDUR/STUR signed imm9 in range, else an
- * address is built in the other scratch register.  datart may be SCR0. */
+/* fp-relative loads/stores.  LDUR/STUR cover the imm9 window.  Outside
+ * it the address is built in the destination itself and then loaded
+ * (`ldr rt, [rt]`): the other scratch often already holds the first
+ * operand of a binary op, and reusing it as an address base drops that
+ * value (seen as a wrong sum once spill slots sit below fp-256). */
 static void frame_load(C64 *c, int rt, int off, int width, int uns) {
     A64Asm *a = c->as;
     if (off >= -256 && off <= 255) {
@@ -189,9 +192,8 @@ static void frame_load(C64 *c, int rt, int off, int width, int uns) {
         }
         return;
     }
-    int at = (rt == SCR0) ? SCR1 : SCR0;
-    emit_fp_addr(c, at, off);
-    emit_load(c, rt, at, width, uns);
+    emit_fp_addr(c, rt, off);
+    emit_load(c, rt, rt, width, uns);
 }
 
 static void frame_store(C64 *c, int valrt, int off, int width) {
@@ -561,9 +563,13 @@ static void emit_binop(C64 *c, const IRInst *s) {
         else a64_sdiv(a, d, ra, rb, is64);
         break;
     case IR_MOD: {
-        if (s->is_unsigned) a64_udiv(a, SCR1, ra, rb, is64);
-        else a64_sdiv(a, SCR1, ra, rb, is64);
-        a64_msub(a, d, SCR1, rb, ra, is64);  /* d = ra - q*rb */
+        /* Quotient needs a register that is neither operand: both may
+         * already occupy x16/x17 when spilled.  x0 is not allocatable. */
+        int q = SCR1;
+        if (q == ra || q == rb) q = A64_X0;
+        if (s->is_unsigned) a64_udiv(a, q, ra, rb, is64);
+        else a64_sdiv(a, q, ra, rb, is64);
+        a64_msub(a, d, q, rb, ra, is64);  /* d = ra - q*rb */
         break;
     }
     case IR_SHL:
@@ -573,11 +579,14 @@ static void emit_binop(C64 *c, const IRInst *s) {
         if (s->is_unsigned) a64_lsrv(a, d, ra, rb, is64);
         else a64_asrv(a, d, ra, rb, is64);
         break;
-    case IR_ROL:
-        /* rol(ra, rb) = ror(ra, -rb); the hardware masks the count. */
-        a64_neg(a, SCR1, rb, is64);
-        a64_rorv(a, d, ra, SCR1, is64);
+    case IR_ROL: {
+        /* rol(ra, rb) = ror(ra, -rb); the hardware masks the count.
+         * Don't negate into ra when the spilled pair occupies both scratches. */
+        int nreg = (SCR1 != ra) ? SCR1 : A64_X0;
+        a64_neg(a, nreg, rb, is64);
+        a64_rorv(a, d, ra, nreg, is64);
         break;
+    }
     default:
         c64_die(c, s, "binary op");
         return;
@@ -591,6 +600,36 @@ static int vlabels_get(C64 *c, int id) {
     if (c->vlabels[id] < 0)
         c->vlabels[id] = a64_new_label(c->as);
     return c->vlabels[id];
+}
+
+/* A dead parameter still receives a register color (it has a def, so the
+ * allocator does not treat it as unused).  That color can alias a live
+ * parameter.  Copying the dead value into the shared register at entry
+ * clobbers the live one.  Skip parameters nothing reads. */
+static int param_is_used(const IRFunction *fn, IRValue v) {
+    if (v < 0) return 0;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *s = &fn->insts.data[i];
+        if (s->op == IR_PARAM) continue;
+        if (s->a == v || s->b == v || s->call_callee == v) return 1;
+        if (s->op == IR_CALL && s->call_args) {
+            for (int k = 0; k < s->call_nargs; k++)
+                if (s->call_args[k] == v) return 1;
+        }
+    }
+    return 0;
+}
+
+/* imm12 stops at 4095.  Step by 4080 so SP stays 16-byte aligned;
+ * the epilogue reloads SP from FP, so the split does not have to be one
+ * instruction. */
+static void sub_sp_bytes(A64Asm *a, unsigned bytes) {
+    while (bytes > 4095) {
+        a64_sub_imm12(a, A64_SP, A64_SP, 4080, 0, 1, 0);
+        bytes -= 4080;
+    }
+    if (bytes)
+        a64_sub_imm12(a, A64_SP, A64_SP, bytes, 0, 1, 0);
 }
 
 static void emit_function(C64 *c, int fi) {
@@ -682,7 +721,7 @@ static void emit_function(C64 *c, int fi) {
     if (ncs & 1)
         a64_str64(a, cs[ncs-1], A64_FP, 16 + 16*cs_pairs - 8);
     if (locals)
-        a64_sub_imm12(a, A64_SP, A64_SP, (unsigned)locals, 0, 1, 0);
+        sub_sp_bytes(a, (unsigned)locals);
 
     /* ---- Incoming integer parameters (x0..x7, then caller stack) ---- */
     int nparams = 0;
@@ -713,7 +752,10 @@ static void emit_function(C64 *c, int fi) {
         if (hr >= 0) { mv[p].dst_reg = hr; mv[p].dst_mem = -1; }
         else { mv[p].dst_reg = -1; mv[p].dst_mem = spill_off(c, s->dst); }
         mv[p].is64 = s->width == 8;
-        mv[p].done = (mv[p].src_reg >= 0 && mv[p].dst_reg == mv[p].src_reg);
+        if (!param_is_used(fn, s->dst))
+            mv[p].done = 1;
+        else
+            mv[p].done = (mv[p].src_reg >= 0 && mv[p].dst_reg == mv[p].src_reg);
     }
     int remaining = 0;
     for (int p = 0; p < nparams; p++) remaining += !mv[p].done;
@@ -763,7 +805,10 @@ static void emit_function(C64 *c, int fi) {
             if (!mv[p].done && mv[p].src_reg >= 0 && mv[p].dst_reg >= 0) {
                 i0 = p; break;
             }
-        if (i0 < 0) { c64_die(c, &fn->insts.data[0], "parameter shuffle"); }
+        if (i0 < 0) {
+            c64_die(c, &fn->insts.data[0], "parameter shuffle");
+            break;
+        }
         /* Cycles may mix 32/64-bit params; move whole registers so a
          * 64-bit value cannot lose its upper half to a w-form move. */
         mv[i0].is64 = 1;
@@ -775,7 +820,11 @@ static void emit_function(C64 *c, int fi) {
                 if (!mv[p].done && mv[p].dst_reg >= 0 &&
                     mv[p].dst_reg != mv[p].src_reg &&
                     mv[p].dst_reg == cur) { q = p; break; }
-            if (q < 0) { c64_die(c, &fn->insts.data[0], "parameter cycle"); }
+            if (q < 0) {
+                c64_die(c, &fn->insts.data[0], "parameter cycle");
+                remaining = 0;
+                break;
+            }
             if (q == i0) {
                 a64_mov_reg(a, mv[i0].dst_reg, SCR0, 1);
                 mv[i0].done = 1; remaining--;

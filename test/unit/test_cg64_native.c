@@ -38,8 +38,11 @@ static int compile_and_run_ex(const char *source, char *const extra_argv[],
     if (sema_check(&tu, 0) != FAKECC_OK || sema_has_errors()) return -1003;
 
     IRModule ir; ir_module_init(&ir);
-    if (ir_generate(&tu, &ir, 1) != FAKECC_OK) return -1004;
-    opt(&ir, 0, 0);
+    /* CG64_OPT=1 runs the mem2reg/-O1 pipeline (T9). Default stays -O0. */
+    const char *opt_env = getenv("CG64_OPT");
+    int opt_level = opt_env ? atoi(opt_env) : 0;
+    if (ir_generate(&tu, &ir, opt_level == 0) != FAKECC_OK) return -1004;
+    opt(&ir, opt_level, 0);
 
     EmitModule em;
     emit_module_init(&em);

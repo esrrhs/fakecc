@@ -156,9 +156,15 @@
   - `rule` TR-8.2: 含函数指针表/全局指针初始化/跳转表的程序在随机加载基址下正确（PIE 证据：多次运行 + `dyld_info` 看 fixup）。
 
 ## Task 9: -O1 优化档在 arm64 后端生效
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: T8
+- **Completion Evidence**（2026-10-03）:
+  - mem2reg 之后大量值溢出。槽位低于 `fp-256` 时，第二条操作数的地址被算进 x16，冲掉已经装进 x16 的第一条操作数；求和再 `% 256` 后退出码随栈地址变化。修复：大偏移先在目标寄存器里形成地址，再 `ldr rt, [rt]`，不再占用另一只 scratch。32 参 `many_stack_args` 在 -O1 得到 112；`call_many_args`（260 参）-O0/-O1 都得到 146。
+  - 除法和旋转的商/取负临时量固定用 x17。两个操作数都溢出时 x17 里已经是除数或被旋转值，结果被覆盖。临时量改为避开操作数（必要时用不可分配的 x0）。帧大于 4095 时 `sub sp` 按 4080 字节分段，因为 imm12 到 4095 为止。
+  - 死参数仍会分到一个寄存器，并且可以和活参数是同一个。序言把死参数拷进这个寄存器，活参数丢失。若这个寄存器又是另一条入参的源，周期消解会从尾巴走进去，找不到闭环后空转（`die_at` 只打印一次）。未使用的参数不再参与序言搬移；消解失败时停止而不是空转。`gcc_torture_divconst_2`（未使用的 `denom` 覆盖了商）和 `gcc_torture_20030307_1`（未使用的 `fsp` 卡死编译）在 -O1 都返回 0。
+  - TR-9.1：`test_cg64_native` -O0 与 `CG64_OPT=1` 均为 44/44。T6/T8 目录（basics、codegen、control_flow、operators、functions、types、pointers、linkage、aggregates、chars_strings）双档对照：与 -O0 一样通过的用例在 -O1 仍通过。原先仅 -O1 失败的两条已复测通过。两边都失败的仍是后续任务（结构体按值、浮点、向量、varargs、extern）。
+  - TR-9.2：`int hot(int n)` 的 `while (i<n) s+=i` 在 -O0 为 44 条指令（循环里反复 `ldrsw`/`str`），-O1 为 31 条，累加器和归纳变量留在寄存器里。
 - **Description**:
   - SSA mem2reg 后的寄存器化代码路径（值常住寄存器、spill/reload、location 变动）；常量折叠/强度削减后的 arm64 选择（立即数形式、cbz/tbz、移位合并）；确保 T6/T8 全部用例在 -O1 同样正确。
 - **Acceptance Criteria Addressed**: FR-2, AC-3
