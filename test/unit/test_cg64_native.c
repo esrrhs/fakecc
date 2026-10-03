@@ -1427,6 +1427,44 @@ static void test_alias(void) {
     emit_module_free(&mgc);
 }
 
+static void test_hidden(void) {
+    const char *def = "/tmp/fakecc_arm64_hidden.o";
+    const char *call = "/tmp/fakecc_arm64_hidden_main.o";
+    const char *outp = "/tmp/fakecc_arm64_hidden_out";
+    const char *err = "/tmp/fakecc_arm64_hidden_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int hidden_add(int x) __attribute__((visibility(\"hidden\"))) {\n"
+        "  return x + 1;\n"
+        "}\n"
+        "int shown = 5;\n"
+        "int priv __attribute__((visibility(\"hidden\"))) = 6;\n",
+        def, NULL), 0);
+    EmitModule md;
+    T_ASSERT_EQ_INT(emit_obj_read(def, &md), 0);
+    int hf = emit_module_find_symbol(&md, "hidden_add");
+    int hs = emit_module_find_symbol(&md, "shown");
+    int hp = emit_module_find_symbol(&md, "priv");
+    T_ASSERT(hf >= 0 && hs >= 0 && hp >= 0);
+    T_ASSERT_EQ_INT((int)md.syms[hf].binding, 3);
+    T_ASSERT_EQ_INT((int)md.syms[hs].binding, 1);
+    T_ASSERT_EQ_INT((int)md.syms[hp].binding, 3);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int hidden_add(int x);\n"
+        "extern int priv;\n"
+        "int main(void) { return hidden_add(priv); }\n",
+        call, NULL), 0);
+    EmitModule mc;
+    T_ASSERT_EQ_INT(emit_obj_read(call, &mc), 0);
+    EmitModule *mods[2] = { &mc, &md };
+    T_ASSERT_EQ_INT(link_capturing(mods, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    emit_module_free(&md);
+    emit_module_free(&mc);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3093,6 +3131,7 @@ int main(void) {
     test_weak();
     test_wref();
     test_alias();
+    test_hidden();
     test_macho_link();
     return t_finalize();
 }

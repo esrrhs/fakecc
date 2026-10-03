@@ -54,6 +54,7 @@
 #define S_ATTR_PURE_INSTRUCTIONS   0x80000000u
 #define S_ATTR_SOME_INSTRUCTIONS   0x00000400u
 #define N_EXT  0x01u
+#define N_PEXT 0x10u /* private external: hidden / internal visibility */
 #define N_SECT 0x0eu
 
 /* Fixed load-image geometry:
@@ -1122,6 +1123,7 @@ int macho_write_object(const EmitModule *em, const char *path) {
             nl.n_strx = (uint32_t)str_at;
             nl.n_type = (uint8_t)(undef ? N_EXT
                                 : s->binding == 0 ? N_SECT : (N_SECT | N_EXT));
+            if (s->binding == 3) nl.n_type |= (uint8_t)N_PEXT;
             nl.n_sect = undef ? 0 : sect_of[s->shndx];
             if (common) {
                 unsigned align = s->value ? (unsigned)s->value : 1;
@@ -1350,6 +1352,7 @@ int macho_read_object(const char *path, EmitModule *em) {
         }
         RSec *rs = &secs[nl.n_sect - 1];
         uint8_t binding = (nl.n_desc & 0x0080) ? 2
+                        : (nl.n_type & N_PEXT) ? 3
                         : (nl.n_type & N_EXT) ? 1 : 0;
         uint8_t ty = rs->shndx == SECT_TEXT ? 2 : 1;
         size_t value = (size_t)(nl.n_value - rs->addr);

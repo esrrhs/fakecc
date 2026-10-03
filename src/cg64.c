@@ -4396,7 +4396,8 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             else if (c.udiv_label >= 0 && a.labels[c.udiv_label].bound)
                 end = a.labels[c.udiv_label].pos;
             emit_module_add_symbol(out, fn->name,
-                                   fn->is_static ? 0 : fn->is_weak ? 2 : 1,
+                                   fn->is_static ? 0 : fn->is_weak ? 2
+                                       : fn->is_hidden ? 3 : 1,
                                    2 /* STT_FUNC */,
                                    (uint16_t)SECT_TEXT, start, end - start);
             if (fn->is_constructor || fn->is_destructor) {
@@ -4434,7 +4435,8 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             /* Common: value is the alignment.  A real symbol: value is
              * the offset within its section. */
             gsym[gi] = emit_module_add_symbol(out, g->name,
-                                              g->is_static ? 0 : g->is_weak ? 2 : 1,
+                                              g->is_static ? 0 : g->is_weak ? 2
+                                                  : g->is_hidden ? 3 : 1,
                                               1 /* STT_OBJECT */, sh,
                                               c.goff[gi], (size_t)g->size);
         }

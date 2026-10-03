@@ -268,6 +268,7 @@ typedef struct {
     int   is_variadic;
     int   is_static;  /* 1 = `static` function — LOCAL linkage */
     int   is_weak;    /* 1 = __attribute__((weak)); a strong def wins at link */
+    int   is_hidden;  /* 1 = Mach-O private-external (hidden) */
     int   is_constructor; /* 1 = emit a .init_array pointer to this function */
     int   is_destructor;  /* 1 = emit a .fini_array pointer to this function */
     int   ctor_prio;
@@ -319,6 +320,7 @@ typedef struct {
                          * when it has no pointer fixup.  x86 ignores this. */
     int   is_static;    /* 1 = `static` global — LOCAL linkage */
     int   is_weak;      /* 1 = __attribute__((weak)) */
+    int   is_hidden;    /* 1 = visibility("hidden"); x86 ignores this */
     int   is_tls;       /* 1 = `__thread` / `_Thread_local` global — .tdata/.tbss */
     int   align;        /* byte alignment (`aligned(N)` / natural); ≥1 */
     SourceLoc loc;
