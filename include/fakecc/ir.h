@@ -349,6 +349,10 @@ typedef struct {
     IRFunctionArray functions;
     IRGlobalArray   globals;
     IRAliasArray    aliases;
+    /* Names declared `__attribute__((weak))` with no definition in this TU.
+     * arm64 records them as N_WEAK_REF; x86 ignores the list. */
+    char **weak_refs;
+    size_t n_weak_refs, cap_weak_refs;
 } IRModule;
 
 void ir_module_init(IRModule *m);

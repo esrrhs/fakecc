@@ -101,6 +101,23 @@ static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name) {
     c->ngfix++;
 }
 
+static int c64_undef_sym(EmitModule *out, const IRModule *ir, const char *name) {
+    int si = emit_module_find_symbol(out, name);
+    if (si >= 0) return si;
+    int weak = 0;
+    if (ir && name) {
+        for (size_t i = 0; i < ir->n_weak_refs; i++) {
+            if (ir->weak_refs[i] && strcmp(ir->weak_refs[i], name) == 0) {
+                weak = 1;
+                break;
+            }
+        }
+    }
+    if (weak)
+        return emit_module_add_symbol(out, name, 2, 0, (uint16_t)SECT_UNDEF, 0, 0);
+    return emit_module_add_undefined(out, name);
+}
+
 static void c64_die(C64 *c, const IRInst *s, const char *what) {
     const char *f = c->fn->loc.file ? c->fn->loc.file : "<arm64>";
     int line = s ? s->loc.line : c->fn->loc.line;
@@ -4435,11 +4452,8 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
         for (size_t i = 0; i < c.ngfix; i++) {
             int gi = c.gfix[i].gidx;
             int si = (gsym && gi >= 0) ? gsym[gi] : -1;
-            if (si < 0 && c.gfix[i].name) {
-                si = emit_module_find_symbol(out, c.gfix[i].name);
-                if (si < 0)
-                    si = emit_module_add_undefined(out, c.gfix[i].name);
-            }
+            if (si < 0 && c.gfix[i].name)
+                si = c64_undef_sym(out, ir, c.gfix[i].name);
             if (si < 0) {
                 die_at("<arm64>", 0, 0,
                        "arm64 object file: global has no symbol");
@@ -4452,9 +4466,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
         /* Pointer slots in __data: ARM64_RELOC_UNSIGNED, addend in the
          * eight bytes at the slot. */
         for (size_t i = 0; i < c.npfix; i++) {
-            int si = emit_module_find_symbol(out, c.pfix[i].sym);
-            if (si < 0)
-                si = emit_module_add_undefined(out, c.pfix[i].sym);
+            int si = c64_undef_sym(out, ir, c.pfix[i].sym);
             int gi = c.pfix[i].gidx;
             if (!c.gsect || gi < 0 || c.gsect[gi] != G_DATA) {
                 die_at("<arm64>", 0, 0,
@@ -4470,9 +4482,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                                        c.pfix[i].addend);
         }
         for (size_t i = 0; i < c.nxcall; i++) {
-            int si = emit_module_find_symbol(out, c.xcall[i].name);
-            if (si < 0)
-                si = emit_module_add_undefined(out, c.xcall[i].name);
+            int si = c64_undef_sym(out, ir, c.xcall[i].name);
             emit_module_add_reloc(out, c.xcall[i].at, 2 /* BRANCH26 */, si, 0);
         }
         free(gsym);

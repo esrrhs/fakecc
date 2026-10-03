@@ -1132,7 +1132,8 @@ int macho_write_object(const EmitModule *em, const char *path) {
             } else {
                 nl.n_value = undef ? 0
                            : sect_addr[s->shndx] + (uint64_t)s->value;
-                if (s->binding == 2) nl.n_desc = 0x0080; /* N_WEAK_DEF */
+                if (s->binding == 2)
+                    nl.n_desc = undef ? 0x0040u : 0x0080u; /* N_WEAK_REF / N_WEAK_DEF */
             }
             buffer_append(&out, (const char *)&nl, sizeof nl);
             str_at += 1 + strlen(s->name) + 1;
@@ -1335,7 +1336,9 @@ int macho_read_object(const char *path, EmitModule *em) {
                 emit_module_add_symbol(em, raw[0] ? raw : NULL, 1, 1,
                                        SHN_COMMON, align, (size_t)nl.n_value);
             } else {
-                emit_module_add_undefined(em, raw[0] ? raw : NULL);
+                uint8_t binding = (nl.n_desc & 0x0040) ? 2 : 1;
+                emit_module_add_symbol(em, raw[0] ? raw : NULL, binding, 0,
+                                       SECT_UNDEF, 0, 0);
             }
             continue;
         }
@@ -1524,6 +1527,11 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
         a64_movz(&stub, A64_X16, 1, 0, 1);
         a64_svc(&stub, 0x80);
     }
+    /* A missing weak symbol's call lands here and returns 0.  Its address
+     * is rewritten to a zero register, so this stub is not that address. */
+    int weak_at = (int)stub.code.len;
+    a64_movz(&stub, A64_X0, 0, 0, 1);
+    a64_ret(&stub, A64_LR);
     buffer_append(&out.text, stub.code.data, stub.code.len);
     a64_free(&stub);
 
@@ -1714,11 +1722,12 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                 uint16_t sh;
                 size_t off;
                 int use_local = adj[i][r->sym].defined && es->binding != 2;
+                int found = 1;
                 if (use_local) {
                     sh = adj[i][r->sym].sh;
                     off = adj[i][r->sym].off;
                 } else {
-                    int found = 0;
+                    found = 0;
                     sh = 0; off = 0;
                     for (size_t g = 0; g < ng; g++) {
                         if (es->name && strcmp(gdefs[g].name, es->name) == 0) {
@@ -1733,6 +1742,11 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                         off = adj[i][r->sym].off;
                         found = 1;
                     }
+                    if (!found && es->binding == 2) {
+                        sh = 0;
+                        off = 0;
+                        found = 2; /* weak and absent: address 0, call returns 0 */
+                    }
                     if (!found) {
                         fprintf(stderr, "fakecc: undefined symbol '%s'\n",
                                 es->name ? es->name : "?");
@@ -1740,6 +1754,33 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                         break;
                     }
                 }
+                if (found == 2 && !is_data[pass]) {
+                    size_t site = text_base[i] + r->offset;
+                    if (site + 4 > out.text.len) {
+                        fprintf(stderr, "fakecc: text reloc past end of section\n");
+                        rc = -1;
+                        break;
+                    }
+                    uint64_t pc = macho_text_offset() + site;
+                    uint32_t w = 0;
+                    memcpy(&w, out.text.data + site, 4);
+                    if (r->type == 2) {
+                        uint64_t tgt = macho_text_offset() + (uint64_t)weak_at;
+                        if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
+                    } else if (r->type == 3) {
+                        w = 0xD2800000u | (w & 31u); /* movz Xd, #0 */
+                    } else if (r->type == 4) {
+                        w = 0xD503201Fu; /* nop */
+                    } else {
+                        fprintf(stderr, "fakecc: unsupported text reloc %u\n", r->type);
+                        rc = -1;
+                        break;
+                    }
+                    memcpy(out.text.data + site, &w, 4);
+                    continue;
+                }
+                if (found == 2)
+                    continue; /* data slot already holds the absolute addend */
                 uint64_t base = sh == SECT_TEXT ? macho_text_offset()
                               : sh == SECT_RODATA ? ro_off
                               : sh == SECT_DATA ? data_off

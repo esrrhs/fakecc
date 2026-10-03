@@ -147,6 +147,9 @@ void ir_module_init(IRModule *m) {
     m->aliases.data = NULL;
     m->aliases.len = 0;
     m->aliases.cap = 0;
+    m->weak_refs = NULL;
+    m->n_weak_refs = 0;
+    m->cap_weak_refs = 0;
 }
 
 void ir_module_free(IRModule *m) {
@@ -192,6 +195,11 @@ void ir_module_free(IRModule *m) {
         free(m->aliases.data[i].target);
     }
     free(m->aliases.data);
+    for (size_t i = 0; i < m->n_weak_refs; i++) free(m->weak_refs[i]);
+    free(m->weak_refs);
+    m->weak_refs = NULL;
+    m->n_weak_refs = 0;
+    m->cap_weak_refs = 0;
     m->functions.data = NULL;
     m->functions.len = 0;
     m->functions.cap = 0;
@@ -216,6 +224,19 @@ void ir_module_push_alias(IRModule *m, const char *name, const char *target,
     al->target = xstrdup(target);
     al->is_static = is_static;
     al->loc = loc;
+}
+
+static void ir_add_weak_ref(IRModule *m, const char *name) {
+    if (!name) return;
+    for (size_t i = 0; i < m->n_weak_refs; i++)
+        if (strcmp(m->weak_refs[i], name) == 0) return;
+    if (m->n_weak_refs >= m->cap_weak_refs) {
+        size_t nc = m->cap_weak_refs ? m->cap_weak_refs * 2 : 4;
+        m->weak_refs = realloc(m->weak_refs, nc * sizeof(char *));
+        if (!m->weak_refs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_weak_refs = nc;
+    }
+    m->weak_refs[m->n_weak_refs++] = xstrdup(name);
 }
 
 static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
@@ -11551,7 +11572,10 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * `extern __thread T a;` declarations are caught here too: storage_class
          * is 2 (extern) and is_tls is 1, but we still skip because extern means
          * "defined elsewhere" — the linker resolves the symbol. */
-        if (s->u.decl.storage_class == 2) continue;
+        if (s->u.decl.storage_class == 2) {
+            if (s->u.decl.is_weak) ir_add_weak_ref(ir, s->u.decl.name);
+            continue;
+        }
         int is_tls = s->u.decl.is_tls;
         int sz = type_size(s->u.decl.type);
         if (s->u.decl.init && s->u.decl.type.kind == TY_STRUCT && s->u.decl.init->kind == EX_INIT_LIST && s->u.decl.type.tag) {
@@ -11615,7 +11639,10 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         }
 
         /* `extern` declarations have no body — no IR is generated for them. */
-        if (fd->is_extern) continue;
+        if (fd->is_extern) {
+            if (fd->is_weak) ir_add_weak_ref(ir, fd->name);
+            continue;
+        }
 
         IRFunction irfn;
         memset(&irfn, 0, sizeof(irfn));

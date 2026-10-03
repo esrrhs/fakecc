@@ -1280,6 +1280,71 @@ static void test_weak(void) {
     emit_module_free(&mst2);
 }
 
+static void test_wref(void) {
+    const char *call = "/tmp/fakecc_arm64_wref_main.o";
+    const char *def = "/tmp/fakecc_arm64_wref_def.o";
+    const char *gcall = "/tmp/fakecc_arm64_wref_g.o";
+    const char *gdef = "/tmp/fakecc_arm64_wref_gd.o";
+    const char *outp = "/tmp/fakecc_arm64_wref_out";
+    const char *err = "/tmp/fakecc_arm64_wref_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern int missing(void) __attribute__((weak));\n"
+        "int main(void) {\n"
+        "  if (!missing) return 7;\n"
+        "  return missing();\n"
+        "}\n",
+        call, NULL), 0);
+    EmitModule mc;
+    T_ASSERT_EQ_INT(emit_obj_read(call, &mc), 0);
+    int ms = emit_module_find_symbol(&mc, "missing");
+    T_ASSERT(ms >= 0);
+    T_ASSERT_EQ_INT((int)mc.syms[ms].binding, 2);
+    T_ASSERT_EQ_INT((int)mc.syms[ms].shndx, 0);
+    EmitModule *alone[1] = { &mc };
+    T_ASSERT_EQ_INT(link_capturing(alone, 1, outp, err), 0);
+    T_ASSERT(!err_has(err, "undefined symbol"));
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int missing(void) { return 3; }\n",
+        def, NULL), 0);
+    EmitModule md;
+    T_ASSERT_EQ_INT(emit_obj_read(def, &md), 0);
+    EmitModule *both[2] = { &mc, &md };
+    T_ASSERT_EQ_INT(link_capturing(both, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 3);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern int val __attribute__((weak));\n"
+        "int main(void) {\n"
+        "  if (!&val) return 7;\n"
+        "  return val;\n"
+        "}\n",
+        gcall, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int val = 4;\n",
+        gdef, NULL), 0);
+    EmitModule mg, mgd;
+    T_ASSERT_EQ_INT(emit_obj_read(gcall, &mg), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(gdef, &mgd), 0);
+    EmitModule *gonly[1] = { &mg };
+    T_ASSERT_EQ_INT(link_capturing(gonly, 1, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    EmitModule *gboth[2] = { &mg, &mgd };
+    T_ASSERT_EQ_INT(link_capturing(gboth, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 4);
+    emit_module_free(&mc);
+    emit_module_free(&md);
+    emit_module_free(&mg);
+    emit_module_free(&mgd);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -2944,6 +3009,7 @@ int main(void) {
     test_macho_obj();
     test_common();
     test_weak();
+    test_wref();
     test_macho_link();
     return t_finalize();
 }
