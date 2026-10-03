@@ -105,9 +105,6 @@ static void reinsert_markers(IRFunction *fn, ExtractedMarker *markers, int nmark
 }
 
 void opt(IRModule *ir, int opt_level, int want_debug) {
-    /* -O1 promotes scalars into SSA regs that must not sit in R11: the
-     * inline va_arg sequence clobbers it.  -O0 keeps the historical set. */
-    ra_set_reserve_va_scratch(opt_level > 0);
     for (size_t i = 0; i < ir->functions.len; i++) {
         IRFunction *fn = &ir->functions.data[i];
         if (opt_level == 0)
@@ -139,5 +136,4 @@ void opt(IRModule *ir, int opt_level, int want_debug) {
             fn->ra_xmm = reg_alloc_xmm(fn);
         }
     }
-    ra_set_reserve_va_scratch(0);
 }

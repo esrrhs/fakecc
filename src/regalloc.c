@@ -19,25 +19,11 @@
 
 typedef RaRegClass RegClass;
 
-/* -O1 reserves R11 so the inline va_arg sequence cannot clobber a
- * mem2reg-promoted pointer that stays live across the builtin. */
-static int ra_reserve_va_scratch = 0;
-
-void ra_set_reserve_va_scratch(int on) {
-    ra_reserve_va_scratch = on ? 1 : 0;
-}
-
 /* x86-64 SysV classes (the historical defaults):
  *   GP  = the 9-register allocatable set in regalloc.h
  *   XMM = xmm0..xmm13, width 32 (YMM) or 64 (ZMM with -mavx512f),
- *         with the x87 long-double exclusion.
- * When ra_reserve_va_scratch is set, R11 drops out of the GP set. */
+ *         with the x87 long-double exclusion. */
 static const RaRegClasses *ra_classes_x86(void) {
-    static const int GP_NO_R11[] = {
-        REG_RSI, REG_RDI,
-        REG_R8,  REG_R9,  REG_R10,
-        REG_RBX, REG_R12, REG_R13
-    };
     static RaRegClasses c = {
         .gp = {
             ALLOCATABLE_REGS,
@@ -54,26 +40,8 @@ static const RaRegClasses *ra_classes_x86(void) {
             1,    /* width-16 floats are x87 long doubles, not XMM */
         },
     };
-    static RaRegClasses c_no_r11 = {
-        .gp = {
-            GP_NO_R11,
-            8,
-            0x1Fu, /* RSI/RDI/R8/R9/R10 */
-            8,
-            0,
-        },
-        .simd = {
-            XMM_ALLOCATABLE_REGS,
-            REG_XMM_ALLOCATABLE,
-            XMM_CALLER_SAVED_MASK,
-            32,
-            1,
-        },
-    };
-    int spill = host_has_avx512f() ? 64 : 32;
-    c.simd.spill_bytes = spill;
-    c_no_r11.simd.spill_bytes = spill;
-    return ra_reserve_va_scratch ? &c_no_r11 : &c;
+    c.simd.spill_bytes = host_has_avx512f() ? 64 : 32;
+    return &c;
 }
 
 const RaRegClasses *ra_classes_current(void) {
@@ -629,30 +597,6 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                     if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, v);
                 }
-            }
-        }
-    }
-
-    /* Pass 1b: Propagate forbid_mask through IR_COPY (phi-elim merges).
-     * Only when -O1 reserved the va_arg scratch: that is the path where
-     * mem2reg emits loop-carried COPYs that must share call-survival
-     * constraints.  Skipping at -O0 keeps that code stream unchanged. */
-    if (ra_reserve_va_scratch) {
-        int changed = 1;
-        while (changed) {
-            changed = 0;
-            for (size_t i = 0; i < fn->insts.len; i++) {
-                const IRInst *inst = &fn->insts.data[i];
-                if (inst->op != IR_COPY) continue;
-                int d = inst->dst, a = inst->a;
-                if (d < 0 || d >= nv || a < 0 || a >= nv) continue;
-                if (!value_in_class(fn, d, float_class, cls->exclude_16byte_ld))
-                    continue;
-                if (!value_in_class(fn, a, float_class, cls->exclude_16byte_ld))
-                    continue;
-                uint32_t m = forbid_mask[d] | forbid_mask[a];
-                if (forbid_mask[d] != m) { forbid_mask[d] = m; changed = 1; }
-                if (forbid_mask[a] != m) { forbid_mask[a] = m; changed = 1; }
             }
         }
     }
