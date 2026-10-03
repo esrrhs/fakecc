@@ -2057,6 +2057,32 @@ static Type check_expr_inner(Expr *e) {
                 return type_clone(e->type);
             }
         }
+        /* __builtin_*_sat saturates in the argument type.  Promoting an
+         * unsigned char to int would wrap 200+100 to 44 instead of 255. */
+        if (e->u.call.callee->kind == EX_VAR
+            && (strcmp(e->u.call.callee->u.var.name, "__builtin_add_sat") == 0
+                || strcmp(e->u.call.callee->u.var.name, "__builtin_sub_sat") == 0
+                || strcmp(e->u.call.callee->u.var.name, "__builtin_mul_sat") == 0)) {
+            if (e->u.call.args.len != 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes 2 arguments", e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            Type bt = check_expr_inner(e->u.call.args.data[1]);
+            if (at.kind != TY_INT || bt.kind != TY_INT) {
+                type_free(&at);
+                type_free(&bt);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s arguments must be integers",
+                       e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            set_type(e, type_clone(at));
+            type_free(&at);
+            type_free(&bt);
+            return type_clone(e->type);
+        }
         /* __builtin_isnormal is type-generic.  Promoting float to double
          * would turn a float subnormal into a normal double. */
         if (e->u.call.callee->kind == EX_VAR

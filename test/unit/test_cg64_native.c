@@ -2082,6 +2082,58 @@ static void test_normal(void) {
         "  return 0; }", 0);
 }
 
+static void test_sat(void) {
+    expect("sat",
+        "package main;\n"
+        "int main(void) {\n"
+        "  unsigned char a = 200, b = 100;\n"
+        "  if (__builtin_add_sat(a, b) != 255) return 1;\n"
+        "  unsigned char c1 = 1, c2 = 2;\n"
+        "  if (__builtin_add_sat(c1, c2) != 3) return 2;\n"
+        "  unsigned char z = 0, one = 1, five = 5, three = 3;\n"
+        "  if (__builtin_sub_sat(z, one) != 0) return 3;\n"
+        "  if (__builtin_sub_sat(five, three) != 2) return 4;\n"
+        "  signed char p = 100, n = -100;\n"
+        "  if (__builtin_add_sat(p, p) != 127) return 5;\n"
+        "  if (__builtin_add_sat(n, n) != -128) return 6;\n"
+        "  if (__builtin_sub_sat(n, p) != -128) return 7;\n"
+        "  if (__builtin_sub_sat(p, n) != 127) return 8;\n"
+        "  signed char ten = 10, twenty = 20;\n"
+        "  if (__builtin_mul_sat(ten, twenty) != 127) return 9;\n"
+        "  unsigned char u16 = 16;\n"
+        "  if (__builtin_mul_sat(u16, u16) != 255) return 10;\n"
+        "  unsigned short h = 60000;\n"
+        "  if (__builtin_add_sat(h, h) != 65535) return 11;\n"
+        "  unsigned u = 4294967295u;\n"
+        "  unsigned u1 = 1, u2 = 2;\n"
+        "  if (__builtin_add_sat(u, u1) != u) return 12;\n"
+        "  if (__builtin_sub_sat(u1, u2) != 0u) return 13;\n"
+        "  if (__builtin_mul_sat(u, u2) != u) return 14;\n"
+        "  int s = 2147483647;\n"
+        "  int si = 1;\n"
+        "  if (__builtin_add_sat(s, si) != s) return 15;\n"
+        "  int t = -2147483647 - 1;\n"
+        "  if (__builtin_sub_sat(t, si) != t) return 16;\n"
+        "  if (__builtin_mul_sat(s, si + si) != s) return 17;\n"
+        "  int neg1 = -1;\n"
+        "  if (__builtin_mul_sat(t, neg1) != s) return 18;\n"
+        "  if (__builtin_add_sat(si, si + si) != 3) return 19;\n"
+        "  unsigned long long U = ~0ull;\n"
+        "  unsigned long long U1 = 1, U2 = 2;\n"
+        "  if (__builtin_add_sat(U, U1) != U) return 20;\n"
+        "  if (__builtin_mul_sat(U, U2) != U) return 21;\n"
+        "  long long S = (long long)(1ull << 63);\n"
+        "  long long Sm1 = -1;\n"
+        "  long long lone = 1;\n"
+        "  if (__builtin_sub_sat(S, lone) != S) return 22;\n"
+        "  long long P = 9223372036854775807ll;\n"
+        "  if (__builtin_add_sat(P, lone) != P) return 23;\n"
+        "  if (__builtin_mul_sat(P, (long long)U2) != P) return 24;\n"
+        "  if (__builtin_mul_sat(S, Sm1) != P) return 25;\n"
+        "  if (__builtin_mul_sat(lone, (long long)U2) != 2) return 26;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -2183,6 +2235,7 @@ int main(void) {
     test_bitg();
     test_lcpy();
     test_normal();
+    test_sat();
     test_trap();
     test_syscall();
     test_frame_addr();

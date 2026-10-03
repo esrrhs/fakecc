@@ -1395,6 +1395,213 @@ static void emit_bitg_builtin(C64 *c, const IRInst *s) {
     commit(c, s->dst, dst);
 }
 
+/* add_sat/sub_sat/mul_sat.  The range is the argument type: an unsigned
+ * char stops at 255, and a signed char stops at -128..127. */
+static int sat_kind(const char *n) {
+    if (!n) return 0;
+    if (strcmp(n, "add_sat") == 0) return 1;
+    if (strcmp(n, "sub_sat") == 0) return 2;
+    if (strcmp(n, "mul_sat") == 0) return 3;
+    return 0;
+}
+
+static void sat_limit(A64Asm *a, int rd, int bits, int is_u, int want_min) {
+    int is64 = bits >= 64;
+    if (is_u) {
+        if (want_min) a64_movz(a, rd, 0, 0, is64);
+        else if (bits >= 64) a64_movn(a, rd, 0, 0, 1);
+        else if (bits >= 32) a64_movn(a, rd, 0, 0, 0);
+        else a64_movz(a, rd, (unsigned)((1u << bits) - 1), 0, 0);
+        return;
+    }
+    if (bits >= 64) {
+        if (want_min) a64_movz(a, rd, 0x8000, 3, 1);
+        else a64_movn(a, rd, 0x8000, 3, 1);
+    } else if (bits >= 32) {
+        if (want_min) a64_movz(a, rd, 0x8000, 1, 0);
+        else a64_movn(a, rd, 0x8000, 1, 0);
+    } else if (bits >= 16) {
+        if (want_min) a64_movn(a, rd, 32767, 0, 0);
+        else a64_movz(a, rd, 32767, 0, 0);
+    } else {
+        if (want_min) a64_movn(a, rd, 127, 0, 0);
+        else a64_movz(a, rd, 127, 0, 0);
+    }
+}
+
+static void sat_prep(A64Asm *a, int dst, int src, int bits, int is_u) {
+    if (bits >= 64) {
+        if (dst != src) a64_mov_reg(a, dst, src, 1);
+    } else if (bits >= 32) {
+        if (dst != src) a64_mov_reg(a, dst, src, 0);
+    } else if (is_u) {
+        a64_uxt(a, dst, src, (unsigned)(bits / 8), 0);
+    } else {
+        a64_sxt(a, dst, src, (unsigned)(bits / 8), 0);
+    }
+}
+
+static void sat_clamp(A64Asm *a, int dst, int val, int bits, int is_u) {
+    int is64 = bits >= 64;
+    int mx = safe_tmp(dst, val, -1, -1);
+    int Lok = a64_new_label(a);
+    int Lend = a64_new_label(a);
+    sat_limit(a, mx, bits, is_u, 0);
+    if (is_u) {
+        a64_cmp_reg(a, val, mx, is64);
+        a64_bcond(a, A64_LS, Lok);
+        a64_mov_reg(a, dst, mx, is64);
+        a64_b(a, Lend);
+    } else {
+        int mn = safe_tmp(dst, val, mx, -1);
+        int Lhi = a64_new_label(a);
+        sat_limit(a, mn, bits, 0, 1);
+        a64_cmp_reg(a, val, mx, is64);
+        a64_bcond(a, A64_GT, Lhi);
+        a64_cmp_reg(a, val, mn, is64);
+        a64_bcond(a, A64_GE, Lok);
+        a64_mov_reg(a, dst, mn, is64);
+        a64_b(a, Lend);
+        a64_bind(a, Lhi);
+        a64_mov_reg(a, dst, mx, is64);
+        a64_b(a, Lend);
+    }
+    a64_bind(a, Lok);
+    if (dst != val) a64_mov_reg(a, dst, val, is64);
+    a64_bind(a, Lend);
+}
+
+static void sat_mull(A64Asm *a, int rd, int rn, int rm, int is_signed) {
+    uint32_t base = is_signed ? 0x9B207C00u : 0x9BA07C00u;
+    a64_word(a, base | ((uint32_t)(rm & 31) << 16)
+                    | ((uint32_t)(rn & 31) << 5) | (uint32_t)(rd & 31));
+}
+
+static void sat_mulh(A64Asm *a, int rd, int rn, int rm, int is_signed) {
+    uint32_t base = is_signed ? 0x9B407C00u : 0x9BC07C00u;
+    a64_word(a, base | ((uint32_t)(rm & 31) << 16)
+                    | ((uint32_t)(rn & 31) << 5) | (uint32_t)(rd & 31));
+}
+
+static void emit_sat_builtin(C64 *c, const IRInst *s) {
+    int kind = sat_kind(s->call_name);
+    if (!kind || s->dst < 0 || s->call_nargs < 2) return;
+    A64Asm *a = c->as;
+    int bits = s->width > 0 ? s->width * 8 : 32;
+    if (bits != 8 && bits != 16 && bits != 32 && bits != 64) bits = 32;
+    int is_u = s->is_unsigned;
+    int is64 = bits >= 64;
+    int dst = dst_reg(c, s->dst);
+    int va = load_op(c, s->call_args[0], dst);
+    int vb = load_op(c, s->call_args[1], va);
+    int ra = safe_tmp(dst, va, vb, -1);
+    int rb = safe_tmp(dst, va, vb, ra);
+    sat_prep(a, ra, va, bits, is_u);
+    sat_prep(a, rb, vb, bits, is_u);
+    if (bits < 32) {
+        int tmp = safe_tmp(dst, ra, rb, -1);
+        if (kind == 2 && is_u) {
+            int Lzero = a64_new_label(a);
+            int Lend = a64_new_label(a);
+            a64_cmp_reg(a, ra, rb, 0);
+            a64_bcond(a, A64_CC, Lzero);
+            a64_sub_reg(a, dst, ra, rb, A64_LSL, 0, 0, 0);
+            a64_b(a, Lend);
+            a64_bind(a, Lzero);
+            a64_movz(a, dst, 0, 0, 0);
+            a64_bind(a, Lend);
+        } else {
+            if (kind == 1) a64_add_reg(a, tmp, ra, rb, A64_LSL, 0, 0, 0);
+            else if (kind == 2) a64_sub_reg(a, tmp, ra, rb, A64_LSL, 0, 0, 0);
+            else a64_mul(a, tmp, ra, rb, 0);
+            sat_clamp(a, dst, tmp, bits, is_u);
+        }
+        commit(c, s->dst, dst);
+        return;
+    }
+    if (kind == 3) {
+        int prod = safe_tmp(dst, ra, rb, -1);
+        int Lsat = a64_new_label(a);
+        int Lend = a64_new_label(a);
+        int sgn = prod;
+        if (bits == 32) {
+            sat_mull(a, prod, ra, rb, !is_u);
+            if (is_u) {
+                int hi = safe_tmp(dst, prod, ra, rb);
+                a64_lsr_imm(a, hi, prod, 32, 1);
+                a64_cbnz(a, hi, Lsat, 1);
+            } else {
+                int ext = safe_tmp(dst, prod, ra, rb);
+                a64_sxt(a, ext, prod, 4, 1);
+                a64_cmp_reg(a, ext, prod, 1);
+                a64_bcond(a, A64_NE, Lsat);
+            }
+            a64_mov_reg(a, dst, prod, 0);
+            a64_b(a, Lend);
+        } else {
+            int hi = safe_tmp(dst, prod, ra, rb);
+            a64_mul(a, prod, ra, rb, 1);
+            sat_mulh(a, hi, ra, rb, !is_u);
+            sgn = hi;
+            if (is_u) {
+                a64_cbnz(a, hi, Lsat, 1);
+            } else {
+                int sign = safe_tmp(dst, prod, hi, ra);
+                a64_asr_imm(a, sign, prod, 63, 1);
+                a64_cmp_reg(a, hi, sign, 1);
+                a64_bcond(a, A64_NE, Lsat);
+            }
+            a64_mov_reg(a, dst, prod, 1);
+            a64_b(a, Lend);
+        }
+        a64_bind(a, Lsat);
+        if (is_u) {
+            sat_limit(a, dst, bits, 1, 0);
+        } else {
+            int Lmin = a64_new_label(a);
+            a64_cmp_imm12(a, sgn, 0, 0, 1);
+            a64_bcond(a, A64_MI, Lmin);
+            sat_limit(a, dst, bits, 0, 0);
+            a64_b(a, Lend);
+            a64_bind(a, Lmin);
+            sat_limit(a, dst, bits, 0, 1);
+        }
+        a64_bind(a, Lend);
+        commit(c, s->dst, dst);
+        return;
+    }
+    {
+        int tmp = safe_tmp(dst, ra, rb, -1);
+        int Lsat = a64_new_label(a);
+        int Lok = a64_new_label(a);
+        int Lend = a64_new_label(a);
+        if (kind == 1) a64_add_reg(a, tmp, ra, rb, A64_LSL, 0, is64, 1);
+        else a64_sub_reg(a, tmp, ra, rb, A64_LSL, 0, is64, 1);
+        if (is_u) {
+            a64_bcond(a, kind == 1 ? A64_CS : A64_CC, Lsat);
+            a64_mov_reg(a, dst, tmp, is64);
+            a64_b(a, Lend);
+            a64_bind(a, Lsat);
+            if (kind == 1) sat_limit(a, dst, bits, 1, 0);
+            else a64_movz(a, dst, 0, 0, is64);
+        } else {
+            int Lmin = a64_new_label(a);
+            a64_bcond(a, A64_VC, Lok);
+            a64_cmp_imm12(a, ra, 0, 0, is64);
+            a64_bcond(a, A64_MI, Lmin);
+            sat_limit(a, dst, bits, 0, 0);
+            a64_b(a, Lend);
+            a64_bind(a, Lmin);
+            sat_limit(a, dst, bits, 0, 1);
+            a64_b(a, Lend);
+            a64_bind(a, Lok);
+            a64_mov_reg(a, dst, tmp, is64);
+        }
+        a64_bind(a, Lend);
+    }
+    commit(c, s->dst, dst);
+}
+
 static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
     if (!s->call_nargs) return s->align16 == A64_MARK_SRET ? 16 : 0;
     if (s->call_name && strcmp(s->call_name, "__syscall") == 0) return 0;
@@ -1874,6 +2081,13 @@ static void emit_call(C64 *c, const IRInst *s) {
         int defined = 0;
         if (find_function(c->ir, s->call_name, &defined) != 0) {
             emit_bitg_builtin(c, s);
+            return;
+        }
+    }
+    if (sat_kind(s->call_name)) {
+        int defined = 0;
+        if (find_function(c->ir, s->call_name, &defined) != 0) {
+            emit_sat_builtin(c, s);
             return;
         }
     }
