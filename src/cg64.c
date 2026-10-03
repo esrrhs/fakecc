@@ -1356,6 +1356,62 @@ static int emit_trap_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* __builtin_fpclassify(nan, inf, normal, subnormal, zero, x).
+ * The category codes are integers; x is float or double. */
+static void emit_fpclassify_builtin(C64 *c, const IRInst *s) {
+    A64Asm *a = c->as;
+    int isd = vw(c, s->call_args[5]) == 8;
+    int fv = load_fp(c, s->call_args[5], -1);
+    /* x16/x17 only. The category codes already sit in allocatable
+     * registers, and overwriting one of them drops the result. */
+    a64_fmov_gp(a, SCR0, fv, 0, isd);
+    if (isd) {
+        a64_lsr_imm(a, SCR1, SCR0, 52, 1);
+        a64_and_imm(a, SCR1, SCR1, 0x7ff, 1);
+        a64_lsl_imm(a, SCR0, SCR0, 12, 1);
+        a64_lsr_imm(a, SCR0, SCR0, 12, 1);
+    } else {
+        a64_lsr_imm(a, SCR1, SCR0, 23, 0);
+        a64_and_imm(a, SCR1, SCR1, 0xff, 0);
+        a64_lsl_imm(a, SCR0, SCR0, 9, 0);
+        a64_lsr_imm(a, SCR0, SCR0, 9, 0);
+    }
+    int Lspec = a64_new_label(a);
+    int Linf = a64_new_label(a);
+    int Lsub = a64_new_label(a);
+    int Lzero = a64_new_label(a);
+    int Lnorm = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+    a64_cmp_imm12(a, SCR1, isd ? 0x7ffu : 0xffu, 0, isd ? 1 : 0);
+    a64_bcond(a, A64_EQ, Lspec);
+    a64_cbz(a, SCR1, Lsub, isd ? 1 : 0);
+    a64_b(a, Lnorm);
+    a64_bind(a, Lspec);
+    a64_cbz(a, SCR0, Linf, isd ? 1 : 0);
+    int dst = dst_reg(c, s->dst);
+    int r = load_op(c, s->call_args[0], dst);
+    if (r != dst) a64_mov_reg(a, dst, r, 0);
+    a64_b(a, Ldone);
+    a64_bind(a, Linf);
+    r = load_op(c, s->call_args[1], dst);
+    if (r != dst) a64_mov_reg(a, dst, r, 0);
+    a64_b(a, Ldone);
+    a64_bind(a, Lsub);
+    a64_cbz(a, SCR0, Lzero, isd ? 1 : 0);
+    r = load_op(c, s->call_args[3], dst);
+    if (r != dst) a64_mov_reg(a, dst, r, 0);
+    a64_b(a, Ldone);
+    a64_bind(a, Lzero);
+    r = load_op(c, s->call_args[4], dst);
+    if (r != dst) a64_mov_reg(a, dst, r, 0);
+    a64_b(a, Ldone);
+    a64_bind(a, Lnorm);
+    r = load_op(c, s->call_args[2], dst);
+    if (r != dst) a64_mov_reg(a, dst, r, 0);
+    a64_bind(a, Ldone);
+    commit(c, s->dst, dst);
+}
+
 static void emit_call(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
     int n = s->call_nargs;
@@ -1386,6 +1442,14 @@ static void emit_call(C64 *c, const IRInst *s) {
                 else emit_rotate_builtin(c, s, rw);
                 return;
             }
+        }
+    }
+    if (s->call_name && strcmp(s->call_name, "fpclassify") == 0
+        && s->call_nargs >= 6) {
+        int defined = 0;
+        if (find_function(c->ir, s->call_name, &defined) != 0) {
+            emit_fpclassify_builtin(c, s);
+            return;
         }
     }
     {

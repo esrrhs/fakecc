@@ -1345,7 +1345,7 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_int(2, 1);
             else if (strcmp(bname, "__builtin_bitreverse8") == 0)
                 ret = type_make_int(1, 1);
-            else if (strcmp(bname, "__builtin_classify_type") == 0)
+            else if (strcmp(bname, "__builtin_classify_type") == 0 || strcmp(bname, "__builtin_fpclassify") == 0)
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_signbit") == 0 || strcmp(bname, "__builtin_signbitf") == 0 || strcmp(bname, "__builtin_signbitl") == 0 || strcmp(bname, "signbit") == 0)
                 ret = type_make_int(4, 0);
@@ -1933,6 +1933,29 @@ static Type check_expr_inner(Expr *e) {
                 type_free(&list_ty);
             }
             set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        /* __builtin_fpclassify is type-generic in its last argument. A
+         * variadic prototype would promote float to double and hide a
+         * float subnormal. Leave that argument's type alone. */
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__builtin_fpclassify") == 0) {
+            if (e->u.call.args.len != 6) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_fpclassify takes 6 arguments");
+                return type_make_void();
+            }
+            for (size_t i = 0; i < e->u.call.args.len; i++) {
+                Type at = check_expr_inner(e->u.call.args.data[i]);
+                if (i == 5 && at.kind != TY_FLOAT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "__builtin_fpclassify value must be a floating type");
+                    return type_make_void();
+                }
+                type_free(&at);
+            }
+            set_type(e, type_make_int(4, 0));
             return type_clone(e->type);
         }
         /* Type-check the callee expression. */

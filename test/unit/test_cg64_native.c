@@ -1848,6 +1848,27 @@ static void test_powi(void) {
         "  return 0; }", 0);
 }
 
+static void test_class(void) {
+    expect("class",
+        "package main;\n"
+        "int main(void) {\n"
+        "  if (__builtin_fpclassify(1, 2, 3, 4, 5, 0.0) != 5) return 1;\n"
+        "  if (__builtin_fpclassify(1, 2, 3, 4, 5, 1.0) != 3) return 2;\n"
+        "  if (__builtin_fpclassify(1, 2, 3, 4, 5, __builtin_inf()) != 2) return 3;\n"
+        "  if (__builtin_fpclassify(1, 2, 3, 4, 5, __builtin_nan(\"\")) != 1) return 4;\n"
+        "  unsigned long long bits = 1;\n"
+        "  double sub;\n"
+        "  __builtin_memcpy(&sub, &bits, 8);\n"
+        "  if (__builtin_fpclassify(1, 2, 3, 4, 5, sub) != 4) return 5;\n"
+        "  if (__builtin_fpclassify(1, 2, 3, 4, 5, 0.0f) != 5) return 6;\n"
+        "  if (__builtin_fpclassify(1, 2, 3, 4, 5, 1.0f) != 3) return 7;\n"
+        "  unsigned fb = 1;\n"
+        "  float fsub;\n"
+        "  __builtin_memcpy(&fsub, &fb, 4);\n"
+        "  if (__builtin_fpclassify(1, 2, 3, 4, 5, fsub) != 4) return 8;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1943,6 +1964,7 @@ int main(void) {
     test_align();
     test_funnel();
     test_powi();
+    test_class();
     test_trap();
     test_syscall();
     test_frame_addr();
