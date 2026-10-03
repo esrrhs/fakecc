@@ -6541,6 +6541,58 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 base = emit_bin_w(fn, IR_ADD, val, am1, w, uns, e->loc);
             return emit_bin_w(fn, IR_BAND, base, nmask, w, uns, e->loc);
         }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_fshl") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_fshr") == 0)) {
+            /* Concatenate the first two arguments and shift.  A zero count
+             * returns the high half for fshl and the low half for fshr;
+             * shifting by the full width is not a hardware shift. */
+            if (e->u.call.args.len < 3) return -1;
+            int left = strcmp(e->u.call.callee->u.var.name, "__builtin_fshl") == 0;
+            int w = type_size(e->type);
+            if (w < 1) w = 4;
+            int bits = w * 8;
+            IRValue hi = lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue lo = lower_expr(fn, st, e->u.call.args.data[1]);
+            IRValue sh = lower_expr(fn, st, e->u.call.args.data[2]);
+            IRValue mask = new_value(fn);
+            emit_inst_w(fn, IR_CONST, mask, -1, -1, bits - 1, w, 1, e->loc);
+            set_value_type(fn, mask, w, 1);
+            IRValue n = emit_bin_w(fn, IR_BAND, sh, mask, w, 1, e->loc);
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, w, 1, e->loc);
+            set_value_type(fn, zero, w, 1);
+            IRValue is0 = emit_bin_w(fn, IR_EQ, n, zero, 4, 0, e->loc);
+            IRValue slot = emit_alloca(fn, w, w, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            int Lsh = new_label(fn);
+            int Lzero = new_label(fn);
+            int Ldone = new_label(fn);
+            emit_inst_w(fn, IR_CBR, -1, is0, Lsh, Lzero, 4, 0, e->loc);
+            emit_inst_w(fn, IR_LABEL, -1, -1, -1, Lzero, 0, 0, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, left ? hi : lo, 0, w, 1, e->loc);
+            emit_inst(fn, IR_BR, -1, -1, -1, Ldone, e->loc);
+            emit_inst_w(fn, IR_LABEL, -1, -1, -1, Lsh, 0, 0, e->loc);
+            IRValue widthv = new_value(fn);
+            emit_inst_w(fn, IR_CONST, widthv, -1, -1, bits, w, 1, e->loc);
+            set_value_type(fn, widthv, w, 1);
+            IRValue wn = emit_bin_w(fn, IR_SUB, widthv, n, w, 1, e->loc);
+            IRValue top, bot;
+            if (left) {
+                top = emit_bin_w(fn, IR_SHL, hi, n, w, 1, e->loc);
+                bot = emit_bin_w(fn, IR_SHR, lo, wn, w, 1, e->loc);
+            } else {
+                top = emit_bin_w(fn, IR_SHL, hi, wn, w, 1, e->loc);
+                bot = emit_bin_w(fn, IR_SHR, lo, n, w, 1, e->loc);
+            }
+            IRValue merged = emit_bin_w(fn, IR_BOR, top, bot, w, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, merged, 0, w, 1, e->loc);
+            emit_inst_w(fn, IR_LABEL, -1, -1, -1, Ldone, 0, 0, e->loc);
+            IRValue out = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, out, addr, -1, 0, w, 1, e->loc);
+            set_value_type(fn, out, w, 1);
+            return out;
+        }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_longjmp") == 0) {
             IRValue buf_ptr = lower_expr(fn, st, e->u.call.args.data[0]);
             emit_inst_w(fn, IR_LONGJMP, -1, buf_ptr, -1, 0, 8, 1, e->loc);

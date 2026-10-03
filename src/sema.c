@@ -1331,6 +1331,14 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_int(2, 1);
             else if (strcmp(bname, "__builtin_rotateleft8") == 0 || strcmp(bname, "__builtin_rotateright8") == 0)
                 ret = type_make_int(1, 1);
+            else if (strcmp(bname, "__builtin_bitreverse64") == 0)
+                ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_bitreverse32") == 0)
+                ret = type_make_int(4, 1);
+            else if (strcmp(bname, "__builtin_bitreverse16") == 0)
+                ret = type_make_int(2, 1);
+            else if (strcmp(bname, "__builtin_bitreverse8") == 0)
+                ret = type_make_int(1, 1);
             else if (strcmp(bname, "__builtin_classify_type") == 0)
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_signbit") == 0 || strcmp(bname, "__builtin_signbitf") == 0 || strcmp(bname, "__builtin_signbitl") == 0 || strcmp(bname, "signbit") == 0)
@@ -1632,6 +1640,22 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "builtin takes at least 1 argument");
+                return type_make_void();
+            }
+            Type t0 = check_expr_inner(e->u.call.args.data[0]);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type ti = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&ti);
+            }
+            set_type(e, t0);
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_fshl") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_fshr") == 0)) {
+            if (e->u.call.args.len != 3) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "funnel shift takes 3 arguments");
                 return type_make_void();
             }
             Type t0 = check_expr_inner(e->u.call.args.data[0]);

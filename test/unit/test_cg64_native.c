@@ -1818,6 +1818,23 @@ static void test_align(void) {
         "  return 0; }", 0);
 }
 
+static void test_funnel(void) {
+    expect("funnel",
+        "package main;\n"
+        "int main(void) {\n"
+        "  if (__builtin_fshl(0x00000001u, 0x80000000u, 1) != 3u) return 1;\n"
+        "  if (__builtin_fshl(0x12345678u, 0u, 0) != 0x12345678u) return 2;\n"
+        "  if (__builtin_fshr(0x00000001u, 0x80000000u, 1) != 0xc0000000u) return 3;\n"
+        "  if (__builtin_fshr(0u, 0x12345678u, 0) != 0x12345678u) return 4;\n"
+        "  unsigned long long h = 1ull;\n"
+        "  if (__builtin_fshl(h, h << 63, 1) != 3ull) return 5;\n"
+        "  if ((unsigned)__builtin_bitreverse8(0x01) != 0x80) return 6;\n"
+        "  if ((unsigned)__builtin_bitreverse16(0x0001) != 0x8000) return 7;\n"
+        "  if (__builtin_bitreverse32(0x00000001u) != 0x80000000u) return 8;\n"
+        "  if (__builtin_bitreverse64(1ull) != (1ull << 63)) return 9;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1911,6 +1928,7 @@ int main(void) {
     test_rfind();
     test_rotate();
     test_align();
+    test_funnel();
     test_trap();
     test_syscall();
     test_frame_addr();

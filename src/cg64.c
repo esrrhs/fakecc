@@ -966,6 +966,26 @@ static int rotate_width(const char *bn) {
     return 0;
 }
 
+static int bitrev_width(const char *bn) {
+    if (!bn || strncmp(bn, "bitreverse", 10) != 0) return 0;
+    const char *p = bn + 10;
+    if (strcmp(p, "8") == 0) return 8;
+    if (strcmp(p, "16") == 0) return 16;
+    if (strcmp(p, "32") == 0) return 32;
+    if (strcmp(p, "64") == 0) return 64;
+    return 0;
+}
+
+static void emit_bitrev_builtin(C64 *c, const IRInst *s, int bits) {
+    if (s->dst < 0 || s->call_nargs < 1) return;
+    int dst = dst_reg(c, s->dst);
+    int src = load_op(c, s->call_args[0], dst);
+    bit1(c->as, bits == 64 ? 0xDAC00000u : 0x5AC00000u, dst, src);
+    if (bits == 8) a64_lsr_imm(c->as, dst, dst, 24, 0);
+    else if (bits == 16) a64_lsr_imm(c->as, dst, dst, 16, 0);
+    commit(c, s->dst, dst);
+}
+
 static void emit_rotate_builtin(C64 *c, const IRInst *s, int width) {
     if (s->dst < 0 || s->call_nargs < 2) return;
     A64Asm *a = c->as;
@@ -1316,10 +1336,12 @@ static void emit_call(C64 *c, const IRInst *s) {
     }
     {
         int rw = rotate_width(s->call_name);
-        if (rw && s->call_nargs >= 2) {
+        int bw = bitrev_width(s->call_name);
+        if ((rw && s->call_nargs >= 2) || (bw && s->call_nargs >= 1)) {
             int defined = 0;
             if (find_function(c->ir, s->call_name, &defined) != 0) {
-                emit_rotate_builtin(c, s, rw);
+                if (bw) emit_bitrev_builtin(c, s, bw);
+                else emit_rotate_builtin(c, s, rw);
                 return;
             }
         }
