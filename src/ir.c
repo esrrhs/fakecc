@@ -6360,10 +6360,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (strcmp(sname, "__atomic_load") == 0) {
                 if (e->u.call.args.len < 2) return -1;
                 IRValue retp = lower_expr(fn, st, e->u.call.args.data[1]);
-                if (e->u.call.args.len > 2)
+                long long ord = 5;
+                if (e->u.call.args.len > 2) {
                     lower_expr(fn, st, e->u.call.args.data[2]);
+                    fold_const_int(e->u.call.args.data[2], &ord);
+                }
+                /* Same barrier as __atomic_load_n.  The copy into ret is plain. */
+                int ak = 0;
+                if (!is_f && (ord == 1 || ord == 2)) ak = 1;
+                else if (!is_f && ord >= 5) ak = 2;
                 IRValue v = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, sz, is_u, e->loc);
+                emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, ak, sz, is_u, e->loc);
                 set_value_type(fn, v, sz, is_u);
                 if (is_f) set_value_float(fn, v, 1);
                 emit_inst_w(fn, IR_STORE_PTR, -1, retp, v, 0, sz, is_u, e->loc);
@@ -6372,13 +6379,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (strcmp(sname, "__atomic_store") == 0) {
                 if (e->u.call.args.len < 2) return -1;
                 IRValue vp = lower_expr(fn, st, e->u.call.args.data[1]);
-                if (e->u.call.args.len > 2)
+                long long ord = 5;
+                if (e->u.call.args.len > 2) {
                     lower_expr(fn, st, e->u.call.args.data[2]);
+                    fold_const_int(e->u.call.args.data[2], &ord);
+                }
                 IRValue v = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, v, vp, -1, 0, sz, is_u, e->loc);
                 set_value_type(fn, v, sz, is_u);
                 if (is_f) set_value_float(fn, v, 1);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, v, 0, sz, is_u, e->loc);
+                /* Same barrier as __atomic_store_n.  The load of *val is plain. */
+                int ak = (!is_f && (ord == 3 || ord == 4 || ord >= 5)) ? 3 : 0;
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, v, ak, sz, is_u, e->loc);
                 return -1;
             }
             if (strcmp(sname, "__atomic_exchange") == 0) {

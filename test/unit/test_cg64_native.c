@@ -2304,6 +2304,56 @@ static void test_aload(void) {
         "  return 0; }", 0);
 }
 
+static void test_aptr(void) {
+    expect("aptr",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 1;\n"
+        "  int r = 0;\n"
+        "  __atomic_load(&x, &r, 0);\n"
+        "  if (r != 1) return 1;\n"
+        "  __atomic_load(&x, &r, 2);\n"
+        "  if (r != 1) return 2;\n"
+        "  __atomic_load(&x, &r, 5);\n"
+        "  if (r != 1) return 3;\n"
+        "  x = -3;\n"
+        "  __atomic_load(&x, &r, 2);\n"
+        "  if (r != -3) return 4;\n"
+        "  int v = 4;\n"
+        "  __atomic_store(&x, &v, 0);\n"
+        "  if (x != 4) return 5;\n"
+        "  v = 9;\n"
+        "  __atomic_store(&x, &v, 3);\n"
+        "  __atomic_load(&x, &r, 5);\n"
+        "  if (r != 9) return 6;\n"
+        "  long long y = 3;\n"
+        "  long long ry = 0;\n"
+        "  __atomic_load(&y, &ry, 2);\n"
+        "  if (ry != 3) return 7;\n"
+        "  long long vy = 8;\n"
+        "  __atomic_store(&y, &vy, 5);\n"
+        "  if (y != 8) return 8;\n"
+        "  unsigned char c = 1;\n"
+        "  unsigned char rc = 0;\n"
+        "  __atomic_load(&c, &rc, 2);\n"
+        "  if (rc != 1) return 9;\n"
+        "  unsigned char vc = 6;\n"
+        "  __atomic_store(&c, &vc, 3);\n"
+        "  if (c != 6) return 10;\n"
+        "  unsigned short h = 2;\n"
+        "  unsigned short rh = 0;\n"
+        "  __atomic_load(&h, &rh, 2);\n"
+        "  if (rh != 2) return 11;\n"
+        "  unsigned short vh = 7;\n"
+        "  __atomic_store(&h, &vh, 3);\n"
+        "  if (h != 7) return 12;\n"
+        "  signed char sc = -5;\n"
+        "  signed char rsc = 0;\n"
+        "  __atomic_load(&sc, &rsc, 5);\n"
+        "  if (rsc != -5) return 13;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2372,6 +2422,7 @@ int main(void) {
     test_barrier();
     test_fence();
     test_aload();
+    test_aptr();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
