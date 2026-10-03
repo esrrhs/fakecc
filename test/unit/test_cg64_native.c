@@ -2019,6 +2019,43 @@ static void test_bitg(void) {
         "  return 0; }", 0);
 }
 
+static void test_lcpy(void) {
+    expect("lcpy",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char d[8];\n"
+        "  unsigned long n = __builtin_strlcpy(d, \"hi\", 8);\n"
+        "  if (n != 2 || d[0] != 104 || d[1] != 105 || d[2] != 0) return 1;\n"
+        "  n = __builtin_strlcpy(d, \"hello\", 4);\n"
+        "  if (n != 5 || d[0] != 104 || d[1] != 101 || d[2] != 108 || d[3] != 0) return 2;\n"
+        "  n = __builtin_strlcpy(d, \"ab\", 0);\n"
+        "  if (n != 2 || d[0] != 104) return 3;\n"
+        "  n = __builtin_strlcpy(d, \"\", 8);\n"
+        "  if (n != 0 || d[0] != 0) return 4;\n"
+        "  char e[8]; e[0] = 97; e[1] = 0;\n"
+        "  n = __builtin_strlcat(e, \"b\", 8);\n"
+        "  if (n != 2 || e[0] != 97 || e[1] != 98 || e[2] != 0) return 5;\n"
+        "  n = __builtin_strlcat(e, \"xyz\", 4);\n"
+        "  if (n != 5 || e[0] != 97 || e[1] != 98 || e[2] != 120 || e[3] != 0) return 6;\n"
+        "  char f[2]; f[0] = 97; f[1] = 98;\n"
+        "  n = __builtin_strlcat(f, \"z\", 2);\n"
+        "  if (n != 3 || f[0] != 97) return 7;\n"
+        "  char s[6]; s[0] = 97; s[1] = 44; s[2] = 98; s[3] = 44; s[4] = 99; s[5] = 0;\n"
+        "  char *p = s;\n"
+        "  char *t = __builtin_strsep(&p, \",\");\n"
+        "  if (!t || t[0] != 97 || t[1] != 0 || !p || p[0] != 98) return 8;\n"
+        "  t = __builtin_strsep(&p, \",\");\n"
+        "  if (!t || t[0] != 98 || !p || p[0] != 99) return 9;\n"
+        "  t = __builtin_strsep(&p, \",\");\n"
+        "  if (!t || t[0] != 99 || p) return 10;\n"
+        "  if (__builtin_strsep(&p, \",\")) return 11;\n"
+        "  char u[3]; u[0] = 44; u[1] = 97; u[2] = 0;\n"
+        "  char *q = u;\n"
+        "  t = __builtin_strsep(&q, \",\");\n"
+        "  if (!t || t[0] != 0 || !q || q[0] != 97) return 12;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -2118,6 +2155,7 @@ int main(void) {
     test_next();
     test_stdc();
     test_bitg();
+    test_lcpy();
     test_trap();
     test_syscall();
     test_frame_addr();

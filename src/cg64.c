@@ -745,6 +745,114 @@ static int emit_span_builtin(C64 *c, const char *name) {
 
 /* strcpy/stpcpy/strncpy/strcat/strncat/strstr.  Result pointer in x0.
  * x3–x5 are caller-saved.  A user definition of the same name still wins. */
+/* strlcpy/strlcat return the length they tried to create.  strsep
+ * rewrites the caller's pointer and does not allocate. */
+static int emit_bound_builtin(C64 *c, const char *name) {
+    int is_strlcpy = name && strcmp(name, "strlcpy") == 0;
+    int is_strlcat = name && strcmp(name, "strlcat") == 0;
+    int is_strsep = name && strcmp(name, "strsep") == 0;
+    if (!is_strlcpy && !is_strlcat && !is_strsep) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+    A64Asm *a = c->as;
+    if (is_strsep) {
+        int Lscan = a64_new_label(a);
+        int Ldelim = a64_new_label(a);
+        int Lnext = a64_new_label(a);
+        int Lhit = a64_new_label(a);
+        int Lend = a64_new_label(a);
+        int Lret = a64_new_label(a);
+        int Lnull = a64_new_label(a);
+        a64_ldr64(a, A64_X2, A64_X0, 0);
+        a64_cbz(a, A64_X2, Lnull, 1);
+        a64_mov_reg(a, A64_X3, A64_X2, 1);
+        a64_bind(a, Lscan);
+        a64_ldr8(a, A64_X4, A64_X2, 0);
+        a64_cbz(a, A64_X4, Lend, 0);
+        a64_mov_reg(a, A64_X5, A64_X1, 1);
+        a64_bind(a, Ldelim);
+        a64_ldr8(a, A64_X6, A64_X5, 0);
+        a64_cbz(a, A64_X6, Lnext, 0);
+        a64_cmp_reg(a, A64_X4, A64_X6, 0);
+        a64_bcond(a, A64_EQ, Lhit);
+        a64_add_imm12(a, A64_X5, A64_X5, 1, 0, 1, 0);
+        a64_b(a, Ldelim);
+        a64_bind(a, Lnext);
+        a64_add_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+        a64_b(a, Lscan);
+        a64_bind(a, Lhit);
+        a64_str8(a, 31, A64_X2, 0);
+        a64_add_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+        a64_str64(a, A64_X2, A64_X0, 0);
+        a64_mov_reg(a, A64_X0, A64_X3, 1);
+        a64_b(a, Lret);
+        a64_bind(a, Lend);
+        a64_str64(a, 31, A64_X0, 0);
+        a64_mov_reg(a, A64_X0, A64_X3, 1);
+        a64_b(a, Lret);
+        a64_bind(a, Lnull);
+        a64_movz(a, A64_X0, 0, 0, 1);
+        a64_bind(a, Lret);
+        return 1;
+    }
+    int Lcopy = a64_new_label(a);
+    int Lnul = a64_new_label(a);
+    int Lterm = a64_new_label(a);
+    int Lmeas = a64_new_label(a);
+    int Llen = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+    a64_movz(a, A64_X6, 0, 0, 1);
+    if (is_strlcat) {
+        int Lfind = a64_new_label(a);
+        int Lapp = a64_new_label(a);
+        int Llong = a64_new_label(a);
+        a64_mov_reg(a, A64_X4, A64_X0, 1);
+        a64_mov_reg(a, A64_X5, A64_X2, 1);
+        a64_bind(a, Lfind);
+        a64_cbz(a, A64_X5, Llong, 1);
+        a64_ldr8(a, A64_X3, A64_X0, 0);
+        a64_cbz(a, A64_X3, Lapp, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_sub_imm12(a, A64_X5, A64_X5, 1, 0, 1, 0);
+        a64_b(a, Lfind);
+        a64_bind(a, Llong);
+        a64_mov_reg(a, A64_X6, A64_X2, 1);
+        a64_mov_reg(a, A64_X4, A64_X1, 1);
+        a64_b(a, Lmeas);
+        a64_bind(a, Lapp);
+        a64_sub_reg(a, A64_X6, A64_X0, A64_X4, A64_LSL, 0, 1, 0);
+        a64_mov_reg(a, A64_X2, A64_X5, 1);
+    }
+    a64_mov_reg(a, A64_X4, A64_X1, 1);
+    a64_cbz(a, A64_X2, Lmeas, 1);
+    a64_bind(a, Lcopy);
+    a64_cmp_imm12(a, A64_X2, 1, 0, 1);
+    a64_bcond(a, A64_EQ, Lterm);
+    a64_ldr8(a, A64_X3, A64_X1, 0);
+    a64_cbz(a, A64_X3, Lnul, 0);
+    a64_str8(a, A64_X3, A64_X0, 0);
+    a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+    a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+    a64_b(a, Lcopy);
+    a64_bind(a, Lnul);
+    a64_str8(a, 31, A64_X0, 0);
+    a64_sub_reg(a, A64_X0, A64_X1, A64_X4, A64_LSL, 0, 1, 0);
+    a64_b(a, Ldone);
+    a64_bind(a, Lterm);
+    a64_str8(a, 31, A64_X0, 0);
+    a64_bind(a, Lmeas);
+    a64_ldr8(a, A64_X3, A64_X1, 0);
+    a64_cbz(a, A64_X3, Llen, 0);
+    a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+    a64_b(a, Lmeas);
+    a64_bind(a, Llen);
+    a64_sub_reg(a, A64_X0, A64_X1, A64_X4, A64_LSL, 0, 1, 0);
+    a64_bind(a, Ldone);
+    a64_add_reg(a, A64_X0, A64_X0, A64_X6, A64_LSL, 0, 1, 0);
+    return 1;
+}
+
 static int emit_copy_builtin(C64 *c, const char *name) {
     int is_strcpy = strcmp(name, "strcpy") == 0;
     int is_stpcpy = strcmp(name, "stpcpy") == 0;
@@ -2006,7 +2114,8 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_scan_builtin(c, s->call_name)
                                  || emit_find_builtin(c, s->call_name)
                                  || emit_span_builtin(c, s->call_name)
-                                 || emit_copy_builtin(c, s->call_name)))) {
+                                 || emit_copy_builtin(c, s->call_name)
+                                 || emit_bound_builtin(c, s->call_name)))) {
         int fi = 0;
         if (!s->call_name) {
             die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
