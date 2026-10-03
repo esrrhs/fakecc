@@ -6209,6 +6209,197 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 return res;
             }
         }
+        /* Same model as __sync_*: plain loads and stores.  Darwin images
+         * do not link libatomic, and a missing call name used to crash
+         * the arm64 backend. */
+        if (e->u.call.callee->kind == EX_VAR &&
+            strncmp(e->u.call.callee->u.var.name, "__atomic_", 9) == 0) {
+            const char *sname = e->u.call.callee->u.var.name;
+            if (strcmp(sname, "__atomic_thread_fence") == 0 ||
+                strcmp(sname, "__atomic_signal_fence") == 0) {
+                for (size_t i = 0; i < e->u.call.args.len; i++)
+                    lower_expr(fn, st, e->u.call.args.data[i]);
+                return -1;
+            }
+            if (e->u.call.args.len < 1)
+                return -1;
+            Expr *p0 = e->u.call.args.data[0];
+            int sz = 4, is_u = 0, is_f = 0;
+            if (p0->type.kind == TY_PTR && p0->type.pointee) {
+                int psz = type_size(*p0->type.pointee);
+                if (psz > 0) sz = psz;
+                is_u = p0->type.pointee->is_unsigned;
+                is_f = p0->type.pointee->kind == TY_FLOAT;
+            }
+            IRValue addr = lower_expr(fn, st, p0);
+            if (strcmp(sname, "__atomic_load_n") == 0) {
+                if (e->u.call.args.len > 1)
+                    lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, v, sz, is_u);
+                if (is_f) set_value_float(fn, v, 1);
+                return v;
+            }
+            if (strcmp(sname, "__atomic_store_n") == 0) {
+                if (e->u.call.args.len < 2) return -1;
+                IRValue val = lower_expr(fn, st, e->u.call.args.data[1]);
+                if (e->u.call.args.len > 2)
+                    lower_expr(fn, st, e->u.call.args.data[2]);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_exchange_n") == 0) {
+                if (e->u.call.args.len < 2) return -1;
+                IRValue val = lower_expr(fn, st, e->u.call.args.data[1]);
+                if (e->u.call.args.len > 2)
+                    lower_expr(fn, st, e->u.call.args.data[2]);
+                IRValue oldv = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, oldv, sz, is_u);
+                if (is_f) set_value_float(fn, oldv, 1);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                return oldv;
+            }
+            if (strcmp(sname, "__atomic_load") == 0) {
+                if (e->u.call.args.len < 2) return -1;
+                IRValue retp = lower_expr(fn, st, e->u.call.args.data[1]);
+                if (e->u.call.args.len > 2)
+                    lower_expr(fn, st, e->u.call.args.data[2]);
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, v, sz, is_u);
+                if (is_f) set_value_float(fn, v, 1);
+                emit_inst_w(fn, IR_STORE_PTR, -1, retp, v, 0, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_store") == 0) {
+                if (e->u.call.args.len < 2) return -1;
+                IRValue vp = lower_expr(fn, st, e->u.call.args.data[1]);
+                if (e->u.call.args.len > 2)
+                    lower_expr(fn, st, e->u.call.args.data[2]);
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, v, vp, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, v, sz, is_u);
+                if (is_f) set_value_float(fn, v, 1);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, v, 0, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_exchange") == 0) {
+                if (e->u.call.args.len < 3) return -1;
+                IRValue vp = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue retp = lower_expr(fn, st, e->u.call.args.data[2]);
+                if (e->u.call.args.len > 3)
+                    lower_expr(fn, st, e->u.call.args.data[3]);
+                IRValue oldv = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, oldv, sz, is_u);
+                if (is_f) set_value_float(fn, oldv, 1);
+                IRValue val = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, val, vp, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, val, sz, is_u);
+                if (is_f) set_value_float(fn, val, 1);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, retp, oldv, 0, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_clear") == 0) {
+                if (e->u.call.args.len > 1)
+                    lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, sz, is_u, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, 0, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_test_and_set") == 0) {
+                if (e->u.call.args.len > 1)
+                    lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue oldv = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, 1, 1, e->loc);
+                set_value_type(fn, oldv, 1, 1);
+                IRValue one = new_value(fn);
+                emit_inst_w(fn, IR_CONST, one, -1, -1, 1, 1, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, one, 0, 1, 1, e->loc);
+                IRValue wide = new_value(fn);
+                emit_inst_w(fn, IR_ZEXT, wide, oldv, -1, 0, 4, 0, e->loc);
+                set_value_type(fn, wide, 4, 0);
+                return wide;
+            }
+            if (strcmp(sname, "__atomic_compare_exchange_n") == 0 ||
+                strcmp(sname, "__atomic_compare_exchange") == 0) {
+                int is_n = strcmp(sname, "__atomic_compare_exchange_n") == 0;
+                if (e->u.call.args.len < 3) return -1;
+                IRValue exp_ptr = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue desired;
+                if (is_n) {
+                    desired = lower_expr(fn, st, e->u.call.args.data[2]);
+                } else {
+                    IRValue dp = lower_expr(fn, st, e->u.call.args.data[2]);
+                    desired = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, desired, dp, -1, 0, sz, is_u, e->loc);
+                    set_value_type(fn, desired, sz, is_u);
+                    if (is_f) set_value_float(fn, desired, 1);
+                }
+                for (size_t i = 3; i < e->u.call.args.len; i++)
+                    lower_expr(fn, st, e->u.call.args.data[i]);
+                IRValue cur = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, cur, addr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, cur, sz, is_u);
+                if (is_f) set_value_float(fn, cur, 1);
+                IRValue expv = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, expv, exp_ptr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, expv, sz, is_u);
+                if (is_f) set_value_float(fn, expv, 1);
+                IRValue eq = emit_bin_w(fn, IR_EQ, cur, expv, 4, 0, e->loc);
+                int Lok = new_label(fn);
+                int Lfail = new_label(fn);
+                int Ldone = new_label(fn);
+                emit_inst_w(fn, IR_CBR, -1, eq, Lfail, Lok, 4, 0, e->loc);
+                emit_inst_w(fn, IR_LABEL, -1, -1, -1, Lok, 0, 0, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, desired, 0, sz, is_u, e->loc);
+                emit_inst(fn, IR_BR, -1, -1, -1, Ldone, e->loc);
+                emit_inst_w(fn, IR_LABEL, -1, -1, -1, Lfail, 0, 0, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, exp_ptr, cur, 0, sz, is_u, e->loc);
+                emit_inst_w(fn, IR_LABEL, -1, -1, -1, Ldone, 0, 0, e->loc);
+                return eq;
+            }
+            {
+                int opc = 0, fetch_old = 0, is_nand = 0, is_rmw = 1;
+                if (strcmp(sname, "__atomic_add_fetch") == 0) opc = IR_ADD;
+                else if (strcmp(sname, "__atomic_fetch_add") == 0) { opc = IR_ADD; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_sub_fetch") == 0) opc = IR_SUB;
+                else if (strcmp(sname, "__atomic_fetch_sub") == 0) { opc = IR_SUB; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_and_fetch") == 0) opc = IR_BAND;
+                else if (strcmp(sname, "__atomic_fetch_and") == 0) { opc = IR_BAND; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_or_fetch") == 0) opc = IR_BOR;
+                else if (strcmp(sname, "__atomic_fetch_or") == 0) { opc = IR_BOR; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_xor_fetch") == 0) opc = IR_BXOR;
+                else if (strcmp(sname, "__atomic_fetch_xor") == 0) { opc = IR_BXOR; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_nand_fetch") == 0) is_nand = 1;
+                else if (strcmp(sname, "__atomic_fetch_nand") == 0) { is_nand = 1; fetch_old = 1; }
+                else is_rmw = 0;
+                if (is_rmw) {
+                    if (e->u.call.args.len < 2) return -1;
+                    IRValue delta = lower_expr(fn, st, e->u.call.args.data[1]);
+                    if (e->u.call.args.len > 2)
+                        lower_expr(fn, st, e->u.call.args.data[2]);
+                    IRValue oldv = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
+                    set_value_type(fn, oldv, sz, is_u);
+                    IRValue res;
+                    if (is_nand) {
+                        IRValue both = emit_bin_w(fn, IR_BAND, oldv, delta, sz, is_u, e->loc);
+                        res = new_value(fn);
+                        emit_inst_w(fn, IR_BNOT, res, both, -1, 0, sz, is_u, e->loc);
+                        set_value_type(fn, res, sz, is_u);
+                    } else {
+                        res = emit_bin_w(fn, opc, oldv, delta, sz, is_u, e->loc);
+                    }
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, res, 0, sz, is_u, e->loc);
+                    return fetch_old ? oldv : res;
+                }
+            }
+        }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_prefetch") == 0) {
             for (size_t i = 0; i < e->u.call.args.len; i++)
                 lower_expr(fn, st, e->u.call.args.data[i]);

@@ -1655,6 +1655,36 @@ static void test_span(void) {
         "  return 0; }", 0);
 }
 
+static void test_atomic(void) {
+    expect("atomic",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 1;\n"
+        "  if (__atomic_load_n(&x, 0) != 1) return 1;\n"
+        "  __atomic_store_n(&x, 9, 0);\n"
+        "  if (x != 9) return 2;\n"
+        "  if (__atomic_exchange_n(&x, 4, 0) != 9 || x != 4) return 3;\n"
+        "  if (__atomic_fetch_add(&x, 3, 0) != 4 || x != 7) return 4;\n"
+        "  if (__atomic_add_fetch(&x, 1, 0) != 8) return 5;\n"
+        "  if (__atomic_fetch_and(&x, 15, 0) != 8 || x != 8) return 6;\n"
+        "  int exp = 8;\n"
+        "  if (!__atomic_compare_exchange_n(&x, &exp, 2, 0, 0, 0) || x != 2) return 7;\n"
+        "  exp = 0;\n"
+        "  if (__atomic_compare_exchange_n(&x, &exp, 5, 0, 0, 0)) return 8;\n"
+        "  if (exp != 2 || x != 2) return 9;\n"
+        "  __atomic_thread_fence(0);\n"
+        "  char b = 0;\n"
+        "  if (__atomic_test_and_set(&b, 0) != 0 || b != 1) return 10;\n"
+        "  if (__atomic_test_and_set(&b, 0) != 1) return 11;\n"
+        "  __atomic_clear(&b, 0);\n"
+        "  if (b != 0) return 12;\n"
+        "  int src = 3, dst = 0;\n"
+        "  __atomic_store(&x, &src, 0);\n"
+        "  __atomic_load(&x, &dst, 0);\n"
+        "  if (x != 3 || dst != 3) return 13;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1740,6 +1770,7 @@ int main(void) {
     test_copy();
     test_pad();
     test_span();
+    test_atomic();
     test_trap();
     test_syscall();
     test_frame_addr();

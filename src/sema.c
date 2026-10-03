@@ -1666,17 +1666,21 @@ static Type check_expr_inner(Expr *e) {
             }
             return type_clone(e->type);
         }
-        /* C11 __atomic_* family — accept the call and lower it as an
-         * ordinary (non-atomic) load/store.  fakecc does not implement
-         * atomic memory ordering; this is enough to compile code that uses
-         * these builtins for portability (e.g. GCC torture tests that
-         * exercise __thread + atomic load).  The IR layer treats the call
-         * as a normal function call — the symbol is left undefined and the
-         * linker resolves it from libc's libatomic when present, or the
-         * harness's compile-only test passes regardless. */
+        /* C11 __atomic_* family.  fakecc does not implement memory
+         * ordering; IR lowers these as ordinary loads and stores so a
+         * freestanding image does not need libatomic. */
         if (e->u.call.callee->kind == EX_VAR
             && strncmp(e->u.call.callee->u.var.name, "__atomic_", 9) == 0) {
             const char *sname = e->u.call.callee->u.var.name;
+            if (strcmp(sname, "__atomic_thread_fence") == 0
+                || strcmp(sname, "__atomic_signal_fence") == 0) {
+                for (size_t i = 0; i < e->u.call.args.len; i++) {
+                    Type at = check_expr_inner(e->u.call.args.data[i]);
+                    type_free(&at);
+                }
+                set_type(e, type_make_void());
+                return type_clone(e->type);
+            }
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__atomic builtin takes at least 1 argument");
@@ -1694,13 +1698,21 @@ static Type check_expr_inner(Expr *e) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&at);
             }
-            /* __atomic_load_n returns the loaded value; __atomic_store_n
-             * returns void; __atomic_*_fetch / fetch_* return the prior
-             * value (same type as the pointee). */
+            /* __atomic_load_n returns the loaded value.  store/clear and
+             * the pointer forms of load/store/exchange are void.
+             * compare_exchange and test_and_set return a boolean. */
             if (strcmp(sname, "__atomic_store_n") == 0
-                || strcmp(sname, "__atomic_clear") == 0) {
+                || strcmp(sname, "__atomic_store") == 0
+                || strcmp(sname, "__atomic_clear") == 0
+                || strcmp(sname, "__atomic_load") == 0
+                || strcmp(sname, "__atomic_exchange") == 0) {
                 type_free(&val_ty);
                 set_type(e, type_make_void());
+            } else if (strcmp(sname, "__atomic_compare_exchange_n") == 0
+                       || strcmp(sname, "__atomic_compare_exchange") == 0
+                       || strcmp(sname, "__atomic_test_and_set") == 0) {
+                type_free(&val_ty);
+                set_type(e, type_make_int(4, 0));
             } else {
                 set_type(e, val_ty);
             }

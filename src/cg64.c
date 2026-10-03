@@ -1363,7 +1363,11 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_span_builtin(c, s->call_name)
                                  || emit_copy_builtin(c, s->call_name)))) {
         int fi = 0;
-        if (find_function(c->ir, s->call_name, &fi) != 0) {
+        if (!s->call_name) {
+            die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
+                   s->loc.line, s->loc.col,
+                   "arm64 backend: call with no target");
+        } else if (find_function(c->ir, s->call_name, &fi) != 0) {
             if (!emit_object_mode())
                 die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
                        s->loc.line, s->loc.col,
