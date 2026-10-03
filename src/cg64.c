@@ -2189,6 +2189,63 @@ static void emit_call(C64 *c, const IRInst *s) {
         if (s->dst >= 0) commit(c, s->dst, d);
         return;
     }
+    if (s->call_name && strcmp(s->call_name, "__fakecc_fadd") == 0) {
+        /* No LDADD for scalar float.  Load, add, CAS, and retry with the
+         * value CAS observed.  The compare is on the IEEE bits. */
+        if (s->call_nargs < 2 || s->dst < 0) return;
+        int w = s->width;
+        if (w != 4 && w != 8) {
+            die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
+                   s->loc.line, s->loc.col,
+                   "arm64 backend: float atomic add width must be 4 or 8");
+            return;
+        }
+        int isd = w == 8;
+        int kind = (int)s->imm & 3;
+        int sub = ((int)s->imm & 4) != 0;
+        int ret_new = ((int)s->imm & 8) != 0;
+        int fv = load_fp(c, s->call_args[1], -1);
+        if (fv != A64_V30) a64_fmov_reg(a, A64_V30, fv, isd);
+        int p0 = load_ptrv(c, s->call_args[0], -1);
+        a64_mov_reg(a, A64_X0, p0, 1);
+        int p = A64_X0;
+        int old = SCR0;
+        if (kind == 1 || kind == 3) {
+            uint32_t ldb = kind == 1
+                ? (isd ? 0xF8BFC000u : 0xB8BFC000u)
+                : (isd ? 0xC8DFFC00u : 0x88DFFC00u);
+            a64_word(a, ldb | ((uint32_t)(p & 31) << 5) | (uint32_t)(old & 31));
+        } else {
+            emit_load(c, old, p, w, 1);
+        }
+        int Lretry = a64_new_label(a);
+        int Ldone = a64_new_label(a);
+        a64_bind(a, Lretry);
+        a64_fmov_gp(a, FSCR, old, 1, isd);
+        if (sub) a64_fsub(a, FSCR, FSCR, A64_V30, isd);
+        else a64_fadd(a, FSCR, FSCR, A64_V30, isd);
+        int neu = SCR1;
+        a64_fmov_gp(a, neu, FSCR, 0, isd);
+        int rs = A64_X1;
+        a64_mov_reg(a, rs, old, 1);
+        uint32_t base = isd ? 0xC8A07C00u : 0x88A07C00u;
+        if (kind & 1) base |= 1u << 22;
+        if (kind & 2) base |= 1u << 15;
+        a64_word(a, base | ((uint32_t)(rs & 31) << 16)
+                       | ((uint32_t)(p & 31) << 5)
+                       | (uint32_t)(neu & 31));
+        a64_cmp_reg(a, rs, old, isd);
+        a64_bcond(a, A64_EQ, Ldone);
+        a64_mov_reg(a, old, rs, 1);
+        a64_b(a, Lretry);
+        a64_bind(a, Ldone);
+        int bits = ret_new ? neu : old;
+        int h = fp_home(c, s->dst);
+        int d = h >= 0 ? h : FSCR;
+        a64_fmov_gp(a, d, bits, 1, isd);
+        if (h < 0) commit_fp(c, s->dst, d);
+        return;
+    }
     if (s->call_name && (strcmp(s->call_name, "__fakecc_ldadd") == 0 ||
                          strcmp(s->call_name, "__fakecc_ldclr") == 0 ||
                          strcmp(s->call_name, "__fakecc_ldeor") == 0 ||

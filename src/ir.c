@@ -420,6 +420,32 @@ static IRValue emit_fakecc_lse(IRFunction *fn, const char *name, IRValue addr, I
     return dst;
 }
 
+/* Float add/sub has no LSE op.  The backend retries with CAS.
+ * imm: kind in bits 0..1, bit 2 subtracts, bit 3 returns the new value. */
+static IRValue emit_fakecc_fadd(IRFunction *fn, IRValue addr, IRValue delta,
+                               int kind, int sub, int fetch_old, int width,
+                               SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = (kind & 3) | (sub ? 4 : 0) | (fetch_old ? 0 : 8);
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = 0;
+    inst.call_name = xstrdup("__fakecc_fadd");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = delta;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, 0);
+    return dst;
+}
+
 /* old + delta, then bring a narrow sum back to the type width.  A 32-bit
  * ADD of a byte leaves the carry in the next byte, and a later 64-bit
  * compare would treat that as a different value. */
@@ -6723,6 +6749,19 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     if (e->u.call.args.len > 2) {
                         lower_expr(fn, st, e->u.call.args.data[2]);
                         fold_const_int(e->u.call.args.data[2], &ord);
+                    }
+                    /* Float add/sub is a CAS retry.  Integer add/sub are LDADD. */
+                    if (is_f && (sz == 4 || sz == 8)
+                        && (opc == IR_ADD || opc == IR_SUB)) {
+                        int kind = 3;
+                        if (ord == 0) kind = 0;
+                        else if (ord == 1 || ord == 2) kind = 1;
+                        else if (ord == 3) kind = 2;
+                        IRValue r = emit_fakecc_fadd(fn, addr, delta, kind,
+                                                    opc == IR_SUB, fetch_old,
+                                                    sz, e->loc);
+                        set_value_float(fn, r, 1);
+                        return r;
                     }
                     /* Add/sub are LDADD (sub adds the negation).  and is
                      * LDCLR of the inverted mask, or is LDSET, xor is LDEOR.

@@ -2663,6 +2663,24 @@ static void test_fcas(void) {
         "  return 0; }", 0);
 }
 
+static void test_fpadd(void) {
+    expect("fpadd",
+        "package main;\n"
+        "int main(void) {\n"
+        "  float f = 1.5f;\n"
+        "  float old = __atomic_fetch_add(&f, 1.0f, 5);\n"
+        "  if (*(int *)&old != 0x3fc00000) return 1;\n"
+        "  if (*(int *)&f != 0x40200000) return 2;\n"
+        "  if (__atomic_add_fetch(&f, 0.5f, 2) != 3.0f) return 3;\n"
+        "  if (__atomic_sub_fetch(&f, 1.0f, 0) != 2.0f) return 4;\n"
+        "  double d = 2.25;\n"
+        "  if (__atomic_fetch_sub(&d, 0.25, 5) != 2.25) return 5;\n"
+        "  if (d != 2.0) return 6;\n"
+        "  if (__atomic_fetch_add(&d, 0.5, 3) != 2.0) return 7;\n"
+        "  if (d != 2.5) return 8;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2743,6 +2761,7 @@ int main(void) {
     test_fat();
     test_fxchg();
     test_fcas();
+    test_fpadd();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

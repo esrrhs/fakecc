@@ -4808,6 +4808,39 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     break;
                 }
+                /* Float add/sub retries with CAS on arm64.  x86 does one
+                 * plain load, add, and store so a single thread matches. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_fadd") == 0
+                    && inst->call_nargs >= 2) {
+                    int w = inst->width;
+                    if (w != 4 && w != 8) w = 4;
+                    int sub = (inst->imm & 4) != 0;
+                    int ret_new = (inst->imm & 8) != 0;
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg_xmm(&out->text, inst->call_args[1], 1,
+                                   ra_xmm, gp_spill_area);
+                    emit_pop_r(&out->text, REG_RCX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
+                    emit_mov_rr(&out->text, REG_RDX, REG_RAX);
+                    if (w == 8) emit_movq_xmm_gp(&out->text, 0, REG_RAX);
+                    else emit_movd_xmm_gp(&out->text, 0, REG_RAX);
+                    emit_sse_arith(&out->text, sub ? 0x5C : 0x58, 0, 1, w == 4);
+                    if (w == 8) emit_movq_gp_xmm(&out->text, REG_RAX, 0);
+                    else emit_movd_gp_xmm(&out->text, REG_RAX, 0);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, w);
+                    if (!ret_new) emit_mov_rr(&out->text, REG_RAX, REG_RDX);
+                    if (w == 8) emit_movq_xmm_gp(&out->text, 0, REG_RAX);
+                    else emit_movd_xmm_gp(&out->text, 0, REG_RAX);
+                    if (inst->dst >= 0 && value_is_float_class(fn, inst->dst) == 1) {
+                        if (dr >= 0 && dr != 0)
+                            emit_xmm_copy(&out->text, dr, 0, w);
+                        else if (dr < 0)
+                            spill_if_needed_xmm(&out->text, inst->dst, 0,
+                                                ra_xmm, gp_spill_area);
+                    }
+                    break;
+                }
                 /* Arm64 uses CAS.  x86 compares and stores the low bytes. */
                 if (inst->call_name && strcmp(inst->call_name, "__fakecc_cas") == 0
                     && inst->call_nargs >= 3) {
