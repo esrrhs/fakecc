@@ -986,6 +986,56 @@ static IRValue emit_float_const(IRFunction *fn, int width, int64_t bits, SourceL
     return v;
 }
 
+/* Signaling NaN.  The quiet bit stays clear.  An empty tag or a zero
+ * payload uses the default signaling NaN for that width.  Darwin has no
+ * nans() in libm, so the bits are built here instead of calling out. */
+static unsigned long long nans_payload(const char *tag) {
+    char *end = NULL;
+    unsigned long long v;
+    if (!tag || !tag[0]) return 0;
+    v = strtoull(tag, &end, 0);
+    if (end == tag) return 0;
+    return v;
+}
+
+static int nans_builtin_bits(const Expr *e, int width,
+                             unsigned long long *lo, unsigned long long *hi) {
+    if (!e || e->kind != EX_CALL || !e->u.call.callee
+        || e->u.call.callee->kind != EX_VAR)
+        return 0;
+    const char *name = e->u.call.callee->u.var.name;
+    int is_f = strcmp(name, "__builtin_nansf") == 0;
+    int is_l = strcmp(name, "__builtin_nansl") == 0;
+    int is_d = strcmp(name, "__builtin_nans") == 0;
+    if (!is_f && !is_l && !is_d) return 0;
+    const char *tag = "";
+    unsigned long long p;
+    if (e->u.call.args.len > 0 && e->u.call.args.data[0]
+        && e->u.call.args.data[0]->kind == EX_STR
+        && e->u.call.args.data[0]->u.str.bytes)
+        tag = e->u.call.args.data[0]->u.str.bytes;
+    p = nans_payload(tag);
+    *lo = 0;
+    *hi = 0;
+    if (is_f || width == 4) {
+        unsigned mant = (unsigned)p & 0x3fffffu;
+        if (mant == 0) mant = 0x200000u;
+        *lo = 0x7f800000u | mant;
+        return 1;
+    }
+    if (width >= 16) {
+        unsigned long long mant = p & ((1ULL << 62) - 1);
+        if (mant == 0) mant = 1ULL << 61;
+        *lo = mant | (1ULL << 63);
+        *hi = 0x7fff;
+        return 1;
+    }
+    p &= (1ULL << 51) - 1;
+    if (p == 0) p = 1ULL << 50;
+    *lo = (0x7ffULL << 52) | p;
+    return 1;
+}
+
 /* Forward decls — bool_normalize (below) calls coerce / emit_bin_w, which are
  * defined later in this file. */
 static IRValue coerce(IRFunction *fn, IRValue v, int src_w, int src_u,
@@ -7254,6 +7304,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue nan_b = emit_fcmp(fn, b, b, wb, 5 /* NE */, e->loc);
                 return emit_bin_w(fn, IR_BOR, nan_a, nan_b, 4, 0, e->loc);
             }
+            if (strcmp(name, "__builtin_nans") == 0 || strcmp(name, "__builtin_nansf") == 0 ||
+                strcmp(name, "__builtin_nansl") == 0) {
+                unsigned long long lo = 0, hi = 0;
+                int w = e->type.width ? e->type.width : 8;
+                nans_builtin_bits(e, w, &lo, &hi);
+                if (w == 16) {
+                    unsigned char buf[16];
+                    long double ld = 0;
+                    memset(buf, 0, sizeof buf);
+                    memcpy(buf, &lo, 8);
+                    memcpy(buf + 8, &hi, 8);
+                    memcpy(&ld, buf, sizeof ld < sizeof buf ? sizeof ld : sizeof buf);
+                    return emit_ld_const(fn, ld, e->loc);
+                }
+                return emit_float_const(fn, w, (int64_t)lo, e->loc);
+            }
             if (strcmp(name, "__builtin_inf") == 0 || strcmp(name, "__builtin_inff") == 0 ||
                 strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_val") == 0 ||
                 strcmp(name, "__builtin_huge_valf") == 0 || strcmp(name, "__builtin_huge_vall") == 0 ||
@@ -10687,7 +10753,18 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             }
         }
         /* Float slots must be packed as the target's binary format, not as the
-         * integer the literal would fold to. */
+         * integer the literal would fold to.  Signaling NaNs are copied as
+         * bits so a float payload is not rewritten by a wider cast. */
+        unsigned long long nlo = 0, nhi = 0;
+        if (nans_builtin_bits(e, (int)ty->width, &nlo, &nhi)) {
+            unsigned char raw[16];
+            int n = sz < 16 ? sz : 16;
+            memset(raw, 0, sizeof raw);
+            memcpy(raw, &nlo, 8);
+            memcpy(raw + 8, &nhi, 8);
+            memcpy(bytes, raw, (size_t)n);
+            return;
+        }
         long double fv;
         if (fold_const_float(e, &fv, ir)) {
             if (ty->width == 16) {

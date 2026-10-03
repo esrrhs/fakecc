@@ -2134,6 +2134,36 @@ static void test_sat(void) {
         "  return 0; }", 0);
 }
 
+static void test_nans(void) {
+    expect("nans",
+        "package main;\n"
+        "const double gs = __builtin_nans(\"1\");\n"
+        "int main(void) {\n"
+        "  unsigned long long b;\n"
+        "  double d = __builtin_nans(\"\");\n"
+        "  __builtin_memcpy(&b, &d, 8);\n"
+        "  if (b != 0x7ff4000000000000ull) return 1;\n"
+        "  double p = __builtin_nans(\"42\");\n"
+        "  __builtin_memcpy(&b, &p, 8);\n"
+        "  if (b != 0x7ff000000000002aull) return 2;\n"
+        "  float f = __builtin_nansf(\"\");\n"
+        "  unsigned fb = 0;\n"
+        "  __builtin_memcpy(&fb, &f, 4);\n"
+        "  if (fb != 0x7fa00000u) return 3;\n"
+        "  float pf = __builtin_nansf(\"1\");\n"
+        "  __builtin_memcpy(&fb, &pf, 4);\n"
+        "  if (fb != 0x7f800001u) return 4;\n"
+        "  long double l = __builtin_nansl(\"\");\n"
+        "  __builtin_memcpy(&b, &l, 8);\n"
+        "  if (b != 0x7ff4000000000000ull) return 5;\n"
+        "  __builtin_memcpy(&b, &gs, 8);\n"
+        "  if (b != 0x7ff0000000000001ull) return 6;\n"
+        "  double q = __builtin_nans(\"0x8000000000001\");\n"
+        "  __builtin_memcpy(&b, &q, 8);\n"
+        "  if (b != 0x7ff0000000000001ull) return 7;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -2236,6 +2266,7 @@ int main(void) {
     test_lcpy();
     test_normal();
     test_sat();
+    test_nans();
     test_trap();
     test_syscall();
     test_frame_addr();

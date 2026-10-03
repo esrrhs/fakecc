@@ -1362,11 +1362,11 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_copysignl") == 0 || strcmp(bname, "copysignl") == 0)
                 ret = type_make_float(type_long_double_width());
-            else if (strcmp(bname, "__builtin_inf") == 0 || strcmp(bname, "__builtin_huge_val") == 0 || strcmp(bname, "__builtin_nan") == 0)
+            else if (strcmp(bname, "__builtin_inf") == 0 || strcmp(bname, "__builtin_huge_val") == 0 || strcmp(bname, "__builtin_nan") == 0 || strcmp(bname, "__builtin_nans") == 0)
                 ret = type_make_float(8);
-            else if (strcmp(bname, "__builtin_inff") == 0 || strcmp(bname, "__builtin_huge_valf") == 0 || strcmp(bname, "__builtin_nanf") == 0)
+            else if (strcmp(bname, "__builtin_inff") == 0 || strcmp(bname, "__builtin_huge_valf") == 0 || strcmp(bname, "__builtin_nanf") == 0 || strcmp(bname, "__builtin_nansf") == 0)
                 ret = type_make_float(4);
-            else if (strcmp(bname, "__builtin_infl") == 0 || strcmp(bname, "__builtin_huge_vall") == 0 || strcmp(bname, "__builtin_nanl") == 0)
+            else if (strcmp(bname, "__builtin_infl") == 0 || strcmp(bname, "__builtin_huge_vall") == 0 || strcmp(bname, "__builtin_nanl") == 0 || strcmp(bname, "__builtin_nansl") == 0)
                 ret = type_make_float(type_long_double_width());
             else if (strcmp(bname, "__builtin_bswap64") == 0)
                 ret = type_make_int(8, 1);
@@ -2644,7 +2644,9 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
             strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_val") == 0 ||
             strcmp(name, "__builtin_huge_valf") == 0 || strcmp(name, "__builtin_huge_vall") == 0 ||
             strcmp(name, "__builtin_nan") == 0 || strcmp(name, "__builtin_nanf") == 0 ||
-            strcmp(name, "__builtin_nanl") == 0)
+            strcmp(name, "__builtin_nanl") == 0 ||
+            strcmp(name, "__builtin_nans") == 0 || strcmp(name, "__builtin_nansf") == 0 ||
+            strcmp(name, "__builtin_nansl") == 0)
             return 1;
     }
     if (e->kind == EX_UNARY
