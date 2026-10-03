@@ -1617,6 +1617,27 @@ static void test_find(void) {
         "  return 0; }", 0);
 }
 
+static void test_pad(void) {
+    expect("pad",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char d[4]; d[0] = 1; d[1] = 2; d[2] = 3; d[3] = 4;\n"
+        "  __builtin_bzero(d, 3);\n"
+        "  if (d[0] != 0 || d[1] != 0 || d[2] != 0 || d[3] != 4) return 1;\n"
+        "  char s[3]; s[0] = 5; s[1] = 6; s[2] = 7;\n"
+        "  char *p = (char *)__builtin_mempcpy(d, s, 3);\n"
+        "  if (p != d + 3 || d[0] != 5 || d[2] != 7) return 2;\n"
+        "  char e[4];\n"
+        "  p = __builtin_stpncpy(e, \"ab\", 4);\n"
+        "  if (p != e + 2 || e[2] != 0 || e[3] != 0) return 3;\n"
+        "  e[3] = 9;\n"
+        "  p = __builtin_stpncpy(e, \"abcd\", 3);\n"
+        "  if (p != e + 3 || e[0] != 97 || e[2] != 99 || e[3] != 9) return 4;\n"
+        "  p = __builtin_stpncpy(e, \"\", 0);\n"
+        "  if (p != e) return 5;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1700,6 +1721,7 @@ int main(void) {
     test_scan();
     test_find();
     test_copy();
+    test_pad();
     test_trap();
     test_syscall();
     test_frame_addr();

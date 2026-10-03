@@ -426,11 +426,21 @@ static int emit_mem_builtin(C64 *c, const char *name) {
     int is_memcpy = strcmp(name, "memcpy") == 0;
     int is_memmove = strcmp(name, "memmove") == 0;
     int is_memset = strcmp(name, "memset") == 0;
-    if (!is_memcpy && !is_memmove && !is_memset) return 0;
+    int is_bzero = strcmp(name, "bzero") == 0;
+    int is_mempcpy = strcmp(name, "mempcpy") == 0;
+    if (!is_memcpy && !is_memmove && !is_memset && !is_bzero && !is_mempcpy)
+        return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
 
     A64Asm *a = c->as;
+    if (is_bzero) {
+        /* bzero(dst, n): the count arrives in x1, the fill byte is 0. */
+        a64_mov_reg(a, A64_X2, A64_X1, 1);
+        a64_movz(a, A64_X1, 0, 0, 1);
+        is_memset = 1;
+    }
+    if (is_mempcpy) is_memcpy = 1;
     int Lfwd = a64_new_label(a);
     int Lback = a64_new_label(a);
     int Lback_loop = a64_new_label(a);
@@ -467,7 +477,9 @@ static int emit_mem_builtin(C64 *c, const char *name) {
         a64_b(a, Lback_loop);
     }
     a64_bind(a, Ldone);
-    a64_mov_reg(a, A64_X0, SCR1, 1);
+    /* mempcpy returns dest+n, which is where the loop stopped. */
+    if (!is_mempcpy)
+        a64_mov_reg(a, A64_X0, SCR1, 1);
     return 1;
 }
 
@@ -596,11 +608,12 @@ static int emit_copy_builtin(C64 *c, const char *name) {
     int is_strcpy = strcmp(name, "strcpy") == 0;
     int is_stpcpy = strcmp(name, "stpcpy") == 0;
     int is_strncpy = strcmp(name, "strncpy") == 0;
+    int is_stpncpy = strcmp(name, "stpncpy") == 0;
     int is_strcat = strcmp(name, "strcat") == 0;
     int is_strncat = strcmp(name, "strncat") == 0;
     int is_strstr = strcmp(name, "strstr") == 0;
-    if (!is_strcpy && !is_stpcpy && !is_strncpy && !is_strcat && !is_strncat
-        && !is_strstr)
+    if (!is_strcpy && !is_stpcpy && !is_strncpy && !is_stpncpy && !is_strcat
+        && !is_strncat && !is_strstr)
         return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
@@ -637,20 +650,25 @@ static int emit_copy_builtin(C64 *c, const char *name) {
         return 1;
     }
 
-    if (is_strncpy) {
+    if (is_strncpy || is_stpncpy) {
         int Lloop = a64_new_label(a);
         int Lpad = a64_new_label(a);
+        int Lnul = a64_new_label(a);
         int Ldone = a64_new_label(a);
+        int Lend = a64_new_label(a);
         a64_mov_reg(a, A64_X4, A64_X0, 1);
+        a64_movz(a, A64_X5, 0, 0, 1); /* address of the first NUL, or 0 */
         a64_bind(a, Lloop);
         a64_cbz(a, A64_X2, Ldone, 1);
         a64_ldr8(a, A64_X3, A64_X1, 0);
         a64_str8(a, A64_X3, A64_X0, 0);
         a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
         a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
-        a64_cbz(a, A64_X3, Lpad, 0);
+        a64_cbz(a, A64_X3, Lnul, 0);
         a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
         a64_b(a, Lloop);
+        a64_bind(a, Lnul);
+        a64_sub_imm12(a, A64_X5, A64_X0, 1, 0, 1, 0);
         a64_bind(a, Lpad);
         a64_cbz(a, A64_X2, Ldone, 1);
         a64_str8(a, 31, A64_X0, 0);
@@ -658,7 +676,15 @@ static int emit_copy_builtin(C64 *c, const char *name) {
         a64_sub_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
         a64_b(a, Lpad);
         a64_bind(a, Ldone);
-        a64_mov_reg(a, A64_X0, A64_X4, 1);
+        if (is_stpncpy) {
+            /* No NUL inside n bytes: return dest+n (x0).  Otherwise the
+             * first NUL, saved in x5. */
+            a64_cbz(a, A64_X5, Lend, 1);
+            a64_mov_reg(a, A64_X0, A64_X5, 1);
+        } else {
+            a64_mov_reg(a, A64_X0, A64_X4, 1);
+        }
+        a64_bind(a, Lend);
         return 1;
     }
 
