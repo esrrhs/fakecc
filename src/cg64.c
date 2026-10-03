@@ -61,7 +61,7 @@ typedef struct {
     size_t            nxcall, capxcall;
 } C64;
 
-enum { G_RO = 1, G_DATA = 2, G_BSS = 3 };
+enum { G_RO = 1, G_DATA = 2, G_BSS = 3, G_COMMON = 4 };
 
 static void c64_die(C64 *c, const IRInst *s, const char *what) {
     const char *f = c->fn->loc.file ? c->fn->loc.file : "<arm64>";
@@ -2201,6 +2201,12 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                 c.pfix[c.npfix].addend = g->fixups[fi].addend;
                 c.npfix++;
             }
+        } else if (emit_object_mode() && !g->is_static) {
+            /* Tentative definition.  A later real definition in another
+             * file must be able to win, so the object carries a common
+             * symbol instead of its own BSS bytes. */
+            c.gsect[gi] = G_COMMON;
+            c.goff[gi] = al;
         } else {
             while (out->bss_size % al) out->bss_size++;
             c.gsect[gi] = G_BSS;
@@ -2380,9 +2386,12 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             const IRGlobal *g = &ir->globals.data[gi];
             if (gsym) gsym[gi] = -1;
             if (!g->name || !c.gsect) continue;
-            uint16_t sh = c.gsect[gi] == G_RO ? (uint16_t)SECT_RODATA
+            uint16_t sh = c.gsect[gi] == G_COMMON ? (uint16_t)SHN_COMMON
+                        : c.gsect[gi] == G_RO ? (uint16_t)SECT_RODATA
                         : c.gsect[gi] == G_DATA ? (uint16_t)SECT_DATA
                         : (uint16_t)SECT_BSS;
+            /* Common: value is the alignment.  A real symbol: value is
+             * the offset within its section. */
             gsym[gi] = emit_module_add_symbol(out, g->name,
                                               g->is_static ? 0 : 1,
                                               1 /* STT_OBJECT */, sh,

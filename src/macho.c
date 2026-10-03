@@ -714,13 +714,13 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
 
 static int macho_sym_ok(const EmitSymbol *s, const uint8_t *sect_of) {
     if (!s->name) return 0;
-    if (s->shndx == SECT_UNDEF) return 1;
+    if (s->shndx == SECT_UNDEF || s->shndx == SHN_COMMON) return 1;
     return s->shndx < 9 && sect_of[s->shndx];
 }
 
-/* 0 local, 1 defined external, 2 undefined external. */
+/* 0 local, 1 defined external, 2 undefined external (commons included). */
 static int macho_sym_pass(const EmitSymbol *s) {
-    if (s->shndx == SECT_UNDEF) return 2;
+    if (s->shndx == SECT_UNDEF || s->shndx == SHN_COMMON) return 2;
     return s->binding == 0 ? 0 : 1;
 }
 
@@ -995,15 +995,24 @@ int macho_write_object(const EmitModule *em, const char *path) {
             const EmitSymbol *s = &em->syms[i];
             if (!macho_sym_ok(s, sect_of)) continue;
             if (macho_sym_pass(s) != pass) continue;
-            int undef = s->shndx == SECT_UNDEF;
+            int common = s->shndx == SHN_COMMON;
+            int undef = s->shndx == SECT_UNDEF || common;
             nlist_64 nl;
             memset(&nl, 0, sizeof nl);
             nl.n_strx = (uint32_t)str_at;
             nl.n_type = (uint8_t)(undef ? N_EXT
                                 : s->binding == 0 ? N_SECT : (N_SECT | N_EXT));
             nl.n_sect = undef ? 0 : sect_of[s->shndx];
-            nl.n_value = undef ? 0
-                       : sect_addr[s->shndx] + (uint64_t)s->value;
+            if (common) {
+                unsigned align = s->value ? (unsigned)s->value : 1;
+                unsigned log = 0;
+                while ((1u << log) < align && log < 15) log++;
+                nl.n_desc = (uint16_t)(log << 8);
+                nl.n_value = (uint64_t)s->size;
+            } else {
+                nl.n_value = undef ? 0
+                           : sect_addr[s->shndx] + (uint64_t)s->value;
+            }
             buffer_append(&out, (const char *)&nl, sizeof nl);
             str_at += 1 + strlen(s->name) + 1;
         }
@@ -1161,7 +1170,14 @@ int macho_read_object(const char *path, EmitModule *em) {
         if (raw[0] == '_') raw++;
         int undef = nl.n_sect == 0;
         if (undef) {
-            emit_module_add_undefined(em, raw[0] ? raw : NULL);
+            if (nl.n_value > 0 && (nl.n_type & N_EXT)) {
+                unsigned log = ((unsigned)nl.n_desc >> 8) & 0x0fu;
+                size_t align = log ? (size_t)1 << log : 1;
+                emit_module_add_symbol(em, raw[0] ? raw : NULL, 1, 1,
+                                       SHN_COMMON, align, (size_t)nl.n_value);
+            } else {
+                emit_module_add_undefined(em, raw[0] ? raw : NULL);
+            }
             continue;
         }
         if (nl.n_sect > nsec || secs[nl.n_sect - 1].shndx == 0) {
@@ -1291,7 +1307,8 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
         adj[i] = xmalloc((m->num_syms ? m->num_syms : 1) * sizeof(Adj));
         for (size_t s = 0; s < m->num_syms; s++) {
             EmitSymbol *es = &m->syms[s];
-            adj[i][s].defined = es->shndx != SECT_UNDEF;
+            adj[i][s].defined = es->shndx != SECT_UNDEF
+                             && es->shndx != SHN_COMMON;
             adj[i][s].sh = es->shndx;
             size_t base = 0;
             if (es->shndx == SECT_TEXT) base = text_base[i];
@@ -1330,6 +1347,60 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     if (rc == 0 && !have_main) {
         fprintf(stderr, "fakecc: no 'main' function found\n");
         rc = -1;
+    }
+
+    /* Tentative definitions share one BSS slot unless a real definition
+     * of the same name already won. */
+    if (rc == 0) {
+        typedef struct { char *name; size_t size, align, off; } Comm;
+        Comm *comms = NULL;
+        size_t ncomm = 0, capcomm = 0;
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t s = 0; s < m->num_syms; s++) {
+                EmitSymbol *es = &m->syms[s];
+                if (es->shndx != SHN_COMMON || !es->name || es->binding == 0)
+                    continue;
+                int defined = 0;
+                for (size_t g = 0; g < ng; g++) {
+                    if (strcmp(gdefs[g].name, es->name) == 0) { defined = 1; break; }
+                }
+                if (defined) continue;
+                size_t found = ncomm;
+                for (size_t c = 0; c < ncomm; c++) {
+                    if (strcmp(comms[c].name, es->name) == 0) { found = c; break; }
+                }
+                if (found == ncomm) {
+                    if (ncomm == capcomm) {
+                        capcomm = capcomm ? capcomm * 2 : 4;
+                        comms = xrealloc(comms, capcomm * sizeof(Comm));
+                    }
+                    comms[ncomm].name = xstrdup(es->name);
+                    comms[ncomm].size = es->size;
+                    comms[ncomm].align = es->value ? es->value : 1;
+                    comms[ncomm].off = 0;
+                    ncomm++;
+                } else {
+                    if (es->size > comms[found].size) comms[found].size = es->size;
+                    if (es->value > comms[found].align) comms[found].align = es->value;
+                }
+            }
+        }
+        for (size_t c = 0; c < ncomm; c++) {
+            size_t al = comms[c].align ? comms[c].align : 1;
+            while (out.bss_size % al) out.bss_size++;
+            comms[c].off = out.bss_size;
+            out.bss_size += comms[c].size ? comms[c].size : 1;
+            if (ng == capg) {
+                capg = capg ? capg * 2 : 8;
+                gdefs = xrealloc(gdefs, capg * sizeof(GDef));
+            }
+            gdefs[ng].name = comms[c].name;
+            gdefs[ng].sh = SECT_BSS;
+            gdefs[ng].off = comms[c].off;
+            ng++;
+        }
+        free(comms);
     }
 
     uint64_t ro_off = 0, data_off = 0, bss_off = 0;

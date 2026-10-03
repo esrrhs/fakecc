@@ -10,6 +10,7 @@
 /* ------------------------------------------------------------------ */
 
 #define SECT_UNDEF  0
+#define SHN_COMMON  0xfff2 /* tentative def: st_value is alignment, st_size is size */
 #define SECT_TEXT   1
 #define SECT_RODATA 2
 #define SECT_DATA   3

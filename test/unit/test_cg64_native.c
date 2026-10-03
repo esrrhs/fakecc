@@ -1206,6 +1206,48 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(run_bin(outp), 7);
     emit_module_free(&mpa);
     emit_module_free(&mpb);
+
+    const char *ta = "/tmp/fakecc_arm64_link_ta.o";
+    const char *tb = "/tmp/fakecc_arm64_link_tb.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int g;\n"
+        "int main(void) { return g; }\n",
+        ta, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int g = 7;\n",
+        tb, NULL), 0);
+    EmitModule mta, mtb;
+    T_ASSERT_EQ_INT(emit_obj_read(ta, &mta), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(tb, &mtb), 0);
+    int gi = emit_module_find_symbol(&mta, "g");
+    T_ASSERT(gi >= 0);
+    T_ASSERT_EQ_INT(mta.syms[gi].shndx, SHN_COMMON);
+    EmitModule *tm[2] = { &mta, &mtb };
+    T_ASSERT_EQ_INT(macho_link_objects(tm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    emit_module_free(&mta);
+    emit_module_free(&mtb);
+
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int g;\n"
+        "int main(void) { g = 4; return g; }\n",
+        ta, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int g;\n",
+        tb, NULL), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(ta, &mta), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(tb, &mtb), 0);
+    EmitModule *cm[2] = { &mta, &mtb };
+    T_ASSERT_EQ_INT(macho_link_objects(cm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 4);
+    emit_module_free(&mta);
+    emit_module_free(&mtb);
 }
 
 static void test_frame_addr(void) {
