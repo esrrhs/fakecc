@@ -34,7 +34,12 @@ static void compile_tu(const char *src, EmitModule *out) {
     opt(&ir, 1, 0);
 
     emit_module_init(out);
+    /* Mach-O links relocatable modules.  The ELF path still emits the
+     * in-memory image codegen has always produced. */
+    int as_obj = target_current()->objfmt == TARGET_OBJFMT_MACHO;
+    if (as_obj) emit_set_object_mode(1);
     codegen(&ir, out, 0);
+    if (as_obj) emit_set_object_mode(0);
 
     ir_module_free(&ir);
     tu_free(&tu);
@@ -131,9 +136,13 @@ static void test_link_static_no_collision(void) {
 }
 
 int main(void) {
-    /* Pins the x86-64 ELF backend; linked artifacts run natively only on
-     * Linux (they are x86-64 ELF). */
+    /* On this Mac the scenarios run as arm64 Mach-O.  Elsewhere they stay
+     * pinned to the x86-64 ELF backend, which executes natively on Linux. */
+#if defined(__APPLE__) && defined(__aarch64__)
+    target_set_current(target_arm64_macos());
+#else
     target_set_current(target_x86_64_linux());
+#endif
     test_obj_roundtrip();
     test_link_two_modules();
     test_link_rejects_no_main();
