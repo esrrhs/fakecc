@@ -429,13 +429,36 @@ static int emit_mem_builtin(C64 *c, const char *name) {
     int is_bzero = strcmp(name, "bzero") == 0;
     int is_mempcpy = strcmp(name, "mempcpy") == 0;
     int is_bcopy = strcmp(name, "bcopy") == 0;
+    int is_memccpy = strcmp(name, "memccpy") == 0;
     if (!is_memcpy && !is_memmove && !is_memset && !is_bzero && !is_mempcpy
-        && !is_bcopy)
+        && !is_bcopy && !is_memccpy)
         return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
 
     A64Asm *a = c->as;
+    if (is_memccpy) {
+        /* memccpy(dst, src, c, n).  The stop byte is copied.  Return the
+         * address just past it, or 0 when n runs out first. */
+        int Lloop = a64_new_label(a);
+        int Lmiss = a64_new_label(a);
+        int Ldone = a64_new_label(a);
+        a64_and_imm(a, A64_X2, A64_X2, 0xff, 0);
+        a64_bind(a, Lloop);
+        a64_cbz(a, A64_X3, Lmiss, 1);
+        a64_ldr8(a, A64_X4, A64_X1, 0);
+        a64_str8(a, A64_X4, A64_X0, 0);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+        a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+        a64_sub_imm12(a, A64_X3, A64_X3, 1, 0, 1, 0);
+        a64_cmp_reg(a, A64_X4, A64_X2, 0);
+        a64_bcond(a, A64_EQ, Ldone);
+        a64_b(a, Lloop);
+        a64_bind(a, Lmiss);
+        a64_movz(a, A64_X0, 0, 0, 1);
+        a64_bind(a, Ldone);
+        return 1;
+    }
     if (is_bcopy) {
         /* bcopy(src, dst, n): opposite of memmove, and overlap-safe. */
         a64_mov_reg(a, SCR0, A64_X0, 1);
@@ -636,7 +659,8 @@ static int emit_find_builtin(C64 *c, const char *name) {
 static int emit_span_builtin(C64 *c, const char *name) {
     int is_spn = strcmp(name, "strspn") == 0;
     int is_cspn = strcmp(name, "strcspn") == 0;
-    if (!is_spn && !is_cspn) return 0;
+    int is_pbrk = strcmp(name, "strpbrk") == 0;
+    if (!is_spn && !is_cspn && !is_pbrk) return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
 
@@ -646,22 +670,34 @@ static int emit_span_builtin(C64 *c, const char *name) {
     int Ladvance = a64_new_label(a);
     int Ldone = a64_new_label(a);
 
+    int Lmiss = a64_new_label(a);
+    int Lhit = a64_new_label(a);
+    int Lend = a64_new_label(a);
     a64_mov_reg(a, A64_X4, A64_X0, 1);
     a64_bind(a, Louter);
     a64_ldr8(a, A64_X2, A64_X0, 0);
-    a64_cbz(a, A64_X2, Ldone, 0);
+    a64_cbz(a, A64_X2, is_pbrk ? Lmiss : Ldone, 0);
     a64_mov_reg(a, A64_X5, A64_X1, 1);
     a64_bind(a, Linner);
     a64_ldr8(a, A64_X3, A64_X5, 0);
-    /* strspn stops when accept runs out.  strcspn advances instead. */
+    /* strspn stops when accept runs out.  strcspn and strpbrk advance. */
     a64_cbz(a, A64_X3, is_spn ? Ldone : Ladvance, 0);
     a64_cmp_reg(a, A64_X2, A64_X3, 0);
-    a64_bcond(a, A64_EQ, is_spn ? Ladvance : Ldone);
+    a64_bcond(a, A64_EQ, is_spn ? Ladvance : (is_pbrk ? Lhit : Ldone));
     a64_add_imm12(a, A64_X5, A64_X5, 1, 0, 1, 0);
     a64_b(a, Linner);
     a64_bind(a, Ladvance);
     a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
     a64_b(a, Louter);
+    if (is_pbrk) {
+        /* x0 already addresses the matching byte. */
+        a64_bind(a, Lhit);
+        a64_b(a, Lend);
+        a64_bind(a, Lmiss);
+        a64_movz(a, A64_X0, 0, 0, 1);
+        a64_bind(a, Lend);
+        return 1;
+    }
     a64_bind(a, Ldone);
     a64_sub_reg(a, A64_X0, A64_X0, A64_X4, A64_LSL, 0, 1, 0);
     return 1;

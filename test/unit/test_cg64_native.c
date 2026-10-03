@@ -1737,6 +1737,25 @@ static void test_case(void) {
         "  return 0; }", 0);
 }
 
+static void test_stop(void) {
+    expect("stop",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char *p = __builtin_strpbrk(\"hello\", \"lx\");\n"
+        "  if (!p || p[0] != 108 || p[1] != 108) return 1;\n"
+        "  if (__builtin_strpbrk(\"hello\", \"xyz\")) return 2;\n"
+        "  if (__builtin_strpbrk(\"hello\", \"\")) return 3;\n"
+        "  if (__builtin_strpbrk(\"\", \"h\")) return 4;\n"
+        "  char d[8];\n"
+        "  char *q = __builtin_memccpy(d, \"abXcd\", 88, 5);\n"
+        "  if (!q || q - d != 3 || d[0] != 97 || d[2] != 88) return 5;\n"
+        "  q = __builtin_memccpy(d, \"ab\", 88, 2);\n"
+        "  if (q || d[0] != 97 || d[1] != 98) return 6;\n"
+        "  q = __builtin_memccpy(d, \"X\", 88, 0);\n"
+        "  if (q) return 7;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1826,6 +1845,7 @@ int main(void) {
     test_alloca_align();
     test_bsd();
     test_case();
+    test_stop();
     test_trap();
     test_syscall();
     test_frame_addr();
