@@ -1100,6 +1100,21 @@ static void test_macho_obj(void) {
     T_ASSERT_EQ_INT((int)fread(&dnreloc, 4, 1, f), 1);
     fclose(f);
     T_ASSERT_EQ_INT((int)dnreloc, 1);
+
+    const char *xpath = "/tmp/fakecc_arm64_xobj.o";
+    rc = fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern int other(int x);\n"
+        "int call(int x) { return other(x); }\n",
+        xpath, NULL);
+    T_ASSERT_EQ_INT(rc, 0);
+    f = fopen(xpath, "rb");
+    T_ASSERT(f != NULL);
+    T_ASSERT_EQ_INT((int)fseek(f, 32 + 72 + 60, SEEK_SET), 0);
+    uint32_t xnreloc = 0;
+    T_ASSERT_EQ_INT((int)fread(&xnreloc, 4, 1, f), 1);
+    fclose(f);
+    T_ASSERT_EQ_INT((int)xnreloc, 1);
 }
 
 static void test_frame_addr(void) {

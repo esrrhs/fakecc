@@ -56,6 +56,9 @@ typedef struct {
     /* Local copy of runtime/int128.c's restoring division.  The arm64
      * image does not link the Linux runtime, and external BL is T14. */
     int               udiv_label;
+    /* Object-file calls to functions that are not in this TU. */
+    struct XCall { uint32_t at; const char *name; } *xcall;
+    size_t            nxcall, capxcall;
 } C64;
 
 enum { G_RO = 1, G_DATA = 2, G_BSS = 3 };
@@ -815,12 +818,24 @@ static void emit_call(C64 *c, const IRInst *s) {
         a64_bl(a, c->udiv_label);
     } else if (!(s->call_name && emit_mem_builtin(c, s->call_name))) {
         int fi = 0;
-        if (find_function(c->ir, s->call_name, &fi) != 0)
-            die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
-                   s->loc.line, s->loc.col,
-                   "arm64 backend: call to undefined function '%s'",
-                   s->call_name);
-        a64_bl(a, c->fn_label[fi]);
+        if (find_function(c->ir, s->call_name, &fi) != 0) {
+            if (!emit_object_mode())
+                die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
+                       s->loc.line, s->loc.col,
+                       "arm64 backend: call to undefined function '%s'",
+                       s->call_name);
+            else {
+                if (c->nxcall == c->capxcall) {
+                    c->capxcall = c->capxcall ? c->capxcall * 2 : 8;
+                    c->xcall = xrealloc(c->xcall, c->capxcall * sizeof *c->xcall);
+                }
+                c->xcall[c->nxcall].at = (uint32_t)a->code.len;
+                c->xcall[c->nxcall].name = s->call_name;
+                c->nxcall++;
+                a64_word(a, 0x94000000u); /* bl, ARM64_RELOC_BRANCH26 */
+            }
+        } else
+            a64_bl(a, c->fn_label[fi]);
     }
 
     if (s->align16 == A64_MARK_HFA) {
@@ -2407,10 +2422,17 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_module_add_data_reloc(out, off, 0 /* UNSIGNED */, si,
                                        c.pfix[i].addend);
         }
+        for (size_t i = 0; i < c.nxcall; i++) {
+            int si = emit_module_find_symbol(out, c.xcall[i].name);
+            if (si < 0)
+                si = emit_module_add_undefined(out, c.xcall[i].name);
+            emit_module_add_reloc(out, c.xcall[i].at, 2 /* BRANCH26 */, si, 0);
+        }
         free(gsym);
     }
     free(c.gfix);
     free(c.pfix);
+    free(c.xcall);
     free(c.gsect);
     free(c.goff);
     a64_free(&a);

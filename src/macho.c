@@ -739,7 +739,7 @@ static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
         const EmitReloc *r = &rels[sorted[i]];
         int sym = (nmap && r->sym < nsyms) ? nmap[r->sym] : 0;
         if (sym < 0) sym = 0;
-        uint32_t pcrel = r->type == 3 ? 1u : 0u;
+        uint32_t pcrel = (r->type == 2 || r->type == 3) ? 1u : 0u;
         uint32_t length = r->type == 0 ? 3u : 2u; /* UNSIGNED is 8 bytes */
         uint32_t word = ((uint32_t)sym & 0xFFFFFFu)
                       | (pcrel << 24)
