@@ -2391,6 +2391,36 @@ static void emit_function(C64 *c, int fi) {
         }
         case IR_DYN_ALLOCA: {
             int r = load_op(c, s->a, -1);
+            if (s->b >= 0) {
+                /* alloca_with_align: alignment arrives in bits.  The ABI
+                 * still requires SP to stay 16-byte aligned, so anything
+                 * finer than that is raised.  For a power of two,
+                 * ~(align-1) is just -align. */
+                if (r == SCR1) {
+                    a64_mov_reg(a, SCR0, r, 1);
+                    r = SCR0;
+                }
+                int al = load_op(c, s->b, r);
+                if (al == r) {
+                    a64_mov_reg(a, SCR1, al, 1);
+                    al = SCR1;
+                }
+                a64_lsr_imm(a, SCR1, al, 3, 1);
+                int Lbig = a64_new_label(a);
+                a64_cmp_imm12(a, SCR1, 16, 0, 1);
+                a64_bcond(a, A64_CS, Lbig);
+                a64_movz(a, SCR1, 16, 0, 1);
+                a64_bind(a, Lbig);
+                a64_neg(a, SCR1, SCR1, 1);
+                mov_sp_like(a, A64_X0, A64_SP);
+                a64_sub_reg(a, A64_X0, A64_X0, r, A64_LSL, 0, 1, 0);
+                a64_and_reg(a, A64_X0, A64_X0, SCR1, 1);
+                mov_sp_like(a, A64_SP, A64_X0);
+                int d = dst_reg(c, s->dst);
+                if (d != A64_X0) a64_mov_reg(a, d, A64_X0, 1);
+                commit(c, s->dst, d);
+                break;
+            }
             /* round size up to 16, then bump sp via a GP staging reg
              * (SUB shifted-register cannot address SP). */
             a64_add_imm12(a, SCR1, r, 15, 0, 1, 0);

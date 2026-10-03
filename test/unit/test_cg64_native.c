@@ -1685,6 +1685,23 @@ static void test_atomic(void) {
         "  return 0; }", 0);
 }
 
+static void test_alloca_align(void) {
+    expect("alloca_align",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char *p = __builtin_alloca_with_align(8, 256);\n"
+        "  if (((unsigned long)p & 31) != 0) return 1;\n"
+        "  p[0] = 7;\n"
+        "  if (p[0] != 7) return 2;\n"
+        "  char *q = __builtin_alloca_with_align(1, 1024);\n"
+        "  if (((unsigned long)q & 127) != 0) return 3;\n"
+        "  char *r = __builtin_alloca(8);\n"
+        "  if (((unsigned long)r & 15) != 0) return 4;\n"
+        "  char *s = __builtin_alloca_with_align(4, 8);\n"
+        "  if (((unsigned long)s & 15) != 0) return 5;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1771,6 +1788,7 @@ int main(void) {
     test_pad();
     test_span();
     test_atomic();
+    test_alloca_align();
     test_trap();
     test_syscall();
     test_frame_addr();

@@ -6422,10 +6422,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return v;
         }
         if (e->u.call.callee->kind == EX_VAR && (strcmp(e->u.call.callee->u.var.name, "__builtin_alloca") == 0 ||
+                                                strcmp(e->u.call.callee->u.var.name, "__builtin_alloca_with_align") == 0 ||
                                                 strcmp(e->u.call.callee->u.var.name, "alloca") == 0)) {
             IRValue sz = lower_expr(fn, st, e->u.call.args.data[0]);
+            /* Second argument is an alignment in bits.  -1 keeps the
+             * historical 16-byte bump used by plain alloca. */
+            IRValue al = -1;
+            if (strcmp(e->u.call.callee->u.var.name, "__builtin_alloca_with_align") == 0
+                && e->u.call.args.len > 1)
+                al = lower_expr(fn, st, e->u.call.args.data[1]);
             IRValue v = new_value(fn);
-            emit_inst_w(fn, IR_DYN_ALLOCA, v, sz, -1, 0, 8, 1, e->loc);
+            emit_inst_w(fn, IR_DYN_ALLOCA, v, sz, al, 0, 8, 1, e->loc);
             set_value_type(fn, v, 8, 1);
             fn->has_dyn_alloca = 1;
             return v;
