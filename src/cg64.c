@@ -885,6 +885,18 @@ static void emit_fp_builtin(C64 *c, const IRInst *s, int kind) {
     commit_fp(c, s->dst, dst);
 }
 
+/* __builtin_trap and __builtin_abort both arrive as a call named abort.
+ * __builtin_unreachable keeps the stripped name.  brk #1 is what clang
+ * emits; the kernel reports SIGTRAP.  A user-defined function wins. */
+static int emit_trap_builtin(C64 *c, const char *name) {
+    if (!name || (strcmp(name, "abort") != 0 && strcmp(name, "unreachable") != 0))
+        return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+    a64_word(c->as, 0xD4200020u);
+    return 1;
+}
+
 static void emit_call(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
     int n = s->call_nargs;
@@ -916,6 +928,7 @@ static void emit_call(C64 *c, const IRInst *s) {
             }
         }
     }
+    if (emit_trap_builtin(c, s->call_name)) return;
 
     int sret = s->align16 == A64_MARK_SRET;
     int start = sret ? 1 : 0;

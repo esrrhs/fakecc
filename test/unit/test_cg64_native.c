@@ -93,7 +93,9 @@ static int compile_and_run_ex(const char *source, char *const extra_argv[],
     }
     int st;
     waitpid(pid, &st, 0);
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1008;
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
+    return -1008;
 }
 
 static int compile_and_run(const char *source) {
@@ -1593,6 +1595,19 @@ static void test_scan(void) {
         "  return 0; }", 0);
 }
 
+static void test_trap(void) {
+    /* brk #1 → SIGTRAP, same status clang produces. */
+    expect("trap",
+        "package main;\n"
+        "int main(void) { __builtin_trap(); return 7; }", 133);
+    expect("unreach",
+        "package main;\n"
+        "int main(void) { __builtin_unreachable(); return 1; }", 133);
+    expect("trap_skip",
+        "package main;\n"
+        "int main(void) { if (0) __builtin_trap(); return 7; }", 7);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -1632,6 +1647,7 @@ int main(void) {
     test_bitops();
     test_fpmath();
     test_scan();
+    test_trap();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
