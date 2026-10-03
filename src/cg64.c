@@ -478,6 +478,80 @@ static int is_va_builtin(const char *name) {
                     || strcmp(name, "va_end") == 0);
 }
 
+/* GCC integer bit builtins stay named calls so x86 can emit lzcnt/tzcnt.
+ * On arm64 they are instructions, not libc helpers.  `long` is 64-bit. */
+static int is_bit_builtin(const char *bn) {
+    if (!bn || strncmp(bn, "__builtin_", 10) != 0) return 0;
+    return strstr(bn, "clz") || strstr(bn, "ctz") || strstr(bn, "ffs")
+        || strstr(bn, "popcount") || strstr(bn, "parity")
+        || strstr(bn, "clrsb") || strstr(bn, "bswap");
+}
+
+static int bit_is64(const char *bn) {
+    if (strstr(bn, "bswap16") || strstr(bn, "bswap32")) return 0;
+    if (strstr(bn, "bswap64")) return 1;
+    size_t n = strlen(bn);
+    if (n >= 2 && bn[n - 2] == 'l' && bn[n - 1] == 'l') return 1;
+    if (n >= 1 && bn[n - 1] == 'l') return 1;
+    return 0;
+}
+
+static int safe_tmp(int a, int b, int c, int d);
+
+static void bit1(A64Asm *a, uint32_t base, int rd, int rn) {
+    a64_word(a, base | ((uint32_t)(rn & 31) << 5) | (uint32_t)(rd & 31));
+}
+
+/* CNT + ADDV into V31, which the allocator never assigns. */
+static void emit_popc(A64Asm *a, int dst, int src, int is64) {
+    a64_fmov_gp(a, FSCR, src, 1, is64);
+    a64_word(a, 0x0E205800u | ((uint32_t)FSCR << 5) | (uint32_t)FSCR);
+    a64_word(a, 0x0E31B800u | ((uint32_t)FSCR << 5) | (uint32_t)FSCR);
+    a64_fmov_gp(a, dst, FSCR, 0, 0);
+}
+
+static void emit_bit_builtin(C64 *c, const IRInst *s) {
+    A64Asm *a = c->as;
+    const char *bn = s->call_name;
+    if (s->dst < 0 || s->call_nargs < 1) return;
+    int is64 = bit_is64(bn);
+    int dst = dst_reg(c, s->dst);
+    int src = load_op(c, s->call_args[0], dst);
+    uint32_t clz = is64 ? 0xDAC01000u : 0x5AC01000u;
+    uint32_t rbit = is64 ? 0xDAC00000u : 0x5AC00000u;
+    if (strstr(bn, "bswap")) {
+        if (strstr(bn, "16")) {
+            /* rev + lsr 16 keeps only the swapped low half. */
+            bit1(a, 0x5AC00800u, dst, src);
+            a64_lsr_imm(a, dst, dst, 16, 0);
+        } else if (is64) {
+            bit1(a, 0xDAC00C00u, dst, src);
+        } else {
+            bit1(a, 0x5AC00800u, dst, src);
+        }
+    } else if (strstr(bn, "clrsb")) {
+        bit1(a, is64 ? 0xDAC01400u : 0x5AC01400u, dst, src);
+    } else if (strstr(bn, "ffs")) {
+        /* 0 if src is zero, otherwise ctz(src)+1. */
+        int tmp = safe_tmp(src, -1, -1, -1);
+        bit1(a, rbit, tmp, src);
+        bit1(a, clz, tmp, tmp);
+        a64_cmp_imm12(a, src, 0, 0, is64);
+        a64_word(a, 0x1A8007E0u | ((uint32_t)(tmp & 31) << 16)
+                                | (uint32_t)(dst & 31));
+    } else if (strstr(bn, "ctz")) {
+        bit1(a, rbit, dst, src);
+        bit1(a, clz, dst, dst);
+    } else if (strstr(bn, "clz")) {
+        bit1(a, clz, dst, src);
+    } else if (strstr(bn, "popcount") || strstr(bn, "parity")) {
+        emit_popc(a, dst, src, is64);
+        if (strstr(bn, "parity"))
+            a64_and_imm(a, dst, dst, 1, 0);
+    }
+    commit(c, s->dst, dst);
+}
+
 static int outgoing_stack_bytes(C64 *c, const IRInst *s) {
     if (!s->call_nargs) return s->align16 == A64_MARK_SRET ? 16 : 0;
     if (s->call_name && strcmp(s->call_name, "__syscall") == 0) return 0;
@@ -661,6 +735,10 @@ static void emit_call(C64 *c, const IRInst *s) {
     }
     if (is_va_builtin(s->call_name)) {
         emit_va(c, s);
+        return;
+    }
+    if (is_bit_builtin(s->call_name)) {
+        emit_bit_builtin(c, s);
         return;
     }
 

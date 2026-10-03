@@ -1515,6 +1515,36 @@ static void test_setjmp(void) {
         "  return 1; }", 7);
 }
 
+static void test_bitops(void) {
+    expect("bits",
+        "package main;\n"
+        "int main(void) {\n"
+        "  unsigned a = 1;\n"
+        "  unsigned long long b = 1ull << 40;\n"
+        "  if (__builtin_clz(a) != 31) return 1;\n"
+        "  if (__builtin_clzll(b) != 23) return 2;\n"
+        "  if (__builtin_ctz(a << 3) != 3) return 3;\n"
+        "  if (__builtin_ctzll(b) != 40) return 4;\n"
+        "  if (__builtin_ffs(0) != 0) return 5;\n"
+        "  if (__builtin_ffs((int)(a << 3)) != 4) return 6;\n"
+        "  if (__builtin_ffsll(0) != 0) return 7;\n"
+        "  if (__builtin_ffsll((long long)b) != 41) return 8;\n"
+        "  if (__builtin_popcount(0xF0u + 0x0Fu) != 8) return 9;\n"
+        "  if (__builtin_popcountll(b - 1) != 40) return 10;\n"
+        "  if (__builtin_parity(7u) != 1) return 11;\n"
+        "  if (__builtin_parityll(0xFull) != 0) return 12;\n"
+        "  if (__builtin_bswap16(0x1234) != 0x3412) return 13;\n"
+        "  if (__builtin_bswap32(0x12345678u) != 0x78563412u) return 14;\n"
+        "  unsigned long long s = __builtin_bswap64(0x0102030405060708ull);\n"
+        "  if ((int)(s & 0xff) != 1) return 15;\n"
+        "  if ((int)(s >> 56) != 8) return 20;\n"
+        "  if (__builtin_clrsb(1) != 30) return 16;\n"
+        "  if (__builtin_clrsb(-1) != 31) return 17;\n"
+        "  if (__builtin_clrsbl(1L) != 62) return 18;\n"
+        "  if (__builtin_clzl(1L) != 63) return 19;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -1551,6 +1581,7 @@ int main(void) {
     test_vec16();
     test_int128();
     test_setjmp();
+    test_bitops();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
