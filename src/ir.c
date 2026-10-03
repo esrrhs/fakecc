@@ -6317,10 +6317,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
             IRValue addr = lower_expr(fn, st, p0);
             if (strcmp(sname, "__atomic_load_n") == 0) {
-                if (e->u.call.args.len > 1)
+                long long ord = 5;
+                if (e->u.call.args.len > 1) {
                     lower_expr(fn, st, e->u.call.args.data[1]);
+                    fold_const_int(e->u.call.args.data[1], &ord);
+                }
+                /* 1 = ldapr (acquire/consume), 2 = ldar (seq_cst). */
+                int ak = 0;
+                if (!is_f && (ord == 1 || ord == 2)) ak = 1;
+                else if (!is_f && ord >= 5) ak = 2;
                 IRValue v = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, 0, sz, is_u, e->loc);
+                emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, ak, sz, is_u, e->loc);
                 set_value_type(fn, v, sz, is_u);
                 if (is_f) set_value_float(fn, v, 1);
                 return v;
@@ -6328,9 +6335,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (strcmp(sname, "__atomic_store_n") == 0) {
                 if (e->u.call.args.len < 2) return -1;
                 IRValue val = lower_expr(fn, st, e->u.call.args.data[1]);
-                if (e->u.call.args.len > 2)
+                long long ord = 5;
+                if (e->u.call.args.len > 2) {
                     lower_expr(fn, st, e->u.call.args.data[2]);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                    fold_const_int(e->u.call.args.data[2], &ord);
+                }
+                /* 3 = stlr (release, acq_rel, seq_cst). */
+                int ak = (!is_f && (ord == 3 || ord == 4 || ord >= 5)) ? 3 : 0;
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, ak, sz, is_u, e->loc);
                 return -1;
             }
             if (strcmp(sname, "__atomic_exchange_n") == 0) {

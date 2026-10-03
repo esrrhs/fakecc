@@ -2273,6 +2273,37 @@ static void test_fence(void) {
         "  return 7; }", 7);
 }
 
+static void test_aload(void) {
+    expect("aload",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 1;\n"
+        "  if (__atomic_load_n(&x, 0) != 1) return 1;\n"
+        "  if (__atomic_load_n(&x, 2) != 1) return 2;\n"
+        "  if (__atomic_load_n(&x, 5) != 1) return 3;\n"
+        "  x = -3;\n"
+        "  if (__atomic_load_n(&x, 2) != -3) return 4;\n"
+        "  __atomic_store_n(&x, 4, 0);\n"
+        "  if (x != 4) return 5;\n"
+        "  __atomic_store_n(&x, 9, 3);\n"
+        "  if (__atomic_load_n(&x, 5) != 9) return 6;\n"
+        "  long long y = 3;\n"
+        "  if (__atomic_load_n(&y, 2) != 3) return 7;\n"
+        "  __atomic_store_n(&y, 8, 5);\n"
+        "  if (y != 8) return 8;\n"
+        "  unsigned char c = 1;\n"
+        "  if (__atomic_load_n(&c, 2) != 1) return 9;\n"
+        "  __atomic_store_n(&c, 6, 3);\n"
+        "  if (c != 6) return 10;\n"
+        "  unsigned short h = 2;\n"
+        "  if (__atomic_load_n(&h, 2) != 2) return 11;\n"
+        "  __atomic_store_n(&h, 7, 3);\n"
+        "  if (h != 7) return 12;\n"
+        "  signed char sc = -5;\n"
+        "  if (__atomic_load_n(&sc, 5) != -5) return 13;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2340,6 +2371,7 @@ int main(void) {
     test_cycle();
     test_barrier();
     test_fence();
+    test_aload();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

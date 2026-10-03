@@ -3265,6 +3265,18 @@ static void emit_function(C64 *c, int fi) {
             break;
         }
         case IR_STORE_PTR: {
+            /* imm 3: release or seq_cst store.  x86 ignores imm and keeps
+             * a plain store, which is what that backend already emitted. */
+            if (s->imm == 3 && !vec16_val(c, s->b) && !scalar_fp_val(c, s->b)) {
+                int p = load_ptrv(c, s->a, -1);
+                int v = load_op(c, s->b, p);
+                uint32_t base = s->width <= 1 ? 0x089FFC00u
+                              : s->width == 2 ? 0x489FFC00u
+                              : s->width == 4 ? 0x889FFC00u
+                              : 0xC89FFC00u;
+                a64_word(a, base | ((uint32_t)(p & 31) << 5) | (uint32_t)(v & 31));
+                break;
+            }
             if (vec16_val(c, s->b)) {
                 int v = load_q(c, s->b, -1);
                 int p = load_ptrv(c, s->a, SCR0);
@@ -3285,6 +3297,23 @@ static void emit_function(C64 *c, int fi) {
             break;
         }
         case IR_LOAD_PTR: {
+            /* imm 1: acquire/consume (ldapr).  imm 2: seq_cst (ldar). */
+            if ((s->imm == 1 || s->imm == 2) && !vec16_val(c, s->dst)
+                && !scalar_fp_val(c, s->dst)) {
+                int p = load_ptrv(c, s->a, -1);
+                int d = dst_reg(c, s->dst);
+                int w = s->width;
+                uint32_t base = s->imm == 2
+                    ? (w <= 1 ? 0x08DFFC00u : w == 2 ? 0x48DFFC00u
+                       : w == 4 ? 0x88DFFC00u : 0xC8DFFC00u)
+                    : (w <= 1 ? 0x38BFC000u : w == 2 ? 0x78BFC000u
+                       : w == 4 ? 0xB8BFC000u : 0xF8BFC000u);
+                a64_word(a, base | ((uint32_t)(p & 31) << 5) | (uint32_t)(d & 31));
+                if (!s->is_unsigned && w < 8)
+                    a64_sxt(a, d, d, (unsigned)w, 1);
+                commit(c, s->dst, d);
+                break;
+            }
             if (vec16_val(c, s->dst)) {
                 int p = load_ptrv(c, s->a, -1);
                 int h = fp_home(c, s->dst);
