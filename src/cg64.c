@@ -492,6 +492,17 @@ static int emit_mem_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* Map A-Z onto a-z.  NUL and every other byte stay put. */
+static void fold_ascii_upper(A64Asm *a, int reg) {
+    int Lskip = a64_new_label(a);
+    a64_cmp_imm12(a, reg, 65, 0, 0);
+    a64_bcond(a, A64_CC, Lskip);
+    a64_cmp_imm12(a, reg, 90, 0, 0);
+    a64_bcond(a, A64_HI, Lskip);
+    a64_add_imm12(a, reg, reg, 32, 0, 0, 0);
+    a64_bind(a, Lskip);
+}
+
 /* memcmp/strcmp/strlen/strncmp.  Same reason as memcpy: the Darwin
  * runtime is not linked yet, and a user definition still wins.
  * Arguments are already in x0/x1(/x2).  The signed byte difference
@@ -501,6 +512,11 @@ static int emit_scan_builtin(C64 *c, const char *name) {
     int is_strcmp = strcmp(name, "strcmp") == 0;
     int is_strncmp = strcmp(name, "strncmp") == 0;
     int is_strlen = strcmp(name, "strlen") == 0;
+    int is_strcasecmp = strcmp(name, "strcasecmp") == 0;
+    int is_strncasecmp = strcmp(name, "strncasecmp") == 0;
+    int fold = is_strcasecmp || is_strncasecmp;
+    if (is_strcasecmp) is_strcmp = 1;
+    if (is_strncasecmp) is_strncmp = 1;
     if (!is_memcmp && !is_strcmp && !is_strncmp && !is_strlen) return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
@@ -528,6 +544,10 @@ static int emit_scan_builtin(C64 *c, const char *name) {
         a64_cbz(a, A64_X2, Lzero, 1);
     a64_ldr8(a, A64_X3, A64_X0, 0);
     a64_ldr8(a, A64_X4, A64_X1, 0);
+    if (fold) {
+        fold_ascii_upper(a, A64_X3);
+        fold_ascii_upper(a, A64_X4);
+    }
     a64_cmp_reg(a, A64_X3, A64_X4, 0);
     a64_bcond(a, A64_NE, Ldiff);
     if (is_strcmp || is_strncmp)

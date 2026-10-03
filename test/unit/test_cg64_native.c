@@ -1722,6 +1722,21 @@ static void test_bsd(void) {
         "  return 0; }", 0);
 }
 
+static void test_case(void) {
+    expect("casefold",
+        "package main;\n"
+        "int main(void) {\n"
+        "  if (__builtin_strcasecmp(\"AbC\", \"aBc\") != 0) return 1;\n"
+        "  if (__builtin_strcasecmp(\"A\", \"b\") >= 0) return 2;\n"
+        "  if (__builtin_strcasecmp(\"b\", \"A\") <= 0) return 3;\n"
+        "  if (__builtin_strcasecmp(\"\", \"\") != 0) return 4;\n"
+        "  if (__builtin_strncasecmp(\"ABC\", \"ab\", 2) != 0) return 5;\n"
+        "  if (__builtin_strncasecmp(\"ABC\", \"ab\", 3) == 0) return 6;\n"
+        "  if (__builtin_strncasecmp(\"AB\", \"abc\", 2) != 0) return 7;\n"
+        "  if (__builtin_strncasecmp(\"A\", \"b\", 0) != 0) return 8;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1810,6 +1825,7 @@ int main(void) {
     test_atomic();
     test_alloca_align();
     test_bsd();
+    test_case();
     test_trap();
     test_syscall();
     test_frame_addr();
