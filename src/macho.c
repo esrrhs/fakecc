@@ -1410,6 +1410,22 @@ static int patch_bl(uint32_t *w, uint64_t pc, uint64_t tgt) {
     return 0;
 }
 
+/* Mach-O nlist has no size.  The bytes up to the next symbol in the
+ * same section are the definition the common is competing with. */
+static size_t macho_symbol_span(const EmitModule *m, uint16_t sh, size_t off) {
+    size_t end = 0;
+    if (sh == SECT_DATA) end = m->data.len;
+    else if (sh == SECT_RODATA) end = m->rodata.len;
+    else if (sh == SECT_BSS) end = m->bss_size;
+    else return 0;
+    for (size_t s = 0; s < m->num_syms; s++) {
+        const EmitSymbol *o = &m->syms[s];
+        if (o->shndx != sh || o->value <= off) continue;
+        if (o->value < end) end = o->value;
+    }
+    return end > off ? end - off : 0;
+}
+
 /* One relocating link of -c modules into a PIE image. */
 int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     if (!n) {
@@ -1539,7 +1555,7 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             out.bss_align = mods[i]->bss_align;
     }
 
-    typedef struct { char *name; uint16_t sh; size_t off; } GDef;
+    typedef struct { char *name; uint16_t sh; size_t off; size_t size; } GDef;
     GDef *gdefs = NULL;
     size_t ng = 0, capg = 0;
     typedef struct { uint16_t sh; size_t off; int defined; } Adj;
@@ -1588,6 +1604,8 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             gdefs[ng].name = xstrdup(es->name);
             gdefs[ng].sh = es->shndx;
             gdefs[ng].off = adj[i][s].off;
+            gdefs[ng].size = es->size ? es->size
+                            : macho_symbol_span(m, es->shndx, es->value);
             ng++;
         }
     }
@@ -1609,10 +1627,23 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                 if (es->shndx != SHN_COMMON || !es->name || es->binding == 0)
                     continue;
                 int defined = 0;
+                size_t def_sz = 0;
                 for (size_t g = 0; g < ng; g++) {
-                    if (strcmp(gdefs[g].name, es->name) == 0) { defined = 1; break; }
+                    if (strcmp(gdefs[g].name, es->name) == 0) {
+                        defined = 1;
+                        def_sz = gdefs[g].size;
+                        break;
+                    }
                 }
-                if (defined) continue;
+                if (defined) {
+                    /* ld64 warns and keeps the real definition.  A larger
+                     * common would otherwise look like it owned the tail. */
+                    if (es->size > def_sz)
+                        fprintf(stderr,
+                                "fakecc: tentative definition of '%s' (%zu bytes) is larger than the real definition (%zu bytes)\n",
+                                es->name, es->size, def_sz);
+                    continue;
+                }
                 size_t found = ncomm;
                 for (size_t c = 0; c < ncomm; c++) {
                     if (strcmp(comms[c].name, es->name) == 0) { found = c; break; }
@@ -1645,6 +1676,7 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             gdefs[ng].name = comms[c].name;
             gdefs[ng].sh = SECT_BSS;
             gdefs[ng].off = comms[c].off;
+            gdefs[ng].size = comms[c].size;
             ng++;
         }
         free(comms);

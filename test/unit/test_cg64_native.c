@@ -18,6 +18,7 @@
 #include "fakecc/target.h"
 #include "test_framework.h"
 
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1148,6 +1149,79 @@ static int run_bin(const char *path) {
     waitpid(pid, &status, 0);
     if (!WIFEXITED(status)) return -1;
     return WEXITSTATUS(status);
+}
+
+/* Linker warnings go to stderr.  Restore it before the assertion runs. */
+static int link_capturing(EmitModule **mods, size_t n, const char *out,
+                          const char *errpath) {
+    int saved = dup(STDERR_FILENO);
+    int fd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (saved < 0 || fd < 0) return -1;
+    dup2(fd, STDERR_FILENO);
+    close(fd);
+    int rc = macho_link_objects(mods, n, out);
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+    return rc;
+}
+
+static int err_has(const char *path, const char *needle) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char buf[1024];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return strstr(buf, needle) != NULL;
+}
+
+static void test_common(void) {
+    const char *a = "/tmp/fakecc_arm64_common_a.o";
+    const char *b = "/tmp/fakecc_arm64_common_b.o";
+    const char *outp = "/tmp/fakecc_arm64_common";
+    const char *err = "/tmp/fakecc_arm64_common_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int big[4];\n"
+        "int main(void) { return big[0]; }\n",
+        a, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int big[1] = { 7 };\n",
+        b, NULL), 0);
+    EmitModule ma, mb;
+    T_ASSERT_EQ_INT(emit_obj_read(a, &ma), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(b, &mb), 0);
+    EmitModule *mods[2] = { &ma, &mb };
+    T_ASSERT_EQ_INT(link_capturing(mods, 2, outp, err), 0);
+    T_ASSERT(err_has(err, "tentative definition of 'big'"));
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    emit_module_free(&ma);
+    emit_module_free(&mb);
+
+    const char *c = "/tmp/fakecc_arm64_common_c.o";
+    const char *d = "/tmp/fakecc_arm64_common_d.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int wide[1];\n"
+        "int main(void) { return wide[0] + wide[1]; }\n",
+        c, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int wide[2] = { 5, 6 };\n",
+        d, NULL), 0);
+    EmitModule mc, md;
+    T_ASSERT_EQ_INT(emit_obj_read(c, &mc), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(d, &md), 0);
+    EmitModule *mods2[2] = { &mc, &md };
+    T_ASSERT_EQ_INT(link_capturing(mods2, 2, outp, err), 0);
+    T_ASSERT(!err_has(err, "tentative definition"));
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 11);
+    emit_module_free(&mc);
+    emit_module_free(&md);
 }
 
 static void test_macho_link(void) {
@@ -2812,6 +2886,7 @@ int main(void) {
     test_syscall();
     test_frame_addr();
     test_macho_obj();
+    test_common();
     test_macho_link();
     return t_finalize();
 }
