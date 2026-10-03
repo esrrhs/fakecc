@@ -48,9 +48,16 @@ build_with() {
 echo "=== stage 1: Stage 0 compiles fakecc ==="
 build_with "$STAGE0" "$WORK/s1" || exit 1
 echo "    -> $WORK/s1/fakecc"
+# Persist stage1 immediately so the workflow uploads the exact
+# stage1 binary even if stage2 crashes the compiler before any
+# v0/fakecc-1 is written.
+cp "$WORK/s1/fakecc" "$ROOT/v0/fakecc-1"
 
 echo "=== stage 2: fakecc-1 compiles fakecc ==="
-build_with "$WORK/s1/fakecc" "$WORK/s2" || exit 1
+if ! build_with "$WORK/s1/fakecc" "$WORK/s2"; then
+    echo "stage2 compiler failed; v0/fakecc-1 retained for inspection" >&2
+    exit 1
+fi
 echo "    -> $WORK/s2/fakecc"
 
 echo
