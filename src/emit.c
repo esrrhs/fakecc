@@ -1,6 +1,7 @@
 #include "fakecc/emit.h"
 #include "fakecc/common.h"
 #include "fakecc/debug.h"
+#include "fakecc/macho.h"
 #include "fakecc/target.h"
 
 #include <stdint.h>
@@ -318,9 +319,16 @@ static uint32_t append_array_shname(Buffer *shstrtab, const char *base,
 /* emit_obj — write a relocatable object file (ET_REL)                 */
 /* ------------------------------------------------------------------ */
 
+static int g_object_mode;
+
+void emit_set_object_mode(int on) { g_object_mode = on ? 1 : 0; }
+int emit_object_mode(void) { return g_object_mode; }
+
 void emit_obj(const EmitModule *m, const char *path) {
-    /* Object-writer dispatch: the body below is the ELF ET_REL writer;
-     * the Mach-O writer branches by object format here when it lands. */
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
+        if (macho_write_object(m, path) != 0) exit(1);
+        return;
+    }
     if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
         fprintf(stderr,
                 "fakecc: object emission for target '%s' is not implemented yet\n",

@@ -13,6 +13,7 @@
 #include "fakecc/opt.h"
 #include "fakecc/emit.h"
 #include "fakecc/codegen.h"
+#include "fakecc/compiler.h"
 #include "fakecc/macho.h"
 #include "fakecc/target.h"
 #include "test_framework.h"
@@ -1037,6 +1038,37 @@ static void test_vec16(void) {
         "  return 0; }", 0);
 }
 
+static void test_macho_obj(void) {
+    const char *path = "/tmp/fakecc_arm64_obj.o";
+    int rc = fakecc_compile_string_to_obj(
+        "package main;\n"
+        "static int hidden(int x) { return x + 1; }\n"
+        "int add(int a, int b) { return a + b + hidden(a); }\n",
+        path, NULL);
+    T_ASSERT_EQ_INT(rc, 0);
+    FILE *f = fopen(path, "rb");
+    T_ASSERT(f != NULL);
+    unsigned char hdr[32];
+    T_ASSERT_EQ_INT((int)fread(hdr, 1, 32, f), 32);
+    uint32_t magic = 0, filetype = 0, flags = 0;
+    memcpy(&magic, hdr, 4);
+    memcpy(&filetype, hdr + 12, 4);
+    memcpy(&flags, hdr + 24, 4);
+    T_ASSERT_EQ_INT((int)magic, (int)0xFEEDFACF);
+    T_ASSERT_EQ_INT((int)filetype, 1);
+    T_ASSERT_EQ_INT((int)(flags & 0x2000), 0x2000);
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    rewind(f);
+    char *buf = malloc((size_t)n);
+    T_ASSERT(buf != NULL);
+    T_ASSERT_EQ_INT((int)fread(buf, 1, (size_t)n, f), (int)n);
+    fclose(f);
+    T_ASSERT(memmem(buf, (size_t)n, "_add", 4) != NULL);
+    T_ASSERT(memmem(buf, (size_t)n, "_hidden", 7) != NULL);
+    free(buf);
+}
+
 static void test_frame_addr(void) {
     expect("frame",
         "package main;\n"
@@ -1128,6 +1160,7 @@ int main(void) {
     test_int128();
     test_syscall();
     test_frame_addr();
+    test_macho_obj();
     return t_finalize();
 }
 

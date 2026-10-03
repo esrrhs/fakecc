@@ -162,7 +162,10 @@ int fakecc_compile_string_to_obj(const char *source,
         return FAKECC_ERR;
 
     EmitModule em;
-    if (lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, NULL) != FAKECC_OK) {
+    emit_set_object_mode(1);
+    int low = lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, NULL);
+    emit_set_object_mode(0);
+    if (low != FAKECC_OK) {
         tu_free(&tu);
         return FAKECC_ERR;
     }

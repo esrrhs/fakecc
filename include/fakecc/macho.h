@@ -24,6 +24,11 @@ struct EmitModule;
 int macho_write_exec(const struct EmitModule *em, uint64_t entry_off,
                      const char *path);
 
+/* Relocatable MH_OBJECT.  Defined symbols are recorded; intra-section
+ * branches are already resolved.  Global-address relocations are not
+ * emitted yet. */
+int macho_write_object(const struct EmitModule *em, const char *path);
+
 /* Single-__text convenience used by low-level encoder tests. */
 int macho_write_exec_text(const Buffer *text, uint64_t entry_off,
                           const char *path);

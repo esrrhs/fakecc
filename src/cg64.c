@@ -2123,7 +2123,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     (void)want_debug;  /* DWARF emission lands in T20. */
 
     int main_id = -1;
-    if (find_function(ir, "main", &main_id) != 0)
+    if (!emit_object_mode() && find_function(ir, "main", &main_id) != 0)
         die_at("<arm64>", 0, 0, "no 'main' function found");
 
     A64Asm a;
@@ -2232,11 +2232,13 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
         }
     }
 
-    /* LC_MAIN entry stub.  dyld hands us x0=argc, x1=argv, x2=envp; keep
+    /* LC_MAIN entry stub.  Object files (-c) are just the functions.
+     * dyld hands us x0=argc, x1=argv, x2=envp; keep
      * them in callee-saved registers across the constructor calls, call
      * main, run destructors in reverse, then Darwin exit(main's value).
      * The stub owns x19..x22 outright (process entry has no caller whose
      * values matter) but saves them anyway to keep the frame ABI-clean. */
+    if (!emit_object_mode()) {
     a64_stp64(&a, A64_FP, A64_LR, A64_SP, -48, A64_PAIR_PRE);
     mov_sp_like(&a, A64_FP, A64_SP);   /* ADD, not ORR (x31==SP vs XZR) */
     a64_stp64(&a, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);
@@ -2261,6 +2263,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     a64_ldp64(&a, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);
     a64_ldp64(&a, A64_FP, A64_LR, A64_SP, 48, A64_PAIR_POST);
     a64_ret(&a, A64_LR);
+    }
     free(ctors);
     free(dtors);
 
@@ -2273,7 +2276,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
 
     /* The code buffer lands after the Mach-O header pad; ADRP page fixups
      * must compute against the runtime file/VA offset. */
-    a64_set_base(&a, macho_text_offset());
+    a64_set_base(&a, emit_object_mode() ? 0 : macho_text_offset());
     if (a64_resolve(&a) != 0) {
         a64_free(&a);
         free(c.fn_label);
@@ -2288,8 +2291,11 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
 
     /* Patch ADRP+ADD pairs and record dyld rebases for pointer
      * initializers now that text length (and so section placement) is
-     * known. */
-    if (c.ngfix || c.npfix) {
+     * known.  An object file cannot bake in the executable layout. */
+    if (emit_object_mode() && (c.ngfix || c.npfix))
+        die_at("<arm64>", 0, 0,
+               "arm64 object file: global relocations are not supported yet");
+    if (!emit_object_mode() && (c.ngfix || c.npfix)) {
         uint64_t ro_off, data_off, bss_off;
         macho_section_offsets(out, out->text.len, &ro_off, &data_off, &bss_off);
         for (size_t i = 0; i < c.ngfix; i++) {
@@ -2338,6 +2344,32 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                 die_at(g->loc.file ? g->loc.file : "<arm64>", g->loc.line, 0,
                        "arm64 backend: bad pointer initializer");
             emit_module_add_rebase(out, slot, (uint64_t)tgt);
+        }
+    }
+    if (emit_object_mode()) {
+        for (size_t i = 0; i < ir->functions.len; i++) {
+            if (!a.labels[c.fn_label[i]].bound) continue;
+            const IRFunction *fn = &ir->functions.data[i];
+            size_t start = a.labels[c.fn_label[i]].pos;
+            size_t end = out->text.len;
+            if (i + 1 < ir->functions.len &&
+                a.labels[c.fn_label[i + 1]].bound)
+                end = a.labels[c.fn_label[i + 1]].pos;
+            else if (c.udiv_label >= 0 && a.labels[c.udiv_label].bound)
+                end = a.labels[c.udiv_label].pos;
+            emit_module_add_symbol(out, fn->name,
+                                   fn->is_static ? 0 : 1, 2 /* STT_FUNC */,
+                                   (uint16_t)SECT_TEXT, start, end - start);
+        }
+        for (size_t gi = 0; gi < ir->globals.len; gi++) {
+            const IRGlobal *g = &ir->globals.data[gi];
+            if (!g->name || !c.gsect) continue;
+            uint16_t sh = c.gsect[gi] == G_RO ? (uint16_t)SECT_RODATA
+                        : c.gsect[gi] == G_DATA ? (uint16_t)SECT_DATA
+                        : (uint16_t)SECT_BSS;
+            emit_module_add_symbol(out, g->name, g->is_static ? 0 : 1,
+                                   1 /* STT_OBJECT */, sh, c.goff[gi],
+                                   (size_t)g->size);
         }
     }
     free(c.gfix);

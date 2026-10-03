@@ -479,7 +479,10 @@ int main(int argc, char **argv) {
         }
         free(src);
         EmitModule em;
-        if (lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg) != FAKECC_OK) {
+        emit_set_object_mode(1);
+        int low = lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+        emit_set_object_mode(0);
+        if (low != FAKECC_OK) {
             tu_free(&tu);
             exit(1);
         }

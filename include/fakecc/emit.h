@@ -269,8 +269,12 @@ void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
 /* Output                                                              */
 /* ------------------------------------------------------------------ */
 
-/* Write a relocatable object file (ET_REL) to path. */
+/* Write a relocatable object file (ET_REL or Mach-O MH_OBJECT) to path. */
 void emit_obj(const EmitModule *m, const char *path);
+/* When set, arm64 codegen emits a relocatable object body (no LC_MAIN
+ * stub) instead of a freestanding executable image. */
+void emit_set_object_mode(int on);
+int  emit_object_mode(void);
 /* Read a relocatable object file into an EmitModule.  Returns 0 on success. */
 int  emit_obj_read(const char *path, EmitModule *m);
 

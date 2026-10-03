@@ -19,7 +19,9 @@
  * hand-built images (see .trae/specs/arm64-macos-backend spike notes). */
 
 #define MH_MAGIC_64   0xFEEDFACFu
+#define MH_OBJECT     1u
 #define MH_EXECUTE    2u
+#define MH_SUBSECTIONS_VIA_SYMBOLS 0x00002000u
 #define MH_NOUNDEFS   0x00000001u
 #define MH_DYLDLINK   0x00000004u
 #define MH_TWOLEVEL   0x00000080u
@@ -46,8 +48,11 @@
 #define VM_PROT_EXEC  4
 
 #define S_REGULAR                  0x00u
+#define S_ZEROFILL                 0x01u
 #define S_ATTR_PURE_INSTRUCTIONS   0x80000000u
 #define S_ATTR_SOME_INSTRUCTIONS   0x00000400u
+#define N_EXT  0x01u
+#define N_SECT 0x0eu
 
 /* Fixed load-image geometry:
  *   mach_header_64 (32) + load commands, then __text at MACHO_TEXT_OFF.
@@ -105,6 +110,46 @@ typedef struct __attribute__((packed)) {
     uint32_t reserved2;
     uint32_t reserved3;
 } section_64;
+
+typedef struct __attribute__((packed)) {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint32_t symoff;
+    uint32_t nsyms;
+    uint32_t stroff;
+    uint32_t strsize;
+} symtab_command;
+
+typedef struct __attribute__((packed)) {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint32_t ilocalsym;
+    uint32_t nlocalsym;
+    uint32_t iextdefsym;
+    uint32_t nextdefsym;
+    uint32_t iundefsym;
+    uint32_t nundefsym;
+    uint32_t tocoff;
+    uint32_t ntoc;
+    uint32_t modtaboff;
+    uint32_t nmodtab;
+    uint32_t extrefsymoff;
+    uint32_t nextrefsyms;
+    uint32_t indirectsymoff;
+    uint32_t nindirectsyms;
+    uint32_t extreloff;
+    uint32_t nextrel;
+    uint32_t locreloff;
+    uint32_t nlocrel;
+} dysymtab_command;
+
+typedef struct __attribute__((packed)) {
+    uint32_t n_strx;
+    uint8_t  n_type;
+    uint8_t  n_sect;
+    uint16_t n_desc;
+    uint64_t n_value;
+} nlist_64;
 
 typedef struct __attribute__((packed)) {
     uint32_t cmd;
@@ -660,6 +705,254 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     if (written != total_size) {
         fprintf(stderr, "fakecc: short write on '%s' (%zu != %zu)\n",
                 path, written, total_size);
+        return -1;
+    }
+    return 0;
+}
+
+static uint64_t align_up_u64(uint64_t v, uint64_t a) {
+    if (a <= 1) return v;
+    return (v + a - 1) & ~(a - 1);
+}
+
+/* MH_OBJECT with __text/__const/__data/__bss and a symbol table.
+ * Relocations are left empty: callers that need a global address still
+ * die in codegen. */
+int macho_write_object(const EmitModule *em, const char *path) {
+    int has_ro = em->rodata.len > 0;
+    int has_data = em->data.len > 0;
+    int has_bss = em->bss_size > 0;
+    uint32_t nsects = 1u + (uint32_t)has_ro + (uint32_t)has_data
+                    + (uint32_t)has_bss;
+    uint32_t seg_cmdsize = (uint32_t)sizeof(segment_command_64)
+                         + nsects * (uint32_t)sizeof(section_64);
+    uint32_t sizeofcmds = seg_cmdsize
+                        + (uint32_t)sizeof(build_version_command)
+                        + (uint32_t)sizeof(symtab_command)
+                        + (uint32_t)sizeof(dysymtab_command);
+    uint64_t content_off = align_up_u64(32u + sizeofcmds, 8);
+
+    uint8_t sect_of[9];
+    uint64_t sect_addr[9];
+    memset(sect_of, 0, sizeof sect_of);
+    memset(sect_addr, 0, sizeof sect_addr);
+    uint32_t nsec = 1;
+    sect_of[SECT_TEXT] = (uint8_t)nsec++;
+    if (has_ro) sect_of[SECT_RODATA] = (uint8_t)nsec++;
+    if (has_data) sect_of[SECT_DATA] = (uint8_t)nsec++;
+    if (has_bss) sect_of[SECT_BSS] = (uint8_t)nsec++;
+
+    uint64_t vm = 0;
+    uint64_t file = content_off;
+    sect_addr[SECT_TEXT] = 0;
+    uint64_t text_off = file;
+    vm += em->text.len;
+    file += em->text.len;
+
+    uint64_t ro_off = 0, data_off = 0;
+    if (has_ro) {
+        uint64_t al = em->rodata_align ? em->rodata_align : 8;
+        vm = align_up_u64(vm, al);
+        file = align_up_u64(file, al);
+        sect_addr[SECT_RODATA] = vm;
+        ro_off = file;
+        vm += em->rodata.len;
+        file += em->rodata.len;
+    }
+    if (has_data) {
+        uint64_t al = em->data_align ? em->data_align : 8;
+        vm = align_up_u64(vm, al);
+        file = align_up_u64(file, al);
+        sect_addr[SECT_DATA] = vm;
+        data_off = file;
+        vm += em->data.len;
+        file += em->data.len;
+    }
+    if (has_bss) {
+        uint64_t al = em->bss_align ? em->bss_align : 8;
+        vm = align_up_u64(vm, al);
+        sect_addr[SECT_BSS] = vm;
+        vm += em->bss_size;
+    }
+    uint64_t content_end = file;
+    uint64_t vm_end = vm;
+
+    size_t nlocal = 0, nglobal = 0;
+    for (size_t i = 0; i < em->num_syms; i++) {
+        const EmitSymbol *s = &em->syms[i];
+        if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
+        if (s->binding == 0) nlocal++;
+        else nglobal++;
+    }
+    size_t nsyms = nlocal + nglobal;
+    size_t strsize = 1;
+    for (size_t i = 0; i < em->num_syms; i++) {
+        const EmitSymbol *s = &em->syms[i];
+        if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
+        strsize += 1 + strlen(s->name) + 1; /* leading '_' */
+    }
+    uint64_t symoff = align_up_u64(content_end, 8);
+    uint64_t stroff = symoff + nsyms * sizeof(nlist_64);
+
+    Buffer out;
+    buffer_init(&out);
+    mach_header_64 hdr;
+    memset(&hdr, 0, sizeof hdr);
+    hdr.magic = MH_MAGIC_64;
+    hdr.cputype = CPU_TYPE_ARM64;
+    hdr.cpusubtype = CPU_SUBTYPE_ARM64_ALL;
+    hdr.filetype = MH_OBJECT;
+    hdr.ncmds = 4;
+    hdr.sizeofcmds = sizeofcmds;
+    hdr.flags = MH_SUBSECTIONS_VIA_SYMBOLS;
+    buffer_append(&out, (const char *)&hdr, sizeof hdr);
+
+    segment_command_64 seg;
+    memset(&seg, 0, sizeof seg);
+    seg.cmd = LC_SEGMENT_64;
+    seg.cmdsize = seg_cmdsize;
+    seg.vmsize = vm_end;
+    seg.fileoff = content_off;
+    seg.filesize = content_end - content_off;
+    seg.maxprot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC;
+    seg.initprot = seg.maxprot;
+    seg.nsects = nsects;
+    buffer_append(&out, (const char *)&seg, sizeof seg);
+
+    section_64 sec;
+    memset(&sec, 0, sizeof sec);
+    memcpy(sec.sectname, "__text", 6);
+    memcpy(sec.segname, "__TEXT", 6);
+    sec.addr = 0;
+    sec.size = em->text.len;
+    sec.offset = (uint32_t)text_off;
+    sec.align = 2;
+    sec.flags = S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS;
+    buffer_append(&out, (const char *)&sec, sizeof sec);
+    if (has_ro) {
+        memset(&sec, 0, sizeof sec);
+        memcpy(sec.sectname, "__const", 7);
+        memcpy(sec.segname, "__TEXT", 6);
+        sec.addr = sect_addr[SECT_RODATA];
+        sec.size = em->rodata.len;
+        sec.offset = (uint32_t)ro_off;
+        sec.align = 3;
+        buffer_append(&out, (const char *)&sec, sizeof sec);
+    }
+    if (has_data) {
+        memset(&sec, 0, sizeof sec);
+        memcpy(sec.sectname, "__data", 6);
+        memcpy(sec.segname, "__DATA", 6);
+        sec.addr = sect_addr[SECT_DATA];
+        sec.size = em->data.len;
+        sec.offset = (uint32_t)data_off;
+        sec.align = 3;
+        buffer_append(&out, (const char *)&sec, sizeof sec);
+    }
+    if (has_bss) {
+        memset(&sec, 0, sizeof sec);
+        memcpy(sec.sectname, "__bss", 5);
+        memcpy(sec.segname, "__DATA", 6);
+        sec.addr = sect_addr[SECT_BSS];
+        sec.size = em->bss_size;
+        sec.align = 3;
+        sec.flags = S_ZEROFILL;
+        buffer_append(&out, (const char *)&sec, sizeof sec);
+    }
+
+    build_version_command bv;
+    memset(&bv, 0, sizeof bv);
+    bv.cmd = LC_BUILD_VERSION;
+    bv.cmdsize = (uint32_t)sizeof bv;
+    bv.platform = PLATFORM_MACOS;
+    bv.minos = 0x000E0000u; /* 14.0.0 */
+    bv.sdk = 0x000E0000u;
+    buffer_append(&out, (const char *)&bv, sizeof bv);
+
+    symtab_command sy;
+    memset(&sy, 0, sizeof sy);
+    sy.cmd = LC_SYMTAB;
+    sy.cmdsize = (uint32_t)sizeof sy;
+    sy.symoff = (uint32_t)symoff;
+    sy.nsyms = (uint32_t)nsyms;
+    sy.stroff = (uint32_t)stroff;
+    sy.strsize = (uint32_t)strsize;
+    buffer_append(&out, (const char *)&sy, sizeof sy);
+
+    dysymtab_command dy;
+    memset(&dy, 0, sizeof dy);
+    dy.cmd = LC_DYSYMTAB;
+    dy.cmdsize = (uint32_t)sizeof dy;
+    dy.ilocalsym = 0;
+    dy.nlocalsym = (uint32_t)nlocal;
+    dy.iextdefsym = (uint32_t)nlocal;
+    dy.nextdefsym = (uint32_t)nglobal;
+    dy.iundefsym = (uint32_t)nsyms;
+    buffer_append(&out, (const char *)&dy, sizeof dy);
+
+    while (out.len < content_off) {
+        char z = 0;
+        buffer_append(&out, &z, 1);
+    }
+    if (em->text.len)
+        buffer_append(&out, em->text.data, em->text.len);
+    if (has_ro) {
+        while (out.len < ro_off) { char z = 0; buffer_append(&out, &z, 1); }
+        buffer_append(&out, em->rodata.data, em->rodata.len);
+    }
+    if (has_data) {
+        while (out.len < data_off) { char z = 0; buffer_append(&out, &z, 1); }
+        buffer_append(&out, em->data.data, em->data.len);
+    }
+    while (out.len < symoff) { char z = 0; buffer_append(&out, &z, 1); }
+
+    /* Locals first, then globals, matching LC_DYSYMTAB.  String offsets
+     * are assigned in the same order. */
+    size_t str_at = 1;
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t i = 0; i < em->num_syms; i++) {
+            const EmitSymbol *s = &em->syms[i];
+            if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
+            int local = s->binding == 0;
+            if (pass == 0 && !local) continue;
+            if (pass == 1 && local) continue;
+            nlist_64 nl;
+            memset(&nl, 0, sizeof nl);
+            nl.n_strx = (uint32_t)str_at;
+            nl.n_type = (uint8_t)(local ? N_SECT : (N_SECT | N_EXT));
+            nl.n_sect = sect_of[s->shndx];
+            nl.n_value = sect_addr[s->shndx] + (uint64_t)s->value;
+            buffer_append(&out, (const char *)&nl, sizeof nl);
+            str_at += 1 + strlen(s->name) + 1;
+        }
+    }
+    char nul = 0;
+    buffer_append(&out, &nul, 1);
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t i = 0; i < em->num_syms; i++) {
+            const EmitSymbol *s = &em->syms[i];
+            if (!s->name || s->shndx >= 9 || !sect_of[s->shndx]) continue;
+            int local = s->binding == 0;
+            if (pass == 0 && !local) continue;
+            if (pass == 1 && local) continue;
+            buffer_append(&out, "_", 1);
+            buffer_append(&out, s->name, strlen(s->name) + 1);
+        }
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "fakecc: cannot create '%s'\n", path);
+        buffer_free(&out);
+        return -1;
+    }
+    size_t written = fwrite(out.data, 1, out.len, f);
+    size_t total = out.len;
+    fclose(f);
+    chmod(path, 0644);
+    buffer_free(&out);
+    if (written != total) {
+        fprintf(stderr, "fakecc: short write on '%s'\n", path);
         return -1;
     }
     return 0;
