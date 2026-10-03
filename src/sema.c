@@ -47,7 +47,7 @@ static int math_builtin_width(const char *n, int *nargs) {
     static const struct { const char *root; int narg; } tab[] = {
         {"nearbyint", 1}, {"floor", 1}, {"trunc", 1}, {"round", 1},
         {"ceil", 1}, {"sqrt", 1}, {"fmin", 2}, {"fmax", 2},
-        {"fma", 3}, {"rint", 1},
+        {"fma", 3}, {"rint", 1}, {"nextafter", 2},
     };
     for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
         size_t L = strlen(tab[i].root);

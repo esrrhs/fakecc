@@ -1869,6 +1869,61 @@ static void test_class(void) {
         "  return 0; }", 0);
 }
 
+static void test_next(void) {
+    expect("next",
+        "package main;\n"
+        "int main(void) {\n"
+        "  double one = 1.0;\n"
+        "  double up = __builtin_nextafter(one, 2.0);\n"
+        "  double dn = __builtin_nextafter(one, 0.0);\n"
+        "  unsigned long long b1, bu, bd;\n"
+        "  __builtin_memcpy(&b1, &one, 8);\n"
+        "  __builtin_memcpy(&bu, &up, 8);\n"
+        "  __builtin_memcpy(&bd, &dn, 8);\n"
+        "  if (bu != b1 + 1) return 1;\n"
+        "  if (bd != b1 - 1) return 2;\n"
+        "  if (__builtin_nextafter(one, one) != one) return 3;\n"
+        "  double z = __builtin_nextafter(0.0, 1.0);\n"
+        "  unsigned long long bz;\n"
+        "  __builtin_memcpy(&bz, &z, 8);\n"
+        "  if (bz != 1) return 4;\n"
+        "  unsigned long long neg = 1;\n"
+        "  neg = neg << 63;\n"
+        "  double nz = __builtin_nextafter(0.0, -1.0);\n"
+        "  unsigned long long bnz;\n"
+        "  __builtin_memcpy(&bnz, &nz, 8);\n"
+        "  if (bnz != neg + 1) return 5;\n"
+        "  double nzero;\n"
+        "  __builtin_memcpy(&nzero, &neg, 8);\n"
+        "  double back = __builtin_nextafter(0.0, nzero);\n"
+        "  unsigned long long bb;\n"
+        "  __builtin_memcpy(&bb, &back, 8);\n"
+        "  if (bb != neg) return 6;\n"
+        "  double inf = __builtin_inf();\n"
+        "  double mx = __builtin_nextafter(inf, 0.0);\n"
+        "  unsigned long long bi, bm;\n"
+        "  __builtin_memcpy(&bi, &inf, 8);\n"
+        "  __builtin_memcpy(&bm, &mx, 8);\n"
+        "  if (bm != bi - 1) return 7;\n"
+        "  double n = __builtin_nextafter(__builtin_nan(\"\"), 1.0);\n"
+        "  if (n == n) return 8;\n"
+        "  unsigned long long sb = 1;\n"
+        "  double sub;\n"
+        "  __builtin_memcpy(&sub, &sb, 8);\n"
+        "  if (__builtin_nextafter(sub, 0.0) != 0.0) return 9;\n"
+        "  float f1 = 1.0f;\n"
+        "  float fu = __builtin_nextafterf(f1, 2.0f);\n"
+        "  unsigned u1, uu;\n"
+        "  __builtin_memcpy(&u1, &f1, 4);\n"
+        "  __builtin_memcpy(&uu, &fu, 4);\n"
+        "  if (uu != u1 + 1) return 10;\n"
+        "  double lu = __builtin_nextafterl(one, 2.0);\n"
+        "  unsigned long long bl;\n"
+        "  __builtin_memcpy(&bl, &lu, 8);\n"
+        "  if (bl != b1 + 1) return 11;\n"
+        "  return 0; }", 0);
+}
+
 static void test_copy(void) {
     expect("copy",
         "package main;\n"
@@ -1965,6 +2020,7 @@ int main(void) {
     test_funnel();
     test_powi();
     test_class();
+    test_next();
     test_trap();
     test_syscall();
     test_frame_addr();

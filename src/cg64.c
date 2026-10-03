@@ -1211,7 +1211,7 @@ static int fp_builtin_kind(const char *n, int *nargs) {
         {"trunc", 4, 1}, {"round", 5, 1}, {"ceil", 6, 1},
         {"fabs", 7, 1}, {"sqrt", 8, 1}, {"fmin", 9, 2},
         {"fmax", 10, 2}, {"fma", 11, 3}, {"rint", 2, 1},
-        {"powi", 12, 2},
+        {"powi", 12, 2}, {"nextafter", 13, 2},
     };
     for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
         if (fp_named(n, tab[i].root)) {
@@ -1325,6 +1325,78 @@ static void emit_fp_builtin(C64 *c, const IRInst *s, int kind) {
         a64_cbz(a, A64_X1, Ldone, 0);
         a64_fmov_gp(a, A64_V2, A64_X2, 1, isd);
         a64_fdiv(a, A64_V0, A64_V2, A64_V0, isd);
+        a64_bind(a, Ldone);
+        int dst = fp_result(c, s->dst, A64_V0);
+        if (dst != A64_V0) a64_fmov_reg(a, dst, A64_V0, isd);
+        commit_fp(c, s->dst, dst);
+        return;
+    }
+    if (kind == 13) {
+        /* nextafter(x, y): the adjacent encoding of x toward y.
+         * ±0 steps to the tiniest subnormal with y's sign.  A NaN
+         * in either argument produces a NaN.  Equal values return y,
+         * so nextafter(+0, -0) keeps the sign. */
+        int xa = load_fp(c, s->call_args[0], -1);
+        a64_fmov_gp(a, A64_X0, xa, 0, isd);
+        int ya = load_fp(c, s->call_args[1], xa);
+        a64_fmov_gp(a, A64_X1, ya, 0, isd);
+        a64_fmov_gp(a, A64_V0, A64_X0, 1, isd);
+        a64_fmov_gp(a, A64_V1, A64_X1, 1, isd);
+        unsigned exp_sh = isd ? 52u : 23u;
+        unsigned exp_max = isd ? 0x7ffu : 0xffu;
+        unsigned frac_sh = isd ? 12u : 9u;
+        unsigned sign = isd ? 63u : 31u;
+        int Lnan = a64_new_label(a);
+        int Lchk_y = a64_new_label(a);
+        int Lstep = a64_new_label(a);
+        int Lnz = a64_new_label(a);
+        int Ldec = a64_new_label(a);
+        int Lbits = a64_new_label(a);
+        int Ly = a64_new_label(a);
+        int Ldone = a64_new_label(a);
+        a64_lsr_imm(a, A64_X2, A64_X0, exp_sh, isd);
+        a64_and_imm(a, A64_X2, A64_X2, exp_max, isd);
+        a64_cmp_imm12(a, A64_X2, exp_max, 0, isd);
+        a64_bcond(a, A64_NE, Lchk_y);
+        a64_lsl_imm(a, A64_X3, A64_X0, frac_sh, isd);
+        a64_cbnz(a, A64_X3, Lnan, isd);
+        a64_bind(a, Lchk_y);
+        a64_lsr_imm(a, A64_X2, A64_X1, exp_sh, isd);
+        a64_and_imm(a, A64_X2, A64_X2, exp_max, isd);
+        a64_cmp_imm12(a, A64_X2, exp_max, 0, isd);
+        a64_bcond(a, A64_NE, Lstep);
+        a64_lsl_imm(a, A64_X3, A64_X1, frac_sh, isd);
+        a64_cbz(a, A64_X3, Lstep, isd);
+        a64_bind(a, Lnan);
+        a64_fadd(a, A64_V0, A64_V0, A64_V1, isd);
+        a64_b(a, Ldone);
+        a64_bind(a, Lstep);
+        a64_fcmp(a, A64_V0, A64_V1, isd);
+        a64_bcond(a, A64_EQ, Ly);
+        a64_lsl_imm(a, A64_X2, A64_X0, 1, isd);
+        a64_lsr_imm(a, A64_X2, A64_X2, 1, isd);
+        a64_lsl_imm(a, A64_X3, A64_X1, 1, isd);
+        a64_lsr_imm(a, A64_X3, A64_X3, 1, isd);
+        a64_cbnz(a, A64_X2, Lnz, isd);
+        a64_lsr_imm(a, A64_X0, A64_X1, sign, isd);
+        a64_lsl_imm(a, A64_X0, A64_X0, sign, isd);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, isd, 0);
+        a64_b(a, Lbits);
+        a64_bind(a, Lnz);
+        a64_eor_reg(a, SCR0, A64_X0, A64_X1, isd);
+        a64_lsr_imm(a, SCR0, SCR0, sign, isd);
+        a64_cbnz(a, SCR0, Ldec, isd);
+        a64_cmp_reg(a, A64_X2, A64_X3, isd);
+        a64_bcond(a, A64_HI, Ldec);
+        a64_add_imm12(a, A64_X0, A64_X0, 1, 0, isd, 0);
+        a64_b(a, Lbits);
+        a64_bind(a, Ldec);
+        a64_sub_imm12(a, A64_X0, A64_X0, 1, 0, isd, 0);
+        a64_bind(a, Lbits);
+        a64_fmov_gp(a, A64_V0, A64_X0, 1, isd);
+        a64_b(a, Ldone);
+        a64_bind(a, Ly);
+        a64_fmov_reg(a, A64_V0, A64_V1, isd);
         a64_bind(a, Ldone);
         int dst = fp_result(c, s->dst, A64_V0);
         if (dst != A64_V0) a64_fmov_reg(a, dst, A64_V0, isd);
