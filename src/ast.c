@@ -781,6 +781,12 @@ static int abi_is_arm64(void) {
     return t && t->arch == TARGET_ARCH_ARM64;
 }
 
+int type_long_double_width(void) {
+    const TargetDesc *t = target_current();
+    if (t && t->arch == TARGET_ARCH_ARM64) return 8;
+    return 16;
+}
+
 int abi_gp_nregs(void) {
     const TargetDesc *t = target_current();
     if (t && t->gp_arg_regs > 0) return t->gp_arg_regs;

@@ -129,6 +129,9 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 /* Integer argument registers for the current target (6 SysV, 8 AAPCS64). */
 int abi_gp_nregs(void);
+/* 16 on SysV x86 (80-bit x87 in a 16-byte slot).  8 on Darwin arm64,
+ * where long double is IEEE double. */
+int type_long_double_width(void);
 /* 1 when a hidden struct-return pointer consumes a GP argument register. */
 int abi_sret_uses_gp(void);
 /* 1 when a MEMORY aggregate is passed as a pointer to a copy (Darwin

@@ -1014,6 +1014,15 @@ static void test_vec16(void) {
         "  if (b[7] != 8) return 2;\n"
         "  if (b[15] != 16) return 3;\n"
         "  return 0; }", 0);
+    expect("ldbl",
+        "package main;\n"
+        "long double add(long double x, long double y) { return x + y; }\n"
+        "int main(void) {\n"
+        "  if (sizeof(long double) != 8) return 1;\n"
+        "  long double a = 1.5L;\n"
+        "  if ((int)(a + 2.5L) != 4) return 2;\n"
+        "  if ((int)add(1.25L, 2.75L) != 4) return 3;\n"
+        "  return 0; }", 0);
 }
 
 int main(void) {

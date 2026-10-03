@@ -1107,16 +1107,17 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
         Type t = type_make_float(8);
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
-    /* long double — TY_FLOAT with width 16 (x87 80-bit extended).  Detected by
-     * a `long` keyword immediately followed by `double` (lookahead without
-     * consuming on mismatch, since `long` alone begins an integer type). */
+    /* long double.  x87 targets use width 16; Darwin arm64 uses width 8
+     * (the same IEEE double).  Detected by a `long` keyword immediately
+     * followed by `double` (lookahead without consuming on mismatch, since
+     * `long` alone begins an integer type). */
     if (peek(p)->kind == TK_KW_LONG
         && p->pos + 1 < p->tokens->len
         && p->tokens->data[p->pos + 1].kind == TK_KW_DOUBLE) {
         advance(p); /* consume `long` */
         advance(p); /* consume `double` */
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
-        Type t = type_make_float(16);
+        Type t = type_make_float(type_long_double_width());
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     /* GNU decimal floating types: _Decimal32/64/128. */
@@ -2683,7 +2684,7 @@ static void float_literal_width(const char *text, int *out_width, int *out_decim
         if (last == 'f' || last == 'F')
             *out_width = 4;
         else if (last == 'l' || last == 'L')
-            *out_width = 16;
+            *out_width = type_long_double_width();
     }
 }
 
@@ -2964,7 +2965,7 @@ static Expr *make_imag_literal(Parser *p, const char *text, SourceLoc loc) {
         if (*s == 'f' || *s == 'F') is_float = 1;
         if (*s == 'l' || *s == 'L') is_ld = 1;
     }
-    Type base = is_float ? type_make_float(4) : (is_ld ? type_make_float(16) : type_make_float(8));
+    Type base = is_float ? type_make_float(4) : (is_ld ? type_make_float(type_long_double_width()) : type_make_float(8));
     Type cty = get_or_create_complex_type(p, base);
 
     /* Clean imag string by stripping i/I/j/J */

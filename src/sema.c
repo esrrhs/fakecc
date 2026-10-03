@@ -1275,19 +1275,19 @@ static Type check_expr_inner(Expr *e) {
             else if (strcmp(bname, "__builtin_fabsf") == 0)
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_fabsl") == 0)
-                ret = type_make_float(16);
+                ret = type_make_float(type_long_double_width());
             else if (strcmp(bname, "__builtin_copysign") == 0 || strcmp(bname, "copysign") == 0)
                 ret = type_make_float(8);
             else if (strcmp(bname, "__builtin_copysignf") == 0 || strcmp(bname, "copysignf") == 0)
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_copysignl") == 0 || strcmp(bname, "copysignl") == 0)
-                ret = type_make_float(16);
+                ret = type_make_float(type_long_double_width());
             else if (strcmp(bname, "__builtin_inf") == 0 || strcmp(bname, "__builtin_huge_val") == 0 || strcmp(bname, "__builtin_nan") == 0)
                 ret = type_make_float(8);
             else if (strcmp(bname, "__builtin_inff") == 0 || strcmp(bname, "__builtin_huge_valf") == 0 || strcmp(bname, "__builtin_nanf") == 0)
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_infl") == 0 || strcmp(bname, "__builtin_huge_vall") == 0 || strcmp(bname, "__builtin_nanl") == 0)
-                ret = type_make_float(16);
+                ret = type_make_float(type_long_double_width());
             else if (strcmp(bname, "__builtin_bswap64") == 0)
                 ret = type_make_int(8, 1);
             else if (strcmp(bname, "__builtin_bswap32") == 0)
@@ -1332,8 +1332,8 @@ static Type check_expr_inner(Expr *e) {
                 params[0] = &p0; params[1] = &p1;
                 num_params = 2;
             } else if (strcmp(bname, "__builtin_copysignl") == 0 || strcmp(bname, "copysignl") == 0) {
-                p0 = type_make_float(16);
-                p1 = type_make_float(16);
+                p0 = type_make_float(type_long_double_width());
+                p1 = type_make_float(type_long_double_width());
                 params[0] = &p0; params[1] = &p1;
                 num_params = 2;
             } else if (strcmp(bname, "__builtin_fabsf") == 0) {
@@ -1345,7 +1345,7 @@ static Type check_expr_inner(Expr *e) {
                 params[0] = &p0;
                 num_params = 1;
             } else if (strcmp(bname, "__builtin_fabsl") == 0) {
-                p0 = type_make_float(16);
+                p0 = type_make_float(type_long_double_width());
                 params[0] = &p0;
                 num_params = 1;
             }
@@ -1550,7 +1550,7 @@ static Type check_expr_inner(Expr *e) {
                 }
                 type_free(&at);
                 if (is_crealf) set_type(e, type_make_float(4));
-                else if (is_creall) set_type(e, type_make_float(16));
+                else if (is_creall) set_type(e, type_make_float(type_long_double_width()));
                 else set_type(e, type_make_float(8));
                 return type_clone(e->type);
             }
