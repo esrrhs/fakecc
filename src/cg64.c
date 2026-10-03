@@ -53,6 +53,9 @@ typedef struct {
         int         addend;
     }                *pfix;
     size_t            npfix, cappfix;
+    /* Local copy of runtime/int128.c's restoring division.  The arm64
+     * image does not link the Linux runtime, and external BL is T14. */
+    int               udiv_label;
 } C64;
 
 enum { G_RO = 1, G_DATA = 2, G_BSS = 3 };
@@ -216,12 +219,22 @@ static void emit_mov_imm_w(A64Asm *a, int rd, int64_t imm, int is64) {
     if (w >> 16) a64_movk(a, rd, w >> 16, 1, 0);
 }
 
+/* Defining instruction, or NULL when v was never written (a -1 slot
+ * in the def map).  Indexing that slot used to walk off the front of
+ * the instruction array. */
+static const IRInst *def_inst(C64 *c, IRValue v) {
+    if (!c->def || v < 0 || v >= c->fn->next_value_id) return NULL;
+    int di = c->def[v];
+    if (di < 0 || (size_t)di >= c->fn->insts.len) return NULL;
+    return &c->fn->insts.data[di];
+}
+
 /* Load operand v into a register; `other` is the register already
  * holding the other operand (scratch choice must not collide). */
 static int load_op(C64 *c, IRValue v, int other) {
     int scratch = (other == SCR0) ? SCR1 : SCR0;
-    const IRInst *d = &c->fn->insts.data[c->def[v]];
-    if (d->op == IR_CONST) {
+    const IRInst *d = def_inst(c, v);
+    if (d && d->op == IR_CONST) {
         int hr = home_reg(c, v);
         if (hr >= 0) return hr;  /* materialized at its CONST definition */
         emit_mov_imm_w(c->as, scratch, d->imm, vw(c, v) == 8);
@@ -746,8 +759,8 @@ static void emit_call(C64 *c, const IRInst *s) {
         done[i] = 0;
         dreg[i] = A64_X0 + i;
         IRValue av = s->call_args[gp_at[i]];
-        const IRInst *d = &c->fn->insts.data[c->def[av]];
-        int r = d->op == IR_CONST ? -1 : home_reg(c, av);
+        const IRInst *d = def_inst(c, av);
+        int r = (d && d->op == IR_CONST) ? -1 : home_reg(c, av);
         if (r >= 0) { kind[i] = 0; src[i] = r; }
         else { kind[i] = 1; src[i] = -1; }
     }
@@ -779,8 +792,8 @@ static void emit_call(C64 *c, const IRInst *s) {
             if (src[i] != dreg[i])
                 a64_mov_reg(a, dreg[i], src[i], is64);
         } else {
-            const IRInst *d = &c->fn->insts.data[c->def[av]];
-            if (d->op == IR_CONST) {
+            const IRInst *d = def_inst(c, av);
+            if (d && d->op == IR_CONST) {
                 emit_mov_imm_w(a, dreg[i], d->imm, is64);
             } else {
                 int so = spill_off(c, av);
@@ -796,6 +809,10 @@ static void emit_call(C64 *c, const IRInst *s) {
 
     if (tgt >= 0) {
         a64_blr(a, tgt);
+    } else if (s->call_name && strcmp(s->call_name, "__fakecc_udivmodti4") == 0) {
+        if (c->udiv_label < 0)
+            c->udiv_label = a64_new_label(a);
+        a64_bl(a, c->udiv_label);
     } else if (!(s->call_name && emit_mem_builtin(c, s->call_name))) {
         int fi = 0;
         if (find_function(c->ir, s->call_name, &fi) != 0)
@@ -849,8 +866,8 @@ static void emit_syscall(C64 *c, const IRInst *s) {
     int src[6], kind[6], done[6];
     for (int i = 0; i < nreg; i++) {
         IRValue av = s->call_args[1 + i];
-        const IRInst *d = &c->fn->insts.data[c->def[av]];
-        int r = d->op == IR_CONST ? -1 : home_reg(c, av);
+        const IRInst *d = def_inst(c, av);
+        int r = (d && d->op == IR_CONST) ? -1 : home_reg(c, av);
         if (r >= 0) { kind[i] = 0; src[i] = r; }
         else { kind[i] = 1; src[i] = -1; }
         done[i] = 0;
@@ -882,8 +899,8 @@ static void emit_syscall(C64 *c, const IRInst *s) {
             if (src[i] != A64_X0 + i)
                 a64_mov_reg(c->as, A64_X0 + i, src[i], is64);
         } else {
-            const IRInst *d = &c->fn->insts.data[c->def[av]];
-            if (d->op == IR_CONST) {
+            const IRInst *d = def_inst(c, av);
+            if (d && d->op == IR_CONST) {
                 emit_mov_imm_w(c->as, A64_X0 + i, d->imm, is64);
             } else {
                 int so = spill_off(c, av);
@@ -896,8 +913,8 @@ static void emit_syscall(C64 *c, const IRInst *s) {
 
     /* Number last so the argument moves can use x16 as scratch freely. */
     IRValue nv = s->call_args[0];
-    const IRInst *nd = &c->fn->insts.data[c->def[nv]];
-    if (nd->op == IR_CONST) {
+    const IRInst *nd = def_inst(c, nv);
+    if (nd && nd->op == IR_CONST) {
         emit_mov_imm_w(a, A64_X16, nd->imm, 1);
     } else {
         int sr = load_op(c, nv, SCR0);
@@ -1995,6 +2012,94 @@ static void emit_function(C64 *c, int fi) {
     c->ra = NULL;
 }
 
+/* Unsigned 128/128 restoring division.  Same contract as
+ * runtime/int128.c __fakecc_udivmodti4: x0..x3 are the two 128-bit
+ * values (lo, hi), x4..x7 are pointers to q_lo, q_hi, r_lo, r_hi.
+ * A zero divisor yields quotient 0 and remainder = numerator. */
+static void emit_udivmodti4(A64Asm *a, int label) {
+    a64_bind(a, label);
+    int Lzero = a64_new_label(a);
+    int Ltop  = a64_new_label(a);
+    int Lge   = a64_new_label(a);
+    int Lbit  = a64_new_label(a);
+    int Lsub  = a64_new_label(a);
+    int Lqhi  = a64_new_label(a);
+    int Lnext = a64_new_label(a);
+    int Lstore = a64_new_label(a);
+
+    a64_or_reg(a, A64_X14, A64_X2, A64_X3, 1);
+    a64_cbz(a, A64_X14, Lzero, 1);
+
+    a64_movz(a, A64_X9,  0, 0, 1);          /* q_lo */
+    a64_movz(a, A64_X10, 0, 0, 1);          /* q_hi */
+    a64_movz(a, A64_X11, 0, 0, 1);          /* r_lo */
+    a64_movz(a, A64_X12, 0, 0, 1);          /* r_hi */
+    a64_movz(a, A64_X13, 127, 0, 1);        /* bit index */
+
+    a64_bind(a, Ltop);
+    a64_lsr_imm(a, SCR0, A64_X12, 63, 1);   /* carry out of r_hi */
+    a64_lsr_imm(a, A64_X14, A64_X11, 63, 1);
+    a64_lsl_imm(a, A64_X12, A64_X12, 1, 1);
+    a64_or_reg(a, A64_X12, A64_X12, A64_X14, 1);
+    a64_lsl_imm(a, A64_X11, A64_X11, 1, 1);
+
+    a64_cmp_imm12(a, A64_X13, 64, 0, 1);
+    a64_bcond(a, A64_GE, Lge);
+    a64_lsrv(a, A64_X14, A64_X0, A64_X13, 1);
+    a64_b(a, Lbit);
+    a64_bind(a, Lge);
+    a64_sub_imm12(a, A64_X15, A64_X13, 64, 0, 1, 0);
+    a64_lsrv(a, A64_X14, A64_X1, A64_X15, 1);
+    a64_bind(a, Lbit);
+    a64_movz(a, A64_X15, 1, 0, 1);
+    a64_and_reg(a, A64_X14, A64_X14, A64_X15, 1);
+    a64_or_reg(a, A64_X11, A64_X11, A64_X14, 1);
+
+    a64_cbnz(a, SCR0, Lsub, 1);
+    a64_cmp_reg(a, A64_X12, A64_X3, 1);
+    a64_bcond(a, A64_HI, Lsub);
+    a64_bcond(a, A64_CC, Lnext);
+    a64_cmp_reg(a, A64_X11, A64_X2, 1);
+    a64_bcond(a, A64_CC, Lnext);
+
+    a64_bind(a, Lsub);
+    a64_cmp_reg(a, A64_X11, A64_X2, 1);
+    a64_cset(a, A64_X14, A64_CC, 1);        /* borrow */
+    a64_sub_reg(a, A64_X11, A64_X11, A64_X2, A64_LSL, 0, 1, 0);
+    a64_sub_reg(a, A64_X12, A64_X12, A64_X3, A64_LSL, 0, 1, 0);
+    a64_sub_reg(a, A64_X12, A64_X12, A64_X14, A64_LSL, 0, 1, 0);
+    a64_cmp_imm12(a, A64_X13, 64, 0, 1);
+    a64_bcond(a, A64_GE, Lqhi);
+    a64_movz(a, A64_X15, 1, 0, 1);
+    a64_lslv(a, A64_X15, A64_X15, A64_X13, 1);
+    a64_or_reg(a, A64_X9, A64_X9, A64_X15, 1);
+    a64_b(a, Lnext);
+    a64_bind(a, Lqhi);
+    a64_sub_imm12(a, A64_X15, A64_X13, 64, 0, 1, 0);
+    a64_movz(a, A64_X14, 1, 0, 1);
+    a64_lslv(a, A64_X14, A64_X14, A64_X15, 1);
+    a64_or_reg(a, A64_X10, A64_X10, A64_X14, 1);
+
+    a64_bind(a, Lnext);
+    a64_sub_imm12(a, A64_X13, A64_X13, 1, 0, 1, 0);
+    a64_cmp_imm12(a, A64_X13, 0, 0, 1);
+    a64_bcond(a, A64_GE, Ltop);
+    a64_b(a, Lstore);
+
+    a64_bind(a, Lzero);
+    a64_movz(a, A64_X9,  0, 0, 1);
+    a64_movz(a, A64_X10, 0, 0, 1);
+    a64_mov_reg(a, A64_X11, A64_X0, 1);
+    a64_mov_reg(a, A64_X12, A64_X1, 1);
+
+    a64_bind(a, Lstore);
+    a64_str64(a, A64_X9,  A64_X4, 0);
+    a64_str64(a, A64_X10, A64_X5, 0);
+    a64_str64(a, A64_X11, A64_X6, 0);
+    a64_str64(a, A64_X12, A64_X7, 0);
+    a64_ret(a, A64_LR);
+}
+
 /* ── Module entry point ──────────────────────────────────────────── */
 
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
@@ -2011,6 +2116,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     memset(&c, 0, sizeof c);
     c.as = &a;
     c.ir = ir;
+    c.udiv_label = -1;
 
     c.fn_label = xmalloc(ir->functions.len * sizeof(int));
     for (size_t i = 0; i < ir->functions.len; i++)
@@ -2145,6 +2251,8 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
         c.fn = &ir->functions.data[i];
         emit_function(&c, (int)i);
     }
+    if (c.udiv_label >= 0)
+        emit_udivmodti4(&a, c.udiv_label);
 
     /* The code buffer lands after the Mach-O header pad; ADRP page fixups
      * must compute against the runtime file/VA offset. */

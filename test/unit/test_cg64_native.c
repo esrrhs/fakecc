@@ -1037,6 +1037,22 @@ static void test_vec16(void) {
         "  return 0; }", 0);
 }
 
+static void test_int128(void) {
+    expect("i128div",
+        "package main;\n"
+        "int main(void) {\n"
+        "  unsigned __int128 u = (unsigned __int128)100;\n"
+        "  if ((int)(u / 7) != 14) return 1;\n"
+        "  if ((int)(u % 7) != 2) return 2;\n"
+        "  __int128 s = -20;\n"
+        "  if ((int)(s / 3) != -6) return 3;\n"
+        "  if ((int)(s % 3) != -2) return 4;\n"
+        "  unsigned __int128 h = (unsigned __int128)1 << 64;\n"
+        "  h = h / 2;\n"
+        "  if ((int)(h >> 63) != 1) return 5;\n"
+        "  return 0; }", 0);
+}
+
 int main(void) {
     target_set_current(target_arm64_macos());
     test_divmod_edgecases();
@@ -1055,6 +1071,7 @@ int main(void) {
     test_varargs();
     test_float();
     test_vec16();
+    test_int128();
     return t_finalize();
 }
 
