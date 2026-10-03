@@ -2250,6 +2250,16 @@ static void test_cycle(void) {
         "  return 0; }", 0);
 }
 
+static void test_barrier(void) {
+    expect("barrier",
+        "package main;\n"
+        "int main(void) {\n"
+        "  __builtin_arm_dmb(11);\n"
+        "  __builtin_arm_dsb(15);\n"
+        "  __builtin_arm_isb(15);\n"
+        "  return 7; }", 7);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2315,6 +2325,7 @@ int main(void) {
     test_hint();
     test_cache();
     test_cycle();
+    test_barrier();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

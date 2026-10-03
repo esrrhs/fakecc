@@ -2149,6 +2149,26 @@ static void emit_call(C64 *c, const IRInst *s) {
             return;
         }
     }
+    if (s->call_name && (strcmp(s->call_name, "arm_dmb") == 0 ||
+                         strcmp(s->call_name, "arm_dsb") == 0 ||
+                         strcmp(s->call_name, "arm_isb") == 0)) {
+        int defined = 0;
+        if (find_function(c->ir, s->call_name, &defined) != 0) {
+            const IRInst *d = s->call_nargs >= 1 ? def_inst(c, s->call_args[0]) : NULL;
+            if (!d || d->op != IR_CONST || d->imm < 0 || d->imm > 15) {
+                die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
+                       s->loc.line, s->loc.col,
+                       "arm64 backend: %s operand must be a constant 0..15",
+                       s->call_name);
+                return;
+            }
+            uint32_t base = strcmp(s->call_name, "arm_dmb") == 0 ? 0xD50330BFu
+                          : strcmp(s->call_name, "arm_dsb") == 0 ? 0xD503309Fu
+                          : 0xD50330DFu;
+            a64_word(c->as, base | ((uint32_t)d->imm << 8));
+            return;
+        }
+    }
     if (is_bit_builtin(s->call_name)) {
         emit_bit_builtin(c, s);
         return;
