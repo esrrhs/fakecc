@@ -185,6 +185,10 @@ void a64_blr(A64Asm *a, int rn);          /* indirect call */
 
 /* ── Scalar floating point (S = 32-bit, D = 64-bit) ───────────────── */
 void a64_fmov_reg(A64Asm *a, int rd, int rm, int is_double);
+/* FMOV between a GP register and a scalar SIMD register.
+ * to_vec=1: FMOV Dd/Sd, Xn/Wn.  to_vec=0: FMOV Xd/Wd, Dn/Sn.
+ * is64 selects the 64-bit form (D/X); otherwise the low 32 bits (S/W). */
+void a64_fmov_gp(A64Asm *a, int rd, int rn, int to_vec, int is64);
 void a64_fadd(A64Asm *a, int rd, int rn, int rm, int is_double);
 void a64_fsub(A64Asm *a, int rd, int rn, int rm, int is_double);
 void a64_fmul(A64Asm *a, int rd, int rn, int rm, int is_double);

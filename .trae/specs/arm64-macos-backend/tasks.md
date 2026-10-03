@@ -173,7 +173,7 @@
   - `rule` TR-9.2: 至少一个热点函数 -O1 指令数显著少于 -O0（证据：反汇编计数，防"优化空转"）。
 
 ## Task 10: 聚合类型 ABI（结构体参数/返回、HFA/间接返回）
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: T9
 - **Description**:
@@ -181,6 +181,10 @@
 - **Acceptance Criteria Addressed**: FR-2, AC-3
 - **Test Requirements**:
   - `rule` TR-10.1: 结构体 ABI 专项用例（尺寸 1/2/3/7/8/9/16/17/32B、HFA 2×double/4×float、嵌套、返回大结构体）与 clang 交叉互调结果一致（证据：专项测试，含 fakecc↔clang 双向调用结构体）。
+- **Completion Evidence**:
+  - 实现：`TargetDesc` 增加 `gp_arg_regs`（x86 6 / arm64 8）与 `sret_uses_gp`（SysV 占用 rdi，Darwin 的间接返回指针在 x8、不占 x0）。`ast.c` 的 `abi_indirect_agg` / `abi_is_hfa` 只在 arm64 上生效：非 HFA 且大于 16 字节走“指针指向调用方副本”；1–4 个相同 float/double 的聚合是 HFA。`ir.c` 用这些函数改分类，x86 的 SysV 路径（6 个 GP、sret 占 rdi、MEMORY 栈拷贝）不变；`test_ir` 显式 pin `x86_64-linux`。HFA 的 SSA 仍是整数位型，调用边界用 `FMOV` 进出 v 寄存器（`CALL_ARG_HFA`、`A64_MARK_HFA`）；大于 16 字节的返回把 `call_args[0]` 标成 `A64_MARK_SRET`，cg64 放进 x8。16 字节整数返回同时写 x0 和 x1。混合 `{int, double}` 两个八字节都走 GP（与 clang 一致，不是 HFA）。
+  - TR-10.1（pass）：`test_cg64_native` 在 -O0 与 `CG64_OPT=1` 均为 82/82。尺寸 1/2/3/7/8/9/16/17/32、嵌套、`many(int, struct s16, int)`、第 8 个参数仍是寄存器的 `struct s8`、HFA 2×double / 4×float、混合 int/double 的退出码与手算一致。交叉链接（可重定位对象要等 T14，测试把函数体抽出来交给 clang 链接）：clang 调用 fakecc 的 s32 返回 11、HFA 2×double 返回 1；fakecc 调用 clang 的同一对函数分别返回 11 和 1；clang 调用 fakecc 的 `many` 返回 34。另用脚本确认 clang→fakecc 的 4×float 返回 10、17 字节结构返回 5。
+  - 限制：3–4 个 double 的 HFA 超过两个八字节，当前 IR 的 `dst`/`b` 放不下，编译期报错，不在本任务的 2×double / 4×float 范围内。标量浮点运算仍是 T12。
 
 ## Task 11: 变长参数（varargs）
 - **Status**: `pending`

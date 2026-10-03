@@ -127,6 +127,16 @@ int sysv_agg_ret_x87(Type t);
  * (SysV); 1 = pass a pointer to a copy.  Pointer is used only for
  * `__va_list_tag` (matches libc/GCC array decay). */
 int sysv_memory_pass_as_pointer(Type t);
+/* Integer argument registers for the current target (6 SysV, 8 AAPCS64). */
+int abi_gp_nregs(void);
+/* 1 when a hidden struct-return pointer consumes a GP argument register. */
+int abi_sret_uses_gp(void);
+/* 1 when a MEMORY aggregate is passed as a pointer to a copy (Darwin
+ * aggregates larger than 16 bytes that are not HFAs). */
+int abi_indirect_agg(Type t);
+/* 1 when `t` is an AAPCS64 homogeneous float/double aggregate of 1–4
+ * elements.  Always 0 on SysV x86. */
+int abi_is_hfa(Type t);
 
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);

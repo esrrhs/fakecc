@@ -606,6 +606,16 @@ void a64_fmov_reg(A64Asm *a, int rd, int rm, int is_double) {
     a64_word(a, base | RN(rm) | RD(rd));
 }
 
+void a64_fmov_gp(A64Asm *a, int rd, int rn, int to_vec, int is64) {
+    /* FMOV (general), scalar.  Checked against clang -arch arm64:
+     *   fmov x0, d0 = 9e660000    fmov d1, x1 = 9e670021
+     *   fmov w2, s2 = 1e260042    fmov s3, w3 = 1e270063 */
+    uint32_t base = is64
+        ? (to_vec ? 0x9E670000u : 0x9E660000u)
+        : (to_vec ? 0x1E270000u : 0x1E260000u);
+    a64_word(a, base | RN(rn) | RD(rd));
+}
+
 static void fp_op(A64Asm *a, uint32_t base_d, uint32_t base_s,
                   int rd, int rn, int rm, int is_double) {
     uint32_t w = (is_double ? base_d : base_s) | RM(rm) | RN(rn) | RD(rd);

@@ -316,6 +316,71 @@ static int emit_mem_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* Bytes of outgoing stack traffic for one call: 8 per stack slot, plus
+ * 16 when call_args[0] must be stashed before it is written to x8. */
+static int outgoing_stack_bytes(const IRInst *s) {
+    if (!s->call_nargs) return s->align16 == A64_MARK_SRET ? 16 : 0;
+    if (s->call_name && strcmp(s->call_name, "__syscall") == 0) return 0;
+    int start = s->align16 == A64_MARK_SRET ? 1 : 0;
+    int gp = 0, fp = 0, st = 0;
+    for (int i = start; i < s->call_nargs; i++) {
+        unsigned f = s->call_arg_on_stack ? s->call_arg_on_stack[i] : 0;
+        if ((f & CALL_ARG_HFA) && !(f & CALL_ARG_STACK) && fp < 8) {
+            fp++;
+            continue;
+        }
+        if ((f & CALL_ARG_STACK) || (f & CALL_ARG_BLOB) || gp >= 8)
+            st++;
+        else
+            gp++;
+    }
+    int bytes = st * 8;
+    if (s->align16 == A64_MARK_SRET) bytes += 16;
+    return bytes;
+}
+
+/* A scratch that is not one of the named registers (x0/x1/x16/x17 are
+ * never allocated, so one of them is always free of homes). */
+static int safe_tmp(int a, int b, int c, int d) {
+    int cand[4] = { SCR0, SCR1, A64_X0, A64_X1 };
+    for (int i = 0; i < 4; i++) {
+        int t = cand[i];
+        if (t != a && t != b && t != c && t != d) return t;
+    }
+    return SCR0;
+}
+
+static void place_from(C64 *c, IRValue v, int src) {
+    if (v < 0) return;
+    int hr = home_reg(c, v);
+    if (hr < 0)
+        frame_store(c, src, spill_off(c, v), 8);
+    else if (hr != src)
+        a64_mov_reg(c->as, hr, src, 1);
+}
+
+/* Deliver two hardware registers into SSA homes without either write
+ * destroying the other source. */
+static void place_pair(C64 *c, IRValue lo, IRValue hi, int s0, int s1) {
+    if (hi < 0) { place_from(c, lo, s0); return; }
+    int h0 = home_reg(c, lo);
+    int h1 = home_reg(c, hi);
+    if (h0 == s1) {
+        int tmp = safe_tmp(s0, s1, h0, h1);
+        a64_mov_reg(c->as, tmp, s1, 1);
+        place_from(c, lo, s0);
+        place_from(c, hi, tmp);
+    } else if (h1 == s0) {
+        int tmp = safe_tmp(s0, s1, h0, h1);
+        a64_mov_reg(c->as, tmp, s0, 1);
+        place_from(c, hi, s1);
+        place_from(c, lo, tmp);
+    } else {
+        place_from(c, hi, s1);
+        place_from(c, lo, s0);
+    }
+}
+
 static void emit_call(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
     int n = s->call_nargs;
@@ -329,83 +394,117 @@ static void emit_call(C64 *c, const IRInst *s) {
         return;
     }
 
-    int nreg = n < 8 ? n : 8;
-    int nstack = n > 8 ? n - 8 : 0;
+    int sret = s->align16 == A64_MARK_SRET;
+    int start = sret ? 1 : 0;
+    int gp_at[8], gp_n = 0, gp_used = 0, fp_used = 0, st_used = 0;
+    int hfa_at[8], hfa_v[8], hfa_n = 0;
+    int stk_at[IR_CALL_MAX_ARGS];
+    int stk_n = 0;
+    for (int i = start; i < n; i++) {
+        unsigned f = s->call_arg_on_stack ? s->call_arg_on_stack[i] : 0;
+        if (f & CALL_ARG_BLOB)
+            c64_die(c, s, "aggregate stack blob");
+        if ((f & CALL_ARG_HFA) && !(f & CALL_ARG_STACK) && fp_used < 8) {
+            hfa_at[hfa_n] = i;
+            hfa_v[hfa_n] = fp_used++;
+            hfa_n++;
+        } else if ((f & CALL_ARG_STACK) || gp_used >= 8) {
+            stk_at[stk_n++] = i;
+            st_used++;
+        } else {
+            gp_at[gp_n++] = i;
+            gp_used++;
+        }
+    }
+    (void)st_used;
 
-    /* Outgoing stack args live in the reserved call zone at the very
-     * bottom of the frame: [sp+0 .. sp+call_area).  sp stays 16-aligned
-     * throughout the function, so no per-call adjustment is needed. */
-    for (int i = 0; i < nstack; i++) {
-        IRValue av = s->call_args[8 + i];
+    /* Stack slots first: they read homes that the GP shuffle will
+     * overwrite.  The area sits at [sp+0 ..). */
+    for (int i = 0; i < stk_n; i++) {
+        IRValue av = s->call_args[stk_at[i]];
         int r = load_op(c, av, -1);
         a64_str64(a, r, A64_SP, 8 * i);
+    }
+    /* HFA eightbytes: integer bits → dN/sN, before GP moves. */
+    for (int i = 0; i < hfa_n; i++) {
+        IRValue av = s->call_args[hfa_at[i]];
+        int r = load_op(c, av, -1);
+        a64_fmov_gp(a, hfa_v[i], r, 1, vw(c, av) == 8);
+    }
+    /* Indirect result pointer, stashed above the outgoing args. */
+    if (sret) {
+        int r = load_op(c, s->call_args[0], -1);
+        a64_str64(a, r, A64_SP, c->call_area - 16);
     }
 
     /* Lift an indirect target into x17 (IP1), which no allocation owns. */
     int tgt = -1;
     if (s->call_callee >= 0) {
         int r = load_ptrv(c, s->call_callee, -1);
-        a64_mov_reg(c->as, SCR1, r, 1);
+        a64_mov_reg(a, SCR1, r, 1);
         tgt = SCR1;
     }
 
     /* Register-argument moves with cycle breaking.
      *   kind 0: source lives in register src[i]
-     *   kind 1: source is a spill slot / CONST (materialized into xi) */
-    int src[8], kind[8], done[8];
-    for (int i = 0; i < nreg; i++) {
+     *   kind 1: source is a spill slot / CONST (materialized into xi)
+     * Slot i's destination is x{dreg}, which is not necessarily x{i}
+     * once HFA and stack-forced args have opened holes. */
+    int src[8], kind[8], done[8], dreg[8];
+    for (int i = 0; i < gp_n; i++) {
         done[i] = 0;
-        IRValue av = s->call_args[i];
+        dreg[i] = A64_X0 + i;
+        IRValue av = s->call_args[gp_at[i]];
         const IRInst *d = &c->fn->insts.data[c->def[av]];
         int r = d->op == IR_CONST ? -1 : home_reg(c, av);
         if (r >= 0) { kind[i] = 0; src[i] = r; }
         else { kind[i] = 1; src[i] = -1; }
     }
 
-    int remaining = nreg;
+    int remaining = gp_n;
     while (remaining > 0) {
         int picked = -1;
-        for (int i = 0; i < nreg; i++) {
+        for (int i = 0; i < gp_n; i++) {
             if (done[i]) continue;
-            /* Picking i writes x_i; blocked while x_i is still needed as a
-             * register source (kind 0) of another pending move. */
             int blocked = 0;
-            for (int j = 0; j < nreg; j++)
+            for (int j = 0; j < gp_n; j++)
                 if (!done[j] && j != i && kind[j] == 0 &&
-                    src[j] == A64_X0 + i) { blocked = 1; break; }
+                    src[j] == dreg[i]) { blocked = 1; break; }
             if (!blocked) { picked = i; break; }
         }
         if (picked < 0) {
-            /* Pure register cycle: lift one source through x16. */
-            for (int i = 0; i < nreg; i++)
+            for (int i = 0; i < gp_n; i++)
                 if (!done[i] && kind[i] == 0) {
-                    a64_mov_reg(c->as, SCR0, src[i], 1);
+                    a64_mov_reg(a, SCR0, src[i], 1);
                     src[i] = SCR0;
                     break;
                 }
             continue;
         }
         int i = picked;
-        IRValue av = s->call_args[i];
+        IRValue av = s->call_args[gp_at[i]];
         int is64 = vw(c, av) == 8;
         if (kind[i] == 0) {
-            if (src[i] != A64_X0 + i)
-                a64_mov_reg(c->as, A64_X0 + i, src[i], is64);
+            if (src[i] != dreg[i])
+                a64_mov_reg(a, dreg[i], src[i], is64);
         } else {
             const IRInst *d = &c->fn->insts.data[c->def[av]];
             if (d->op == IR_CONST) {
-                emit_mov_imm_w(c->as, A64_X0 + i, d->imm, is64);
+                emit_mov_imm_w(a, dreg[i], d->imm, is64);
             } else {
                 int so = spill_off(c, av);
-                frame_load(c, A64_X0 + i, so, is64 ? 8 : 4, is64 ? 1 : 0);
+                frame_load(c, dreg[i], so, is64 ? 8 : 4, is64 ? 1 : 0);
             }
         }
         done[i] = 1;
         remaining--;
     }
 
+    if (sret)
+        a64_ldr64(a, A64_X8, A64_SP, c->call_area - 16);
+
     if (tgt >= 0) {
-        a64_blr(c->as, tgt);
+        a64_blr(a, tgt);
     } else if (!(s->call_name && emit_mem_builtin(c, s->call_name))) {
         int fi = 0;
         if (find_function(c->ir, s->call_name, &fi) != 0)
@@ -413,13 +512,21 @@ static void emit_call(C64 *c, const IRInst *s) {
                    s->loc.line, s->loc.col,
                    "arm64 backend: call to undefined function '%s'",
                    s->call_name);
-        a64_bl(c->as, c->fn_label[fi]);
+        a64_bl(a, c->fn_label[fi]);
     }
 
-    if (s->dst >= 0) {
+    if (s->align16 == A64_MARK_HFA) {
+        int r0 = SCR0, r1 = SCR1;
+        a64_fmov_gp(a, r0, A64_V0, 0, 1);
+        if (s->b >= 0)
+            a64_fmov_gp(a, r1, A64_V1, 0, 1);
+        place_pair(c, s->dst, s->b, r0, r1);
+    } else if (s->dst >= 0 && s->b >= 0) {
+        place_pair(c, s->dst, s->b, A64_X0, A64_X1);
+    } else if (s->dst >= 0) {
         int d = dst_reg(c, s->dst);
         if (d != A64_X0)
-            a64_mov_reg(c->as, d, A64_X0, s->width == 8);
+            a64_mov_reg(a, d, A64_X0, s->width == 8);
         commit(c, s->dst, d);
     }
 }
@@ -677,8 +784,8 @@ static void emit_function(C64 *c, int fi) {
     int call_area = 0;
     for (size_t j = 0; j < fn->insts.len; j++) {
         const IRInst *s = &fn->insts.data[j];
-        if (s->op == IR_CALL && s->call_nargs > 8) {
-            int bytes = (s->call_nargs - 8) * 8;
+        if (s->op == IR_CALL) {
+            int bytes = outgoing_stack_bytes(s);
             if (bytes > call_area) call_area = bytes;
         }
     }
@@ -732,21 +839,30 @@ static void emit_function(C64 *c, int fi) {
     /* Cycle-safe placement: a parameter arriving in x0..x7 may be homed in
      * x2..x7, so a naive move can clobber a not-yet-read incoming reg. */
     typedef struct { int src_reg; int src_mem;   /* -1, or fp offset */
+                    int src_vec;                /* >=0: incoming V register */
                     int dst_reg; int dst_mem;   /* -1, or fp spill offset */
                     int is64; int done; } PMove;
     PMove *mv = xmalloc((size_t)(nparams > 0 ? nparams : 1) * sizeof(PMove));
-    int gp_idx = 0, stack_arg_idx = 0;
+    int gp_idx = 0, fp_idx = 0, stack_arg_idx = 0;
     for (int p = 0; p < nparams; p++) {
         const IRInst *s = &fn->insts.data[p];
-        if (s->is_float || s->force_stack)
-            c64_die(c, s, "float/aggregate parameter");
-        if (gp_idx < 8) {
-            mv[p].src_reg = A64_X0 + gp_idx++;
-            mv[p].src_mem = -1;
-        } else {
+        mv[p].src_vec = -1;
+        mv[p].src_reg = -1;
+        mv[p].src_mem = -1;
+        if (s->force_stack && s->alloca_bytes > 8)
+            c64_die(c, s, "aggregate stack blob");
+        int is_sret = fn->sret_value >= 0 && s->dst == fn->sret_value;
+        if (s->is_float && !s->force_stack) {
+            /* HFA eightbyte: bits arrive in the next V register. */
+            mv[p].src_vec = fp_idx++;
+        } else if (is_sret) {
+            /* Darwin indirect result pointer.  Does not consume x0. */
+            mv[p].src_reg = A64_X8;
+        } else if (s->force_stack || gp_idx >= 8) {
             /* Above the saved frame (Darwin ABI: no pushed return addr). */
-            mv[p].src_reg = -1;
             mv[p].src_mem = save_total + 8 * stack_arg_idx++;
+        } else {
+            mv[p].src_reg = A64_X0 + gp_idx++;
         }
         int hr = home_reg(c, s->dst);
         if (hr >= 0) { mv[p].dst_reg = hr; mv[p].dst_mem = -1; }
@@ -761,7 +877,12 @@ static void emit_function(C64 *c, int fi) {
     for (int p = 0; p < nparams; p++) remaining += !mv[p].done;
 #define PM_EMIT(p) do {                                                      \
         PMove *_m = &mv[(p)];                                                \
-        if (_m->dst_reg >= 0) {                                              \
+        if (_m->src_vec >= 0) {                                              \
+            int _tmp = _m->dst_reg >= 0 ? _m->dst_reg : SCR1;                \
+            a64_fmov_gp(a, _tmp, _m->src_vec, 0, _m->is64);                  \
+            if (_m->dst_reg < 0)                                             \
+                frame_store(c, _tmp, _m->dst_mem, 8);                        \
+        } else if (_m->dst_reg >= 0) {                                       \
             if (_m->src_reg >= 0) {                                          \
                 if (_m->src_reg != _m->dst_reg)                              \
                     a64_mov_reg(a, _m->dst_reg, _m->src_reg, _m->is64);      \
@@ -954,10 +1075,29 @@ static void emit_function(C64 *c, int fi) {
             break;
 
         case IR_RETURN: {
-            if (s->a >= 0) {
+            if (s->align16 == A64_MARK_HFA && s->a >= 0) {
+                int r0 = load_op(c, s->a, -1);
+                int r1 = s->b >= 0 ? load_op(c, s->b, r0) : -1;
+                a64_fmov_gp(a, A64_V0, r0, 1, vw(c, s->a) == 8);
+                if (r1 >= 0)
+                    a64_fmov_gp(a, A64_V1, r1, 1, vw(c, s->b) == 8);
+            } else if (s->a >= 0 && s->b >= 0) {
+                int r0 = load_op(c, s->a, -1);
+                int r1 = load_op(c, s->b, r0);
+                int wide = vw(c, s->a) == 8;
+                if (r0 == A64_X1) {
+                    a64_mov_reg(a, SCR0, r0, wide);
+                    if (r1 != A64_X1) a64_mov_reg(a, A64_X1, r1, vw(c, s->b) == 8);
+                    a64_mov_reg(a, A64_X0, SCR0, wide);
+                } else {
+                    if (r1 != A64_X1) a64_mov_reg(a, A64_X1, r1, vw(c, s->b) == 8);
+                    if (r0 != A64_X0) a64_mov_reg(a, A64_X0, r0, wide);
+                }
+            } else if (s->a >= 0) {
                 int r = load_op(c, s->a, -1);
+                int wide = vw(c, s->a) == 8 || fn->ret_width >= 8;
                 if (r != A64_X0)
-                    a64_mov_reg(a, A64_X0, r, fn->ret_width == 8);
+                    a64_mov_reg(a, A64_X0, r, wide);
             }
             a64_b(a, epilog);
             break;

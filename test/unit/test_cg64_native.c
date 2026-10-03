@@ -423,6 +423,323 @@ static void test_recursion_deep(void) {
         "int main(){ int v = rec(10000); return v==10000 ? 0 : 1; }", 0);
 }
 
+/* Compile to the native image and leave it at the usual path. */
+static int compile_image(const char *source) {
+    TokenArray tokens;
+    token_array_init(&tokens);
+    if (lex(source, "<case>", &tokens) != FAKECC_OK) return -1;
+    TranslationUnit tu; tu_init(&tu);
+    if (parse(&tokens, &tu) != FAKECC_OK) return -1;
+    if (sema_check(&tu, 0) != FAKECC_OK || sema_has_errors()) return -1;
+    IRModule ir; ir_module_init(&ir);
+    if (ir_generate(&tu, &ir, 1) != FAKECC_OK) return -1;
+    opt(&ir, 0, 0);
+    EmitModule em;
+    emit_module_init(&em);
+    codegen(&ir, &em, 0);
+    const char *path = "/tmp/fakecc_cg64_native_test";
+    int rc = macho_write_exec(&em, macho_text_offset(), path);
+    emit_module_free(&em);
+    ir_module_free(&ir);
+    tu_free(&tu);
+    token_array_free(&tokens);
+    return rc;
+}
+
+static int read_macho_text(const char *path, unsigned char **out, size_t *outn) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return -1; }
+    long sz = ftell(fp);
+    if (sz < 32) { fclose(fp); return -1; }
+    rewind(fp);
+    unsigned char *data = malloc((size_t)sz);
+    if (!data || fread(data, 1, (size_t)sz, fp) != (size_t)sz) {
+        free(data); fclose(fp); return -1;
+    }
+    fclose(fp);
+    uint32_t ncmds, off = 32;
+    memcpy(&ncmds, data + 16, 4);
+    for (uint32_t c = 0; c < ncmds; c++) {
+        uint32_t cmd, cmdsize;
+        memcpy(&cmd, data + off, 4);
+        memcpy(&cmdsize, data + off + 4, 4);
+        if (cmd == 0x19) { /* LC_SEGMENT_64 */
+            uint32_t nsects;
+            memcpy(&nsects, data + off + 64, 4);
+            uint32_t so = off + 72;
+            for (uint32_t s = 0; s < nsects; s++) {
+                if (memcmp(data + so, "__text", 6) == 0) {
+                    uint64_t size;
+                    uint32_t fileoff;
+                    memcpy(&size, data + so + 40, 8);
+                    memcpy(&fileoff, data + so + 48, 4);
+                    *outn = (size_t)size;
+                    *out = malloc(*outn);
+                    if (!*out) { free(data); return -1; }
+                    memcpy(*out, data + fileoff, *outn);
+                    free(data);
+                    return 0;
+                }
+                so += 80;
+            }
+        }
+        off += cmdsize;
+    }
+    free(data);
+    return -1;
+}
+
+/* Function `which` in emission order.  0 is the LC_MAIN stub. */
+static int nth_func(const unsigned char *text, size_t n, int which,
+                    const unsigned char **start, size_t *len) {
+    size_t i = 0, seen = 0, begin = 0;
+    while (i + 4 <= n) {
+        uint32_t w;
+        memcpy(&w, text + i, 4);
+        i += 4;
+        if (w == 0xD65F03C0u) { /* ret */
+            if ((int)seen == which) {
+                *start = text + begin;
+                *len = i - begin;
+                return 0;
+            }
+            seen++;
+            begin = i;
+        }
+    }
+    return -1;
+}
+
+static void write_sym(FILE *fp, const char *name, const unsigned char *b, size_t n) {
+    fprintf(fp, ".globl _%s\n.p2align 2\n_%s:\n", name, name);
+    for (size_t i = 0; i < n; i++)
+        fprintf(fp, ".byte %u\n", b[i]);
+}
+
+/* Point every BL in a fakecc caller at an `id` that will be appended
+ * immediately after this function. */
+static void retarget_bl(unsigned char *b, size_t n) {
+    for (size_t i = 0; i + 4 <= n; i += 4) {
+        uint32_t w;
+        memcpy(&w, b + i, 4);
+        if ((w >> 26) == 0x25) {
+            int disp = (int)((n - i) / 4);
+            w = 0x94000000u | ((uint32_t)disp & 0x3ffffffu);
+            memcpy(b + i, &w, 4);
+        }
+    }
+}
+
+static int clang_exit(const char *csrc) {
+    FILE *fp = fopen("/tmp/fakecc_abi_main.c", "w");
+    if (!fp) return -1;
+    fputs(csrc, fp);
+    fclose(fp);
+    int rc = system("clang -arch arm64 -O0 -o /tmp/fakecc_abi_cross "
+                    "/tmp/fakecc_abi_main.c /tmp/fakecc_abi_fn.s >/tmp/fakecc_abi_clang.log 2>&1");
+    if (rc != 0) return -2;
+    rc = system("/tmp/fakecc_abi_cross");
+    return WIFEXITED(rc) ? WEXITSTATUS(rc) : -3;
+}
+
+static void test_abi_cross(void) {
+    /* clang calls a fakecc callee, and a fakecc caller calls a clang
+     * callee.  Relocatable objects are T14, so the function bodies are
+     * lifted out of the image and linked by clang. */
+    const char *src =
+        "package main;\n"
+        "struct s32 { long a,b,c,d; };\n"
+        "struct s32 id(struct s32 a){ a.d += a.a; return a; }\n"
+        "int sum(void){ struct s32 a; a.a=1; a.b=2; a.c=3; a.d=4;\n"
+        " struct s32 b; b=id(a); return (int)(b.a+b.b+b.c+b.d); }\n"
+        "int main(){ return 0; }\n";
+    T_ASSERT(compile_image(src) == 0);
+    unsigned char *text = NULL; size_t tn = 0;
+    T_ASSERT(read_macho_text("/tmp/fakecc_cg64_native_test", &text, &tn) == 0);
+    const unsigned char *id = NULL, *sum = NULL;
+    size_t idn = 0, sumn = 0;
+    T_ASSERT(nth_func(text, tn, 1, &id, &idn) == 0);
+    T_ASSERT(nth_func(text, tn, 2, &sum, &sumn) == 0);
+    FILE *fp = fopen("/tmp/fakecc_abi_fn.s", "w");
+    T_ASSERT(fp != NULL);
+    fputs(".text\n", fp);
+    write_sym(fp, "id", id, idn);
+    fclose(fp);
+    T_ASSERT_EQ_INT(clang_exit(
+        "struct s32 { long a,b,c,d; };\n"
+        "struct s32 id(struct s32 a);\n"
+        "int main(void){ struct s32 a={1,2,3,4}; struct s32 b=id(a);\n"
+        " return (int)(b.a+b.b+b.c+b.d); }\n"), 11);
+
+    /* clang's id, fakecc's sum with its BL retargeted at that id. */
+    fp = fopen("/tmp/clang_id.c", "w");
+    T_ASSERT(fp != NULL);
+    fputs("struct s32 { long a,b,c,d; };\n"
+          "struct s32 id(struct s32 a){ a.d += a.a; return a; }\n", fp);
+    fclose(fp);
+    T_ASSERT(system("clang -arch arm64 -O0 -c /tmp/clang_id.c -o /tmp/clang_id.o") == 0);
+    unsigned char *ct = NULL; size_t cn = 0;
+    T_ASSERT(read_macho_text("/tmp/clang_id.o", &ct, &cn) == 0);
+    const unsigned char *cid = NULL; size_t cidn = 0;
+    T_ASSERT(nth_func(ct, cn, 0, &cid, &cidn) == 0);
+    unsigned char *sumb = malloc(sumn);
+    T_ASSERT(sumb != NULL);
+    memcpy(sumb, sum, sumn);
+    retarget_bl(sumb, sumn);
+    fp = fopen("/tmp/fakecc_abi_fn.s", "w");
+    T_ASSERT(fp != NULL);
+    fputs(".text\n", fp);
+    write_sym(fp, "sum", sumb, sumn);
+    write_sym(fp, "id", cid, cidn);
+    fclose(fp);
+    T_ASSERT_EQ_INT(clang_exit("int sum(void);\nint main(void){ return sum(); }\n"), 11);
+    free(sumb);
+    free(ct);
+    free(text);
+
+    src = "package main;\n"
+          "struct h2 { double a, b; };\n"
+          "struct h2 id(struct h2 x){ return x; }\n"
+          "int sum(void){ struct h2 x; unsigned long long *p;\n"
+          " p=(unsigned long long *)&x; p[0]=1; p[1]=2;\n"
+          " struct h2 y; y=id(x);\n"
+          " unsigned long long *q=(unsigned long long *)&y;\n"
+          " return q[0]==1 && q[1]==2; }\n"
+          "int main(){ return 0; }\n";
+    T_ASSERT(compile_image(src) == 0);
+    T_ASSERT(read_macho_text("/tmp/fakecc_cg64_native_test", &text, &tn) == 0);
+    T_ASSERT(nth_func(text, tn, 1, &id, &idn) == 0);
+    T_ASSERT(nth_func(text, tn, 2, &sum, &sumn) == 0);
+    fp = fopen("/tmp/fakecc_abi_fn.s", "w");
+    T_ASSERT(fp != NULL);
+    fputs(".text\n", fp);
+    write_sym(fp, "id", id, idn);
+    fclose(fp);
+    T_ASSERT_EQ_INT(clang_exit(
+        "struct h2 { double a, b; };\n"
+        "struct h2 id(struct h2 x);\n"
+        "int main(void){ struct h2 x; unsigned long long *p=(unsigned long long *)&x;\n"
+        " p[0]=1; p[1]=2; struct h2 y=id(x);\n"
+        " unsigned long long *q=(unsigned long long *)&y;\n"
+        " return q[0]==1 && q[1]==2; }\n"), 1);
+    fp = fopen("/tmp/clang_id.c", "w");
+    fputs("struct h2 { double a, b; };\nstruct h2 id(struct h2 x){ return x; }\n", fp);
+    fclose(fp);
+    T_ASSERT(system("clang -arch arm64 -O0 -c /tmp/clang_id.c -o /tmp/clang_id.o") == 0);
+    T_ASSERT(read_macho_text("/tmp/clang_id.o", &ct, &cn) == 0);
+    T_ASSERT(nth_func(ct, cn, 0, &cid, &cidn) == 0);
+    sumb = malloc(sumn);
+    memcpy(sumb, sum, sumn);
+    retarget_bl(sumb, sumn);
+    fp = fopen("/tmp/fakecc_abi_fn.s", "w");
+    fputs(".text\n", fp);
+    write_sym(fp, "sum", sumb, sumn);
+    write_sym(fp, "id", cid, cidn);
+    fclose(fp);
+    T_ASSERT_EQ_INT(clang_exit("int sum(void);\nint main(void){ return sum(); }\n"), 1);
+    free(sumb);
+    free(ct);
+    free(text);
+}
+
+static void test_struct_abi(void) {
+    /* Sizes 1/2/3/7/8/9/16/17/32, nested, and a struct between ints.
+     * Same source under clang must return the same code: both compilers
+     * are internally consistent, so this locks the observable result.
+     * Register assignment itself is checked by the cross-link test. */
+    expect("s1",
+        "package main;\n"
+        "struct s1 { char a; };\n"
+        "int f(struct s1 s){ return s.a; }\n"
+        "int main(){ struct s1 s; s.a=41; return f(s); }", 41);
+    expect("s2",
+        "package main;\n"
+        "struct s2 { char a[2]; };\n"
+        "int f(struct s2 s){ return s.a[0]+s.a[1]; }\n"
+        "int main(){ struct s2 s; s.a[0]=20; s.a[1]=22; return f(s); }", 42);
+    expect("s3",
+        "package main;\n"
+        "struct s3 { char a[3]; };\n"
+        "int f(struct s3 s){ return s.a[0]+s.a[1]+s.a[2]; }\n"
+        "int main(){ struct s3 s; s.a[0]=1; s.a[1]=2; s.a[2]=3; return f(s); }", 6);
+    expect("s7",
+        "package main;\n"
+        "struct s7 { char a[7]; };\n"
+        "int f(struct s7 s){ return s.a[0]+s.a[6]; }\n"
+        "int main(){ struct s7 s; s.a[0]=10; s.a[6]=7; return f(s); }", 17);
+    expect("s8",
+        "package main;\n"
+        "struct s8 { long a; };\n"
+        "long f(struct s8 s){ return s.a+1; }\n"
+        "int main(){ struct s8 s; s.a=40; return (int)f(s); }", 41);
+    expect("s9",
+        "package main;\n"
+        "struct s9 { char a[9]; };\n"
+        "int f(struct s9 s){ return s.a[0]+s.a[8]; }\n"
+        "int main(){ struct s9 s; s.a[0]=4; s.a[8]=5; return f(s); }", 9);
+    expect("s16",
+        "package main;\n"
+        "struct s16 { long a, b; };\n"
+        "struct s16 f(struct s16 s){ s.b += s.a; return s; }\n"
+        "int main(){ struct s16 s; s.a=3; s.b=4; s=f(s); return (int)(s.a+s.b); }", 10);
+    expect("s17",
+        "package main;\n"
+        "struct s17 { char a[17]; };\n"
+        "struct s17 f(struct s17 s){ s.a[0]++; s.a[16]++; return s; }\n"
+        "int main(){ struct s17 s; s.a[0]=1; s.a[16]=2; s=f(s);\n"
+        " return s.a[0]+s.a[16]; }", 5);
+    expect("s32",
+        "package main;\n"
+        "struct s32 { long a,b,c,d; };\n"
+        "struct s32 f(struct s32 s){ s.d += s.a; return s; }\n"
+        "int main(){ struct s32 s; s.a=1; s.b=2; s.c=3; s.d=4; s=f(s);\n"
+        " return (int)(s.a+s.b+s.c+s.d); }", 11);
+    expect("nested",
+        "package main;\n"
+        "struct inner { int a, b; };\n"
+        "struct outer { struct inner i; int c; };\n"
+        "int f(struct outer o){ return o.i.a + o.i.b + o.c; }\n"
+        "int main(){ struct outer o; o.i.a=1; o.i.b=2; o.c=3; return f(o); }", 6);
+    expect("many_s16",
+        "package main;\n"
+        "struct s16 { long a, b; };\n"
+        "int many(int a, struct s16 s, int b){ return a+(int)s.a+(int)s.b+b; }\n"
+        "int main(){ struct s16 s; s.a=10; s.b=20; return many(1,s,3); }", 34);
+    expect("after7",
+        "package main;\n"
+        "struct s8 { long a; };\n"
+        "int f(int a0,int a1,int a2,int a3,int a4,int a5,int a6,\n"
+        "      struct s8 s, int a8){\n"
+        " return a0+a1+a2+a3+a4+a5+a6+(int)s.a+a8; }\n"
+        "int main(){ struct s8 s; s.a=10;\n"
+        " return f(1,1,1,1,1,1,1,s,1); }", 18);
+    expect("hfa2",
+        "package main;\n"
+        "struct h2 { double a, b; };\n"
+        "struct h2 id(struct h2 x){ return x; }\n"
+        "int main(){ struct h2 x; unsigned long long *p;\n"
+        " p=(unsigned long long *)&x; p[0]=1; p[1]=2;\n"
+        " struct h2 y; y=id(x);\n"
+        " unsigned long long *q=(unsigned long long *)&y;\n"
+        " return q[0]==1 && q[1]==2; }", 1);
+    expect("hfa4",
+        "package main;\n"
+        "struct h4 { float a,b,c,d; };\n"
+        "struct h4 id(struct h4 x){ return x; }\n"
+        "int main(){ struct h4 x; unsigned *p=(unsigned *)&x;\n"
+        " p[0]=1; p[1]=2; p[2]=3; p[3]=4;\n"
+        " struct h4 y; y=id(x); unsigned *q=(unsigned *)&y;\n"
+        " return (int)(q[0]+q[1]+q[2]+q[3]); }", 10);
+    expect("mixed",
+        "package main;\n"
+        "struct m { int a; double b; };\n"
+        "int f(struct m s){ unsigned long long u; u=*(unsigned long long *)&s.b;\n"
+        " return s.a + (int)u; }\n"
+        "int main(){ struct m s; unsigned long long *p;\n"
+        " s.a=7; p=(unsigned long long *)&s.b; *p=4; return f(s); }", 11);
+}
+
 int main(void) {
     target_set_current(target_arm64_macos());
     test_divmod_edgecases();
@@ -436,6 +753,8 @@ int main(void) {
     test_recursion_deep();
     test_globals_and_aggregates();
     test_pie_rebase();
+    test_struct_abi();
+    test_abi_cross();
     return t_finalize();
 }
 

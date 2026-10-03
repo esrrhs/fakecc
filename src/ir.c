@@ -1501,6 +1501,26 @@ static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
     }
 }
 
+/* Darwin aggregate classes differ from SysV in two ways that the rest of
+ * this file expresses by rewriting the SysV eightbyte classes:
+ *   - a non-HFA SSE eightbyte (mixed int/float) travels in a GP register
+ *     holding the raw bits, not a V register;
+ *   - an HFA keeps its SSE classes so the backend uses v0..v7, but the
+ *     SSA values stay integer bit patterns (see CALL_ARG_HFA).
+ * An HFA that does not fit in two eightbytes (3–4 doubles) is not
+ * representable in the current IR and is rejected. */
+static void abi_adjust_cls(Type t, SysVRegClass *cls, int *nreg, SourceLoc loc) {
+    if (abi_sret_uses_gp()) return;
+    if (abi_is_hfa(t)) {
+        if (*nreg == 0)
+            die_at(loc.file ? loc.file : "<arm64>", loc.line, loc.col,
+                   "arm64 HFA wider than two eightbytes is not supported yet");
+        return;
+    }
+    for (int i = 0; i < *nreg && i < 2; i++)
+        if (cls[i] == SYSV_CLS_SSE) cls[i] = SYSV_CLS_INTEGER;
+}
+
 static int  new_label(IRFunction *fn);
 static void emit_label(IRFunction *fn, int label, SourceLoc loc);
 static void emit_br(IRFunction *fn, int label, SourceLoc loc);
@@ -6896,6 +6916,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             ret_nreg_pre = 2;
         } else if (is_ret_struct_pre) {
             ret_nreg_pre = sysv_classify_agg(e->type, ret_cls_pre);
+            abi_adjust_cls(e->type, ret_cls_pre, &ret_nreg_pre, e->loc);
         }
         int ret_in_mem_pre = is_ret_struct_pre && ret_nreg_pre == 0;
         if (type_is_complex_ldouble(e->type)) {
@@ -6914,7 +6935,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Register-class aggregates expand into per-eightbyte SSA args.
          * MEMORY-class aggregates are one stack blob (pointer + nbytes)
          * so huge by-value structs do not explode IR_CALL. */
-        int call_used_gp = ret_in_mem_pre ? 1 : 0;
+        int call_used_gp = (ret_in_mem_pre && abi_sret_uses_gp()) ? 1 : 0;
         int call_used_xmm = 0;
         Type callee_ty = e->u.call.callee->type;
         while (callee_ty.kind == TY_PTR && callee_ty.pointee)
@@ -6936,6 +6957,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     asz = 16;
                 } else {
                     nreg = sysv_classify_agg(arg->type, cls);
+                    abi_adjust_cls(arg->type, cls, &nreg, e->loc);
                 }
                 int is_memory = (nreg == 0);
                 /* SysV: unnamed __m256/__m512 to a variadic or unprototyped
@@ -6949,8 +6971,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     /* GNU empty structs occupy no argument slots. */
                     continue;
                 }
-                if (is_memory && sysv_memory_pass_as_pointer(arg->type)) {
-                    /* va_list: pass a pointer to a stack copy (array decay). */
+                if (is_memory && (sysv_memory_pass_as_pointer(arg->type)
+                                  || abi_indirect_agg(arg->type))) {
+                    /* Pointer to a stack copy: SysV va_list, or a Darwin
+                     * aggregate larger than 16 bytes. */
                     int copy_sz = asz;
                     if (copy_sz < 1) copy_sz = 1;
                     IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
@@ -6963,8 +6987,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                         exit(1);
                     }
                     arg_vals[nargs] = tmp_addr;
-                    arg_on_stack[nargs] = 0;
-                    if (call_used_gp < 6) call_used_gp++;
+                    if (call_used_gp < abi_gp_nregs()) {
+                        arg_on_stack[nargs] = 0;
+                        call_used_gp++;
+                    } else if (!abi_sret_uses_gp()) {
+                        arg_on_stack[nargs] = CALL_ARG_STACK;
+                    } else {
+                        arg_on_stack[nargs] = 0;
+                    }
                     nargs++;
                     continue;
                 }
@@ -6988,16 +7018,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     if (cls[k] == SYSV_CLS_SSE) need_fp++;
                     else need_gp++;
                 }
-                int fits_in_regs = (call_used_gp + need_gp <= 6
+                int fits_in_regs = (call_used_gp + need_gp <= abi_gp_nregs()
                                     && call_used_xmm + need_fp <= 8);
                 if (fits_in_regs) {
                     call_used_gp += need_gp;
                     call_used_xmm += need_fp;
                 }
+                int hfa = abi_is_hfa(arg->type);
                 SysVRegClass *acls = malloc((size_t)nreg * sizeof(SysVRegClass));
                 IRValue *ebs = malloc((size_t)nreg * sizeof(IRValue));
                 if (!acls || !ebs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-                for (int k = 0; k < nreg; k++) acls[k] = cls[k];
+                /* HFA bits stay in the GP file; the call boundary moves
+                 * them into V registers.  Loading as INTEGER keeps mem2reg
+                 * and the GP allocator on the bit pattern. */
+                for (int k = 0; k < nreg; k++)
+                    acls[k] = hfa ? SYSV_CLS_INTEGER : cls[k];
                 load_agg_regs(fn, av, asz, nreg, acls, ebs, e->loc);
                 for (int k = 0; k < nreg; k++) {
                     if (nargs >= arg_limit) {
@@ -7006,10 +7041,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                         exit(1);
                     }
                     arg_vals[nargs] = ebs[k];
-                    arg_on_stack[nargs] = !fits_in_regs
-                        ? sysv_stack_arg_flags(1, arg->type) : 0;
-                    if (k != 0 && arg_on_stack[nargs])
-                        arg_on_stack[nargs] = CALL_ARG_STACK; /* only first eightbyte aligns */
+                    if (!fits_in_regs)
+                        arg_on_stack[nargs] = (k == 0)
+                            ? sysv_stack_arg_flags(1, arg->type) : CALL_ARG_STACK;
+                    else if (hfa)
+                        arg_on_stack[nargs] = CALL_ARG_HFA;
+                    else
+                        arg_on_stack[nargs] = 0;
                     nargs++;
                 }
                 free(acls);
@@ -7026,7 +7064,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (get_value_is_float(fn, av)) {
                 if (call_used_xmm < 8) call_used_xmm++;
             } else {
-                if (call_used_gp < 6) call_used_gp++;
+                if (call_used_gp < abi_gp_nregs()) call_used_gp++;
             }
             nargs++;
         }
@@ -7090,6 +7128,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.b = ret_hi;   /* second return eightbyte, or -1 */
         inst.x87_pair = is_x87_ret;
         inst.imm = is_x87_st0 ? 16 : (is_cld_ret ? 32 : 0);
+        if (ret_in_mem && !abi_sret_uses_gp())
+            inst.align16 = A64_MARK_SRET;
         inst.loc = e->loc;
         inst.call_name = NULL;
         inst.call_callee = -1;
@@ -7203,24 +7243,31 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return v;
         }
         if (is_ret_struct && ret_nreg > 0) {
-            /* Result eightbytes are INTEGER (RAX/RDX) or SSE (XMM0/XMM1).
-             * Mark float class on the SSA results so codegen picks XMM.
-             * A 16-byte SSE+SSEUP vector is one XMM (width 16, kind 4). */
-            int vecw = sysv_sse_vec_bytes(ret_nreg, type_size(e->type), ret_cls);
+            /* Result eightbytes are INTEGER (RAX/RDX or x0/x1) or SSE
+             * (XMM0/XMM1).  A Darwin HFA result is bits in v0/v1; the SSA
+             * values stay integer so the GP allocator owns them and the
+             * backend fmovs at the call boundary. */
+            int hfa_ret = abi_is_hfa(e->type);
+            SysVRegClass store_cls[2];
+            store_cls[0] = hfa_ret ? SYSV_CLS_INTEGER : ret_cls[0];
+            store_cls[1] = hfa_ret ? SYSV_CLS_INTEGER : ret_cls[1];
+            int vecw = sysv_sse_vec_bytes(ret_nreg, type_size(e->type), store_cls);
             inst.width = vecw ? vecw : 8;
-            inst.is_float = (ret_cls[0] == SYSV_CLS_SSE);
+            inst.is_float = !hfa_ret && (ret_cls[0] == SYSV_CLS_SSE);
+            if (hfa_ret) inst.align16 = A64_MARK_HFA;
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
             set_value_type(fn, ret_lo, vecw ? vecw : 8, vecw ? 0 : 1);
-            if (ret_cls[0] == SYSV_CLS_SSE)
+            if (!hfa_ret && ret_cls[0] == SYSV_CLS_SSE)
                 set_value_float(fn, ret_lo, vecw ? 4 : 1);
             if (ret_hi >= 0) {
                 set_value_type(fn, ret_hi, 8, 1);
-                if (ret_cls[1] == SYSV_CLS_SSE) set_value_float(fn, ret_hi, 1);
+                if (!hfa_ret && ret_cls[1] == SYSV_CLS_SSE)
+                    set_value_float(fn, ret_hi, 1);
             }
             IRValue ebs[2] = { ret_lo, ret_hi };
             store_agg_regs(fn, slot_addr, type_size(e->type), ret_nreg,
-                           ret_cls, ebs, e->loc);
+                           store_cls, ebs, e->loc);
             free(arg_vals);
             free(arg_on_stack);
             free(arg_nbytes);
@@ -8668,6 +8715,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                         emit_inst_w(fn, IR_CONST, hi, -1, -1, 0, 8, 1, s->loc);
                     }
                     emit_inst_w(fn, IR_RETURN, -1, z, hi, 0, 8, 1, s->loc);
+                    if (g_ir_cur_fd && abi_is_hfa(g_ir_cur_fd->ret_type))
+                        fn->insts.data[fn->insts.len - 1].align16 = A64_MARK_HFA;
                 } else {
                     emit_inst_w(fn, IR_RETURN, -1, fn->sret_value, -1, 0,
                                 8, 1, s->loc);
@@ -8695,11 +8744,17 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 cls[0] = (SysVRegClass)fn->ret_reg_cls[0];
                 cls[1] = (SysVRegClass)fn->ret_reg_cls[1];
                 IRValue ebs[2];
-                load_agg_regs(fn, v, fn->ret_width, fn->ret_reg_n, cls, ebs,
+                int hfa_ret = g_ir_cur_fd && abi_is_hfa(g_ir_cur_fd->ret_type);
+                SysVRegClass lcls[2];
+                lcls[0] = hfa_ret ? SYSV_CLS_INTEGER : cls[0];
+                lcls[1] = hfa_ret ? SYSV_CLS_INTEGER : cls[1];
+                load_agg_regs(fn, v, fn->ret_width, fn->ret_reg_n, lcls, ebs,
                               s->loc);
                 IRValue hi = (fn->ret_reg_n > 1) ? ebs[1] : -1;
                 emit_inst_w(fn, IR_RETURN, -1, ebs[0], hi, 0, 8, 1, s->loc);
-                if (cls[0] == SYSV_CLS_SSE)
+                if (hfa_ret)
+                    fn->insts.data[fn->insts.len - 1].align16 = A64_MARK_HFA;
+                else if (cls[0] == SYSV_CLS_SSE)
                     fn->insts.data[fn->insts.len - 1].is_float = 1;
             } else {
                 /* MEMORY class: copy into hidden sret slot; return pointer. */
@@ -10709,7 +10764,8 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         } else if (irfn.ret_is_struct) {
             SysVRegClass rcls[2];
             irfn.ret_reg_n = sysv_classify_agg(fd->ret_type, rcls);
-            for (int i = 0; i < irfn.ret_reg_n; i++)
+            abi_adjust_cls(fd->ret_type, rcls, &irfn.ret_reg_n, fd->loc);
+            for (int i = 0; i < irfn.ret_reg_n && i < 2; i++)
                 irfn.ret_reg_cls[i] = (int)rcls[i];
             /* Struct size for copy/load lives in ret_width. */
             irfn.ret_width = type_size(fd->ret_type);
@@ -10756,7 +10812,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             emit_inst_w(&irfn, IR_PARAM, irfn.sret_value, -1, -1, next_pidx++,
                         8, 1, fd->loc);
         }
-        int used_gp = (irfn.sret_value >= 0) ? 1 : 0;
+        int used_gp = (irfn.sret_value >= 0 && abi_sret_uses_gp()) ? 1 : 0;
         int used_xmm = 0;
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
@@ -10775,16 +10831,20 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     nreg = 2;
                 } else {
                     nreg = sysv_classify_agg(pty, cls);
+                    abi_adjust_cls(pty, cls, &nreg, ploc);
                 }
                 int is_memory = (nreg == 0);
-                if (is_memory && sysv_memory_pass_as_pointer(pty)) {
+                if (is_memory && (sysv_memory_pass_as_pointer(pty)
+                                  || abi_indirect_agg(pty))) {
                     param_nreg[p] = -1;
                     param_ebs[p] = malloc(sizeof(IRValue));
                     if (!param_ebs[p]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                     param_ebs[p][0] = new_value(&irfn);
                     emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
                                 next_pidx++, 8, 1, ploc);
-                    if (used_gp < 6) used_gp++;
+                    if (used_gp < abi_gp_nregs()) used_gp++;
+                    else if (!abi_sret_uses_gp())
+                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
                 } else if (is_memory) {
                     /* Incoming stack blob: PARAM dst is LEA [rbp+off]. */
                     int total = type_size(pty);
@@ -10810,7 +10870,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 /* SysV: an aggregate is passed entirely in registers or
                  * entirely on the stack.  Register-class that do not fit
                  * go on the stack as eightbytes. */
-                int fits = (used_gp + need_gp <= 6 && used_xmm + need_fp <= 8);
+                int hfa = abi_is_hfa(pty);
+                int fits = (used_gp + need_gp <= abi_gp_nregs()
+                            && used_xmm + need_fp <= 8);
                 if (fits) {
                     used_gp += need_gp;
                     used_xmm += need_fp;
@@ -10835,9 +10897,11 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                         int al = type_stack_align(pty);
                         if (al) irfn.insts.data[irfn.insts.len - 1].align16 = al;
                     }
-                    if (is_sse)
+                    if (is_sse && !hfa)
                         set_value_float(&irfn, param_ebs[p][k],
                                         (pw == 16 || pw == 32 || pw == 64) ? 4 : 1);
+                    if (hfa && fits)
+                        irfn.insts.data[irfn.insts.len - 1].is_float = 1;
                 }
                 }
             } else {
@@ -10854,7 +10918,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     /* long double is stack-only (codegen keys off value_is_ld). */
                     if (pty.width != 16 && used_xmm < 8) used_xmm++;
                 } else {
-                    if (used_gp < 6) used_gp++;
+                    if (used_gp < abi_gp_nregs()) used_gp++;
                 }
             }
         }

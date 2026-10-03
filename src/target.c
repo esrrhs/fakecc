@@ -13,6 +13,8 @@ static const TargetDesc TARGET_X86_64_LINUX = {
     64,
     32,                    /* YMM: 32-byte vectors by default (-mavx) */
     "x86_64-linux",
+    6,
+    1,
 };
 
 static const TargetDesc TARGET_ARM64_MACOS = {
@@ -22,6 +24,8 @@ static const TargetDesc TARGET_ARM64_MACOS = {
     64,
     16,                    /* NEON Q registers are 16 bytes */
     "arm64-macos",
+    8,
+    0,
 };
 
 const TargetDesc *target_x86_64_linux(void) { return &TARGET_X86_64_LINUX; }

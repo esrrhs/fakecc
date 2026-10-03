@@ -10,6 +10,8 @@ static void test_canonical_targets(void) {
     T_ASSERT_EQ_INT(t->objfmt, TARGET_OBJFMT_ELF);
     T_ASSERT_EQ_INT(t->ptr_bits, 64);
     T_ASSERT_EQ_INT(t->native_vector_bytes, 32);
+    T_ASSERT_EQ_INT(t->gp_arg_regs, 6);
+    T_ASSERT_EQ_INT(t->sret_uses_gp, 1);
     T_ASSERT_STR_EQ(t->triple, "x86_64-linux");
     T_ASSERT(target_backend_ready(t));
 
@@ -19,6 +21,8 @@ static void test_canonical_targets(void) {
     T_ASSERT_EQ_INT(t->objfmt, TARGET_OBJFMT_MACHO);
     T_ASSERT_EQ_INT(t->ptr_bits, 64);
     T_ASSERT_EQ_INT(t->native_vector_bytes, 16);
+    T_ASSERT_EQ_INT(t->gp_arg_regs, 8);
+    T_ASSERT_EQ_INT(t->sret_uses_gp, 0);
     T_ASSERT_STR_EQ(t->triple, "arm64-macos");
     /* Freestanding arm64 Mach-O executables work since T5/T6; relocatable
      * object emission and dylib links land in T14/T19. */

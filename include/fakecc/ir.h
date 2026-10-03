@@ -110,6 +110,14 @@ typedef enum {
 #define CALL_ARG_ALIGN32 4
 #define CALL_ARG_ALIGN64 8
 #define CALL_ARG_BLOB    16
+/* Darwin HFA eightbyte: the SSA value is an integer bit pattern, but the
+ * call boundary moves it through the next V register (not a GP). */
+#define CALL_ARG_HFA     32
+/* IR_CALL / IR_RETURN align16 on arm64.  x86 leaves these 0.
+ * HFA: result eightbytes travel in v0/v1.  SRET: call_args[0] is the
+ * indirect-result pointer and belongs in x8, not x0. */
+#define A64_MARK_HFA     4
+#define A64_MARK_SRET    8
 
 typedef struct {
     IROpcode op;

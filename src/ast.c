@@ -1,4 +1,5 @@
 #include "fakecc/ast.h"
+#include "fakecc/target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -769,6 +770,78 @@ int sysv_memory_pass_as_pointer(Type t) {
      * pointer, matching libc. */
     return t.kind == TY_STRUCT && t.tag
         && strcmp(t.tag, "__va_list_tag") == 0;
+}
+
+static int abi_is_arm64(void) {
+    const TargetDesc *t = target_current();
+    return t && t->arch == TARGET_ARCH_ARM64;
+}
+
+int abi_gp_nregs(void) {
+    const TargetDesc *t = target_current();
+    if (t && t->gp_arg_regs > 0) return t->gp_arg_regs;
+    return 6;
+}
+
+int abi_sret_uses_gp(void) {
+    const TargetDesc *t = target_current();
+    if (!t) return 1;
+    return t->sret_uses_gp;
+}
+
+/* Element count of a homogeneous float/double aggregate, or -1.
+ * `kind` is 0 on entry and becomes 4 (float) or 8 (double). */
+static int hfa_elems(Type t, int *kind) {
+    if (t.is_vector || t.is_decimal) return -1;
+    if (t.kind == TY_FLOAT) {
+        if (t.width != 4 && t.width != 8) return -1;
+        if (*kind == 0) *kind = t.width;
+        if (*kind != t.width) return -1;
+        return 1;
+    }
+    if (t.kind == TY_ARRAY && t.elem_type && t.length > 0) {
+        int n = hfa_elems(*t.elem_type, kind);
+        if (n <= 0) return -1;
+        long long tot = (long long)n * t.length;
+        if (tot > 4) return -1;
+        return (int)tot;
+    }
+    if (t.kind != TY_STRUCT || !t.tag) return -1;
+    const StructRegistry *reg = get_ir_structs();
+    if (!reg) reg = get_sema_structs();
+    if (!reg) reg = get_parser_structs();
+    const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : NULL;
+    if (!sd || sd->is_union) return -1;
+    int total = 0, any = 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        if (sd->members[i].bit_width == 0) continue;
+        if (sd->members[i].bit_width > 0) return -1;
+        Type mt = sd->members[i].type;
+        if (mt.kind == TY_ARRAY && mt.length <= 0 && !mt.vla_dim) continue;
+        int n = hfa_elems(mt, kind);
+        if (n <= 0) return -1;
+        total += n;
+        any = 1;
+        if (total > 4) return -1;
+    }
+    return any ? total : -1;
+}
+
+int abi_is_hfa(Type t) {
+    if (!abi_is_arm64()) return 0;
+    int kind = 0;
+    int n = hfa_elems(t, &kind);
+    return n >= 1 && n <= 4;
+}
+
+int abi_indirect_agg(Type t) {
+    /* Darwin: a non-HFA aggregate larger than 16 bytes is passed and
+     * returned through a pointer.  HFAs use V registers instead. */
+    if (!abi_is_arm64()) return 0;
+    if (t.is_vector) return 0;
+    if (t.kind != TY_STRUCT) return 0;
+    if (abi_is_hfa(t)) return 0;
+    return type_size(t) > 16;
 }
 
 int g_no_avx = 0;

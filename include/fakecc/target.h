@@ -44,6 +44,9 @@ typedef struct {
                                           x86-64 default 32 (YMM; -mavx512f widens to 64),
                                           arm64 NEON 16 */
     const char  *triple;               /* canonical triple string */
+    int          gp_arg_regs;          /* integer argument registers: 6 SysV, 8 AAPCS64 */
+    int          sret_uses_gp;         /* 1: hidden sret consumes a GP (SysV rdi);
+                                          0: sret arrives in x8 and does not */
 } TargetDesc;
 
 /* The process-wide current target.  Defaults to the host default
