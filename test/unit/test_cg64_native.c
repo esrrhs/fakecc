@@ -1317,6 +1317,49 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(run_bin(outp), 5);
     emit_module_free(&mea);
     emit_module_free(&meb);
+
+    const char *fa = "/tmp/fakecc_arm64_link_fa.o";
+    const char *fb = "/tmp/fakecc_arm64_link_fb.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int add(int a, int b) { return a + b; }\n"
+        "int main(void) {\n"
+        "  int (*p)(int, int) = add;\n"
+        "  return p(20, 22);\n"
+        "}\n",
+        fa, NULL), 0);
+    EmitModule mfa;
+    T_ASSERT_EQ_INT(emit_obj_read(fa, &mfa), 0);
+    EmitModule *onef[1] = { &mfa };
+    T_ASSERT_EQ_INT(macho_link_objects(onef, 1, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 42);
+    emit_module_free(&mfa);
+
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int add(int a, int b);\n"
+        "int main(void) {\n"
+        "  int (*p)(int, int) = add;\n"
+        "  return p(20, 22);\n"
+        "}\n",
+        fa, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int add(int a, int b) { return a + b; }\n",
+        fb, NULL), 0);
+    EmitModule mfb;
+    T_ASSERT_EQ_INT(emit_obj_read(fa, &mfa), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(fb, &mfb), 0);
+    int addu = emit_module_find_symbol(&mfa, "add");
+    T_ASSERT(addu >= 0);
+    T_ASSERT_EQ_INT(mfa.syms[addu].shndx, 0);
+    EmitModule *fm[2] = { &mfa, &mfb };
+    T_ASSERT_EQ_INT(macho_link_objects(fm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 42);
+    emit_module_free(&mfa);
+    emit_module_free(&mfb);
 }
 
 static void test_frame_addr(void) {

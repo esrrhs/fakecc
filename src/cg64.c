@@ -63,6 +63,18 @@ typedef struct {
 
 enum { G_RO = 1, G_DATA = 2, G_BSS = 3, G_COMMON = 4 };
 
+static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name) {
+    if (c->ngfix == c->capgfix) {
+        c->capgfix = c->capgfix ? c->capgfix * 2 : 64;
+        c->gfix = realloc(c->gfix, c->capgfix * sizeof *c->gfix);
+        if (!c->gfix) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    c->gfix[c->ngfix].at = at;
+    c->gfix[c->ngfix].gidx = gidx;
+    c->gfix[c->ngfix].name = name;
+    c->ngfix++;
+}
+
 static void c64_die(C64 *c, const IRInst *s, const char *what) {
     const char *f = c->fn->loc.file ? c->fn->loc.file : "<arm64>";
     int line = s ? s->loc.line : c->fn->loc.line;
@@ -1991,15 +2003,8 @@ static void emit_function(C64 *c, int fi) {
             int d = dst_reg(c, s->dst);
             /* adrp d, page ; add d, d, #pageoff — both words patched in
              * codegen64 once __const/__data/__bss placement is final. */
-            if (c->ngfix == c->capgfix) {
-                c->capgfix = c->capgfix ? c->capgfix * 2 : 64;
-                c->gfix = realloc(c->gfix, c->capgfix * sizeof *c->gfix);
-                if (!c->gfix) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-            }
-            c->gfix[c->ngfix].at = (uint32_t)a->code.len;
-            c->gfix[c->ngfix].gidx = gi;
-            c->gfix[c->ngfix].name = gi < 0 ? s->call_name : NULL;
-            c->ngfix++;
+            note_page_reloc(c, (uint32_t)a->code.len, gi,
+                            gi < 0 ? s->call_name : NULL);
             a64_word(a, 0x90000000u | (uint32_t)(d & 31));
             a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
                                     | (uint32_t)(d & 31));
@@ -2011,10 +2016,22 @@ static void emit_function(C64 *c, int fi) {
             break;
         case IR_FADDR: {
             int fi = 0;
-            if (find_function(c->ir, s->call_name, &fi) != 0)
+            int missing = find_function(c->ir, s->call_name, &fi) != 0;
+            if (missing && !emit_object_mode()) {
                 c64_die(c, s, "external function address");
+                break;
+            }
             int d = dst_reg(c, s->dst);
-            a64_adrp_add_label(a, d, c->fn_label[fi]);
+            /* Object text is concatenated after an entry stub, so a baked
+             * ADRP would miss the real page.  Record a reloc instead. */
+            if (emit_object_mode()) {
+                note_page_reloc(c, (uint32_t)a->code.len, -1, s->call_name);
+                a64_word(a, 0x90000000u | (uint32_t)(d & 31));
+                a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
+                                        | (uint32_t)(d & 31));
+            } else {
+                a64_adrp_add_label(a, d, c->fn_label[fi]);
+            }
             commit(c, s->dst, d);
             break;
         }
