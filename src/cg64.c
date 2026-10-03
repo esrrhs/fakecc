@@ -743,6 +743,50 @@ static int emit_span_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* __builtin_clear_cache(start, end).  Apple Silicon will execute a stale
+ * instruction line unless the data cache is cleaned and the instruction
+ * cache is invalidated to the point of unification.  Reading CTR_EL0 is
+ * SIGILL in user mode on this OS, so the step is 64 bytes: this machine's
+ * line is 128, and a shorter step still hits every line.  Args are already
+ * in x0 and x1.  An empty or reversed range does nothing. */
+static int emit_cache_builtin(C64 *c, const char *name) {
+    if (!name || strcmp(name, "clear_cache") != 0) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+    A64Asm *a = c->as;
+    int Ldone = a64_new_label(a);
+    int Ldc = a64_new_label(a);
+    int Ldc_end = a64_new_label(a);
+    int Lic = a64_new_label(a);
+    int Lic_end = a64_new_label(a);
+    a64_cmp_reg(a, A64_X0, A64_X1, 1);
+    a64_bcond(a, A64_CS, Ldone);
+    a64_movz(a, A64_X17, 64, 0, 1);
+    a64_sub_imm12(a, A64_X2, A64_X17, 1, 0, 1, 0);
+    a64_mvn(a, A64_X2, A64_X2, 1);
+    a64_and_reg(a, A64_X9, A64_X0, A64_X2, 1);
+    a64_bind(a, Ldc);
+    a64_cmp_reg(a, A64_X9, A64_X1, 1);
+    a64_bcond(a, A64_CS, Ldc_end);
+    a64_word(a, 0xD50B7B20u | A64_X9);
+    a64_add_reg(a, A64_X9, A64_X9, A64_X17, A64_LSL, 0, 1, 0);
+    a64_b(a, Ldc);
+    a64_bind(a, Ldc_end);
+    a64_word(a, 0xD5033B9Fu);
+    a64_and_reg(a, A64_X9, A64_X0, A64_X2, 1);
+    a64_bind(a, Lic);
+    a64_cmp_reg(a, A64_X9, A64_X1, 1);
+    a64_bcond(a, A64_CS, Lic_end);
+    a64_word(a, 0xD50B7520u | A64_X9);
+    a64_add_reg(a, A64_X9, A64_X9, A64_X17, A64_LSL, 0, 1, 0);
+    a64_b(a, Lic);
+    a64_bind(a, Lic_end);
+    a64_word(a, 0xD5033B9Fu);
+    a64_word(a, 0xD5033FDFu);
+    a64_bind(a, Ldone);
+    return 1;
+}
+
 /* strcpy/stpcpy/strncpy/strcat/strncat/strstr.  Result pointer in x0.
  * x3–x5 are caller-saved.  A user definition of the same name still wins. */
 /* strlcpy/strlcat return the length they tried to create.  strsep
@@ -2332,7 +2376,8 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_find_builtin(c, s->call_name)
                                  || emit_span_builtin(c, s->call_name)
                                  || emit_copy_builtin(c, s->call_name)
-                                 || emit_bound_builtin(c, s->call_name)))) {
+                                 || emit_bound_builtin(c, s->call_name)
+                                 || emit_cache_builtin(c, s->call_name)))) {
         int fi = 0;
         if (!s->call_name) {
             die_at(s->loc.file ? s->loc.file : c->fn->loc.file,

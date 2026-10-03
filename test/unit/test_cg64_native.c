@@ -2228,6 +2228,17 @@ static void test_hint(void) {
         "  return 0; }", 0);
 }
 
+static void test_cache(void) {
+    expect("cache",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char b[128];\n"
+        "  __builtin_clear_cache(b, b);\n"
+        "  __builtin_clear_cache(b + 64, b);\n"
+        "  __builtin_clear_cache(b, b + 64);\n"
+        "  return 7; }", 7);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2291,6 +2302,7 @@ int main(void) {
     test_nans();
     test_trap();
     test_hint();
+    test_cache();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
