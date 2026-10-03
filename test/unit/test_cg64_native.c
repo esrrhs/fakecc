@@ -1511,6 +1511,34 @@ static void test_addend(void) {
     emit_module_free(&md);
 }
 
+static void test_used(void) {
+    const char *obj = "/tmp/fakecc_arm64_used.o";
+    const char *outp = "/tmp/fakecc_arm64_used_out";
+    const char *err = "/tmp/fakecc_arm64_used_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "static int quiet(void) __attribute__((used)) { return 3; }\n"
+        "int keeper(void) __attribute__((used)) { return 4; }\n"
+        "int plain(void) { return 1; }\n"
+        "int main(void) { return keeper(); }\n",
+        obj, NULL), 0);
+    EmitModule m;
+    T_ASSERT_EQ_INT(emit_obj_read(obj, &m), 0);
+    int q = emit_module_find_symbol(&m, "quiet");
+    int k = emit_module_find_symbol(&m, "keeper");
+    int p = emit_module_find_symbol(&m, "plain");
+    T_ASSERT(q >= 0 && k >= 0 && p >= 0);
+    T_ASSERT_EQ_INT((int)(m.syms[q].macho_desc & 0x0020), 0x0020);
+    T_ASSERT_EQ_INT((int)(m.syms[k].macho_desc & 0x0020), 0x0020);
+    T_ASSERT_EQ_INT((int)(m.syms[p].macho_desc & 0x0020), 0);
+    T_ASSERT_EQ_INT((int)m.syms[q].binding, 0);
+    EmitModule *mods[1] = { &m };
+    T_ASSERT_EQ_INT(link_capturing(mods, 1, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 4);
+    emit_module_free(&m);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3179,6 +3207,7 @@ int main(void) {
     test_alias();
     test_hidden();
     test_addend();
+    test_used();
     test_macho_link();
     return t_finalize();
 }

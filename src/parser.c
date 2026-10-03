@@ -112,6 +112,7 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 static char *g_parsed_alias = NULL;
 static int g_parsed_weak = 0;
 static int g_parsed_hidden = 0;
+static int g_parsed_used = 0;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
 static int g_parsed_constructor = 0;
@@ -283,6 +284,10 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                         depth--;
                     }
                 }
+                continue;
+            } else if (strcmp(name, "used") == 0 || strcmp(name, "__used__") == 0) {
+                g_parsed_used = 1;
+                advance(p);
                 continue;
             } else if (strcmp(name, "alias") == 0 || strcmp(name, "__alias__") == 0) {
                 advance(p);
@@ -4001,6 +4006,8 @@ static Stmt parse_stmt(Parser *p) {
             g_parsed_weak = 0;
             s.u.decl.is_hidden = g_parsed_hidden;
             g_parsed_hidden = 0;
+            s.u.decl.is_used = g_parsed_used;
+            g_parsed_used = 0;
             stmt_array_push(&decls, s);
             if (peek(p)->kind == TK_COMMA) {
                 advance(p);
@@ -4907,6 +4914,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
     g_parsed_weak = 0;
     fn.is_hidden = g_parsed_hidden;
     g_parsed_hidden = 0;
+    fn.is_used = g_parsed_used;
+    g_parsed_used = 0;
     if (g_parsed_no_instrument) {
         fn.no_instrument = 1;
         g_parsed_no_instrument = 0;

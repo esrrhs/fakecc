@@ -4475,11 +4475,13 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                 end = a.labels[c.fn_label[i + 1]].pos;
             else if (c.udiv_label >= 0 && a.labels[c.udiv_label].bound)
                 end = a.labels[c.udiv_label].pos;
-            emit_module_add_symbol(out, fn->name,
+            int fsi = emit_module_add_symbol(out, fn->name,
                                    fn->is_static ? 0 : fn->is_weak ? 2
                                        : fn->is_hidden ? 3 : 1,
                                    2 /* STT_FUNC */,
                                    (uint16_t)SECT_TEXT, start, end - start);
+            if (fn->is_used && fsi >= 0)
+                out->syms[fsi].macho_desc |= 0x0020;
             if (fn->is_constructor || fn->is_destructor) {
                 int fsym = emit_module_find_symbol(out, fn->name);
                 Buffer *arr = fn->is_constructor ? &out->init_array
@@ -4519,6 +4521,8 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                                                   : g->is_hidden ? 3 : 1,
                                               1 /* STT_OBJECT */, sh,
                                               c.goff[gi], (size_t)g->size);
+            if (g->is_used && gsym[gi] >= 0)
+                out->syms[gsym[gi]].macho_desc |= 0x0020;
         }
         for (size_t i = 0; i < c.nlrel; i++) {
             if (emit_module_find_symbol(out, c.lrel[i].name) >= 0) continue;

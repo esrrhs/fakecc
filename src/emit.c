@@ -96,6 +96,7 @@ int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
                 m->syms[i].shndx = shndx;
                 m->syms[i].value = value;
                 m->syms[i].size = size;
+                m->syms[i].macho_desc = 0;
                 return (int)i;
             }
         }
@@ -113,6 +114,7 @@ int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
     s->shndx = shndx;
     s->value = value;
     s->size = size;
+    s->macho_desc = 0;
     return (int)m->num_syms++;
 }
 

@@ -40,6 +40,7 @@ typedef struct {
     uint16_t shndx;    /* section index, or SHN_UNDEF(0) for undefined */
     size_t value;      /* offset within section (defined symbols) */
     size_t size;       /* byte size (0 for undefined symbols) */
+    uint16_t macho_desc; /* Mach-O n_desc bits the ELF writer ignores */
 } EmitSymbol;
 
 /* ------------------------------------------------------------------ */

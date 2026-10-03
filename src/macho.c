@@ -1141,6 +1141,7 @@ int macho_write_object(const EmitModule *em, const char *path) {
                 if (s->binding == 2)
                     nl.n_desc = undef ? 0x0040u : 0x0080u; /* N_WEAK_REF / N_WEAK_DEF */
             }
+            nl.n_desc |= (uint16_t)(s->macho_desc & 0x0020u); /* N_NO_DEAD_STRIP */
             buffer_append(&out, (const char *)&nl, sizeof nl);
             str_at += 1 + strlen(s->name) + 1;
         }
@@ -1346,6 +1347,9 @@ int macho_read_object(const char *path, EmitModule *em) {
                 emit_module_add_symbol(em, raw[0] ? raw : NULL, binding, 0,
                                        SECT_UNDEF, 0, 0);
             }
+            if (em->num_syms)
+                em->syms[em->num_syms - 1].macho_desc =
+                    (uint16_t)(nl.n_desc & 0x0020u);
             continue;
         }
         if (nl.n_sect > nsec || secs[nl.n_sect - 1].shndx == 0) {
@@ -1362,6 +1366,9 @@ int macho_read_object(const char *path, EmitModule *em) {
         size_t value = (size_t)(nl.n_value - rs->addr);
         emit_module_add_symbol(em, raw[0] ? raw : NULL, binding, ty,
                                rs->shndx, value, 0);
+        if (em->num_syms)
+            em->syms[em->num_syms - 1].macho_desc =
+                (uint16_t)(nl.n_desc & 0x0020u);
     }
 
     for (int i = 0; i < nsec; i++) {
