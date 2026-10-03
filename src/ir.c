@@ -462,6 +462,33 @@ static IRValue emit_fakecc_cas(IRFunction *fn, IRValue addr, IRValue exp_ptr,
     return dst;
 }
 
+/* Same CAS, but the expected argument is a value and the result is the
+ * previous memory contents.  Nothing is written back through a pointer. */
+static IRValue emit_fakecc_cas_old(IRFunction *fn, IRValue addr, IRValue expected,
+                                  IRValue desired, int kind, int width,
+                                  int is_unsigned, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = kind;
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = is_unsigned;
+    inst.call_name = xstrdup("__fakecc_cas_old");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 3);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = expected;
+    inst.call_args[2] = desired;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, is_unsigned);
+    return dst;
+}
+
 static int get_value_width(const IRFunction *fn, IRValue v) {
     if (v < 0 || v >= fn->value_meta_cap) return 4;
     return fn->value_width[v];
@@ -6324,16 +6351,34 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
             if (strcmp(sname, "__sync_bool_compare_and_swap") == 0 ||
                 strcmp(sname, "__sync_val_compare_and_swap") == 0) {
+                int is_bool = strcmp(sname, "__sync_bool_compare_and_swap") == 0;
                 int val_sz = sz;
                 int val_u = is_u;
-                if (strcmp(sname, "__sync_bool_compare_and_swap") == 0) {
-                    if (e->u.call.args.data[0]->type.kind == TY_PTR && e->u.call.args.data[0]->type.pointee) {
-                        val_sz = type_size(*e->u.call.args.data[0]->type.pointee);
-                        val_u = e->u.call.args.data[0]->type.pointee->is_unsigned;
-                    }
+                int is_f = 0;
+                if (e->u.call.args.data[0]->type.kind == TY_PTR && e->u.call.args.data[0]->type.pointee) {
+                    Type *pt = e->u.call.args.data[0]->type.pointee;
+                    val_sz = type_size(*pt);
+                    val_u = pt->is_unsigned;
+                    is_f = pt->kind == TY_FLOAT;
                 }
                 IRValue old_expected = lower_expr(fn, st, e->u.call.args.data[1]);
                 IRValue new_desired = lower_expr(fn, st, e->u.call.args.data[2]);
+                /* __sync is a full barrier, so this is casal.  Float and
+                 * odd sizes stay a plain pair. */
+                if (!is_f && (val_sz == 1 || val_sz == 2 || val_sz == 4 || val_sz == 8)) {
+                    IRValue oldv = emit_fakecc_cas_old(fn, addr, old_expected, new_desired,
+                                                      3, val_sz, val_u, e->loc);
+                    if (val_sz < 8 && !(val_u && val_sz == 4)) {
+                        IRValue n = new_value(fn);
+                        emit_inst_w(fn, val_u ? IR_ZEXT : IR_SEXT, n, oldv, -1, 0,
+                                    8, val_u, e->loc);
+                        set_value_type(fn, n, val_sz, val_u);
+                        oldv = n;
+                    }
+                    if (is_bool)
+                        return emit_bin_w(fn, IR_EQ, oldv, old_expected, 4, 0, e->loc);
+                    return oldv;
+                }
                 IRValue cur_val = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, cur_val, addr, -1, 0, val_sz, val_u, e->loc);
                 set_value_type(fn, cur_val, val_sz, val_u);

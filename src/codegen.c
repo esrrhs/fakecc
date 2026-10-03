@@ -4795,6 +4795,37 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     break;
                 }
+                /* Expected is a value.  The result is the previous memory
+                 * contents; a match stores the desired value. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_cas_old") == 0
+                    && inst->call_nargs >= 3) {
+                    int w = inst->width;
+                    if (w != 1 && w != 2 && w != 4 && w != 8) w = 4;
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg(&out->text, inst->call_args[1], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg(&out->text, inst->call_args[2], REG_RAX, ra);
+                    emit_push_r(&out->text, REG_RAX);
+                    emit_pop_r(&out->text, REG_RDX);
+                    emit_pop_r(&out->text, REG_RSI);
+                    emit_pop_r(&out->text, REG_RCX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
+                    emit_cmp_rr_w(&out->text, REG_RAX, REG_RSI, w >= 8 ? 8 : 4);
+                    size_t je = emit_jcc_rel32(&out->text, 0x84);
+                    size_t jmp = emit_jmp_rel32(&out->text);
+                    patch_rel32(&out->text, je, out->text.len);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
+                    patch_rel32(&out->text, jmp, out->text.len);
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                    }
+                    break;
+                }
                 /* __syscall(num, a0..a5) — emit a raw `syscall` instruction.
                  * Linux x86-64 syscall ABI: rax = num, args in rdi/rsi/rdx/r10/r8/r9.
                  * We use the same push-then-pop dance to load args safely. */

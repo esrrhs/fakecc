@@ -2571,6 +2571,29 @@ static void test_sync(void) {
         "  return 0; }", 0);
 }
 
+static void test_scas(void) {
+    expect("scas",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 9;\n"
+        "  if (__sync_bool_compare_and_swap(&x, 8, 1) != 0 || x != 9) return 1;\n"
+        "  if (__sync_bool_compare_and_swap(&x, 9, 4) != 1 || x != 4) return 2;\n"
+        "  if (__sync_val_compare_and_swap(&x, 3, 7) != 4 || x != 4) return 3;\n"
+        "  if (__sync_val_compare_and_swap(&x, 4, 11) != 4 || x != 11) return 4;\n"
+        "  unsigned char c = 250;\n"
+        "  if (__sync_bool_compare_and_swap(&c, 249, 1) != 0 || c != 250) return 5;\n"
+        "  if (__sync_val_compare_and_swap(&c, 250, 3) != 250 || c != 3) return 6;\n"
+        "  signed char sc = -1;\n"
+        "  if (__sync_val_compare_and_swap(&sc, 0, 2) != -1 || sc != -1) return 7;\n"
+        "  if (__sync_bool_compare_and_swap(&sc, -1, 5) != 1 || sc != 5) return 8;\n"
+        "  short h = 7;\n"
+        "  if (__sync_val_compare_and_swap(&h, 7, -2) != 7 || h != -2) return 9;\n"
+        "  long long y = 1;\n"
+        "  if (__sync_val_compare_and_swap(&y, 1, 9) != 1 || y != 9) return 10;\n"
+        "  if (__sync_bool_compare_and_swap(&y, 8, 2) != 0 || y != 9) return 11;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2647,6 +2670,7 @@ int main(void) {
     test_cas();
     test_tas();
     test_sync();
+    test_scas();
     test_syscall();
     test_frame_addr();
     test_macho_obj();
