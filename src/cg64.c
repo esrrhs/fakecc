@@ -2151,7 +2151,8 @@ static void emit_call(C64 *c, const IRInst *s) {
     }
     if (s->call_name && (strcmp(s->call_name, "arm_dmb") == 0 ||
                          strcmp(s->call_name, "arm_dsb") == 0 ||
-                         strcmp(s->call_name, "arm_isb") == 0)) {
+                         strcmp(s->call_name, "arm_isb") == 0 ||
+                         strcmp(s->call_name, "__fakecc_dmb") == 0)) {
         int defined = 0;
         if (find_function(c->ir, s->call_name, &defined) != 0) {
             const IRInst *d = s->call_nargs >= 1 ? def_inst(c, s->call_args[0]) : NULL;
@@ -2162,9 +2163,9 @@ static void emit_call(C64 *c, const IRInst *s) {
                        s->call_name);
                 return;
             }
-            uint32_t base = strcmp(s->call_name, "arm_dmb") == 0 ? 0xD50330BFu
-                          : strcmp(s->call_name, "arm_dsb") == 0 ? 0xD503309Fu
-                          : 0xD50330DFu;
+            uint32_t base = strcmp(s->call_name, "arm_dsb") == 0 ? 0xD503309Fu
+                          : strcmp(s->call_name, "arm_isb") == 0 ? 0xD50330DFu
+                          : 0xD50330BFu;
             a64_word(c->as, base | ((uint32_t)d->imm << 8));
             return;
         }

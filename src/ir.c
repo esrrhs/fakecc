@@ -349,6 +349,26 @@ static void set_value_type(IRFunction *fn, IRValue v, int width, int is_unsigned
     fn->value_is_unsigned[v] = is_unsigned;
 }
 
+/* A real DMB.  x86 codegen ignores this call, which is what that
+ * backend already did for these builtins.  crm is the 4-bit option. */
+static void emit_fakecc_dmb(IRFunction *fn, int crm, SourceLoc loc) {
+    IRValue immv = new_value(fn);
+    emit_inst_w(fn, IR_CONST, immv, -1, -1, crm, 4, 1, loc);
+    set_value_type(fn, immv, 4, 1);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = -1;
+    inst.a = -1;
+    inst.b = -1;
+    inst.loc = loc;
+    inst.call_name = xstrdup("__fakecc_dmb");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 1);
+    inst.call_args[0] = immv;
+    ir_inst_array_push(&fn->insts, inst);
+}
+
 static int get_value_width(const IRFunction *fn, IRValue v) {
     if (v < 0 || v >= fn->value_meta_cap) return 4;
     return fn->value_width[v];
@@ -6189,6 +6209,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             strncmp(e->u.call.callee->u.var.name, "__sync_", 7) == 0) {
             const char *sname = e->u.call.callee->u.var.name;
             if (strcmp(sname, "__sync_synchronize") == 0) {
+                /* Full barrier.  This clang uses dmb ish, option 11. */
+                emit_fakecc_dmb(fn, 11, e->loc);
                 return -1;
             }
             IRValue addr = lower_expr(fn, st, e->u.call.args.data[0]);
@@ -6269,6 +6291,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 strcmp(sname, "__atomic_signal_fence") == 0) {
                 for (size_t i = 0; i < e->u.call.args.len; i++)
                     lower_expr(fn, st, e->u.call.args.data[i]);
+                /* signal_fence is only a compiler barrier.  thread_fence
+                 * matches this clang: relaxed is empty, acquire and consume
+                 * are dmb ishld (9), and release and stronger are dmb ish (11). */
+                if (strcmp(sname, "__atomic_thread_fence") == 0) {
+                    long long ord = 5;
+                    if (e->u.call.args.len >= 1)
+                        fold_const_int(e->u.call.args.data[0], &ord);
+                    if (ord != 0) {
+                        int crm = (ord == 1 || ord == 2) ? 9 : 11;
+                        emit_fakecc_dmb(fn, crm, e->loc);
+                    }
+                }
                 return -1;
             }
             if (e->u.call.args.len < 1)

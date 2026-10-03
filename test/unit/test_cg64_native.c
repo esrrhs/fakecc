@@ -2260,6 +2260,19 @@ static void test_barrier(void) {
         "  return 7; }", 7);
 }
 
+static void test_fence(void) {
+    expect("fence",
+        "package main;\n"
+        "int main(void) {\n"
+        "  __atomic_thread_fence(0);\n"
+        "  __atomic_thread_fence(2);\n"
+        "  __atomic_thread_fence(3);\n"
+        "  __atomic_thread_fence(5);\n"
+        "  __atomic_signal_fence(5);\n"
+        "  __sync_synchronize();\n"
+        "  return 7; }", 7);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2326,6 +2339,7 @@ int main(void) {
     test_cache();
     test_cycle();
     test_barrier();
+    test_fence();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

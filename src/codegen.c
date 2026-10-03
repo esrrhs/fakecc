@@ -4701,6 +4701,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
 
             case IR_CALL: {
+                /* Arm64 memory barrier.  x86 keeps the historical no-op. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_dmb") == 0)
+                    break;
                 /* __syscall(num, a0..a5) — emit a raw `syscall` instruction.
                  * Linux x86-64 syscall ABI: rax = num, args in rdi/rsi/rdx/r10/r8/r9.
                  * We use the same push-then-pop dance to load args safely. */
