@@ -2120,6 +2120,44 @@ static void emit_call(C64 *c, const IRInst *s) {
         emit_syscall(c, s);
         return;
     }
+    if (s->call_name && strcmp(s->call_name, "__fakecc_swp") == 0) {
+        /* SWP Rs, Rt, [Rn].  Rs is the new value, Rt receives the old one.
+         * kind in imm: bit0 acquire, bit1 release. */
+        if (s->call_nargs < 2) return;
+        int w = s->width;
+        if (w != 1 && w != 2 && w != 4 && w != 8) {
+            die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
+                   s->loc.line, s->loc.col,
+                   "arm64 backend: atomic exchange width must be 1, 2, 4, or 8");
+            return;
+        }
+        int p = load_ptrv(c, s->call_args[0], -1);
+        int v = load_op(c, s->call_args[1], p);
+        int d = s->dst >= 0 ? dst_reg(c, s->dst) : SCR0;
+        if (p == d || p == v) {
+            int t = safe_tmp(d, v, p == d ? -1 : p, -1);
+            a64_mov_reg(a, t, p, 1);
+            p = t;
+        }
+        if (v == d || v == p) {
+            int t = safe_tmp(d, p, -1, -1);
+            a64_mov_reg(a, t, v, 1);
+            v = t;
+        }
+        uint32_t base = w == 1 ? 0x38208000u : w == 2 ? 0x78208000u
+                      : w == 4 ? 0xB8208000u : 0xF8208000u;
+        int kind = (int)s->imm;
+        if (kind < 0 || kind > 3) kind = 3;
+        if (kind & 1) base |= 1u << 23;
+        if (kind & 2) base |= 1u << 22;
+        a64_word(a, base | ((uint32_t)(v & 31) << 16)
+                       | ((uint32_t)(p & 31) << 5)
+                       | (uint32_t)(d & 31));
+        if (!s->is_unsigned && w < 8)
+            a64_sxt(a, d, d, (unsigned)w, 1);
+        if (s->dst >= 0) commit(c, s->dst, d);
+        return;
+    }
     if (is_va_builtin(s->call_name)) {
         emit_va(c, s);
         return;

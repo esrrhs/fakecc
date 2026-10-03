@@ -2354,6 +2354,34 @@ static void test_aptr(void) {
         "  return 0; }", 0);
 }
 
+static void test_xchg(void) {
+    expect("xchg",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 9;\n"
+        "  if (__atomic_exchange_n(&x, 4, 0) != 9) return 1;\n"
+        "  if (x != 4) return 2;\n"
+        "  if (__atomic_exchange_n(&x, 1, 2) != 4) return 3;\n"
+        "  if (__atomic_exchange_n(&x, 6, 3) != 1) return 4;\n"
+        "  if (__atomic_exchange_n(&x, 8, 5) != 6) return 5;\n"
+        "  if (x != 8) return 6;\n"
+        "  x = -3;\n"
+        "  if (__atomic_exchange_n(&x, 2, 5) != -3) return 7;\n"
+        "  long long y = 3;\n"
+        "  if (__atomic_exchange_n(&y, 8, 3) != 3) return 8;\n"
+        "  if (y != 8) return 9;\n"
+        "  unsigned char c = 1;\n"
+        "  if (__atomic_exchange_n(&c, 6, 2) != 1) return 10;\n"
+        "  if (c != 6) return 11;\n"
+        "  unsigned short h = 2;\n"
+        "  if (__atomic_exchange_n(&h, 7, 3) != 2) return 12;\n"
+        "  if (h != 7) return 13;\n"
+        "  signed char sc = -5;\n"
+        "  if (__atomic_exchange_n(&sc, 4, 5) != -5) return 14;\n"
+        "  if (sc != 4) return 15;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2423,6 +2451,7 @@ int main(void) {
     test_fence();
     test_aload();
     test_aptr();
+    test_xchg();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

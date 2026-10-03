@@ -369,6 +369,32 @@ static void emit_fakecc_dmb(IRFunction *fn, int crm, SourceLoc loc) {
     ir_inst_array_push(&fn->insts, inst);
 }
 
+/* Atomic exchange.  kind 0 relaxed, 1 acquire, 2 release, 3 acq_rel.
+ * x86 lowers this to a plain swap, which is what that backend already
+ * emitted.  arm64 emits SWP/SWPA/SWPL/SWPAL. */
+static IRValue emit_fakecc_swp(IRFunction *fn, IRValue addr, IRValue val,
+                               int kind, int width, int is_unsigned, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = kind;
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = is_unsigned;
+    inst.call_name = xstrdup("__fakecc_swp");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = val;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, is_unsigned);
+    return dst;
+}
+
 static int get_value_width(const IRFunction *fn, IRValue v) {
     if (v < 0 || v >= fn->value_meta_cap) return 4;
     return fn->value_width[v];
@@ -6348,14 +6374,27 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (strcmp(sname, "__atomic_exchange_n") == 0) {
                 if (e->u.call.args.len < 2) return -1;
                 IRValue val = lower_expr(fn, st, e->u.call.args.data[1]);
-                if (e->u.call.args.len > 2)
+                long long ord = 5;
+                if (e->u.call.args.len > 2) {
                     lower_expr(fn, st, e->u.call.args.data[2]);
-                IRValue oldv = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
-                set_value_type(fn, oldv, sz, is_u);
-                if (is_f) set_value_float(fn, oldv, 1);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
-                return oldv;
+                    fold_const_int(e->u.call.args.data[2], &ord);
+                }
+                /* Float and oversized objects stay a plain pair.  Integer
+                 * 1/2/4/8 use one SWP so the read and write cannot tear. */
+                if (is_f || (sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
+                    IRValue oldv = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
+                    set_value_type(fn, oldv, sz, is_u);
+                    if (is_f) set_value_float(fn, oldv, 1);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                    return oldv;
+                }
+                /* 0 relaxed, 1 acquire (consume too), 2 release, 3 acq_rel/seq_cst. */
+                int kind = 3;
+                if (ord == 0) kind = 0;
+                else if (ord == 1 || ord == 2) kind = 1;
+                else if (ord == 3) kind = 2;
+                return emit_fakecc_swp(fn, addr, val, kind, sz, is_u, e->loc);
             }
             if (strcmp(sname, "__atomic_load") == 0) {
                 if (e->u.call.args.len < 2) return -1;
