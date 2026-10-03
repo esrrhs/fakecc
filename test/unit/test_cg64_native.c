@@ -1037,6 +1037,27 @@ static void test_vec16(void) {
         "  return 0; }", 0);
 }
 
+static void test_syscall(void) {
+    /* Carry set + positive errno becomes -errno.  EBADF is 9.
+     * Anonymous mmap is Darwin mmap=197, PROT_READ|PROT_WRITE=3,
+     * MAP_PRIVATE|MAP_ANON=0x1002. */
+    expect("sys_err",
+        "package main;\n"
+        "int main(void) {\n"
+        "  long r = __syscall(4, -1, 0, 0);\n"
+        "  if (r != -9) return 1;\n"
+        "  long z = __syscall(4, 1, 0, 0);\n"
+        "  if (z != 0) return 2;\n"
+        "  long p = __syscall(20);\n"
+        "  if (p <= 0) return 3;\n"
+        "  long m = __syscall(197, 0, 16384, 3, 0x1002, -1, 0);\n"
+        "  if (m <= 0) return 4;\n"
+        "  char *page = (char *)m;\n"
+        "  page[0] = 42;\n"
+        "  if (page[0] != 42) return 5;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -1072,6 +1093,7 @@ int main(void) {
     test_float();
     test_vec16();
     test_int128();
+    test_syscall();
     return t_finalize();
 }
 

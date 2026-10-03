@@ -848,11 +848,11 @@ static void emit_call(C64 *c, const IRInst *s) {
     }
 }
 
-/* Raw Darwin syscall: number in x16, arguments in x0..x5, svc #0x80,
- * result in x0.  The IR shape mirrors the x86 backend's __syscall
- * intrinsic: call_args[0] is the number, call_args[1..6] the arguments.
- * (errno/carry handling arrives with the T13 builtin pass; this slice
- * exists so freestanding code can do write/exit without libSystem.) */
+/* Raw Darwin syscall: number in x16, arguments in x0..x5, svc #0x80.
+ * The kernel sets the carry flag and leaves a positive errno in x0 on
+ * failure.  x9 (caller-saved, already forbidden across the call, and
+ * the scratch Apple's own stubs use) records that carry; a set carry
+ * negates x0 so the result is the Linux-shaped -errno. */
 static void emit_syscall(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
     int n = s->call_nargs;
@@ -921,6 +921,13 @@ static void emit_syscall(C64 *c, const IRInst *s) {
         a64_mov_reg(a, A64_X16, sr, 1);
     }
     a64_svc(a, 0x80);
+    {
+        int ok = a64_new_label(a);
+        a64_cset(a, A64_X9, A64_CS, 1);
+        a64_cbz(a, A64_X9, ok, 1);
+        a64_neg(a, A64_X0, A64_X0, 1);
+        a64_bind(a, ok);
+    }
 
     if (s->dst >= 0) {
         int d = dst_reg(c, s->dst);
