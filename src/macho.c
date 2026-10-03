@@ -6,8 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+/* The bootstrap (FAKECC_SELFHOST) preprocesses with the minimal v0/fakeinc
+ * stubs, which lack these headers; the selfhost image never invokes
+ * codesign (see macho_codesign). */
+#ifndef FAKECC_SELFHOST
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 /* Mach-O 64-bit structures and constants (Apple loader/mach-o headers).
  * Layout below was validated against lld/ld64 output and by executing
@@ -446,6 +451,7 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
 }
 
 int macho_codesign(const char *path) {
+#ifndef FAKECC_SELFHOST
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "fakecc: fork failed for codesign\n");
@@ -463,4 +469,9 @@ int macho_codesign(const char *path) {
         return -1;
     }
     return 0;
+#else
+    /* Selfhost images never emit a Mach-O that needs a host codesign. */
+    (void)path;
+    return -1;
+#endif
 }

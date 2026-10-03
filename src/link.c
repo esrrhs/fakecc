@@ -1891,6 +1891,24 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
+    uint64_t base = is_shared ? 0 : ELF_BASE;
+    uint64_t code_vaddr = base + text_offset;
+    /* Combined .rodata follows .text; pad .text so rodata's vaddr matches
+     * max_ro_align even when text_offset is not 16-aligned
+     * (hdr + _start = 0x16e).  This MUST happen before the layout sizes
+     * below: the pad grows the physical rx content, so computing file
+     * offsets first and padding afterwards desynchronizes the physical
+     * image from the declared layout (the GOT would then be written a
+     * few bytes after its resolved slots, which crashes lazy glibc loaders
+     * while eager musl/gcompat loaders paper over it). */
+    {
+        size_t ro_va = (size_t)(code_vaddr + text.len);
+        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
+        while (extra--) {
+            char z = 0;
+            buffer_append(&text, &z, 1);
+        }
+    }
     /* .dynamic size: num_needed×DT_NEEDED + [DT_SONAME] + [DT_RUNPATH] + 9 fixed tags +
      * DT_NULL, plus DT_RELA/RELASZ/RELENT when .rela.dyn is non-empty. */
     size_t dynamic_size = 0;
@@ -1917,7 +1935,6 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t data_file_offset = rx_filesz;
     if (data_file_offset & (PAGE_SIZE - 1))
         data_file_offset = (data_file_offset + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
-    uint64_t base = is_shared ? 0 : ELF_BASE;
     uint64_t data_vaddr = base + data_file_offset;
     size_t got_data_off = data.len;
     while (got_data_off & 7) got_data_off++;
@@ -1962,17 +1979,6 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     bss_data_off = pad_size_to(bss_data_off, max_bss_align);
     uint64_t bss_vaddr = data_vaddr + bss_data_off;
     size_t bss_file_offset = data_file_offset + bss_data_off;
-    uint64_t code_vaddr = base + text_offset;
-    /* Combined .rodata follows .text; pad so its vaddr matches max_ro_align
-     * even when text_offset is not 16-aligned (hdr + _start = 0x16e). */
-    {
-        size_t ro_va = (size_t)(code_vaddr + text.len);
-        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
-        while (extra--) {
-            char z = 0;
-            buffer_append(&text, &z, 1);
-        }
-    }
 
     /* ---- Compute final symbol addresses ---- */
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));

@@ -149,12 +149,24 @@ static void frame_load(C64 *c, int rt, int off, int width, int uns) {
     A64Asm *a = c->as;
     if (off >= -256 && off <= 255) {
         switch (width) {
-        case 1: if (uns) a64_ldur8(a, rt, A64_FP, off);
-                else a64_ldursb64(a, rt, A64_FP, off); break;
-        case 2: if (uns) a64_ldur16(a, rt, A64_FP, off);
-                else a64_ldursh64(a, rt, A64_FP, off); break;
-        case 4: if (uns) a64_ldur32(a, rt, A64_FP, off);
-                else a64_ldursw(a, rt, A64_FP, off); break;
+        case 1:
+            if (uns)
+                a64_ldur8(a, rt, A64_FP, off);
+            else
+                a64_ldursb64(a, rt, A64_FP, off);
+            break;
+        case 2:
+            if (uns)
+                a64_ldur16(a, rt, A64_FP, off);
+            else
+                a64_ldursh64(a, rt, A64_FP, off);
+            break;
+        case 4:
+            if (uns)
+                a64_ldur32(a, rt, A64_FP, off);
+            else
+                a64_ldursw(a, rt, A64_FP, off);
+            break;
         default: a64_ldur64(a, rt, A64_FP, off); break;
         }
         return;
