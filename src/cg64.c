@@ -42,7 +42,7 @@ typedef struct {
     size_t           *goff;
     /* ADRP+ADD pairs targeting globals; patched once the final section
      * placement (which depends on the total text length) is known. */
-    struct GFix { uint32_t at; int gidx; const char *name; } *gfix;
+    struct GFix { uint32_t at; int gidx; const char *name; int value; int addend; } *gfix;
     size_t            ngfix, capgfix;
     /* Pointer slots inside global initializers.  Resolved into dyld
      * rebases once every section base is known. */
@@ -89,7 +89,8 @@ static const char *note_label_sym(C64 *c, int ir_id, int a64lab) {
     return buf;
 }
 
-static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name) {
+static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name,
+                            int value) {
     if (c->ngfix == c->capgfix) {
         c->capgfix = c->capgfix ? c->capgfix * 2 : 64;
         c->gfix = realloc(c->gfix, c->capgfix * sizeof *c->gfix);
@@ -98,6 +99,8 @@ static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name) {
     c->gfix[c->ngfix].at = at;
     c->gfix[c->ngfix].gidx = gidx;
     c->gfix[c->ngfix].name = name;
+    c->gfix[c->ngfix].value = value;
+    c->gfix[c->ngfix].addend = 0;
     c->ngfix++;
 }
 
@@ -2857,7 +2860,84 @@ static int cmp_cond(const IRInst *s) {
     }
 }
 
+static int c64_eval_offset(C64 *c, int v, int64_t *out, int depth) {
+    if (depth > 6 || v < 0 || !c->def || v >= c->fn->next_value_id) return 0;
+    int di = c->def[v];
+    if (di < 0 || (size_t)di >= c->fn->insts.len) return 0;
+    const IRInst *s = &c->fn->insts.data[di];
+    if (s->op == IR_CONST) { *out = s->imm; return 1; }
+    if (s->op == IR_SEXT || s->op == IR_ZEXT || s->op == IR_TRUNC) {
+        int64_t inner;
+        if (!c64_eval_offset(c, s->a, &inner, depth + 1)) return 0;
+        if (s->op == IR_SEXT) {
+            int sw = (int)s->imm;
+            if (sw == 1) inner = (int8_t)inner;
+            else if (sw == 2) inner = (int16_t)inner;
+            else if (sw == 4) inner = (int32_t)inner;
+        } else if (s->width == 1) inner &= 0xff;
+        else if (s->width == 2) inner &= 0xffff;
+        else if (s->width == 4) inner &= 0xffffffffLL;
+        *out = inner;
+        return 1;
+    }
+    if (s->op == IR_MUL || s->op == IR_ADD) {
+        int64_t x, y;
+        if (!c64_eval_offset(c, s->a, &x, depth + 1)) return 0;
+        if (!c64_eval_offset(c, s->b, &y, depth + 1)) return 0;
+        *out = (s->op == IR_MUL) ? x * y : x + y;
+        return 1;
+    }
+    return 0;
+}
+
+static int c64_value_uses(C64 *c, int v) {
+    int n = 0;
+    for (size_t i = 0; i < c->fn->insts.len; i++) {
+        const IRInst *s = &c->fn->insts.data[i];
+        if (s->a == v || s->b == v) n++;
+        if (s->op != IR_CALL) continue;
+        if (s->call_callee == v) n++;
+        for (int k = 0; k < s->call_nargs; k++)
+            if (s->call_args && s->call_args[k] == v) n++;
+    }
+    return n;
+}
+
+/* A one-use ADRP+ADD plus a constant byte offset becomes ARM64_RELOC_ADDEND
+ * so the linker, not a later add, applies an offset that may cross a page. */
+static int fold_page_addend(C64 *c, const IRInst *s) {
+    if ((s->op != IR_ADD && s->op != IR_SUB) || s->width != 8 || s->is_float)
+        return 0;
+    int base, neg = s->op == IR_SUB;
+    int64_t off = 0;
+    if (neg) {
+        base = s->a;
+        if (!c64_eval_offset(c, s->b, &off, 0)) return 0;
+        off = -off;
+    } else {
+        int64_t left = 0, right = 0;
+        int lc = c64_eval_offset(c, s->a, &left, 0);
+        int rc = c64_eval_offset(c, s->b, &right, 0);
+        if (rc && !lc) { base = s->a; off = right; }
+        else if (lc && !rc) { base = s->b; off = left; }
+        else return 0;
+    }
+    if (off == 0 || off > 0x7FFFFF || off < -0x800000) return 0;
+    int gi = -1;
+    for (size_t i = 0; i < c->ngfix; i++)
+        if (c->gfix[i].value == base) gi = (int)i;
+    if (gi < 0) return 0;
+    if (c64_value_uses(c, base) != 1) return 0;
+    c->gfix[gi].addend += (int)off;
+    int ra = load_op(c, base, -1);
+    int d = dst_reg(c, s->dst);
+    if (d != ra) a64_mov_reg(c->as, d, ra, 1);
+    commit(c, s->dst, d);
+    return 1;
+}
+
 static void emit_binop(C64 *c, const IRInst *s) {
+    if (fold_page_addend(c, s)) return;
     A64Asm *a = c->as;
     int d = dst_reg(c, s->dst);
     int is64 = s->width == 8;
@@ -3686,7 +3766,7 @@ static void emit_function(C64 *c, int fi) {
             int lab = vlabels_get(c, (int)s->imm);
             if (emit_object_mode()) {
                 const char *nm = note_label_sym(c, (int)s->imm, lab);
-                note_page_reloc(c, (uint32_t)a->code.len, -1, nm);
+                note_page_reloc(c, (uint32_t)a->code.len, -1, nm, s->dst);
                 a64_word(a, 0x90000000u | (uint32_t)(d & 31));
                 a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
                                         | (uint32_t)(d & 31));
@@ -3999,7 +4079,7 @@ static void emit_function(C64 *c, int fi) {
             /* adrp d, page ; add d, d, #pageoff — both words patched in
              * codegen64 once __const/__data/__bss placement is final. */
             note_page_reloc(c, (uint32_t)a->code.len, gi,
-                            gi < 0 ? s->call_name : NULL);
+                            gi < 0 ? s->call_name : NULL, s->dst);
             a64_word(a, 0x90000000u | (uint32_t)(d & 31));
             a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
                                     | (uint32_t)(d & 31));
@@ -4020,7 +4100,7 @@ static void emit_function(C64 *c, int fi) {
             /* Object text is concatenated after an entry stub, so a baked
              * ADRP would miss the real page.  Record a reloc instead. */
             if (emit_object_mode()) {
-                note_page_reloc(c, (uint32_t)a->code.len, -1, s->call_name);
+                note_page_reloc(c, (uint32_t)a->code.len, -1, s->call_name, s->dst);
                 a64_word(a, 0x90000000u | (uint32_t)(d & 31));
                 a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
                                         | (uint32_t)(d & 31));
@@ -4340,7 +4420,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             int gi = c.gfix[i].gidx;
             uint64_t base = c.gsect[gi] == G_RO ? ro_off
                           : c.gsect[gi] == G_DATA ? data_off : bss_off;
-            uint64_t tgt = base + c.goff[gi];
+            uint64_t tgt = base + c.goff[gi] + (uint64_t)c.gfix[i].addend;
             uint64_t pc = (uint64_t)macho_text_offset() + c.gfix[i].at;
             int64_t pages = (int64_t)((tgt & ~(uint64_t)0xFFF)
                                       - (pc & ~(uint64_t)0xFFF)) >> 12;
@@ -4461,7 +4541,13 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                        "arm64 object file: global has no symbol");
                 continue;
             }
+            if (c.gfix[i].addend)
+                emit_module_add_reloc(out, c.gfix[i].at, 10 /* ADDEND */,
+                                      0, c.gfix[i].addend);
             emit_module_add_reloc(out, c.gfix[i].at, 3 /* PAGE21 */, si, 0);
+            if (c.gfix[i].addend)
+                emit_module_add_reloc(out, c.gfix[i].at + 4, 10 /* ADDEND */,
+                                      0, c.gfix[i].addend);
             emit_module_add_reloc(out, c.gfix[i].at + 4, 4 /* PAGEOFF12 */,
                                   si, 0);
         }

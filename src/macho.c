@@ -781,12 +781,16 @@ static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
         const EmitReloc *r = &rels[sorted[i]];
         int sym = (nmap && r->sym < nsyms) ? nmap[r->sym] : 0;
         if (sym < 0) sym = 0;
+        uint32_t ext = (r->type == 10) ? 0u : 1u;
+        uint32_t symfield = (r->type == 10)
+                          ? ((uint32_t)r->addend & 0xFFFFFFu)
+                          : ((uint32_t)sym & 0xFFFFFFu);
         uint32_t pcrel = (r->type == 2 || r->type == 3) ? 1u : 0u;
         uint32_t length = r->type == 0 ? 3u : 2u; /* UNSIGNED is 8 bytes */
-        uint32_t word = ((uint32_t)sym & 0xFFFFFFu)
+        uint32_t word = symfield
                       | (pcrel << 24)
                       | (length << 25)
-                      | (1u << 27)
+                      | (ext << 27)
                       | ((r->type & 0xFu) << 28);
         int32_t addr = (int32_t)r->offset;
         buffer_append(out, (const char *)&addr, 4);
@@ -1369,6 +1373,8 @@ int macho_read_object(const char *path, EmitModule *em) {
             fprintf(stderr, "fakecc: '%s' relocations are out of range\n", path);
             return -1;
         }
+        int32_t pending = 0;
+        int have_pending = 0;
         for (uint32_t ri = 0; ri < rs->nreloc; ri++) {
             int32_t addr = 0;
             uint32_t word = 0;
@@ -1376,12 +1382,23 @@ int macho_read_object(const char *path, EmitModule *em) {
             memcpy(&word, buf + rs->reloff + ri * 8 + 4, 4);
             uint32_t sym = word & 0xFFFFFFu;
             uint32_t type = (word >> 28) & 0xFu;
+            if (type == 10) {
+                /* ARM64_RELOC_ADDEND: signed 24-bit addend for the next reloc. */
+                pending = (int32_t)(sym & 0xFFFFFFu);
+                if (pending & 0x800000) pending |= ~0xFFFFFF;
+                have_pending = 1;
+                continue;
+            }
             int32_t addend = 0;
             if (type == 0 && rs->shndx == SECT_DATA &&
                 (size_t)addr + 8 <= em->data.len) {
                 int64_t full = 0;
                 memcpy(&full, em->data.data + addr, 8);
                 addend = (int32_t)full;
+            }
+            if (have_pending) {
+                addend = pending;
+                have_pending = 0;
             }
             if (rs->shndx == SECT_INIT_ARRAY || rs->shndx == SECT_FINI_ARRAY) {
                 size_t slot = ((size_t)addr / 16) * 8;

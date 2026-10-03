@@ -1465,6 +1465,52 @@ static void test_hidden(void) {
     emit_module_free(&mc);
 }
 
+static int reloc_addend_is(const EmitModule *m, int addend) {
+    for (size_t i = 0; i < m->num_relocs; i++)
+        if (m->relocs[i].addend == addend) return 1;
+    return 0;
+}
+
+static void test_addend(void) {
+    const char *def = "/tmp/fakecc_arm64_addend_def.o";
+    const char *call = "/tmp/fakecc_arm64_addend_main.o";
+    const char *outp = "/tmp/fakecc_arm64_addend_out";
+    const char *err = "/tmp/fakecc_arm64_addend_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "struct S { int a; int b; };\n"
+        "struct S g;\n"
+        "struct B { char pad[5000]; int x; };\n"
+        "struct B wide;\n"
+        "void set_fields(void) { g.b = 9; wide.x = 7; }\n",
+        def, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "struct S { int a; int b; };\n"
+        "extern struct S g;\n"
+        "struct B { char pad[5000]; int x; };\n"
+        "extern struct B wide;\n"
+        "void set_fields(void);\n"
+        "int main(void) {\n"
+        "  set_fields();\n"
+        "  if (g.b != 9) return 1;\n"
+        "  return wide.x;\n"
+        "}\n",
+        call, NULL), 0);
+    EmitModule mc;
+    T_ASSERT_EQ_INT(emit_obj_read(call, &mc), 0);
+    T_ASSERT(reloc_addend_is(&mc, 4));
+    T_ASSERT(reloc_addend_is(&mc, 5000));
+    EmitModule md;
+    T_ASSERT_EQ_INT(emit_obj_read(def, &md), 0);
+    EmitModule *mods[2] = { &mc, &md };
+    T_ASSERT_EQ_INT(link_capturing(mods, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    emit_module_free(&mc);
+    emit_module_free(&md);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3132,6 +3178,7 @@ int main(void) {
     test_wref();
     test_alias();
     test_hidden();
+    test_addend();
     test_macho_link();
     return t_finalize();
 }
