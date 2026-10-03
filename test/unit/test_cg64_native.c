@@ -1545,6 +1545,33 @@ static void test_bitops(void) {
         "  return 0; }", 0);
 }
 
+static void test_fpmath(void) {
+    expect("fpmath",
+        "package main;\n"
+        "int main(void) {\n"
+        "  double a = -3.5;\n"
+        "  float b = -2.5f;\n"
+        "  if (__builtin_fabs(a) != 3.5) return 1;\n"
+        "  if (__builtin_fabsf(b) != 2.5f) return 2;\n"
+        "  if (__builtin_fabsl(-8.0L) != 8.0L) return 3;\n"
+        "  if (__builtin_sqrt(9.0) != 3.0) return 4;\n"
+        "  if (__builtin_sqrtf(4.0f) != 2.0f) return 5;\n"
+        "  if (__builtin_ceil(1.2) != 2.0) return 6;\n"
+        "  if (__builtin_floor(-1.2) != -2.0) return 7;\n"
+        "  if (__builtin_trunc(-1.8) != -1.0) return 8;\n"
+        "  if (__builtin_round(2.5) != 3.0) return 9;\n"
+        "  if (__builtin_nearbyint(2.5) != 2.0) return 10;\n"
+        "  if (__builtin_fmin(1.5, -4.0) != -4.0) return 11;\n"
+        "  if (__builtin_fmaxf(-1.0f, 4.0f) != 4.0f) return 12;\n"
+        "  if (__builtin_fma(2.0, 3.0, 4.0) != 10.0) return 13;\n"
+        "  if (__builtin_fmaf(-2.0f, 3.0f, 1.0f) != -5.0f) return 14;\n"
+        "  if (__builtin_copysign(2.0, -1.0) != -2.0) return 15;\n"
+        "  if (__builtin_copysign(-2.0, 1.0) != 2.0) return 16;\n"
+        "  if (__builtin_copysignf(-3.0f, 1.0f) != 3.0f) return 17;\n"
+        "  if (__builtin_fmin(__builtin_nan(\"\"), 3.0) != 3.0) return 18;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -1582,6 +1609,7 @@ int main(void) {
     test_int128();
     test_setjmp();
     test_bitops();
+    test_fpmath();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

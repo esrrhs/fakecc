@@ -721,6 +721,114 @@ static void emit_va(C64 *c, const IRInst *s) {
     place_from(c, s->dst, base);
 }
 
+/* Names after the IR strips the __builtin_ prefix.  A trailing f/l is the
+ * width suffix; long double is IEEE double on Darwin, so 'l' uses the
+ * 64-bit instruction.  A user function of the same name still wins. */
+static int fp_named(const char *n, const char *root) {
+    size_t L = strlen(root);
+    if (strncmp(n, root, L) != 0) return 0;
+    char s = n[L];
+    return s == '\0' || ((s == 'f' || s == 'l') && n[L + 1] == '\0');
+}
+
+static int fp_builtin_kind(const char *n, int *nargs) {
+    if (!n) return 0;
+    struct { const char *root; int kind; int narg; } tab[] = {
+        {"copysign", 1, 2}, {"nearbyint", 2, 1}, {"floor", 3, 1},
+        {"trunc", 4, 1}, {"round", 5, 1}, {"ceil", 6, 1},
+        {"fabs", 7, 1}, {"sqrt", 8, 1}, {"fmin", 9, 2},
+        {"fmax", 10, 2}, {"fma", 11, 3}, {"rint", 2, 1},
+    };
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+        if (fp_named(n, tab[i].root)) {
+            *nargs = tab[i].narg;
+            return tab[i].kind;
+        }
+    }
+    return 0;
+}
+
+static void fp_unop(A64Asm *a, uint32_t base_d, int rd, int rn, int isd) {
+    uint32_t base = isd ? base_d : (base_d & ~0x00400000u);
+    a64_word(a, base | ((uint32_t)(rn & 31) << 5) | (uint32_t)(rd & 31));
+}
+
+static void fp_binop(A64Asm *a, uint32_t base_d, int rd, int rn, int rm, int isd) {
+    uint32_t base = isd ? base_d : (base_d & ~0x00400000u);
+    a64_word(a, base | ((uint32_t)(rm & 31) << 16)
+                    | ((uint32_t)(rn & 31) << 5)
+                    | (uint32_t)(rd & 31));
+}
+
+static int fp_result(C64 *c, IRValue v, int fallback) {
+    int h = fp_home(c, v);
+    return h >= 0 ? h : fallback;
+}
+
+static void emit_fp_builtin(C64 *c, const IRInst *s, int kind) {
+    A64Asm *a = c->as;
+    if (s->dst < 0) return;
+    int isd = vw(c, s->call_args[0]) == 8;
+    if (kind == 1) {
+        /* copysign: clear the sign bit, then OR in the sign of arg2. */
+        int mag = load_fp(c, s->call_args[0], -1);
+        int sgn = load_fp(c, s->call_args[1], mag);
+        a64_fmov_gp(a, A64_X0, mag, 0, isd);
+        a64_fmov_gp(a, A64_X1, sgn, 0, isd);
+        unsigned sign = isd ? 63u : 31u;
+        a64_lsl_imm(a, A64_X0, A64_X0, 1, isd);
+        a64_lsr_imm(a, A64_X0, A64_X0, 1, isd);
+        a64_lsr_imm(a, A64_X1, A64_X1, sign, isd);
+        a64_lsl_imm(a, A64_X1, A64_X1, sign, isd);
+        a64_or_reg(a, A64_X0, A64_X0, A64_X1, isd);
+        int dst = fp_result(c, s->dst, (mag == FSCR || sgn == FSCR) ? A64_V30 : FSCR);
+        a64_fmov_gp(a, dst, A64_X0, 1, isd);
+        commit_fp(c, s->dst, dst);
+        return;
+    }
+    if (kind == 11) {
+        /* Park all three in GP first: a spilled third operand would
+         * otherwise reuse the only two vector scratches. */
+        int r = load_fp(c, s->call_args[0], -1);
+        a64_fmov_gp(a, A64_X0, r, 0, isd);
+        r = load_fp(c, s->call_args[1], -1);
+        a64_fmov_gp(a, A64_X1, r, 0, isd);
+        r = load_fp(c, s->call_args[2], -1);
+        a64_fmov_gp(a, SCR0, r, 0, isd);
+        a64_fmov_gp(a, A64_V0, A64_X0, 1, isd);
+        a64_fmov_gp(a, A64_V1, A64_X1, 1, isd);
+        a64_fmov_gp(a, A64_V2, SCR0, 1, isd);
+        int dst = fp_result(c, s->dst, A64_V3);
+        /* FMADD Dd, Dn, Dm, Da = arg0 * arg1 + arg2. */
+        uint32_t base = isd ? 0x1F400000u : 0x1F000000u;
+        a64_word(a, base | ((uint32_t)A64_V1 << 16) | ((uint32_t)A64_V2 << 10)
+                       | ((uint32_t)A64_V0 << 5) | (uint32_t)(dst & 31));
+        commit_fp(c, s->dst, dst);
+        return;
+    }
+    if (kind == 9 || kind == 10) {
+        int a0 = load_fp(c, s->call_args[0], -1);
+        int a1 = load_fp(c, s->call_args[1], a0);
+        int dst = fp_result(c, s->dst, a0);
+        /* FMINNM/FMAXNM: a quiet NaN loses to the numeric operand.
+         * Plain FMIN/FMAX return the NaN on this CPU. */
+        fp_binop(a, kind == 9 ? 0x1E607800u : 0x1E606800u, dst, a0, a1, isd);
+        commit_fp(c, s->dst, dst);
+        return;
+    }
+    int src = load_fp(c, s->call_args[0], -1);
+    int dst = fp_result(c, s->dst, src == FSCR ? A64_V30 : FSCR);
+    uint32_t base = 0x1E60C000u; /* fabs */
+    if (kind == 8) base = 0x1E61C000u;       /* sqrt */
+    else if (kind == 6) base = 0x1E64C000u;  /* ceil  = frintp */
+    else if (kind == 3) base = 0x1E654000u;  /* floor = frintm */
+    else if (kind == 4) base = 0x1E65C000u;  /* trunc = frintz */
+    else if (kind == 5) base = 0x1E664000u;  /* round = frinta */
+    else if (kind == 2) base = 0x1E67C000u;  /* rint / nearbyint = frinti */
+    fp_unop(a, base, dst, src, isd);
+    commit_fp(c, s->dst, dst);
+}
+
 static void emit_call(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
     int n = s->call_nargs;
@@ -740,6 +848,17 @@ static void emit_call(C64 *c, const IRInst *s) {
     if (is_bit_builtin(s->call_name)) {
         emit_bit_builtin(c, s);
         return;
+    }
+    {
+        int fp_narg = 0;
+        int fp_kind = fp_builtin_kind(s->call_name, &fp_narg);
+        if (fp_kind && s->call_nargs >= fp_narg) {
+            int defined = 0;
+            if (find_function(c->ir, s->call_name, &defined) != 0) {
+                emit_fp_builtin(c, s, fp_kind);
+                return;
+            }
+        }
     }
 
     int sret = s->align16 == A64_MARK_SRET;

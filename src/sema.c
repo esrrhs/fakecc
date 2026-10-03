@@ -39,6 +39,30 @@ int sema_error_count(void) {
     return g_sema_error_count;
 }
 
+/* libm-style builtins the arm64 backend lowers directly.  Width is 4
+ * (f), 8, or long double (l).  *nargs is 1, 2, or 3.  -1 if unrelated. */
+static int math_builtin_width(const char *n, int *nargs) {
+    const char *b = n;
+    if (strncmp(b, "__builtin_", 10) == 0) b += 10;
+    static const struct { const char *root; int narg; } tab[] = {
+        {"nearbyint", 1}, {"floor", 1}, {"trunc", 1}, {"round", 1},
+        {"ceil", 1}, {"sqrt", 1}, {"fmin", 2}, {"fmax", 2},
+        {"fma", 3}, {"rint", 1},
+    };
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+        size_t L = strlen(tab[i].root);
+        if (strncmp(b, tab[i].root, L) != 0) continue;
+        char s = b[L];
+        if (s == '\0') { *nargs = tab[i].narg; return 8; }
+        if (s == 'f' && b[L + 1] == '\0') { *nargs = tab[i].narg; return 4; }
+        if (s == 'l' && b[L + 1] == '\0') {
+            *nargs = tab[i].narg;
+            return type_long_double_width();
+        }
+    }
+    return -1;
+}
+
 static void sema_report_error(const SourceLoc *loc, const char *fmt, ...) {
     if (fakecc_had_error()) return;
     va_list ap;
@@ -1254,6 +1278,7 @@ static Type check_expr_inner(Expr *e) {
         }
         if (strncmp(e->u.var.name, "__builtin_", 10) == 0 || strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
+            int math_narg = 0, math_w = 0;
             Type ret = type_default_int();
             if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)
                 ret = type_make_void();
@@ -1276,6 +1301,8 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_fabsl") == 0)
                 ret = type_make_float(type_long_double_width());
+            else if ((math_w = math_builtin_width(bname, &math_narg)) > 0)
+                ret = type_make_float(math_w);
             else if (strcmp(bname, "__builtin_copysign") == 0 || strcmp(bname, "copysign") == 0)
                 ret = type_make_float(8);
             else if (strcmp(bname, "__builtin_copysignf") == 0 || strcmp(bname, "copysignf") == 0)
@@ -1318,8 +1345,8 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_int(8, 1);
             else if (strcmp(bname, "__builtin_va_arg_pack") == 0 || strcmp(bname, "__builtin_va_arg_pack_len") == 0)
                 ret = type_default_int();
-            Type p0, p1;
-            Type *params[2];
+            Type p0, p1, p2;
+            Type *params[3];
             int num_params = 0;
             if (strcmp(bname, "__builtin_copysignf") == 0 || strcmp(bname, "copysignf") == 0) {
                 p0 = type_make_float(4);
@@ -1348,6 +1375,24 @@ static Type check_expr_inner(Expr *e) {
                 p0 = type_make_float(type_long_double_width());
                 params[0] = &p0;
                 num_params = 1;
+            } else {
+                int narg = 0;
+                int w = math_builtin_width(bname, &narg);
+                if (w > 0) {
+                    p0 = type_make_float(w);
+                    params[0] = &p0;
+                    num_params = 1;
+                    if (narg >= 2) {
+                        p1 = type_make_float(w);
+                        params[1] = &p1;
+                        num_params = 2;
+                    }
+                    if (narg >= 3) {
+                        p2 = type_make_float(w);
+                        params[2] = &p2;
+                        num_params = 3;
+                    }
+                }
             }
             Type fn = type_make_func(ret, num_params > 0 ? (Type * const *)params : NULL, num_params);
             /* Builtins without a recorded prototype (memcpy, snprintf_chk, …)
