@@ -1224,6 +1224,62 @@ static void test_common(void) {
     emit_module_free(&md);
 }
 
+static void test_weak(void) {
+    const char *wk = "/tmp/fakecc_arm64_weak.o";
+    const char *st = "/tmp/fakecc_arm64_strong.o";
+    const char *st2 = "/tmp/fakecc_arm64_strong2.o";
+    const char *call = "/tmp/fakecc_arm64_weak_main.o";
+    const char *outp = "/tmp/fakecc_arm64_weak_out";
+    const char *err = "/tmp/fakecc_arm64_weak_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int pick(void) __attribute__((weak)) { return 1; }\n",
+        wk, NULL), 0);
+    EmitModule mwk;
+    T_ASSERT_EQ_INT(emit_obj_read(wk, &mwk), 0);
+    int ps = emit_module_find_symbol(&mwk, "pick");
+    T_ASSERT(ps >= 0);
+    T_ASSERT_EQ_INT((int)mwk.syms[ps].binding, 2);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int pick(void);\n"
+        "int main(void) { return pick(); }\n",
+        call, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int pick(void) { return 2; }\n",
+        st, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int pick(void) { return 3; }\n",
+        st2, NULL), 0);
+    EmitModule mcall, mst, mst2;
+    T_ASSERT_EQ_INT(emit_obj_read(call, &mcall), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(st, &mst), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(st2, &mst2), 0);
+    EmitModule *only[2] = { &mcall, &mwk };
+    T_ASSERT_EQ_INT(link_capturing(only, 2, outp, err), 0);
+    T_ASSERT(!err_has(err, "duplicate symbol"));
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 1);
+    EmitModule *win[3] = { &mcall, &mwk, &mst };
+    T_ASSERT_EQ_INT(link_capturing(win, 3, outp, err), 0);
+    T_ASSERT(!err_has(err, "duplicate symbol"));
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 2);
+    EmitModule *rev[3] = { &mcall, &mst, &mwk };
+    T_ASSERT_EQ_INT(link_capturing(rev, 3, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 2);
+    EmitModule *dup[3] = { &mcall, &mst, &mst2 };
+    T_ASSERT(link_capturing(dup, 3, outp, err) != 0);
+    T_ASSERT(err_has(err, "duplicate symbol"));
+    emit_module_free(&mwk);
+    emit_module_free(&mcall);
+    emit_module_free(&mst);
+    emit_module_free(&mst2);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -2887,6 +2943,7 @@ int main(void) {
     test_frame_addr();
     test_macho_obj();
     test_common();
+    test_weak();
     test_macho_link();
     return t_finalize();
 }

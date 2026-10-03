@@ -1132,6 +1132,7 @@ int macho_write_object(const EmitModule *em, const char *path) {
             } else {
                 nl.n_value = undef ? 0
                            : sect_addr[s->shndx] + (uint64_t)s->value;
+                if (s->binding == 2) nl.n_desc = 0x0080; /* N_WEAK_DEF */
             }
             buffer_append(&out, (const char *)&nl, sizeof nl);
             str_at += 1 + strlen(s->name) + 1;
@@ -1345,7 +1346,8 @@ int macho_read_object(const char *path, EmitModule *em) {
             return -1;
         }
         RSec *rs = &secs[nl.n_sect - 1];
-        uint8_t binding = (nl.n_type & N_EXT) ? 1 : 0;
+        uint8_t binding = (nl.n_desc & 0x0080) ? 2
+                        : (nl.n_type & N_EXT) ? 1 : 0;
         uint8_t ty = rs->shndx == SECT_TEXT ? 2 : 1;
         size_t value = (size_t)(nl.n_value - rs->addr);
         emit_module_add_symbol(em, raw[0] ? raw : NULL, binding, ty,
@@ -1555,7 +1557,7 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             out.bss_align = mods[i]->bss_align;
     }
 
-    typedef struct { char *name; uint16_t sh; size_t off; size_t size; } GDef;
+    typedef struct { char *name; uint16_t sh; size_t off; size_t size; uint8_t binding; } GDef;
     GDef *gdefs = NULL;
     size_t ng = 0, capg = 0;
     typedef struct { uint16_t sh; size_t off; int defined; } Adj;
@@ -1580,23 +1582,34 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             else if (es->shndx == SECT_BSS) base = bss_base[i];
             adj[i][s].off = base + es->value;
             if (!adj[i][s].defined || !es->name || es->binding == 0) continue;
-            if (es->shndx == SECT_TEXT && strcmp(es->name, "main") == 0) {
-                if (have_main) {
-                    fprintf(stderr, "fakecc: duplicate symbol 'main'\n");
-                    rc = -1;
-                    break;
-                }
-                have_main = 1;
-                main_off = adj[i][s].off;
-            }
+            int is_main = es->shndx == SECT_TEXT && strcmp(es->name, "main") == 0;
+            int keep = 1;
             for (size_t g = 0; g < ng; g++) {
-                if (strcmp(gdefs[g].name, es->name) == 0) {
+                if (strcmp(gdefs[g].name, es->name) != 0) continue;
+                int old_weak = gdefs[g].binding == 2;
+                int new_weak = es->binding == 2;
+                if (!old_weak && !new_weak) {
                     fprintf(stderr, "fakecc: duplicate symbol '%s'\n", es->name);
                     rc = -1;
                     break;
                 }
+                if (old_weak && !new_weak) {
+                    gdefs[g].sh = es->shndx;
+                    gdefs[g].off = adj[i][s].off;
+                    gdefs[g].size = es->size ? es->size
+                                   : macho_symbol_span(m, es->shndx, es->value);
+                    gdefs[g].binding = es->binding;
+                    if (is_main) main_off = adj[i][s].off;
+                }
+                keep = 0;
+                break;
             }
             if (rc) break;
+            if (!keep) continue;
+            if (is_main) {
+                have_main = 1;
+                main_off = adj[i][s].off;
+            }
             if (ng == capg) {
                 capg = capg ? capg * 2 : 8;
                 gdefs = xrealloc(gdefs, capg * sizeof(GDef));
@@ -1606,6 +1619,7 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             gdefs[ng].off = adj[i][s].off;
             gdefs[ng].size = es->size ? es->size
                             : macho_symbol_span(m, es->shndx, es->value);
+            gdefs[ng].binding = es->binding;
             ng++;
         }
     }
@@ -1677,6 +1691,7 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             gdefs[ng].sh = SECT_BSS;
             gdefs[ng].off = comms[c].off;
             gdefs[ng].size = comms[c].size;
+            gdefs[ng].binding = 1;
             ng++;
         }
         free(comms);
@@ -1698,7 +1713,8 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                 EmitSymbol *es = &m->syms[r->sym];
                 uint16_t sh;
                 size_t off;
-                if (adj[i][r->sym].defined) {
+                int use_local = adj[i][r->sym].defined && es->binding != 2;
+                if (use_local) {
                     sh = adj[i][r->sym].sh;
                     off = adj[i][r->sym].off;
                 } else {
@@ -1711,6 +1727,11 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                             found = 1;
                             break;
                         }
+                    }
+                    if (!found && adj[i][r->sym].defined) {
+                        sh = adj[i][r->sym].sh;
+                        off = adj[i][r->sym].off;
+                        found = 1;
                     }
                     if (!found) {
                         fprintf(stderr, "fakecc: undefined symbol '%s'\n",

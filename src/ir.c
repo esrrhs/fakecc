@@ -235,6 +235,7 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->is_readonly = is_readonly;
     g->is_const_obj = 0;
     g->is_static = is_static;
+    g->is_weak = 0;
     g->is_tls = is_tls;
     g->align = 8;
     g->loc = loc;
@@ -11597,6 +11598,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             if (al > 0) g->align = al;
         }
         if (type_is_const_obj(s->u.decl.type)) g->is_const_obj = 1;
+        if (s->u.decl.is_weak && !is_static) g->is_weak = 1;
         if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);
@@ -11640,6 +11642,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.ret_x87_bytes = 0;
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
+        irfn.is_weak = fd->is_weak;
         irfn.is_constructor = fd->is_constructor;
         irfn.is_destructor = fd->is_destructor;
         irfn.ctor_prio = fd->ctor_prio ? fd->ctor_prio : 65535;
