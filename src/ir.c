@@ -8159,7 +8159,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             exit(1);
         }
         IRValue dst = new_value(fn);
-        emit_inst(fn, IR_LADDR, dst, -1, -1, lbl_id, e->loc);
+        /* A label address is a code pointer, not a 32-bit int.  Width 4
+         * makes the backend sign-extend it and drop the high half. */
+        emit_inst_w(fn, IR_LADDR, dst, -1, -1, lbl_id, 8, 1, e->loc);
         return dst;
     }
     default: break;   /* EX_INIT_LIST is lowered in ST_DECL, not here */

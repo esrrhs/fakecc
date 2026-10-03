@@ -1149,6 +1149,34 @@ static int run_bin(const char *path) {
 }
 
 static void test_macho_link(void) {
+    expect("label_addr",
+        "package main;\n"
+        "int main(void) {\n"
+        "  void *p = &&done;\n"
+        "  goto *p;\n"
+        "  return 1;\n"
+        "done:\n"
+        "  return 7;\n"
+        "}", 7);
+    const char *la = "/tmp/fakecc_arm64_link_la.o";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int main(void) {\n"
+        "  void *p = &&done;\n"
+        "  goto *p;\n"
+        "  return 1;\n"
+        "done:\n"
+        "  return 7;\n"
+        "}\n",
+        la, NULL), 0);
+    EmitModule mla;
+    T_ASSERT_EQ_INT(emit_obj_read(la, &mla), 0);
+    EmitModule *lam[1] = { &mla };
+    T_ASSERT_EQ_INT(macho_link_objects(lam, 1, "/tmp/fakecc_arm64_link_out"), 0);
+    T_ASSERT_EQ_INT(macho_codesign("/tmp/fakecc_arm64_link_out"), 0);
+    T_ASSERT_EQ_INT(run_bin("/tmp/fakecc_arm64_link_out"), 7);
+    emit_module_free(&mla);
+
     const char *a = "/tmp/fakecc_arm64_link_a.o";
     const char *b = "/tmp/fakecc_arm64_link_b.o";
     const char *outp = "/tmp/fakecc_arm64_link_out";

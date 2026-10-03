@@ -59,9 +59,35 @@ typedef struct {
     /* Object-file calls to functions that are not in this TU. */
     struct XCall { uint32_t at; const char *name; } *xcall;
     size_t            nxcall, capxcall;
+    /* &&label sites.  Object files cannot bake the address: the linker
+     * prepends an entry stub, which changes the page offset. */
+    struct LRel { int a64lab; char *name; } *lrel;
+    size_t            nlrel, caplrel;
 } C64;
 
 enum { G_RO = 1, G_DATA = 2, G_BSS = 3, G_COMMON = 4 };
+
+static const char *note_label_sym(C64 *c, int ir_id, int a64lab) {
+    const char *fn = (c->fn && c->fn->name) ? c->fn->name : "fn";
+    size_t n = strlen(fn) + 24;
+    char *buf = xmalloc(n);
+    snprintf(buf, n, ".L%s_%d", fn, ir_id);
+    for (size_t i = 0; i < c->nlrel; i++) {
+        if (strcmp(c->lrel[i].name, buf) == 0) {
+            free(buf);
+            return c->lrel[i].name;
+        }
+    }
+    if (c->nlrel == c->caplrel) {
+        c->caplrel = c->caplrel ? c->caplrel * 2 : 8;
+        c->lrel = realloc(c->lrel, c->caplrel * sizeof *c->lrel);
+        if (!c->lrel) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    c->lrel[c->nlrel].a64lab = a64lab;
+    c->lrel[c->nlrel].name = buf;
+    c->nlrel++;
+    return buf;
+}
 
 static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name) {
     if (c->ngfix == c->capgfix) {
@@ -1743,7 +1769,16 @@ static void emit_function(C64 *c, int fi) {
         }
         case IR_LADDR: {
             int d = dst_reg(c, s->dst);
-            a64_adrp_add_label(a, d, vlabels_get(c, (int)s->imm));
+            int lab = vlabels_get(c, (int)s->imm);
+            if (emit_object_mode()) {
+                const char *nm = note_label_sym(c, (int)s->imm, lab);
+                note_page_reloc(c, (uint32_t)a->code.len, -1, nm);
+                a64_word(a, 0x90000000u | (uint32_t)(d & 31));
+                a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
+                                        | (uint32_t)(d & 31));
+            } else {
+                a64_adrp_add_label(a, d, lab);
+            }
             commit(c, s->dst, d);
             break;
         }
@@ -2440,6 +2475,15 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                                               1 /* STT_OBJECT */, sh,
                                               c.goff[gi], (size_t)g->size);
         }
+        for (size_t i = 0; i < c.nlrel; i++) {
+            if (emit_module_find_symbol(out, c.lrel[i].name) >= 0) continue;
+            int lab = c.lrel[i].a64lab;
+            if (lab < 0 || (size_t)lab >= a.nlabels || !a.labels[lab].bound)
+                continue;
+            emit_module_add_symbol(out, c.lrel[i].name, 0 /* local */,
+                                   2 /* STT_FUNC */, (uint16_t)SECT_TEXT,
+                                   a.labels[lab].pos, 0);
+        }
         /* ADRP + ADD against the global symbol.  The linker fills the
          * page and page-offset immediates (ARM64_RELOC_PAGE21 / PAGEOFF12). */
         for (size_t i = 0; i < c.ngfix; i++) {
@@ -2490,6 +2534,8 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     free(c.gfix);
     free(c.pfix);
     free(c.xcall);
+    for (size_t i = 0; i < c.nlrel; i++) free(c.lrel[i].name);
+    free(c.lrel);
     free(c.gsect);
     free(c.goff);
     a64_free(&a);
