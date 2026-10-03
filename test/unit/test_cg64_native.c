@@ -2488,6 +2488,45 @@ static void test_bitrmw(void) {
         "  return 0; }", 0);
 }
 
+static void test_cas(void) {
+    expect("cas",
+        "package main;\n"
+        "int main(void) {\n"
+        "  int x = 1;\n"
+        "  int e = 1;\n"
+        "  if (!__atomic_compare_exchange_n(&x, &e, 4, 0, 0, 0) || x != 4) return 1;\n"
+        "  e = 0;\n"
+        "  if (__atomic_compare_exchange_n(&x, &e, 5, 0, 2, 2) || e != 4 || x != 4) return 2;\n"
+        "  e = 4;\n"
+        "  if (!__atomic_compare_exchange_n(&x, &e, 9, 0, 3, 0) || x != 9) return 3;\n"
+        "  e = 9;\n"
+        "  if (!__atomic_compare_exchange_n(&x, &e, 8, 0, 5, 5) || x != 8) return 4;\n"
+        "  x = -3;\n"
+        "  e = -3;\n"
+        "  if (!__atomic_compare_exchange_n(&x, &e, 2, 0, 5, 5) || x != 2) return 5;\n"
+        "  long long y = 3;\n"
+        "  long long ey = 3;\n"
+        "  if (!__atomic_compare_exchange_n(&y, &ey, 8, 0, 2, 0) || y != 8) return 6;\n"
+        "  unsigned char c = 1;\n"
+        "  unsigned char ec = 1;\n"
+        "  if (!__atomic_compare_exchange_n(&c, &ec, 6, 0, 0, 0) || c != 6) return 7;\n"
+        "  ec = 0;\n"
+        "  if (__atomic_compare_exchange_n(&c, &ec, 9, 0, 5, 5) || ec != 6) return 8;\n"
+        "  unsigned short h = 2;\n"
+        "  unsigned short eh = 2;\n"
+        "  if (!__atomic_compare_exchange_n(&h, &eh, 7, 1, 3, 0) || h != 7) return 9;\n"
+        "  signed char sc = -5;\n"
+        "  signed char esc = -5;\n"
+        "  if (!__atomic_compare_exchange_n(&sc, &esc, 4, 0, 5, 0) || sc != 4) return 10;\n"
+        "  esc = 0;\n"
+        "  if (__atomic_compare_exchange_n(&sc, &esc, 1, 0, 0, 0) || esc != 4) return 11;\n"
+        "  int d = 3;\n"
+        "  x = 2;\n"
+        "  e = 2;\n"
+        "  if (!__atomic_compare_exchange(&x, &e, &d, 0, 5, 5) || x != 3) return 12;\n"
+        "  return 0; }", 0);
+}
+
 static void test_int128(void) {
     expect("i128div",
         "package main;\n"
@@ -2561,6 +2600,7 @@ int main(void) {
     test_xchgp();
     test_fadd();
     test_bitrmw();
+    test_cas();
     test_syscall();
     test_frame_addr();
     test_macho_obj();

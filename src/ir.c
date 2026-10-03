@@ -435,6 +435,33 @@ static IRValue atomic_add_result(IRFunction *fn, IROpcode op, IRValue old, IRVal
     return n;
 }
 
+/* Compare-exchange.  kind 0 relaxed, 1 acquire, 2 release, 3 acq_rel.
+ * Returns 1 on success.  On failure the observed value is written through
+ * exp_ptr.  x86 does the same with a plain compare. */
+static IRValue emit_fakecc_cas(IRFunction *fn, IRValue addr, IRValue exp_ptr,
+                               IRValue desired, int kind, int width, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = kind;
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = 1;
+    inst.call_name = xstrdup("__fakecc_cas");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 3);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = exp_ptr;
+    inst.call_args[2] = desired;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, 4, 0);
+    return dst;
+}
+
 static int get_value_width(const IRFunction *fn, IRValue v) {
     if (v < 0 || v >= fn->value_meta_cap) return 4;
     return fn->value_width[v];
@@ -6542,6 +6569,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 }
                 for (size_t i = 3; i < e->u.call.args.len; i++)
                     lower_expr(fn, st, e->u.call.args.data[i]);
+                /* Success order picks cas/casa/casl/casal.  A strong CAS
+                 * is a valid weak CAS.  Float and odd sizes stay a plain pair. */
+                if (!is_f && (sz == 1 || sz == 2 || sz == 4 || sz == 8)) {
+                    long long succ = 5;
+                    if (e->u.call.args.len > 4)
+                        fold_const_int(e->u.call.args.data[4], &succ);
+                    int kind = 3;
+                    if (succ == 0) kind = 0;
+                    else if (succ == 1 || succ == 2) kind = 1;
+                    else if (succ == 3) kind = 2;
+                    return emit_fakecc_cas(fn, addr, exp_ptr, desired, kind, sz, e->loc);
+                }
                 IRValue cur = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, cur, addr, -1, 0, sz, is_u, e->loc);
                 set_value_type(fn, cur, sz, is_u);
