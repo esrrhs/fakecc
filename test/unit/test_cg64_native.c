@@ -1852,6 +1852,19 @@ static void test_io(void) {
         "  if (errno != 0) return 4;\n"
         "  return 7;\n"
         "}\n", 7);
+    expect("getpid_stable",
+        "package main;\n"
+        "long getpid(void);\n"
+        "int main(void) {\n"
+        "  long a = getpid();\n"
+        "  if (a <= 0) return 1;\n"
+        "  if (getpid() != a) return 2;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("getpid_user",
+        "package main;\n"
+        "long getpid(void) { return 4; }\n"
+        "int main(void) { return getpid() == 4 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
