@@ -785,7 +785,8 @@ static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
         uint32_t symfield = (r->type == 10)
                           ? ((uint32_t)r->addend & 0xFFFFFFu)
                           : ((uint32_t)sym & 0xFFFFFFu);
-        uint32_t pcrel = (r->type == 2 || r->type == 3 || r->type == 5) ? 1u : 0u;
+        uint32_t pcrel = (r->type == 2 || r->type == 3 || r->type == 5
+                          || r->type == 8) ? 1u : 0u;
         uint32_t length = (r->type == 0 || r->type == 1) ? 3u : 2u; /* 8-byte slots */
         uint32_t word = symfield
                       | (pcrel << 24)
@@ -1559,6 +1560,11 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     int weak_at = (int)stub.code.len;
     a64_movz(&stub, A64_X0, 0, 0, 1);
     a64_ret(&stub, A64_LR);
+    /* One TLV thunk for the whole image.  x0 is the descriptor; the
+     * variable's template address is the third pointer. */
+    int tlv_at = (int)stub.code.len;
+    a64_ldr64(&stub, A64_X0, A64_X0, 16);
+    a64_ret(&stub, A64_LR);
     buffer_append(&out.text, stub.code.data, stub.code.len);
     a64_free(&stub);
 
@@ -1777,6 +1783,47 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
         }
     }
 
+    typedef struct { char *name; int filled; } TlvEnt;
+    TlvEnt *tlvs = NULL;
+    size_t ntlv = 0, captlv = 0;
+    size_t tlv_base = 0;
+    if (rc == 0) {
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t ri = 0; ri < m->num_relocs; ri++) {
+                EmitReloc *r = &m->relocs[ri];
+                if (r->type != 8 || r->sym >= m->num_syms) continue;
+                const char *nm = m->syms[r->sym].name;
+                if (!nm) continue;
+                int have = 0;
+                for (size_t g = 0; g < ntlv; g++) {
+                    if (strcmp(tlvs[g].name, nm) == 0) { have = 1; break; }
+                }
+                if (have) continue;
+                if (ntlv == captlv) {
+                    captlv = captlv ? captlv * 2 : 4;
+                    tlvs = xrealloc(tlvs, captlv * sizeof(TlvEnt));
+                }
+                tlvs[ntlv].name = xstrdup(nm);
+                tlvs[ntlv].filled = 0;
+                ntlv++;
+            }
+        }
+        if (ntlv) {
+            while (out.data.len % 8) {
+                char z = 0;
+                buffer_append(&out.data, &z, 1);
+            }
+            tlv_base = out.data.len;
+            for (size_t g = 0; g < ntlv; g++) {
+                char z[24];
+                memset(z, 0, sizeof z);
+                buffer_append(&out.data, z, sizeof z);
+            }
+            if (out.data_align < 8) out.data_align = 8;
+        }
+    }
+
     uint64_t ro_off = 0, data_off = 0, bss_off = 0;
     if (rc == 0)
         macho_section_offsets(&out, out.text.len, &ro_off, &data_off, &bss_off);
@@ -1894,6 +1941,32 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                         }
                         if (r->type == 5) patch_adrp(&w, pc, got_va);
                         else w |= (uint32_t)(((got_va & 0xFFFu) >> 3) << 10);
+                    } else if (r->type == 8 || r->type == 9) {
+                        int slot = -1;
+                        for (size_t g = 0; g < ntlv; g++) {
+                            if (es->name && strcmp(tlvs[g].name, es->name) == 0) {
+                                slot = (int)g;
+                                break;
+                            }
+                        }
+                        if (slot < 0 || data_off == 0) {
+                            fprintf(stderr, "fakecc: tlv reloc has no slot\n");
+                            rc = -1;
+                            break;
+                        }
+                        uint64_t desc = data_off + tlv_base + (uint64_t)slot * 24;
+                        if (!tlvs[slot].filled) {
+                            emit_module_add_rebase(&out, desc,
+                                                   macho_text_offset() + (uint64_t)tlv_at);
+                            emit_module_add_rebase(&out, desc + 16, tgt);
+                            tlvs[slot].filled = 1;
+                        }
+                        if (r->type == 8) patch_adrp(&w, pc, desc);
+                        else {
+                            /* LDR Xt, [Xn, #imm] -> ADD Xt, Xn, #byteoff. */
+                            w = 0x91000000u | ((uint32_t)(desc & 0xFFFu) << 10)
+                              | (w & 0x3FFu);
+                        }
                     } else if (r->type == 2) {
                         if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
                     } else if (r->type == 3) patch_adrp(&w, pc, tgt);
@@ -2021,6 +2094,8 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     free(gdefs);
     for (size_t g = 0; g < ngot; g++) free(gots[g].name);
     free(gots);
+    for (size_t g = 0; g < ntlv; g++) free(tlvs[g].name);
+    free(tlvs);
     free(ctors);
     free(dtors);
     free(ctor_at);

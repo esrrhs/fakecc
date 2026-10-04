@@ -1661,6 +1661,40 @@ static void test_call_stub(void) {
     emit_module_free(&md);
 }
 
+static void test_tls(void) {
+    expect("tls_inc",
+        "package main;\n"
+        "__thread int t = 3;\n"
+        "int bump(void) { t += 1; return t; }\n"
+        "int main(void) { return bump(); }\n", 4);
+    const char *call = "/tmp/fakecc_arm64_tls_main.o";
+    const char *def = "/tmp/fakecc_arm64_tls_def.o";
+    const char *outp = "/tmp/fakecc_arm64_tls_out";
+    const char *err = "/tmp/fakecc_arm64_tls_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern __thread int t;\n"
+        "int main(void) { t += 2; return t; }\n",
+        call, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "__thread int t = 5;\n",
+        def, NULL), 0);
+    EmitModule mc, md;
+    T_ASSERT_EQ_INT(emit_obj_read(call, &mc), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(def, &md), 0);
+    int saw = 0;
+    for (size_t i = 0; i < mc.num_relocs; i++)
+        if (mc.relocs[i].type == 8) saw = 1;
+    T_ASSERT(saw);
+    EmitModule *mods[2] = { &mc, &md };
+    T_ASSERT_EQ_INT(link_capturing(mods, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 7);
+    emit_module_free(&mc);
+    emit_module_free(&md);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3334,6 +3368,7 @@ int main(void) {
     test_got();
     test_fn_got();
     test_call_stub();
+    test_tls();
     test_macho_link();
     return t_finalize();
 }

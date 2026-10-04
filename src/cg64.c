@@ -42,7 +42,7 @@ typedef struct {
     size_t           *goff;
     /* ADRP+ADD pairs targeting globals; patched once the final section
      * placement (which depends on the total text length) is known. */
-    struct GFix { uint32_t at; int gidx; const char *name; int value; int addend; int got; } *gfix;
+    struct GFix { uint32_t at; int gidx; const char *name; int value; int addend; int got; int tlvp; } *gfix;
     size_t            ngfix, capgfix;
     /* Pointer slots inside global initializers.  Resolved into dyld
      * rebases once every section base is known. */
@@ -57,6 +57,10 @@ typedef struct {
     /* Local copy of runtime/int128.c's restoring division.  The arm64
      * image does not link the Linux runtime, and external BL is T14. */
     int               udiv_label;
+    /* Exec-mode TLV descriptors live in __data.  -1 means this global
+     * has no descriptor.  The image has one template, not a copy per thread. */
+    int              *tlv_off;
+    int               tlv_thunk;
     /* Object-file calls to functions that are not in this TU.
      * Weak calls stay a BRANCH26 so a missing target can return 0.
      * Any other external call goes through one local stub per symbol. */
@@ -107,6 +111,7 @@ static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name,
     c->gfix[c->ngfix].value = value;
     c->gfix[c->ngfix].addend = 0;
     c->gfix[c->ngfix].got = 0;
+    c->gfix[c->ngfix].tlvp = 0;
     c->ngfix++;
 }
 
@@ -2946,6 +2951,7 @@ static int fold_page_addend(C64 *c, const IRInst *s) {
     for (size_t i = 0; i < c->ngfix; i++)
         if (c->gfix[i].value == base) gi = (int)i;
     if (gi < 0) return 0;
+    if (c->gfix[gi].tlvp) return 0;
     if (c64_value_uses(c, base) != 1) return 0;
     c->gfix[gi].addend += (int)off;
     int ra = load_op(c, base, -1);
@@ -4115,9 +4121,25 @@ static void emit_function(C64 *c, int fi) {
             commit(c, s->dst, d);
             break;
         }
-        case IR_GADDR_TLS:
-            c64_die(c, s, "thread-local variable");
+        case IR_GADDR_TLS: {
+            int gi = find_global_idx(c->ir, s->call_name);
+            if (gi < 0 && !emit_object_mode()) {
+                c64_die(c, s, "external thread-local variable");
+                break;
+            }
+            int d = dst_reg(c, s->dst);
+            note_page_reloc(c, (uint32_t)a->code.len, gi,
+                            gi < 0 ? s->call_name : NULL, s->dst);
+            c->gfix[c->ngfix - 1].tlvp = 1;
+            /* adrp x0, desc; ldr x0, [x0, #off]; ldr x16, [x0]; blr x16 */
+            a64_word(a, 0x90000000u | (uint32_t)A64_X0);
+            a64_word(a, 0xF9400000u | ((uint32_t)A64_X0 << 5) | (uint32_t)A64_X0);
+            a64_ldr64(a, A64_X16, A64_X0, 0);
+            a64_blr(a, A64_X16);
+            if (d != A64_X0) a64_mov_reg(a, d, A64_X0, 1);
+            commit(c, s->dst, d);
             break;
+        }
         case IR_FADDR: {
             int fi = 0;
             int missing = find_function(c->ir, s->call_name, &fi) != 0;
@@ -4282,6 +4304,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     c.as = &a;
     c.ir = ir;
     c.udiv_label = -1;
+    c.tlv_thunk = -1;
 
     c.fn_label = xmalloc(ir->functions.len * sizeof(int));
     for (size_t i = 0; i < ir->functions.len; i++)
@@ -4293,19 +4316,18 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     if (ir->globals.len) {
         c.gsect = xmalloc(ir->globals.len * sizeof(int));
         c.goff = xmalloc(ir->globals.len * sizeof(size_t));
+        c.tlv_off = xmalloc(ir->globals.len * sizeof(int));
+        for (size_t gi = 0; gi < ir->globals.len; gi++) c.tlv_off[gi] = -1;
     }
     for (size_t gi = 0; gi < ir->globals.len; gi++) {
         const IRGlobal *g = &ir->globals.data[gi];
         size_t al = g->align > 0 ? (size_t)g->align : 8;
-        if (g->is_tls)
-            die_at(g->loc.file ? g->loc.file : "<arm64>", g->loc.line, 0,
-                   "arm64 backend: thread-local variable not supported yet");
         /* A readonly global that contains a pointer must live in __DATA:
          * dyld chained fixups are applied to writable pages, and
          * __TEXT,__const is mapped read-only/execute.  A C const object
          * with no fixup is the same kind of bytes as a string literal. */
         if ((g->is_readonly || (g->is_const_obj && g->init_bytes))
-            && !g->num_fixups) {
+            && !g->num_fixups && !g->is_tls) {
             while (out->rodata.len % al) { char z = 0; buffer_append(&out->rodata, &z, 1); }
             c.gsect[gi] = G_RO;
             c.goff[gi] = out->rodata.len;
@@ -4349,6 +4371,25 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             c.goff[gi] = out->bss_size;
             out->bss_size += g->size;
             if (al > out->bss_align) out->bss_align = al;
+        }
+    }
+    if (!emit_object_mode() && c.tlv_off) {
+        int any_tls = 0;
+        for (size_t gi = 0; gi < ir->globals.len; gi++) {
+            if (!ir->globals.data[gi].is_tls) continue;
+            any_tls = 1;
+            while (out->data.len % 8) {
+                char z = 0;
+                buffer_append(&out->data, &z, 1);
+            }
+            c.tlv_off[gi] = (int)out->data.len;
+            char desc[24];
+            memset(desc, 0, sizeof desc);
+            buffer_append(&out->data, desc, sizeof desc);
+        }
+        if (any_tls) {
+            c.tlv_thunk = a64_new_label(&a);
+            if (out->data_align < 8) out->data_align = 8;
         }
     }
 
@@ -4438,6 +4479,11 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
         a64_word(&a, 0xF9400000u | ((uint32_t)A64_X16 << 5) | (uint32_t)A64_X16);
         a64_br_reg(&a, A64_X16);
     }
+    if (c.tlv_thunk >= 0) {
+        a64_bind(&a, c.tlv_thunk);
+        a64_ldr64(&a, A64_X0, A64_X0, 16);
+        a64_ret(&a, A64_LR);
+    }
 
     /* The code buffer lands after the Mach-O header pad; ADRP page fixups
      * must compute against the runtime file/VA offset. */
@@ -4460,8 +4506,42 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     if (!emit_object_mode() && (c.ngfix || c.npfix)) {
         uint64_t ro_off, data_off, bss_off;
         macho_section_offsets(out, out->text.len, &ro_off, &data_off, &bss_off);
+        if (c.tlv_thunk >= 0 && a.labels[c.tlv_thunk].bound && c.tlv_off) {
+            uint64_t thunk_va = (uint64_t)macho_text_offset()
+                              + a.labels[c.tlv_thunk].pos;
+            for (size_t gi = 0; gi < ir->globals.len; gi++) {
+                if (c.tlv_off[gi] < 0) continue;
+                uint64_t desc = data_off + (uint64_t)c.tlv_off[gi];
+                uint64_t base = c.gsect[gi] == G_RO ? ro_off
+                              : c.gsect[gi] == G_DATA ? data_off : bss_off;
+                emit_module_add_rebase(out, desc, thunk_va);
+                emit_module_add_rebase(out, desc + 16, base + c.goff[gi]);
+            }
+        }
         for (size_t i = 0; i < c.ngfix; i++) {
             int gi = c.gfix[i].gidx;
+            if (c.gfix[i].tlvp) {
+                if (gi < 0 || !c.tlv_off || c.tlv_off[gi] < 0) {
+                    die_at("<arm64>", 0, 0,
+                           "arm64 backend: thread-local variable has no descriptor");
+                    continue;
+                }
+                uint64_t desc = data_off + (uint64_t)c.tlv_off[gi];
+                uint64_t pc = (uint64_t)macho_text_offset() + c.gfix[i].at;
+                int64_t pages = (int64_t)((desc & ~(uint64_t)0xFFF)
+                                          - (pc & ~(uint64_t)0xFFF)) >> 12;
+                uint32_t w0, w1;
+                memcpy(&w0, out->text.data + c.gfix[i].at, 4);
+                memcpy(&w1, out->text.data + c.gfix[i].at + 4, 4);
+                w0 |= (uint32_t)((pages & 3) << 29)
+                    | (uint32_t)(((pages >> 2) & 0x7FFFF) << 5);
+                /* TLVP page-offset is an address, so the load becomes an add. */
+                w1 = 0x91000000u | ((uint32_t)(desc & 0xFFFu) << 10)
+                   | (w1 & 0x3FFu);
+                memcpy(out->text.data + c.gfix[i].at, &w0, 4);
+                memcpy(out->text.data + c.gfix[i].at + 4, &w1, 4);
+                continue;
+            }
             uint64_t base = c.gsect[gi] == G_RO ? ro_off
                           : c.gsect[gi] == G_DATA ? data_off : bss_off;
             uint64_t tgt = base + c.goff[gi] + (uint64_t)c.gfix[i].addend;
@@ -4609,6 +4689,13 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                        "arm64 object file: global has no symbol");
                 continue;
             }
+            if (c.gfix[i].tlvp) {
+                emit_module_add_reloc(out, c.gfix[i].at, 8 /* TLVP_LOAD_PAGE21 */,
+                                      si, 0);
+                emit_module_add_reloc(out, c.gfix[i].at + 4,
+                                      9 /* TLVP_LOAD_PAGEOFF12 */, si, 0);
+                continue;
+            }
             if (c.gfix[i].got) {
                 if (c.gfix[i].addend)
                     emit_module_add_reloc(out, c.gfix[i].at, 10 /* ADDEND */,
@@ -4687,6 +4774,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     free(c.lrel);
     free(c.gsect);
     free(c.goff);
+    free(c.tlv_off);
     a64_free(&a);
     free(c.fn_label);
 }
