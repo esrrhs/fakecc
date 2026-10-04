@@ -2340,6 +2340,27 @@ static void test_io(void) {
         "package main;\n"
         "long flock(long fd, long op) { return op ? 3 : 3; }\n"
         "int main(void) { return flock(1, 2) == 3 ? 7 : 1; }\n", 7);
+    expect("getgroups_list",
+        "package main;\n"
+        "int errno;\n"
+        "long getgroups(long n, int *g);\n"
+        "long getdtablesize(void);\n"
+        "int main(void) {\n"
+        "  long n = getgroups(0, 0);\n"
+        "  if (n <= 0 || n > 64) return 1;\n"
+        "  int g[64];\n"
+        "  int i;\n"
+        "  for (i = 0; i < 64; i++) g[i] = -1;\n"
+        "  if (n > 1 && (getgroups(1, g) >= 0 || errno != 22)) return 2;\n"
+        "  if (getgroups(n, g) != n || errno != 0) return 3;\n"
+        "  if (g[0] < 0) return 4;\n"
+        "  if (getdtablesize() <= 0) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("getgroups_user",
+        "package main;\n"
+        "long getgroups(long n, int *g) { return n ? 3 : 3; }\n"
+        "int main(void) { return getgroups(1, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
