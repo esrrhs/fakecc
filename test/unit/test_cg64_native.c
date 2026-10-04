@@ -3306,6 +3306,24 @@ static void test_io(void) {
         "package main;\n"
         "long setsid(void) { return 3; }\n"
         "int main(void) { return setsid() == 3 ? 7 : 1; }\n", 7);
+    expect("kill_self",
+        "package main;\n"
+        "int errno;\n"
+        "long getpid(void);\n"
+        "long kill(long pid, long sig);\n"
+        "int main(void) {\n"
+        "  long pid = getpid();\n"
+        "  if (pid <= 1) return 1;\n"
+        "  if (kill(pid, 0) != 0) return 2;\n"
+        "  if (kill(999999, 0) != -3 || errno != 3) return 3;\n"
+        "  if (kill(pid, 99) != -22 || errno != 22) return 4;\n"
+        "  if (kill(pid, 0) != 0 || errno != 0) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("kill_user",
+        "package main;\n"
+        "long kill(long pid, long sig) { return sig ? 3 : 3; }\n"
+        "int main(void) { return kill(1, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {

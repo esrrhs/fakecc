@@ -1342,7 +1342,7 @@ static int emit_pipe_builtin(C64 *c, const char *name) {
     return 1;
 }
 
-/* read/write/pread/pwrite/open/close/dup/dup2/fsync/fdatasync/chflags/fchflags/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/setpgid/setsid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/getrusage/openat/unlinkat/mkdirat/renameat/faccessat/symlinkat/readlinkat/linkat/fchmodat/fchownat/mkfifoat/mkdir/rmdir/lseek/truncate/ftruncate.
+/* read/write/pread/pwrite/open/close/dup/dup2/fsync/fdatasync/chflags/fchflags/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/setpgid/setsid/kill/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/getrusage/openat/unlinkat/mkdirat/renameat/faccessat/symlinkat/readlinkat/linkat/fchmodat/fchownat/mkfifoat/mkdir/rmdir/lseek/truncate/ftruncate.
  * Arguments are already in x0..x5.  Darwin numbers, with the same
  * carry-to-negative errno fix as __syscall.  A same-TU int errno is
  * updated with the positive code, or cleared on success.  A same-TU
@@ -1387,6 +1387,7 @@ static int emit_io_builtin(C64 *c, const char *name) {
     else if (strcmp(name, "getpgid") == 0) num = 151;
     else if (strcmp(name, "setpgid") == 0) num = 82;
     else if (strcmp(name, "setsid") == 0) num = 147;
+    else if (strcmp(name, "kill") == 0) num = 37;
     else if (strcmp(name, "getsid") == 0) num = 310;
     else if (strcmp(name, "getgroups") == 0) num = 79;
     else if (strcmp(name, "getdtablesize") == 0) num = 89;
@@ -1450,6 +1451,9 @@ static int emit_io_builtin(C64 *c, const char *name) {
     /* Darwin's libc ORs the POSIX resource with 0x1000 before the syscall. */
     if (num == 194 || num == 195)
         a64_or_imm(a, A64_X0, A64_X0, 0x1000, 1);
+    /* The public kill stub sets the POSIX flag in x2 before syscall 37. */
+    if (num == 37)
+        a64_movz(a, A64_X2, 1, 0, 1);
     a64_movz(a, A64_X16, (unsigned)num, 0, 1);
     a64_svc(a, 0x80);
     {
