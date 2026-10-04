@@ -2493,6 +2493,44 @@ static void test_io(void) {
         "package main;\n"
         "long socketpair(long domain, long type, long proto, int *sv) { return domain ? 3 : 3; }\n"
         "int main(void) { return socketpair(1, 1, 0, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("readv_file",
+        "package main;\n"
+        "int errno;\n"
+        "long readv(long fd, long *iov, long n);\n"
+        "long writev(long fd, long *iov, long n);\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "long lseek(long fd, long off, long whence);\n"
+        "int main(void) {\n"
+        "  unlink(\"/tmp/fakecc_readv_rt\");\n"
+        "  long fd = open(\"/tmp/fakecc_readv_rt\", 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  char a[2]; a[0] = 'a'; a[1] = 'b';\n"
+        "  char b[2]; b[0] = 'c'; b[1] = 'd';\n"
+        "  long iov[4];\n"
+        "  iov[0] = (long)a; iov[1] = 2;\n"
+        "  iov[2] = (long)b; iov[3] = 2;\n"
+        "  if (writev(fd, iov, 2) != 4) return 2;\n"
+        "  if (lseek(fd, 0, 0) != 0) return 3;\n"
+        "  char c[2]; c[0] = 0; c[1] = 0;\n"
+        "  char d[2]; d[0] = 0; d[1] = 0;\n"
+        "  long riov[4];\n"
+        "  riov[0] = (long)c; riov[1] = 2;\n"
+        "  riov[2] = (long)d; riov[3] = 2;\n"
+        "  if (readv(fd, riov, 2) != 4) return 4;\n"
+        "  if (c[0] != 'a' || c[1] != 'b' || d[0] != 'c' || d[1] != 'd') return 5;\n"
+        "  if (readv(-1, riov, 2) != -9 || errno != 9) return 6;\n"
+        "  if (lseek(fd, 0, 0) != 0) return 8;\n"
+        "  if (readv(fd, riov, 2) != 4 || errno != 0) return 9;\n"
+        "  close(fd);\n"
+        "  unlink(\"/tmp/fakecc_readv_rt\");\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("readv_user",
+        "package main;\n"
+        "long readv(long fd, long *iov, long n) { return n ? 3 : 3; }\n"
+        "int main(void) { return readv(0, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
