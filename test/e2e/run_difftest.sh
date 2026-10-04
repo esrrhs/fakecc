@@ -3,6 +3,15 @@
 # compare exit codes.  gcc is the oracle, so a case never needs a
 # hand-computed expected value.
 set -uo pipefail
+# Portability helpers (timeout/nproc/readelf shims for non-GNU hosts).
+_COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Abort if the shims could not be sourced: a silently missing `timeout` turns
+# every case into a confusing "command not found" instead of a clear error.
+. "$_COMPAT_DIR/compat.sh" || { echo "cannot source compat.sh from $_COMPAT_DIR" >&2; exit 2; }
+# run_e2e fans cases out to `xargs bash -c` workers, which only see exported
+# functions, so re-export the shims this script's workers rely on.
+export -f timeout nproc 2>/dev/null || true
+
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 FAKECC=${1:-"$ROOT/build/fakecc"}

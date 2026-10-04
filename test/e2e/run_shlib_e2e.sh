@@ -2,6 +2,15 @@
 # Shared-library link tests: -l / -l: / -nostdlib / -nodefaultlibs / .so path.
 # Default link is freestanding (builtin runtime/, no DT_NEEDED).  -lc is opt-in.
 set -uo pipefail
+# Portability helpers (timeout/nproc/readelf shims for non-GNU hosts).
+_COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Abort if the shims could not be sourced: a silently missing `timeout` turns
+# every case into a confusing "command not found" instead of a clear error.
+. "$_COMPAT_DIR/compat.sh" || { echo "cannot source compat.sh from $_COMPAT_DIR" >&2; exit 2; }
+# run_e2e fans cases out to `xargs bash -c` workers, which only see exported
+# functions, so re-export the shims this script's workers rely on.
+export -f timeout nproc 2>/dev/null || true
+
 
 FAKECC=${1:-./build/fakecc}
 shift || true
@@ -16,15 +25,8 @@ trap 'rm -rf "$TMP"' EXIT
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAIL=1; }
 
-# Locale-independent helpers for dynamic tags.
-has_needed() {
-    local bin="$1" soname="$2"
-    LANG=C readelf -d "$bin" 2>/dev/null | grep '(NEEDED)' | grep -F "[$soname]" >/dev/null
-}
-has_runpath() {
-    local bin="$1" needle="$2"
-    LANG=C readelf -d "$bin" 2>/dev/null | grep '(RUNPATH)' | grep -F "$needle" >/dev/null
-}
+# Locale-independent dynamic-tag helpers (has_needed / has_runpath) come from
+# the sourced compat.sh, which prefers readelf and falls back to otool.
 
 # Build a tiny shared library with gcc (oracle object code; fakecc only records
 # DT_NEEDED and resolves via the dynamic linker at run time).
