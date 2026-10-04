@@ -3399,6 +3399,23 @@ static void test_io(void) {
         "package main;\n"
         "long sigpending(int *set) { return set ? 3 : 3; }\n"
         "int main(void) { return sigpending(0) == 3 ? 7 : 1; }\n", 7);
+    expect("minherit_page",
+        "package main;\n"
+        "int errno;\n"
+        "long minherit(long addr, long len, long inherit);\n"
+        "int main(void) {\n"
+        "  long p = __syscall(197, 0, 16384, 3, 0x1002, -1, 0);\n"
+        "  if (p <= 0) return 1;\n"
+        "  if (minherit(p, 16384, 1) != 0) return 2;\n"
+        "  if (minherit(p, 16384, 99) != -22 || errno != 22) return 3;\n"
+        "  if (minherit(p, 16384, 0) != 0 || errno != 0) return 4;\n"
+        "  if (__syscall(73, p, 16384) != 0) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("minherit_user",
+        "package main;\n"
+        "long minherit(long addr, long len, long inherit) { return inherit ? 3 : 3; }\n"
+        "int main(void) { return minherit(0, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
