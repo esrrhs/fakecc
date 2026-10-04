@@ -2281,6 +2281,40 @@ static void test_io(void) {
         "package main;\n"
         "long getpgrp(void) { return 3; }\n"
         "int main(void) { return getpgrp() == 3 ? 7 : 1; }\n", 7);
+    expect("fchdir_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long fchdir(long fd);\n"
+        "long getcwd(char *b, long n);\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  char a[1040];\n"
+        "  char b[1040];\n"
+        "  if (!getcwd(a, 1040)) return 1;\n"
+        "  long old = open(\".\", 0, 0);\n"
+        "  if (old < 0) return 2;\n"
+        "  long fd = open(\"/tmp\", 0, 0);\n"
+        "  if (fd < 0) return 3;\n"
+        "  if (fchdir(fd) != 0) return 4;\n"
+        "  if (!getcwd(b, 1040)) return 5;\n"
+        "  int i = 0;\n"
+        "  while (b[i]) i++;\n"
+        "  if (i < 3 || b[i - 3] != 't' || b[i - 2] != 'm' || b[i - 1] != 'p') return 6;\n"
+        "  if (fchdir(-1) != -9 || errno != 9) return 8;\n"
+        "  if (fchdir(old) != 0 || errno != 0) return 9;\n"
+        "  if (!getcwd(b, 1040)) return 10;\n"
+        "  i = 0;\n"
+        "  while (a[i] && a[i] == b[i]) i++;\n"
+        "  if (a[i] || b[i]) return 11;\n"
+        "  close(old);\n"
+        "  close(fd);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("fchdir_user",
+        "package main;\n"
+        "long fchdir(long fd) { return fd ? 3 : 3; }\n"
+        "int main(void) { return fchdir(1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
