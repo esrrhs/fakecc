@@ -1909,6 +1909,43 @@ static void test_io(void) {
         "package main;\n"
         "long access(char *path, long mode) { return path ? 3 : 3; }\n"
         "int main(void) { return access(\"x\", 0) == 3 ? 7 : 1; }\n", 7);
+    expect("chdir_rename",
+        "package main;\n"
+        "int errno;\n"
+        "long mkdir(char *path, long mode);\n"
+        "long rmdir(char *path);\n"
+        "long chdir(char *path);\n"
+        "long open(char *path, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long access(char *path, long mode);\n"
+        "long unlink(char *path);\n"
+        "long rename(char *old, char *neu);\n"
+        "int main(void) {\n"
+        "  char *dir = \"/tmp/fakecc_chdir_rt\";\n"
+        "  char *abs = \"/tmp/fakecc_chdir_rt/note\";\n"
+        "  char *neu = \"/tmp/fakecc_chdir_rt/ren\";\n"
+        "  if (chdir(\"/tmp/fakecc_chdir_missing\") != -2) return 1;\n"
+        "  if (errno != 2) return 2;\n"
+        "  unlink(abs);\n"
+        "  unlink(neu);\n"
+        "  rmdir(dir);\n"
+        "  if (mkdir(dir, 448) != 0) return 3;\n"
+        "  if (chdir(dir) != 0) return 4;\n"
+        "  long fd = open(\"note\", 0x602, 420);\n"
+        "  if (fd < 0) return 5;\n"
+        "  if (close(fd) != 0) return 6;\n"
+        "  if (access(abs, 0) != 0) return 8;\n"
+        "  if (rename(abs, neu) != 0) return 9;\n"
+        "  if (access(neu, 0) != 0) return 10;\n"
+        "  if (chdir(\"/tmp\") != 0) return 11;\n"
+        "  if (unlink(neu) != 0) return 12;\n"
+        "  if (rmdir(dir) != 0) return 13;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("chdir_user",
+        "package main;\n"
+        "long chdir(char *path) { return path ? 3 : 3; }\n"
+        "int main(void) { return chdir(\"x\") == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
