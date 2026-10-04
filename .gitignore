@@ -89,3 +89,6 @@ calltest
 !test/e2e/cases/aggregates/test_retmem_temp.c
 
 Testing/
+
+# Local agent workspace data
+.workbuddy/
