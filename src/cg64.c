@@ -1308,6 +1308,40 @@ static int emit_dup_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+static void emit_store_errno(C64 *c, int egi);
+
+/* pipe returns the two descriptors in x0 and x1, not through the
+ * pointer argument.  They are stored into the caller's int[2]. */
+static int emit_pipe_builtin(C64 *c, const char *name) {
+    if (!name || strcmp(name, "pipe") != 0) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+    A64Asm *a = c->as;
+    int egi = find_global_idx(c->ir, "errno");
+    int fail = a64_new_label(a);
+    int done = a64_new_label(a);
+    a64_mov_reg(a, A64_X12, A64_X0, 1);
+    a64_movz(a, A64_X16, 42, 0, 1);
+    a64_svc(a, 0x80);
+    a64_cset(a, A64_X9, A64_CS, 1);
+    a64_cbnz(a, A64_X9, fail, 1);
+    a64_str32(a, A64_X0, A64_X12, 0);
+    a64_str32(a, A64_X1, A64_X12, 4);
+    if (egi >= 0) {
+        note_page_reloc(c, (uint32_t)a->code.len, egi, NULL, -1);
+        a64_word(a, 0x90000000u | (uint32_t)A64_X16);
+        a64_word(a, 0x91000000u | ((uint32_t)A64_X16 << 5) | (uint32_t)A64_X16);
+        a64_str32(a, 31, A64_X16, 0);
+    }
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_b(a, done);
+    a64_bind(a, fail);
+    emit_store_errno(c, egi);
+    a64_neg(a, A64_X0, A64_X0, 1);
+    a64_bind(a, done);
+    return 1;
+}
+
 /* read/write/open/close/dup/dup2/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/mkdir/rmdir/lseek.
  * Arguments are already in x0..x5.  Darwin numbers, with the same
  * carry-to-negative errno fix as __syscall.  A same-TU int errno is
@@ -3190,6 +3224,7 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_span_builtin(c, s->call_name)
                                  || emit_copy_builtin(c, s->call_name)
                                  || emit_dup_builtin(c, s->call_name)
+                                 || emit_pipe_builtin(c, s->call_name)
                                  || emit_io_builtin(c, s->call_name)
                                  || emit_getcwd(c, s->call_name)
                                  || emit_getenv(c, s->call_name)

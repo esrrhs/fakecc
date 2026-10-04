@@ -2073,6 +2073,32 @@ static void test_io(void) {
         "package main;\n"
         "long dup(long fd) { return fd ? 3 : 3; }\n"
         "int main(void) { return dup(1) == 3 ? 7 : 1; }\n", 7);
+    expect("pipe_bytes",
+        "package main;\n"
+        "long pipe(int *fds);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long read(long fd, char *buf, long n);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  int fds[2];\n"
+        "  if (pipe(fds) != 0) return 1;\n"
+        "  if (fds[0] < 0 || fds[1] < 0) return 2;\n"
+        "  char *msg = \"ab\";\n"
+        "  if (write(fds[1], msg, 2) != 2) return 3;\n"
+        "  char buf[4];\n"
+        "  buf[0] = 0; buf[1] = 0;\n"
+        "  if (read(fds[0], buf, 2) != 2) return 4;\n"
+        "  if (buf[0] != 'a' || buf[1] != 'b') return 5;\n"
+        "  if (close(fds[0]) != 0 || close(fds[1]) != 0) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("pipe_user",
+        "package main;\n"
+        "long pipe(int *fds) { return fds ? 3 : 3; }\n"
+        "int main(void) {\n"
+        "  int fds[2];\n"
+        "  return pipe(fds) == 3 ? 7 : 1;\n"
+        "}\n", 7);
 }
 
 static void test_getenv(void) {
