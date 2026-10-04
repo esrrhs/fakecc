@@ -1342,7 +1342,7 @@ static int emit_pipe_builtin(C64 *c, const char *name) {
     return 1;
 }
 
-/* read/write/pread/pwrite/open/close/dup/dup2/fsync/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/mkdir/rmdir/lseek/truncate/ftruncate.
+/* read/write/pread/pwrite/open/close/dup/dup2/fsync/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/mkdir/rmdir/lseek/truncate/ftruncate.
  * Arguments are already in x0..x5.  Darwin numbers, with the same
  * carry-to-negative errno fix as __syscall.  A same-TU int errno is
  * updated with the positive code, or cleared on success.  A same-TU
@@ -1419,6 +1419,8 @@ static int emit_io_builtin(C64 *c, const char *name) {
     else if (strcmp(name, "msync") == 0) num = 65;
     else if (strcmp(name, "mlock") == 0) num = 203;
     else if (strcmp(name, "munlock") == 0) num = 204;
+    else if (strcmp(name, "getpriority") == 0) num = 100;
+    else if (strcmp(name, "setpriority") == 0) num = 96;
     else if (strcmp(name, "rmdir") == 0) num = 137;
     else if (strcmp(name, "lseek") == 0) num = 199;
     else if (strcmp(name, "truncate") == 0) num = 200;

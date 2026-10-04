@@ -2888,6 +2888,24 @@ static void test_io(void) {
         "package main;\n"
         "long mlock(long addr, long len) { return len ? 3 : 3; }\n"
         "int main(void) { return mlock(0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("priority_self",
+        "package main;\n"
+        "int errno;\n"
+        "long getpriority(long which, long who);\n"
+        "long setpriority(long which, long who, long prio);\n"
+        "int main(void) {\n"
+        "  long cur = getpriority(0, 0);\n"
+        "  if (cur < 0 || cur > 19) return 1;\n"
+        "  if (setpriority(0, 0, cur + 1) != 0) return 2;\n"
+        "  if (getpriority(0, 0) != cur + 1) return 3;\n"
+        "  if (getpriority(99, 0) != -22 || errno != 22) return 4;\n"
+        "  if (getpriority(0, 0) != cur + 1 || errno != 0) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("priority_user",
+        "package main;\n"
+        "long getpriority(long which, long who) { return which ? 3 : 3; }\n"
+        "int main(void) { return getpriority(1, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
