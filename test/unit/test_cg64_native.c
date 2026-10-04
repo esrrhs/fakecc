@@ -2844,6 +2844,28 @@ static void test_io(void) {
         "package main;\n"
         "long madvise(long addr, long len, long advice) { return advice ? 3 : 3; }\n"
         "int main(void) { return madvise(0, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("mprotect_page",
+        "package main;\n"
+        "int errno;\n"
+        "long mprotect(long addr, long len, long prot);\n"
+        "long msync(long addr, long len, long flags);\n"
+        "int main(void) {\n"
+        "  long p = __syscall(197, 0, 16384, 3, 0x1002, -1, 0);\n"
+        "  if (p < 0) return 1;\n"
+        "  if (mprotect(p, 16384, 1) != 0) return 2;\n"
+        "  if (mprotect(p, 16384, 3) != 0) return 3;\n"
+        "  char *q = (char *)p;\n"
+        "  q[0] = 7;\n"
+        "  if (q[0] != 7) return 4;\n"
+        "  if (mprotect(p + 1, 16384, 3) != -22 || errno != 22) return 5;\n"
+        "  if (msync(p, 16384, 1) != 0 || errno != 0) return 6;\n"
+        "  if (__syscall(73, p, 16384) != 0) return 8;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("mprotect_user",
+        "package main;\n"
+        "long mprotect(long addr, long len, long prot) { return prot ? 3 : 3; }\n"
+        "int main(void) { return mprotect(0, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
