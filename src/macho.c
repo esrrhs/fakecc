@@ -1853,6 +1853,12 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             for (size_t ri = 0; ri < lens[pass]; ri++) {
                 if (skip_pair) { skip_pair = 0; continue; }
                 EmitReloc *r = &lists[pass][ri];
+                /* ARM64_RELOC_ADDEND carries no fixup of its own: cg64 folds
+                 * it into the addend of the reloc that follows (both come
+                 * from the same gfix entry), so in memory it is redundant.
+                 * The .o reader has to decode it because the file format
+                 * splits the two across separate entries. */
+                if (r->type == 10) continue;
                 if (r->sym >= m->num_syms) { rc = -1; break; }
                 EmitSymbol *es = &m->syms[r->sym];
                 uint16_t sh;

@@ -4740,9 +4740,11 @@ static void emit_function(C64 *c, int fi) {
         }
         case IR_GADDR: {
             int gi = find_global_idx(c->ir, s->call_name);
-            /* A single TU executable has nowhere to find this symbol.
-             * An object file records a page reloc and the linker resolves it. */
-            if (gi < 0 && !emit_object_mode()) {
+            /* The symbol may live in a sibling TU (the builtin runtime
+             * linked alongside the program is the common case), so the same
+             * rule as calls applies: only a lone single-TU link has nowhere
+             * else to look, and there a page reloc could not be resolved. */
+            if (gi < 0 && !emit_object_mode() && !emit_multi_tu()) {
                 c64_die(c, s, "external global variable");
                 break;
             }
@@ -4769,7 +4771,8 @@ static void emit_function(C64 *c, int fi) {
         }
         case IR_GADDR_TLS: {
             int gi = find_global_idx(c->ir, s->call_name);
-            if (gi < 0 && !emit_object_mode()) {
+            /* A sibling TU may own it, same as any other external. */
+            if (gi < 0 && !emit_object_mode() && !emit_multi_tu()) {
                 c64_die(c, s, "external thread-local variable");
                 break;
             }
@@ -4789,7 +4792,8 @@ static void emit_function(C64 *c, int fi) {
         case IR_FADDR: {
             int fi = 0;
             int missing = find_function(c->ir, s->call_name, &fi) != 0;
-            if (missing && !emit_object_mode()) {
+            /* Taking a sibling TU's address is legal in a multi-TU link. */
+            if (missing && !emit_object_mode() && !emit_multi_tu()) {
                 c64_die(c, s, "external function address");
                 break;
             }
