@@ -1822,6 +1822,25 @@ static void test_io(void) {
         "int main(void) { return write(1, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
+static void test_getenv(void) {
+    expect("getenv_path",
+        "package main;\n"
+        "char *getenv(char *name);\n"
+        "int main(void) {\n"
+        "  char *p = getenv(\"PATH\");\n"
+        "  if (!p || !p[0]) return 1;\n"
+        "  if (p[0]=='P' && p[1]=='A' && p[2]=='T' && p[3]=='H' && p[4]=='=')\n"
+        "    return 2;\n"
+        "  if (getenv(\"PAT\")) return 3;\n"
+        "  if (getenv(\"FAKECC_NO_SUCH_VAR_ZZ\")) return 4;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("getenv_user",
+        "package main;\n"
+        "char *getenv(char *name) { return name ? 0 : 0; }\n"
+        "int main(void) { return getenv(\"PATH\") ? 1 : 7; }\n", 7);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3499,6 +3518,7 @@ int main(void) {
     test_malloc();
     test_strdup();
     test_io();
+    test_getenv();
     test_macho_link();
     return t_finalize();
 }

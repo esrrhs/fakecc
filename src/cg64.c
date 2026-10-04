@@ -61,6 +61,8 @@ typedef struct {
      * has no descriptor.  The image has one template, not a copy per thread. */
     int              *tlv_off;
     int               tlv_thunk;
+    /* Exec-mode slot in __bss that holds the process envp.  -1 in an object. */
+    int               environ_off;
     /* Object-file calls to functions that are not in this TU.
      * Weak calls stay a BRANCH26 so a missing target can return 0.
      * Any other external call goes through one local stub per symbol. */
@@ -113,6 +115,14 @@ static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name,
     c->gfix[c->ngfix].got = 0;
     c->gfix[c->ngfix].tlvp = 0;
     c->ngfix++;
+}
+
+/* ADRP+ADD of the exec-mode envp slot.  Patched with the other page relocs. */
+static void emit_environ_addr(C64 *c, int rd) {
+    A64Asm *a = c->as;
+    note_page_reloc(c, (uint32_t)a->code.len, -2, NULL, -1);
+    a64_word(a, 0x90000000u | (uint32_t)(rd & 31));
+    a64_word(a, 0x91000000u | ((uint32_t)(rd & 31) << 5) | (uint32_t)(rd & 31));
 }
 
 static int c64_is_weak_ref(const IRModule *ir, const char *name) {
@@ -1321,6 +1331,54 @@ static int emit_io_builtin(C64 *c, const char *name) {
         a64_neg(a, A64_X0, A64_X0, 1);
         a64_bind(a, ok);
     }
+    return 1;
+}
+
+/* getenv.  The entry stub stores dyld's envp in the bss slot.  A same-TU
+ * definition still wins.  Object files keep the call external. */
+static int emit_getenv(C64 *c, const char *name) {
+    if (!name || strcmp(name, "getenv") != 0) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+    if (emit_object_mode() || c->environ_off < 0) return 0;
+
+    A64Asm *a = c->as;
+    int Lloop = a64_new_label(a);
+    int Lcmp = a64_new_label(a);
+    int Leq = a64_new_label(a);
+    int Lnext = a64_new_label(a);
+    int Lmiss = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+
+    a64_mov_reg(a, A64_X1, A64_X0, 1);
+    emit_environ_addr(c, A64_X0);
+    a64_ldr64(a, A64_X0, A64_X0, 0);
+    a64_cbz(a, A64_X0, Lmiss, 1);
+    a64_bind(a, Lloop);
+    a64_ldr64(a, A64_X2, A64_X0, 0);
+    a64_cbz(a, A64_X2, Lmiss, 1);
+    a64_mov_reg(a, A64_X4, A64_X2, 1);
+    a64_mov_reg(a, A64_X5, A64_X1, 1);
+    a64_bind(a, Lcmp);
+    a64_ldr8(a, A64_X6, A64_X5, 0);
+    a64_ldr8(a, A64_X7, A64_X4, 0);
+    a64_cbz(a, A64_X6, Leq, 0);
+    a64_cmp_reg(a, A64_X6, A64_X7, 0);
+    a64_bcond(a, A64_NE, Lnext);
+    a64_add_imm12(a, A64_X4, A64_X4, 1, 0, 1, 0);
+    a64_add_imm12(a, A64_X5, A64_X5, 1, 0, 1, 0);
+    a64_b(a, Lcmp);
+    a64_bind(a, Leq);
+    a64_cmp_imm12(a, A64_X7, 61, 0, 0);
+    a64_bcond(a, A64_NE, Lnext);
+    a64_add_imm12(a, A64_X0, A64_X4, 1, 0, 1, 0);
+    a64_b(a, Ldone);
+    a64_bind(a, Lnext);
+    a64_add_imm12(a, A64_X0, A64_X0, 8, 0, 1, 0);
+    a64_b(a, Lloop);
+    a64_bind(a, Lmiss);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_bind(a, Ldone);
     return 1;
 }
 
@@ -2991,6 +3049,7 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_copy_builtin(c, s->call_name)
                                  || emit_dup_builtin(c, s->call_name)
                                  || emit_io_builtin(c, s->call_name)
+                                 || emit_getenv(c, s->call_name)
                                  || emit_bound_builtin(c, s->call_name)
                                  || emit_cache_builtin(c, s->call_name)))) {
         int fi = 0;
@@ -4568,6 +4627,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     c.ir = ir;
     c.udiv_label = -1;
     c.tlv_thunk = -1;
+    c.environ_off = -1;
 
     c.fn_label = xmalloc(ir->functions.len * sizeof(int));
     for (size_t i = 0; i < ir->functions.len; i++)
@@ -4655,6 +4715,12 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             if (out->data_align < 8) out->data_align = 8;
         }
     }
+    if (!emit_object_mode()) {
+        while (out->bss_size % 8) out->bss_size++;
+        c.environ_off = (int)out->bss_size;
+        out->bss_size += 8;
+        if (out->bss_align < 8) out->bss_align = 8;
+    }
 
     /* Constructor/destructor order (matches the ELF _start walk in
      * link.c): constructors ascending by priority, source order as the
@@ -4707,6 +4773,8 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     a64_mov_reg(&a, A64_X19, A64_X0, 1);
     a64_mov_reg(&a, A64_X20, A64_X1, 1);
     a64_mov_reg(&a, A64_X21, A64_X2, 1);
+    emit_environ_addr(&c, A64_X16);
+    a64_str64(&a, A64_X21, A64_X16, 0);
     for (int i = 0; i < nctors; i++)
         a64_bl(&a, c.fn_label[ctors[i]]);
     a64_mov_reg(&a, A64_X0, A64_X19, 1);
@@ -4805,9 +4873,15 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                 memcpy(out->text.data + c.gfix[i].at + 4, &w1, 4);
                 continue;
             }
-            uint64_t base = c.gsect[gi] == G_RO ? ro_off
-                          : c.gsect[gi] == G_DATA ? data_off : bss_off;
-            uint64_t tgt = base + c.goff[gi] + (uint64_t)c.gfix[i].addend;
+            uint64_t tgt;
+            if (gi < 0) {
+                tgt = bss_off + (uint64_t)c.environ_off
+                    + (uint64_t)c.gfix[i].addend;
+            } else {
+                uint64_t base = c.gsect[gi] == G_RO ? ro_off
+                              : c.gsect[gi] == G_DATA ? data_off : bss_off;
+                tgt = base + c.goff[gi] + (uint64_t)c.gfix[i].addend;
+            }
             uint64_t pc = (uint64_t)macho_text_offset() + c.gfix[i].at;
             int64_t pages = (int64_t)((tgt & ~(uint64_t)0xFFF)
                                       - (pc & ~(uint64_t)0xFFF)) >> 12;
