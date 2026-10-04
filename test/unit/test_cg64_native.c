@@ -2822,6 +2822,28 @@ static void test_io(void) {
         "package main;\n"
         "long fchmod(long fd, long mode) { return mode ? 3 : 3; }\n"
         "int main(void) { return fchmod(1, 420) == 3 ? 7 : 1; }\n", 7);
+    expect("madvise_page",
+        "package main;\n"
+        "int errno;\n"
+        "long madvise(long addr, long len, long advice);\n"
+        "long mincore(long addr, long len, char *vec);\n"
+        "int main(void) {\n"
+        "  long p = __syscall(197, 0, 16384, 3, 0x1002, -1, 0);\n"
+        "  if (p < 0) return 1;\n"
+        "  if (madvise(p + 1, 16384, 0) != -22 || errno != 22) return 2;\n"
+        "  if (madvise(p, 16384, 2) != 0 || errno != 0) return 3;\n"
+        "  char *q = (char *)p;\n"
+        "  q[0] = 1;\n"
+        "  char v = 0;\n"
+        "  if (mincore(p, 16384, &v) != 0) return 4;\n"
+        "  if ((v & 1) == 0) return 5;\n"
+        "  if (__syscall(73, p, 16384) != 0) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("madvise_user",
+        "package main;\n"
+        "long madvise(long addr, long len, long advice) { return advice ? 3 : 3; }\n"
+        "int main(void) { return madvise(0, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
