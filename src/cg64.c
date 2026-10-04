@@ -1199,6 +1199,105 @@ static int emit_copy_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* x0 is the user byte count.  On success x0 is the payload pointer;
+ * on failure x0 is 0.  Clobbers x1-x5, x9 and x16.  Same mapping as
+ * malloc: 16-byte header holding the mapped length. */
+static void emit_mmap_bytes(A64Asm *a) {
+    int nonzero = a64_new_label(a);
+    int fail = a64_new_label(a);
+    int done = a64_new_label(a);
+    a64_cbnz(a, A64_X0, nonzero, 1);
+    a64_movz(a, A64_X0, 1, 0, 1);
+    a64_bind(a, nonzero);
+    a64_add_imm12(a, A64_X0, A64_X0, 31, 0, 1, 0);
+    a64_lsr_imm(a, A64_X0, A64_X0, 4, 1);
+    a64_lsl_imm(a, A64_X0, A64_X0, 4, 1);
+    a64_mov_reg(a, A64_X1, A64_X0, 1);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_movz(a, A64_X2, 3, 0, 1);
+    a64_movz(a, A64_X3, 0x1002, 0, 1);
+    a64_movn(a, A64_X4, 0, 0, 1);
+    a64_movz(a, A64_X5, 0, 0, 1);
+    a64_movz(a, A64_X16, 197, 0, 1);
+    a64_svc(a, 0x80);
+    a64_cset(a, A64_X9, A64_CS, 1);
+    a64_cbnz(a, A64_X9, fail, 1);
+    a64_str64(a, A64_X1, A64_X0, 0);
+    a64_add_imm12(a, A64_X0, A64_X0, 16, 0, 1, 0);
+    a64_b(a, done);
+    a64_bind(a, fail);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_bind(a, done);
+}
+
+/* strdup/strndup.  A same-TU definition wins.  The copy is allocated
+ * with a same-TU malloc when one exists, otherwise with mmap.  The
+ * source and the copied length are spilled around that call. */
+static int emit_dup_builtin(C64 *c, const char *name) {
+    int is_strdup = strcmp(name, "strdup") == 0;
+    int is_strndup = strcmp(name, "strndup") == 0;
+    if (!is_strdup && !is_strndup) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+
+    A64Asm *a = c->as;
+    int Lcount = a64_new_label(a);
+    int Lalloc = a64_new_label(a);
+    int Lcopy = a64_new_label(a);
+    int Lnul = a64_new_label(a);
+    int Lfail = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+
+    a64_sub_imm12(a, A64_SP, A64_SP, 16, 0, 1, 0);
+    a64_str64(a, A64_X0, A64_SP, 0);
+    if (is_strndup)
+        a64_str64(a, A64_X1, A64_SP, 8);
+    a64_movz(a, A64_X13, 0, 0, 1);
+    a64_bind(a, Lcount);
+    if (is_strndup) {
+        a64_ldr64(a, A64_X1, A64_SP, 8);
+        a64_cmp_reg(a, A64_X13, A64_X1, 1);
+        a64_bcond(a, A64_EQ, Lalloc);
+    }
+    a64_ldr8(a, A64_X2, A64_X0, 0);
+    a64_cbz(a, A64_X2, Lalloc, 0);
+    a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    a64_add_imm12(a, A64_X13, A64_X13, 1, 0, 1, 0);
+    a64_b(a, Lcount);
+    a64_bind(a, Lalloc);
+    a64_str64(a, A64_X13, A64_SP, 8);
+    a64_add_imm12(a, A64_X0, A64_X13, 1, 0, 1, 0);
+    {
+        int mfi = 0;
+        if (find_function(c->ir, "malloc", &mfi) == 0)
+            a64_bl(a, c->fn_label[mfi]);
+        else
+            emit_mmap_bytes(a);
+    }
+    a64_cbz(a, A64_X0, Lfail, 1);
+    a64_mov_reg(a, A64_X14, A64_X0, 1);
+    a64_ldr64(a, A64_X1, A64_SP, 0);
+    a64_ldr64(a, A64_X13, A64_SP, 8);
+    a64_mov_reg(a, A64_X0, A64_X14, 1);
+    a64_bind(a, Lcopy);
+    a64_cbz(a, A64_X13, Lnul, 1);
+    a64_ldr8(a, A64_X2, A64_X1, 0);
+    a64_str8(a, A64_X2, A64_X0, 0);
+    a64_add_imm12(a, A64_X0, A64_X0, 1, 0, 1, 0);
+    a64_add_imm12(a, A64_X1, A64_X1, 1, 0, 1, 0);
+    a64_sub_imm12(a, A64_X13, A64_X13, 1, 0, 1, 0);
+    a64_b(a, Lcopy);
+    a64_bind(a, Lnul);
+    a64_str8(a, 31, A64_X0, 0);
+    a64_mov_reg(a, A64_X0, A64_X14, 1);
+    a64_b(a, Ldone);
+    a64_bind(a, Lfail);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_bind(a, Ldone);
+    a64_add_imm12(a, A64_SP, A64_SP, 16, 0, 1, 0);
+    return 1;
+}
+
 /* Bytes of outgoing stack traffic for one call: 8 per stack slot, plus
  * 16 when call_args[0] must be stashed before it is written to x8. */
 static int is_va_builtin(const char *name) {
@@ -2864,6 +2963,7 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_find_builtin(c, s->call_name)
                                  || emit_span_builtin(c, s->call_name)
                                  || emit_copy_builtin(c, s->call_name)
+                                 || emit_dup_builtin(c, s->call_name)
                                  || emit_bound_builtin(c, s->call_name)
                                  || emit_cache_builtin(c, s->call_name)))) {
         int fi = 0;

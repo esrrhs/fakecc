@@ -1758,6 +1758,35 @@ static void test_malloc(void) {
         "}\n", 8);
 }
 
+static void test_strdup(void) {
+    expect("strdup_copy",
+        "package main;\n"
+        "char *strdup(char *s);\n"
+        "int main(void) {\n"
+        "  char s[4];\n"
+        "  s[0] = 'a'; s[1] = 'b'; s[2] = 0;\n"
+        "  char *p = strdup(s);\n"
+        "  if (!p) return 1;\n"
+        "  if (p[0] != 'a' || p[1] != 'b' || p[2]) return 2;\n"
+        "  p[0] = 'z';\n"
+        "  if (s[0] != 'a') return 3;\n"
+        "  return p[0] == 'z' ? 7 : 4;\n"
+        "}\n", 7);
+    expect("strndup_cut",
+        "package main;\n"
+        "char *strndup(char *s, unsigned long n);\n"
+        "int main(void) {\n"
+        "  char *p = strndup(\"hello\", 3);\n"
+        "  if (!p) return 1;\n"
+        "  if (p[0] != 'h' || p[1] != 'e' || p[2] != 'l' || p[3]) return 2;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("strdup_user",
+        "package main;\n"
+        "char *strdup(char *s) { return s ? 0 : 0; }\n"
+        "int main(void) { return strdup(\"a\") ? 1 : 7; }\n", 7);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3433,6 +3462,7 @@ int main(void) {
     test_call_stub();
     test_tls();
     test_malloc();
+    test_strdup();
     test_macho_link();
     return t_finalize();
 }
