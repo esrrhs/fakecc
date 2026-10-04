@@ -3033,6 +3033,36 @@ static void test_io(void) {
         "package main;\n"
         "long symlinkat(char *target, long dirfd, char *path) { return path ? 3 : 3; }\n"
         "int main(void) { return symlinkat(\"a\", 0, \"b\") == 3 ? 7 : 1; }\n", 7);
+    expect("readlinkat_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "long symlink(char *target, char *path);\n"
+        "long readlinkat(long dirfd, char *path, char *buf, long n);\n"
+        "int main(void) {\n"
+        "  char *abs = \"/tmp/fakecc_readlinkat_rt\";\n"
+        "  unlink(abs);\n"
+        "  if (symlink(\"tgtname\", abs) != 0) return 1;\n"
+        "  long dir = open(\"/tmp\", 0, 0);\n"
+        "  if (dir < 0) return 2;\n"
+        "  char buf[8];\n"
+        "  int i;\n"
+        "  for (i = 0; i < 8; i++) buf[i] = 1;\n"
+        "  if (readlinkat(dir, \"fakecc_readlinkat_rt\", buf, 8) != 7) return 3;\n"
+        "  if (buf[0] != 't' || buf[6] != 'e' || buf[7] != 1) return 4;\n"
+        "  if (readlinkat(dir, \"no_such_fakecc_rla\", buf, 8) != -2 || errno != 2) return 5;\n"
+        "  if (readlinkat(200, \"fakecc_readlinkat_rt\", buf, 8) != -9 || errno != 9) return 6;\n"
+        "  if (readlinkat(dir, \"fakecc_readlinkat_rt\", buf, 8) != 7 || errno != 0) return 8;\n"
+        "  unlink(abs);\n"
+        "  close(dir);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("readlinkat_user",
+        "package main;\n"
+        "long readlinkat(long dirfd, char *path, char *buf, long n) { return n ? 3 : 3; }\n"
+        "int main(void) { return readlinkat(0, 0, 0, 8) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
