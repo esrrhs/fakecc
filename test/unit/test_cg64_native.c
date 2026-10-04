@@ -2776,6 +2776,27 @@ static void test_io(void) {
         "package main;\n"
         "long poll(int *fds, long nfds, long timeout) { return nfds ? 3 : 3; }\n"
         "int main(void) { return poll(0, 1, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("kqueue_empty",
+        "package main;\n"
+        "int errno;\n"
+        "long kqueue(void);\n"
+        "long kevent(long kq, long *chg, long nchg, long *ev, long nev, long *ts);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  long fd = kqueue();\n"
+        "  if (fd < 0) return 1;\n"
+        "  long ts[2];\n"
+        "  ts[0] = 0; ts[1] = 0;\n"
+        "  if (kevent(fd, 0, 0, 0, 0, ts) != 0) return 2;\n"
+        "  if (kevent(-1, 0, 0, 0, 0, ts) != -9 || errno != 9) return 3;\n"
+        "  if (kevent(fd, 0, 0, 0, 0, ts) != 0 || errno != 0) return 4;\n"
+        "  close(fd);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("kqueue_user",
+        "package main;\n"
+        "long kqueue(void) { return 3; }\n"
+        "int main(void) { return kqueue() == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
