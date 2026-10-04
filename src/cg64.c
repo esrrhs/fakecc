@@ -1310,7 +1310,8 @@ static int emit_dup_builtin(C64 *c, const char *name) {
 
 /* read/write/open/close/unlink/chmod/lseek.  Arguments are already
  * in x0..x5.  Darwin numbers, with the same carry-to-negative-errno
- * fix as __syscall.  A same-TU definition still wins. */
+ * fix as __syscall.  A same-TU int errno is updated with the positive
+ * code, or cleared on success.  A same-TU definition still wins. */
 static int emit_io_builtin(C64 *c, const char *name) {
     int num = 0;
     if (strcmp(name, "read") == 0) num = 3;
@@ -1324,11 +1325,25 @@ static int emit_io_builtin(C64 *c, const char *name) {
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
     A64Asm *a = c->as;
+    int egi = find_global_idx(c->ir, "errno");
     a64_movz(a, A64_X16, (unsigned)num, 0, 1);
     a64_svc(a, 0x80);
     {
         int ok = a64_new_label(a);
         a64_cset(a, A64_X9, A64_CS, 1);
+        if (egi >= 0) {
+            int clear = a64_new_label(a);
+            int stored = a64_new_label(a);
+            note_page_reloc(c, (uint32_t)a->code.len, egi, NULL, -1);
+            a64_word(a, 0x90000000u | (uint32_t)A64_X16);
+            a64_word(a, 0x91000000u | ((uint32_t)A64_X16 << 5) | (uint32_t)A64_X16);
+            a64_cbz(a, A64_X9, clear, 1);
+            a64_str32(a, A64_X0, A64_X16, 0);
+            a64_b(a, stored);
+            a64_bind(a, clear);
+            a64_str32(a, 31, A64_X16, 0);
+            a64_bind(a, stored);
+        }
         a64_cbz(a, A64_X9, ok, 1);
         a64_neg(a, A64_X0, A64_X0, 1);
         a64_bind(a, ok);

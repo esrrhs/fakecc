@@ -1840,6 +1840,18 @@ static void test_io(void) {
         "package main;\n"
         "long unlink(char *path) { return path ? 3 : 3; }\n"
         "int main(void) { return unlink(\"x\") == 3 ? 7 : 1; }\n", 7);
+    expect("errno_write",
+        "package main;\n"
+        "int errno;\n"
+        "long write(long fd, char *buf, long n);\n"
+        "int main(void) {\n"
+        "  char *p = \"x\";\n"
+        "  if (write(-1, p, 1) != -9) return 1;\n"
+        "  if (errno != 9) return 2;\n"
+        "  if (write(1, p, 0) != 0) return 3;\n"
+        "  if (errno != 0) return 4;\n"
+        "  return 7;\n"
+        "}\n", 7);
 }
 
 static void test_getenv(void) {
