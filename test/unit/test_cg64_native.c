@@ -3105,6 +3105,37 @@ static void test_io(void) {
         "package main;\n"
         "long linkat(long olddir, char *oldpath, long newdir, char *newpath, long flags) { return flags ? 3 : 3; }\n"
         "int main(void) { return linkat(0, 0, 0, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("fchmodat_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "long access(char *p, long mode);\n"
+        "long fchmodat(long dirfd, char *path, long mode, long flags);\n"
+        "int main(void) {\n"
+        "  char *abs = \"/tmp/fakecc_fchmodat_rt\";\n"
+        "  unlink(abs);\n"
+        "  long fd = open(abs, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  close(fd);\n"
+        "  long dir = open(\"/tmp\", 0, 0);\n"
+        "  if (dir < 0) return 2;\n"
+        "  if (fchmodat(dir, \"fakecc_fchmodat_rt\", 0, 0) != 0) return 3;\n"
+        "  if (access(abs, 4) != -13 || errno != 13) return 4;\n"
+        "  if (fchmodat(dir, \"fakecc_fchmodat_rt\", 420, 0) != 0) return 5;\n"
+        "  if (access(abs, 4) != 0 || errno != 0) return 6;\n"
+        "  if (fchmodat(200, \"fakecc_fchmodat_rt\", 420, 0) != -9 || errno != 9) return 8;\n"
+        "  if (fchmodat(dir, \"no_such_fakecc_fca\", 420, 0) != -2 || errno != 2) return 9;\n"
+        "  if (fchmodat(dir, \"fakecc_fchmodat_rt\", 420, 0) != 0 || errno != 0) return 10;\n"
+        "  unlink(abs);\n"
+        "  close(dir);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("fchmodat_user",
+        "package main;\n"
+        "long fchmodat(long dirfd, char *path, long mode, long flags) { return flags ? 3 : 3; }\n"
+        "int main(void) { return fchmodat(0, 0, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
