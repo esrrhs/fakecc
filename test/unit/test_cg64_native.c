@@ -1865,6 +1865,26 @@ static void test_io(void) {
         "package main;\n"
         "long getpid(void) { return 4; }\n"
         "int main(void) { return getpid() == 4 ? 7 : 1; }\n", 7);
+    expect("mkdir_rmdir",
+        "package main;\n"
+        "int errno;\n"
+        "long mkdir(char *path, long mode);\n"
+        "long rmdir(char *path);\n"
+        "int main(void) {\n"
+        "  char *path = \"/tmp/fakecc_mkdir_rt\";\n"
+        "  rmdir(path);\n"
+        "  if (mkdir(path, 448) != 0) return 1;\n"
+        "  if (mkdir(path, 448) != -17) return 2;\n"
+        "  if (errno != 17) return 3;\n"
+        "  if (rmdir(path) != 0) return 4;\n"
+        "  if (rmdir(path) != -2) return 5;\n"
+        "  if (errno != 2) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("mkdir_user",
+        "package main;\n"
+        "long mkdir(char *path, long mode) { return path ? 3 : 3; }\n"
+        "int main(void) { return mkdir(\"x\", 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
