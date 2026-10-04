@@ -2378,6 +2378,29 @@ static void test_io(void) {
         "package main;\n"
         "long mkfifo(char *path, long mode) { return mode ? 3 : 3; }\n"
         "int main(void) { return mkfifo(0, 420) == 3 ? 7 : 1; }\n", 7);
+    expect("pathconf_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long pathconf(char *path, long name);\n"
+        "long fpathconf(long fd, long name);\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  if (pathconf(\"/tmp\", 4) != 255) return 1;\n"
+        "  if (pathconf(\"/tmp\", 5) != 1024) return 2;\n"
+        "  if (pathconf(\"/tmp/no_such_fakecc_pc\", 4) != -2 || errno != 2) return 3;\n"
+        "  if (pathconf(\"/tmp\", 99) != -22 || errno != 22) return 4;\n"
+        "  long fd = open(\"/tmp\", 0, 0);\n"
+        "  if (fd < 0) return 5;\n"
+        "  if (fpathconf(fd, 4) != 255 || errno != 0) return 6;\n"
+        "  if (fpathconf(-1, 4) != -9 || errno != 9) return 8;\n"
+        "  close(fd);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("pathconf_user",
+        "package main;\n"
+        "long pathconf(char *path, long name) { return name ? 3 : 3; }\n"
+        "int main(void) { return pathconf(0, 4) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
