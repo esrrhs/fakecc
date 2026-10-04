@@ -2215,6 +2215,29 @@ static void test_io(void) {
         "package main;\n"
         "long gettimeofday(long *tv, long *tz) { return tv ? 3 : 3; }\n"
         "int main(void) { return gettimeofday(0, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("getentropy_bytes",
+        "package main;\n"
+        "int errno;\n"
+        "long getentropy(char *buf, long n);\n"
+        "long issetugid(void);\n"
+        "int main(void) {\n"
+        "  char b[8];\n"
+        "  int i;\n"
+        "  for (i = 0; i < 8; i++) b[i] = 0;\n"
+        "  if (getentropy(b, 8) != 0) return 1;\n"
+        "  int any = 0;\n"
+        "  for (i = 0; i < 8; i++) if (b[i]) any = 1;\n"
+        "  if (!any) return 2;\n"
+        "  if (getentropy(b, 257) >= 0 || errno == 0) return 3;\n"
+        "  if (getentropy(b, 0) != 0 || errno != 0) return 4;\n"
+        "  long ug = issetugid();\n"
+        "  if (ug != 0 && ug != 1) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("getentropy_user",
+        "package main;\n"
+        "long getentropy(char *buf, long n) { return n ? 3 : 3; }\n"
+        "int main(void) { return getentropy(0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
