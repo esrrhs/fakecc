@@ -2555,6 +2555,32 @@ static void test_io(void) {
         "package main;\n"
         "long socket(long domain, long type, long proto) { return domain ? 3 : 3; }\n"
         "int main(void) { return socket(1, 1, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("sockopt_type",
+        "package main;\n"
+        "int errno;\n"
+        "long socket(long domain, long type, long proto);\n"
+        "long getsockopt(long fd, long level, long name, int *val, int *len);\n"
+        "long setsockopt(long fd, long level, long name, int *val, long len);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  long fd = socket(1, 1, 0);\n"
+        "  if (fd < 0) return 1;\n"
+        "  int typ = -1;\n"
+        "  int len = 4;\n"
+        "  if (getsockopt(fd, 0xffff, 0x1008, &typ, &len) != 0) return 2;\n"
+        "  if (typ != 1 || len != 4) return 3;\n"
+        "  int one = 1;\n"
+        "  if (setsockopt(fd, 0xffff, 4, &one, 4) != 0) return 4;\n"
+        "  if (getsockopt(-1, 0xffff, 0x1008, &typ, &len) != -9 || errno != 9) return 5;\n"
+        "  len = 4;\n"
+        "  if (getsockopt(fd, 0xffff, 0x1008, &typ, &len) != 0 || errno != 0) return 6;\n"
+        "  close(fd);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("sockopt_user",
+        "package main;\n"
+        "long getsockopt(long fd, long level, long name, int *val, int *len) { return name ? 3 : 3; }\n"
+        "int main(void) { return getsockopt(0, 0, 1, 0, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
