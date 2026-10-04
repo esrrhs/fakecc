@@ -2980,6 +2980,26 @@ static void test_io(void) {
         "package main;\n"
         "long mkdirat(long dirfd, char *path, long mode) { return mode ? 3 : 3; }\n"
         "int main(void) { return mkdirat(0, 0, 448) == 3 ? 7 : 1; }\n", 7);
+    expect("faccessat_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long faccessat(long dirfd, char *path, long mode, long flags);\n"
+        "int main(void) {\n"
+        "  long dir = open(\"/tmp\", 0, 0);\n"
+        "  if (dir < 0) return 1;\n"
+        "  if (faccessat(dir, \".\", 0, 0) != 0) return 2;\n"
+        "  if (faccessat(dir, \"no_such_fakecc_fa\", 0, 0) != -2 || errno != 2) return 3;\n"
+        "  if (faccessat(200, \"no_such_fakecc_fa\", 0, 0) != -9 || errno != 9) return 4;\n"
+        "  if (faccessat(dir, \".\", 0, 0) != 0 || errno != 0) return 5;\n"
+        "  close(dir);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("faccessat_user",
+        "package main;\n"
+        "long faccessat(long dirfd, char *path, long mode, long flags) { return flags ? 3 : 3; }\n"
+        "int main(void) { return faccessat(0, 0, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
