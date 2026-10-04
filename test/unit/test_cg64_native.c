@@ -1731,6 +1731,31 @@ static void test_malloc(void) {
         "  unsigned long n = 1ul << 32;\n"
         "  return calloc(n, n) ? 1 : 7;\n"
         "}\n", 7);
+    expect("realloc_grow",
+        "package main;\n"
+        "void *malloc(unsigned long n);\n"
+        "void *realloc(void *p, unsigned long n);\n"
+        "int main(void) {\n"
+        "  char *p = malloc(4);\n"
+        "  if (!p) return 1;\n"
+        "  p[0] = 1; p[1] = 2; p[2] = 3; p[3] = 4;\n"
+        "  char *q = realloc(p, 8);\n"
+        "  if (!q) return 2;\n"
+        "  if (q[0] != 1 || q[3] != 4) return 3;\n"
+        "  q[7] = 5;\n"
+        "  return q[0] + q[7];\n"
+        "}\n", 6);
+    expect("realloc_null",
+        "package main;\n"
+        "void *realloc(void *p, unsigned long n);\n"
+        "int main(void) {\n"
+        "  char *p = realloc(0, 4);\n"
+        "  if (!p) return 1;\n"
+        "  p[0] = 8;\n"
+        "  int v = p[0];\n"
+        "  char *z = realloc(p, 0);\n"
+        "  return z ? 2 : v;\n"
+        "}\n", 8);
 }
 
 static void test_macho_link(void) {

@@ -467,7 +467,8 @@ static int emit_alloc_builtin(C64 *c, const char *name) {
     int is_malloc = strcmp(name, "malloc") == 0;
     int is_free = strcmp(name, "free") == 0;
     int is_calloc = strcmp(name, "calloc") == 0;
-    if (!is_malloc && !is_free && !is_calloc) return 0;
+    int is_realloc = strcmp(name, "realloc") == 0;
+    if (!is_malloc && !is_free && !is_calloc && !is_realloc) return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
     A64Asm *a = c->as;
@@ -485,6 +486,40 @@ static int emit_alloc_builtin(C64 *c, const char *name) {
     int fail = a64_new_label(a);
     int done = a64_new_label(a);
     int zloop = a64_new_label(a);
+    int after = a64_new_label(a);
+    int have_size = a64_new_label(a);
+    if (is_realloc) {
+        int as_malloc = a64_new_label(a);
+        int as_free = a64_new_label(a);
+        int use_new = a64_new_label(a);
+        a64_cbz(a, A64_X0, as_malloc, 1);
+        a64_cbz(a, A64_X1, as_free, 1);
+        a64_mov_reg(a, A64_X10, A64_X0, 1);
+        a64_mov_reg(a, A64_X12, A64_X1, 1);
+        a64_sub_imm12(a, A64_X11, A64_X0, 16, 0, 1, 0);
+        a64_ldr64(a, A64_X11, A64_X11, 0);
+        a64_sub_imm12(a, A64_X11, A64_X11, 16, 0, 1, 0);
+        a64_cmp_reg(a, A64_X11, A64_X12, 1);
+        a64_bcond(a, A64_LS, use_new);
+        a64_mov_reg(a, A64_X11, A64_X12, 1);
+        a64_bind(a, use_new);
+        a64_movz(a, A64_X14, 1, 0, 1);
+        a64_mov_reg(a, A64_X0, A64_X12, 1);
+        a64_movz(a, A64_X7, 0, 0, 1);
+        a64_b(a, have_size);
+        a64_bind(a, as_malloc);
+        a64_mov_reg(a, A64_X0, A64_X1, 1);
+        a64_movz(a, A64_X7, 0, 0, 1);
+        a64_movz(a, A64_X14, 0, 0, 1);
+        a64_b(a, have_size);
+        a64_bind(a, as_free);
+        a64_sub_imm12(a, A64_X0, A64_X0, 16, 0, 1, 0);
+        a64_ldr64(a, A64_X1, A64_X0, 0);
+        a64_movz(a, A64_X16, 73, 0, 1);
+        a64_svc(a, 0x80);
+        a64_movz(a, A64_X0, 0, 0, 1);
+        a64_b(a, done);
+    }
     if (is_calloc) {
         int nzero = a64_new_label(a);
         a64_mul(a, A64_X2, A64_X0, A64_X1, 1);
@@ -495,9 +530,12 @@ static int emit_alloc_builtin(C64 *c, const char *name) {
         a64_bind(a, nzero);
         a64_mov_reg(a, A64_X7, A64_X2, 1);
         a64_mov_reg(a, A64_X0, A64_X2, 1);
+        a64_movz(a, A64_X14, 0, 0, 1);
     } else {
         a64_movz(a, A64_X7, 0, 0, 1);
+        a64_movz(a, A64_X14, 0, 0, 1);
     }
+    a64_bind(a, have_size);
     a64_cbnz(a, A64_X0, nonzero, 1);
     a64_movz(a, A64_X0, 1, 0, 1);
     a64_bind(a, nonzero);
@@ -519,13 +557,39 @@ static int emit_alloc_builtin(C64 *c, const char *name) {
     a64_mov_reg(a, A64_X2, A64_X0, 1);
     a64_mov_reg(a, A64_X3, A64_X7, 1);
     a64_bind(a, zloop);
-    a64_cbz(a, A64_X3, done, 1);
+    a64_cbz(a, A64_X3, after, 1);
     a64_str8(a, 31, A64_X2, 0); /* strb wzr */
     a64_add_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
     a64_sub_imm12(a, A64_X3, A64_X3, 1, 0, 1, 0);
     a64_b(a, zloop);
     a64_bind(a, fail);
     a64_movz(a, A64_X0, 0, 0, 1);
+    a64_b(a, done);
+    a64_bind(a, after);
+    {
+        int cloop = a64_new_label(a);
+        int copied = a64_new_label(a);
+        a64_cbz(a, A64_X14, done, 1);
+        a64_mov_reg(a, A64_X13, A64_X0, 1);
+        a64_mov_reg(a, A64_X2, A64_X13, 1);
+        a64_mov_reg(a, A64_X3, A64_X10, 1);
+        a64_mov_reg(a, A64_X4, A64_X11, 1);
+        a64_bind(a, cloop);
+        a64_cbz(a, A64_X4, copied, 1);
+        a64_ldr8(a, A64_X5, A64_X3, 0);
+        a64_str8(a, A64_X5, A64_X2, 0);
+        a64_add_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+        a64_add_imm12(a, A64_X3, A64_X3, 1, 0, 1, 0);
+        a64_sub_imm12(a, A64_X4, A64_X4, 1, 0, 1, 0);
+        a64_b(a, cloop);
+        a64_bind(a, copied);
+        a64_mov_reg(a, A64_X0, A64_X10, 1);
+        a64_sub_imm12(a, A64_X0, A64_X0, 16, 0, 1, 0);
+        a64_ldr64(a, A64_X1, A64_X0, 0);
+        a64_movz(a, A64_X16, 73, 0, 1);
+        a64_svc(a, 0x80);
+        a64_mov_reg(a, A64_X0, A64_X13, 1);
+    }
     a64_bind(a, done);
     return 1;
 }
