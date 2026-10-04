@@ -3195,6 +3195,31 @@ static void test_io(void) {
         "package main;\n"
         "long mkfifoat(long dirfd, char *path, long mode) { return mode ? 3 : 3; }\n"
         "int main(void) { return mkfifoat(0, 0, 420) == 3 ? 7 : 1; }\n", 7);
+    expect("fdatasync_file",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long unlink(char *p);\n"
+        "long fdatasync(long fd);\n"
+        "int main(void) {\n"
+        "  char *abs = \"/tmp/fakecc_fdatasync_rt\";\n"
+        "  unlink(abs);\n"
+        "  long fd = open(abs, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  if (write(fd, \"ab\", 2) != 2) return 2;\n"
+        "  if (fdatasync(fd) != 0) return 3;\n"
+        "  if (fdatasync(-1) != -9 || errno != 9) return 4;\n"
+        "  if (fdatasync(fd) != 0 || errno != 0) return 5;\n"
+        "  close(fd);\n"
+        "  unlink(abs);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("fdatasync_user",
+        "package main;\n"
+        "long fdatasync(long fd) { return fd ? 3 : 3; }\n"
+        "int main(void) { return fdatasync(1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {

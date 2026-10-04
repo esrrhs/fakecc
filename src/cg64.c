@@ -1342,7 +1342,7 @@ static int emit_pipe_builtin(C64 *c, const char *name) {
     return 1;
 }
 
-/* read/write/pread/pwrite/open/close/dup/dup2/fsync/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/getrusage/openat/unlinkat/mkdirat/renameat/faccessat/symlinkat/readlinkat/linkat/fchmodat/fchownat/mkfifoat/mkdir/rmdir/lseek/truncate/ftruncate.
+/* read/write/pread/pwrite/open/close/dup/dup2/fsync/fdatasync/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/getrusage/openat/unlinkat/mkdirat/renameat/faccessat/symlinkat/readlinkat/linkat/fchmodat/fchownat/mkfifoat/mkdir/rmdir/lseek/truncate/ftruncate.
  * Arguments are already in x0..x5.  Darwin numbers, with the same
  * carry-to-negative errno fix as __syscall.  A same-TU int errno is
  * updated with the positive code, or cleared on success.  A same-TU
@@ -1358,6 +1358,7 @@ static int emit_io_builtin(C64 *c, const char *name) {
     else if (strcmp(name, "dup") == 0) num = 41;
     else if (strcmp(name, "dup2") == 0) num = 90;
     else if (strcmp(name, "fsync") == 0) num = 95;
+    else if (strcmp(name, "fdatasync") == 0) num = 187;
     else if (strcmp(name, "flock") == 0) num = 131;
     else if (strcmp(name, "link") == 0) num = 9;
     else if (strcmp(name, "unlink") == 0) num = 10;
