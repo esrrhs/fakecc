@@ -1946,6 +1946,30 @@ static void test_io(void) {
         "package main;\n"
         "long chdir(char *path) { return path ? 3 : 3; }\n"
         "int main(void) { return chdir(\"x\") == 3 ? 7 : 1; }\n", 7);
+    expect("symlink_readlink",
+        "package main;\n"
+        "int errno;\n"
+        "long symlink(char *target, char *path);\n"
+        "long readlink(char *path, char *buf, long n);\n"
+        "long unlink(char *path);\n"
+        "int main(void) {\n"
+        "  char *link = \"/tmp/fakecc_sym_rt\";\n"
+        "  unlink(link);\n"
+        "  if (symlink(\"target\", link) != 0) return 1;\n"
+        "  char buf[8];\n"
+        "  int i;\n"
+        "  for (i = 0; i < 8; i++) buf[i] = 1;\n"
+        "  if (readlink(link, buf, 8) != 6) return 2;\n"
+        "  if (buf[0] != 't' || buf[5] != 't' || buf[6] != 1) return 3;\n"
+        "  if (unlink(link) != 0) return 4;\n"
+        "  if (readlink(link, buf, 8) != -2) return 5;\n"
+        "  if (errno != 2) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("symlink_user",
+        "package main;\n"
+        "long symlink(char *target, char *path) { return target ? 3 : 3; }\n"
+        "int main(void) { return symlink(\"a\", \"b\") == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
