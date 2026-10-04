@@ -3288,6 +3288,24 @@ static void test_io(void) {
         "package main;\n"
         "long setpgid(long pid, long pgid) { return pgid ? 3 : 3; }\n"
         "int main(void) { return setpgid(0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("setsid_self",
+        "package main;\n"
+        "int errno;\n"
+        "long getpid(void);\n"
+        "long getsid(long pid);\n"
+        "long setsid(void);\n"
+        "int main(void) {\n"
+        "  long pid = getpid();\n"
+        "  if (pid <= 1) return 1;\n"
+        "  if (setsid() != pid) return 2;\n"
+        "  if (getsid(0) != pid || errno != 0) return 3;\n"
+        "  if (setsid() != -1 || errno != 1) return 4;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("setsid_user",
+        "package main;\n"
+        "long setsid(void) { return 3; }\n"
+        "int main(void) { return setsid() == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
