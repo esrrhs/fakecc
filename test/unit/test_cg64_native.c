@@ -3450,6 +3450,41 @@ static void test_io(void) {
         "package main;\n"
         "long sendmsg(long fd, long *hdr, long flags) { return flags ? 3 : 3; }\n"
         "int main(void) { return sendmsg(1, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("recvmsg_pair",
+        "package main;\n"
+        "int errno;\n"
+        "long socketpair(long domain, long type, long proto, int *sv);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long close(long fd);\n"
+        "long recvmsg(long fd, long *hdr, long flags);\n"
+        "int main(void) {\n"
+        "  int sv[2];\n"
+        "  if (socketpair(1, 1, 0, sv) != 0) return 1;\n"
+        "  if (write(sv[0], \"ab\", 2) != 2) return 2;\n"
+        "  if (write(sv[0], \"cd\", 2) != 2) return 3;\n"
+        "  char buf[2];\n"
+        "  buf[0] = 0; buf[1] = 0;\n"
+        "  long iov[2];\n"
+        "  iov[0] = (long)buf;\n"
+        "  iov[1] = 2;\n"
+        "  long hdr[6];\n"
+        "  int i;\n"
+        "  for (i = 0; i < 6; i++) hdr[i] = 0;\n"
+        "  hdr[2] = (long)iov;\n"
+        "  hdr[3] = 1;\n"
+        "  if (recvmsg(sv[1], hdr, 0) != 2 || buf[0] != 'a' || buf[1] != 'b') return 4;\n"
+        "  if (recvmsg(-1, hdr, 0) != -9 || errno != 9) return 5;\n"
+        "  buf[0] = 0; buf[1] = 0;\n"
+        "  if (recvmsg(sv[1], hdr, 0) != 2 || errno != 0) return 6;\n"
+        "  if (buf[0] != 'c' || buf[1] != 'd') return 8;\n"
+        "  close(sv[0]);\n"
+        "  close(sv[1]);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("recvmsg_user",
+        "package main;\n"
+        "long recvmsg(long fd, long *hdr, long flags) { return flags ? 3 : 3; }\n"
+        "int main(void) { return recvmsg(1, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
