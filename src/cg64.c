@@ -42,7 +42,7 @@ typedef struct {
     size_t           *goff;
     /* ADRP+ADD pairs targeting globals; patched once the final section
      * placement (which depends on the total text length) is known. */
-    struct GFix { uint32_t at; int gidx; const char *name; int value; int addend; } *gfix;
+    struct GFix { uint32_t at; int gidx; const char *name; int value; int addend; int got; } *gfix;
     size_t            ngfix, capgfix;
     /* Pointer slots inside global initializers.  Resolved into dyld
      * rebases once every section base is known. */
@@ -102,22 +102,22 @@ static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name,
     c->gfix[c->ngfix].name = name;
     c->gfix[c->ngfix].value = value;
     c->gfix[c->ngfix].addend = 0;
+    c->gfix[c->ngfix].got = 0;
     c->ngfix++;
+}
+
+static int c64_is_weak_ref(const IRModule *ir, const char *name) {
+    if (!ir || !name) return 0;
+    for (size_t i = 0; i < ir->n_weak_refs; i++)
+        if (ir->weak_refs[i] && strcmp(ir->weak_refs[i], name) == 0)
+            return 1;
+    return 0;
 }
 
 static int c64_undef_sym(EmitModule *out, const IRModule *ir, const char *name) {
     int si = emit_module_find_symbol(out, name);
     if (si >= 0) return si;
-    int weak = 0;
-    if (ir && name) {
-        for (size_t i = 0; i < ir->n_weak_refs; i++) {
-            if (ir->weak_refs[i] && strcmp(ir->weak_refs[i], name) == 0) {
-                weak = 1;
-                break;
-            }
-        }
-    }
-    if (weak)
+    if (c64_is_weak_ref(ir, name))
         return emit_module_add_symbol(out, name, 2, 0, (uint16_t)SECT_UNDEF, 0, 0);
     return emit_module_add_undefined(out, name);
 }
@@ -4081,9 +4081,19 @@ static void emit_function(C64 *c, int fi) {
              * codegen64 once __const/__data/__bss placement is final. */
             note_page_reloc(c, (uint32_t)a->code.len, gi,
                             gi < 0 ? s->call_name : NULL, s->dst);
+            /* A symbol defined in another image is reached through the GOT.
+             * ADRP cannot span the 4 GiB gap down to a missing weak address,
+             * so those stay a direct page reloc and the linker writes zero. */
+            int use_got = gi < 0 && emit_object_mode()
+                       && !c64_is_weak_ref(c->ir, s->call_name);
+            if (use_got) c->gfix[c->ngfix - 1].got = 1;
             a64_word(a, 0x90000000u | (uint32_t)(d & 31));
-            a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
-                                    | (uint32_t)(d & 31));
+            if (use_got)
+                a64_word(a, 0xF9400000u | ((uint32_t)(d & 31) << 5)
+                                        | (uint32_t)(d & 31));
+            else
+                a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
+                                        | (uint32_t)(d & 31));
             commit(c, s->dst, d);
             break;
         }
@@ -4565,6 +4575,19 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             if (si < 0) {
                 die_at("<arm64>", 0, 0,
                        "arm64 object file: global has no symbol");
+                continue;
+            }
+            if (c.gfix[i].got) {
+                if (c.gfix[i].addend)
+                    emit_module_add_reloc(out, c.gfix[i].at, 10 /* ADDEND */,
+                                          0, c.gfix[i].addend);
+                emit_module_add_reloc(out, c.gfix[i].at, 5 /* GOT_LOAD_PAGE21 */,
+                                      si, 0);
+                if (c.gfix[i].addend)
+                    emit_module_add_reloc(out, c.gfix[i].at + 4, 10 /* ADDEND */,
+                                          0, c.gfix[i].addend);
+                emit_module_add_reloc(out, c.gfix[i].at + 4,
+                                      6 /* GOT_LOAD_PAGEOFF12 */, si, 0);
                 continue;
             }
             if (c.gfix[i].addend)

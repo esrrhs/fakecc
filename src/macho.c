@@ -785,7 +785,7 @@ static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
         uint32_t symfield = (r->type == 10)
                           ? ((uint32_t)r->addend & 0xFFFFFFu)
                           : ((uint32_t)sym & 0xFFFFFFu);
-        uint32_t pcrel = (r->type == 2 || r->type == 3) ? 1u : 0u;
+        uint32_t pcrel = (r->type == 2 || r->type == 3 || r->type == 5) ? 1u : 0u;
         uint32_t length = (r->type == 0 || r->type == 1) ? 3u : 2u; /* 8-byte slots */
         uint32_t word = symfield
                       | (pcrel << 24)
@@ -1732,6 +1732,51 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
         free(comms);
     }
 
+    typedef struct { char *name; int32_t addend; int filled; } GotEnt;
+    GotEnt *gots = NULL;
+    size_t ngot = 0, capgot = 0;
+    size_t got_base = 0;
+    if (rc == 0) {
+        for (size_t i = 0; i < n; i++) {
+            EmitModule *m = mods[i];
+            for (size_t ri = 0; ri < m->num_relocs; ri++) {
+                EmitReloc *r = &m->relocs[ri];
+                if (r->type != 5 || r->sym >= m->num_syms) continue;
+                const char *nm = m->syms[r->sym].name;
+                if (!nm) continue;
+                int have = 0;
+                for (size_t g = 0; g < ngot; g++) {
+                    if (gots[g].addend == r->addend &&
+                        strcmp(gots[g].name, nm) == 0) {
+                        have = 1;
+                        break;
+                    }
+                }
+                if (have) continue;
+                if (ngot == capgot) {
+                    capgot = capgot ? capgot * 2 : 4;
+                    gots = xrealloc(gots, capgot * sizeof(GotEnt));
+                }
+                gots[ngot].name = xstrdup(nm);
+                gots[ngot].addend = r->addend;
+                gots[ngot].filled = 0;
+                ngot++;
+            }
+        }
+        if (ngot) {
+            while (out.data.len % 8) {
+                char z = 0;
+                buffer_append(&out.data, &z, 1);
+            }
+            got_base = out.data.len;
+            for (size_t g = 0; g < ngot; g++) {
+                char z[8] = {0};
+                buffer_append(&out.data, z, 8);
+            }
+            if (out.data_align < 8) out.data_align = 8;
+        }
+    }
+
     uint64_t ro_off = 0, data_off = 0, bss_off = 0;
     if (rc == 0)
         macho_section_offsets(&out, out.text.len, &ro_off, &data_off, &bss_off);
@@ -1828,7 +1873,28 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                     uint64_t pc = macho_text_offset() + site;
                     uint32_t w = 0;
                     memcpy(&w, out.text.data + site, 4);
-                    if (r->type == 2) {
+                    if (r->type == 5 || r->type == 6) {
+                        int slot = -1;
+                        for (size_t g = 0; g < ngot; g++) {
+                            if (es->name && gots[g].addend == r->addend &&
+                                strcmp(gots[g].name, es->name) == 0) {
+                                slot = (int)g;
+                                break;
+                            }
+                        }
+                        if (slot < 0 || data_off == 0) {
+                            fprintf(stderr, "fakecc: got reloc has no slot\n");
+                            rc = -1;
+                            break;
+                        }
+                        uint64_t got_va = data_off + got_base + (uint64_t)slot * 8;
+                        if (!gots[slot].filled) {
+                            emit_module_add_rebase(&out, got_va, tgt);
+                            gots[slot].filled = 1;
+                        }
+                        if (r->type == 5) patch_adrp(&w, pc, got_va);
+                        else w |= (uint32_t)(((got_va & 0xFFFu) >> 3) << 10);
+                    } else if (r->type == 2) {
                         if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
                     } else if (r->type == 3) patch_adrp(&w, pc, tgt);
                     else if (r->type == 4) patch_add_pageoff(&w, tgt);
@@ -1953,6 +2019,8 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     free(text_base); free(ro_base); free(data_base); free(bss_base);
     for (size_t g = 0; g < ng; g++) free(gdefs[g].name);
     free(gdefs);
+    for (size_t g = 0; g < ngot; g++) free(gots[g].name);
+    free(gots);
     free(ctors);
     free(dtors);
     free(ctor_at);
