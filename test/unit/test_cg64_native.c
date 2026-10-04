@@ -2745,6 +2745,37 @@ static void test_io(void) {
         "package main;\n"
         "long getpeername(long fd, char *addr, int *len) { return fd ? 3 : 3; }\n"
         "int main(void) { return getpeername(1, 0, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("poll_socket",
+        "package main;\n"
+        "int errno;\n"
+        "long socketpair(long domain, long type, long proto, int *sv);\n"
+        "long poll(int *fds, long nfds, long timeout);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  int sv[2];\n"
+        "  if (socketpair(1, 1, 0, sv) != 0) return 1;\n"
+        "  int p[2];\n"
+        "  p[0] = sv[0];\n"
+        "  p[1] = 4;\n"
+        "  if (poll(p, -1, 0) != -22 || errno != 22) return 2;\n"
+        "  if (poll(p, 1, 0) != 1 || errno != 0) return 3;\n"
+        "  int rev = (p[1] >> 16) & 0xffff;\n"
+        "  if ((rev & 4) == 0) return 4;\n"
+        "  int bad[2];\n"
+        "  bad[0] = 200;\n"
+        "  bad[1] = 1;\n"
+        "  if (poll(bad, 1, 0) != 1) return 5;\n"
+        "  int nval = (bad[1] >> 16) & 0xffff;\n"
+        "  if ((nval & 32) == 0) return 6;\n"
+        "  if (poll(0, 0, 0) != 0) return 8;\n"
+        "  close(sv[0]);\n"
+        "  close(sv[1]);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("poll_user",
+        "package main;\n"
+        "long poll(int *fds, long nfds, long timeout) { return nfds ? 3 : 3; }\n"
+        "int main(void) { return poll(0, 1, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
