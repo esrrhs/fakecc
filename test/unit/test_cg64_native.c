@@ -2925,6 +2925,34 @@ static void test_io(void) {
         "package main;\n"
         "long getrusage(long who, long *ru) { return who ? 3 : 3; }\n"
         "int main(void) { return getrusage(1, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("openat_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long openat(long dirfd, char *path, long flags, long mode);\n"
+        "long unlinkat(long dirfd, char *path, long flags);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  long dir = open(\"/tmp\", 0, 0);\n"
+        "  if (dir < 0) return 1;\n"
+        "  unlinkat(dir, \"fakecc_ulat_rt\", 0);\n"
+        "  long fd = openat(dir, \"fakecc_ulat_rt\", 0x602, 420);\n"
+        "  if (fd < 0) return 2;\n"
+        "  close(fd);\n"
+        "  if (unlinkat(dir, \"fakecc_ulat_rt\", 0) != 0) return 3;\n"
+        "  if (unlinkat(dir, \"fakecc_ulat_rt\", 0) != -2 || errno != 2) return 4;\n"
+        "  if (openat(200, \"fakecc_ulat_rt\", 0, 0) != -9 || errno != 9) return 5;\n"
+        "  fd = openat(dir, \"fakecc_ulat_rt\", 0x602, 420);\n"
+        "  if (fd < 0 || errno != 0) return 6;\n"
+        "  close(fd);\n"
+        "  unlinkat(dir, \"fakecc_ulat_rt\", 0);\n"
+        "  close(dir);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("openat_user",
+        "package main;\n"
+        "long openat(long dirfd, char *path, long flags, long mode) { return flags ? 3 : 3; }\n"
+        "int main(void) { return openat(0, 0, 1, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
