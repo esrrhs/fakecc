@@ -2468,6 +2468,31 @@ static void test_io(void) {
         "package main;\n"
         "long chown(char *path, long uid, long gid) { return uid ? 3 : 3; }\n"
         "int main(void) { return chown(0, 1, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("socketpair_stream",
+        "package main;\n"
+        "int errno;\n"
+        "long socketpair(long domain, long type, long proto, int *sv);\n"
+        "long read(long fd, char *buf, long n);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  int sv[2];\n"
+        "  sv[0] = -1; sv[1] = -1;\n"
+        "  if (socketpair(99, 1, 0, sv) != -47 || errno != 47) return 1;\n"
+        "  if (socketpair(1, 1, 0, sv) != 0 || errno != 0) return 2;\n"
+        "  if (sv[0] < 0 || sv[1] < 0 || sv[0] == sv[1]) return 3;\n"
+        "  char c = 42;\n"
+        "  if (write(sv[0], &c, 1) != 1) return 4;\n"
+        "  char d = 0;\n"
+        "  if (read(sv[1], &d, 1) != 1 || d != 42) return 5;\n"
+        "  close(sv[0]);\n"
+        "  close(sv[1]);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("socketpair_user",
+        "package main;\n"
+        "long socketpair(long domain, long type, long proto, int *sv) { return domain ? 3 : 3; }\n"
+        "int main(void) { return socketpair(1, 1, 0, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
