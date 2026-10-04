@@ -459,6 +459,54 @@ static int find_function(const IRModule *ir, const char *name, int *idx_out) {
 
 static void emit_syscall(C64 *c, const IRInst *s);
 
+/* malloc/free via Darwin mmap/munmap when this TU does not define them.
+ * The block stores its length in the 16 bytes before the returned pointer
+ * so free can munmap the same range. */
+static int emit_alloc_builtin(C64 *c, const char *name) {
+    int is_malloc = strcmp(name, "malloc") == 0;
+    int is_free = strcmp(name, "free") == 0;
+    if (!is_malloc && !is_free) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+    A64Asm *a = c->as;
+    if (is_free) {
+        int done = a64_new_label(a);
+        a64_cbz(a, A64_X0, done, 1);
+        a64_sub_imm12(a, A64_X0, A64_X0, 16, 0, 1, 0);
+        a64_ldr64(a, A64_X1, A64_X0, 0);
+        a64_movz(a, A64_X16, 73, 0, 1); /* munmap */
+        a64_svc(a, 0x80);
+        a64_bind(a, done);
+        return 1;
+    }
+    int nonzero = a64_new_label(a);
+    int fail = a64_new_label(a);
+    int done = a64_new_label(a);
+    a64_cbnz(a, A64_X0, nonzero, 1);
+    a64_movz(a, A64_X0, 1, 0, 1);
+    a64_bind(a, nonzero);
+    a64_add_imm12(a, A64_X0, A64_X0, 31, 0, 1, 0);
+    a64_lsr_imm(a, A64_X0, A64_X0, 4, 1);
+    a64_lsl_imm(a, A64_X0, A64_X0, 4, 1);
+    a64_mov_reg(a, A64_X1, A64_X0, 1);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_movz(a, A64_X2, 3, 0, 1);
+    a64_movz(a, A64_X3, 0x1002, 0, 1);
+    a64_movn(a, A64_X4, 0, 0, 1);
+    a64_movz(a, A64_X5, 0, 0, 1);
+    a64_movz(a, A64_X16, 197, 0, 1); /* mmap */
+    a64_svc(a, 0x80);
+    a64_cset(a, A64_X9, A64_CS, 1);
+    a64_cbnz(a, A64_X9, fail, 1);
+    a64_str64(a, A64_X1, A64_X0, 0);
+    a64_add_imm12(a, A64_X0, A64_X0, 16, 0, 1, 0);
+    a64_b(a, done);
+    a64_bind(a, fail);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_bind(a, done);
+    return 1;
+}
+
 /* Freestanding memcpy/memmove/memset.  Struct assignment above 64 bytes
  * lowers to a call, and the Darwin runtime is not linked yet (T16).
  * A user-defined function of the same name still wins.  The three
@@ -2723,7 +2771,8 @@ static void emit_call(C64 *c, const IRInst *s) {
         if (c->udiv_label < 0)
             c->udiv_label = a64_new_label(a);
         a64_bl(a, c->udiv_label);
-    } else if (!(s->call_name && (emit_mem_builtin(c, s->call_name)
+    } else if (!(s->call_name && (emit_alloc_builtin(c, s->call_name)
+                                 || emit_mem_builtin(c, s->call_name)
                                  || emit_scan_builtin(c, s->call_name)
                                  || emit_find_builtin(c, s->call_name)
                                  || emit_span_builtin(c, s->call_name)

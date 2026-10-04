@@ -1695,6 +1695,26 @@ static void test_tls(void) {
     emit_module_free(&md);
 }
 
+static void test_malloc(void) {
+    expect("malloc_roundtrip",
+        "package main;\n"
+        "void *malloc(unsigned long n);\n"
+        "void free(void *p);\n"
+        "int main(void) {\n"
+        "  char *p = malloc(4);\n"
+        "  if (!p) return 1;\n"
+        "  p[0] = 9;\n"
+        "  int v = p[0];\n"
+        "  free(p);\n"
+        "  free(0);\n"
+        "  return v;\n"
+        "}\n", 9);
+    expect("malloc_user",
+        "package main;\n"
+        "void *malloc(unsigned long n) { return n ? 0 : 0; }\n"
+        "int main(void) { return malloc(4) ? 1 : 7; }\n", 7);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3369,6 +3389,7 @@ int main(void) {
     test_fn_got();
     test_call_stub();
     test_tls();
+    test_malloc();
     test_macho_link();
     return t_finalize();
 }
