@@ -2260,6 +2260,27 @@ static void test_io(void) {
         "package main;\n"
         "long getrlimit(long res, long *rl) { return res ? 3 : 3; }\n"
         "int main(void) { return getrlimit(8, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("pgrp_ids",
+        "package main;\n"
+        "int errno;\n"
+        "long getpgrp(void);\n"
+        "long getpgid(long pid);\n"
+        "long getsid(long pid);\n"
+        "long getpid(void);\n"
+        "int main(void) {\n"
+        "  long g = getpgrp();\n"
+        "  if (g <= 0) return 1;\n"
+        "  if (getpgid(0) != g) return 2;\n"
+        "  if (getpgid(getpid()) != g) return 3;\n"
+        "  if (getsid(0) <= 0) return 4;\n"
+        "  if (getpgid(-1) != -3 || errno != 3) return 5;\n"
+        "  if (getpgrp() != g || errno != 0) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("pgrp_user",
+        "package main;\n"
+        "long getpgrp(void) { return 3; }\n"
+        "int main(void) { return getpgrp() == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
