@@ -2531,6 +2531,30 @@ static void test_io(void) {
         "package main;\n"
         "long readv(long fd, long *iov, long n) { return n ? 3 : 3; }\n"
         "int main(void) { return readv(0, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("socket_unix",
+        "package main;\n"
+        "int errno;\n"
+        "long socket(long domain, long type, long proto);\n"
+        "long shutdown(long fd, long how);\n"
+        "long socketpair(long domain, long type, long proto, int *sv);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  long fd = socket(1, 1, 0);\n"
+        "  if (fd < 0) return 1;\n"
+        "  if (socket(99, 1, 0) != -47 || errno != 47) return 2;\n"
+        "  int sv[2];\n"
+        "  if (socketpair(1, 1, 0, sv) != 0 || errno != 0) return 3;\n"
+        "  if (shutdown(sv[0], 2) != 0) return 4;\n"
+        "  if (shutdown(-1, 2) != -9 || errno != 9) return 5;\n"
+        "  close(fd);\n"
+        "  close(sv[0]);\n"
+        "  close(sv[1]);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("socket_user",
+        "package main;\n"
+        "long socket(long domain, long type, long proto) { return domain ? 3 : 3; }\n"
+        "int main(void) { return socket(1, 1, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
