@@ -3342,6 +3342,28 @@ static void test_io(void) {
         "package main;\n"
         "long getitimer(long which, long *tv) { return which ? 3 : 3; }\n"
         "int main(void) { return getitimer(1, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("setitimer_disarm",
+        "package main;\n"
+        "int errno;\n"
+        "long setitimer(long which, long *neu, long *old);\n"
+        "long getitimer(long which, long *tv);\n"
+        "int main(void) {\n"
+        "  long neu[4];\n"
+        "  long old[4];\n"
+        "  int i;\n"
+        "  for (i = 0; i < 4; i++) { neu[i] = 0; old[i] = -1; }\n"
+        "  if (setitimer(0, neu, old) != 0) return 2;\n"
+        "  if (old[0] < 0 || old[1] < 0 || old[2] < 0 || old[3] < 0) return 3;\n"
+        "  if (setitimer(99, neu, old) != -22 || errno != 22) return 4;\n"
+        "  if (setitimer(0, neu, 0) != 0 || errno != 0) return 5;\n"
+        "  if (getitimer(0, old) != 0) return 6;\n"
+        "  if (old[0] != 0 || old[1] != 0 || old[2] != 0 || old[3] != 0) return 8;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("setitimer_user",
+        "package main;\n"
+        "long setitimer(long which, long *neu, long *old) { return which ? 3 : 3; }\n"
+        "int main(void) { return setitimer(1, 0, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
