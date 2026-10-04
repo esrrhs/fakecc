@@ -2184,6 +2184,20 @@ static void test_io(void) {
         "package main;\n"
         "long getuid(void) { return 4; }\n"
         "int main(void) { return getuid() == 4 ? 7 : 1; }\n", 7);
+    expect("umask_roundtrip",
+        "package main;\n"
+        "long umask(long mask);\n"
+        "int main(void) {\n"
+        "  long old = umask(18);\n"
+        "  if (old < 0) return 1;\n"
+        "  if (umask(old) != 18) return 2;\n"
+        "  if (umask(old) != old) return 3;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("umask_user",
+        "package main;\n"
+        "long umask(long mask) { return mask ? 3 : 3; }\n"
+        "int main(void) { return umask(18) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
