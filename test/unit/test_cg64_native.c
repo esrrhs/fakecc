@@ -3324,6 +3324,24 @@ static void test_io(void) {
         "package main;\n"
         "long kill(long pid, long sig) { return sig ? 3 : 3; }\n"
         "int main(void) { return kill(1, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("getitimer_real",
+        "package main;\n"
+        "int errno;\n"
+        "long getitimer(long which, long *tv);\n"
+        "int main(void) {\n"
+        "  long tv[4];\n"
+        "  int i;\n"
+        "  for (i = 0; i < 4; i++) tv[i] = -1;\n"
+        "  if (getitimer(0, tv) != 0) return 2;\n"
+        "  if (tv[0] < 0 || tv[1] < 0 || tv[2] < 0 || tv[3] < 0) return 3;\n"
+        "  if (getitimer(99, tv) != -22 || errno != 22) return 4;\n"
+        "  if (getitimer(0, tv) != 0 || errno != 0) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("getitimer_user",
+        "package main;\n"
+        "long getitimer(long which, long *tv) { return which ? 3 : 3; }\n"
+        "int main(void) { return getitimer(1, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
