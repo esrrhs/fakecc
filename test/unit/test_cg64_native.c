@@ -3136,6 +3136,39 @@ static void test_io(void) {
         "package main;\n"
         "long fchmodat(long dirfd, char *path, long mode, long flags) { return flags ? 3 : 3; }\n"
         "int main(void) { return fchmodat(0, 0, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("fchownat_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "long getuid(void);\n"
+        "long getgid(void);\n"
+        "long fchownat(long dirfd, char *path, long uid, long gid, long flags);\n"
+        "int main(void) {\n"
+        "  char *abs = \"/tmp/fakecc_fchownat_rt\";\n"
+        "  unlink(abs);\n"
+        "  long uid = getuid();\n"
+        "  long gid = getgid();\n"
+        "  if (uid < 0 || gid < 0) return 1;\n"
+        "  long fd = open(abs, 0x602, 420);\n"
+        "  if (fd < 0) return 2;\n"
+        "  close(fd);\n"
+        "  long dir = open(\"/tmp\", 0, 0);\n"
+        "  if (dir < 0) return 3;\n"
+        "  if (fchownat(dir, \"fakecc_fchownat_rt\", uid, gid, 0) != 0) return 4;\n"
+        "  if (fchownat(dir, \"fakecc_fchownat_rt\", -1, -1, 0) != 0) return 5;\n"
+        "  if (fchownat(200, \"fakecc_fchownat_rt\", uid, gid, 0) != -9 || errno != 9) return 6;\n"
+        "  if (fchownat(dir, \"no_such_fakecc_fow\", uid, gid, 0) != -2 || errno != 2) return 8;\n"
+        "  if (fchownat(dir, \"fakecc_fchownat_rt\", uid, gid, 0) != 0 || errno != 0) return 9;\n"
+        "  unlink(abs);\n"
+        "  close(dir);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("fchownat_user",
+        "package main;\n"
+        "long fchownat(long dirfd, char *path, long uid, long gid, long flags) { return flags ? 3 : 3; }\n"
+        "int main(void) { return fchownat(0, 0, 1, 1, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
