@@ -3169,6 +3169,32 @@ static void test_io(void) {
         "package main;\n"
         "long fchownat(long dirfd, char *path, long uid, long gid, long flags) { return flags ? 3 : 3; }\n"
         "int main(void) { return fchownat(0, 0, 1, 1, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("mkfifoat_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "long mkfifoat(long dirfd, char *path, long mode);\n"
+        "int main(void) {\n"
+        "  unlink(\"/tmp/fakecc_mkfifoat_rt\");\n"
+        "  unlink(\"/tmp/fakecc_mkfifoat_rt2\");\n"
+        "  long dir = open(\"/tmp\", 0, 0);\n"
+        "  if (dir < 0) return 1;\n"
+        "  if (mkfifoat(dir, \"fakecc_mkfifoat_rt\", 420) != 0) return 2;\n"
+        "  if (mkfifoat(dir, \"fakecc_mkfifoat_rt\", 420) != -17 || errno != 17) return 3;\n"
+        "  if (mkfifoat(200, \"fakecc_mkfifoat_rt2\", 420) != -9 || errno != 9) return 4;\n"
+        "  if (mkfifoat(dir, \"no_such_dir_fakecc/x\", 420) != -2 || errno != 2) return 5;\n"
+        "  if (mkfifoat(dir, \"fakecc_mkfifoat_rt2\", 420) != 0 || errno != 0) return 6;\n"
+        "  unlink(\"/tmp/fakecc_mkfifoat_rt\");\n"
+        "  unlink(\"/tmp/fakecc_mkfifoat_rt2\");\n"
+        "  close(dir);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("mkfifoat_user",
+        "package main;\n"
+        "long mkfifoat(long dirfd, char *path, long mode) { return mode ? 3 : 3; }\n"
+        "int main(void) { return mkfifoat(0, 0, 420) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
