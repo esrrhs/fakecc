@@ -1909,6 +1909,9 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                     if (r->type == 2) {
                         uint64_t tgt = macho_text_offset() + (uint64_t)weak_at;
                         if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
+                    } else if (r->type == 11) {
+                        uint64_t tgt = macho_text_offset() + (uint64_t)weak_at;
+                        if (patch_b(&w, pc, tgt) != 0) { rc = -1; break; }
                     } else if (r->type == 3) {
                         w = 0xD2800000u | (w & 31u); /* movz Xd, #0 */
                     } else if (r->type == 4) {

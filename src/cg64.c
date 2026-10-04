@@ -125,8 +125,27 @@ static void emit_environ_addr(C64 *c, int rd) {
     a64_word(a, 0x91000000u | ((uint32_t)(rd & 31) << 5) | (uint32_t)(rd & 31));
 }
 
+/* Symbols the arm64 backend knows no definition for, and which a program is
+ * allowed to do without.  runtime/thread.c is built around Linux's clone(),
+ * futex() and friends; there is no Darwin equivalent to lower them to, so
+ * rather than fail the whole link -- which would take printf and every other
+ * runtime service down with it -- resolve them to address 0 and let the
+ * caller observe the failure.  pthread_create then returns an error instead
+ * of the program being unbuildable.
+ *
+ * This is a stand-in until the runtime grows a real Darwin thread layer; it
+ * is deliberately narrow, so a genuine missing symbol still fails loudly. */
+static const char *const c64_absent_on_darwin[] = {
+    "__clone",
+    "__clone3",
+};
+
 static int c64_is_weak_ref(const IRModule *ir, const char *name) {
-    if (!ir || !name) return 0;
+    if (!name) return 0;
+    for (size_t i = 0; i < sizeof c64_absent_on_darwin
+                            / sizeof *c64_absent_on_darwin; i++)
+        if (strcmp(c64_absent_on_darwin[i], name) == 0) return 1;
+    if (!ir) return 0;
     for (size_t i = 0; i < ir->n_weak_refs; i++)
         if (ir->weak_refs[i] && strcmp(ir->weak_refs[i], name) == 0)
             return 1;
