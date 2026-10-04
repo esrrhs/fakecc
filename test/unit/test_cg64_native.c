@@ -1970,6 +1970,45 @@ static void test_io(void) {
         "package main;\n"
         "long symlink(char *target, char *path) { return target ? 3 : 3; }\n"
         "int main(void) { return symlink(\"a\", \"b\") == 3 ? 7 : 1; }\n", 7);
+    expect("hard_link",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *path, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long read(long fd, char *buf, long n);\n"
+        "long link(char *old, char *neu);\n"
+        "long unlink(char *path);\n"
+        "long access(char *path, long mode);\n"
+        "int main(void) {\n"
+        "  char *a = \"/tmp/fakecc_link_a\";\n"
+        "  char *b = \"/tmp/fakecc_link_b\";\n"
+        "  unlink(a);\n"
+        "  unlink(b);\n"
+        "  long fd = open(a, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  char *msg = \"xy\";\n"
+        "  if (write(fd, msg, 2) != 2) return 2;\n"
+        "  if (close(fd) != 0) return 3;\n"
+        "  if (link(a, b) != 0) return 4;\n"
+        "  fd = open(b, 0, 0);\n"
+        "  if (fd < 0) return 5;\n"
+        "  char buf[4];\n"
+        "  buf[0] = 0; buf[1] = 0;\n"
+        "  if (read(fd, buf, 2) != 2) return 6;\n"
+        "  if (buf[0] != 'x' || buf[1] != 'y') return 8;\n"
+        "  if (close(fd) != 0) return 9;\n"
+        "  if (unlink(a) != 0) return 10;\n"
+        "  if (access(b, 0) != 0) return 11;\n"
+        "  if (unlink(b) != 0) return 12;\n"
+        "  if (link(a, b) != -2) return 13;\n"
+        "  if (errno != 2) return 14;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("link_user",
+        "package main;\n"
+        "long link(char *old, char *neu) { return old ? 3 : 3; }\n"
+        "int main(void) { return link(\"a\", \"b\") == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
