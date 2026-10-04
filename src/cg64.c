@@ -3379,12 +3379,15 @@ static void emit_call(C64 *c, const IRInst *s) {
                    s->loc.line, s->loc.col,
                    "arm64 backend: call with no target");
         } else if (find_function(c->ir, s->call_name, &fi) != 0) {
-            if (!emit_object_mode())
+            /* Not in this TU.  Under -c and in a multi-TU link a sibling may
+             * define it, so route the call through a stub the linker
+             * retargets; only a lone single-TU link has nowhere to look. */
+            if (!emit_object_mode() && !emit_multi_tu())
                 die_at(s->loc.file ? s->loc.file : c->fn->loc.file,
                        s->loc.line, s->loc.col,
                        "arm64 backend: call to undefined function '%s'",
                        s->call_name);
-            else if (c64_is_weak_ref(c->ir, s->call_name)) {
+            if (emit_object_mode() && c64_is_weak_ref(c->ir, s->call_name)) {
                 if (c->nxcall == c->capxcall) {
                     c->capxcall = c->capxcall ? c->capxcall * 2 : 8;
                     c->xcall = xrealloc(c->xcall, c->capxcall * sizeof *c->xcall);
@@ -4944,7 +4947,12 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
         die_at("<arm64>", 0, 0, "no 'main' function found");
     /* The LC_MAIN stub belongs to the one TU that defines main; in a multi-TU
      * link the rest contribute functions and data only. */
-    int want_entry = have_main && !emit_object_mode();
+    /* Who writes the program entry point.  A lone freestanding TU has to
+     * emit its own LC_MAIN stub.  Under -c the object must not contain one
+     * (the linker writes it into the executable), and in a multi-TU link the
+     * linker emits exactly one for the merged image -- a per-TU stub would
+     * duplicate it and displace every symbol after it. */
+    int want_entry = have_main && !emit_object_mode() && !emit_multi_tu();
 
     A64Asm a;
     a64_init(&a);
@@ -5132,13 +5140,31 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     }
     if (c.udiv_label >= 0)
         emit_udivmodti4(&a, c.udiv_label);
+    /* Two ways to reach a sibling TU's function, and they are not
+     * interchangeable.  Under -c the module is a real object that dyld
+     * relocates through the GOT, which is what an indirect branch
+     * expresses; a direct BL has no place to record its displacement and
+     * self-branches.  When the linker merges in-memory modules it patches
+     * text relocations itself, so a BRANCH26 to the final address is both
+     * correct and cheaper.  Pick by which path this module will take. */
     for (size_t i = 0; i < c.nstub; i++) {
         a64_bind(&a, c.stub[i].lab);
-        note_page_reloc(&c, (uint32_t)a.code.len, -1, c.stub[i].name, -1);
-        c.gfix[c.ngfix - 1].got = 1;
-        a64_word(&a, 0x90000000u | (uint32_t)A64_X16);
-        a64_word(&a, 0xF9400000u | ((uint32_t)A64_X16 << 5) | (uint32_t)A64_X16);
-        a64_br_reg(&a, A64_X16);
+        if (emit_object_mode()) {
+            note_page_reloc(&c, (uint32_t)a.code.len, -1, c.stub[i].name, -1);
+            c.gfix[c.ngfix - 1].got = 1;
+            a64_word(&a, 0x90000000u | (uint32_t)A64_X16);
+            a64_word(&a, 0xF9400000u | ((uint32_t)A64_X16 << 5)
+                                 | (uint32_t)A64_X16);
+            a64_br_reg(&a, A64_X16);
+        } else {
+            /* A single BL, not an ADRP+ADD pair, so it cannot ride the
+             * gfix -> reloc conversion below (that would emit PAGE21 at
+             * `at` and PAGEOFF12 at `at+4`, one instruction past the stub).
+             * Mark it so the conversion emits just the branch. */
+            note_page_reloc(&c, (uint32_t)a.code.len, -3 /* stub marker */,
+                            c.stub[i].name, -1);
+            a64_word(&a, 0x14000000u); /* b, imm26 patched by the linker */
+        }
     }
     if (c.tlv_thunk >= 0) {
         a64_bind(&a, c.tlv_thunk);
@@ -5275,7 +5301,10 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_module_add_rebase(out, slot, (uint64_t)tgt);
         }
     }
-    if (emit_object_mode()) {
+    /* Functions become linkable symbols whenever anything may consume them
+     * later: an object file, or a sibling TU in a multi-TU link whose branch
+     * has to be retargeted.  A lone freestanding TU needs none of this. */
+    if (emit_object_mode() || emit_multi_tu()) {
         for (size_t i = 0; i < ir->functions.len; i++) {
             if (!a.labels[c.fn_label[i]].bound) continue;
             const IRFunction *fn = &ir->functions.data[i];
@@ -5348,6 +5377,20 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
          * page and page-offset immediates (ARM64_RELOC_PAGE21 / PAGEOFF12). */
         for (size_t i = 0; i < c.ngfix; i++) {
             int gi = c.gfix[i].gidx;
+            /* gidx -2 marks the entry stub's environ slot and -1 a by-name
+             * external; neither is a module global, so there is nothing to
+             * relocate against.  The direct-write path bakes the environ
+             * address in earlier, and it has no TU siblings then. */
+            if (gi < 0 && !c.gfix[i].name) continue;
+            if (gi == -3) {          /* stub call site: one BRANCH26 */
+                int si = c64_undef_sym(out, ir, c.gfix[i].name);
+                if (si < 0) continue;
+                /* `at` is the code length just before the BL was emitted,
+                 * which is already the instruction's own offset. */
+                emit_module_add_reloc(out, c.gfix[i].at, 11 /* BRANCH26_TAIL */,
+                                      si, 0);
+                continue;
+            }
             int si = (gsym && gi >= 0) ? gsym[gi] : -1;
             if (si < 0 && c.gfix[i].name)
                 si = c64_undef_sym(out, ir, c.gfix[i].name);

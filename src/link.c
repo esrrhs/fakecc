@@ -1048,10 +1048,12 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     /* Linker dispatch: the arm64-macos backend emits an ad-hoc signed
      * Mach-O PIE; everything below is the ELF executable/DSO linker. */
     if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
-        /* A direct -c compile records symbols.  Those modules need the
-         * relocating link.  A single freestanding TU has none: its text
-         * already starts with the LC_MAIN stub. */
-        int from_objects = 0;
+        /* The direct-write fast path packs exactly one module and has no room
+         * to relocate anything, so it is only valid for a lone freestanding
+         * TU whose text already starts with the LC_MAIN stub.  Modules that
+         * recorded symbols (-c, hence also anything a multi-TU link leaves
+         * behind) need the relocating link instead. */
+        int from_objects = n > 1;
         for (size_t i = 0; i < n; i++)
             if (mods[i]->num_syms) from_objects = 1;
         int rc;

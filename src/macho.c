@@ -1443,6 +1443,21 @@ static int patch_bl(uint32_t *w, uint64_t pc, uint64_t tgt) {
     return 0;
 }
 
+/* Unconditional branch (b): same imm26 geometry as bl, opcode 0x14000000.
+ * A cross-TU stub has to be a tail call -- it stands in for the call the
+ * caller actually wrote, so the return address the caller pushed must stay
+ * the one that returns to it.  Branching with link instead would push a
+ * second address and resume past the end of the stub. */
+static int patch_b(uint32_t *w, uint64_t pc, uint64_t tgt) {
+    int64_t disp = (int64_t)tgt - (int64_t)pc;
+    if ((disp & 3) || disp < -(1 << 27) || disp >= (1 << 27)) {
+        fprintf(stderr, "fakecc: branch target out of range\n");
+        return -1;
+    }
+    *w = 0x14000000u | (uint32_t)((disp >> 2) & 0x3FFFFFF);
+    return 0;
+}
+
 /* Mach-O nlist has no size.  The bytes up to the next symbol in the
  * same section are the definition the common is competing with. */
 static size_t macho_symbol_span(const EmitModule *m, uint16_t sh, size_t off) {
@@ -1969,6 +1984,9 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                         }
                     } else if (r->type == 2) {
                         if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
+                    } else if (r->type == 11) {
+                        /* Stub tail call: b, not bl. */
+                        if (patch_b(&w, pc, tgt) != 0) { rc = -1; break; }
                     } else if (r->type == 3) patch_adrp(&w, pc, tgt);
                     else if (r->type == 4) patch_add_pageoff(&w, tgt);
                     else {
