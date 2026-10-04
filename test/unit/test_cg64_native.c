@@ -2238,6 +2238,28 @@ static void test_io(void) {
         "package main;\n"
         "long getentropy(char *buf, long n) { return n ? 3 : 3; }\n"
         "int main(void) { return getentropy(0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("rlimit_nofile",
+        "package main;\n"
+        "int errno;\n"
+        "long getrlimit(long res, long *rl);\n"
+        "long setrlimit(long res, long *rl);\n"
+        "int main(void) {\n"
+        "  long rl[2];\n"
+        "  if (getrlimit(8, rl) != 0) return 1;\n"
+        "  if (rl[0] <= 0) return 2;\n"
+        "  if (rl[1] != -1 && rl[1] < rl[0]) return 3;\n"
+        "  if (getrlimit(99, rl) >= 0 || errno != 22) return 4;\n"
+        "  if (getrlimit(8, rl) != 0 || errno != 0) return 5;\n"
+        "  long pair[2];\n"
+        "  pair[0] = rl[0];\n"
+        "  pair[1] = rl[1];\n"
+        "  if (setrlimit(8, pair) != 0 || errno != 0) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("rlimit_user",
+        "package main;\n"
+        "long getrlimit(long res, long *rl) { return res ? 3 : 3; }\n"
+        "int main(void) { return getrlimit(8, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
