@@ -3220,6 +3220,30 @@ static void test_io(void) {
         "package main;\n"
         "long fdatasync(long fd) { return fd ? 3 : 3; }\n"
         "int main(void) { return fdatasync(1) == 3 ? 7 : 1; }\n", 7);
+    expect("chflags_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "long chflags(char *path, long flags);\n"
+        "int main(void) {\n"
+        "  char *abs = \"/tmp/fakecc_chflags_rt\";\n"
+        "  unlink(abs);\n"
+        "  long fd = open(abs, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  close(fd);\n"
+        "  if (chflags(abs, 1) != 0) return 2;\n"
+        "  if (chflags(abs, 0) != 0) return 3;\n"
+        "  if (chflags(\"/tmp/no_such_fakecc_cf\", 0) != -2 || errno != 2) return 4;\n"
+        "  if (chflags(abs, 0) != 0 || errno != 0) return 5;\n"
+        "  unlink(abs);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("chflags_user",
+        "package main;\n"
+        "long chflags(char *path, long flags) { return flags ? 3 : 3; }\n"
+        "int main(void) { return chflags(0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
