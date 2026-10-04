@@ -1885,6 +1885,30 @@ static void test_io(void) {
         "package main;\n"
         "long mkdir(char *path, long mode) { return path ? 3 : 3; }\n"
         "int main(void) { return mkdir(\"x\", 0) == 3 ? 7 : 1; }\n", 7);
+    expect("access_file",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *path, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *path);\n"
+        "long access(char *path, long mode);\n"
+        "int main(void) {\n"
+        "  char *path = \"/tmp/fakecc_access_rt\";\n"
+        "  unlink(path);\n"
+        "  long fd = open(path, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  if (close(fd) != 0) return 2;\n"
+        "  if (access(path, 0) != 0) return 3;\n"
+        "  if (access(path, 4) != 0) return 4;\n"
+        "  if (unlink(path) != 0) return 5;\n"
+        "  if (access(path, 0) != -2) return 6;\n"
+        "  if (errno != 2) return 8;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("access_user",
+        "package main;\n"
+        "long access(char *path, long mode) { return path ? 3 : 3; }\n"
+        "int main(void) { return access(\"x\", 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
