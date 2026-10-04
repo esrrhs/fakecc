@@ -1342,7 +1342,7 @@ static int emit_pipe_builtin(C64 *c, const char *name) {
     return 1;
 }
 
-/* read/write/pread/pwrite/open/close/dup/dup2/fsync/fdatasync/chflags/fchflags/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/setpgid/setsid/kill/getitimer/setitimer/sigprocmask/sigpending/minherit/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/sendmsg/recvmsg/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/getrusage/openat/unlinkat/mkdirat/renameat/faccessat/symlinkat/readlinkat/linkat/fchmodat/fchownat/mkfifoat/mkdir/rmdir/lseek/truncate/ftruncate.
+/* read/write/pread/preadv/pwrite/open/close/dup/dup2/fsync/fdatasync/chflags/fchflags/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/setpgid/setsid/kill/getitimer/setitimer/sigprocmask/sigpending/minherit/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/sendmsg/recvmsg/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/getrusage/openat/unlinkat/mkdirat/renameat/faccessat/symlinkat/readlinkat/linkat/fchmodat/fchownat/mkfifoat/mkdir/rmdir/lseek/truncate/ftruncate.
  * Arguments are already in x0..x5.  Darwin numbers, with the same
  * carry-to-negative errno fix as __syscall.  A same-TU int errno is
  * updated with the positive code, or cleared on success.  A same-TU
@@ -1352,6 +1352,7 @@ static int emit_io_builtin(C64 *c, const char *name) {
     if (strcmp(name, "read") == 0) num = 3;
     else if (strcmp(name, "write") == 0) num = 4;
     else if (strcmp(name, "pread") == 0) num = 153;
+    else if (strcmp(name, "preadv") == 0) num = 540;
     else if (strcmp(name, "pwrite") == 0) num = 154;
     else if (strcmp(name, "open") == 0) num = 5;
     else if (strcmp(name, "close") == 0) num = 6;

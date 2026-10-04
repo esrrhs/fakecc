@@ -3485,6 +3485,42 @@ static void test_io(void) {
         "package main;\n"
         "long recvmsg(long fd, long *hdr, long flags) { return flags ? 3 : 3; }\n"
         "int main(void) { return recvmsg(1, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("preadv_offset",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long lseek(long fd, long off, long whence);\n"
+        "long unlink(char *p);\n"
+        "long preadv(long fd, long *iov, long cnt, long off);\n"
+        "int main(void) {\n"
+        "  char *abs = \"/tmp/fakecc_preadv_rt\";\n"
+        "  unlink(abs);\n"
+        "  long fd = open(abs, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  if (write(fd, \"abcd\", 4) != 4) return 2;\n"
+        "  if (lseek(fd, 0, 1) != 4) return 3;\n"
+        "  char buf[2];\n"
+        "  buf[0] = 0; buf[1] = 0;\n"
+        "  long iov[2];\n"
+        "  iov[0] = (long)buf;\n"
+        "  iov[1] = 2;\n"
+        "  if (preadv(fd, iov, 1, 1) != 2 || buf[0] != 'b' || buf[1] != 'c') return 4;\n"
+        "  if (lseek(fd, 0, 1) != 4) return 5;\n"
+        "  if (preadv(-1, iov, 1, 0) != -9 || errno != 9) return 6;\n"
+        "  buf[0] = 0; buf[1] = 0;\n"
+        "  if (preadv(fd, iov, 1, 0) != 2 || errno != 0) return 8;\n"
+        "  if (buf[0] != 'a' || buf[1] != 'b') return 9;\n"
+        "  if (lseek(fd, 0, 1) != 4) return 10;\n"
+        "  close(fd);\n"
+        "  unlink(abs);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("preadv_user",
+        "package main;\n"
+        "long preadv(long fd, long *iov, long cnt, long off) { return off ? 3 : 3; }\n"
+        "int main(void) { return preadv(1, 0, 1, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
