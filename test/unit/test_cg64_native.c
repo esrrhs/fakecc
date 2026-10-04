@@ -2128,6 +2128,42 @@ static void test_io(void) {
         "package main;\n"
         "long ftruncate(long fd, long len) { return fd ? 3 : 3; }\n"
         "int main(void) { return ftruncate(1, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("pread_keeps_offset",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *path, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long read(long fd, char *buf, long n);\n"
+        "long pread(long fd, char *buf, long n, long off);\n"
+        "long pwrite(long fd, char *buf, long n, long off);\n"
+        "long lseek(long fd, long off, long whence);\n"
+        "long fsync(long fd);\n"
+        "long unlink(char *path);\n"
+        "int main(void) {\n"
+        "  char *path = \"/tmp/fakecc_pread_rt\";\n"
+        "  unlink(path);\n"
+        "  long fd = open(path, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  char *msg = \"abcd\";\n"
+        "  if (write(fd, msg, 4) != 4) return 2;\n"
+        "  char buf[4];\n"
+        "  buf[0] = 0; buf[1] = 0;\n"
+        "  if (pread(fd, buf, 2, 1) != 2) return 3;\n"
+        "  if (buf[0] != 'b' || buf[1] != 'c') return 4;\n"
+        "  if (lseek(fd, 0, 1) != 4) return 5;\n"
+        "  char *z = \"Z\";\n"
+        "  if (pwrite(fd, z, 1, 0) != 1) return 6;\n"
+        "  if (lseek(fd, 0, 1) != 4) return 8;\n"
+        "  if (fsync(fd) != 0) return 9;\n"
+        "  if (pread(-1, buf, 1, 0) != -9 || errno != 9) return 10;\n"
+        "  if (close(fd) != 0 || unlink(path) != 0) return 11;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("pread_user",
+        "package main;\n"
+        "long pread(long fd, char *buf, long n, long off) { return fd ? 3 : 3; }\n"
+        "int main(void) { return pread(1, 0, 0, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
