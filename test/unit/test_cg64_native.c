@@ -2953,6 +2953,33 @@ static void test_io(void) {
         "package main;\n"
         "long openat(long dirfd, char *path, long flags, long mode) { return flags ? 3 : 3; }\n"
         "int main(void) { return openat(0, 0, 1, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("mkdirat_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long mkdirat(long dirfd, char *path, long mode);\n"
+        "long renameat(long olddir, char *old, long newdir, char *newp);\n"
+        "long rmdir(char *p);\n"
+        "long access(char *p, long mode);\n"
+        "int main(void) {\n"
+        "  rmdir(\"/tmp/fakecc_mkdirat_rt\");\n"
+        "  rmdir(\"/tmp/fakecc_mkdirat_rt2\");\n"
+        "  long dir = open(\"/tmp\", 0, 0);\n"
+        "  if (dir < 0) return 1;\n"
+        "  if (mkdirat(dir, \"fakecc_mkdirat_rt\", 448) != 0) return 2;\n"
+        "  if (mkdirat(dir, \"fakecc_mkdirat_rt\", 448) != -17 || errno != 17) return 3;\n"
+        "  if (renameat(dir, \"fakecc_mkdirat_rt\", dir, \"fakecc_mkdirat_rt2\") != 0 || errno != 0) return 4;\n"
+        "  if (access(\"/tmp/fakecc_mkdirat_rt\", 0) != -2) return 5;\n"
+        "  if (rmdir(\"/tmp/fakecc_mkdirat_rt2\") != 0) return 6;\n"
+        "  if (mkdirat(200, \"fakecc_mkdirat_rt\", 448) != -9 || errno != 9) return 8;\n"
+        "  close(dir);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("mkdirat_user",
+        "package main;\n"
+        "long mkdirat(long dirfd, char *path, long mode) { return mode ? 3 : 3; }\n"
+        "int main(void) { return mkdirat(0, 0, 448) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
