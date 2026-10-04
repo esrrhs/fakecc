@@ -1117,17 +1117,22 @@ static void test_macho_obj(void) {
     uint32_t xnreloc = 0;
     T_ASSERT_EQ_INT((int)fread(&xnreloc, 4, 1, f), 1);
     fclose(f);
-    T_ASSERT_EQ_INT((int)xnreloc, 1);
+    T_ASSERT_EQ_INT((int)xnreloc, 2);
 
     EmitModule back;
     T_ASSERT_EQ_INT(emit_obj_read(xpath, &back), 0);
     T_ASSERT(back.text.len > 0);
-    T_ASSERT_EQ_INT((int)back.num_relocs, 1);
+    T_ASSERT_EQ_INT((int)back.num_relocs, 2);
     T_ASSERT(emit_module_find_symbol(&back, "call") >= 0);
     int other = emit_module_find_symbol(&back, "other");
     T_ASSERT(other >= 0);
     T_ASSERT_EQ_INT(back.syms[other].shndx, 0);
-    T_ASSERT_EQ_INT((int)back.relocs[0].type, 2);
+    int saw5 = 0, saw6 = 0;
+    for (size_t i = 0; i < back.num_relocs; i++) {
+        if (back.relocs[i].type == 5) saw5 = 1;
+        if (back.relocs[i].type == 6) saw6 = 1;
+    }
+    T_ASSERT(saw5 && saw6);
     emit_module_free(&back);
 
     T_ASSERT_EQ_INT(emit_obj_read(ppath, &back), 0);
@@ -1616,6 +1621,38 @@ static void test_fn_got(void) {
     for (size_t i = 0; i < mc.num_relocs; i++)
         if (mc.relocs[i].type == 5) saw = 1;
     T_ASSERT(saw);
+    EmitModule *mods[2] = { &mc, &md };
+    T_ASSERT_EQ_INT(link_capturing(mods, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 6);
+    emit_module_free(&mc);
+    emit_module_free(&md);
+}
+
+static void test_call_stub(void) {
+    const char *call = "/tmp/fakecc_arm64_stub_main.o";
+    const char *def = "/tmp/fakecc_arm64_stub_def.o";
+    const char *outp = "/tmp/fakecc_arm64_stub_out";
+    const char *err = "/tmp/fakecc_arm64_stub_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern int add1(int x);\n"
+        "int main(void) { return add1(5); }\n",
+        call, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int add1(int x) { return x + 1; }\n",
+        def, NULL), 0);
+    EmitModule mc, md;
+    T_ASSERT_EQ_INT(emit_obj_read(call, &mc), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(def, &md), 0);
+    int saw_got = 0, saw_bl = 0;
+    for (size_t i = 0; i < mc.num_relocs; i++) {
+        if (mc.relocs[i].type == 5) saw_got = 1;
+        if (mc.relocs[i].type == 2) saw_bl = 1;
+    }
+    T_ASSERT(saw_got);
+    T_ASSERT(!saw_bl);
     EmitModule *mods[2] = { &mc, &md };
     T_ASSERT_EQ_INT(link_capturing(mods, 2, outp, err), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
@@ -3296,6 +3333,7 @@ int main(void) {
     test_subtractor();
     test_got();
     test_fn_got();
+    test_call_stub();
     test_macho_link();
     return t_finalize();
 }

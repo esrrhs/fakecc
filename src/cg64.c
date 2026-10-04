@@ -57,9 +57,13 @@ typedef struct {
     /* Local copy of runtime/int128.c's restoring division.  The arm64
      * image does not link the Linux runtime, and external BL is T14. */
     int               udiv_label;
-    /* Object-file calls to functions that are not in this TU. */
+    /* Object-file calls to functions that are not in this TU.
+     * Weak calls stay a BRANCH26 so a missing target can return 0.
+     * Any other external call goes through one local stub per symbol. */
     struct XCall { uint32_t at; const char *name; } *xcall;
     size_t            nxcall, capxcall;
+    struct Stub { const char *name; int lab; } *stub;
+    size_t            nstub, capstub;
     /* &&label sites.  Object files cannot bake the address: the linker
      * prepends an entry stub, which changes the page offset. */
     struct LRel { int a64lab; char *name; } *lrel;
@@ -112,6 +116,19 @@ static int c64_is_weak_ref(const IRModule *ir, const char *name) {
         if (ir->weak_refs[i] && strcmp(ir->weak_refs[i], name) == 0)
             return 1;
     return 0;
+}
+
+static int c64_stub_label(C64 *c, const char *name) {
+    for (size_t i = 0; i < c->nstub; i++)
+        if (c->stub[i].name && strcmp(c->stub[i].name, name) == 0)
+            return c->stub[i].lab;
+    if (c->nstub == c->capstub) {
+        c->capstub = c->capstub ? c->capstub * 2 : 4;
+        c->stub = xrealloc(c->stub, c->capstub * sizeof *c->stub);
+    }
+    c->stub[c->nstub].name = name;
+    c->stub[c->nstub].lab = a64_new_label(c->as);
+    return c->stub[c->nstub++].lab;
 }
 
 static int c64_undef_sym(EmitModule *out, const IRModule *ir, const char *name) {
@@ -2719,7 +2736,7 @@ static void emit_call(C64 *c, const IRInst *s) {
                        s->loc.line, s->loc.col,
                        "arm64 backend: call to undefined function '%s'",
                        s->call_name);
-            else {
+            else if (c64_is_weak_ref(c->ir, s->call_name)) {
                 if (c->nxcall == c->capxcall) {
                     c->capxcall = c->capxcall ? c->capxcall * 2 : 8;
                     c->xcall = xrealloc(c->xcall, c->capxcall * sizeof *c->xcall);
@@ -2728,7 +2745,8 @@ static void emit_call(C64 *c, const IRInst *s) {
                 c->xcall[c->nxcall].name = s->call_name;
                 c->nxcall++;
                 a64_word(a, 0x94000000u); /* bl, ARM64_RELOC_BRANCH26 */
-            }
+            } else
+                a64_bl(a, c64_stub_label(c, s->call_name));
         } else
             a64_bl(a, c->fn_label[fi]);
     }
@@ -4412,6 +4430,14 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     }
     if (c.udiv_label >= 0)
         emit_udivmodti4(&a, c.udiv_label);
+    for (size_t i = 0; i < c.nstub; i++) {
+        a64_bind(&a, c.stub[i].lab);
+        note_page_reloc(&c, (uint32_t)a.code.len, -1, c.stub[i].name, -1);
+        c.gfix[c.ngfix - 1].got = 1;
+        a64_word(&a, 0x90000000u | (uint32_t)A64_X16);
+        a64_word(&a, 0xF9400000u | ((uint32_t)A64_X16 << 5) | (uint32_t)A64_X16);
+        a64_br_reg(&a, A64_X16);
+    }
 
     /* The code buffer lands after the Mach-O header pad; ADRP page fixups
      * must compute against the runtime file/VA offset. */
@@ -4656,6 +4682,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     free(c.gfix);
     free(c.pfix);
     free(c.xcall);
+    free(c.stub);
     for (size_t i = 0; i < c.nlrel; i++) free(c.lrel[i].name);
     free(c.lrel);
     free(c.gsect);
