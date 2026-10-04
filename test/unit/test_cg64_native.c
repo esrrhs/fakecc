@@ -3364,6 +3364,24 @@ static void test_io(void) {
         "package main;\n"
         "long setitimer(long which, long *neu, long *old) { return which ? 3 : 3; }\n"
         "int main(void) { return setitimer(1, 0, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("sigprocmask_read",
+        "package main;\n"
+        "int errno;\n"
+        "long sigprocmask(long how, int *set, int *old);\n"
+        "int main(void) {\n"
+        "  int old = -1;\n"
+        "  int again = -1;\n"
+        "  int set = 1;\n"
+        "  if (sigprocmask(0, 0, &old) != 0) return 2;\n"
+        "  if (sigprocmask(99, &set, &again) != -22 || errno != 22) return 4;\n"
+        "  if (sigprocmask(0, 0, &again) != 0 || errno != 0) return 5;\n"
+        "  if (again != old) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("sigprocmask_user",
+        "package main;\n"
+        "long sigprocmask(long how, int *set, int *old) { return how ? 3 : 3; }\n"
+        "int main(void) { return sigprocmask(1, 0, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
