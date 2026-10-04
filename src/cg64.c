@@ -1361,6 +1361,119 @@ static int emit_io_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* x0 holds a positive errno.  A same-TU int errno receives it. */
+static void emit_store_errno(C64 *c, int egi) {
+    if (egi < 0) return;
+    A64Asm *a = c->as;
+    note_page_reloc(c, (uint32_t)a->code.len, egi, NULL, -1);
+    a64_word(a, 0x90000000u | (uint32_t)A64_X16);
+    a64_word(a, 0x91000000u | ((uint32_t)A64_X16 << 5) | (uint32_t)A64_X16);
+    a64_str32(a, A64_X0, A64_X16, 0);
+}
+
+/* getcwd.  Darwin writes the path with fcntl(F_GETPATH) into a 1024-byte
+ * scratch buffer, then copies it if the caller has room.  A zero size is
+ * EINVAL and a short buffer is ERANGE.  A same-TU definition still wins. */
+static int emit_getcwd(C64 *c, const char *name) {
+    if (!name || strcmp(name, "getcwd") != 0) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+
+    A64Asm *a = c->as;
+    int egi = find_global_idx(c->ir, "errno");
+    int Lbadsz = a64_new_label(a);
+    int Lopen_fail = a64_new_label(a);
+    int Lctl_fail = a64_new_label(a);
+    int Lrange = a64_new_label(a);
+    int Lmeas = a64_new_label(a);
+    int Lgot = a64_new_label(a);
+    int Lcopy = a64_new_label(a);
+    int Lcopied = a64_new_label(a);
+    int Ldone = a64_new_label(a);
+
+    a64_mov_reg(a, A64_X12, A64_X0, 1);
+    a64_mov_reg(a, A64_X13, A64_X1, 1);
+    a64_cbz(a, A64_X13, Lbadsz, 1);
+    a64_sub_imm12(a, A64_SP, A64_SP, 1040, 0, 1, 0);
+    a64_movz(a, A64_X2, 46, 0, 0); /* '.' */
+    a64_str8(a, A64_X2, A64_SP, 0);
+    a64_str8(a, 31, A64_SP, 1);
+    a64_add_imm12(a, A64_X0, A64_SP, 0, 0, 1, 0); /* SP, not ORR/XZR */
+    a64_movz(a, A64_X1, 0, 0, 1);
+    a64_movz(a, A64_X2, 0, 0, 1);
+    a64_movz(a, A64_X16, 5, 0, 1); /* open */
+    a64_svc(a, 0x80);
+    a64_cset(a, A64_X9, A64_CS, 1);
+    a64_cbnz(a, A64_X9, Lopen_fail, 1);
+    a64_mov_reg(a, A64_X14, A64_X0, 1);
+    a64_mov_reg(a, A64_X0, A64_X14, 1);
+    a64_movz(a, A64_X1, 50, 0, 1); /* F_GETPATH */
+    a64_add_imm12(a, A64_X2, A64_SP, 16, 0, 1, 0);
+    a64_movz(a, A64_X16, 92, 0, 1); /* fcntl */
+    a64_svc(a, 0x80);
+    a64_cset(a, A64_X9, A64_CS, 1);
+    a64_cbnz(a, A64_X9, Lctl_fail, 1);
+    a64_add_imm12(a, A64_X2, A64_SP, 16, 0, 1, 0);
+    a64_movz(a, A64_X3, 0, 0, 1);
+    a64_bind(a, Lmeas);
+    a64_ldr8(a, A64_X4, A64_X2, 0);
+    a64_cbz(a, A64_X4, Lgot, 0);
+    a64_add_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+    a64_add_imm12(a, A64_X3, A64_X3, 1, 0, 1, 0);
+    a64_b(a, Lmeas);
+    a64_bind(a, Lgot);
+    a64_add_imm12(a, A64_X4, A64_X3, 1, 0, 1, 0);
+    a64_cmp_reg(a, A64_X4, A64_X13, 1);
+    a64_bcond(a, A64_HI, Lrange);
+    a64_add_imm12(a, A64_X2, A64_SP, 16, 0, 1, 0);
+    a64_mov_reg(a, A64_X5, A64_X12, 1);
+    a64_mov_reg(a, A64_X6, A64_X4, 1);
+    a64_bind(a, Lcopy);
+    a64_cbz(a, A64_X6, Lcopied, 1);
+    a64_ldr8(a, A64_X7, A64_X2, 0);
+    a64_str8(a, A64_X7, A64_X5, 0);
+    a64_add_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+    a64_add_imm12(a, A64_X5, A64_X5, 1, 0, 1, 0);
+    a64_sub_imm12(a, A64_X6, A64_X6, 1, 0, 1, 0);
+    a64_b(a, Lcopy);
+    a64_bind(a, Lcopied);
+    a64_mov_reg(a, A64_X0, A64_X14, 1);
+    a64_movz(a, A64_X16, 6, 0, 1); /* close */
+    a64_svc(a, 0x80);
+    a64_mov_reg(a, A64_X0, A64_X12, 1);
+    a64_b(a, Ldone);
+    a64_bind(a, Lopen_fail);
+    emit_store_errno(c, egi);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_b(a, Ldone);
+    a64_bind(a, Lctl_fail);
+    a64_str64(a, A64_X0, A64_SP, 8);
+    a64_mov_reg(a, A64_X0, A64_X14, 1);
+    a64_movz(a, A64_X16, 6, 0, 1);
+    a64_svc(a, 0x80);
+    a64_ldr64(a, A64_X0, A64_SP, 8);
+    emit_store_errno(c, egi);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_b(a, Ldone);
+    a64_bind(a, Lrange);
+    a64_mov_reg(a, A64_X0, A64_X14, 1);
+    a64_movz(a, A64_X16, 6, 0, 1);
+    a64_svc(a, 0x80);
+    a64_movz(a, A64_X0, 34, 0, 1); /* ERANGE */
+    emit_store_errno(c, egi);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_bind(a, Ldone);
+    a64_add_imm12(a, A64_SP, A64_SP, 1040, 0, 1, 0);
+    int Lret = a64_new_label(a);
+    a64_b(a, Lret);
+    a64_bind(a, Lbadsz);
+    a64_movz(a, A64_X0, 22, 0, 1); /* EINVAL */
+    emit_store_errno(c, egi);
+    a64_movz(a, A64_X0, 0, 0, 1);
+    a64_bind(a, Lret);
+    return 1;
+}
+
 /* getenv.  The entry stub stores dyld's envp in the bss slot.  A same-TU
  * definition still wins.  Object files keep the call external. */
 static int emit_getenv(C64 *c, const char *name) {
@@ -3076,6 +3189,7 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_copy_builtin(c, s->call_name)
                                  || emit_dup_builtin(c, s->call_name)
                                  || emit_io_builtin(c, s->call_name)
+                                 || emit_getcwd(c, s->call_name)
                                  || emit_getenv(c, s->call_name)
                                  || emit_bound_builtin(c, s->call_name)
                                  || emit_cache_builtin(c, s->call_name)))) {

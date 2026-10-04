@@ -2009,6 +2009,35 @@ static void test_io(void) {
         "package main;\n"
         "long link(char *old, char *neu) { return old ? 3 : 3; }\n"
         "int main(void) { return link(\"a\", \"b\") == 3 ? 7 : 1; }\n", 7);
+    expect("getcwd_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long chdir(char *path);\n"
+        "char *getcwd(char *buf, unsigned long n);\n"
+        "int main(void) {\n"
+        "  if (chdir(\"/tmp\") != 0) return 1;\n"
+        "  char buf[64];\n"
+        "  char *p = getcwd(buf, 64);\n"
+        "  if (p != buf || buf[0] != '/') return 2;\n"
+        "  int n = 0;\n"
+        "  while (buf[n]) n++;\n"
+        "  if (n < 3) return 3;\n"
+        "  if (buf[n - 3] != 't' || buf[n - 2] != 'm' || buf[n - 1] != 'p')\n"
+        "    return 4;\n"
+        "  if (getcwd(buf, 0)) return 5;\n"
+        "  if (errno != 22) return 6;\n"
+        "  char tiny[1];\n"
+        "  if (getcwd(tiny, 1)) return 8;\n"
+        "  if (errno != 34) return 9;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("getcwd_user",
+        "package main;\n"
+        "char *getcwd(char *buf, unsigned long n) { return buf ? 0 : 0; }\n"
+        "int main(void) {\n"
+        "  char b[4];\n"
+        "  return getcwd(b, 4) ? 1 : 7;\n"
+        "}\n", 7);
 }
 
 static void test_getenv(void) {
