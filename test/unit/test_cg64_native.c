@@ -2866,6 +2866,28 @@ static void test_io(void) {
         "package main;\n"
         "long mprotect(long addr, long len, long prot) { return prot ? 3 : 3; }\n"
         "int main(void) { return mprotect(0, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("mlock_page",
+        "package main;\n"
+        "int errno;\n"
+        "long mlock(long addr, long len);\n"
+        "long munlock(long addr, long len);\n"
+        "int main(void) {\n"
+        "  long p = __syscall(197, 0, 16384, 3, 0x1002, -1, 0);\n"
+        "  if (p < 0) return 1;\n"
+        "  char *q = (char *)p;\n"
+        "  q[0] = 1;\n"
+        "  if (mlock(p, 16384) != 0) return 2;\n"
+        "  if (munlock(p, 16384) != 0) return 3;\n"
+        "  if (mlock(p + 1, 16384) != -12 || errno != 12) return 4;\n"
+        "  if (mlock(p, 16384) != 0 || errno != 0) return 5;\n"
+        "  munlock(p, 16384);\n"
+        "  if (__syscall(73, p, 16384) != 0) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("mlock_user",
+        "package main;\n"
+        "long mlock(long addr, long len) { return len ? 3 : 3; }\n"
+        "int main(void) { return mlock(0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
