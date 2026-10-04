@@ -1308,7 +1308,7 @@ static int emit_dup_builtin(C64 *c, const char *name) {
     return 1;
 }
 
-/* read/write/open/close/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/mkdir/rmdir/lseek.
+/* read/write/open/close/dup/dup2/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/mkdir/rmdir/lseek.
  * Arguments are already in x0..x5.  Darwin numbers, with the same
  * carry-to-negative errno fix as __syscall.  A same-TU int errno is
  * updated with the positive code, or cleared on success.  A same-TU
@@ -1319,6 +1319,8 @@ static int emit_io_builtin(C64 *c, const char *name) {
     else if (strcmp(name, "write") == 0) num = 4;
     else if (strcmp(name, "open") == 0) num = 5;
     else if (strcmp(name, "close") == 0) num = 6;
+    else if (strcmp(name, "dup") == 0) num = 41;
+    else if (strcmp(name, "dup2") == 0) num = 90;
     else if (strcmp(name, "link") == 0) num = 9;
     else if (strcmp(name, "unlink") == 0) num = 10;
     else if (strcmp(name, "chdir") == 0) num = 12;
