@@ -3244,6 +3244,30 @@ static void test_io(void) {
         "package main;\n"
         "long chflags(char *path, long flags) { return flags ? 3 : 3; }\n"
         "int main(void) { return chflags(0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("fchflags_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "long fchflags(long fd, long flags);\n"
+        "int main(void) {\n"
+        "  char *abs = \"/tmp/fakecc_fchflags_rt\";\n"
+        "  unlink(abs);\n"
+        "  long fd = open(abs, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  if (fchflags(fd, 1) != 0) return 2;\n"
+        "  if (fchflags(fd, 0) != 0) return 3;\n"
+        "  if (fchflags(-1, 0) != -9 || errno != 9) return 4;\n"
+        "  if (fchflags(fd, 0) != 0 || errno != 0) return 5;\n"
+        "  close(fd);\n"
+        "  unlink(abs);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("fchflags_user",
+        "package main;\n"
+        "long fchflags(long fd, long flags) { return flags ? 3 : 3; }\n"
+        "int main(void) { return fchflags(1, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
