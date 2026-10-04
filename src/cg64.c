@@ -459,13 +459,15 @@ static int find_function(const IRModule *ir, const char *name, int *idx_out) {
 
 static void emit_syscall(C64 *c, const IRInst *s);
 
-/* malloc/free via Darwin mmap/munmap when this TU does not define them.
- * The block stores its length in the 16 bytes before the returned pointer
- * so free can munmap the same range. */
+/* malloc/free/calloc via Darwin mmap/munmap when this TU does not define
+ * them.  The block stores its mapped length in the 16 bytes before the
+ * returned pointer so free can munmap the same range.  calloc checks that
+ * the element count and size do not wrap. */
 static int emit_alloc_builtin(C64 *c, const char *name) {
     int is_malloc = strcmp(name, "malloc") == 0;
     int is_free = strcmp(name, "free") == 0;
-    if (!is_malloc && !is_free) return 0;
+    int is_calloc = strcmp(name, "calloc") == 0;
+    if (!is_malloc && !is_free && !is_calloc) return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
     A64Asm *a = c->as;
@@ -482,6 +484,20 @@ static int emit_alloc_builtin(C64 *c, const char *name) {
     int nonzero = a64_new_label(a);
     int fail = a64_new_label(a);
     int done = a64_new_label(a);
+    int zloop = a64_new_label(a);
+    if (is_calloc) {
+        int nzero = a64_new_label(a);
+        a64_mul(a, A64_X2, A64_X0, A64_X1, 1);
+        a64_cbz(a, A64_X0, nzero, 1);
+        a64_udiv(a, A64_X3, A64_X2, A64_X0, 1);
+        a64_cmp_reg(a, A64_X3, A64_X1, 1);
+        a64_bcond(a, A64_NE, fail);
+        a64_bind(a, nzero);
+        a64_mov_reg(a, A64_X7, A64_X2, 1);
+        a64_mov_reg(a, A64_X0, A64_X2, 1);
+    } else {
+        a64_movz(a, A64_X7, 0, 0, 1);
+    }
     a64_cbnz(a, A64_X0, nonzero, 1);
     a64_movz(a, A64_X0, 1, 0, 1);
     a64_bind(a, nonzero);
@@ -500,7 +516,14 @@ static int emit_alloc_builtin(C64 *c, const char *name) {
     a64_cbnz(a, A64_X9, fail, 1);
     a64_str64(a, A64_X1, A64_X0, 0);
     a64_add_imm12(a, A64_X0, A64_X0, 16, 0, 1, 0);
-    a64_b(a, done);
+    a64_mov_reg(a, A64_X2, A64_X0, 1);
+    a64_mov_reg(a, A64_X3, A64_X7, 1);
+    a64_bind(a, zloop);
+    a64_cbz(a, A64_X3, done, 1);
+    a64_str8(a, 31, A64_X2, 0); /* strb wzr */
+    a64_add_imm12(a, A64_X2, A64_X2, 1, 0, 1, 0);
+    a64_sub_imm12(a, A64_X3, A64_X3, 1, 0, 1, 0);
+    a64_b(a, zloop);
     a64_bind(a, fail);
     a64_movz(a, A64_X0, 0, 0, 1);
     a64_bind(a, done);

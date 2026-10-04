@@ -1713,6 +1713,24 @@ static void test_malloc(void) {
         "package main;\n"
         "void *malloc(unsigned long n) { return n ? 0 : 0; }\n"
         "int main(void) { return malloc(4) ? 1 : 7; }\n", 7);
+    expect("calloc_zero",
+        "package main;\n"
+        "void *calloc(unsigned long n, unsigned long sz);\n"
+        "int main(void) {\n"
+        "  char *p = calloc(4, 4);\n"
+        "  if (!p) return 1;\n"
+        "  int i;\n"
+        "  for (i = 0; i < 16; i++) if (p[i]) return 2;\n"
+        "  p[15] = 6;\n"
+        "  return p[15];\n"
+        "}\n", 6);
+    expect("calloc_overflow",
+        "package main;\n"
+        "void *calloc(unsigned long n, unsigned long sz);\n"
+        "int main(void) {\n"
+        "  unsigned long n = 1ul << 32;\n"
+        "  return calloc(n, n) ? 1 : 7;\n"
+        "}\n", 7);
 }
 
 static void test_macho_link(void) {
