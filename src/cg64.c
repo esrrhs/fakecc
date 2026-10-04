@@ -1298,6 +1298,32 @@ static int emit_dup_builtin(C64 *c, const char *name) {
     return 1;
 }
 
+/* read/write/open/close/lseek.  Arguments are already in x0..x5.
+ * Darwin numbers, with the same carry-to-negative-errno fix as
+ * __syscall.  A same-TU definition still wins. */
+static int emit_io_builtin(C64 *c, const char *name) {
+    int num = 0;
+    if (strcmp(name, "read") == 0) num = 3;
+    else if (strcmp(name, "write") == 0) num = 4;
+    else if (strcmp(name, "open") == 0) num = 5;
+    else if (strcmp(name, "close") == 0) num = 6;
+    else if (strcmp(name, "lseek") == 0) num = 199;
+    else return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+    A64Asm *a = c->as;
+    a64_movz(a, A64_X16, (unsigned)num, 0, 1);
+    a64_svc(a, 0x80);
+    {
+        int ok = a64_new_label(a);
+        a64_cset(a, A64_X9, A64_CS, 1);
+        a64_cbz(a, A64_X9, ok, 1);
+        a64_neg(a, A64_X0, A64_X0, 1);
+        a64_bind(a, ok);
+    }
+    return 1;
+}
+
 /* Bytes of outgoing stack traffic for one call: 8 per stack slot, plus
  * 16 when call_args[0] must be stashed before it is written to x8. */
 static int is_va_builtin(const char *name) {
@@ -2964,6 +2990,7 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_span_builtin(c, s->call_name)
                                  || emit_copy_builtin(c, s->call_name)
                                  || emit_dup_builtin(c, s->call_name)
+                                 || emit_io_builtin(c, s->call_name)
                                  || emit_bound_builtin(c, s->call_name)
                                  || emit_cache_builtin(c, s->call_name)))) {
         int fi = 0;

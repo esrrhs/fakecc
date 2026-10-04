@@ -1787,6 +1787,41 @@ static void test_strdup(void) {
         "int main(void) { return strdup(\"a\") ? 1 : 7; }\n", 7);
 }
 
+static void test_io(void) {
+    /* Darwin open flags: O_RDWR|O_CREAT|O_TRUNC = 0x602.  EBADF is 9. */
+    expect("io_roundtrip",
+        "package main;\n"
+        "long open(char *path, long flags, long mode);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long read(long fd, char *buf, long n);\n"
+        "long lseek(long fd, long off, long whence);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  long fd = open(\"/tmp/fakecc_io_rt\", 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  char *msg = \"ab\";\n"
+        "  if (write(fd, msg, 2) != 2) return 2;\n"
+        "  if (lseek(fd, 0, 0) != 0) return 3;\n"
+        "  char buf[4];\n"
+        "  buf[0] = 0; buf[1] = 0;\n"
+        "  if (read(fd, buf, 2) != 2) return 4;\n"
+        "  if (buf[0] != 'a' || buf[1] != 'b') return 5;\n"
+        "  if (close(fd) != 0) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("write_badfd",
+        "package main;\n"
+        "long write(long fd, char *buf, long n);\n"
+        "int main(void) {\n"
+        "  char *p = \"x\";\n"
+        "  return write(-1, p, 1) == -9 ? 7 : 1;\n"
+        "}\n", 7);
+    expect("write_user",
+        "package main;\n"
+        "long write(long fd, char *buf, long n) { return n ? 3 : 3; }\n"
+        "int main(void) { return write(1, 0, 1) == 3 ? 7 : 1; }\n", 7);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3463,6 +3498,7 @@ int main(void) {
     test_tls();
     test_malloc();
     test_strdup();
+    test_io();
     test_macho_link();
     return t_finalize();
 }
