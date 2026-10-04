@@ -2401,6 +2401,37 @@ static void test_io(void) {
         "package main;\n"
         "long pathconf(char *path, long name) { return name ? 3 : 3; }\n"
         "int main(void) { return pathconf(0, 4) == 3 ? 7 : 1; }\n", 7);
+    expect("utimes_file",
+        "package main;\n"
+        "int errno;\n"
+        "long utimes(char *path, long *tv);\n"
+        "long futimes(long fd, long *tv);\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "int main(void) {\n"
+        "  unlink(\"/tmp/fakecc_utimes_rt\");\n"
+        "  long fd = open(\"/tmp/fakecc_utimes_rt\", 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  close(fd);\n"
+        "  if (utimes(\"/tmp/fakecc_utimes_rt\", 0) != 0) return 2;\n"
+        "  long tv[4];\n"
+        "  tv[0] = 1700000000; tv[1] = 0;\n"
+        "  tv[2] = 1700000001; tv[3] = 0;\n"
+        "  if (utimes(\"/tmp/fakecc_utimes_rt\", tv) != 0) return 3;\n"
+        "  if (utimes(\"/tmp/no_such_fakecc_ut\", 0) != -2 || errno != 2) return 4;\n"
+        "  fd = open(\"/tmp/fakecc_utimes_rt\", 2, 0);\n"
+        "  if (fd < 0) return 5;\n"
+        "  if (futimes(fd, tv) != 0 || errno != 0) return 6;\n"
+        "  if (futimes(-1, 0) != -9 || errno != 9) return 8;\n"
+        "  close(fd);\n"
+        "  unlink(\"/tmp/fakecc_utimes_rt\");\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("utimes_user",
+        "package main;\n"
+        "long utimes(char *path, long *tv) { return path ? 3 : 3; }\n"
+        "int main(void) { return utimes(0, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
