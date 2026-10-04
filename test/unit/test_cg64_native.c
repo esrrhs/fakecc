@@ -2797,6 +2797,31 @@ static void test_io(void) {
         "package main;\n"
         "long kqueue(void) { return 3; }\n"
         "int main(void) { return kqueue() == 3 ? 7 : 1; }\n", 7);
+    expect("fchmod_mode",
+        "package main;\n"
+        "int errno;\n"
+        "long fchmod(long fd, long mode);\n"
+        "long access(char *path, long mode);\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "int main(void) {\n"
+        "  unlink(\"/tmp/fakecc_fchmod_rt\");\n"
+        "  long fd = open(\"/tmp/fakecc_fchmod_rt\", 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  if (fchmod(fd, 0) != 0) return 2;\n"
+        "  if (access(\"/tmp/fakecc_fchmod_rt\", 4) != -13 || errno != 13) return 3;\n"
+        "  if (fchmod(fd, 420) != 0 || errno != 0) return 4;\n"
+        "  if (access(\"/tmp/fakecc_fchmod_rt\", 4) != 0) return 5;\n"
+        "  if (fchmod(-1, 420) != -9 || errno != 9) return 6;\n"
+        "  close(fd);\n"
+        "  unlink(\"/tmp/fakecc_fchmod_rt\");\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("fchmod_user",
+        "package main;\n"
+        "long fchmod(long fd, long mode) { return mode ? 3 : 3; }\n"
+        "int main(void) { return fchmod(1, 420) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {

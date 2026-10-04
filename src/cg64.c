@@ -1342,7 +1342,7 @@ static int emit_pipe_builtin(C64 *c, const char *name) {
     return 1;
 }
 
-/* read/write/pread/pwrite/open/close/dup/dup2/fsync/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/mkdir/rmdir/lseek/truncate/ftruncate.
+/* read/write/pread/pwrite/open/close/dup/dup2/fsync/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/mkdir/rmdir/lseek/truncate/ftruncate.
  * Arguments are already in x0..x5.  Darwin numbers, with the same
  * carry-to-negative errno fix as __syscall.  A same-TU int errno is
  * updated with the positive code, or cleared on success.  A same-TU
@@ -1412,6 +1412,7 @@ static int emit_io_builtin(C64 *c, const char *name) {
     else if (strcmp(name, "poll") == 0) num = 230;
     else if (strcmp(name, "kqueue") == 0) num = 362;
     else if (strcmp(name, "kevent") == 0) num = 363;
+    else if (strcmp(name, "fchmod") == 0) num = 124;
     else if (strcmp(name, "rmdir") == 0) num = 137;
     else if (strcmp(name, "lseek") == 0) num = 199;
     else if (strcmp(name, "truncate") == 0) num = 200;
