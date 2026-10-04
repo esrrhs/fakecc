@@ -2906,6 +2906,25 @@ static void test_io(void) {
         "package main;\n"
         "long getpriority(long which, long who) { return which ? 3 : 3; }\n"
         "int main(void) { return getpriority(1, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("rusage_self",
+        "package main;\n"
+        "int errno;\n"
+        "long getrusage(long who, long *ru);\n"
+        "int main(void) {\n"
+        "  long ru[32];\n"
+        "  int i;\n"
+        "  for (i = 0; i < 32; i++) ru[i] = -1;\n"
+        "  if (getrusage(99, ru) != -22 || errno != 22) return 1;\n"
+        "  if (getrusage(0, ru) != 0 || errno != 0) return 2;\n"
+        "  if (ru[0] < 0) return 3;\n"
+        "  if (ru[4] <= 0) return 4;\n"
+        "  if (getrusage(-1, ru) != 0) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("rusage_user",
+        "package main;\n"
+        "long getrusage(long who, long *ru) { return who ? 3 : 3; }\n"
+        "int main(void) { return getrusage(1, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
