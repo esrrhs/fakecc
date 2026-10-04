@@ -3382,6 +3382,23 @@ static void test_io(void) {
         "package main;\n"
         "long sigprocmask(long how, int *set, int *old) { return how ? 3 : 3; }\n"
         "int main(void) { return sigprocmask(1, 0, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("sigpending_empty",
+        "package main;\n"
+        "int errno;\n"
+        "long sigpending(int *set);\n"
+        "int main(void) {\n"
+        "  int set = -1;\n"
+        "  int again = -1;\n"
+        "  if (sigpending(&set) != 0) return 2;\n"
+        "  if (set != 0) return 3;\n"
+        "  if (sigpending(&again) != 0 || errno != 0) return 4;\n"
+        "  if (again != 0) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("sigpending_user",
+        "package main;\n"
+        "long sigpending(int *set) { return set ? 3 : 3; }\n"
+        "int main(void) { return sigpending(0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
