@@ -1342,7 +1342,7 @@ static int emit_pipe_builtin(C64 *c, const char *name) {
     return 1;
 }
 
-/* read/write/pread/pwrite/open/close/dup/dup2/fsync/fdatasync/chflags/fchflags/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/getrusage/openat/unlinkat/mkdirat/renameat/faccessat/symlinkat/readlinkat/linkat/fchmodat/fchownat/mkfifoat/mkdir/rmdir/lseek/truncate/ftruncate.
+/* read/write/pread/pwrite/open/close/dup/dup2/fsync/fdatasync/chflags/fchflags/link/unlink/chdir/chmod/access/symlink/readlink/rename/getpid/getppid/getuid/geteuid/getgid/getegid/umask/gettimeofday/issetugid/getentropy/getrlimit/setrlimit/getpgrp/getpgid/setpgid/getsid/fchdir/flock/getgroups/getdtablesize/mkfifo/pathconf/fpathconf/utimes/futimes/chown/fchown/lchown/socketpair/readv/writev/socket/shutdown/getsockopt/setsockopt/bind/listen/getsockname/connect/accept/sendto/recvfrom/getpeername/poll/kqueue/kevent/fchmod/madvise/mincore/mprotect/msync/mlock/munlock/getpriority/setpriority/getrusage/openat/unlinkat/mkdirat/renameat/faccessat/symlinkat/readlinkat/linkat/fchmodat/fchownat/mkfifoat/mkdir/rmdir/lseek/truncate/ftruncate.
  * Arguments are already in x0..x5.  Darwin numbers, with the same
  * carry-to-negative errno fix as __syscall.  A same-TU int errno is
  * updated with the positive code, or cleared on success.  A same-TU
@@ -1385,6 +1385,7 @@ static int emit_io_builtin(C64 *c, const char *name) {
     else if (strcmp(name, "setrlimit") == 0) num = 195;
     else if (strcmp(name, "getpgrp") == 0) num = 81;
     else if (strcmp(name, "getpgid") == 0) num = 151;
+    else if (strcmp(name, "setpgid") == 0) num = 82;
     else if (strcmp(name, "getsid") == 0) num = 310;
     else if (strcmp(name, "getgroups") == 0) num = 79;
     else if (strcmp(name, "getdtablesize") == 0) num = 89;

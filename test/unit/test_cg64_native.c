@@ -3268,6 +3268,26 @@ static void test_io(void) {
         "package main;\n"
         "long fchflags(long fd, long flags) { return flags ? 3 : 3; }\n"
         "int main(void) { return fchflags(1, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("setpgid_self",
+        "package main;\n"
+        "int errno;\n"
+        "long getpid(void);\n"
+        "long getpgid(long pid);\n"
+        "long setpgid(long pid, long pgid);\n"
+        "int main(void) {\n"
+        "  long pid = getpid();\n"
+        "  if (pid <= 1) return 1;\n"
+        "  if (setpgid(0, 0) != 0) return 2;\n"
+        "  if (getpgid(0) != pid || errno != 0) return 3;\n"
+        "  if (setpgid(0, -1) != -22 || errno != 22) return 4;\n"
+        "  if (setpgid(999999, 0) != -3 || errno != 3) return 5;\n"
+        "  if (setpgid(0, pid) != 0 || errno != 0) return 6;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("setpgid_user",
+        "package main;\n"
+        "long setpgid(long pid, long pgid) { return pgid ? 3 : 3; }\n"
+        "int main(void) { return setpgid(0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
