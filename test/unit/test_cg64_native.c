@@ -3063,6 +3063,48 @@ static void test_io(void) {
         "package main;\n"
         "long readlinkat(long dirfd, char *path, char *buf, long n) { return n ? 3 : 3; }\n"
         "int main(void) { return readlinkat(0, 0, 0, 8) == 3 ? 7 : 1; }\n", 7);
+    expect("linkat_tmp",
+        "package main;\n"
+        "int errno;\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long write(long fd, char *buf, long n);\n"
+        "long read(long fd, char *buf, long n);\n"
+        "long unlink(char *p);\n"
+        "long linkat(long olddir, char *oldpath, long newdir, char *newpath, long flags);\n"
+        "int main(void) {\n"
+        "  char *src = \"/tmp/fakecc_linkat_a\";\n"
+        "  char *dst = \"/tmp/fakecc_linkat_b\";\n"
+        "  char *dst2 = \"/tmp/fakecc_linkat_c\";\n"
+        "  unlink(src);\n"
+        "  unlink(dst);\n"
+        "  unlink(dst2);\n"
+        "  long fd = open(src, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  if (write(fd, \"ab\", 2) != 2) return 2;\n"
+        "  close(fd);\n"
+        "  long dir = open(\"/tmp\", 0, 0);\n"
+        "  if (dir < 0) return 3;\n"
+        "  if (linkat(dir, \"fakecc_linkat_a\", dir, \"fakecc_linkat_b\", 0) != 0) return 4;\n"
+        "  fd = open(dst, 0, 0);\n"
+        "  if (fd < 0) return 5;\n"
+        "  char buf[2];\n"
+        "  if (read(fd, buf, 2) != 2 || buf[0] != 'a' || buf[1] != 'b') return 6;\n"
+        "  close(fd);\n"
+        "  if (linkat(dir, \"fakecc_linkat_a\", dir, \"fakecc_linkat_b\", 0) != -17 || errno != 17) return 8;\n"
+        "  if (linkat(200, \"fakecc_linkat_a\", dir, \"fakecc_linkat_c\", 0) != -9 || errno != 9) return 9;\n"
+        "  if (linkat(dir, \"no_such_fakecc_la\", dir, \"fakecc_linkat_d\", 0) != -2 || errno != 2) return 10;\n"
+        "  if (linkat(dir, \"fakecc_linkat_a\", dir, \"fakecc_linkat_c\", 0) != 0 || errno != 0) return 11;\n"
+        "  unlink(src);\n"
+        "  unlink(dst);\n"
+        "  unlink(dst2);\n"
+        "  close(dir);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("linkat_user",
+        "package main;\n"
+        "long linkat(long olddir, char *oldpath, long newdir, char *newpath, long flags) { return flags ? 3 : 3; }\n"
+        "int main(void) { return linkat(0, 0, 0, 0, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
