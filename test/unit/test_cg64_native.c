@@ -2198,6 +2198,23 @@ static void test_io(void) {
         "package main;\n"
         "long umask(long mask) { return mask ? 3 : 3; }\n"
         "int main(void) { return umask(18) == 3 ? 7 : 1; }\n", 7);
+    expect("gettimeofday_now",
+        "package main;\n"
+        "long gettimeofday(long *tv, long *tz);\n"
+        "int main(void) {\n"
+        "  long tv[2];\n"
+        "  tv[0] = 0; tv[1] = -1;\n"
+        "  if (gettimeofday(tv, 0) != 0) return 1;\n"
+        "  if (tv[0] < 1700000000 || tv[0] > 2000000000) return 2;\n"
+        "  long usec = tv[1] & 0xffffffff;\n"
+        "  if (usec < 0 || usec >= 1000000) return 3;\n"
+        "  if (gettimeofday(0, 0) != 0) return 4;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("gettimeofday_user",
+        "package main;\n"
+        "long gettimeofday(long *tv, long *tz) { return tv ? 3 : 3; }\n"
+        "int main(void) { return gettimeofday(0, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
