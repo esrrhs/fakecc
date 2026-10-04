@@ -585,6 +585,19 @@ int main(int argc, char **argv) {
         nlinked_files = 0;
 
     int nmods = ninputs + nlinked_files;
+    /* A TU that defines no main is legal as soon as more than one module
+     * contributes to the link -- the arm64 backend emits its entry stub in
+     * whichever TU owns main, so it must not reject the others.  Count only
+     * real source TUs: a prebuilt .o input never carries one. */
+    int nsource_tus = 0;
+    for (int i = 0; i < ninputs; i++) {
+        size_t len = strlen(inputs[i]);
+        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o')
+            continue;
+        nsource_tus++;
+    }
+    emit_set_multi_tu(nsource_tus + nlinked_files > 1);
+
     EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
     if (!mods || !mod_ptrs) {

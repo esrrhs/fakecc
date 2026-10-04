@@ -4933,11 +4933,18 @@ static void emit_udivmodti4(A64Asm *a, int label) {
 /* ── Module entry point ──────────────────────────────────────────── */
 
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
-    (void)want_debug;  /* DWARF emission lands in T20. */
+(void)want_debug;  /* DWARF emission lands in T20. */
 
     int main_id = -1;
-    if (!emit_object_mode() && find_function(ir, "main", &main_id) != 0)
+    int have_main = find_function(ir, "main", &main_id) == 0;
+    /* A TU without main is only an error when nothing else can supply it:
+     * under -c the object carries no entry at all, and in a multi-TU link a
+     * sibling TU may define it. */
+    if (!have_main && !emit_object_mode() && !emit_multi_tu())
         die_at("<arm64>", 0, 0, "no 'main' function found");
+    /* The LC_MAIN stub belongs to the one TU that defines main; in a multi-TU
+     * link the rest contribute functions and data only. */
+    int want_entry = have_main && !emit_object_mode();
 
     A64Asm a;
     a64_init(&a);
@@ -5036,7 +5043,9 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
             if (out->data_align < 8) out->data_align = 8;
         }
     }
-    if (!emit_object_mode()) {
+    /* The environ slot is written by the entry stub and read back by the
+     * getenv builtin, so it is only allocated for the TU that emits it. */
+    if (want_entry) {
         while (out->bss_size % 8) out->bss_size++;
         c.environ_off = (int)out->bss_size;
         out->bss_size += 8;
@@ -5086,7 +5095,7 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
      * main, run destructors in reverse, then Darwin exit(main's value).
      * The stub owns x19..x22 outright (process entry has no caller whose
      * values matter) but saves them anyway to keep the frame ABI-clean. */
-    if (!emit_object_mode()) {
+    if (want_entry) {
     a64_stp64(&a, A64_FP, A64_LR, A64_SP, -48, A64_PAIR_PRE);
     mov_sp_like(&a, A64_FP, A64_SP);   /* ADD, not ORR (x31==SP vs XZR) */
     a64_stp64(&a, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);

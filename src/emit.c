@@ -326,6 +326,15 @@ static int g_object_mode;
 void emit_set_object_mode(int on) { g_object_mode = on ? 1 : 0; }
 int emit_object_mode(void) { return g_object_mode; }
 
+/* Multi-TU link: more than one translation unit contributes to the output.
+ * The arm64 backend emits its LC_MAIN entry stub inside the TU that defines
+ * main, so it needs to know a TU without main is legitimate rather than an
+ * error -- which is only true once another TU can supply it. */
+static int g_multi_tu;
+
+void emit_set_multi_tu(int on) { g_multi_tu = on ? 1 : 0; }
+int emit_multi_tu(void) { return g_multi_tu; }
+
 void emit_obj(const EmitModule *m, const char *path) {
     if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
         if (macho_write_object(m, path) != 0) exit(1);
