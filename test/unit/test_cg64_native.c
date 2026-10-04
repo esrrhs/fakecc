@@ -2432,6 +2432,42 @@ static void test_io(void) {
         "package main;\n"
         "long utimes(char *path, long *tv) { return path ? 3 : 3; }\n"
         "int main(void) { return utimes(0, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("chown_self",
+        "package main;\n"
+        "int errno;\n"
+        "long chown(char *path, long uid, long gid);\n"
+        "long fchown(long fd, long uid, long gid);\n"
+        "long lchown(char *path, long uid, long gid);\n"
+        "long getuid(void);\n"
+        "long getgid(void);\n"
+        "long open(char *p, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long unlink(char *p);\n"
+        "long symlink(char *target, char *link);\n"
+        "int main(void) {\n"
+        "  long uid = getuid();\n"
+        "  long gid = getgid();\n"
+        "  if (uid < 0 || gid < 0) return 1;\n"
+        "  unlink(\"/tmp/fakecc_chown_rt\");\n"
+        "  unlink(\"/tmp/fakecc_chown_ln\");\n"
+        "  long fd = open(\"/tmp/fakecc_chown_rt\", 0x602, 420);\n"
+        "  if (fd < 0) return 2;\n"
+        "  if (chown(\"/tmp/fakecc_chown_rt\", uid, gid) != 0) return 3;\n"
+        "  if (chown(\"/tmp/fakecc_chown_rt\", -1, -1) != 0) return 4;\n"
+        "  if (chown(\"/tmp/no_such_fakecc_ch\", uid, gid) != -2 || errno != 2) return 5;\n"
+        "  if (fchown(fd, uid, gid) != 0 || errno != 0) return 6;\n"
+        "  if (fchown(-1, uid, gid) != -9 || errno != 9) return 8;\n"
+        "  if (symlink(\"/tmp/fakecc_chown_rt\", \"/tmp/fakecc_chown_ln\") != 0) return 9;\n"
+        "  if (lchown(\"/tmp/fakecc_chown_ln\", uid, gid) != 0 || errno != 0) return 10;\n"
+        "  close(fd);\n"
+        "  unlink(\"/tmp/fakecc_chown_ln\");\n"
+        "  unlink(\"/tmp/fakecc_chown_rt\");\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("chown_user",
+        "package main;\n"
+        "long chown(char *path, long uid, long gid) { return uid ? 3 : 3; }\n"
+        "int main(void) { return chown(0, 1, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
