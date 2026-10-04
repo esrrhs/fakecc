@@ -8057,9 +8057,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     || strstr(cname, "__builtin_parity") || strstr(cname, "__builtin_clrsb")
                     || strstr(cname, "__builtin_bswap"))
                     inst.call_name = xstrdup(cname);
+                /* abort() must stay distinct from __builtin_trap(): libc abort
+                 * raises SIGABRT while the builtin traps with SIGTRAP, and a
+                 * caller can observe the difference in the wait status.
+                 * __builtin_abort keeps the library meaning, so fold it onto
+                 * `abort` and leave __builtin_trap under its own name. */
                 else if (strcmp(cname, "__builtin_abort") == 0) inst.call_name = xstrdup("abort");
                 else if (strcmp(cname, "__builtin_exit") == 0) inst.call_name = xstrdup("exit");
-                else if (strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("abort");
+                else if (strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("__builtin_trap");
                 else if (strcmp(cname, "__builtin_memset") == 0) inst.call_name = xstrdup("memset");
                 else if (strcmp(cname, "__builtin_memcpy") == 0) inst.call_name = xstrdup("memcpy");
                 else if (strcmp(cname, "__builtin_bzero") == 0) inst.call_name = xstrdup("bzero");

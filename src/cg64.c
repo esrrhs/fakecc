@@ -1497,6 +1497,57 @@ static void emit_store_errno(C64 *c, int egi) {
     a64_str32(a, A64_X0, A64_X16, 0);
 }
 
+/* Process termination: exit / _exit / _Exit / abort.
+ *
+ * Darwin has a single `exit` syscall (1) that takes the status in x0 and
+ * never returns; `abort` is SIGABRT.  These are libc-level names rather than
+ * syscalls, so the freestanding arm64 backend has to supply them itself or
+ * every torture case that ends with exit() fails to compile.  A same-TU
+ * definition still wins, so a program that implements its own exit keeps it.
+ *
+ * The emitted body cannot fall through, so a dummy return is appended: the
+ * syscall is unreachable and the epilogue only exists to keep the function
+ * well-formed for disassembly and for the branch-density bookkeeping. */
+static int emit_exit_builtin(C64 *c, const char *name) {
+    if (!name) return 0;
+    int is_exit = strcmp(name, "exit") == 0;
+    int is_atexit = strcmp(name, "_exit") == 0 || strcmp(name, "_Exit") == 0;
+    int is_abort = strcmp(name, "abort") == 0;
+    if (!is_exit && !is_atexit && !is_abort) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+    A64Asm *a = c->as;
+    if (is_abort) {
+        /* Darwin abort() raises SIGABRT.  kill(getpid(), SIGABRT) is the
+         * faithful lowering, and the pid has to be the real one: a hard-coded
+         * 1 would signal whatever process happens to own pid 1 instead of us,
+         * and the call would fall through to the _exit fallback below with the
+         * wrong status. */
+        a64_movz(a, A64_X16, 20, 0, 1); /* getpid */
+        a64_svc(a, 0x80);
+        /* getpid cannot fail, so x0 is the pid; Darwin kill takes (pid, sig)
+         * in x0/x1. */
+        a64_movz(a, A64_X16, 37, 0, 1); /* kill */
+        a64_movz(a, A64_X1, 6, 0, 1);   /* SIGABRT */
+        a64_svc(a, 0x80);
+        /* kill only returns if the signal was blocked or ignored; fall back
+         * to _exit(134) so abort() can never return to its caller and the
+         * wait status still reads as SIGABRT. */
+        a64_movz(a, A64_X16, 1, 0, 1);
+        a64_movz(a, A64_X0, 134, 0, 1);
+        a64_svc(a, 0x80);
+        a64_ret(a, A64_LR);
+        return 1;
+    }
+    /* exit/_exit/_Exit all take the status in x0 and trap straight into the
+     * kernel, so atexit handlers do not run - matching _exit, and matching
+     * what a freestanding program without libc can promise. */
+    a64_movz(a, A64_X16, 1, 0, 1);
+    a64_svc(a, 0x80);
+    a64_ret(a, A64_LR);
+    return 1;
+}
+
 /* getcwd.  Darwin writes the path with fcntl(F_GETPATH) into a 1024-byte
  * scratch buffer, then copies it if the caller has room.  A zero size is
  * EINVAL and a short buffer is ERANGE.  A same-TU definition still wins. */
@@ -2664,13 +2715,14 @@ static void emit_fp_builtin(C64 *c, const IRInst *s, int kind) {
     commit_fp(c, s->dst, dst);
 }
 
-/* __builtin_trap and __builtin_abort both arrive as a call named abort.
- * __builtin_unreachable and __builtin_debugtrap keep the stripped name.
- * brk #1 is what clang emits; the kernel reports SIGTRAP.  debugtrap is
- * not noreturn, so the instructions after it stay in the function.
- * A user-defined function wins. */
+/* __builtin_trap arrives as a call named __builtin_trap; __builtin_abort and
+ * libc abort() both arrive as `abort` and are handled by emit_exit_builtin,
+ * which raises SIGABRT.  brk #1 is what clang emits and the kernel reports
+ * SIGTRAP.  debugtrap is not noreturn, so the instructions after it stay in
+ * the function.  A user-defined function wins. */
 static int emit_trap_builtin(C64 *c, const char *name) {
-    if (!name || (strcmp(name, "abort") != 0 && strcmp(name, "unreachable") != 0
+    if (!name || (strcmp(name, "__builtin_trap") != 0
+                  && strcmp(name, "unreachable") != 0
                   && strcmp(name, "debugtrap") != 0))
         return 0;
     int defined = 0;
@@ -3309,6 +3361,7 @@ static void emit_call(C64 *c, const IRInst *s) {
         a64_bl(a, c->udiv_label);
     } else if (!(s->call_name && (emit_alloc_builtin(c, s->call_name)
                                  || emit_mem_builtin(c, s->call_name)
+                                 || emit_exit_builtin(c, s->call_name)
                                  || emit_scan_builtin(c, s->call_name)
                                  || emit_find_builtin(c, s->call_name)
                                  || emit_span_builtin(c, s->call_name)

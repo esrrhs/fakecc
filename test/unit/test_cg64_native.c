@@ -3523,6 +3523,45 @@ static void test_io(void) {
         "int main(void) { return preadv(1, 0, 1, 1) == 3 ? 7 : 1; }\n", 7);
 }
 
+/* exit()/_exit() trap straight into the Darwin exit syscall, so the status
+ * comes back as the process wait status and the code after the call never
+ * runs.  abort() must raise SIGABRT (status 134), not the SIGTRAP (133) that
+ * __builtin_trap produces -- the two are distinguishable by a caller. */
+static void test_exit(void) {
+    expect("exit_status",
+        "package main;\n"
+        "void exit(int s);\n"
+        "int main(void) { exit(42); return 7; }\n", 42);
+    expect("exit_zero",
+        "package main;\n"
+        "void exit(int s);\n"
+        "int main(void) { exit(0); return 7; }\n", 0);
+    expect("_exit_status",
+        "package main;\n"
+        "void _exit(int s);\n"
+        "int main(void) { _exit(3); return 7; }\n", 3);
+    expect("_Exit_status",
+        "package main;\n"
+        "void _Exit(int s);\n"
+        "int main(void) { _Exit(5); return 7; }\n", 5);
+    /* 128 + SIGABRT(6). */
+    expect("abort_sigabrt",
+        "package main;\n"
+        "void abort(void);\n"
+        "int main(void) { abort(); return 7; }\n", 134);
+    /* 128 + SIGTRAP(5): __builtin_trap keeps its own identity so it stays
+     * distinct from libc abort(). */
+    expect("builtin_trap_sigtrap",
+        "package main;\n"
+        "void __builtin_trap(void);\n"
+        "int main(void) { __builtin_trap(); return 7; }\n", 133);
+    /* A same-TU definition wins over the builtin, and still runs. */
+    expect("exit_user_defined",
+        "package main;\n"
+        "void exit(int s) { if (s == 11) __builtin_trap(); }\n"
+        "int main(void) { exit(11); return 7; }\n", 133);
+}
+
 static void test_getenv(void) {
     expect("getenv_path",
         "package main;\n"
@@ -5219,6 +5258,7 @@ int main(void) {
     test_malloc();
     test_strdup();
     test_io();
+    test_exit();
     test_getenv();
     test_macho_link();
     return t_finalize();
