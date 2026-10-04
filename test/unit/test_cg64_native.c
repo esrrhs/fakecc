@@ -2164,6 +2164,26 @@ static void test_io(void) {
         "package main;\n"
         "long pread(long fd, char *buf, long n, long off) { return fd ? 3 : 3; }\n"
         "int main(void) { return pread(1, 0, 0, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("ids_stable",
+        "package main;\n"
+        "long getuid(void);\n"
+        "long geteuid(void);\n"
+        "long getgid(void);\n"
+        "long getegid(void);\n"
+        "long getppid(void);\n"
+        "int main(void) {\n"
+        "  long u = getuid();\n"
+        "  if (u < 0 || geteuid() != u) return 1;\n"
+        "  long g = getgid();\n"
+        "  if (g < 0 || getegid() != g) return 2;\n"
+        "  if (getppid() < 0) return 3;\n"
+        "  if (getuid() != u || getgid() != g) return 4;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("getuid_user",
+        "package main;\n"
+        "long getuid(void) { return 4; }\n"
+        "int main(void) { return getuid() == 4 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
