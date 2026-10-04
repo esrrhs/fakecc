@@ -1592,6 +1592,38 @@ static void test_got(void) {
     emit_module_free(&md);
 }
 
+static void test_fn_got(void) {
+    const char *call = "/tmp/fakecc_arm64_fngot_main.o";
+    const char *def = "/tmp/fakecc_arm64_fngot_def.o";
+    const char *outp = "/tmp/fakecc_arm64_fngot_out";
+    const char *err = "/tmp/fakecc_arm64_fngot_err.txt";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "extern int add1(int x);\n"
+        "int main(void) {\n"
+        "  int (*p)(int) = add1;\n"
+        "  return p(5);\n"
+        "}\n",
+        call, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
+        "package main;\n"
+        "int add1(int x) { return x + 1; }\n",
+        def, NULL), 0);
+    EmitModule mc, md;
+    T_ASSERT_EQ_INT(emit_obj_read(call, &mc), 0);
+    T_ASSERT_EQ_INT(emit_obj_read(def, &md), 0);
+    int saw = 0;
+    for (size_t i = 0; i < mc.num_relocs; i++)
+        if (mc.relocs[i].type == 5) saw = 1;
+    T_ASSERT(saw);
+    EmitModule *mods[2] = { &mc, &md };
+    T_ASSERT_EQ_INT(link_capturing(mods, 2, outp, err), 0);
+    T_ASSERT_EQ_INT(macho_codesign(outp), 0);
+    T_ASSERT_EQ_INT(run_bin(outp), 6);
+    emit_module_free(&mc);
+    emit_module_free(&md);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -3263,6 +3295,7 @@ int main(void) {
     test_used();
     test_subtractor();
     test_got();
+    test_fn_got();
     test_macho_link();
     return t_finalize();
 }

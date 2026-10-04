@@ -4112,9 +4112,15 @@ static void emit_function(C64 *c, int fi) {
              * ADRP would miss the real page.  Record a reloc instead. */
             if (emit_object_mode()) {
                 note_page_reloc(c, (uint32_t)a->code.len, -1, s->call_name, s->dst);
+                int use_got = missing && !c64_is_weak_ref(c->ir, s->call_name);
+                if (use_got) c->gfix[c->ngfix - 1].got = 1;
                 a64_word(a, 0x90000000u | (uint32_t)(d & 31));
-                a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
-                                        | (uint32_t)(d & 31));
+                if (use_got)
+                    a64_word(a, 0xF9400000u | ((uint32_t)(d & 31) << 5)
+                                            | (uint32_t)(d & 31));
+                else
+                    a64_word(a, 0x91000000u | ((uint32_t)(d & 31) << 5)
+                                            | (uint32_t)(d & 31));
             } else {
                 a64_adrp_add_label(a, d, c->fn_label[fi]);
             }
