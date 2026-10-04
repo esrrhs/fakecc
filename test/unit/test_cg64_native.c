@@ -2361,6 +2361,23 @@ static void test_io(void) {
         "package main;\n"
         "long getgroups(long n, int *g) { return n ? 3 : 3; }\n"
         "int main(void) { return getgroups(1, 0) == 3 ? 7 : 1; }\n", 7);
+    expect("mkfifo_path",
+        "package main;\n"
+        "int errno;\n"
+        "long mkfifo(char *path, long mode);\n"
+        "long unlink(char *p);\n"
+        "int main(void) {\n"
+        "  unlink(\"/tmp/fakecc_fifo_rt\");\n"
+        "  if (mkfifo(\"/tmp/fakecc_fifo_rt\", 420) != 0) return 1;\n"
+        "  if (mkfifo(\"/tmp/fakecc_fifo_rt\", 420) != -17 || errno != 17) return 2;\n"
+        "  if (mkfifo(\"/tmp/no_such_dir_fakecc/x\", 420) != -2 || errno != 2) return 3;\n"
+        "  if (unlink(\"/tmp/fakecc_fifo_rt\") != 0 || errno != 0) return 4;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("mkfifo_user",
+        "package main;\n"
+        "long mkfifo(char *path, long mode) { return mode ? 3 : 3; }\n"
+        "int main(void) { return mkfifo(0, 420) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
