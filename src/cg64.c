@@ -1308,15 +1308,17 @@ static int emit_dup_builtin(C64 *c, const char *name) {
     return 1;
 }
 
-/* read/write/open/close/lseek.  Arguments are already in x0..x5.
- * Darwin numbers, with the same carry-to-negative-errno fix as
- * __syscall.  A same-TU definition still wins. */
+/* read/write/open/close/unlink/chmod/lseek.  Arguments are already
+ * in x0..x5.  Darwin numbers, with the same carry-to-negative-errno
+ * fix as __syscall.  A same-TU definition still wins. */
 static int emit_io_builtin(C64 *c, const char *name) {
     int num = 0;
     if (strcmp(name, "read") == 0) num = 3;
     else if (strcmp(name, "write") == 0) num = 4;
     else if (strcmp(name, "open") == 0) num = 5;
     else if (strcmp(name, "close") == 0) num = 6;
+    else if (strcmp(name, "unlink") == 0) num = 10;
+    else if (strcmp(name, "chmod") == 0) num = 15;
     else if (strcmp(name, "lseek") == 0) num = 199;
     else return 0;
     int defined = 0;

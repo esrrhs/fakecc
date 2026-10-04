@@ -1820,6 +1820,26 @@ static void test_io(void) {
         "package main;\n"
         "long write(long fd, char *buf, long n) { return n ? 3 : 3; }\n"
         "int main(void) { return write(1, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("unlink_chmod",
+        "package main;\n"
+        "long open(char *path, long flags, long mode);\n"
+        "long close(long fd);\n"
+        "long chmod(char *path, long mode);\n"
+        "long unlink(char *path);\n"
+        "int main(void) {\n"
+        "  char *path = \"/tmp/fakecc_io_un\";\n"
+        "  long fd = open(path, 0x602, 420);\n"
+        "  if (fd < 0) return 1;\n"
+        "  if (close(fd) != 0) return 2;\n"
+        "  if (chmod(path, 384) != 0) return 3;\n"
+        "  if (unlink(path) != 0) return 4;\n"
+        "  if (open(path, 0, 0) != -2) return 5;\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("unlink_user",
+        "package main;\n"
+        "long unlink(char *path) { return path ? 3 : 3; }\n"
+        "int main(void) { return unlink(\"x\") == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
