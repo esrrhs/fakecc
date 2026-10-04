@@ -2675,6 +2675,31 @@ static void test_io(void) {
         "package main;\n"
         "long connect(long fd, char *addr, long len) { return len ? 3 : 3; }\n"
         "int main(void) { return connect(0, 0, 1) == 3 ? 7 : 1; }\n", 7);
+    expect("sendto_pair",
+        "package main;\n"
+        "int errno;\n"
+        "long socketpair(long domain, long type, long proto, int *sv);\n"
+        "long sendto(long fd, char *buf, long n, long flags, char *addr, long alen);\n"
+        "long recvfrom(long fd, char *buf, long n, long flags, char *addr, int *alen);\n"
+        "long close(long fd);\n"
+        "int main(void) {\n"
+        "  int sv[2];\n"
+        "  if (socketpair(1, 1, 0, sv) != 0) return 1;\n"
+        "  char c = 42;\n"
+        "  if (sendto(sv[0], &c, 1, 0, 0, 0) != 1) return 2;\n"
+        "  char d = 0;\n"
+        "  if (recvfrom(sv[1], &d, 1, 0, 0, 0) != 1 || d != 42) return 3;\n"
+        "  if (sendto(-1, &c, 1, 0, 0, 0) != -9 || errno != 9) return 4;\n"
+        "  c = 7;\n"
+        "  if (sendto(sv[0], &c, 1, 0, 0, 0) != 1 || errno != 0) return 5;\n"
+        "  close(sv[0]);\n"
+        "  close(sv[1]);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    expect("sendto_user",
+        "package main;\n"
+        "long sendto(long fd, char *buf, long n, long flags, char *addr, long alen) { return n ? 3 : 3; }\n"
+        "int main(void) { return sendto(0, 0, 1, 0, 0, 0) == 3 ? 7 : 1; }\n", 7);
 }
 
 static void test_getenv(void) {
