@@ -580,8 +580,13 @@ int main(int argc, char **argv) {
         nlinked_files += (int)pp->nfiles;
     }
     /* The arm64 backend links freestanding user code until the Darwin
-     * runtime platform layer lands (tasks T16+); skip builtin packages. */
-    if (target_current()->arch == TARGET_ARCH_ARM64)
+     * runtime platform layer lands (tasks T16+); skip builtin packages.
+     * FAKECC_ARM64_RUNTIME=1 opts in while that is still being worked on;
+     * the default stays off because the runtime is not yet correct there and
+     * linking it costs more than it gains (see
+     * docs/t16-darwin-runtime-port.md for the measurements). */
+    if (target_current()->arch == TARGET_ARCH_ARM64
+        && !getenv("FAKECC_ARM64_RUNTIME"))
         nlinked_files = 0;
 
     int nmods = ninputs + nlinked_files;
@@ -619,11 +624,14 @@ int main(int argc, char **argv) {
     }
     free(user_tus);
 
-    /* The arm64 backend links freestanding user code only while the
-     * Darwin runtime platform layer is being built (tasks T16+); do not
-     * codegen the (still Linux-syscall) builtin runtime package for it. */
+    /* Must agree exactly with the nlinked_files reservation above.  The two
+     * used to differ (that one was unconditional, this one carried
+     * !nostdlib), so arm64 + -nostdlib let Phase 3 fill modules into an array
+     * that was never sized for them and the tail reached emit_link
+     * uninitialized. */
     int arm64_freestanding =
-        target_current()->arch == TARGET_ARCH_ARM64 && !nostdlib;
+        target_current()->arch == TARGET_ARCH_ARM64
+        && !nostdlib && !getenv("FAKECC_ARM64_RUNTIME");
 
     /* Phase 3: codegen already-parsed package files (builtin rt + any package
      * pulled in by `import`).  The user's own package is skipped: it has
