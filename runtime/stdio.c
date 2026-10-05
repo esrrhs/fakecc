@@ -189,9 +189,11 @@ size_t fread(void *p, size_t sz, size_t nm, FILE *f) {
     size_t total = sz * nm;
     unsigned char *dst = (unsigned char *)p;
     size_t done = 0;
-    while (f->nunget > 0 && done < total) {
-        f->nunget = f->nunget - 1;
-        dst[done] = (unsigned char)f->ungot[f->nunget];
+    int pending = f->nunget;
+    while (pending > 0 && done < total) {
+        pending = pending - 1;
+        f->nunget = pending;
+        dst[done] = (unsigned char)f->ungot[pending];
         done = done + 1;
     }
     /* A read is allowed to come up short -- at a short read, at end of
