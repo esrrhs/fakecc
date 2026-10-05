@@ -191,6 +191,11 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 typedef struct EmitModule {
+    /* Set for a translation unit the user wrote, as opposed to one loaded
+     * from a package.  A user definition overrides a package's definition of
+     * the same name -- that is how a program replaces fputs or memcpy, and
+     * the C library is expected to lose.  */
+    int      is_user_tu;
     Buffer   text;     /* .text */
     Buffer   rodata;   /* .rodata (string literals, long double constants) */
     Buffer   data;     /* .data (mutable globals) */

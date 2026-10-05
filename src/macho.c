@@ -1180,6 +1180,10 @@ int macho_write_object(const EmitModule *em, const char *path) {
 }
 
 int macho_read_object(const char *path, EmitModule *em) {
+    /* An object file carries no user/package distinction -- only a module
+     * the driver built from a command-line source is a user TU.  Clear it so
+     * stale stack storage cannot masquerade as one. */
+    em->is_user_tu = 0;
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "fakecc: cannot open '%s'\n", path);
@@ -1613,7 +1617,13 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             out.bss_align = mods[i]->bss_align;
     }
 
-    typedef struct { char *name; uint16_t sh; size_t off; size_t size; uint8_t binding; } GDef;
+    /* from_user records that the definition currently held came from a
+     * user-written TU.  Such a definition outranks one from a package, so a
+     * program can replace memcpy or fputs and have its version linked --
+     * which is what the C library's replaceable-symbol rule requires, and
+     * what gcc's torture cases rely on when they define their own. */
+    typedef struct { char *name; uint16_t sh; size_t off; size_t size;
+                     uint8_t binding; int from_user; } GDef;
     GDef *gdefs = NULL;
     size_t ng = 0, capg = 0;
     typedef struct { uint16_t sh; size_t off; int defined; } Adj;
@@ -1644,17 +1654,34 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                 if (strcmp(gdefs[g].name, es->name) != 0) continue;
                 int old_weak = gdefs[g].binding == 2;
                 int new_weak = es->binding == 2;
-                if (!old_weak && !new_weak) {
-                    fprintf(stderr, "fakecc: duplicate symbol '%s'\n", es->name);
-                    rc = -1;
-                    break;
-                }
-                if (old_weak && !new_weak) {
+                /* The newcomer replaces the incumbent when it is stronger
+                 * (a strong symbol over a weak one) or when the incumbent
+                 * came from a package and the newcomer is a user
+                 * definition.  Replacing a package symbol with a user's is
+                 * how a program overrides memcpy; two user definitions, or
+                 * two package ones, are a genuine conflict. */
+                int new_from_user = m->is_user_tu;
+                int old_from_user = gdefs[g].from_user;
+                int replace_old = (new_from_user && !old_from_user)
+                               || (old_weak && !new_weak);
+                /* A package definition meeting a user definition of the same
+                 * name steps aside -- that is the replaceable-symbol rule,
+                 * and it is the case that arrives second here. */
+                int old_loses = old_from_user && !new_from_user;
+                if (!replace_old && !old_loses) {
+                    if (!old_weak && !new_weak) {
+                        fprintf(stderr, "fakecc: duplicate symbol '%s'\n",
+                                es->name);
+                        rc = -1;
+                        break;
+                    }
+                } else if (replace_old) {
                     gdefs[g].sh = es->shndx;
                     gdefs[g].off = adj[i][s].off;
                     gdefs[g].size = es->size ? es->size
                                    : macho_symbol_span(m, es->shndx, es->value);
                     gdefs[g].binding = es->binding;
+                    gdefs[g].from_user = new_from_user;
                     if (is_main) main_off = adj[i][s].off;
                 }
                 keep = 0;
@@ -1676,6 +1703,7 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             gdefs[ng].size = es->size ? es->size
                             : macho_symbol_span(m, es->shndx, es->value);
             gdefs[ng].binding = es->binding;
+            gdefs[ng].from_user = m->is_user_tu;
             ng++;
         }
     }

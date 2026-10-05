@@ -621,6 +621,9 @@ int main(int argc, char **argv) {
             tu_free(&user_tus[i]);
         }
         mod_ptrs[i] = &mods[i];
+        /* A definition here outranks the same name from a package, so a
+         * program can replace memcpy or fputs with its own. */
+        mods[i].is_user_tu = 1;
     }
     free(user_tus);
 
