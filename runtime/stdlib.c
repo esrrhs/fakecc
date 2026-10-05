@@ -28,10 +28,13 @@ float fabsf(float x) {
     return ux.f;
 }
 long double fabsl(long double x) {
-    union { long double ld; unsigned long long u[2]; } ux;
-    ux.ld = x;
-    ux.u[1] = ux.u[1] & ~0x8000ULL;
-    return ux.ld;
+    /* The sign bit sits at the top of the *last* word, which is bit 15 of
+     * the second word in x86's 80-bit layout but bit 63 of the only word
+     * arm64 gives long double.  Comparing against zero flips the sign the
+     * same way on both without naming a bit position. */
+    if (x < 0.0L) return -x;
+    if (x > 0.0L) return x;
+    return x;
 }
 
 double copysign(double x, double y) {
@@ -51,12 +54,13 @@ float copysignf(float x, float y) {
 }
 
 long double copysignl(long double x, long double y) {
-    union { long double ld; unsigned long long u[2]; } ux, uy;
-    ux.ld = x;
-    uy.ld = y;
-    /* 80-bit sign is bit 15 of the exponent word (the low 16 bits of u[1]). */
-    ux.u[1] = (ux.u[1] & ~0x8000ULL) | (uy.u[1] & 0x8000ULL);
-    return ux.ld;
+    /* See fabsl: naming the sign bit would mean naming x86's 80-bit layout,
+     * which arm64 does not share.  Building the magnitude by hand instead
+     * works on both. */
+    long double mag = (x < 0.0L) ? -x : x;
+    if (y < 0.0L) return -mag;
+    if (y > 0.0L) return mag;
+    return x;                      /* y is -0.0 or +0.0: keep x's sign */
 }
 
 double floor(double x) {
@@ -357,15 +361,15 @@ static long double strtofp_body(const char *s, char **end) {
             if (w0 == 'i' && w1 == 'n' && w2 == 'i' && w3 == 't' && w4 == 'y')
                 s = s + 5;
             if (end) *end = (char *)s;
-            union { long double ld; unsigned long long u[2]; } infv;
-            infv.u[0] = 0;
-            infv.u[1] = 0;
-            infv.ld = 0.0L;
-            /* 80-bit +inf: exponent all-ones, mantissa 1<<63 */
-            infv.u[0] = 0x8000000000000000ULL;
-            infv.u[1] = 0x7fff;
-            if (neg) infv.u[1] = infv.u[1] | 0x8000;
-            return infv.ld;
+            /* long double is 80-bit on x86-64 but the same 64 bits as double
+             * on arm64, so a fixed bit pattern cannot serve both.  Dividing
+             * a non-zero by zero raises the trap the hardware defines, which
+             * every target agrees on. */
+            {
+                long double one = 1.0L;
+                long double inf = one / 0.0L;
+                return neg ? -inf : inf;
+            }
         }
         if (c0 == 'n' && c1 == 'a' && c2 == 'n') {
             s = s + 3;
@@ -376,11 +380,11 @@ static long double strtofp_body(const char *s, char **end) {
                 /* else leave s at '(' so endptr is after "nan", matching C99 */
             }
             if (end) *end = (char *)s;
-            union { long double ld; unsigned long long u[2]; } nanv;
-            nanv.u[0] = 0xc000000000000000ULL;
-            nanv.u[1] = 0x7fff;
-            if (neg) nanv.u[1] = nanv.u[1] | 0x8000;
-            return nanv.ld;
+            {
+                long double zero = 0.0L;
+                long double nan = zero / zero;
+                return neg ? -nan : nan;
+            }
         }
     }
 
