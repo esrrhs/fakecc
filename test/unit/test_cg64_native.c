@@ -270,19 +270,22 @@ static void test_entry_abi(void) {
 static void test_ctor_dtor(void) {
     expect("ctor_priority_order",
         "package main;\n"
-        "__attribute__((constructor(200))) void late(void){ __syscall(1,21); }\n"
-        "__attribute__((constructor(100))) void early(void){ __syscall(1,11); }\n"
+        "void exit(int s);\n"
+        "__attribute__((constructor(200))) void late(void){ exit(21); }\n"
+        "__attribute__((constructor(100))) void early(void){ exit(11); }\n"
         "int main(){ return 0; }", 11);
     expect("ctor_default_prio",
         "package main;\n"
-        "__attribute__((constructor)) void c(void){ __syscall(1,77); }\n"
+        "void exit(int s);\n"
+        "__attribute__((constructor)) void c(void){ exit(77); }\n"
         "int main(){ return 0; }", 77);
     /* Destructors walk the priority list backwards (highest first), and
      * run AFTER main (main's own return 9 must not be observed). */
     expect("dtor_reverse_order",
         "package main;\n"
-        "__attribute__((destructor(100))) void a(void){ __syscall(1,31); }\n"
-        "__attribute__((destructor(200))) void b(void){ __syscall(1,32); }\n"
+        "void exit(int s);\n"
+        "__attribute__((destructor(100))) void a(void){ exit(31); }\n"
+        "__attribute__((destructor(200))) void b(void){ exit(32); }\n"
         "int main(){ return 9; }", 32);
     expect("no_ctor_main_runs",
         "package main;\nint main(){ return 42; }", 42);
@@ -3562,6 +3565,35 @@ static void test_exit(void) {
         "int main(void) { exit(11); return 7; }\n", 133);
 }
 
+/* The builtin runtime is written against Linux syscall numbers, which the
+ * arm64 backend has to translate or the program does the wrong thing
+ * silently.  Number 1 is the sharpest case: Linux write, Darwin exit.  A
+ * program that writes to stdout must therefore survive and return normally
+ * -- before the translation it terminated with the descriptor as its status. */
+static void test_syscall_translation(void) {
+    expect("syscall_write_not_exit",
+        "package main;\n"
+        "int main(void) {\n"
+        "  char m[2];\n"
+        "  m[0] = 88; m[1] = 10;\n"
+        "  __syscall(1, 1, (long)m, 2);\n"
+        "  return 7;\n"
+        "}\n", 7);
+    /* Whatever fd 0 does here, the point is that control comes back: an
+     * untranslated number 1 is Darwin's exit, which would have terminated
+     * the process with the descriptor as its status. */
+    expect("syscall_write_returns",
+        "package main;\n"
+        "int main(void) { long n = __syscall(1, 0, 0, 0); return 7; }\n", 7);
+    /* An unmapped number is not rewritten: getpid (Linux 39) becomes Darwin
+     * 20 and yields a real pid, which would be impossible if the literal
+     * reached the kernel as 39. */
+    expect("syscall_getpid_translated",
+        "package main;\n"
+        "int main(void) { long r = __syscall(39, 0, 0, 0, 0, 0, 0);\n"
+        "  return r > 0 ? 7 : 5; }\n", 7);
+}
+
 static void test_getenv(void) {
     expect("getenv_path",
         "package main;\n"
@@ -3714,12 +3746,14 @@ static void test_macho_link(void) {
     const char *cb = "/tmp/fakecc_arm64_link_cb.o";
     T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
         "package main;\n"
-        "__attribute__((constructor(200))) void late(void){ __syscall(1,21); }\n"
+        "void exit(int s);\n"
+        "__attribute__((constructor(200))) void late(void){ exit(21); }\n"
         "int main(void) { return 0; }\n",
         ca, NULL), 0);
     T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
         "package main;\n"
-        "__attribute__((constructor(100))) void early(void){ __syscall(1,11); }\n",
+        "void exit(int s);\n"
+        "__attribute__((constructor(100))) void early(void){ exit(11); }\n",
         cb, NULL), 0);
     EmitModule mca, mcb;
     T_ASSERT_EQ_INT(emit_obj_read(ca, &mca), 0);
@@ -3736,12 +3770,14 @@ static void test_macho_link(void) {
 
     T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
         "package main;\n"
-        "__attribute__((destructor(100))) void a(void){ __syscall(1,31); }\n"
+        "void exit(int s);\n"
+        "__attribute__((destructor(100))) void a(void){ exit(31); }\n"
         "int main(void) { return 9; }\n",
         ca, NULL), 0);
     T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(
         "package main;\n"
-        "__attribute__((destructor(200))) void b(void){ __syscall(1,32); }\n",
+        "void exit(int s);\n"
+        "__attribute__((destructor(200))) void b(void){ exit(32); }\n",
         cb, NULL), 0);
     T_ASSERT_EQ_INT(emit_obj_read(ca, &mca), 0);
     T_ASSERT_EQ_INT(emit_obj_read(cb, &mcb), 0);
@@ -5259,6 +5295,7 @@ int main(void) {
     test_strdup();
     test_io();
     test_exit();
+    test_syscall_translation();
     test_getenv();
     test_macho_link();
     return t_finalize();

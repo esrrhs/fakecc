@@ -3451,6 +3451,34 @@ static void emit_call(C64 *c, const IRInst *s) {
  * failure.  x9 (caller-saved, already forbidden across the call, and
  * the scratch Apple's own stubs use) records that carry; a set carry
  * negates x0 so the result is the Linux-shaped -errno. */
+/* Linux x86-64 syscall number -> Darwin arm64.  Returns `num` unchanged when
+ * there is no counterpart, so an unmapped call reaches the kernel and fails
+ * there rather than doing something arbitrary.
+ *
+ * Only entries verified against the Darwin arm64 syscall table are listed.
+ * An entry that is merely plausible is worse than a missing one: a wrong
+ * number silently performs a different operation, which is how a printf
+ * ended up calling exit.  When in doubt, leave it unmapped -- the call
+ * fails loudly at the kernel instead. */
+static int64_t c64_darwin_syscall(int64_t num) {
+    switch (num) {
+    case 0:  return 3;   /* read */
+    case 1:  return 4;   /* write */
+    case 2:  return 5;   /* open */
+    case 3:  return 6;   /* close */
+    case 8:  return 199; /* lseek */
+    case 9:  return 197; /* mmap */
+    case 11: return 73;  /* munmap */
+    case 39: return 20;  /* getpid */
+    case 60: return 1;   /* exit */
+    case 87: return 10;  /* unlink */
+    case 90: return 90;  /* dup2 */
+    case 186: return 224;/* gettid */
+    case 231: return 1;  /* exit_group -> exit: Darwin has no group */
+    default: return num; /* futex(202), clone(56): no equivalent exists */
+    }
+}
+
 static void emit_syscall(C64 *c, const IRInst *s) {
     A64Asm *a = c->as;
     int n = s->call_nargs;
@@ -3513,7 +3541,22 @@ static void emit_syscall(C64 *c, const IRInst *s) {
     IRValue nv = s->call_args[0];
     const IRInst *nd = def_inst(c, nv);
     if (nd && nd->op == IR_CONST) {
-        emit_mov_imm_w(a, A64_X16, nd->imm, 1);
+        /* The builtin runtime is written against Linux x86-64 syscall
+         * numbers, but this backend talks to Darwin, where the same number
+         * means something else entirely -- number 1 is exit, not write, so
+         * an untranslated printf terminates the process instead of printing.
+         * The sources predate the arm64 port and are shared with x86, so
+         * translate here rather than in the runtime.
+         *
+         * Only a literal number is translated.  A computed one is left
+         * alone: guessing there could silently change behaviour, and every
+         * call site in the runtime passes a constant.  Numbers with no
+         * Darwin counterpart (futex, clone) stay put and fail at the
+         * kernel, which is the honest outcome for a platform that cannot
+         * honour them. */
+        int64_t num = nd->imm;
+        int64_t mapped = c64_darwin_syscall(num);
+        emit_mov_imm_w(a, A64_X16, mapped, 1);
     } else {
         int sr = load_op(c, nv, SCR0);
         a64_mov_reg(a, A64_X16, sr, 1);
