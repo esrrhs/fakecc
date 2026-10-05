@@ -5240,7 +5240,10 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
 
     /* The code buffer lands after the Mach-O header pad; ADRP page fixups
      * must compute against the runtime file/VA offset. */
-    a64_set_base(&a, emit_object_mode() ? 0 : macho_text_offset());
+    /* Object and multi-TU modules are relocated later, so any address baked
+     * into them would be relative to a layout that does not exist yet. */
+    a64_set_base(&a, (emit_object_mode() || emit_multi_tu()) ? 0
+                                                        : macho_text_offset());
     if (a64_resolve(&a) != 0) {
         a64_free(&a);
         free(c.fn_label);
@@ -5255,8 +5258,11 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
 
     /* Patch ADRP+ADD pairs and record dyld rebases for pointer
      * initializers now that text length (and so section placement) is
-     * known.  An object file cannot bake in the executable layout. */
-    if (!emit_object_mode() && (c.ngfix || c.npfix)) {
+     * known.  Neither an object file nor a multi-TU link can bake in the
+     * executable layout: the first goes through dyld, the second has the
+     * linker concatenating sections, so what looks like a section-relative
+     * offset here stops being one.  Both must record relocations instead. */
+    if (!emit_object_mode() && !emit_multi_tu() && (c.ngfix || c.npfix)) {
         uint64_t ro_off, data_off, bss_off;
         macho_section_offsets(out, out->text.len, &ro_off, &data_off, &bss_off);
         if (c.tlv_thunk >= 0 && a.labels[c.tlv_thunk].bound && c.tlv_off) {
