@@ -89,7 +89,8 @@ e2e -O1 演进（-O1，全量 2685）：
 | 开启（只有号码转译） | 1947 | 大量程序被全局指针 bug 拖垮 |
 | 开启 + 指针全局修复 | 2366 | — |
 | 开启 + 按目标选文件（va_copy 修好） | 2379 | printf/sprintf 已能工作 |
-| 开启 + 用户符号覆盖（`0f83802f`） | **2411** | 链接器语义修复，仍差 63 |
+| 开启 + 用户符号覆盖（`0f83802f`） | 2411 | 链接器语义修复 |
+| 开启 + 标签/函数地址重定位（`856c9b75`） | **2450** | SIGILL 45→0，仍差 24 |
 
 **结论：runtime 门控暂不能默认开。** printf / sprintf / vfprintf 系列现在
 在 arm64 上都能工作了（`fead10a3` 修好了 `__fakecc_va_copy` 的 24 vs 8 字节
@@ -134,6 +135,33 @@ gcc torture 用例自己定义这些函数，而 runtime 也有一份。
    没做这个优化，于是它真的被调用了 → abort。
 
 **结论：那 116 个 SIGABRT 主要是 cg64 的死函数消除能力缺口，与 runtime 无关。**
+
+## 🔴 下一步（2026-10-05 晚，已定位到具体一行但未修完）
+
+**`macho_section_offsets()` 返回文件偏移，而 `macho_link_objects` 用它补 ADRP 立即数。**
+
+`macho_write_exec` 走 dyld chained fixup，要文件偏移 —— 那里没问题。
+但链接器补 `adrp` 的 page 立即数时需要的是**虚拟地址**，两者差 `MACHO_BASE_VA`。
+少这一层时，每个全局变量/数组的 ADRP 都指向低 4GB 的错误页。
+
+最小复现（单模块正确，多 TU 读回错误的值）：
+```c
+int arr[4];
+int main(void) { arr[2] = 40; return arr[2] == 40 ? 7 : 1; }
+```
+
+试过改成 `ro_va/data_va/bss_va = off + MACHO_BASE_VA`：
+- 单模块与基线无回归（`arr`/struct/空初始化器都 rc=7）
+- runtime 开启时从"读回错值 rc=1"变成 **SIGSEGV**
+
+方向对但有连带问题没查清（很可能是 rebase 记录也吃到了 VA ——
+`emit_module_add_rebase` 的 slot 期望文件偏移，加 VA 后会报
+`rebase slot 0x100030d18 outside __data`）。
+
+**下次从这里入手**：把 `*_va` 只用于 `patch_adrp` 的 tgt，
+`emit_module_add_rebase` 仍传文件偏移，然后重测那 25 个新增失败。
+
+⚠️ 我已回退这次改动（只验证了一半，不提交半成品）。
 
 ## 下一个要查的
 1. **开了 runtime 后 `memcpy`/`abort` 是否仍未定义**？runtime/stdlib.c 有它们，
