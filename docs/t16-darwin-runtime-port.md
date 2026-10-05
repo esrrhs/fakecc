@@ -217,10 +217,28 @@ int main(void) { arr[2] = 40; return arr[2] == 40 ? 7 : 1; }
 `emit_module_add_rebase` 的 slot 期望文件偏移，加 VA 后会报
 `rebase slot 0x100030d18 outside __data`）。
 
-**下次从这里入手**：把 `*_va` 只用于 `patch_adrp` 的 tgt，
-`emit_module_add_rebase` 仍传文件偏移，然后重测那 25 个新增失败。
+⚠️ **以上判断是错的，已回退。** 两条理由：
 
-⚠️ 我已回退这次改动（只验证了一半，不提交半成品）。
+1. 反汇编里 `adrp x4, 0x100034000` **正是 `__bss` 的 VA**
+   （`otool -l` 确认 `__bss addr = 0x100034000`）—— cg64 烘焙时**已经**
+   加了 `MACHO_BASE_VA`，链接器本来就不缺。
+2. `patch_adrp(w, pc, tgt)` 的 **pc 和 tgt 必须在同一坐标系** —— 它算的是
+   `(tgt - pc) >> 12` 的页差。`pc` 来自 `macho_text_offset()`（文件偏移），
+   所以 `tgt` 也必须是文件偏移。只改 `tgt` 会让差值错 4GB。
+
+实测：按上面那条建议改完，baseline 无回归，但 runtime 开启时
+从 rc=1 变成 SIGSEGV —— 正是坐标系不一致的表现。
+
+### 坐标系速查（24 小时里在这里栽了三次）
+| 量 | 坐标系 | 出处 |
+|---|---|---|
+| `macho_text_offset()` | 文件偏移 = 1024 | macho.c:345 |
+| `macho_section_offsets()` 的三个返回 | 文件偏移 | 用于 dyld chained fixup |
+| 段的 `sec.addr` / `vmaddr` | **VA** = `MACHO_BASE_VA + 文件偏移` | macho.c:541 / :529 |
+| 反汇编里的 `adrp` 立即数 | **VA** | — |
+| `EmitRebase.slot` / `.target` | 文件偏移 | `macho_build_fixups` 用 `data_page` 校验 |
+
+**判据：先拿 `otool -l` 的段 addr 对一下反汇编里的 adrp 目标，再动手。**
 
 ## 下一个要查的
 1. **开了 runtime 后 `memcpy`/`abort` 是否仍未定义**？runtime/stdlib.c 有它们，
