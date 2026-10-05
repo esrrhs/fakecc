@@ -769,6 +769,18 @@ static void ftab_cur_free(void) { ftab_free(&g_sema_ft); }
 static const FunSig *ftab_lookup(const char *name) {
     return ftab_find(&g_sema_ft, name);
 }
+/* Copy a FunSig out of the table.  Callers keep the returned value across
+ * recursive check_expr_inner() calls, which can push new package exports and
+ * realloc the table -- a raw &t->data[i] would dangle by the time it is read
+ * back.  The nested param_types array is shared, not cloned: those Type
+ * objects live until ftab_free, and the snapshot is only read. */
+static int ftab_snapshot(const char *name, FunSig *out) {
+    const FunSig *sig = ftab_find(&g_sema_ft, name);
+    if (!sig) return 0;
+    *out = *sig;
+    return 1;
+}
+
 static void ftab_add(const FunctionDecl *fn) { ftab_push(&g_sema_ft, fn); }
 static void ftab_add_export(const PkgFuncExport *ex) {
     ftab_push_export(&g_sema_ft, ex);
@@ -1820,7 +1832,10 @@ static Type check_expr_inner(Expr *e) {
                                  && local_fn_sym->type.pointee
                                  && local_fn_sym->type.pointee->kind == TY_FUNC;
             int have_local = local_is_fnptr || (local_is_fn_decl && !local_fn_sym->type.func_is_unprototyped);
-            const FunSig *sig = have_local ? NULL : ftab_lookup(e->u.call.callee->u.var.name);
+            FunSig sig_snapshot;
+            const FunSig *sig = (have_local ||
+                                 !ftab_snapshot(e->u.call.callee->u.var.name, &sig_snapshot))
+                                ? NULL : &sig_snapshot;
             if (local_fn_sym && local_fn_sym->type.kind == TY_FUNC
                 && !(local_fn_sym->type.func_is_unprototyped && sig && !sig->is_unprototyped)) {
                 const Type *fty = &local_fn_sym->type;
