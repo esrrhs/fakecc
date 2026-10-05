@@ -67,13 +67,16 @@ static int parse_fopen_mode(const char *mode, int *flags, int *writable) {
         *writable = plus;
         return 1;
     }
+    /* O_CREAT is 0x200 and O_TRUNC is 0x400 on both Linux and Darwin; the
+     * 0x40 used here belongs to O_NOCTTY, so "w" created nothing and "a"
+     * asked for neither create nor append.  O_APPEND is 0x08. */
     if (mode[0] == 'w') {
-        *flags = (plus ? 2 : 1) | 64 | 512;
+        *flags = (plus ? 2 : 1) | 512 /* O_CREAT */ | 1024 /* O_TRUNC */;
         *writable = 1;
         return 1;
     }
     if (mode[0] == 'a') {
-        *flags = (plus ? 2 : 1) | 64 | 1024;
+        *flags = (plus ? 2 : 1) | 512 /* O_CREAT */ | 8 /* O_APPEND */;
         *writable = 1;
         return 1;
     }
