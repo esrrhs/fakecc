@@ -579,14 +579,19 @@ int main(int argc, char **argv) {
         if (!pp->owns_files) continue;
         nlinked_files += (int)pp->nfiles;
     }
-    /* The arm64 backend links freestanding user code until the Darwin
-     * runtime platform layer lands (tasks T16+); skip builtin packages.
-     * FAKECC_ARM64_RUNTIME=1 opts in while that is still being worked on;
-     * the default stays off because the runtime is not yet correct there and
-     * linking it costs more than it gains (see
-     * docs/t16-darwin-runtime-port.md for the measurements). */
+    /* The Darwin runtime is linked by default.  It has to be: without it a
+     * program has no printf, no malloc, no string functions, and e2e -O1
+     * scores 2474 against 2536 with it (see docs/t16-darwin-runtime-port.md
+     * for how that gap closed).  FAKECC_ARM64_RUNTIME=0 still links
+     * freestanding user code, which is the older behaviour and useful when
+     * bisecting a runtime problem.  Both gates below read this one value --
+     * when they were separate expressions they drifted, and the second one
+     * filling modules the first had not reserved produced a segfault rather
+     * than anything resembling the real fault. */
+    const char *arm64_rt = getenv("FAKECC_ARM64_RUNTIME");
+    int arm64_link_runtime = !arm64_rt || strcmp(arm64_rt, "0") != 0;
     if (target_current()->arch == TARGET_ARCH_ARM64
-        && !getenv("FAKECC_ARM64_RUNTIME"))
+        && !arm64_link_runtime)
         nlinked_files = 0;
 
     int nmods = ninputs + nlinked_files;
@@ -634,7 +639,8 @@ int main(int argc, char **argv) {
      * uninitialized. */
     int arm64_freestanding =
         target_current()->arch == TARGET_ARCH_ARM64
-        && !nostdlib && !getenv("FAKECC_ARM64_RUNTIME");
+        && !nostdlib
+        && !arm64_link_runtime;
 
     /* Phase 3: codegen already-parsed package files (builtin rt + any package
      * pulled in by `import`).  The user's own package is skipped: it has
