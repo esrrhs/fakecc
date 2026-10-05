@@ -664,12 +664,6 @@ char *getenv(const char *name) {
     return 0;
 }
 
-void __fakecc_va_copy(void *dst, void *src) {
-    char *d = (char *)dst;
-    char *s = (char *)src;
-    int i = 0;
-    while (i < 24) {
-        d[i] = s[i];
-        i = i + 1;
-    }
-}
+/* The va_copy helper is target-specific and lives in stdlib_darwin.c /
+ * stdlib_linux.c: a va_list is 24 bytes on x86-64 but a single pointer on
+ * arm64, so the copy width cannot be shared. */

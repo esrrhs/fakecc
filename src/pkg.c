@@ -3,6 +3,7 @@
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/common.h"
+#include "fakecc/target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -244,8 +245,12 @@ static int is_dir(const char *path) {
 #endif
 }
 
+/* Defined below; declared here because the self-host directory probe runs
+ * before it in this file. */
+static int c_file_matches_target(const char *name);
+
 #ifdef FAKECC_SELFHOST
-/* True if dir contains at least one *.c file. */
+/* True if dir contains at least one *.c file for the current target. */
 static int dir_has_c(const char *dir) {
     long fd = pkg_open(dir, PKG_O_RDONLY | PKG_O_DIRECTORY);
     if (fd < 0) return 0;
@@ -257,7 +262,7 @@ static int dir_has_c(const char *dir) {
         long off = 0;
         while (off < nread) {
             struct pkg_dirent64 *e = (struct pkg_dirent64 *)(buf + off);
-            if (ends_with_c(e->d_name)) { found = 1; break; }
+            if (ends_with_c(e->d_name) && c_file_matches_target(e->d_name)) { found = 1; break; }
             off = off + e->d_reclen;
         }
         if (found) break;
@@ -273,7 +278,7 @@ static int dir_has_c(const char *dir) {
     int found = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
-        if (ends_with_c(e->d_name)) { found = 1; break; }
+        if (ends_with_c(e->d_name) && c_file_matches_target(e->d_name)) { found = 1; break; }
     }
     closedir(d);
     return found;
@@ -319,6 +324,78 @@ static void pkgs_push(PkgContext *ctx, Package *p) {
 }
 
 /* Collect *.c basenames in dir, sorted. Caller frees names and the array. */
+/* Does this file name belong to the target being built?
+ *
+ * A package may hold per-target variants of the same unit, named with the
+ * OS and/or architecture as a suffix before the .c, Go-style:
+ *
+ *   flush.c              every target
+ *   flush_linux.c        Linux only
+ *   flush_darwin.c       Darwin only
+ *   flush_arm64.c        arm64, whatever the OS
+ *   flush_darwin_arm64.c Darwin arm64 only
+ *
+ * Exactly one variant of a given basename may match, and the more specific
+ * name is the one that matches: the filter below is not a fallback chain,
+ * so a package that lists both flush_darwin.c and flush_darwin_arm64.c would
+ * include both.  Callers rely on that to keep the choice explicit.
+ *
+ * The dialect has no conditional compilation, so this is how a shared
+ * runtime expresses "the va_list here is 8 bytes, there it is 24". */
+static int c_file_matches_target(const char *name) {
+    size_t n = strlen(name);
+    if (n < 2 || strcmp(name + n - 2, ".c") != 0) return 0;
+
+    const TargetDesc *t = target_current();
+    /* Strip the .c and split the remaining underscores.  The last two
+     * components may be an OS and/or an arch tag; anything else is part of
+     * the unit's own name and never matches a tag. */
+    static const char *const os_tags[] = { "linux", "darwin" };
+    static const char *const arch_tags[] = { "amd64", "arm64" };
+
+    size_t end = n - 2;                /* exclusive end of the stem */
+    int want_os = t->os == TOS_LINUX ? 0
+                : t->os == TOS_MACOS ? 1 : -1;
+    int want_arch = t->arch == TARGET_ARCH_X86_64 ? 0
+                  : t->arch == TARGET_ARCH_ARM64 ? 1 : -1;
+
+    /* At most two trailing tags; scan from the right. */
+    for (int step = 0; step < 2; step++) {
+        size_t i = end;
+        while (i > 0 && name[i - 1] != '_') i--;
+        if (i == 0 || i == end) break;         /* no underscore: stop */
+        size_t tlen = end - i;
+        const char *tag = name + i;
+        int matched = 0;
+        for (size_t k = 0; k < sizeof os_tags / sizeof *os_tags; k++)
+            if (strlen(os_tags[k]) == tlen
+                && memcmp(tag, os_tags[k], tlen) == 0) {
+                /* k indexes the tag table; want_os was built from the same
+                 * order, so the cast is just to keep -Wsign-compare quiet. */
+                if (want_os < 0 || want_os != (int)k) return 0;  /* other OS */
+                want_os = -1;                 /* consumed; must not repeat */
+                matched = 1;
+                break;
+            }
+        if (!matched) {
+            for (size_t k = 0; k < sizeof arch_tags / sizeof *arch_tags; k++)
+                if (strlen(arch_tags[k]) == tlen
+                    && memcmp(tag, arch_tags[k], tlen) == 0) {
+                    if (want_arch < 0 || want_arch != (int)k) return 0;
+                    want_arch = -1;
+                    matched = 1;
+                    break;
+                }
+        }
+        if (!matched) break;                  /* not a tag: part of the name */
+        end = i - 1;                          /* also drop the underscore */
+        if (end == 0) return 0;
+    }
+    /* An unrecognised target has no variants to pick, so a tagged file
+     * cannot be right; an untagged one always is. */
+    return 1;
+}
+
 static char **list_c_files(const char *dir, size_t *nout) {
     char **names = NULL;
     size_t n = 0, cap = 0;
@@ -335,7 +412,7 @@ static char **list_c_files(const char *dir, size_t *nout) {
         long off = 0;
         while (off < nread) {
             struct pkg_dirent64 *e = (struct pkg_dirent64 *)(buf + off);
-            if (ends_with_c(e->d_name)) {
+            if (ends_with_c(e->d_name) && c_file_matches_target(e->d_name)) {
                 if (n >= cap) {
                     cap = cap ? cap * 2 : 4;
                     names = xrealloc(names, cap * sizeof(char *));
@@ -354,7 +431,7 @@ static char **list_c_files(const char *dir, size_t *nout) {
     }
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
-        if (ends_with_c(e->d_name)) {
+        if (ends_with_c(e->d_name) && c_file_matches_target(e->d_name)) {
             if (n >= cap) {
                 cap = cap ? cap * 2 : 4;
                 names = xrealloc(names, cap * sizeof(char *));
