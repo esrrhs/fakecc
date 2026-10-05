@@ -3900,10 +3900,22 @@ static void emit_vec(C64 *c, const IRInst *s) {
     str_q(a, A64_V30, pd, 0);
 }
 
+/* Debug aid: FAKECC_DUMP_IR=1 prints one line per IR instruction, prefixed
+ * with the function it belongs to.  Several passes run over the same
+ * function, so the same IR appears more than once -- filter on the header
+ * line when reading the output. */
+static int c64_ir_dump_on(void) {
+    static int cached = -1;
+    if (cached < 0) cached = getenv("FAKECC_DUMP_IR") != NULL;
+    return cached;
+}
+
 static void emit_function(C64 *c, int fi) {
     const IRFunction *fn = c->fn;
     A64Asm *a = c->as;
     a64_bind(a, c->fn_label[fi]);
+    if (c64_ir_dump_on())
+        fprintf(stderr, "== fn %s (fi=%d)\n", fn->name ? fn->name : "?", fi);
 
     const RAResult *ra = (const RAResult *)fn->ra;
     c->ra = ra;
@@ -4266,6 +4278,12 @@ static void emit_function(C64 *c, int fi) {
     int epilog = a64_new_label(a);
     for (size_t j = nparams; j < fn->insts.len; j++) {
         const IRInst *s = &fn->insts.data[j];
+        if (c64_ir_dump_on())
+            fprintf(stderr, "  IR[%zu] op=%d a=%d b=%d dst=%d imm=%d w=%d "
+                            "name=%s\n",
+                    j, (int)s->op, (int)s->a, (int)s->b, (int)s->dst,
+                    (int)s->imm, (int)s->width,
+                    s->call_name ? s->call_name : "-");
         switch (s->op) {
         case IR_CONST: {
             if (scalar_fp_val(c, s->dst) || s->is_float) {
@@ -5498,15 +5516,15 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
                                       6 /* GOT_LOAD_PAGEOFF12 */, si, 0);
                 continue;
             }
-            if (c.gfix[i].addend)
-                emit_module_add_reloc(out, c.gfix[i].at, 10 /* ADDEND */,
-                                      0, c.gfix[i].addend);
-            emit_module_add_reloc(out, c.gfix[i].at, 3 /* PAGE21 */, si, 0);
-            if (c.gfix[i].addend)
-                emit_module_add_reloc(out, c.gfix[i].at + 4, 10 /* ADDEND */,
-                                      0, c.gfix[i].addend);
+            /* fold_page_addend folded "&g + n" into the fixup rather than
+             * emitting an add, so the offset has to travel on both halves of
+             * the pair.  Carrying it as a separate type-10 ADDEND record left
+             * the linker computing the page from the bare symbol, and the
+             * address came out a page low -- visible as a[i] reading a[0]. */
+            emit_module_add_reloc(out, c.gfix[i].at, 3 /* PAGE21 */, si,
+                                  c.gfix[i].addend);
             emit_module_add_reloc(out, c.gfix[i].at + 4, 4 /* PAGEOFF12 */,
-                                  si, 0);
+                                  si, c.gfix[i].addend);
         }
         /* Pointer slots in __data: ARM64_RELOC_UNSIGNED, addend in the
          * eight bytes at the slot. */
