@@ -4497,7 +4497,12 @@ static void emit_function(C64 *c, int fi) {
         case IR_LADDR: {
             int d = dst_reg(c, s->dst);
             int lab = vlabels_get(c, (int)s->imm);
-            if (emit_object_mode()) {
+            /* A multi-TU module is merged by the linker, so the label's
+             * address is not known here -- the same reason pointer
+             * initializers need a relocation (f10186a3).  Baking the
+             * module-local offset in produced a computed goto that branched
+             * into the Mach-O header once another module was linked in. */
+            if (emit_object_mode() || emit_multi_tu()) {
                 const char *nm = note_label_sym(c, (int)s->imm, lab);
                 note_page_reloc(c, (uint32_t)a->code.len, -1, nm, s->dst);
                 a64_word(a, 0x90000000u | (uint32_t)(d & 31));
@@ -4860,9 +4865,11 @@ static void emit_function(C64 *c, int fi) {
                 break;
             }
             int d = dst_reg(c, s->dst);
-            /* Object text is concatenated after an entry stub, so a baked
-             * ADRP would miss the real page.  Record a reloc instead. */
-            if (emit_object_mode()) {
+            /* Object text is concatenated after an entry stub, and a
+             * multi-TU module is merged by the linker, so in both cases a
+             * baked ADRP misses the real page.  Record a reloc instead --
+             * the same reason IR_LADDR and pointer initializers need one. */
+            if (emit_object_mode() || emit_multi_tu()) {
                 note_page_reloc(c, (uint32_t)a->code.len, -1, s->call_name, s->dst);
                 int use_got = missing && !c64_is_weak_ref(c->ir, s->call_name);
                 if (use_got) c->gfix[c->ngfix - 1].got = 1;
