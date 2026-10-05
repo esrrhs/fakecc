@@ -194,16 +194,21 @@ size_t fread(void *p, size_t sz, size_t nm, FILE *f) {
         dst[done] = (unsigned char)f->ungot[f->nunget];
         done = done + 1;
     }
-    if (done < total) {
-        long n = __syscall(0, (long)f->fd, (long)(dst + done), (long)(total - done));
+    /* A read is allowed to come up short -- at a short read, at end of
+     * file, or from a pipe -- so keep asking until the request is met or
+     * the file gives nothing more.  One read is not enough. */
+    while (done < total) {
+        long n = __syscall(0, (long)f->fd, (long)(dst + done),
+                           (long)(total - done));
         if (n < 0) {
             f->err = 1;
-            if (done == 0) return 0;
-        } else if (n == 0) {
-            f->eof = 1;
-        } else {
-            done = done + (size_t)n;
+            break;
         }
+        if (n == 0) {
+            f->eof = 1;
+            break;
+        }
+        done = done + (size_t)n;
     }
     return done / sz;
 }
