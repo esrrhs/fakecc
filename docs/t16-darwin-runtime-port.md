@@ -80,19 +80,47 @@ Darwin 的路径是 `pthread_create`（libSystem）或 `bsdthread_create`（sysc
 3. 之后再考虑 thread.c 的 Darwin 重写。
 
 ## 实测数据（2026-10-05）
-解除 runtime 门控后的 e2e 演进（-O1，全量 2685）：
+runtime 链接开关现为 `FAKECC_ARM64_RUNTIME=1`（默认关闭，不用改代码重编）。
+e2e -O1 演进（-O1，全量 2685）：
 
 | 状态 | 通过 | 说明 |
 |---|---|---|
-| 门控关闭（当前 HEAD） | **2461** | runtime 未链接，printf 等不可用 |
-| 门控开启（仅号码转译） | 1947 | 大量程序被全局指针 bug 拖垮 |
-| 门控开启 + 指针全局修复 | 2366 | 仍低于基线 95 |
+| 关闭（当前 HEAD `1ab31210`） | **2474** | runtime 未链接，printf 等不可用 |
+| 开启（只有号码转译） | 1947 | 大量程序被全局指针 bug 拖垮 |
+| 开启 + 指针全局修复 | 2366 | — |
+| 开启 + 按目标选文件（va_copy 修好） | 2379 | printf/sprintf 已能工作，仍差 95 |
 
-**结论：runtime 门控暂不能开。** 修复了多 TU 布局烘焙（`f10186a3`）后从
-1947 回升到 2366，但仍差 95 —— runtime 内部还有未查清的问题（printf 仍跳到
-垃圾地址 `0x3e02a1303f7`）。
+**结论：runtime 门控暂不能默认开。** printf / sprintf / vfprintf 系列现在
+在 arm64 上都能工作了（`fead10a3` 修好了 `__fakecc_va_copy` 的 24 vs 8 字节
+问题），但整体仍差基线 95 —— runtime 里还有别的问题在拖累。
 
-⚠️ 不要再单独解除那个门控来"试试看"，它每次都要花 ~25 分钟 e2e 才能评估。
+⚠️ 不要再单独解除门控来"试试看"，每次评估要花 ~25 分钟 e2e。
+
+## 开启时的失败分类（307 条，2026-10-05）
+| 类别 | 数量 | 说明 |
+|---|---|---|
+| `expected 0, got 134`(SIGABRT) | 116 | 多数在 gcc_torture/builtins/，调用 `__builtin_*_chk`，依赖 memcpy/abort 等 libc |
+| `expected 0, got 132`(SIGILL) | 38 | 非法指令，多为 aggregates/ 与向量相关 |
+| `expected 0, got 1` | 33 | 一般错误返回 |
+| 编译期 arm64 backend 错误 | 61 | 其中 vector wider than ×6、aggregate stack blob ×4 |
+| 编译器段错误 | 4 | decimal_float / decimal_global_init |
+
+**重要澄清（已验证）**：
+1. 抽样 `gcc_torture_builtin_memcpy_chk.c` 在**开与关两种模式下都失败**（都 rc=134），
+   说明 SIGABRT/SIGILL 这批**多数与 runtime 无关**。
+2. `memcpy` 在**两种模式下都能用**（rc=7）—— cg64 有 `memcpy` builtin，
+   不依赖 runtime。所以"开了 runtime 却没有 memcpy"这个猜想被排除。
+3. memcpy_chk 用例 abort 的真正原因：该 gcc torture 探针在 x86 上会被死函数
+   消除优化掉（`link_error()` 是个未被使用的纯函数），但 arm64 的 cg64
+   没做这个优化，于是它真的被调用了 → abort。
+
+**结论：那 116 个 SIGABRT 主要是 cg64 的死函数消除能力缺口，与 runtime 无关。**
+
+## 下一个要查的
+1. **开了 runtime 后 `memcpy`/`abort` 是否仍未定义**？runtime/stdlib.c 有它们，
+   但若因某种原因没被链接进镜像，就会继续报 undefined。
+2. aggregates/ 的 SIGILL（向量宽度、aggregate stack blob 未支持）是独立的
+   cg64 能力缺口，与 runtime 无关，但会拖累总数。
 
 ## 已查明并修复的前置 bug
 1. **syscall 号码**（`109a7a53`）—— 已在 `emit_syscall` 里加 Linux→Darwin 映射。
