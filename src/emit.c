@@ -15,6 +15,13 @@
 /* ------------------------------------------------------------------ */
 
 void emit_module_init(EmitModule *m) {
+    /* Only a TU the driver built from a command-line source is a user TU
+     * (main.c promotes it after lowering); modules codegen'd for imported
+     * packages must start at 0.  The driver's module array is malloc'd, so
+     * without this the field kept stale heap bytes and a package definition
+     * (memcpy, strlen, ...) was occasionally mistaken for a user one, which
+     * made the replaceable-symbol rule report a spurious duplicate symbol. */
+    m->is_user_tu = 0;
     buffer_init(&m->text);
     buffer_init(&m->rodata);
     buffer_init(&m->data);
