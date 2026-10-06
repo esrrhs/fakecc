@@ -44,6 +44,12 @@ typedef struct {
      * placement (which depends on the total text length) is known. */
     struct GFix { uint32_t at; int gidx; const char *name; int value; int addend; int got; int tlvp; } *gfix;
     size_t            ngfix, capgfix;
+    /* First gfix entry belonging to the function being compiled.  IR value
+     * ids are allocated per function and collide across functions, so
+     * fold_page_addend may only match entries inside this range; entries of
+     * earlier functions stay queued because their relocs are emitted once
+     * every function has been compiled. */
+    size_t            fn_gfix_start;
     /* Pointer slots inside global initializers.  Resolved into dyld
      * rebases once every section base is known. */
     struct PFix {
@@ -3656,7 +3662,10 @@ static int fold_page_addend(C64 *c, const IRInst *s) {
     }
     if (off == 0 || off > 0x7FFFFF || off < -0x800000) return 0;
     int gi = -1;
-    for (size_t i = 0; i < c->ngfix; i++)
+    /* Only this function's gfix entries are candidates: value ids repeat
+     * across functions, so a global scan could fold onto another function's
+     * ADRP+ADD pair and corrupt its addend. */
+    for (size_t i = c->fn_gfix_start; i < c->ngfix; i++)
         if (c->gfix[i].value == base) gi = (int)i;
     if (gi < 0) return 0;
     if (c->gfix[gi].tlvp) return 0;
@@ -3914,6 +3923,7 @@ static void emit_function(C64 *c, int fi) {
     const IRFunction *fn = c->fn;
     A64Asm *a = c->as;
     a64_bind(a, c->fn_label[fi]);
+    c->fn_gfix_start = c->ngfix;
     if (c64_ir_dump_on())
         fprintf(stderr, "== fn %s (fi=%d)\n", fn->name ? fn->name : "?", fi);
 
@@ -5214,8 +5224,15 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     for (int i = ndtors - 1; i >= 0; i--)
         a64_bl(&a, c.fn_label[dtors[i]]);
     a64_mov_reg(&a, A64_X0, A64_X22, 1);
-    a64_movz(&a, A64_X16, 1, 0, 1);              /* exit */
-    a64_svc(&a, 0x80);
+    /* The C runtime's exit() flushes stdio before leaving; a bare
+     * freestanding TU without it falls back to the raw exit syscall. */
+    int exit_id = -1;
+    if (find_function(ir, "exit", &exit_id) == 0)
+        a64_bl(&a, c.fn_label[exit_id]);
+    else {
+        a64_movz(&a, A64_X16, 1, 0, 1);          /* exit */
+        a64_svc(&a, 0x80);
+    }
     /* Unreachable, but keep a valid epilogue for disassembly/tools. */
     a64_ldp64(&a, A64_X21, A64_X22, A64_FP, 32, A64_PAIR_OFFSET);
     a64_ldp64(&a, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);

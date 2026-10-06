@@ -1539,10 +1539,16 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
     A64Asm stub;
     a64_init(&stub);
     int main_at;
+    /* Slot for "bl exit" right after main's result is in x0.  Patched to a
+     * call of the C runtime's exit() (which flushes stdio) when the image
+     * defines one, or NOP when it does not, leaving the raw syscall below. */
+    int exit_at;
     if (nctors == 0 && ndtors == 0) {
         a64_stp64(&stub, A64_FP, A64_LR, A64_SP, -16, A64_PAIR_PRE);
         a64_add_imm12(&stub, A64_FP, A64_SP, 0, 0, 1, 0);
         main_at = (int)stub.code.len;
+        a64_word(&stub, 0x94000000u);
+        exit_at = (int)stub.code.len;
         a64_word(&stub, 0x94000000u);
         a64_movz(&stub, A64_X16, 1, 0, 1);
         a64_svc(&stub, 0x80);
@@ -1571,6 +1577,8 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             a64_word(&stub, 0x94000000u);
         }
         a64_mov_reg(&stub, A64_X0, A64_X22, 1);
+        exit_at = (int)stub.code.len;
+        a64_word(&stub, 0x94000000u);
         a64_movz(&stub, A64_X16, 1, 0, 1);
         a64_svc(&stub, 0x80);
     }
@@ -2024,8 +2032,11 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
                     } else if (r->type == 11) {
                         /* Stub tail call: b, not bl. */
                         if (patch_b(&w, pc, tgt) != 0) { rc = -1; break; }
-                    } else if (r->type == 3) patch_adrp(&w, pc, tgt);
-                    else if (r->type == 4) patch_add_pageoff(&w, tgt);
+                    } else if (r->type == 3) {
+                        patch_adrp(&w, pc, tgt);
+                    } else if (r->type == 4) {
+                        patch_add_pageoff(&w, tgt);
+                    }
                     else {
                         fprintf(stderr, "fakecc: unsupported text reloc %u\n", r->type);
                         rc = -1;
@@ -2108,6 +2119,32 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             rc = -1;
         else
             memcpy(out.text.data + main_at, &w, 4);
+        /* Route normal termination through the C runtime's exit() so its
+         * fflush(NULL) runs; the raw exit syscall that follows in the stub
+         * is the fallback for an image linked without the runtime. */
+        if (rc == 0) {
+            size_t exit_off = 0;
+            int have_exit = 0;
+            for (size_t g = 0; g < ng; g++) {
+                if (gdefs[g].sh == SECT_TEXT &&
+                    strcmp(gdefs[g].name, "exit") == 0) {
+                    exit_off = gdefs[g].off;
+                    have_exit = 1;
+                    break;
+                }
+            }
+            if (have_exit) {
+                pc = macho_text_offset() + (uint64_t)exit_at;
+                tgt = macho_text_offset() + exit_off;
+                if (patch_bl(&w, pc, tgt) != 0)
+                    rc = -1;
+                else
+                    memcpy(out.text.data + exit_at, &w, 4);
+            } else {
+                w = 0xD503201Fu; /* NOP: keep the syscall fallback */
+                memcpy(out.text.data + exit_at, &w, 4);
+            }
+        }
         for (size_t i = 0; i < nctors && rc == 0; i++) {
             EmitModule *m = mods[ctors[i].mod];
             uint32_t sy = ctors[i].sym;
