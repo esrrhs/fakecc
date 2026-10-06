@@ -338,12 +338,16 @@ int remove(const char *path) {
 
 void perror(const char *s) {
     stdio_init();
+    /* Take stderr before the strlen below.  The register holding it is the
+     * one strlen's result lands in, so loading it afterwards passes the
+     * length to fputs as the stream and the write faults. */
+    FILE *err = stderr;
     if (s && s[0]) {
-        fputs(s, stderr);
-        fputs(": ", stderr);
+        fputs(s, err);
+        fputs(": ", err);
     }
-    fputs("error\n", stderr);
-    fflush(stderr);
+    fputs("error\n", err);
+    fflush(err);
 }
 
 int fgetc(FILE *f) {
