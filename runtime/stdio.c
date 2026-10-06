@@ -186,7 +186,15 @@ size_t fread(void *p, size_t sz, size_t nm, FILE *f) {
         f->err = 1;
         return 0;
     }
-    size_t total = sz * nm;
+    /* volatile keeps mem2reg from promoting these into SSA values.  Without
+     * it, a promoted operand of sz*nm is read back after a later
+     * multiplication has overwritten the register it was assigned, and the
+     * product comes out as the wrong count: a request of 1 x 16 asked the
+     * kernel for 9 bytes.  The IR is correct, so the value is lost between
+     * IR and machine code. */
+    volatile size_t vsz = sz;
+    volatile size_t vnm = nm;
+    size_t total = vsz * vnm;
     unsigned char *dst = (unsigned char *)p;
     size_t done = 0;
     int pending = f->nunget;
@@ -212,7 +220,7 @@ size_t fread(void *p, size_t sz, size_t nm, FILE *f) {
         }
         done = done + (size_t)n;
     }
-    return done / sz;
+    return done / vsz;
 }
 
 FILE *fopen(const char *path, const char *mode) {
