@@ -4322,8 +4322,7 @@ static void emit_function(C64 *c, int fi) {
             commit(c, s->dst, d);
             break;
         }
-        case IR_COPY:
-        case IR_TRUNC: {
+        case IR_COPY: {
             if (vec16_val(c, s->dst) || vec16_val(c, s->a)) {
                 int r = load_q(c, s->a, -1);
                 commit_q(c, s->dst, r);
@@ -4337,6 +4336,38 @@ static void emit_function(C64 *c, int fi) {
             int ra = load_op(c, s->a, -1);
             int d = dst_reg(c, s->dst);
             if (d != ra) a64_mov_reg(a, d, ra, s->width == 8);
+            commit(c, s->dst, d);
+            break;
+        }
+        case IR_TRUNC: {
+            if (vec16_val(c, s->dst) || vec16_val(c, s->a)) {
+                int r = load_q(c, s->a, -1);
+                commit_q(c, s->dst, r);
+                break;
+            }
+            if (scalar_fp_val(c, s->dst) || scalar_fp_val(c, s->a)) {
+                int r = load_fp(c, s->a, -1);
+                commit_fp(c, s->dst, r);
+                break;
+            }
+            int ra = load_op(c, s->a, -1);
+            int d = dst_reg(c, s->dst);
+            int fromw = vw(c, s->a);
+            /* A register keeps its high bits, so narrowing must re-establish
+             * the value-of-width-W invariant, matching the x86 backend's
+             * mask_to_width: a signed cast sign-extends (SXTB/SXTH), an
+             * unsigned one zero-extends (UXTB/UXTH).  Treating TRUNC as a bare
+             * move left the discarded bits behind and the compare opcodes use
+             * the register as-is -- (unsigned char)(x & 256) then read 256.
+             * The 4-byte target is a plain W move, which clears the top word. */
+            if (s->width < 4 && fromw > s->width) {
+                if (s->is_unsigned)
+                    a64_uxt(a, d, ra, (unsigned)s->width, 0);
+                else
+                    a64_sxt(a, d, ra, (unsigned)s->width, 0);
+            }
+            else if (d != ra)
+                a64_mov_reg(a, d, ra, s->width == 8);
             commit(c, s->dst, d);
             break;
         }
