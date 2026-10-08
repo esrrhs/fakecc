@@ -730,6 +730,34 @@ static int macho_sym_pass(const EmitSymbol *s) {
 static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
                                const int *nmap, size_t nsyms);
 
+/* An extern reloc carrying a non-zero addend occupies TWO Mach-O records:
+ * an ARM64_RELOC_ADDEND (type 10) with the signed 24-bit value, immediately
+ * before the reloc it qualifies.  UNSIGNED (0) keeps its addend in the data
+ * slot, SUBTRACTOR (1) pairs with a following UNSIGNED, and ADDEND (10) is the
+ * prefix record itself -- none of the three gets a prefix. */
+static int reloc_needs_addend_pair(const EmitReloc *r) {
+    return r->addend != 0 && r->type != 0 && r->type != 1 && r->type != 10;
+}
+
+/* Number of on-disk records (ADDEND prefixes included) for a reloc array. */
+static size_t reloc_record_count(const EmitReloc *rels, size_t n) {
+    size_t c = n;
+    for (size_t i = 0; i < n; i++)
+        if (reloc_needs_addend_pair(&rels[i])) c++;
+    return c;
+}
+
+static size_t reloc_record_count_sh(const EmitReloc *rels, size_t n,
+                                    uint16_t sh) {
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++)
+        if (rels[i].shndx == sh) {
+            c++;
+            if (reloc_needs_addend_pair(&rels[i])) c++;
+        }
+    return c;
+}
+
 static size_t reloc_count_sh(const EmitReloc *rels, size_t n, uint16_t sh) {
     size_t c = 0;
     for (size_t i = 0; i < n; i++)
@@ -781,6 +809,18 @@ static void macho_write_relocs(Buffer *out, const EmitReloc *rels, size_t n,
         const EmitReloc *r = &rels[sorted[i]];
         int sym = (nmap && r->sym < nsyms) ? nmap[r->sym] : 0;
         if (sym < 0) sym = 0;
+        if (reloc_needs_addend_pair(r)) {
+            /* ARM64_RELOC_ADDEND: same address as the record that follows,
+             * r_symbolnum holds the signed 24-bit addend, r_extern = 0.
+             * Emitting it immediately before its reloc is what the reader's
+             * one-record pending addend expects. */
+            int32_t aaddr = (int32_t)r->offset;
+            uint32_t aword = ((uint32_t)r->addend & 0xFFFFFFu)
+                           | (2u << 25)          /* length = 2 (instruction) */
+                           | (10u << 28);        /* ARM64_RELOC_ADDEND */
+            buffer_append(out, (const char *)&aaddr, 4);
+            buffer_append(out, (const char *)&aword, 4);
+        }
         uint32_t ext = (r->type == 10) ? 0u : 1u;
         uint32_t symfield = (r->type == 10)
                           ? ((uint32_t)r->addend & 0xFFFFFFu)
@@ -914,13 +954,15 @@ int macho_write_object(const EmitModule *em, const char *path) {
         if (!macho_sym_ok(s, sect_of)) continue;
         strsize += 1 + strlen(s->name) + 1; /* leading '_' */
     }
-    size_t nreloc = em->num_relocs;
-    size_t nreloc_data = reloc_count_sh(em->data_relocs, em->num_data_relocs,
-                                        SECT_DATA);
-    size_t nreloc_init = reloc_count_sh(em->data_relocs, em->num_data_relocs,
-                                        SECT_INIT_ARRAY);
-    size_t nreloc_fini = reloc_count_sh(em->data_relocs, em->num_data_relocs,
-                                        SECT_FINI_ARRAY);
+    size_t nreloc = reloc_record_count(em->relocs, em->num_relocs);
+    size_t nreloc_data = reloc_record_count_sh(em->data_relocs,
+                                               em->num_data_relocs, SECT_DATA);
+    size_t nreloc_init = reloc_record_count_sh(em->data_relocs,
+                                               em->num_data_relocs,
+                                               SECT_INIT_ARRAY);
+    size_t nreloc_fini = reloc_record_count_sh(em->data_relocs,
+                                               em->num_data_relocs,
+                                               SECT_FINI_ARRAY);
     uint64_t rel_at = align_up_u64(content_end, 8);
     uint64_t reloff = nreloc ? rel_at : 0;
     rel_at += nreloc * 8;
@@ -1104,7 +1146,9 @@ int macho_write_object(const EmitModule *em, const char *path) {
             ni++;
         }
     }
-    macho_write_relocs(&out, em->relocs, nreloc, nmap, em->num_syms);
+    /* nreloc counts on-disk records (ADDEND pairs expand 1:2); the array
+     * itself still has em->num_relocs entries, so pass that for the bound. */
+    macho_write_relocs(&out, em->relocs, em->num_relocs, nmap, em->num_syms);
     macho_write_relocs_sh(&out, em->data_relocs, em->num_data_relocs, SECT_DATA,
                           nmap, em->num_syms, 0);
     macho_write_relocs_sh(&out, em->data_relocs, em->num_data_relocs,
