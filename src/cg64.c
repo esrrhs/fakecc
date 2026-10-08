@@ -3267,18 +3267,23 @@ static void emit_call(C64 *c, const IRInst *s) {
         for (int i = 0; i < fp_n; i++) nleft -= fdone[i];
         while (nleft > 0) {
             int picked = -1;
-            for (int i = 0; i < fp_n; i++)
-                if (!fdone[i] && fsrc[i] == FSCR) { picked = i; break; }
-            for (int i = 0; picked < 0 && i < fp_n; i++) {
+            for (int i = 0; i < fp_n; i++) {
                 if (fdone[i]) continue;
+                /* j blocks i while it still has to read the register i wants
+                 * to overwrite.  A value parked in FSCR, or a spill/const
+                 * not yet materialized, occupies no V register and so never
+                 * blocks anyone -- which also leaves a parked node last. */
                 int blocked = 0;
-                if (fhome[i])
-                    for (int j = 0; j < fp_n; j++)
-                        if (!fdone[j] && j != i && fhome[j] && fsrc[j] == fdst[i])
-                            blocked = 1;
+                for (int j = 0; j < fp_n; j++) {
+                    if (fdone[j] || j == i || !fhome[j]) continue;
+                    if (fsrc[j] == fdst[i]) { blocked = 1; break; }
+                }
                 if (!blocked) { picked = i; break; }
             }
             if (picked < 0) {
+                /* The remaining home moves form a cycle.  Park one source in
+                 * FSCR and mark it homeless; its partner becomes movable and
+                 * the parked node reads FSCR only after that partner ran. */
                 for (int i = 0; i < fp_n; i++)
                     if (!fdone[i] && fhome[i]) {
                         if (fisd[i] == 2) fmov_q(a, FSCR, fsrc[i]);
@@ -3289,9 +3294,14 @@ static void emit_call(C64 *c, const IRInst *s) {
                     }
                 continue;
             }
-            int r = fhome[picked] ? fsrc[picked]
-                    : (fisd[picked] == 2 ? load_q(c, fav[picked], fdst[picked])
-                                         : load_fp(c, fav[picked], fdst[picked]));
+            int r;
+            if (fhome[picked])
+                r = fsrc[picked];
+            else if (fsrc[picked] == FSCR)
+                r = FSCR;   /* parked there above to break a register cycle */
+            else
+                r = fisd[picked] == 2 ? load_q(c, fav[picked], fdst[picked])
+                                      : load_fp(c, fav[picked], fdst[picked]);
             if (r != fdst[picked]) {
                 if (fisd[picked] == 2) fmov_q(a, fdst[picked], r);
                 else a64_fmov_reg(a, fdst[picked], r, fisd[picked]);
