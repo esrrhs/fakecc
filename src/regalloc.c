@@ -718,6 +718,33 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         }
     }
 
+    /* Pass 2b (arm64 GP only): all integer arguments arrive simultaneously in
+     * x0..x7 and the prologue routes each incoming register to its home.  The
+     * normal backward walk only connects a parameter's SSA value to what it
+     * meets inside the body, so two parameters whose short live ranges never
+     * overlap there could be given the SAME home (e.g. an arg resident in x2
+     * and another routed x1->x2); the prologue then overwrites the resident
+     * value before the body reads it.  Register-passed parameters therefore
+     * pairwise interfere: their homes must be distinct so the entry shuffle is
+     * an injective permutation it can realise.  Stack parameters are not in a
+     * register and are left out. */
+    if (!float_class && target_current()->arch == TARGET_ARCH_ARM64) {
+        int gp[8], ngp = 0;
+        for (size_t i = 0; i < (size_t)nv && i < fn->insts.len && ngp < 8
+                       && fn->insts.data[i].op == IR_PARAM; i++) {
+            IRValue pv = fn->insts.data[i].dst;
+            /* Any two integer arguments not passed on the stack arrive in two
+             * distinct x registers, so their homes must differ too.  The GP
+             * class already excludes float/vector params. */
+            if (!fn->insts.data[i].force_stack && pv >= 0 && pv < nv &&
+                value_in_class(fn, pv, 0, cls->exclude_16byte_ld))
+                gp[ngp++] = pv;
+        }
+        for (int a = 0; a < ngp; a++)
+            for (int b = a + 1; b < ngp; b++)
+                ig_add_edge(g, gp[a], gp[b]);
+    }
+
     bs_free(&live);
     for (size_t bi = 0; bi < cfg->num; bi++) {
         bs_free(&use_b[bi]);
