@@ -267,6 +267,15 @@ int main(void) { arr[2] = 40; return arr[2] == 40 ? 7 : 1; }
    烘焙进 dyld rebase；链接器拼接段后偏移失效，导致 `stdout = &_rt_stdout`
    这类指针全局指向错误位置。修法与 `-c` 一致：走重定位路径。
 3. **`__clone` 弱解析**（`4a973536`）—— runtime/thread.c 用 Linux clone。
+4. **`.o` 写盘丢失折叠偏移**（`55e1a56b`）—— 与上文"a[2] 读成 a[0]"同根，
+   但只出现在 `-c` 写盘再链接的多 TU 路径：`fold_page_addend` 把 `&g+n`
+   折进 PAGE21/PAGEOFF12 的 addend，而 `macho_write_object` 逐记录序列化时
+   丢弃了 addend —— arm64 Mach-O 要求在该 reloc 前发一条
+   ARM64_RELOC_ADDEND(type 10) 记录。读盘侧（`macho_read_object`）本来就
+   认 ADDEND，只有写盘缺失。现象：兄弟 TU 里 `wide[1]` 读成 `wide[0]`、
+   结构体字段读到其对象基址；`test_cg64_native:1230/:1517` 由此转绿。
+   直接可执行路径不经序列化，所以单 TU 一直正常。修复后 fakecc 的 `.o`
+   也能被 Apple 原生 `ld` 正确链接（addend 记录对其可见）。
 
 ## 下一个要查的
 printf 崩溃点 `0x3e02a1303f7`（垃圾地址）说明还有一个指针/地址错误未修。
