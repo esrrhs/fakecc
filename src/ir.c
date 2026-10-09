@@ -3540,6 +3540,8 @@ static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
     ir_call_reserve_args(&inst, nargs);
     for (int i = 0; i < nargs; i++)
         inst.call_args[i] = args[i];
+    inst.width = 8;
+    inst.is_unsigned = 1;
     ir_inst_array_push(&fn->insts, inst);
     set_value_type(fn, dst, 8, 1);
     return dst;
@@ -3605,9 +3607,30 @@ static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr
     return bos_emit_named_call(fn, bos_chk_rt_name(cn), args, 4, e->loc);
 }
 
+/* Lower a va_list forwarded to vsprintf/vsnprintf after a fortify fold.
+ * On arm64 Darwin va_list is an 8-byte by-value aggregate that rides one
+ * GP register; lower_expr yields its storage address, so load the cursor.
+ * On SysV the tag is array-of-1 and decays to a pointer, which lower_expr
+ * already provides. */
+static IRValue bos_lower_va_list_arg(IRFunction *fn, IRSymTable *st,
+                                     const Expr *arg) {
+    IRValue v = lower_expr(fn, st, arg);
+    if (!abi_sret_uses_gp() && arg->type.kind == TY_STRUCT && arg->type.tag
+        && strcmp(arg->type.tag, "__va_list_tag") == 0) {
+        IRValue m = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, m, v, -1, 0, 8, 1, arg->loc);
+        return m;
+    }
+    return v;
+}
+
+/* va_first >= 0 marks args[va_first..] as anonymous variadic arguments:
+ * under fakecc's Darwin convention those ride 8-byte outgoing stack slots
+ * (never registers), exactly like the normal EX_CALL variadic path, so the
+ * callee's va_start/va_arg see them. */
 static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
                                      IRValue *args, int nargs, SourceLoc loc,
-                                     int width, int is_unsigned) {
+                                     int width, int is_unsigned, int va_first) {
     IRValue dst = new_value(fn);
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
@@ -3619,8 +3642,16 @@ static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
     ir_call_reserve_args(&inst, nargs);
-    for (int i = 0; i < nargs; i++)
-        inst.call_args[i] = args[i];
+    for (int i = 0; i < nargs; i++) {
+        IRValue av = args[i];
+        if (va_first >= 0 && i >= va_first)
+            av = va_float_bits(fn, av, loc);
+        inst.call_args[i] = av;
+        if (va_first >= 0 && i >= va_first)
+            inst.call_arg_on_stack[i] = CALL_ARG_STACK;
+    }
+    inst.width = width;
+    inst.is_unsigned = is_unsigned;
     ir_inst_array_push(&fn->insts, inst);
     set_value_type(fn, dst, width, is_unsigned);
     return dst;
@@ -3687,9 +3718,12 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
                 fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
                 exit(1);
             }
-            args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+            args[nargs++] = (is_v && i == 5)
+                ? bos_lower_va_list_arg(fn, st, e->u.call.args.data[i])
+                : lower_expr(fn, st, e->u.call.args.data[i]);
         }
-        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0);
+        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0,
+                                     is_v ? -1 : 3);
     }
     args[nargs++] = lower_expr(fn, st, e->u.call.args.data[2]);
     IRValue szv = new_value(fn);
@@ -3705,9 +3739,12 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
             fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
             exit(1);
         }
-        args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+        args[nargs++] = (is_v && i == 5)
+            ? bos_lower_va_list_arg(fn, st, e->u.call.args.data[i])
+            : lower_expr(fn, st, e->u.call.args.data[i]);
     }
-    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
+    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0,
+                                 is_v ? -1 : 5);
 }
 
 /* Known C-string bytes (NUL not included in *nbytes) plus a byte offset. */
@@ -3935,9 +3972,12 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
                 fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
                 exit(1);
             }
-            args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+            args[nargs++] = (is_v && i == 4)
+                ? bos_lower_va_list_arg(fn, st, e->u.call.args.data[i])
+                : lower_expr(fn, st, e->u.call.args.data[i]);
         }
-        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0);
+        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0,
+                                     is_v ? -1 : 2);
     }
     args[nargs++] = lower_expr(fn, st, e->u.call.args.data[1]);
     IRValue szv = new_value(fn);
@@ -3953,9 +3993,12 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
             fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
             exit(1);
         }
-        args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+        args[nargs++] = (is_v && i == 4)
+            ? bos_lower_va_list_arg(fn, st, e->u.call.args.data[i])
+            : lower_expr(fn, st, e->u.call.args.data[i]);
     }
-    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
+    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0,
+                                 is_v ? -1 : 4);
 }
 
 /* __builtin___stpcpy_chk / __builtin___strcpy_chk (dst, src, size).

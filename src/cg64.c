@@ -3457,7 +3457,7 @@ static void emit_call(C64 *c, const IRInst *s) {
     } else if (s->dst >= 0) {
         int d = dst_reg(c, s->dst);
         if (d != A64_X0)
-            a64_mov_reg(a, d, A64_X0, s->width == 8);
+            a64_mov_reg(a, d, A64_X0, s->width == 8 || vw(c, s->dst) == 8);
         commit(c, s->dst, d);
     }
 }
