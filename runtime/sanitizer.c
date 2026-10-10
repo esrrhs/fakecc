@@ -48,11 +48,20 @@ static void asan_write_dec(int fd, unsigned long val) {
 void __asan_init(void) {
     if (g_asan_inited) return;
     g_asan_inited = 1;
-    /* Map 16TB shadow memory at 0x100000000000 with MAP_NORESERVE | MAP_FIXED (0x4032) */
-    long p = __syscall(9, 0x100000000000L, 0x100000000000L, 3, 0x4032, -1, 0);
+    /* Map 16TB of shadow memory at 0x100000000000, MAP_FIXED so the address is
+     * the one the shadow lookup in asan_check_range assumes.  The flag value
+     * is per-target: MAP_ANONYMOUS and MAP_NORESERVE are 0x20/0x4000 on Linux
+     * but 0x1000/0x0040 on Darwin, so passing Linux's 0x4032 to Darwin asks
+     * for MAP_PRIVATE plus an undefined bit and no MAP_ANON, and the mapping
+     * is refused. */
+    long flags = __fakecc_map_fixed_anon;
+    long p = __syscall(9, 0x100000000000L, 0x100000000000L, 3, flags, -1, 0);
     if (p < 0) {
-        p = __syscall(9, 0x100000000000L, 0x10000000000L, 3, 0x4032, -1, 0);
+        p = __syscall(9, 0x100000000000L, 0x10000000000L, 3, flags, -1, 0);
     }
+    /* MAP_FIXED makes the kernel honour the address or fail; a different
+     * address means the shadow lookup would read the wrong page. */
+    if (p != 0x100000000000L) g_asan_inited = 0;
 }
 
 void __asan_poison_memory_region(void *addr, size_t size) {

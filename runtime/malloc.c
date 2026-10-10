@@ -15,8 +15,12 @@ static size_t align16(size_t n) {
     return (n + 15) & ~((size_t)15);
 }
 
+/* The flags are per-target: MAP_ANONYMOUS is 0x20 on Linux and 0x1000 on
+ * Darwin, so Linux's 0x22 names an undefined bit to Darwin and the mapping
+ * is refused.  The address is left to the kernel here, so only MAP_PRIVATE
+ * and MAP_ANONYMOUS are needed. */
 static void *map_anon(size_t n) {
-    long p = __syscall(9, 0, (long)n, 3, 0x22, -1, 0);
+    long p = __syscall(9, 0, (long)n, 3, __fakecc_map_private_anon, -1, 0);
     if (p < 0) return 0;
     return (void *)p;
 }
