@@ -1,4 +1,7 @@
 // expect: 0
+// unsupported_on: darwin-arm64
+// Its asin is written in x87 inline asm (fpatan / fsqrt plus an 80-bit
+// long double), which has no arm64 equivalent to assemble.
 package main;
 
 extern void* memcpy(void*, const void*, unsigned long);
