@@ -50,6 +50,21 @@ run_single_case() {
     local extra_flags
     extra_flags=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
 
+    # Platform-intrinsic skips, e.g. a test keyed to x87 80-bit long double
+    # (memcmp of 10 bytes, literals beyond double range) that the platform
+    # ABI genuinely cannot satisfy — the host toolchain fails it the same
+    # way.  Tag is `<os>-<machine>` from uname (darwin-arm64, linux-x86_64).
+    local host_tag
+    host_tag="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m)"
+    local skipped=0
+    for t in $(sed -n 's|^//[[:space:]]*unsupported_on:[[:space:]]*\(.*\)|\1|p' "$src" | head -1); do
+        if [ "$t" = "$host_tag" ]; then skipped=1; fi
+    done
+    if [ "$skipped" = "1" ]; then
+        echo "SKIP $name (unsupported on $host_tag)"
+        return 0
+    fi
+
     timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA $extra_flags "$src" -o "$out" 2>"$cc_err"
     local cc_rc=$?
 
@@ -110,10 +125,11 @@ find "$CASE_DIR" -name '*.c' | sort | xargs -P "$JOBS" -n 1 bash -c 'run_single_
 
 n_pass=$(grep -c '^PASS ' "$WORK/results.log" || true)
 n_fail=$(grep -c '^FAIL ' "$WORK/results.log" || true)
+n_skip=$(grep -c '^SKIP ' "$WORK/results.log" || true)
 
 cat "$WORK/results.log" | sort
 
-echo "--- e2e${label:+ ($label)}: $n_pass passed, $n_fail failed, $((n_pass + n_fail)) total ---"
+echo "--- e2e${label:+ ($label)}: $n_pass passed, $n_fail failed, $n_skip skipped, $((n_pass + n_fail + n_skip)) total ---"
 
 if [ "$n_fail" -ne 0 ]; then
     exit 1

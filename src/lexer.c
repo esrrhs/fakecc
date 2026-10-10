@@ -1,6 +1,7 @@
 #include "fakecc/lexer.h"
 #include "fakecc/common.h"
 #include "fakecc/token.h"
+#include "fakecc/ast.h"
 
 #include <ctype.h>
 #include <stddef.h>
@@ -33,7 +34,10 @@ static const char *predefined_macro_literal(const char *text, int *out_is_float)
     if (strcmp(text, "__SIZEOF_POINTER__") == 0) return "8";
     if (strcmp(text, "__SIZEOF_FLOAT__") == 0) return "4";
     if (strcmp(text, "__SIZEOF_DOUBLE__") == 0) return "8";
-    if (strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0) return "16";
+    /* arm64 Darwin follows the platform ABI: long double is the 8-byte
+     * double type.  Every other target uses 16 bytes (SysV x87). */
+    if (strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0)
+        return type_long_double_width() == 8 ? "8" : "16";
     if (strcmp(text, "__SIZEOF_SIZE_T__") == 0) return "8";
     if (strcmp(text, "__SIZEOF_WCHAR_T__") == 0) return "4";
     if (strcmp(text, "__SIZEOF_WINT_T__") == 0) return "4";

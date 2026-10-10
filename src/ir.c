@@ -1766,12 +1766,27 @@ static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
  * representable in the current IR and is rejected. */
 /* Sema marks a builtin that has no recorded prototype (memset, memcpy,
  * …) as variadic with zero parameters so the arity check accepts the
- * call.  That is not a Darwin varargs function: the arguments use the
- * normal registers.  A real `f(...)` has a user name and does use the
- * stack convention. */
+ * call.  That is usually not a Darwin varargs function: the arguments use
+ * the normal registers.  A real `f(...)` has a user name and does use the
+ * stack convention.
+ *
+ * The exception is the stdio formatted-output family (__builtin_printf,
+ * __builtin_fprintf, __builtin_sprintf_chk, the *_unlocked variants, …):
+ * those genuinely are variadic and their anonymous arguments ride the
+ * Darwin vararg stack slots.  Match the printf/scanf family by name and
+ * keep every other builtin on registers — a fixed-arity builtin such as
+ * __builtin_exit(0) otherwise sends its one argument to the stack while
+ * the callee reads w0.  (The fortify __*_chk folds mark their own stack
+ * arguments explicitly and are unaffected.) */
 static int prototype_less_builtin(const char *name) {
     if (!name) return 0;
-    if (strncmp(name, "__builtin_", 10) == 0) return 1;
+    const char *n = name;
+    if (strncmp(n, "__builtin_", 10) == 0) n += 10;
+    /* Real variadic formatted-I/O: honour the Darwin anonymous-stack ABI. */
+    if (strstr(n, "printf") != NULL || strstr(n, "scanf") != NULL)
+        return 0;
+    if (strncmp(name, "__builtin_", 10) == 0)
+        return 1;
     return strcmp(name, "memset") == 0 || strcmp(name, "memcpy") == 0
         || strcmp(name, "memmove") == 0 || strcmp(name, "mempcpy") == 0
         || strcmp(name, "alloca") == 0;
@@ -4568,7 +4583,35 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
         }
         out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
     } else if (bop == BOP_DIV) {
-        if (is_float && elem_sz <= 8) {
+        if (is_float && elem_sz <= 8 && type_long_double_width() < 16) {
+            /* The platform has no float wider than double (arm64 Darwin's
+             * long double is an 8-byte double), so an 80-bit/quad scratch
+             * is unavailable.  Call the runtime's compiler-rt-style
+             * scaled division, which stays in range for exponent-limit
+             * operands.  Results return through two stack slots to avoid
+             * a complex struct-return ABI special case. */
+            const char *dn = elem_sz == 4 ? "__fakecc_divsc3"
+                                          : "__fakecc_divdc3";
+            IRValue slot_r = emit_alloca(fn, elem_sz, elem_sz, 0, e->loc);
+            IRValue slot_i = emit_alloca(fn, elem_sz, elem_sz, 0, e->loc);
+            /* The helpers take the output slots by pointer: materialise the
+             * alloca addresses as IR_ADDR values (an alloca dst is only a
+             * slot identity for IR_LOAD/STORE, not a pointer SSA). */
+            IRValue addr_r = emit_bin_w(fn, IR_ADDR, slot_r, -1, 8, 1, e->loc);
+            IRValue addr_i = emit_bin_w(fn, IR_ADDR, slot_i, -1, 8, 1, e->loc);
+            IRValue cargs[6] = {
+                addr_r, addr_i, l_real, l_imag, r_real, r_imag
+            };
+            emit_runtime_call_void(fn, dn, cargs, 6, e->loc);
+            out_r = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, out_r, slot_r, -1, 0, elem_sz, 0, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            set_value_float(fn, out_r, 1);
+            out_i = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, out_i, slot_i, -1, 0, elem_sz, 0, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            set_value_float(fn, out_i, 1);
+        } else if (is_float && elem_sz <= 8) {
             /* Float/double complex division: compute via 80-bit long double (16-byte)
              * to prevent intermediate overflow/underflow in denominator and numerators. */
             IRValue a = convert_numeric(fn, l_real, elem_sz, 16, 0, 1, e->loc);

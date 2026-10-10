@@ -1587,45 +1587,42 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
      * call of the C runtime's exit() (which flushes stdio) when the image
      * defines one, or NOP when it does not, leaving the raw syscall below. */
     int exit_at;
-    if (nctors == 0 && ndtors == 0) {
-        a64_stp64(&stub, A64_FP, A64_LR, A64_SP, -16, A64_PAIR_PRE);
-        a64_add_imm12(&stub, A64_FP, A64_SP, 0, 0, 1, 0);
-        main_at = (int)stub.code.len;
+    /* Optional bl __fakecc_set_environ(envp); NOPed when the runtime does
+     * not provide the hook.  Always reserve the slot so argc/argv/envp can
+     * live in callee-saved registers on every image, with or without
+     * constructors. */
+    int envset_at;
+    /* Keep argc/argv/envp across the environ hook, constructors, and main's
+     * result across destructors.  Destructors run highest priority first. */
+    a64_stp64(&stub, A64_FP, A64_LR, A64_SP, -48, A64_PAIR_PRE);
+    a64_add_imm12(&stub, A64_FP, A64_SP, 0, 0, 1, 0);
+    a64_stp64(&stub, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);
+    a64_stp64(&stub, A64_X21, A64_X22, A64_FP, 32, A64_PAIR_OFFSET);
+    a64_mov_reg(&stub, A64_X19, A64_X0, 1);
+    a64_mov_reg(&stub, A64_X20, A64_X1, 1);
+    a64_mov_reg(&stub, A64_X21, A64_X2, 1);
+    a64_mov_reg(&stub, A64_X0, A64_X21, 1);
+    envset_at = (int)stub.code.len;
+    a64_word(&stub, 0x94000000u);
+    for (size_t i = 0; i < nctors; i++) {
+        ctor_at[i] = (int)stub.code.len;
         a64_word(&stub, 0x94000000u);
-        exit_at = (int)stub.code.len;
-        a64_word(&stub, 0x94000000u);
-        a64_movz(&stub, A64_X16, 1, 0, 1);
-        a64_svc(&stub, 0x80);
-    } else {
-        /* Keep argc/argv/envp across constructors, and main's result
-         * across destructors.  Destructors run highest priority first. */
-        a64_stp64(&stub, A64_FP, A64_LR, A64_SP, -48, A64_PAIR_PRE);
-        a64_add_imm12(&stub, A64_FP, A64_SP, 0, 0, 1, 0);
-        a64_stp64(&stub, A64_X19, A64_X20, A64_FP, 16, A64_PAIR_OFFSET);
-        a64_stp64(&stub, A64_X21, A64_X22, A64_FP, 32, A64_PAIR_OFFSET);
-        a64_mov_reg(&stub, A64_X19, A64_X0, 1);
-        a64_mov_reg(&stub, A64_X20, A64_X1, 1);
-        a64_mov_reg(&stub, A64_X21, A64_X2, 1);
-        for (size_t i = 0; i < nctors; i++) {
-            ctor_at[i] = (int)stub.code.len;
-            a64_word(&stub, 0x94000000u);
-        }
-        a64_mov_reg(&stub, A64_X0, A64_X19, 1);
-        a64_mov_reg(&stub, A64_X1, A64_X20, 1);
-        a64_mov_reg(&stub, A64_X2, A64_X21, 1);
-        main_at = (int)stub.code.len;
-        a64_word(&stub, 0x94000000u);
-        a64_mov_reg(&stub, A64_X22, A64_X0, 1);
-        for (size_t i = 0; i < ndtors; i++) {
-            dtor_at[i] = (int)stub.code.len;
-            a64_word(&stub, 0x94000000u);
-        }
-        a64_mov_reg(&stub, A64_X0, A64_X22, 1);
-        exit_at = (int)stub.code.len;
-        a64_word(&stub, 0x94000000u);
-        a64_movz(&stub, A64_X16, 1, 0, 1);
-        a64_svc(&stub, 0x80);
     }
+    a64_mov_reg(&stub, A64_X0, A64_X19, 1);
+    a64_mov_reg(&stub, A64_X1, A64_X20, 1);
+    a64_mov_reg(&stub, A64_X2, A64_X21, 1);
+    main_at = (int)stub.code.len;
+    a64_word(&stub, 0x94000000u);
+    a64_mov_reg(&stub, A64_X22, A64_X0, 1);
+    for (size_t i = 0; i < ndtors; i++) {
+        dtor_at[i] = (int)stub.code.len;
+        a64_word(&stub, 0x94000000u);
+    }
+    a64_mov_reg(&stub, A64_X0, A64_X22, 1);
+    exit_at = (int)stub.code.len;
+    a64_word(&stub, 0x94000000u);
+    a64_movz(&stub, A64_X16, 1, 0, 1);
+    a64_svc(&stub, 0x80);
     /* A missing weak symbol's call lands here and returns 0.  Its address
      * is rewritten to a zero register, so this stub is not that address. */
     int weak_at = (int)stub.code.len;
@@ -2187,6 +2184,31 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path) {
             } else {
                 w = 0xD503201Fu; /* NOP: keep the syscall fallback */
                 memcpy(out.text.data + exit_at, &w, 4);
+            }
+        }
+        /* Wire the envp hook if the runtime defines it; otherwise NOP the
+         * reserved branch (the mov x0,x21 above it stays harmless). */
+        if (rc == 0) {
+            size_t envset_off = 0;
+            int have_envset = 0;
+            for (size_t g = 0; g < ng; g++) {
+                if (gdefs[g].sh == SECT_TEXT &&
+                    strcmp(gdefs[g].name, "__fakecc_set_environ") == 0) {
+                    envset_off = gdefs[g].off;
+                    have_envset = 1;
+                    break;
+                }
+            }
+            if (have_envset) {
+                pc = macho_text_offset() + (uint64_t)envset_at;
+                tgt = macho_text_offset() + envset_off;
+                if (patch_bl(&w, pc, tgt) != 0)
+                    rc = -1;
+                else
+                    memcpy(out.text.data + envset_at, &w, 4);
+            } else {
+                w = 0xD503201Fu; /* NOP */
+                memcpy(out.text.data + envset_at, &w, 4);
             }
         }
         for (size_t i = 0; i < nctors && rc == 0; i++) {

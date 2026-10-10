@@ -625,48 +625,13 @@ void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void 
     qsort_rec((char *)base, n, sz, cmp);
 }
 
-int chmod(const char *path, int mode) {
-    long r = __syscall(90, (long)path, (long)mode);
-    return r < 0 ? -1 : 0;
-}
-
-/* Scan /proc/self/environ.  Returned pointer is into a static buffer. */
-char *getenv(const char *name) {
-    static char block[8192];
-    size_t nlen = 0;
-    while (name[nlen]) nlen = nlen + 1;
-    long fd = __syscall(2, (long)"/proc/self/environ", 0, 0);
-    if (fd < 0) return 0;
-    long n = __syscall(0, fd, (long)block, 8191);
-    __syscall(3, fd);
-    if (n <= 0) return 0;
-    if (n > 8191) n = 8191;
-    block[n] = 0;
-    char *p = block;
-    while ((unsigned long)(p - block) < (unsigned long)n) {
-        if (*p == 0) {
-            p = p + 1;
-            continue;
-        }
-        size_t i = 0;
-        while (p[i] && p[i] != '=') i = i + 1;
-        if (p[i] == '=' && i == nlen) {
-            int match = 1;
-            size_t j = 0;
-            while (j < nlen) {
-                if (p[j] != name[j]) {
-                    match = 0;
-                    break;
-                }
-                j = j + 1;
-            }
-            if (match) return p + i + 1;
-        }
-        while (*p) p = p + 1;
-        p = p + 1;
-    }
-    return 0;
-}
+/* chmod() and getenv() are platform-specific:
+ *   - Linux builds use the raw syscall numbers / /proc/self/environ
+ *     (see stdlib_linux.c);
+ *   - Darwin builds leave the names undefined so the arm64 backend emits
+ *     its own chmod syscall and the envp-scanning getenv builtin.
+ * Keeping the Linux bodies here would be selected on every target (this
+ * file is un-suffixed) and shadow the correct Darwin implementations. */
 
 /* The va_copy helper is target-specific and lives in stdlib_darwin.c /
  * stdlib_linux.c: a va_list is 24 bytes on x86-64 but a single pointer on

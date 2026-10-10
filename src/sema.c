@@ -1321,6 +1321,41 @@ static Type check_expr_inner(Expr *e) {
         }
         if (strncmp(e->u.var.name, "__builtin_", 10) == 0 || strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
+            /* A __builtin_X reference mirrors a user-visible declaration of
+             * X when one is in scope (fprintf, fprintf_unlocked, ...).  The
+             * generic synthesizer below builds a zero-prototype variadic
+             * function, which on arm64 Darwin pushes every argument through
+             * the anonymous-arg stack slots and corrupts the call; adopt the
+             * declared prototype instead.  Only the type is borrowed — IR
+             * still lowers the call under its __builtin_ name. */
+            if (strncmp(bname, "__builtin_", 10) == 0) {
+                const char *plain = bname + 10;
+                const Sym *ps = symtable_find(st, plain);
+                Type pt = ps ? ps->type : type_make_void();
+                while (pt.kind == TY_PTR && pt.pointee) pt = *pt.pointee;
+                if (pt.kind == TY_FUNC) {
+                    set_type(e, type_clone(ps->type));
+                    return type_clone(e->type);
+                }
+                const FunSig *fsig = ftab_lookup(plain);
+                if (fsig) {
+                    const Type **ptys = NULL;
+                    if (fsig->arity > 0) {
+                        ptys = malloc(fsig->arity * sizeof(Type *));
+                        if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                        for (int qi = 0; qi < fsig->arity; qi++)
+                            ptys[qi] = &fsig->param_types[qi];
+                    }
+                    Type fn2 = type_make_func_var(fsig->ret_type, (Type **)ptys,
+                                                  fsig->arity, fsig->is_variadic);
+                    fn2.func_is_unprototyped = fsig->is_unprototyped;
+                    free(ptys);
+                    Type fp2 = type_make_ptr(fn2);
+                    type_free(&fn2);
+                    set_type(e, fp2);
+                    return type_clone(e->type);
+                }
+            }
             int math_narg = 0, math_w = 0;
             Type ret = type_default_int();
             if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_debugtrap") == 0 || strcmp(bname, "__builtin_assume") == 0 || strcmp(bname, "__builtin_clear_cache") == 0 || strcmp(bname, "__builtin_arm_dmb") == 0 || strcmp(bname, "__builtin_arm_dsb") == 0 || strcmp(bname, "__builtin_arm_isb") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)

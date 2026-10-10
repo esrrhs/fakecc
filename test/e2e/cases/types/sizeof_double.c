@@ -1,15 +1,15 @@
 // sizeof(double) / sizeof(long double) / sizeof(short) / sizeof(char).
 // Pins the remaining scalar sizes that sizeof_int / sizeof_long leave
-// uncovered: double is 8, long double is 16 (x87 80-bit extended, SysV
-// aligns/pads it to 16), short is 2, char is 1.  Also checks that sizeof
-// a double expression (not just the type) works, and that long double
-// arithmetic is wide enough to hold a value a double could not round
-// exactly.
+// uncovered: double is 8, long double matches the platform ABI (16 for
+// x87 80-bit extended on SysV, 8 — a plain double — on arm64 Darwin),
+// short is 2, char is 1.  Also checks that sizeof a double expression
+// (not just the type) works, and that long double arithmetic is wide
+// enough to hold a value a double could not round exactly.
 // expect: 0
 package main;
 int main() {
     if ((int)sizeof(double) != 8) return 1;
-    if ((int)sizeof(long double) != 16) return 2;
+    if ((int)sizeof(long double) != __SIZEOF_LONG_DOUBLE__) return 2;
     if ((int)sizeof(short) != 2) return 3;
     if ((int)sizeof(char) != 1) return 4;
 
