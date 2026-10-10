@@ -1507,14 +1507,24 @@ static int emit_io_builtin(C64 *c, const char *name) {
             a64_bind(a, stored);
         }
         a64_cbz(a, A64_X9, ok, 1);
-        /* These are libc-level names, not syscalls: POSIX has them report
-         * failure as -1 with the reason in errno, not as the negated errno
-         * a raw syscall returns.  A caller testing `== -1` -- or the C
-         * library wrappers the x86 backend reaches through the runtime,
-         * which fold the negative errno to -1 -- would otherwise never
-         * recognise the error.  errno was stored above from the positive
-         * code, so collapsing the return value loses nothing. */
-        a64_mov_imm64(a, A64_X0, (uint64_t)-1);
+        /* How failure is reported depends on what the caller believes this
+         * name is, so the two linking modes answer it differently.
+         *
+         * A lone freestanding TU has no libc at all: the body synthesised
+         * here is the *only* implementation of write/open/... and it is a
+         * raw syscall wrapper, so it reports the way __syscall does -- the
+         * negated errno.  test_cg64_native pins that contract for every name
+         * in the table (write(-1,..) == -9 and friends).
+         *
+         * Once another module joins the link there is a libc in the picture
+         * and callers expect POSIX: -1, with the reason in errno.  The e2e
+         * runtime tests check exactly that (chmod on a missing path).  errno
+         * was stored above from the positive code, so collapsing the return
+         * value to -1 loses nothing either way. */
+        if (emit_multi_tu())
+            a64_mov_imm64(a, A64_X0, (uint64_t)-1);
+        else
+            a64_neg(a, A64_X0, A64_X0, 1);
         a64_bind(a, ok);
     }
     return 1;
