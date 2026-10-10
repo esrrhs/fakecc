@@ -50,25 +50,35 @@ typedef struct {
     int scope_depth;
 } Parser;
 
+static const Token *synthesized_eof(void) {
+    static Token eof_tok;
+    eof_tok.kind = TK_EOF;
+    eof_tok.text = "";
+    eof_tok.loc.file = "(error)";
+    eof_tok.loc.line = 0;
+    eof_tok.loc.col = 0;
+    return &eof_tok;
+}
+
 static const Token *peek(const Parser *p) {
     /* After a fatal error, synthesize EOF so parse loops terminate instead
      * of spinning on the same (possibly unconsumed) token. */
-    if (fakecc_had_error()) {
-        static Token eof_tok;
-        eof_tok.kind = TK_EOF;
-        eof_tok.text = "";
-        eof_tok.loc.file = "(error)";
-        eof_tok.loc.line = 0;
-        eof_tok.loc.col = 0;
-        return &eof_tok;
-    }
-    return &p->tokens->data[p->pos];
+    if (fakecc_had_error())
+        return synthesized_eof();
+    if (p->tokens->len == 0)
+        return synthesized_eof();
+    /* Scanners can leave p->pos past the end (an unmatched '(' for instance);
+     * report the terminating EOF token instead of reading past the array. */
+    size_t pos = p->pos < p->tokens->len ? p->pos : p->tokens->len - 1;
+    return &p->tokens->data[pos];
 }
 
 static const Token *advance(Parser *p) {
     if (fakecc_had_error())
         return peek(p);
-    return &p->tokens->data[p->pos++];
+    if (p->pos < p->tokens->len)
+        return &p->tokens->data[p->pos++];
+    return peek(p);
 }
 
 /* A token usable as a member/variable name.  Normally TK_IDENT, but fakecc
@@ -201,7 +211,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                     depth++;
                     Expr *e = parse_ternary(p);
                     long long val = 0;
-                    if (fold_const_int(e, &val)) {
+                    if (e && fold_const_int(e, &val)) {
                         if (val <= 0 || (val & (val - 1)) != 0) {
                             return die_at(e->loc.file, e->loc.line, e->loc.col,
                                    "requested alignment '%lld' is not a positive power of 2", val);
@@ -1385,6 +1395,8 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                 const Token *wtok = peek(p);
                 Expr *we = parse_ternary(p);
                 long long wval = 0;
+                if (!we)
+                    return;
                 if (fold_const_int(we, &wval)) {
                     bit_width = (int)wval;
                 } else if (we->kind == EX_VAR) {
@@ -1540,6 +1552,8 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
             advance(p);
             Expr *e = parse_ternary(p);
             long long val = 0;
+            if (!e)
+                return;
             if (fold_const_int(e, &val)) {
                 has_value = 1; value = (int)val;
             } else if (e->kind == EX_VAR) {
@@ -4213,6 +4227,8 @@ static Stmt parse_stmt(Parser *p) {
         } else {
             Expr *ce = parse_ternary(p);
             long long folded;
+            if (!ce)
+                return (Stmt){0};
             if (ce->kind == EX_FLOAT_LIT || !fold_const_int(ce, &folded))
                 {
                     die_at(cv->loc.file, cv->loc.line, cv->loc.col,
@@ -4233,6 +4249,8 @@ static Stmt parse_stmt(Parser *p) {
             } else {
                 Expr *he = parse_ternary(p);
                 long long folded_h;
+                if (!he)
+                    return (Stmt){0};
                 if (he->kind == EX_FLOAT_LIT || !fold_const_int(he, &folded_h))
                     {
                         die_at(hv->loc.file, hv->loc.line, hv->loc.col,
@@ -5255,7 +5273,7 @@ static int is_definition_only_lookahead(const Parser *p) {
     return (pos < p->tokens->len && p->tokens->data[pos].kind == TK_SEMICOLON);
 }
 
-int parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx) {
+static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx) {
     fakecc_clear_error();
     Parser p;
     p.tokens = tokens;
@@ -5447,9 +5465,18 @@ int parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx)
     stmt_array_free(&p.prepend);
     parser_pop_scope(&p, -1);
     free(p.locals.data);
-    g_parser_tu = NULL;
     if (fakecc_had_error()) return FAKECC_ERR;
     return FAKECC_OK;
+}
+
+int parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu, PkgContext *ctx) {
+    int rc = parse_in_pkg_impl(tokens, tu, ctx);
+    /* g_parser_tu points into *tu, so it must not outlive this call: the
+     * error paths above return early, and a later parse (next file of a
+     * package build, next compile in the same process) would otherwise read
+     * a TranslationUnit that no longer exists. */
+    g_parser_tu = NULL;
+    return rc;
 }
 
 int parse(const TokenArray *tokens, TranslationUnit *tu) {

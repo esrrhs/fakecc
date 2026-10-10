@@ -10324,7 +10324,8 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
                 return;
             }
             int n = sz < src->size ? sz : src->size;
-            memcpy(bytes, src->init_bytes, n);
+            if (src->init_bytes)
+                memcpy(bytes, src->init_bytes, n);
             return;
         }
     }

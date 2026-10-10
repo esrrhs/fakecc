@@ -96,6 +96,19 @@ void type_free(Type *t) {
 extern const StructRegistry *get_ir_structs(void);
 extern const StructRegistry *get_sema_structs(void);
 extern const StructRegistry *get_parser_structs(void);
+
+/* The struct registry to consult for layout.  Every phase publishes the
+ * TranslationUnit it is working on and unpublishes it when it is done — except
+ * ir_generate(), whose registry codegen still needs afterwards.  Ask the
+ * earliest phase that is live: a leftover IR registry points at a
+ * TranslationUnit that may already be gone (second compile in the same
+ * process, next file of a package build). */
+static const StructRegistry *current_structs(void) {
+    const StructRegistry *reg = get_parser_structs();
+    if (!reg) reg = get_sema_structs();
+    if (!reg) reg = get_ir_structs();
+    return reg;
+}
 extern const TranslationUnit *get_sema_tu(void);
 extern const TranslationUnit *get_ir_tu(void);
 
@@ -122,9 +135,7 @@ long long type_size(Type t) {
     case TY_ARRAY:  return 0;   /* array without an element type — malformed */
     case TY_STRUCT: {
         if (p->tag) {
-            const StructRegistry *reg = get_ir_structs();
-            if (!reg) reg = get_sema_structs();
-            if (!reg) reg = get_parser_structs();
+            const StructRegistry *reg = current_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
                 if (sd && sd->size > 0) return count * sd->size;
@@ -146,9 +157,7 @@ int type_is_empty_struct(Type t) {
     /* GNU empty structs and size-0 types (only a flexible/`[0]` member)
      * consume no argument slots.  gcc named args and va_arg agree. */
     if (t.kind != TY_STRUCT) return 0;
-    const StructRegistry *reg = get_ir_structs();
-    if (!reg) reg = get_sema_structs();
-    if (!reg) reg = get_parser_structs();
+    const StructRegistry *reg = current_structs();
     if (t.tag && reg) {
         const StructDef *sd = struct_registry_find_c(reg, t.tag);
         if (sd) return sd->size <= 0 || sd->num_members == 0;
@@ -475,9 +484,7 @@ long long type_align(Type t) {
     case TY_ARRAY: return 1;    /* array without an element type — malformed */
     case TY_STRUCT: {
         if (p->tag) {
-            const StructRegistry *reg = get_ir_structs();
-            if (!reg) reg = get_sema_structs();
-            if (!reg) reg = get_parser_structs();
+            const StructRegistry *reg = current_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
                 if (sd && sd->align > 0) return sd->align;
@@ -560,7 +567,7 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
         return 0;
     }
     if (t.kind == TY_STRUCT && t.tag) {
-        const StructRegistry *reg = get_ir_structs();
+        const StructRegistry *reg = current_structs();
         const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : NULL;
         if (!sd) {
             int sz = type_size(t);
@@ -675,7 +682,7 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     if (t.kind != TY_STRUCT || !t.tag) return 0;
     int sz = type_size(t);
     if (sz <= 0 || sz > 64) return 0;
-    const StructRegistry *reg = get_ir_structs();
+    const StructRegistry *reg = current_structs();
     const StructDef *sd = NULL;
     if (reg) sd = struct_registry_find_c(reg, t.tag);
     if (!sd) {
@@ -735,9 +742,7 @@ static int type_is_pure_x87(Type t) {
         return type_is_pure_x87(*t.elem_type);
     }
     if (t.kind != TY_STRUCT || !t.tag) return 0;
-    const StructRegistry *reg = get_ir_structs();
-    if (!reg) reg = get_sema_structs();
-    if (!reg) reg = get_parser_structs();
+    const StructRegistry *reg = current_structs();
     const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : NULL;
     if (!sd) return 0;
     int any = 0;

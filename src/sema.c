@@ -2797,7 +2797,8 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     if (keep_union_desig) {
         if (last_union_member_idx < 0 || last_union_member_idx >= sd->num_members)
             last_union_member_idx = 0;
-        const char *mn = sd->members[last_union_member_idx].name;
+        const char *mn = sd->num_members > 0
+            ? sd->members[last_union_member_idx].name : NULL;
         if (mn && mn[0]) {
             union_member_name = xstrdup(mn);
             union_desig_kind = 1;
@@ -3185,8 +3186,8 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
     }
 }
 
-int sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
-                       PkgContext *ctx) {
+static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_main,
+                                  PkgContext *ctx) {
     fakecc_clear_error();
     g_sema_error_count = 0;
     TranslationUnit *tu = (TranslationUnit *)tu_const;
@@ -3492,11 +3493,20 @@ int sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
 
     ftab_cur_free();
     symtable_free(&globals);
+    if (fakecc_had_error() || g_sema_error_count > 0) return FAKECC_ERR;
+    return FAKECC_OK;
+}
+
+int sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
+                       PkgContext *ctx) {
+    int rc = sema_check_in_pkg_impl(tu_const, require_main, ctx);
+    /* g_sema_structs/g_sema_tu point into *tu_const: drop them on the error
+     * paths too (they return early), so a later compile in the same process
+     * cannot consult a TranslationUnit that has gone away. */
     g_sema_pkg = NULL;
     g_sema_tu = NULL;
     g_sema_structs = NULL;
-    if (fakecc_had_error() || g_sema_error_count > 0) return FAKECC_ERR;
-    return FAKECC_OK;
+    return rc;
 }
 
 int sema_check(const TranslationUnit *tu, int require_main) {
