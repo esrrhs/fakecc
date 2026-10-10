@@ -1841,6 +1841,19 @@ static void abi_adjust_cls(Type t, SysVRegClass *cls, int *nreg, SourceLoc loc) 
         *nreg = 0;
         return;
     }
+    /* A 16-byte aggregate SysV folded to a single eightbyte, either because
+     * it holds a vector (SSE + SSEUP collapse to one XMM) or because the
+     * second eightbyte is padding.  arm64 has no XMM pair to merge into: a
+     * composite that is not an HFA occupies one eightbyte per double-word,
+     * so `struct { V }` has to be two of them.  Leaving it at one passed
+     * only x0, and the upper half came back zero --
+     * `struct S { V x; }; id(s).x[1]` read 0 instead of 4. */
+    if (t.kind == TY_STRUCT && type_size(t) == 16 && *nreg == 1) {
+        cls[0] = SYSV_CLS_INTEGER;
+        cls[1] = SYSV_CLS_INTEGER;
+        *nreg = 2;
+        return;
+    }
     for (int i = 0; i < *nreg && i < 2; i++)
         if (cls[i] == SYSV_CLS_SSE) cls[i] = SYSV_CLS_INTEGER;
 }
