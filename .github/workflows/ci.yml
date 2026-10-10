@@ -101,13 +101,12 @@ jobs:
           lcov --list coverage.info
 
       - name: Upload coverage reports to Codecov
-        continue-on-error: true
         if: matrix.config.cov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: build/coverage.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   # Wall-clock of this job is dominated by self-hosted e2e and difftest
   # (each run twice, -O0 then -O1).  -O0 finishes around 33 min; -O1 needs
