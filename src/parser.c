@@ -4213,6 +4213,8 @@ static Stmt parse_stmt(Parser *p) {
         } else {
             Expr *ce = parse_ternary(p);
             long long folded;
+            if (!ce)
+                return (Stmt){0};
             if (ce->kind == EX_FLOAT_LIT || !fold_const_int(ce, &folded))
                 {
                     die_at(cv->loc.file, cv->loc.line, cv->loc.col,
@@ -4233,6 +4235,8 @@ static Stmt parse_stmt(Parser *p) {
             } else {
                 Expr *he = parse_ternary(p);
                 long long folded_h;
+                if (!he)
+                    return (Stmt){0};
                 if (he->kind == EX_FLOAT_LIT || !fold_const_int(he, &folded_h))
                     {
                         die_at(hv->loc.file, hv->loc.line, hv->loc.col,
