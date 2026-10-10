@@ -130,3 +130,5 @@ bash test/compile/gcc_compile/run_compile.sh ./build/fakecc -O0
 ## 随机程序差分测试（test/fuzz）
 
 `test/fuzz/gen_random.py SEED {gcc|fakecc}` 按种子生成随机 C 程序（混合位宽/符号整数运算、移位、除法、循环、switch、函数调用等，避免未定义行为），`test/fuzz/run_fuzz.sh [fakecc] [种子数] [起始种子]` 用 gcc 作为 oracle，对比 fakecc `-O0`/`-O1` 的输出。已知会错误编译的程序保存在 `test/fuzz/known_failures/seed<N>.{gcc,fcc}.c`（报告为 XFAIL，不使其失败；修复后会报告 XPASS，可删除该对文件）。CI 的 `fuzz` job 运行该脚本。
+
+生成的辅助函数只读写局部变量和参数，不写全局变量：函数调用可以出现在表达式的任意位置，而 C 未规定表达式各操作数的求值顺序，一旦函数带全局副作用，gcc 与 fakecc 就可能各自"正确地"打印出不同的值（这类程序不是误编译，实测 clang 与 fakecc 一致而与 gcc 不同）。因此输出一旦不一致即为 fakecc 的真实误编译。

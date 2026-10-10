@@ -10,6 +10,12 @@ static functions and global arrays.  All arithmetic is done in unsigned types
 and shifts/divisors are masked so the programs avoid undefined behaviour.
 They print every global/local/array element so any miscompile shows up in
 stdout.
+
+The helper functions never write a global: a call may sit anywhere inside an
+expression and C leaves the order in which the operands of an expression are
+evaluated unspecified, so a call with side effects would let both compilers be
+"right" while printing different values.  Keeping the helpers free of global
+stores makes the printed values depend only on the program, not on the order.
 """
 import random
 import sys
@@ -92,11 +98,15 @@ def main():
             return "(!%s)" % cond(scope, depth - 1)
         return "(%s)" % expr(scope, max(depth, 0))
 
+    # globals the function being generated is allowed to store into; empty for
+    # the static helpers (see the module docstring), all globals inside main
+    pool = []
+
     def assign(scope):
-        if R.random() < 0.15:
+        if pool and R.random() < 0.15:
             a = R.choice(arr)
             return "%s[%d] = %s;" % (a[0], R.randrange(a[2]), expr(scope, 3, a[1]))
-        nm, ty = R.choice([v for v in gl + scope if v[0][0] not in "iw"])
+        nm, ty = R.choice([v for v in pool + scope if v[0][0] not in "iw"])
         return "%s = %s;" % (nm, expr(scope, R.randint(1, 4), ty))
 
     def stmt(scope, depth, ind, n):
@@ -160,6 +170,7 @@ def main():
         out.append(s)
         funcs.append(("f%d" % fi, rt, pt))
     m = "int main(void) {\n"
+    pool = gl
     mloc = [("m%d" % i, T()) for i in range(R.randint(2, 4))]
     for n, t in mloc:
         m += "    %s %s = %s;\n" % (t[0], n, lit(t))
