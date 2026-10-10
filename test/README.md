@@ -124,3 +124,9 @@ bash test/e2e/run_gdb_e2e.sh ./build/fakecc
 # 5. 运行 2,003 个 compile 健壮性编译测试
 bash test/compile/gcc_compile/run_compile.sh ./build/fakecc -O0
 ```
+
+---
+
+## 随机程序差分测试（test/fuzz）
+
+`test/fuzz/gen_random.py SEED {gcc|fakecc}` 按种子生成随机 C 程序（混合位宽/符号整数运算、移位、除法、循环、switch、函数调用等，避免未定义行为），`test/fuzz/run_fuzz.sh [fakecc] [种子数] [起始种子]` 用 gcc 作为 oracle，对比 fakecc `-O0`/`-O1` 的输出。已知会错误编译的程序保存在 `test/fuzz/known_failures/seed<N>.{gcc,fcc}.c`（报告为 XFAIL，不使其失败；修复后会报告 XPASS，可删除该对文件）。CI 的 `fuzz` job 运行该脚本。
