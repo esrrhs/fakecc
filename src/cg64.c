@@ -1506,7 +1506,14 @@ static int emit_io_builtin(C64 *c, const char *name) {
             a64_bind(a, stored);
         }
         a64_cbz(a, A64_X9, ok, 1);
-        a64_neg(a, A64_X0, A64_X0, 1);
+        /* These are libc-level names, not syscalls: POSIX has them report
+         * failure as -1 with the reason in errno, not as the negated errno
+         * a raw syscall returns.  A caller testing `== -1` -- or the C
+         * library wrappers the x86 backend reaches through the runtime,
+         * which fold the negative errno to -1 -- would otherwise never
+         * recognise the error.  errno was stored above from the positive
+         * code, so collapsing the return value loses nothing. */
+        a64_mov_imm64(a, A64_X0, (uint64_t)-1);
         a64_bind(a, ok);
     }
     return 1;
@@ -3488,7 +3495,8 @@ static int64_t c64_darwin_syscall(int64_t num) {
     case 39: return 20;  /* getpid */
     case 60: return 1;   /* exit */
     case 87: return 10;  /* unlink */
-    case 90: return 90;  /* dup2 */
+    case 90: return 15;  /* chmod (Linux dup2 is 33, not 90) */
+    case 102: return 24; /* getuid */
     case 186: return 224;/* gettid */
     case 231: return 1;  /* exit_group -> exit: Darwin has no group */
     default: return num; /* futex(202), clone(56): no equivalent exists */
@@ -3582,6 +3590,10 @@ static void emit_syscall(C64 *c, const IRInst *s) {
         int ok = a64_new_label(a);
         a64_cset(a, A64_X9, A64_CS, 1);
         a64_cbz(a, A64_X9, ok, 1);
+        /* A raw syscall reports failure as the negated errno, which is what
+         * lets a caller tell the codes apart.  The libc-level names in
+         * emit_io_builtin collapse this to -1 instead, because POSIX has
+         * them report -1 with the reason only in errno. */
         a64_neg(a, A64_X0, A64_X0, 1);
         a64_bind(a, ok);
     }
@@ -5255,6 +5267,13 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
     a64_mov_reg(&a, A64_X21, A64_X2, 1);
     emit_environ_addr(&c, A64_X16);
     a64_str64(&a, A64_X21, A64_X16, 0);
+    /* Hand envp to the runtime, if it provides the hook, so its getenv can
+     * scan the process environment without /proc. */
+    int envset_id = -1;
+    if (find_function(ir, "__fakecc_set_environ", &envset_id) == 0) {
+        a64_mov_reg(&a, A64_X0, A64_X21, 1);
+        a64_bl(&a, c.fn_label[envset_id]);
+    }
     for (int i = 0; i < nctors; i++)
         a64_bl(&a, c.fn_label[ctors[i]]);
     a64_mov_reg(&a, A64_X0, A64_X19, 1);
