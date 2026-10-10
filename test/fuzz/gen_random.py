@@ -16,6 +16,11 @@ expression and C leaves the order in which the operands of an expression are
 evaluated unspecified, so a call with side effects would let both compilers be
 "right" while printing different values.  Keeping the helpers free of global
 stores makes the printed values depend only on the program, not on the order.
+
+run_fuzz.sh enforces both invariants instead of trusting this generator: the
+oracle is built with UBSan in trap mode, so a program with undefined behaviour
+dies instead of printing a value, and a difference is re-checked against clang
+(reported AMBIG when clang prints what fakecc prints).
 """
 import random
 import sys
