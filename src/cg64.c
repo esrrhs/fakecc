@@ -4241,6 +4241,33 @@ static void emit_function(C64 *c, int fi) {
         else
             mv[p].done = (mv[p].src_reg >= 0 && mv[p].dst_reg == mv[p].src_reg);
     }
+    int remaining = 0;
+    for (int p = 0; p < nparams; p++) remaining += !mv[p].done;
+#define PM_EMIT(p) do {                                                      \
+        PMove *_m = &mv[(p)];                                                \
+        if (_m->src_vec >= 0) {                                              \
+            int _tmp = _m->dst_reg >= 0 ? _m->dst_reg : SCR1;                \
+            a64_fmov_gp(a, _tmp, _m->src_vec, 0, _m->is64);                  \
+            if (_m->dst_reg < 0)                                             \
+                frame_store(c, _tmp, _m->dst_mem, 8);                        \
+        } else if (_m->dst_reg >= 0) {                                       \
+            if (_m->src_reg >= 0) {                                          \
+                if (_m->src_reg != _m->dst_reg)                              \
+                    a64_mov_reg(a, _m->dst_reg, _m->src_reg, _m->is64);      \
+            } else {                                                         \
+                frame_load(c, SCR1, _m->src_mem, 8, 1);                      \
+                a64_mov_reg(a, _m->dst_reg, SCR1, _m->is64);                 \
+            }                                                                \
+        } else {                                                             \
+            if (_m->src_reg >= 0)                                            \
+                a64_mov_reg(a, SCR1, _m->src_reg, _m->is64);                 \
+            else                                                             \
+                frame_load(c, SCR1, _m->src_mem, 8, 1);                      \
+            frame_store(c, SCR1, _m->dst_mem, 8);                            \
+        }                                                                    \
+        _m->done = 1; remaining--;                                           \
+    } while (0)
+
     /* Incoming V-reg parameters can be homed in v0..v7, so place them
      * before the GP shuffle and break cycles through v31. */
     {
@@ -4255,9 +4282,47 @@ static void emit_function(C64 *c, int fi) {
                         if (fin[j].done || j == i || fin[j].stack) continue;
                         if (fin[j].src == fin[i].dst) { blocked = 1; break; }
                     }
+                /* An HFA eightbyte still parked in an incoming V register is
+                 * not in fin at all -- the GP shuffle below consumes it, and
+                 * that runs only after this loop -- so the check above cannot
+                 * see it.  Writing into a register that still holds one
+                 * destroys the value before it is read: a scalar double homed
+                 * into v0 overwrote the real part of a __complex__ double
+                 * arriving in v0/v1, and `cond ? a : b` then returned b as
+                 * the real part. */
+                if (!blocked && fin[i].dst >= 0)
+                    for (int q = 0; q < nparams; q++)
+                        if (!mv[q].done && mv[q].src_vec == fin[i].dst) {
+                            blocked = 1;
+                            break;
+                        }
                 if (!blocked) { picked = i; break; }
             }
             if (picked < 0) {
+                /* Every pending fin write would land on a V register an HFA
+                 * eightbyte still needs.  Consume those eightbytes first: a
+                 * move with src_vec >= 0 only reads a V register and writes a
+                 * GP one, which no pending float move touches.  Skip one
+                 * whose destination GP register is still another pending
+                 * move's incoming source -- that is a real cycle and the
+                 * shuffle below breaks it properly. */
+                int released = 0;
+                for (int q = 0; q < nparams; q++) {
+                    if (mv[q].done || mv[q].src_vec < 0) continue;
+                    int cycle = 0;
+                    if (mv[q].dst_reg >= 0)
+                        for (int r = 0; r < nparams; r++)
+                            if (!mv[r].done && r != q
+                                && mv[r].src_reg == mv[q].dst_reg) {
+                                cycle = 1;
+                                break;
+                            }
+                    if (cycle) continue;
+                    PM_EMIT(q);
+                    released = 1;
+                    break;
+                }
+                if (released) continue;
                 for (int i = 0; i < nfin; i++)
                     if (!fin[i].done && !fin[i].stack) {
                         if (fin[i].isd == 2) fmov_q(a, FSCR, fin[i].src);
@@ -4291,33 +4356,6 @@ static void emit_function(C64 *c, int fi) {
             nleft--;
         }
     }
-    int remaining = 0;
-    for (int p = 0; p < nparams; p++) remaining += !mv[p].done;
-#define PM_EMIT(p) do {                                                      \
-        PMove *_m = &mv[(p)];                                                \
-        if (_m->src_vec >= 0) {                                              \
-            int _tmp = _m->dst_reg >= 0 ? _m->dst_reg : SCR1;                \
-            a64_fmov_gp(a, _tmp, _m->src_vec, 0, _m->is64);                  \
-            if (_m->dst_reg < 0)                                             \
-                frame_store(c, _tmp, _m->dst_mem, 8);                        \
-        } else if (_m->dst_reg >= 0) {                                       \
-            if (_m->src_reg >= 0) {                                          \
-                if (_m->src_reg != _m->dst_reg)                              \
-                    a64_mov_reg(a, _m->dst_reg, _m->src_reg, _m->is64);      \
-            } else {                                                         \
-                frame_load(c, SCR1, _m->src_mem, 8, 1);                      \
-                a64_mov_reg(a, _m->dst_reg, SCR1, _m->is64);                 \
-            }                                                                \
-        } else {                                                             \
-            if (_m->src_reg >= 0)                                            \
-                a64_mov_reg(a, SCR1, _m->src_reg, _m->is64);                 \
-            else                                                             \
-                frame_load(c, SCR1, _m->src_mem, 8, 1);                      \
-            frame_store(c, SCR1, _m->dst_mem, 8);                            \
-        }                                                                    \
-        _m->done = 1; remaining--;                                           \
-    } while (0)
-
     while (remaining > 0) {
         int picked = -1;
         for (int p = 0; p < nparams; p++) {
