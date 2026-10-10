@@ -207,9 +207,19 @@ static int home_reg(C64 *c, IRValue v) {
     return hw >= 0 ? hw : -1;
 }
 
+/* A negative reg[] is not by itself "spilled": REG_NONE also marks a value
+ * that belongs to the *other* register class, whose home is that class's
+ * result rather than a slot here.  Only a value the allocator gave a real
+ * spill slot has one, so ask the slot, not the register. */
+static int has_spill_slot(C64 *c, IRValue v) {
+    if (!c->ra || v < 0 || v >= c->ra->num_values) return 0;
+    int slot = c->ra->spill_slot[v];
+    if (slot < 0 || slot >= c->ra->num_spill_slots) return 0;
+    return c->spill_off != NULL;
+}
+
 static int spill_off(C64 *c, IRValue v) {
-    if (!c->ra || v < 0 || v >= c->ra->num_values || c->ra->reg[v] >= 0)
-        return 0;
+    if (!has_spill_slot(c, v)) return 0;
     return c->spill_off[c->ra->spill_slot[v]];
 }
 
@@ -263,10 +273,13 @@ static int fp_home(const C64 *c, IRValue v) {
     return hw >= 0 ? hw : -1;
 }
 
+/* Same distinction as has_spill_slot, for the SIMD class. */
 static int fp_spill(const C64 *c, IRValue v) {
-    if (!c->ra_fp || v < 0 || v >= c->ra_fp->num_values || c->ra_fp->reg[v] >= 0)
-        return 0;
-    return c->fp_spill_off[c->ra_fp->spill_slot[v]];
+    if (!c->ra_fp || v < 0 || v >= c->ra_fp->num_values) return 0;
+    int slot = c->ra_fp->spill_slot[v];
+    if (slot < 0 || slot >= c->ra_fp->num_spill_slots) return 0;
+    if (!c->fp_spill_off) return 0;
+    return c->fp_spill_off[slot];
 }
 
 /* v30/v31 are outside the allocatable set. */
