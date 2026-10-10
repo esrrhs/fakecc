@@ -196,6 +196,185 @@ float atanf(float x) {
     return (float)atan((double)x);
 }
 
+/* exp / log / pow / atan2 / asin / acos.
+ *
+ * pow is what the x86 build got from the host libm and a freestanding arm64
+ * image has to carry itself: gcc_torture declares it extern and really calls
+ * it, and the Mach-O linker turns an unresolved symbol into a hard error
+ * instead of deferring to dyld.  exp and log are the pair it is built from.
+ *
+ * Both need range reduction.  A Taylor series for e^x only converges near
+ * the origin, so the exponent is split off and re-applied as an exact power
+ * of two; log reduces its argument to [1,2) before using the atanh series,
+ * whose argument then stays below 1/3. */
+
+/* 2^k, exact.  Scaling by repeated multiplication would overflow for the k a
+ * large argument produces, so write the biased exponent directly; a k below
+ * the normal range is built from the smallest normal times the remainder. */
+static double rt_pow2(int k) {
+    union { double d; unsigned long long u; } v;
+    if (k > 1023) {
+        v.u = 0x7ff0000000000000ULL;
+        return v.d;
+    }
+    if (k < -1074) return 0.0;
+    if (k < -1022) {
+        v.u = 0x0010000000000000ULL;          /* 2^-1022 */
+        return v.d * rt_pow2(k + 1022);
+    }
+    v.u = (unsigned long long)(k + 1023) << 52;
+    return v.d;
+}
+
+double exp(double x) {
+    if (x != x) return x;
+    if (x == 0.0) return 1.0;
+    union { double d; unsigned long long u; } inf;
+    inf.u = 0x7ff0000000000000ULL;
+    if (x > 709.7827128933840) return inf.d;
+    if (x < -745.1332191019411) return 0.0;
+    double ln2 = 0.69314718055994530942;
+    int k = (int)floor(x / ln2 + 0.5);
+    double r = x - (double)k * ln2;           /* |r| <= ln2/2 */
+    double term = 1.0;
+    double sum = 1.0;
+    for (int i = 1; i <= 30; i++) {
+        term = term * r / (double)i;
+        sum = sum + term;
+    }
+    return sum * rt_pow2(k);
+}
+
+double log(double x) {
+    if (x != x) return x;
+    if (x > 1.7976931348623157e308) return x;   /* +Inf stays +Inf */
+    if (x == 0.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0xfff0000000000000ULL;            /* -Inf */
+        return v.d;
+    }
+    if (x < 0.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0x7ff8000000000000ULL;            /* NaN */
+        return v.d;
+    }
+    union { double d; unsigned long long u; } v;
+    v.d = x;
+    int be = (int)((v.u >> 52) & 0x7ffULL);
+    int e2 = 0;
+    if (be == 0) {                              /* subnormal */
+        v.d = x * 4503599627370496.0;           /* 2^52, brings it into range */
+        e2 = -52;
+        be = (int)((v.u >> 52) & 0x7ffULL);
+    }
+    e2 = e2 + be - 1023;
+    v.u = (v.u & 0x000fffffffffffffULL) | (1023ULL << 52);
+    double m = v.d;                             /* [1,2) */
+    /* log(m) = 2*atanh((m-1)/(m+1)). */
+    double z = (m - 1.0) / (m + 1.0);
+    double z2 = z * z;
+    double term = z;
+    double sum = z;
+    for (int i = 1; i <= 40; i++) {
+        term = term * z2;
+        sum = sum + term / (double)(2 * i + 1);
+    }
+    return (double)e2 * 0.69314718055994530942 + 2.0 * sum;
+}
+
+double log10(double x) {
+    return log(x) / 2.30258509299404568402;
+}
+
+double pow(double x, double y) {
+    if (y == 0.0) return 1.0;
+    if (x != x) return x;
+    if (y != y) return y;
+    if (x == 1.0) return 1.0;
+    /* An integral exponent is exact under repeated squaring, and it is the
+     * only case where a negative base has a real result at all. */
+    if (y > -1024.0 && y < 1024.0 && y == floor(y)) {
+        long long n = (long long)y;
+        int neg = 0;
+        if (n < 0) { neg = 1; n = -n; }
+        double base = x;
+        double r = 1.0;
+        while (n > 0) {
+            if (n & 1) r = r * base;
+            base = base * base;
+            n = n >> 1;
+        }
+        if (neg) r = 1.0 / r;
+        return r;
+    }
+    if (x == 0.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = y > 0.0 ? 0x0000000000000000ULL : 0x7ff0000000000000ULL;
+        return v.d;
+    }
+    if (x < 0.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0x7ff8000000000000ULL;
+        return v.d;
+    }
+    if (x > 1.7976931348623157e308) return y > 0.0 ? x : 0.0;
+    return exp(y * log(x));
+}
+
+double atan2(double y, double x) {
+    if (x != x || y != y) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0x7ff8000000000000ULL;
+        return v.d;
+    }
+    double pi = 3.14159265358979323846;
+    double pi_half = 1.57079632679489661923;
+    if (x > 0.0) return atan(y / x);
+    if (x < 0.0) {
+        if (y >= 0.0) return atan(y / x) + pi;
+        return atan(y / x) - pi;
+    }
+    if (y > 0.0) return pi_half;
+    if (y < 0.0) return -pi_half;
+    return 0.0;
+}
+
+double asin(double x) {
+    if (x != x) return x;
+    if (x > 1.0 || x < -1.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0x7ff8000000000000ULL;
+        return v.d;
+    }
+    double pi_half = 1.57079632679489661923;
+    if (x == 1.0) return pi_half;
+    if (x == -1.0) return -pi_half;
+    /* atan2(x, sqrt(1-x*x)) rather than atan(x / sqrt(...)): the quotient
+     * has no quadrant, and (1-x)*(1+x) keeps the cancellation away from
+     * x = 1, where 1-x*x has already lost half its digits. */
+    return atan2(x, sqrt((1.0 - x) * (1.0 + x)));
+}
+
+double acos(double x) {
+    if (x != x) return x;
+    return 1.57079632679489661923 - asin(x);
+}
+
+/* setjmp / longjmp.
+ *
+ * Saving the frame pointer and the return address is not expressible in the
+ * language, so the backend lowers __builtin_setjmp / __builtin_longjmp
+ * itself (IR_FRAME_ADDR / IR_RETURN_ADDR / IR_LONGJMP, all of which cg64
+ * implements) and the libc names are one-line wrappers.  jmp_buf belongs to
+ * the caller: an array of long large enough for the saved frame, fp, lr and
+ * the callee-saved registers. */
+int setjmp(long *env) {
+    return __builtin_setjmp((void *)env);
+}
+void longjmp(long *env, int val) {
+    __builtin_longjmp((void *)env, val);
+}
+
 
 /* Shared body of the strto* family: parses [ws][sign][base prefix][digits] and
  * returns the magnitude, with the sign reported through *neg.  On overflow
