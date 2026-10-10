@@ -1455,6 +1455,7 @@ static int emit_io_builtin(C64 *c, const char *name) {
     else if (strcmp(name, "madvise") == 0) num = 75;
     else if (strcmp(name, "mincore") == 0) num = 78;
     else if (strcmp(name, "mprotect") == 0) num = 74;
+    else if (strcmp(name, "munmap") == 0) num = 73;
     else if (strcmp(name, "msync") == 0) num = 65;
     else if (strcmp(name, "mlock") == 0) num = 203;
     else if (strcmp(name, "munlock") == 0) num = 204;
@@ -1685,6 +1686,53 @@ static int emit_getcwd(C64 *c, const char *name) {
 
 /* getenv.  The entry stub stores dyld's envp in the bss slot.  A same-TU
  * definition still wins.  Object files keep the call external. */
+/* mmap / mmap2.
+ *
+ * Syscall 197 takes six arguments and reports failure the way libc does --
+ * by returning MAP_FAILED, not -1 -- so it cannot join emit_io_builtin's
+ * three-argument table.  It is variadic too: mmap's sixth argument (offset)
+ * is absent on Darwin, whose kernel always maps whole pages, so the caller's
+ * x5 is simply not forwarded.
+ *
+ * MAP_FAILED is (void *)-1, which is what a caller compares against.  errno
+ * gets the positive code. */
+static int emit_mmap(C64 *c, const char *name) {
+    if (!name) return 0;
+    int is_mmap = strcmp(name, "mmap") == 0;
+    int is_mmap2 = strcmp(name, "mmap2") == 0;
+    if (!is_mmap && !is_mmap2) return 0;
+    int defined = 0;
+    if (find_function(c->ir, name, &defined) == 0) return 0;
+
+    A64Asm *a = c->as;
+    int egi = find_global_idx(c->ir, "errno");
+    int ok = a64_new_label(a);
+    a64_movz(a, A64_X16, 197, 0, 1);
+    a64_svc(a, 0x80);
+    a64_cset(a, A64_X9, A64_CS, 1);
+    if (egi >= 0) {
+        int clear = a64_new_label(a);
+        int stored = a64_new_label(a);
+        note_page_reloc(c, (uint32_t)a->code.len, egi, NULL, -1);
+        a64_word(a, 0x90000000u | (uint32_t)A64_X16);
+        a64_word(a, 0x91000000u | ((uint32_t)A64_X16 << 5) | (uint32_t)A64_X16);
+        a64_cbz(a, A64_X9, clear, 1);
+        a64_str32(a, A64_X0, A64_X16, 0);
+        a64_b(a, stored);
+        a64_bind(a, clear);
+        a64_str32(a, 31, A64_X16, 0);
+        a64_bind(a, stored);
+    }
+    /* The kernel already returns -1 on failure, which is MAP_FAILED, so
+     * there is nothing to rewrite here -- unlike emit_io_builtin, whose
+     * return value is the negated errno. */
+    a64_cbz(a, A64_X9, ok, 1);
+    a64_mov_imm64(a, A64_X0, (uint64_t)-1);
+    a64_bind(a, ok);
+    (void)is_mmap2;
+    return 1;
+}
+
 static int emit_getenv(C64 *c, const char *name) {
     if (!name || strcmp(name, "getenv") != 0) return 0;
     int defined = 0;
@@ -3412,6 +3460,7 @@ static void emit_call(C64 *c, const IRInst *s) {
                                  || emit_pipe_builtin(c, s->call_name)
                                  || emit_io_builtin(c, s->call_name)
                                  || emit_getcwd(c, s->call_name)
+                                 || emit_mmap(c, s->call_name)
                                  || emit_getenv(c, s->call_name)
                                  || emit_bound_builtin(c, s->call_name)
                                  || emit_cache_builtin(c, s->call_name)))) {
