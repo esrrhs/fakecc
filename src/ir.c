@@ -11955,7 +11955,16 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     int is_sse = (cls[k] == SYSV_CLS_SSE);
                     int pw = 8;
                     if (is_sse && nreg == 1) {
+                        /* An HFA eightbyte carries one element, not the
+                         * whole aggregate: sizing it from type_size()
+                         * charged aligned(16) padding to the parameter, and
+                         * the backend then moved the incoming V register
+                         * into a GP one 32 bits at a time. */
                         int sz = type_size(pty);
+                        if (hfa) {
+                            int ew = abi_hfa_elem_size(pty);
+                            if (ew > 0) sz = ew;
+                        }
                         if (sz == 8 || sz == 16 || sz == 32 || sz == 64)
                             pw = sz;
                     }

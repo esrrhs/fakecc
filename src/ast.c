@@ -844,6 +844,20 @@ int abi_is_hfa(Type t) {
     return n >= 1 && n <= 4;
 }
 
+/* Width of one element of a homogeneous float/double aggregate, or -1.
+ * An HFA's eightbytes hold one element each, which is not the aggregate's
+ * size: `struct __attribute__((aligned(16))) { double d; }` is 16 bytes
+ * carrying a single 8-byte element, and sizing its parameter from
+ * type_size made the incoming V->GP move 32-bit, so the high half of the
+ * double was lost and `(int)s.d` read 0. */
+int abi_hfa_elem_size(Type t) {
+    if (!abi_is_arm64()) return -1;
+    int kind = 0;
+    int n = hfa_elems(t, &kind);
+    if (n < 1 || n > 4) return -1;
+    return kind ? kind : -1;
+}
+
 int abi_indirect_agg(Type t) {
     /* Darwin: a non-HFA aggregate larger than 16 bytes is passed and
      * returned through a pointer.  HFAs use V registers instead. */

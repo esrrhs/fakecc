@@ -140,6 +140,10 @@ int abi_indirect_agg(Type t);
 /* 1 when `t` is an AAPCS64 homogeneous float/double aggregate of 1–4
  * elements.  Always 0 on SysV x86. */
 int abi_is_hfa(Type t);
+/* Width of one element of that aggregate (4 or 8), or -1.  Not the size of
+ * `t`: an aligned(16) `struct { double d; }` is 16 bytes with one 8-byte
+ * element.  -1 on SysV x86. */
+int abi_hfa_elem_size(Type t);
 
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
