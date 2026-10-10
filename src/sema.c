@@ -2797,7 +2797,8 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     if (keep_union_desig) {
         if (last_union_member_idx < 0 || last_union_member_idx >= sd->num_members)
             last_union_member_idx = 0;
-        const char *mn = sd->members[last_union_member_idx].name;
+        const char *mn = sd->num_members > 0
+            ? sd->members[last_union_member_idx].name : NULL;
         if (mn && mn[0]) {
             union_member_name = xstrdup(mn);
             union_desig_kind = 1;

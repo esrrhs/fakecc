@@ -201,7 +201,7 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                     depth++;
                     Expr *e = parse_ternary(p);
                     long long val = 0;
-                    if (fold_const_int(e, &val)) {
+                    if (e && fold_const_int(e, &val)) {
                         if (val <= 0 || (val & (val - 1)) != 0) {
                             return die_at(e->loc.file, e->loc.line, e->loc.col,
                                    "requested alignment '%lld' is not a positive power of 2", val);
@@ -1385,6 +1385,8 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                 const Token *wtok = peek(p);
                 Expr *we = parse_ternary(p);
                 long long wval = 0;
+                if (!we)
+                    return;
                 if (fold_const_int(we, &wval)) {
                     bit_width = (int)wval;
                 } else if (we->kind == EX_VAR) {
@@ -1540,6 +1542,8 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
             advance(p);
             Expr *e = parse_ternary(p);
             long long val = 0;
+            if (!e)
+                return;
             if (fold_const_int(e, &val)) {
                 has_value = 1; value = (int)val;
             } else if (e->kind == EX_VAR) {
