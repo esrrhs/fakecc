@@ -134,3 +134,9 @@ bash test/compile/gcc_compile/run_compile.sh ./build/fakecc -O0
 生成的辅助函数只读写局部变量和参数，不写全局变量：函数调用可以出现在表达式的任意位置，而 C 未规定表达式各操作数的求值顺序，一旦函数带全局副作用，gcc 与 fakecc 就可能各自"正确地"打印出不同的值（这类程序不是误编译，实测 clang 与 fakecc 一致而与 gcc 不同）。因此输出一旦不一致即为 fakecc 的真实误编译。
 
 脚本还额外兜底这两类"生成器自己写出坏程序"的情况，避免把生成器的 bug 记到 fakecc 头上：oracle 用 `-fsanitize=undefined -fsanitize-trap=undefined` 构建（不需要 libubsan），程序一旦有未定义行为（越界移位、除零、有符号溢出等）就会 trap 并被报为 FAIL；出现差异时再用 clang 复跑一遍，若 clang 与 fakecc 输出一致而 gcc 不同，说明该程序的结果并不唯一（未指定/实现定义行为），报告为 AMBIG 而非 FAIL。
+
+---
+
+## libFuzzer 模糊测试（fuzz）
+
+与上面"生成完整合法程序"互补的一套：基于 libFuzzer + ASan/UBSan 的覆盖率引导变异测试，专找 crash、内存错误和未定义行为。`fuzz/build_fuzz.sh` 构建两个 target（`fuzz_compile` 把任意字节喂给 fakecc 前端，`fuzz_differential` 与 `gcc -fsyntax-only` 比较接受/拒绝），语料从现有测试集抽样生成。用法与 CI 调度见 `fuzz/README.md`。
