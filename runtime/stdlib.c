@@ -375,6 +375,21 @@ void longjmp(long *env, int val) {
     __builtin_longjmp((void *)env, val);
 }
 
+/* gcc_torture's link-time assertion.  A case calls link_error() only on a
+ * path that is supposed to be unreachable -- dead after constant folding, or
+ * guarded by a condition the optimiser must prove false -- and on ELF the
+ * unresolved symbol is what reports failure: the link breaks if the call
+ * survives.
+ *
+ * A static Mach-O link has nowhere to defer an undefined symbol to, so it
+ * would reject every such case whether or not the compiler got it right.
+ * Give the name the body the idiom already implies instead: reaching it *is*
+ * the failure, and abort() says so.  The two cases this unblocks still fail
+ * if their guard is ever taken. */
+void link_error(void) {
+    abort();
+}
+
 
 /* Shared body of the strto* family: parses [ws][sign][base prefix][digits] and
  * returns the magnitude, with the sign reported through *neg.  On overflow
