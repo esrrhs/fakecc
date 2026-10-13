@@ -135,14 +135,25 @@ foreach(lvl O0 O1)
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_multi_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-    # gcc-oracle differential suite over a curated e2e manifest.
-    add_test(NAME difftest_${lvl}
-             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl}
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # Differential suite: uses gcc on Linux, clang on macOS (detected at runtime).
+    if(APPLE)
+        add_test(NAME difftest_${lvl}
+                 COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl} --oracle clang
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    else()
+        add_test(NAME difftest_${lvl}
+                 COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl}
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
 
-    # Shared-library linking: -l / -l: / -nodefaultlibs / .so path.
+    # Shared-library linking: ELF .so on Linux, Mach-O .dylib on macOS.
+    # Each script auto-skips on the wrong platform.
     add_test(NAME e2e_shlib_${lvl}
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_shlib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    add_test(NAME e2e_dylib_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_dylib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     # Compile-only robustness suite (2,003 GCC edge-case tests).

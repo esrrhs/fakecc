@@ -268,7 +268,8 @@ jobs:
 
   # macOS e2e suites: same coverage as Linux bootstrap-suite, but using the
   # host-built compiler (bootstrap on arm64 hits a conditional-branch-range
-  # limitation that is being investigated separately).
+  # limitation that is being investigated separately). Uses clang as the
+  # difftest oracle (instead of gcc on Linux) and includes Mach-O dylib tests.
   macos-suite:
     name: macos · ${{ matrix.label }}
     runs-on: macos-latest
@@ -281,7 +282,13 @@ jobs:
             opt: -O0
           - label: e2e -O1
             opt: -O1
-          - label: multi/cli/compile/ports
+          - label: difftest -O0
+            opt: -O0
+            suite: difftest
+          - label: difftest -O1
+            opt: -O1
+            suite: difftest
+          - label: multi/cli/dylib/compile/ports
             opt: ""
     steps:
       - uses: actions/checkout@v4
@@ -297,10 +304,15 @@ jobs:
             e2e*)
               CC_TIMEOUT=300 bash test/e2e/run_e2e.sh build/fakecc ${{ matrix.opt }}
               ;;
-            multi/cli/compile/ports)
+            difftest*)
+              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh build/fakecc ${{ matrix.opt }} --oracle clang
+              ;;
+            multi/cli/dylib/compile/ports)
               bash test/e2e/run_multi_e2e.sh build/fakecc -O0
               bash test/e2e/run_multi_e2e.sh build/fakecc -O1
               bash test/e2e/run_cli_e2e.sh build/fakecc
+              bash test/e2e/run_dylib_e2e.sh build/fakecc -O0
+              bash test/e2e/run_dylib_e2e.sh build/fakecc -O1
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh build/fakecc -O0
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh build/fakecc -O1
               bash test/app_ports/run_all.sh build/fakecc -O0

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Differential testing: run every e2e case through both gcc and fakecc,
-# compare exit codes.  gcc is the oracle, so a case never needs a
-# hand-computed expected value.
+# Differential testing: run every e2e case through both an oracle compiler and
+# fakecc, compare exit codes. The oracle (default: gcc) is the reference, so a
+# case never needs a hand-computed expected value.
+#
+# Usage: run_difftest.sh [fakecc] [flags...] [--oracle ORACLE]
+#   --oracle ORACLE   oracle compiler command (default: gcc, macOS can use clang)
 set -uo pipefail
 # Portability helpers (timeout/nproc/readelf shims for non-GNU hosts).
 _COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -18,8 +21,24 @@ FAKECC=${1:-"$ROOT/build/fakecc"}
 shift || true
 MANIFEST=${MANIFEST:-"$ROOT/test/e2e/difftest_manifest.txt"}
 SUITE_DIR="$ROOT/test/e2e/cases"
-# Extra fakecc flags (e.g. -O0); gcc remains the unmodified oracle.
-FCC_FLAGS="${CC_FLAGS:-} $*"
+
+# Parse --oracle flag
+ORACLE="gcc"
+FCC_FLAGS_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --oracle)
+            ORACLE="$2"
+            shift 2
+            ;;
+        *)
+            FCC_FLAGS_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+# Extra fakecc flags (e.g. -O0); oracle remains the unmodified reference.
+FCC_FLAGS="${CC_FLAGS:-} ${FCC_FLAGS_ARGS[*]:-}"
 
 if [ ! -x "$FAKECC" ]; then
     echo "difftest: fakecc not executable: $FAKECC" >&2
@@ -27,8 +46,8 @@ if [ ! -x "$FAKECC" ]; then
 fi
 # Collect every .c case except the gdb/debug suite (which uses gdb
 # breakpoints, not exit codes) and the expect_error cases (rejected
-# by design, gcc would accept them).  Also skip files that import a
-# package other than `runtime`: gcc has no package system, and stripping
+# by design, oracle would accept them).  Also skip files that import a
+# package other than `runtime`: oracle has no package system, and stripping
 # `import flags;` still leaves `flags.CONST` which it cannot parse.
 files=()
 for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
@@ -51,4 +70,4 @@ if [ ${#files[@]} -eq 0 ]; then
     exit 1
 fi
 
-exec bash "$ROOT/tools/difftest.sh" -c "$FAKECC" -f "$FCC_FLAGS" "${files[@]}"
+exec bash "$ROOT/tools/difftest.sh" -c "$FAKECC" -f "$FCC_FLAGS" -o "$ORACLE" "${files[@]}"
