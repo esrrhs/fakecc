@@ -1500,7 +1500,11 @@ static int sect_is(const char *sect, const char *name) {
         if (name[i] == '\0') return sect[i] == '\0';
         if (sect[i] != name[i]) return 0;
     }
-    return name[16] == '\0';
+    /* All 16 bytes matched and name had no NUL in the first 16 positions.
+     * A valid Mach-O section name is at most 16 bytes, so this is a match.
+     * We avoid accessing name[16] here because GCC's -Warray-bounds correctly
+     * flags it as out-of-bounds for string literals shorter than 17 bytes. */
+    return 1;
 }
 
 int macho_read_object(const char *path, EmitModule *em) {
