@@ -168,6 +168,11 @@ add_test(NAME e2e_gdb
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_gdb_e2e.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# DWARF against a real lldb (macOS equivalent of gdb test).
+add_test(NAME e2e_lldb
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_lldb_e2e.sh $<TARGET_FILE:fakecc>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_test(NAME e2e_cli
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_cli_e2e.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
