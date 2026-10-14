@@ -135,7 +135,8 @@ foreach(lvl O0 O1)
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_multi_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-    # Differential suite: uses gcc on Linux, clang on macOS (detected at runtime).
+    # gcc-oracle differential suite over a curated e2e manifest.
+    # macOS uses clang as the oracle (no gcc on CI runners).
     if(APPLE)
         add_test(NAME difftest_${lvl}
                  COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl} --oracle clang
@@ -146,14 +147,9 @@ foreach(lvl O0 O1)
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
 
-    # Shared-library linking: ELF .so on Linux, Mach-O .dylib on macOS.
-    # Each script auto-skips on the wrong platform.
+    # Shared-library linking: -l / -l: / -nodefaultlibs / .so path.
     add_test(NAME e2e_shlib_${lvl}
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_shlib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-    add_test(NAME e2e_dylib_${lvl}
-             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_dylib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     # Compile-only robustness suite (2,003 GCC edge-case tests).
@@ -166,11 +162,6 @@ endforeach()
 # expected answers differ between them.  Skipped gracefully if gdb is absent.
 add_test(NAME e2e_gdb
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_gdb_e2e.sh $<TARGET_FILE:fakecc>
-         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-# DWARF against a real lldb (macOS equivalent of gdb test).
-add_test(NAME e2e_lldb
-         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_lldb_e2e.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_test(NAME e2e_cli

@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
-# Differential testing: compile the same program with an oracle compiler and
-# with fakecc, run both, compare exit codes.
+# Differential testing: compile the same program with gcc and with fakecc,
+# run both, compare exit codes.
 #
-#   tools/difftest.sh [-c FAKECC] [-f "FAKECC_FLAGS"] [-o ORACLE] file.c [file.c ...]
+#   tools/difftest.sh [-c FAKECC] [-f "FAKECC_FLAGS"] file.c [file.c ...]
 #
-# The oracle compiler (default: gcc) is the reference, so a case never needs a
-# hand-computed expected value. That matters more than it sounds: a wrong
-# expectation looks exactly like a compiler bug, and chasing one costs more
-# than writing the whole harness.
+# gcc is the oracle, so a case never needs a hand-computed expected value.
+# That matters more than it sounds: a wrong expectation looks exactly like a
+# compiler bug, and chasing one costs more than writing the whole harness.
 #
 # Input files are in the fakecc dialect (a leading `package main;`); the line
-# is stripped before handing the source to the oracle.
+# is stripped before handing the source to gcc.
 set -uo pipefail
+# Portability helpers (timeout shim for non-GNU hosts).
+_COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../test" && pwd)
+. "$_COMPAT_DIR/compat.sh" || { echo "cannot source compat.sh from $_COMPAT_DIR" >&2; exit 2; }
 
 FAKECC=${FAKECC:-./build/fakecc}
-ORACLE=${ORACLE:-gcc}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
-# Flags for fakecc only: oracle stays the unmodified reference regardless of the
+# Flags for fakecc only: the oracle stays unmodified regardless of the
 # optimization level we are exercising.
 FCC_FLAGS=${FCC_FLAGS:-}
+# Oracle compiler: gcc on Linux, clang on macOS (both understand gnu99).
+ORACLE=${ORACLE:-gcc}
 
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 
@@ -32,13 +35,16 @@ while getopts "c:f:o:j:" opt; do
     esac
 done
 shift $((OPTIND - 1))
-[ $# -gt 0 ] || { echo "usage: $0 [-c FAKECC] [-o ORACLE] file.c ..." >&2; exit 2; }
+[ $# -gt 0 ] || { echo "usage: $0 [-c FAKECC] file.c ..." >&2; exit 2; }
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 TOOLS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-export FAKECC ORACLE RUN_TIMEOUT FCC_FLAGS WORK TOOLS_DIR
+export FAKECC RUN_TIMEOUT FCC_FLAGS WORK TOOLS_DIR ORACLE
+# The worker subshell only sees exported functions; re-export the timeout
+# shim from compat.sh so it is available inside difftest_one.
+export -f timeout nproc 2>/dev/null || true
 
 difftest_one() {
     local src="$1"
@@ -111,7 +117,7 @@ difftest_one() {
             echo '#define alloca __builtin_alloca'
         fi
         cat "$WORK/$name.prep.c"
-    } > "$WORK/$name.$ORACLE.c"
+    } > "$WORK/$name.gcc.c"
     # Header-free gcc must not accept implicit libc decls (`int getenv()`).
     # Do not pass -w: we need the diagnostic.  Fall back to glibc headers
     # when gcc fails or only succeeded by assuming implicit functions.
@@ -126,8 +132,8 @@ difftest_one() {
     if ! $ORACLE -std=gnu99 -D_GNU_SOURCE \
             -Wno-error=int-conversion -Wno-error=implicit-int \
             -Wno-error=incompatible-pointer-types \
-            $extra_flags -o "$WORK/$name.$ORACLE" "$WORK/$name.$ORACLE.c" -lm 2>"$WORK/$name.$ORACLE.err" \
-       || grep -qE 'implicit declaration|隐式声明' "$WORK/$name.$ORACLE.err"; then
+            $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err" \
+       || grep -qE 'implicit declaration|隐式声明' "$WORK/$name.gcc.err"; then
         {
             echo '#define _GNU_SOURCE 1'
             echo '#ifndef __INT_MIN__'
@@ -179,22 +185,22 @@ src = re.sub(r"typedef\s+struct\s+_?IO_FILE\s+FILE\s*;", "", src)
 src = re.sub(r"typedef\s+struct\s+FILE\s+FILE\s*;", "", src)
 sys.stdout.buffer.write(src.encode("latin-1"))
 PY
-        } > "$WORK/$name.$ORACLE.c"
+        } > "$WORK/$name.gcc.c"
         if ! $ORACLE -std=gnu99 -D_GNU_SOURCE -w \
                 -Wno-error=int-conversion -Wno-error=implicit-int \
                 -Wno-error=incompatible-pointer-types \
-                $extra_flags -o "$WORK/$name.$ORACLE" "$WORK/$name.$ORACLE.c" -lm 2>"$WORK/$name.$ORACLE.err"; then
-            printf '%-28s FAIL ($ORACLE rejected: %s)\n' "$base" "$(head -1 "$WORK/$name.$ORACLE.err")"
+                $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err"; then
+            printf '%-28s FAIL (%s rejected: %s)\n' "$base" "$ORACLE" "$(head -1 "$WORK/$name.gcc.err")"
             return 1
         fi
     fi
     local gcc_rc=0
-    timeout "$RUN_TIMEOUT" "$WORK/$name.$ORACLE" >"$WORK/$name.$ORACLE.out" 2>"$WORK/$name.$ORACLE.stderr" || gcc_rc=$?
+    timeout "$RUN_TIMEOUT" "$WORK/$name.gcc" >"$WORK/$name.gcc.out" 2>"$WORK/$name.gcc.stderr" || gcc_rc=$?
 
     if ! "$FAKECC" $FCC_FLAGS $fcc_extra "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
         local rc=$?
         if [ "$rc" -ge 128 ]; then
-            printf '%-28s DIFF (fakecc killed by signal %s; $ORACLE exits %s)\n' \
+            printf '%-28s DIFF (fakecc killed by signal %s; gcc exits %s)\n' \
                    "$base" "$((rc - 128))" "$gcc_rc"
         else
             printf '%-28s DIFF (fakecc rejected: %s)\n' \
@@ -206,12 +212,12 @@ PY
     timeout "$RUN_TIMEOUT" "$WORK/$name.fcc" >"$WORK/$name.fcc.out" 2>"$WORK/$name.fcc.stderr" || fcc_rc=$?
 
     if [ "$fcc_rc" = "124" ] && [ "$gcc_rc" != "124" ]; then
-        printf '%-28s DIFF (fakecc build did not terminate; $ORACLE exits %s)\n' "$base" "$gcc_rc"
+        printf '%-28s DIFF (fakecc build did not terminate; gcc exits %s)\n' "$base" "$gcc_rc"
         return 1
     elif [ "$gcc_rc" != "$fcc_rc" ]; then
-        printf '%-28s DIFF ($ORACLE exits %s, fakecc exits %s)\n' "$base" "$gcc_rc" "$fcc_rc"
+        printf '%-28s DIFF (gcc exits %s, fakecc exits %s)\n' "$base" "$gcc_rc" "$fcc_rc"
         return 1
-    elif ! cmp -s "$WORK/$name.$ORACLE.out" "$WORK/$name.fcc.out"; then
+    elif ! cmp -s "$WORK/$name.gcc.out" "$WORK/$name.fcc.out"; then
         printf '%-28s DIFF (same exit %s, different stdout)\n' "$base" "$gcc_rc"
         return 1
     else
