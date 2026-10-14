@@ -1,4 +1,7 @@
 // expect: 0
+// Over-aligned vector frame slots: gcc's arm64 layout does not match the
+// x86 assumption this case pins.
+// skip_oracle: darwin
 // vector_size(32) and vector_size(64) side by side in one frame.
 //
 // vector32_align and vector64_align each hold a single over-aligned local.

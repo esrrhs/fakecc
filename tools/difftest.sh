@@ -73,11 +73,15 @@ difftest_one() {
         esac
     done
 
+    # Package qualifiers (`runtime.puts` -> `puts`) are stripped by python,
+    # not by sed: `\b` is a GNU extension, so on BSD sed (macOS) the sed pass
+    # silently left every qualified call in place and gcc then rejected the
+    # translation unit with "'runtime' undeclared".
     sed -E \
         -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
         -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
-        -e 's/\b(runtime|fmt|io|ctype)\.//g' \
-        "$src" > "$WORK/$name.body.c"
+        "$src" \
+        | python3 "$TOOLS_DIR/strip_pkg_qualifier.py" > "$WORK/$name.body.c"
 
     # Prefer a header-free translation: torture ports ship their own libc
     # prototypes (`fprintf(void*, ...)`, `isprint`) which clash with glibc

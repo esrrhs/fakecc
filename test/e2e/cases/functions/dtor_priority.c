@@ -1,4 +1,6 @@
 // expect: 0
+// Mach-O has no constructor/destructor priorities: the oracle rejects them.
+// skip_oracle: darwin
 package main;
 
 static int g;

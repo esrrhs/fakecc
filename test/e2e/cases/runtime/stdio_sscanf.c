@@ -2,6 +2,8 @@
 // suppression.  Must match glibc conversion and assignment counts.
 // skip_oracle: clang
 // expect: 0
+// Darwin libc %n and assignment counts differ from glibc/fakecc's runtime.
+// skip_oracle: darwin
 package main;
 import runtime;
 int main() {

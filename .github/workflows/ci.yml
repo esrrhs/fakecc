@@ -149,7 +149,10 @@ jobs:
   bootstrap:
     name: bootstrap (fixed point)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The self-hosting pass (stage 2) runs the -O0 bootstrapped fakecc against
+    # the full compiler and is inherently slow; stage 1 took ~1 min while stage 2
+    # alone ran past 14 min under runner contention, so 15 min was too tight.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

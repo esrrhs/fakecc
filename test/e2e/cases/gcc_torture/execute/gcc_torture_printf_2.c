@@ -1,4 +1,6 @@
 // expect: 0
+// Darwin's <stdio.h> declares freopen; the port's prototype clashes.
+// skip_oracle: darwin
 package main;
 
 extern void abort(void);

@@ -17,6 +17,8 @@ FAKECC=${1:-"$ROOT/build/fakecc"}
 shift || true
 MANIFEST=${MANIFEST:-"$ROOT/test/e2e/difftest_manifest.txt"}
 SUITE_DIR="$ROOT/test/e2e/cases"
+# Same `<os>-<arch>` tag run_e2e.sh uses for `unsupported_on:` (darwin-arm64).
+HOST_TAG="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m)"
 # Oracle compiler: gcc by default, clang on macOS (pass --oracle clang).
 ORACLE="gcc"
 EXTRA_FLAGS=()
@@ -66,6 +68,27 @@ for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
         if grep -qE '^//[[:space:]]*skip_oracle:[[:space:]]*clang' "$f"; then
             continue
         fi
+    fi
+    # Oracle gaps that are Darwin's, not fakecc's: Mach-O has no init/fini
+    # priorities and only weak aliases, there is no generic syscall(), the SDK
+    # headers clash with the libc prototypes the torture ports carry, and
+    # Darwin's libc formats %n/%p and scanf differently from glibc (annotated
+    # `skip_oracle: darwin`).  e2e still runs these against expect:.
+    if [ "$(uname -s)" = "Darwin" ]; then
+        if grep -qE '^//[[:space:]]*skip_oracle:[[:space:]]*darwin' "$f"; then
+            continue
+        fi
+    fi
+    # Platform-intrinsic skips: run_e2e.sh honours `unsupported_on: <os>-<arch>`
+    # (e.g. darwin-arm64) for ABI limits no compiler can satisfy here.  difftest
+    # must agree — if e2e will not run the case on this host, comparing it
+    # against the oracle is not a signal either.
+    skip_host=0
+    for t in $(sed -n 's|^//[[:space:]]*unsupported_on:[[:space:]]*\(.*\)|\1|p' "$f" | head -1); do
+        if [ "$t" = "$HOST_TAG" ]; then skip_host=1; fi
+    done
+    if [ "$skip_host" = "1" ]; then
+        continue
     fi
     files+=("$f")
 done

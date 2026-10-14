@@ -1,4 +1,6 @@
 // expect: 0
+// ptrauth intrinsics need arm64e; the oracle cannot link them here.
+// skip_oracle: darwin
 // Pointer-authentication instructions.
 //
 // Darwin signs a thread start routine before handing it to the kernel and

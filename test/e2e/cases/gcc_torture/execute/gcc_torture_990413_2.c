@@ -1,4 +1,6 @@
 // expect: 0
+// Darwin SDK headers declare asin, so the port's static decl clashes.
+// skip_oracle: darwin
 // unsupported_on: darwin-arm64
 // skip_oracle: clang
 // Its asin is written in x87 inline asm (fpatan / fsqrt plus an 80-bit

@@ -1,4 +1,7 @@
 // expect: 0
+// Darwin libc formats %p/%# differently from glibc (and from fakecc's
+// runtime).
+// skip_oracle: darwin
 // `#` on f/e always prints a decimal point; on g it keeps trailing zeros.
 // skip_oracle: clang
 // `%#.0o` of 0 is `0`.  glibc `%p` of NULL is `(nil)`.
