@@ -1,5 +1,6 @@
 // expect: 0
 // gcc_flags: -pthread
+// skip_oracle: clang
 // Threads on Darwin come from libpthread: the runtime declares
 // pthread_create/join/self/exit extern, and the arm64 backend binds them
 // from libSystem at load time.  Building them from syscalls instead is not

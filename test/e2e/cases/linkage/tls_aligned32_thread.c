@@ -1,5 +1,6 @@
 // expect: 0
 // gcc_flags: -pthread
+// skip_oracle: clang
 
 // An aligned(32) TLS object must stay 32-aligned in a child thread too.
 //

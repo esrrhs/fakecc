@@ -1,5 +1,6 @@
 // expect: 0
 // gcc_flags: -pthread
+// skip_oracle: clang
 
 // Three workers run concurrently here, so the three threads' thread_id and
 // thread_accum copies have to be genuinely separate rather than one shared

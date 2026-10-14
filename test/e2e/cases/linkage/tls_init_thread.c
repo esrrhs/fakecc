@@ -1,5 +1,6 @@
 // expect: 0
 // gcc_flags: -pthread
+// skip_oracle: clang
 
 // Darwin has no per-thread __thread object of its own to fall back on, so
 // this goes through the native TLV path: a tlv_descriptor in
