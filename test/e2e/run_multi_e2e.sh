@@ -516,10 +516,16 @@ gcc -fno-pic -fno-pie -c "$TMP/gcc_32s_x.c" -o "$TMP/gcc_32s_x.o"
 run_multi 7 "$TMP/fc_32s_x_main.c" "$TMP/gcc_32s_x.o"
 
 # gcc -mcmodel=large uses R_X86_64_64 in .text (8-byte S+A, not PC32).
-echo 'int g = 7; int get(void) { return g; }' > "$TMP/gcc_large.c"
-echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_large_main.c"
-gcc -O2 -mcmodel=large -fno-pic -c "$TMP/gcc_large.c" -o "$TMP/gcc_large.o"
-run_multi 7 "$TMP/fc_large_main.c" "$TMP/gcc_large.o"
+# ELF/x86_64-only: -mcmodel is an x86 code-model and R_X86_64_64 has no
+# Mach-O equivalent, so there is nothing for fakecc to consume here.
+if is_elf_host && [ "$(uname -m)" = "x86_64" ]; then
+    echo 'int g = 7; int get(void) { return g; }' > "$TMP/gcc_large.c"
+    echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_large_main.c"
+    gcc -O2 -mcmodel=large -fno-pic -c "$TMP/gcc_large.c" -o "$TMP/gcc_large.o"
+    run_multi 7 "$TMP/fc_large_main.c" "$TMP/gcc_large.o"
+else
+    pass "gcc -mcmodel=large interop (skipped, x86_64 ELF-only)"
+fi
 
 # gcc -O2 jump tables live in .rodata with .rela.rodata (R_X86_64_64 / PC32).
 # ELF/x86_64-only: arm64 and Mach-O use different relocation sections.
@@ -661,24 +667,30 @@ if [ -f "$TMP/tls_und.o" ]; then
 fi
 
 # gcc -fcommon: SHN_COMMON must merge into BSS and be writable.
-echo 'int g; int get(void) { return g; }' > "$TMP/gcc_common.c"
-echo 'package main; extern int g; int get(void); int main(void) { g = 9; return get(); }' > "$TMP/fc_common_main.c"
-gcc -fcommon -c "$TMP/gcc_common.c" -o "$TMP/gcc_common.o"
-run_multi 9 "$TMP/fc_common_main.c" "$TMP/gcc_common.o"
+# ELF-only: SHN_COMMON is a GNU-ld/ELF construct; Mach-O records these as a
+# __common section that fakecc's Mach-O object reader does not consume.
+if is_elf_host; then
+    echo 'int g; int get(void) { return g; }' > "$TMP/gcc_common.c"
+    echo 'package main; extern int g; int get(void); int main(void) { g = 9; return get(); }' > "$TMP/fc_common_main.c"
+    gcc -fcommon -c "$TMP/gcc_common.c" -o "$TMP/gcc_common.o"
+    run_multi 9 "$TMP/fc_common_main.c" "$TMP/gcc_common.o"
 
-# Two COMMON defs of the same name share one slot (max size).
-echo 'int g; int setg(int v) { g = v; return g; }' > "$TMP/gcc_c1.c"
-echo 'char g[8]; int getg(void) { return (int)g[0]; }' > "$TMP/gcc_c2.c"
-echo 'package main; int setg(int v); int getg(void); int main(void) { setg(6); return getg(); }' > "$TMP/fc_cmerge.c"
-gcc -fcommon -c "$TMP/gcc_c1.c" -o "$TMP/gcc_c1.o"
-gcc -fcommon -c "$TMP/gcc_c2.c" -o "$TMP/gcc_c2.o"
-run_multi 6 "$TMP/fc_cmerge.c" "$TMP/gcc_c1.o" "$TMP/gcc_c2.o"
+    # Two COMMON defs of the same name share one slot (max size).
+    echo 'int g; int setg(int v) { g = v; return g; }' > "$TMP/gcc_c1.c"
+    echo 'char g[8]; int getg(void) { return (int)g[0]; }' > "$TMP/gcc_c2.c"
+    echo 'package main; int setg(int v); int getg(void); int main(void) { setg(6); return getg(); }' > "$TMP/fc_cmerge.c"
+    gcc -fcommon -c "$TMP/gcc_c1.c" -o "$TMP/gcc_c1.o"
+    gcc -fcommon -c "$TMP/gcc_c2.c" -o "$TMP/gcc_c2.o"
+    run_multi 6 "$TMP/fc_cmerge.c" "$TMP/gcc_c1.o" "$TMP/gcc_c2.o"
 
-# GLOBAL definition overrides COMMON.
-echo 'int g; int get(void) { return g; }' > "$TMP/gcc_common2.c"
-echo 'package main; int g = 11; int get(void); int main(void) { return get(); }' > "$TMP/fc_common_ov.c"
-gcc -fcommon -c "$TMP/gcc_common2.c" -o "$TMP/gcc_common2.o"
-run_multi 11 "$TMP/fc_common_ov.c" "$TMP/gcc_common2.o"
+    # GLOBAL definition overrides COMMON.
+    echo 'int g; int get(void) { return g; }' > "$TMP/gcc_common2.c"
+    echo 'package main; int g = 11; int get(void); int main(void) { return get(); }' > "$TMP/fc_common_ov.c"
+    gcc -fcommon -c "$TMP/gcc_common2.c" -o "$TMP/gcc_common2.o"
+    run_multi 11 "$TMP/fc_common_ov.c" "$TMP/gcc_common2.o"
+else
+    pass "gcc -fcommon SHN_COMMON interop (skipped, ELF-only section)"
+fi
 
 # gcc STB_WEAK definition satisfies UND; GLOBAL overrides WEAK.
 echo 'int __attribute__((weak)) val(void) { return 3; }' > "$TMP/gcc_weak.c"
@@ -709,10 +721,16 @@ gcc -fPIC -c "$TMP/gcc_relro.c" -o "$TMP/gcc_relro.o"
 run_multi 3 "$TMP/fc_relro.c" "$TMP/gcc_relro.o"
 
 # gcc -fdata-sections puts BSS objects in .bss.<name>.
-echo 'int a; int b; int sum(void) { a = 2; b = 5; return a + b; }' > "$TMP/gcc_bsssec.c"
-echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_bsssec.c"
-gcc -fdata-sections -c "$TMP/gcc_bsssec.c" -o "$TMP/gcc_bsssec.o"
-run_multi 7 "$TMP/fc_bsssec.c" "$TMP/gcc_bsssec.o"
+# ELF-only: with -fdata-sections gcc -fcommon these undefined globals land in
+# a __common,__DATA section on Mach-O, which fakecc's reader does not consume.
+if is_elf_host; then
+    echo 'int a; int b; int sum(void) { a = 2; b = 5; return a + b; }' > "$TMP/gcc_bsssec.c"
+    echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_bsssec.c"
+    gcc -fdata-sections -c "$TMP/gcc_bsssec.c" -o "$TMP/gcc_bsssec.o"
+    run_multi 7 "$TMP/fc_bsssec.c" "$TMP/gcc_bsssec.o"
+else
+    pass "gcc -fdata-sections .bss.<name> interop (skipped, ELF-only)"
+fi
 
 # gcc .rodata.cst16 as the only rodata (fakecc TU has no string literals).
 echo 'package main; int check(void); int main(void) { return check(); }' > "$TMP/fc_cst16_only.c"
@@ -721,10 +739,16 @@ gcc -O2 -c "$TMP/gcc_cst16_only.c" -o "$TMP/gcc_cst16_only.o"
 run_multi 10 "$TMP/fc_cst16_only.c" "$TMP/gcc_cst16_only.o"
 
 # gcc WEAK TLS is a valid Initial-Exec definition for a fakecc UND TLS ref.
-echo '__thread int __attribute__((weak)) tv = 5;' > "$TMP/gcc_wtls.c"
-echo 'package main; extern __thread int tv; int main(void) { return tv; }' > "$TMP/fc_wtls.c"
-gcc -c "$TMP/gcc_wtls.c" -o "$TMP/gcc_wtls.o"
-run_multi 5 "$TMP/fc_wtls.c" "$TMP/gcc_wtls.o"
+# ELF-only: this is the ELF Initial-Exec weak-TLS model; on Mach-O gcc lowers
+# TLS through emutls (__emutls_get_address), which fakecc does not resolve.
+if is_elf_host; then
+    echo '__thread int __attribute__((weak)) tv = 5;' > "$TMP/gcc_wtls.c"
+    echo 'package main; extern __thread int tv; int main(void) { return tv; }' > "$TMP/fc_wtls.c"
+    gcc -c "$TMP/gcc_wtls.c" -o "$TMP/gcc_wtls.o"
+    run_multi 5 "$TMP/fc_wtls.c" "$TMP/gcc_wtls.o"
+else
+    pass "gcc weak-TLS interop (skipped, ELF TLS model)"
+fi
 
 # PT_TLS p_align must cover 32-byte TLS objects (not a hardcoded 16).
 echo 'package main; __thread char tc = 1; __thread int tx __attribute__((aligned(32))); int main(void) { tx = 1; return ((unsigned long)&tx & 31ul) ? 1 : 0; }' > "$TMP/tls_al32.c"
@@ -751,21 +775,27 @@ if [ -f "$TMP/prog" ]; then
 fi
 
 # gcc -fdata-sections splits TLS into .tdata.<name> / .tbss.<name>.
-echo '__thread int a = 3; __thread int b = 4; int sum(void) { return a + b; }' > "$TMP/gcc_tdsec.c"
-echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_tdsec.c"
-gcc -fdata-sections -c "$TMP/gcc_tdsec.c" -o "$TMP/gcc_tdsec.o"
-run_multi 7 "$TMP/fc_tdsec.c" "$TMP/gcc_tdsec.o"
+# ELF-only: Mach-O has no .tdata/.tbss split; gcc there uses emutls, which
+# fakecc's Mach-O reader cannot consume.
+if is_elf_host; then
+    echo '__thread int a = 3; __thread int b = 4; int sum(void) { return a + b; }' > "$TMP/gcc_tdsec.c"
+    echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_tdsec.c"
+    gcc -fdata-sections -c "$TMP/gcc_tdsec.c" -o "$TMP/gcc_tdsec.o"
+    run_multi 7 "$TMP/fc_tdsec.c" "$TMP/gcc_tdsec.o"
 
-echo '__thread int a; __thread int b; int sum(void) { a = 2; b = 5; return a + b; }' > "$TMP/gcc_tbsec.c"
-echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_tbsec.c"
-gcc -fdata-sections -c "$TMP/gcc_tbsec.c" -o "$TMP/gcc_tbsec.o"
-run_multi 7 "$TMP/fc_tbsec.c" "$TMP/gcc_tbsec.o"
+    echo '__thread int a; __thread int b; int sum(void) { a = 2; b = 5; return a + b; }' > "$TMP/gcc_tbsec.c"
+    echo 'package main; int sum(void); int main(void) { return sum(); }' > "$TMP/fc_tbsec.c"
+    gcc -fdata-sections -c "$TMP/gcc_tbsec.c" -o "$TMP/gcc_tbsec.o"
+    run_multi 7 "$TMP/fc_tbsec.c" "$TMP/gcc_tbsec.o"
 
-# gcc aligned tbss after a fakecc tdata byte: object offset must stay 32-aligned.
-echo '__thread int tx __attribute__((aligned(32)));' > "$TMP/gcc_tx32.c"
-echo 'package main; extern __thread int tx; __thread char tc = 1; int main(void) { tx = 1; return ((unsigned long)&tx & 31ul) ? 1 : 0; }' > "$TMP/fc_tx32.c"
-gcc -c "$TMP/gcc_tx32.c" -o "$TMP/gcc_tx32.o"
-run_multi 0 "$TMP/fc_tx32.c" "$TMP/gcc_tx32.o"
+    # gcc aligned tbss after a fakecc tdata byte: object offset must stay 32-aligned.
+    echo '__thread int tx __attribute__((aligned(32)));' > "$TMP/gcc_tx32.c"
+    echo 'package main; extern __thread int tx; __thread char tc = 1; int main(void) { tx = 1; return ((unsigned long)&tx & 31ul) ? 1 : 0; }' > "$TMP/fc_tx32.c"
+    gcc -c "$TMP/gcc_tx32.c" -o "$TMP/gcc_tx32.o"
+    run_multi 0 "$TMP/fc_tx32.c" "$TMP/gcc_tx32.o"
+else
+    pass "gcc -fdata-sections TLS split interop (skipped, ELF-only .tdata/.tbss)"
+fi
 
 # gcc -fPIC Global-Dynamic TLS (TLSGD + __tls_get_addr) relaxed to IE.
 # ELF/x86_64-only: Mach-O uses different TLS relocation types.
@@ -781,14 +811,25 @@ if is_elf_host && [ "$(uname -m)" = "x86_64" ]; then
 else
     pass "gcc -fPIC TLS object has TLSGD (skipped, x86_64 ELF-only)"
 fi
-run_multi 9 "$TMP/fc_tlsgd.c" "$TMP/gcc_tlsgd.o"
+# Linking a gcc -fPIC (emutls on Mach-O) Global-Dynamic TLS object is an
+# ELF-only interop path; on Mach-O fakecc would hit __emutls_get_address.
+if is_elf_host; then
+    run_multi 9 "$TMP/fc_tlsgd.c" "$TMP/gcc_tlsgd.o"
+else
+    pass "gcc -fPIC Global-Dynamic TLS link (skipped, ELF TLS model)"
+fi
 
 # Reverse: fakecc TLS def, gcc -fPIC access (TLSGD to a defined symbol).
-echo 'package main; __thread int tv = 11; int dummy(void) { return tv; }' > "$TMP/fc_tlsdef.c"
-echo 'extern __thread int tv; int get(void) { return tv; }' > "$TMP/gcc_tlsuse.c"
-echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_tlsuse_main.c"
-gcc -fPIC -c "$TMP/gcc_tlsuse.c" -o "$TMP/gcc_tlsuse.o"
-run_multi 11 "$TMP/fc_tlsdef.c" "$TMP/gcc_tlsuse.o" "$TMP/fc_tlsuse_main.c"
+# ELF-only: gcc -fPIC TLS access on Mach-O uses emutls, unresolved by fakecc.
+if is_elf_host; then
+    echo 'package main; __thread int tv = 11; int dummy(void) { return tv; }' > "$TMP/fc_tlsdef.c"
+    echo 'extern __thread int tv; int get(void) { return tv; }' > "$TMP/gcc_tlsuse.c"
+    echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_tlsuse_main.c"
+    gcc -fPIC -c "$TMP/gcc_tlsuse.c" -o "$TMP/gcc_tlsuse.o"
+    run_multi 11 "$TMP/fc_tlsdef.c" "$TMP/gcc_tlsuse.o" "$TMP/fc_tlsuse_main.c"
+else
+    pass "gcc -fPIC TLS-access link (skipped, ELF TLS model)"
+fi
 
 # __attribute__((constructor)) runs before main (static _start walk).
 echo 'package main; int g; __attribute__((constructor)) void ctor(void) { g = 7; } int main(void) { return g; }' > "$TMP/ctor.c"
@@ -811,10 +852,16 @@ fi
 run_multi 7 "$TMP/ctor.o"
 
 # gcc constructor .o linked by fakecc.
-echo 'int g; __attribute__((constructor)) void ctor(void) { g = 9; } int get(void) { return g; }' > "$TMP/gcc_ctor.c"
-echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_ctor_main.c"
-gcc -c "$TMP/gcc_ctor.c" -o "$TMP/gcc_ctor.o"
-run_multi 9 "$TMP/fc_ctor_main.c" "$TMP/gcc_ctor.o"
+# ELF-only: the `int g;` lands in a __common section in gcc's Mach-O object,
+# which fakecc's reader does not consume.
+if is_elf_host; then
+    echo 'int g; __attribute__((constructor)) void ctor(void) { g = 9; } int get(void) { return g; }' > "$TMP/gcc_ctor.c"
+    echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_ctor_main.c"
+    gcc -c "$TMP/gcc_ctor.c" -o "$TMP/gcc_ctor.o"
+    run_multi 9 "$TMP/fc_ctor_main.c" "$TMP/gcc_ctor.o"
+else
+    pass "gcc constructor .o link (skipped, ELF __common section)"
+fi
 
 # gcc Local-Dynamic TLS (TLSLD + DTPOFF32) relaxed to LE.
 # ELF/x86_64-only: Mach-O uses different TLS relocation types.
@@ -830,7 +877,12 @@ if is_elf_host && [ "$(uname -m)" = "x86_64" ]; then
 else
     pass "gcc local-dynamic TLS object has TLSLD (skipped, x86_64 ELF-only)"
 fi
-run_multi 10 "$TMP/fc_tlsld.c" "$TMP/gcc_tlsld.o"
+# Linking a gcc local-dynamic TLS object is ELF-only; on Mach-O it uses emutls.
+if is_elf_host; then
+    run_multi 10 "$TMP/fc_tlsld.c" "$TMP/gcc_tlsld.o"
+else
+    pass "gcc local-dynamic TLS link (skipped, ELF TLS model)"
+fi
 
 # destructor runs after main (static _start reverse walk).
 echo 'package main; int g = 3; __attribute__((destructor)) void bye(void) { g = 1; } int main(void) { return g; }' > "$TMP/dtor.c"
@@ -875,15 +927,21 @@ else
 fi
 
 # constructor priority: smaller runs first (gcc .init_array.00NNN).
-cat > "$TMP/gcc_prio.c" <<'EOF'
+# ELF-only: Mach-O gcc rejects constructor priorities outright, and the
+# .init_array.00NNN ordering scheme is an ELF/GNU-ld convention.
+if is_elf_host; then
+    cat > "$TMP/gcc_prio.c" <<'EOF'
 int g;
 __attribute__((constructor(200))) void ctor_b(void) { g = 2; }
 __attribute__((constructor(101))) void ctor_a(void) { g = 1; }
 int get(void) { return g; }
 EOF
-echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_prio_main.c"
-gcc -c "$TMP/gcc_prio.c" -o "$TMP/gcc_prio.o"
-run_multi 2 "$TMP/fc_prio_main.c" "$TMP/gcc_prio.o"
+    echo 'package main; int get(void); int main(void) { return get(); }' > "$TMP/fc_prio_main.c"
+    gcc -c "$TMP/gcc_prio.c" -o "$TMP/gcc_prio.o"
+    run_multi 2 "$TMP/fc_prio_main.c" "$TMP/gcc_prio.o"
+else
+    pass "gcc constructor-priority link (skipped, ELF-only)"
+fi
 
 # fakecc constructor(N) in one TU.
 echo 'package main; int g; __attribute__((constructor(200))) void ctor_b(void) { g = 2; } __attribute__((constructor(101))) void ctor_a(void) { g = 1; } int main(void) { return g; }' > "$TMP/fc_prio.c"
