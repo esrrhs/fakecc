@@ -51,7 +51,7 @@ static int compile_and_run_ex(const char *source, char *const extra_argv[],
     codegen(&ir, &em, 0);
 
     const char *path = "/tmp/fakecc_cg64_native_test";
-    if (macho_write_exec(&em, macho_text_offset(), path) != 0)
+    if (macho_write_exec(&em, macho_text_offset(), path, 0) != 0)
         return -1005;
     emit_module_free(&em);
     ir_module_free(&ir);
@@ -445,7 +445,7 @@ static int compile_image(const char *source) {
     emit_module_init(&em);
     codegen(&ir, &em, 0);
     const char *path = "/tmp/fakecc_cg64_native_test";
-    int rc = macho_write_exec(&em, macho_text_offset(), path);
+    int rc = macho_write_exec(&em, macho_text_offset(), path, 0);
     emit_module_free(&em);
     ir_module_free(&ir);
     tu_free(&tu);
@@ -1167,7 +1167,7 @@ static int link_capturing(EmitModule **mods, size_t n, const char *out,
     if (saved < 0 || fd < 0) return -1;
     dup2(fd, STDERR_FILENO);
     close(fd);
-    int rc = macho_link_objects(mods, n, out);
+    int rc = macho_link_objects(mods, n, out, 0);
     fflush(stderr);
     dup2(saved, STDERR_FILENO);
     close(saved);
@@ -3637,7 +3637,7 @@ static void test_macho_link(void) {
     EmitModule mla;
     T_ASSERT_EQ_INT(emit_obj_read(la, &mla), 0);
     EmitModule *lam[1] = { &mla };
-    T_ASSERT_EQ_INT(macho_link_objects(lam, 1, "/tmp/fakecc_arm64_link_out"), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(lam, 1, "/tmp/fakecc_arm64_link_out", 0), 0);
     T_ASSERT_EQ_INT(macho_codesign("/tmp/fakecc_arm64_link_out"), 0);
     T_ASSERT_EQ_INT(run_bin("/tmp/fakecc_arm64_link_out"), 7);
     emit_module_free(&mla);
@@ -3658,7 +3658,7 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(emit_obj_read(a, &ma), 0);
     T_ASSERT_EQ_INT(emit_obj_read(b, &mb), 0);
     EmitModule *mods[2] = { &ma, &mb };
-    T_ASSERT_EQ_INT(macho_link_objects(mods, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(mods, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 42);
     emit_module_free(&ma);
@@ -3673,7 +3673,7 @@ static void test_macho_link(void) {
     EmitModule mg;
     T_ASSERT_EQ_INT(emit_obj_read(g, &mg), 0);
     EmitModule *one[1] = { &mg };
-    T_ASSERT_EQ_INT(macho_link_objects(one, 1, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(one, 1, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 7);
     emit_module_free(&mg);
@@ -3694,7 +3694,7 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(emit_obj_read(pa, &mpa), 0);
     T_ASSERT_EQ_INT(emit_obj_read(pb, &mpb), 0);
     EmitModule *pm[2] = { &mpa, &mpb };
-    T_ASSERT_EQ_INT(macho_link_objects(pm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(pm, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 7);
     emit_module_free(&mpa);
@@ -3718,7 +3718,7 @@ static void test_macho_link(void) {
     T_ASSERT(gi >= 0);
     T_ASSERT_EQ_INT(mta.syms[gi].shndx, SHN_COMMON);
     EmitModule *tm[2] = { &mta, &mtb };
-    T_ASSERT_EQ_INT(macho_link_objects(tm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(tm, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 7);
     emit_module_free(&mta);
@@ -3736,7 +3736,7 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(emit_obj_read(ta, &mta), 0);
     T_ASSERT_EQ_INT(emit_obj_read(tb, &mtb), 0);
     EmitModule *cm[2] = { &mta, &mtb };
-    T_ASSERT_EQ_INT(macho_link_objects(cm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(cm, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 4);
     emit_module_free(&mta);
@@ -3762,7 +3762,7 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(mca.init_prio[0], 200);
     T_ASSERT_EQ_INT(mcb.init_prio[0], 100);
     EmitModule *cm2[2] = { &mca, &mcb };
-    T_ASSERT_EQ_INT(macho_link_objects(cm2, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(cm2, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 11);
     emit_module_free(&mca);
@@ -3782,7 +3782,7 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(emit_obj_read(ca, &mca), 0);
     T_ASSERT_EQ_INT(emit_obj_read(cb, &mcb), 0);
     EmitModule *dm[2] = { &mca, &mcb };
-    T_ASSERT_EQ_INT(macho_link_objects(dm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(dm, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 32);
     emit_module_free(&mca);
@@ -3815,7 +3815,7 @@ static void test_macho_link(void) {
     T_ASSERT(cu >= 0);
     T_ASSERT_EQ_INT(mea.syms[cu].shndx, 0);
     EmitModule *em[2] = { &mea, &meb };
-    T_ASSERT_EQ_INT(macho_link_objects(em, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(em, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 5);
     emit_module_free(&mea);
@@ -3834,7 +3834,7 @@ static void test_macho_link(void) {
     EmitModule mfa;
     T_ASSERT_EQ_INT(emit_obj_read(fa, &mfa), 0);
     EmitModule *onef[1] = { &mfa };
-    T_ASSERT_EQ_INT(macho_link_objects(onef, 1, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(onef, 1, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 42);
     emit_module_free(&mfa);
@@ -3858,7 +3858,7 @@ static void test_macho_link(void) {
     T_ASSERT(addu >= 0);
     T_ASSERT_EQ_INT(mfa.syms[addu].shndx, 0);
     EmitModule *fm[2] = { &mfa, &mfb };
-    T_ASSERT_EQ_INT(macho_link_objects(fm, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(fm, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 42);
     emit_module_free(&mfa);
@@ -3891,7 +3891,7 @@ static void test_macho_link(void) {
     T_ASSERT_EQ_INT(emit_obj_read(aa, &maa), 0);
     T_ASSERT_EQ_INT(emit_obj_read(ab, &mab), 0);
     EmitModule *am[2] = { &maa, &mab };
-    T_ASSERT_EQ_INT(macho_link_objects(am, 2, outp), 0);
+    T_ASSERT_EQ_INT(macho_link_objects(am, 2, outp, 0), 0);
     T_ASSERT_EQ_INT(macho_codesign(outp), 0);
     T_ASSERT_EQ_INT(run_bin(outp), 7);
     emit_module_free(&maa);
