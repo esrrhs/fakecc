@@ -2244,6 +2244,17 @@ static size_t macho_symbol_span(const EmitModule *m, uint16_t sh, size_t off) {
     return end > off ? end - off : 0;
 }
 
+/* Length of a string that is not guaranteed to be NUL-terminated: load
+ * command names and string table entries are byte ranges inside the file.
+ * strnlen would do this, but it is POSIX 2008 and glibc hides it behind the
+ * strict C99 this project is built with -- it compiled on Darwin and broke
+ * every Linux job. */
+static size_t macho_strnlen(const char *s, size_t max) {
+    size_t n = 0;
+    while (n < max && s[n]) n++;
+    return n;
+}
+
 /* Read a linked dylib: install name plus exported symbols.  See the header.
  *
  * Only the exported defined range of the symbol table is collected.  A dylib
@@ -2295,7 +2306,7 @@ int macho_read_dylib(const char *path, char **install_name_out,
              * terminating NUL.  Copy exactly the bytes up to the first one. */
             if (name_off >= 8 && name_off < cmdsize) {
                 size_t avail = cmdsize - name_off;
-                size_t len = strnlen((const char *)(p + name_off), avail);
+                size_t len = macho_strnlen((const char *)(p + name_off), avail);
                 if (len && len < avail) {
                     iname = xmalloc(len + 1);
                     memcpy(iname, p + name_off, len);
@@ -2346,7 +2357,7 @@ int macho_read_dylib(const char *path, char **install_name_out,
             if (!(nl.n_type & N_EXT)) continue;           /* not external */
             const char *raw = (const char *)(strtab + nl.n_strx);
             size_t avail = strsize - nl.n_strx;
-            size_t len = strnlen(raw, avail);
+            size_t len = macho_strnlen(raw, avail);
             if (!len || len >= avail) continue;
             if (raw[0] == '_') { raw++; len--; }
             if (!len) continue;

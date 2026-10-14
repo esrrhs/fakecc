@@ -307,8 +307,7 @@ void emit_aux_rpath_add(const char *path) {
         g_rpaths = realloc(g_rpaths, g_rpath_cap * sizeof *g_rpaths);
         if (!g_rpaths) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     }
-    g_rpaths[g_nrpath++] = strdup(path);
-    if (!g_rpaths[g_nrpath - 1]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    g_rpaths[g_nrpath++] = xstrdup(path);
 }
 
 const EmitAuxLib *emit_aux_libs(size_t *n) {
