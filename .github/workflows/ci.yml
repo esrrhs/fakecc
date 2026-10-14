@@ -255,6 +255,7 @@ jobs:
               bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O0
               bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O1
               bash test/e2e/run_gdb_e2e.sh v0/fakecc-1
+              bash test/e2e/run_cli_e2e.sh v0/fakecc-1
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O0
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O1
               bash test/app_ports/run_all.sh v0/fakecc-1 -O0
@@ -314,6 +315,8 @@ jobs:
             multi/cli/compile/ports)
               bash test/e2e/run_multi_e2e.sh build/fakecc -O0
               bash test/e2e/run_multi_e2e.sh build/fakecc -O1
+              bash test/e2e/run_dylib_e2e.sh build/fakecc -O0
+              bash test/e2e/run_dylib_e2e.sh build/fakecc -O1
               bash test/e2e/run_cli_e2e.sh build/fakecc
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh build/fakecc -O0
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh build/fakecc -O1
