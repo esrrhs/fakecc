@@ -47,6 +47,12 @@
 #define LC_DYLD_CHAINED_FIXUPS 0x80000034u
 #define LC_SYMTAB         0x02u
 #define LC_DYSYMTAB       0x0Bu
+#define LC_ID_DYLIB       0x0Du
+#define LC_RPATH          (0x1Cu | LC_REQ_DYLD)
+#define LC_REQ_DYLD       0x80000000u
+#define MH_DYLIB          6u
+#define N_TYPE            0x0Eu
+#define N_STAB            0xE0u
 
 #define PLATFORM_MACOS 1u
 
@@ -263,6 +269,73 @@ static uint64_t encode_bind_ptr(uint32_t ordinal, uint32_t next) {
          | (1ull << 63);
 }
 
+/* LC_LOAD_DYLIB slots, in the order they are written.  dyld numbers them
+ * from 1, so slot i is bound with ordinal i+1.  Slot 0 is libSystem unless
+ * -nostdlib/-nodefaultlibs dropped it; the rest are the auxiliary dylibs the
+ * driver was asked to link against.
+ *
+ * Only libraries something actually binds are listed.  A requested library
+ * no reference touches would otherwise become a load-time dependency, and a
+ * missing filespec dyld could not satisfy would turn a link that should have
+ * succeeded into one that cannot start. */
+typedef struct {
+    const char *name;      /* what goes in the load command */
+    int         aux;       /* index into emit_aux_libs(), or -1 for libSystem */
+} MachoDylib;
+
+#define MACHO_MAX_DYLIBS 64
+
+/* C spelling of a Mach-O import name: the leading underscore is part of the
+ * symbol the file names, not of anything a caller sees. */
+static const char *import_c_name(const char *mach) {
+    return (mach && mach[0] == '_') ? mach + 1 : mach;
+}
+
+/* Bind each import to the library that exports it.  Every import is named in
+ * some LC_LOAD_DYLIB or dyld has nowhere to look; one nobody exports falls
+ * back to libSystem, which is what every import resolved against before
+ * auxiliary libraries existed. */
+static int imports_ordinal(const char *mach_name, const MachoDylib *libs,
+                           size_t nlibs) {
+    /* A libSystem import is not in any aux library, so it falls through to
+     * ordinal 1 -- which is where it belonged all along. */
+    int owner = emit_aux_lib_of(import_c_name(mach_name));
+    if (owner < 0) return 1;
+    for (size_t i = 0; i < nlibs; i++)
+        if (libs[i].aux == owner) return (int)(i + 1);
+    return 1;
+}
+
+/* Collect the LC_LOAD_DYLIB slots this image needs, from the imports it
+ * carries plus libSystem. */
+static size_t macho_dylib_list(const EmitModule *em, int skip_libsystem,
+                               MachoDylib *out) {
+    size_t n = 0;
+    if (!skip_libsystem) {
+        out[n].name = LIBSYSTEM_PATH;
+        out[n].aux = -1;
+        n++;
+    }
+    size_t naux = 0;
+    const EmitAuxLib *aux = emit_aux_libs(&naux);
+    /* Ordered by aux index rather than by first use so a given library always
+     * lands on the same ordinal no matter which of its symbols is bound
+     * first. */
+    for (size_t a = 0; a < naux && n < MACHO_MAX_DYLIBS; a++) {
+        int used = 0;
+        for (size_t i = 0; i < em->num_binds && !used; i++) {
+            const char *cname = import_c_name(em->binds[i].name);
+            for (size_t k = 0; k < aux[a].nsyms; k++)
+                if (strcmp(aux[a].syms[k], cname) == 0) { used = 1; break; }
+        }
+        if (!used) continue;
+        out[n].name = aux[a].install_name;
+        out[n].aux = (int)a;
+        n++;
+    }
+    return n;
+}
+
 /* Encode em->rebases and em->binds into __data and build the
  * LC_DYLD_CHAINED_FIXUPS payload plus an empty exports trie.  Only __DATA
  * is chained; const data that contains pointers is placed there by
@@ -270,7 +343,8 @@ static uint64_t encode_bind_ptr(uint32_t ordinal, uint32_t next) {
  * stride is measured to whichever kind follows it. */
 static int macho_build_fixups(const EmitModule *em, uint64_t data_page,
                               uint64_t data_file, char **data_img_out,
-                              Buffer *fixblob, Buffer *trie) {
+                              Buffer *fixblob, Buffer *trie,
+                              const MachoDylib *libs, size_t nlibs) {
     /* A fixup may sit in any file-backed section of __DATA, not just
      * __data: the thread-local descriptor table is one too. */
     uint64_t file_bytes = (uint64_t)em->data.len
@@ -412,12 +486,14 @@ static int macho_build_fixups(const EmitModule *em, uint64_t data_page,
                     (uint16_t)(off % MACHO_PAGE_SIZE));
     }
     /* dyld_chained_import: lib_ordinal 8 | weak_import 1 | name_offset 23.
-     * libSystem.B.dylib is the one LC_LOAD_DYLIB this image carries, so
-     * every import resolves against ordinal 1. */
+     * libSystem is the LC_LOAD_DYLIB every image carries anyway; an import a
+     * dylib named on the command line exports is numbered against that
+     * library's own slot instead. */
     size_t at = 0;
     for (size_t k = 0; k < nimp; k++) {
+        uint32_t ord = (uint32_t)imports_ordinal(imp_name[k], libs, nlibs);
         put_u32(blob + imports_off + 4u * k,
-                (uint32_t)(1u | ((at & 0x7FFFFFu) << 9)));
+                (ord & 0xFFu) | ((uint32_t)(at & 0x7FFFFFu) << 9));
         memcpy(blob + symbols_off + at, imp_name[k], strlen(imp_name[k]) + 1);
         at += strlen(imp_name[k]) + 1;
     }
@@ -567,10 +643,17 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     Buffer fixblob, trieblob;
     buffer_init(&fixblob);
     buffer_init(&trieblob);
+    /* What this image has to load, decided before the fixups are encoded:
+     * the chained imports cite libraries by ordinal, so the two have to be
+     * built from the same list or a bind names the wrong library. */
+    MachoDylib dylibs[MACHO_MAX_DYLIBS];
+    size_t ndylibs = macho_dylib_list(em, skip_libsystem, dylibs);
+    size_t nrpaths = 0;
+    const char *const *rpaths = emit_aux_rpaths(&nrpaths);
     int has_fix = em->num_rebases > 0 || em->num_binds > 0;
     if (has_fix &&
         macho_build_fixups(em, data_page, data_file, &data_img,
-                           &fixblob, &trieblob) != 0) {
+                           &fixblob, &trieblob, dylibs, ndylibs) != 0) {
         buffer_free(&fixblob);
         buffer_free(&trieblob);
         return -1;
@@ -611,20 +694,38 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         align8(dylinker_name_off + (uint32_t)strlen(DYLINKER_PATH) + 1);
 
     const uint32_t dylib_name_off = 24u;
-    const uint32_t dylib_cmdsz =
-        align8(dylib_name_off + (uint32_t)strlen(LIBSYSTEM_PATH) + 1);
+    /* Each dylib load command is the fixed header plus its padded path. */
+    uint32_t dylib_cmdsz[MACHO_MAX_DYLIBS];
+    uint32_t dylib_bytes = 0;
+    for (size_t i = 0; i < ndylibs; i++) {
+        dylib_cmdsz[i] =
+            align8(dylib_name_off + (uint32_t)strlen(dylibs[i].name) + 1);
+        dylib_bytes += dylib_cmdsz[i];
+    }
+    /* LC_RPATH is the same shape with a shorter header. */
+    const uint32_t rpath_name_off = 12u;
+    uint32_t rpath_cmdsz[MACHO_MAX_DYLIBS];
+    uint32_t rpath_bytes = 0;
+    for (size_t i = 0; i < nrpaths && i < MACHO_MAX_DYLIBS; i++) {
+        rpath_cmdsz[i] =
+            align8(rpath_name_off + (uint32_t)strlen(rpaths[i]) + 1);
+        rpath_bytes += rpath_cmdsz[i];
+    }
+    size_t nrpath_cmds = nrpaths < MACHO_MAX_DYLIBS ? nrpaths
+                                                    : (size_t)MACHO_MAX_DYLIBS;
 
     /* PAGEZERO, __TEXT, [__DATA], __LINKEDIT + the non-segment commands
-     * (build version, uuid, main, dylinker, [dylib if !skip_libsystem]).
-     * Pointer initializers add LC_DYLD_CHAINED_FIXUPS and an empty
-     * LC_DYLD_EXPORTS_TRIE (dyld wants the pair). */
-    const uint32_t n_dylib_cmds = skip_libsystem ? 0u : 1u;
-    const uint32_t ncmds = (data_present ? 4u : 3u) + 4u + n_dylib_cmds + (has_fix ? 2u : 0u);
+     * (build version, uuid, main, dylinker, the dylibs this image loads, and
+     * any -rpath).  Pointer initializers add LC_DYLD_CHAINED_FIXUPS and an
+     * empty LC_DYLD_EXPORTS_TRIE (dyld wants the pair). */
+    const uint32_t ncmds = (data_present ? 4u : 3u) + 4u
+                         + (uint32_t)ndylibs + (uint32_t)nrpath_cmds
+                         + (has_fix ? 2u : 0u);
     const uint32_t uuid_cmd = 24;
     const uint32_t sizeofcmds =
         seg_plain_cmd + seg_text_cmd + seg_data_cmd + seg_plain_cmd
         + build_cmd + uuid_cmd + main_cmd
-        + dylinker_cmdsz + (skip_libsystem ? 0 : dylib_cmdsz)
+        + dylinker_cmdsz + dylib_bytes + rpath_bytes
         + (has_fix ? 32u : 0u);
 
     const uint32_t cmds_end = (uint32_t)sizeof(mach_header_64) + sizeofcmds;
@@ -851,16 +952,29 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     APPEND_BYTES(DYLINKER_PATH, strlen(DYLINKER_PATH) + 1);
     APPEND_ZERO(dylinker_cmdsz - dylinker_name_off - strlen(DYLINKER_PATH) - 1);
 
-    /* ── LC_LOAD_DYLIB (libSystem; omitted for -nostdlib/-nodefaultlibs) ── */
-    if (!skip_libsystem) {
+    /* ── LC_LOAD_DYLIB, one per library this image needs ── */
+    for (size_t i = 0; i < ndylibs; i++) {
         dylib_command dc;
         memset(&dc, 0, sizeof dc);
         dc.cmd = LC_LOAD_DYLIB;
-        dc.cmdsize = dylib_cmdsz;
+        dc.cmdsize = dylib_cmdsz[i];
         dc.dylib.name_offset = dylib_name_off;
         APPEND_BYTES(&dc, 24); /* offsetof(dylib_command, name) — fakecc dialect has no offsetof */
-        APPEND_BYTES(LIBSYSTEM_PATH, strlen(LIBSYSTEM_PATH) + 1);
-        APPEND_ZERO(dylib_cmdsz - dylib_name_off - strlen(LIBSYSTEM_PATH) - 1);
+        APPEND_BYTES(dylibs[i].name, strlen(dylibs[i].name) + 1);
+        APPEND_ZERO(dylib_cmdsz[i] - dylib_name_off - strlen(dylibs[i].name) - 1);
+    }
+
+    /* ── LC_RPATH, one per -Wl,-rpath entry ── */
+    /* The libraries keep whatever install name their own LC_ID_DYLIB gave
+     * them -- @rpath/... included -- so the paths dyld substitutes for that
+     * prefix come from here and nowhere else. */
+    for (size_t i = 0; i < nrpath_cmds; i++) {
+        uint32_t rc_cmd = LC_RPATH, rc_size = rpath_cmdsz[i], rc_off = rpath_name_off;
+        APPEND_BYTES(&rc_cmd, 4);
+        APPEND_BYTES(&rc_size, 4);
+        APPEND_BYTES(&rc_off, 4);
+        APPEND_BYTES(rpaths[i], strlen(rpaths[i]) + 1);
+        APPEND_ZERO(rpath_cmdsz[i] - rpath_name_off - strlen(rpaths[i]) - 1);
     }
 
     /* ── __TEXT segment file bytes: pad → text → __const → page ── */
@@ -2128,6 +2242,139 @@ static size_t macho_symbol_span(const EmitModule *m, uint16_t sh, size_t off) {
         if (o->value < end) end = o->value;
     }
     return end > off ? end - off : 0;
+}
+
+/* Read a linked dylib: install name plus exported symbols.  See the header.
+ *
+ * Only the exported defined range of the symbol table is collected.  A dylib
+ * also carries undefined symbols of its own -- everything it imports from
+ * libSystem -- and treating those as things it supplies would let any name
+ * in the dependency graph resolve, which is exactly the diagnostic we are
+ * trying to keep.  LC_DYSYMTAB names that range when it is present. */
+int macho_read_dylib(const char *path, char **install_name_out,
+                     char ***syms_out, size_t *nsyms_out) {
+    *install_name_out = NULL;
+    *syms_out = NULL;
+    *nsyms_out = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize < (long)sizeof(mach_header_64)) { fclose(f); return -1; }
+    unsigned char *buf = xmalloc((size_t)fsize);
+    if (fread(buf, 1, (size_t)fsize, f) != (size_t)fsize) {
+        free(buf); fclose(f); return -1;
+    }
+    fclose(f);
+
+    mach_header_64 hdr;
+    memcpy(&hdr, buf, sizeof hdr);
+    if (hdr.magic != MH_MAGIC_64 || hdr.filetype != MH_DYLIB) {
+        free(buf); return -1;
+    }
+
+    char *iname = NULL;
+    uint32_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
+    int have_dysym = 0;
+    uint32_t iextdef = 0, nextdef = 0;
+
+    const unsigned char *p = buf + sizeof hdr;
+    const unsigned char *pend = p + hdr.sizeofcmds;
+    if (pend > buf + fsize) pend = buf + fsize;
+    for (uint32_t ci = 0; ci < hdr.ncmds && p + 8 <= pend; ci++) {
+        uint32_t cmd = 0, cmdsize = 0;
+        memcpy(&cmd, p, 4);
+        memcpy(&cmdsize, p + 4, 4);
+        if (cmdsize < 8 || p + cmdsize > buf + fsize) break;
+        if (cmd == LC_ID_DYLIB && cmdsize > 24 && !iname) {
+            uint32_t name_off = 0;
+            memcpy(&name_off, p + 8, 4);
+            /* The name is a byte range inside the command, not a C string:
+             * cmdsize may run past it with padding, and nothing guarantees a
+             * terminating NUL.  Copy exactly the bytes up to the first one. */
+            if (name_off >= 8 && name_off < cmdsize) {
+                size_t avail = cmdsize - name_off;
+                size_t len = strnlen((const char *)(p + name_off), avail);
+                if (len && len < avail) {
+                    iname = xmalloc(len + 1);
+                    memcpy(iname, p + name_off, len);
+                    iname[len] = '\0';
+                }
+            }
+        } else if (cmd == LC_SYMTAB && cmdsize >= sizeof(symtab_command)) {
+            symtab_command sy;
+            memcpy(&sy, p, sizeof sy);
+            symoff = sy.symoff;
+            nsyms = sy.nsyms;
+            stroff = sy.stroff;
+            strsize = sy.strsize;
+        } else if (cmd == LC_DYSYMTAB && cmdsize >= sizeof(dysymtab_command)) {
+            dysymtab_command dy;
+            memcpy(&dy, p, sizeof dy);
+            iextdef = dy.iextdefsym;
+            nextdef = dy.nextdefsym;
+            have_dysym = 1;
+        }
+        p += cmdsize;
+    }
+
+    if (!nsyms || !strsize
+        || (uint64_t)symoff + (uint64_t)nsyms * sizeof(nlist_64) > (uint64_t)fsize
+        || (uint64_t)stroff + strsize > (uint64_t)fsize) {
+        free(buf); free(iname);
+        return -1;
+    }
+    const unsigned char *strtab = buf + stroff;
+
+    int rc = -1;
+    if (iname) {
+        char **syms = NULL;
+        size_t n = 0, cap = 0;
+        uint32_t first = 0, count = nsyms;
+        if (have_dysym && iextdef <= nsyms && iextdef + nextdef <= nsyms) {
+            first = iextdef;
+            count = nextdef;
+        }
+        for (uint32_t i = first; i < first + count; i++) {
+            nlist_64 nl;
+            memcpy(&nl, buf + symoff + (uint64_t)i * sizeof nl, sizeof nl);
+            if (nl.n_strx == 0 || nl.n_strx >= strsize) continue;
+            /* Skip debug entries and anything that is not a definition. */
+            if (nl.n_type & N_STAB) continue;
+            if ((nl.n_type & N_TYPE) == 0) continue;      /* N_UNDF */
+            if (!(nl.n_type & N_EXT)) continue;           /* not external */
+            const char *raw = (const char *)(strtab + nl.n_strx);
+            size_t avail = strsize - nl.n_strx;
+            size_t len = strnlen(raw, avail);
+            if (!len || len >= avail) continue;
+            if (raw[0] == '_') { raw++; len--; }
+            if (!len) continue;
+            if (n == cap) {
+                cap = cap ? cap * 2 : 64;
+                syms = xrealloc(syms, cap * sizeof *syms);
+            }
+            syms[n] = xmalloc(len + 1);
+            memcpy(syms[n], raw, len);
+            syms[n][len] = '\0';
+            /* Until 2018 ld64 honoured N_WEAK_DEF with a duplicate export, so
+             * a library can name the same symbol twice.  One entry is enough:
+             * the set only answers "who supplies this name". */
+            int dup = 0;
+            for (size_t k = 0; k < n; k++)
+                if (strcmp(syms[k], syms[n]) == 0) { dup = 1; break; }
+            if (dup) { free(syms[n]); continue; }
+            n++;
+        }
+        syms = xrealloc(syms, (n ? n : 1) * sizeof *syms);
+        *install_name_out = iname;
+        *syms_out = syms;
+        *nsyms_out = n;
+        rc = 0;
+    }
+    free(buf);
+    if (rc != 0) free(iname);
+    return rc;
 }
 
 /* One relocating link of -c modules into a PIE image. */

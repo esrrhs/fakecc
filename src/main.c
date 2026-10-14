@@ -3,6 +3,7 @@
 #include "fakecc/emit.h"
 #include "fakecc/ir.h"
 #include "fakecc/lexer.h"
+#include "fakecc/macho.h"
 #include "fakecc/opt.h"
 #include "fakecc/parser.h"
 #include "fakecc/pkg.h"
@@ -252,6 +253,45 @@ static char *path_join(const char *a, const char *b) {
     return p;
 }
 
+/* Locate -l NAME (or a name given directly with -l:) among the search dirs.
+ * Returns a malloc'd path, or NULL when nothing of that name is there. */
+static char *find_lib_file(const char *soname, char **lib_paths,
+                           int num_lib_paths) {
+    if (strchr(soname, '/'))
+        return file_readable(soname) ? xstrdup(soname) : NULL;
+    for (int d = 0; d < num_lib_paths; d++) {
+        char *path = path_join(lib_paths[d], soname);
+        if (file_readable(path)) return path;
+        free(path);
+    }
+    return NULL;
+}
+
+/* Tell the Mach-O backend about every dylib named on the command line: its
+ * install name and the symbols it exports.  This has to run before any code
+ * is generated, because codegen decides whether a call it cannot see is legal
+ * by asking whether some registered library supplies the name -- and the
+ * alternative to knowing is refusing every one of them.
+ *
+ * A library that does not parse as Mach-O (an ELF .so, say) is skipped rather
+ * than diagnosed: the ELF side of the linker has never needed this table. */
+static void register_aux_dylibs(char **needed, int num_needed,
+                                char **lib_paths, int num_lib_paths) {
+    if (target_current()->objfmt != TARGET_OBJFMT_MACHO) return;
+    for (int i = 0; i < num_needed; i++) {
+        /* libSystem is already covered by the static list in emit.c. */
+        if (is_system_soname(needed[i])) continue;
+        char *path = find_lib_file(needed[i], lib_paths, num_lib_paths);
+        if (!path) continue;
+        char *iname = NULL;
+        char **syms = NULL;
+        size_t nsyms = 0;
+        if (macho_read_dylib(path, &iname, &syms, &nsyms) == 0)
+            emit_aux_lib_add(iname, syms, nsyms);
+        free(path);
+    }
+}
+
 /* Builtin freestanding runtime: one package, directory runtime/. */
 static const char *rt_pkg_name(void) { return "runtime"; }
 
@@ -457,8 +497,14 @@ int main(int argc, char **argv) {
                     if (!rpath) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
                     memcpy(rpath, opt, len);
                     rpath[len] = '\0';
-                    /* Store rpath for later use (add to lib_paths for RUNPATH). */
+                    /* On Mach-O an rpath is its own load command: dyld reads
+                     * the list from the image and substitutes each entry for
+                     * the @rpath prefix in a dylib's install name.  It is
+                     * still added to the link-time search dirs, which is what
+                     * the ELF side wants for DT_RUNPATH and lets a later -l
+                     * resolve out of the same directory. */
                     paths_add(&lib_paths, &num_lib_paths, rpath);
+                    emit_aux_rpath_add(rpath);
                     free(rpath);
                     opt += len;
                     if (*opt == ',') opt++;
@@ -559,6 +605,7 @@ int main(int argc, char **argv) {
     }
 
     require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
+    register_aux_dylibs(needed, num_needed, lib_paths, num_lib_paths);
 
     int nrt = 0;
     if (!nostdlib) {
@@ -750,6 +797,10 @@ int main(int argc, char **argv) {
     free(needed);
     for (int i = 0; i < num_lib_paths; i++) free(lib_paths[i]);
     free(lib_paths);
+    /* The dylib table outlives every link that could consult it, so nothing
+     * inside the compiler releases it.  Freed here because the ASan build
+     * treats a reachable allocation at exit exactly like a lost one. */
+    emit_aux_reset();
     pkg_ctx_free(&pkg);
     return 0;
 }

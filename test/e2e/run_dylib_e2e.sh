@@ -83,17 +83,24 @@ extern int definitely_missing_xyz(void);
 int main(void) { return definitely_missing_xyz(); }
 EOF
 
-# 1) Default freestanding: printf via runtime/, no LC_LOAD_DYLIB for libSystem.
+# 1) Default freestanding: printf comes from runtime/, and the only library the
+#    image loads is libSystem.
+#    "Loads nothing at all" is not a state that exists on macOS: dyld refuses
+#    an image with no LC_LOAD_DYLIB ("missing LC_LOAD_DYLIB (must link with at
+#    least libSystem.dylib)"), so an executable here always depends on it.
+#    The invariant worth asserting is the one the linker actually controls --
+#    that linking adds none of the user's own libraries.
 rm -f "$TMP/p"
 timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_printf.c" -o "$TMP/p" 2>"$TMP/err" \
     || { fail "freestanding printf compile: $(head -1 "$TMP/err")"; }
 if [ -x "$TMP/p" ]; then
     got=0; timeout "$RUN_TIMEOUT" "$TMP/p" >/dev/null || got=$?
     if [ "$got" = "0" ]; then pass "freestanding printf run"; else fail "freestanding printf run (exit $got)"; fi
-    if has_load_dylib "$TMP/p" "libSystem"; then
-        fail "freestanding should not load libSystem (has LC_LOAD_DYLIB libSystem)"
+    extra=$(otool -L "$TMP/p" | tail -n +2 | awk '{print $1}' | grep -v 'libSystem' || true)
+    if [ -z "$extra" ]; then
+        pass "freestanding loads only libSystem"
     else
-        pass "freestanding no libSystem"
+        fail "freestanding loads unexpected libraries: $extra"
     fi
 fi
 
@@ -161,6 +168,26 @@ if [ -x "$TMP/p" ]; then
         pass "-rpath LC_RPATH"
     else
         fail "-rpath missing LC_RPATH /custom/path"
+    fi
+fi
+
+# 7) A name the linked dylib does not export must stay a compile-time error.
+#    Reading a library's exports widens the set of importable names, but it has
+#    to stay exactly the contents of that library: a misspelling that linked
+#    would only surface as a launch-time "symbol not found" from dyld.
+cat > "$TMP/main_typo.c" <<'EOF'
+package main;
+extern int addx(int a, int b);
+int main(void) { return addx(20, 22); }
+EOF
+rm -f "$TMP/p"
+if timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA "$TMP/main_typo.c" "$TMP/libadd.dylib" -o "$TMP/p" 2>"$TMP/err"; then
+    fail "misspelled dylib symbol should not link"
+else
+    if grep -qiE "undefined|unresolved|missing" "$TMP/err"; then
+        pass "misspelled dylib symbol rejected"
+    else
+        fail "misspelled dylib symbol rejected (wrong message: $(head -1 "$TMP/err"))"
     fi
 fi
 

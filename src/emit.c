@@ -278,12 +278,80 @@ static const char *const emit_darwin_imports[] = {
     "__cxa_atexit",
 };
 
+/* ------------------------------------------------------------------ */
+/* Auxiliary dylibs                                                    */
+/* ------------------------------------------------------------------ */
+
+static EmitAuxLib *g_aux_libs = NULL;
+static size_t g_aux_n = 0, g_aux_cap = 0;
+static char **g_rpaths = NULL;
+static size_t g_nrpath = 0, g_rpath_cap = 0;
+
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms) {
+    if (g_aux_n == g_aux_cap) {
+        g_aux_cap = g_aux_cap ? g_aux_cap * 2 : 4;
+        g_aux_libs = realloc(g_aux_libs, g_aux_cap * sizeof *g_aux_libs);
+        if (!g_aux_libs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    g_aux_libs[g_aux_n].install_name = install_name;
+    g_aux_libs[g_aux_n].syms = syms;
+    g_aux_libs[g_aux_n].nsyms = nsyms;
+    g_aux_n++;
+}
+
+void emit_aux_rpath_add(const char *path) {
+    for (size_t i = 0; i < g_nrpath; i++)
+        if (strcmp(g_rpaths[i], path) == 0) return;
+    if (g_nrpath == g_rpath_cap) {
+        g_rpath_cap = g_rpath_cap ? g_rpath_cap * 2 : 4;
+        g_rpaths = realloc(g_rpaths, g_rpath_cap * sizeof *g_rpaths);
+        if (!g_rpaths) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    g_rpaths[g_nrpath++] = strdup(path);
+    if (!g_rpaths[g_nrpath - 1]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+}
+
+const EmitAuxLib *emit_aux_libs(size_t *n) {
+    if (n) *n = g_aux_n;
+    return g_aux_libs;
+}
+
+const char *const *emit_aux_rpaths(size_t *n) {
+    if (n) *n = g_nrpath;
+    return (const char *const *)g_rpaths;
+}
+
+void emit_aux_reset(void) {
+    for (size_t i = 0; i < g_aux_n; i++) {
+        free(g_aux_libs[i].install_name);
+        for (size_t k = 0; k < g_aux_libs[i].nsyms; k++)
+            free(g_aux_libs[i].syms[k]);
+        free(g_aux_libs[i].syms);
+    }
+    free(g_aux_libs);
+    g_aux_libs = NULL; g_aux_n = 0; g_aux_cap = 0;
+    for (size_t i = 0; i < g_nrpath; i++) free(g_rpaths[i]);
+    free(g_rpaths);
+    g_rpaths = NULL; g_nrpath = 0; g_rpath_cap = 0;
+}
+
+int emit_aux_lib_of(const char *name) {
+    if (!name) return -1;
+    for (size_t i = 0; i < g_aux_n; i++)
+        for (size_t k = 0; k < g_aux_libs[i].nsyms; k++)
+            if (strcmp(g_aux_libs[i].syms[k], name) == 0) return (int)i;
+    return -1;
+}
+
 int emit_is_darwin_import(const char *name) {
     if (!name) return 0;
     for (size_t i = 0; i < sizeof emit_darwin_imports
                             / sizeof *emit_darwin_imports; i++)
         if (strcmp(emit_darwin_imports[i], name) == 0) return 1;
-    return 0;
+    /* Anything a dylib named on the command line exports resolves the same
+     * way a libSystem symbol does: dyld binds it at load time from an
+     * LC_LOAD_DYLIB the image carries because that library was requested. */
+    return emit_aux_lib_of(name) >= 0;
 }
 
 /* ------------------------------------------------------------------ */

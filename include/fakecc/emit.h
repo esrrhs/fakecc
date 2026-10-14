@@ -298,12 +298,41 @@ void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
  * the Mach-O "_" prefix is added here, so callers pass "pthread_create". */
 void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
 
-/* True when `name` is a function the arm64 backend may import from
- * libSystem instead of requiring a definition in the program.  The list is
- * deliberately explicit: an undefined call that is not on it still fails at
- * compile time, which is what keeps a misspelled name a diagnostic rather
- * than a launch-time "symbol not found" from dyld. */
+/* True when `name` is a function the arm64 backend may import from a dylib
+ * instead of requiring a definition in the program.  Two sources feed it:
+ * a fixed list of libSystem names, and every symbol exported by a dylib the
+ * driver was told to link against (see emit_aux_lib_add).  Both are
+ * deliberately closed sets — an undefined call that is not in them still
+ * fails at compile time, which is what keeps a misspelled name a diagnostic
+ * rather than a launch-time "symbol not found" from dyld. */
 int emit_is_darwin_import(const char *name);
+
+/* ------------------------------------------------------------------ */
+/* Auxiliary dylibs (-l / .dylib on the command line)                  */
+/* ------------------------------------------------------------------ */
+
+/* One dylib the driver was asked to link against.  install_name is what an
+ * LC_LOAD_DYLIB has to name (the library's own LC_ID_DYLIB, e.g.
+ * "@rpath/libadd.dylib"); syms are its exported symbols, i.e. the names a
+ * reference may leave undefined and still link. */
+typedef struct {
+    char  *install_name;
+    char **syms;
+    size_t nsyms;
+} EmitAuxLib;
+
+/* Register one dylib, taking ownership of install_name and syms. */
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms);
+/* Add one LC_RPATH entry (ownership retained by the caller until exit). */
+void emit_aux_rpath_add(const char *path);
+/* Read back what the driver registered. */
+const EmitAuxLib *emit_aux_libs(size_t *n);
+const char *const *emit_aux_rpaths(size_t *n);
+/* Free everything registered above. */
+void emit_aux_reset(void);
+/* Index of the aux lib exporting `name`, or -1 when none does.  An ordinal
+ * 2+n in the imports table addresses emit_aux_libs()[n]. */
+int emit_aux_lib_of(const char *name);
 
 /* ------------------------------------------------------------------ */
 /* Output                                                              */

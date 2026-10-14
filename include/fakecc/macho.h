@@ -26,6 +26,15 @@ struct EmitModule;
 int macho_write_exec(const struct EmitModule *em, uint64_t entry_off,
                      const char *path, int skip_libsystem);
 
+/* Read a linked Mach-O dynamic library (MH_DYLIB) back far enough to link
+ * against it: its install name from LC_ID_DYLIB, and the C spellings of the
+ * symbols it exports.  A reference that resolves to one of these names is
+ * left for dyld to bind instead of being rejected as undefined.
+ * Returns 0 on success; *install_name and *syms are heap allocations the
+ * caller owns (free each string, then the array). */
+int macho_read_dylib(const char *path, char **install_name_out,
+                     char ***syms_out, size_t *nsyms_out);
+
 /* Relocatable MH_OBJECT.  Defined symbols are recorded; intra-section
  * branches are already resolved.  Global-address relocations are not
  * emitted yet. */
