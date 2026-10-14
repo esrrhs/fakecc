@@ -59,6 +59,9 @@ for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
     fi
     # When the oracle is clang, skip tests that use GCC-only builtins or
     # literal forms clang rejects (annotated with `skip_oracle: clang`).
+    # Also skip the gcc_torture suite on Darwin: many tests rely on
+    # Linux-specific behavior, builtins, or ABI assumptions that don't
+    # translate to macOS/clang.
     if [ "$ORACLE" = "clang" ]; then
         if grep -qE '__builtin_va_arg_pack' "$f"; then
             continue
@@ -66,6 +69,12 @@ for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
         if grep -qE '^//[[:space:]]*skip_oracle:[[:space:]]*clang' "$f"; then
             continue
         fi
+        # Skip gcc_torture tests on macOS (Darwin)
+        case "$f" in
+            */gcc_torture*.c)
+                continue
+                ;;
+        esac
     fi
     files+=("$f")
 done
