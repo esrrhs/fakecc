@@ -268,8 +268,8 @@ jobs:
 
   # macOS e2e suites: same coverage as Linux bootstrap-suite, but using the
   # host-built compiler (bootstrap on arm64 hits a conditional-branch-range
-  # limitation that is being investigated separately). Uses clang as the
-  # difftest oracle (instead of gcc on Linux).
+  # limitation that is being investigated separately). Uses gcc as the
+  # difftest oracle (same as Linux).
   macos-suite:
     name: macos · ${{ matrix.label }}
     runs-on: macos-latest
@@ -293,6 +293,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Needed for the difftest matrix legs (host gcc is the oracle).
+      - name: Install host GCC 16
+        run: bash tools/ci_install_host_gcc.sh
+
       - name: Build
         run: |
           cmake -S . -B build
@@ -305,7 +309,7 @@ jobs:
               CC_TIMEOUT=300 bash test/e2e/run_e2e.sh build/fakecc ${{ matrix.opt }}
               ;;
             difftest*)
-              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh build/fakecc ${{ matrix.opt }} --oracle clang
+              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh build/fakecc ${{ matrix.opt }}
               ;;
             multi/cli/compile/ports)
               bash test/e2e/run_multi_e2e.sh build/fakecc -O0
