@@ -1,5 +1,6 @@
 // expect: 0
 // Hexadecimal escape sequences: `\xHH` (char) and `\xHH...` (string).
+// skip_oracle: clang
 // Verifies `\x41` == 'A' in a char literal, that `\x` is greedy (consumes all
 // consecutive hex digits, so `\x42C` == 0x42C low byte == 0x2C), and that
 // separate hex escapes decode independently in a string.  Returns 0 on

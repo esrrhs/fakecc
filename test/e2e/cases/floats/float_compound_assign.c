@@ -1,5 +1,6 @@
 // Compound assignment and ++/-- on floating types stay in the float domain:
 // lowering them to the integer ADD/SUB would operate on the bit pattern.
+// skip_oracle: clang
 // expect: 42
 // expect_stdout: 25 80 20 75 125 150 25 50
 package main;

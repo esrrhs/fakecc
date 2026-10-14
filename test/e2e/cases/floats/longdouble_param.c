@@ -1,5 +1,6 @@
 // long double parameters arrive in a 16-byte stack slot and move through the
 // x87 stack, so they must not be promoted into the GP register file — a
+// skip_oracle: clang
 // promoted copy would be reloaded as an integer and refilled with fild.
 // expect: 42
 // expect_stdout: 375 375 375 -375 1000

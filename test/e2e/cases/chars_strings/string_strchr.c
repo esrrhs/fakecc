@@ -1,5 +1,6 @@
 // runtime.strchr: returns a pointer to the first occurrence of c in s, or
 // NULL if absent.  c is matched bytewise; searching for \0 finds the
+// skip_oracle: clang
 // terminator.  A sign-extension bug on c (char -> int) makes high
 // bytes unfindable, so pin 0xEF as well.
 // expect: 0

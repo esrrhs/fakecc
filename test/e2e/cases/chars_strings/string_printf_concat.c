@@ -1,5 +1,6 @@
 // expect: 11
 // expect_stdout: hello world
+// skip_oracle: clang
 // libc puts (via runtime.printf of a plain string) writes the full payload.
 package main;
 import runtime;

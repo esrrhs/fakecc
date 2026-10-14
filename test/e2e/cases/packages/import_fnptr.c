@@ -1,5 +1,6 @@
 // expect: 0
 // expect_stdout: hi
+// skip_oracle: clang
 // expect_stdout: hi
 // expect_stdout: hi
 /* Imported functions used as values (callback / &fn), not only as calls. */

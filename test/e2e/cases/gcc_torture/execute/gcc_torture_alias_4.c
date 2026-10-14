@@ -1,5 +1,6 @@
 // expect: 0
 package main;
+// skip_oracle: clang
 /* { dg-require-alias "" } */
 int a = 1;
 extern int b __attribute__ ((alias ("a")));

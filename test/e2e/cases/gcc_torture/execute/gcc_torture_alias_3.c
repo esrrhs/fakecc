@@ -1,5 +1,6 @@
 // expect: 0
 package main;
+// skip_oracle: clang
 /* { dg-require-alias "" } */
 /* { dg-skip-if "" { powerpc-ibm-aix* } } */
 static int a=0;

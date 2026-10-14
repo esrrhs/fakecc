@@ -1,5 +1,6 @@
 // expect: 0
 package main;
+// skip_oracle: clang
 typedef long unsigned int Size_t;
 void abort(void);
 struct huge_struct

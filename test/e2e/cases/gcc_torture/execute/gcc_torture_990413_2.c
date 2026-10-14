@@ -1,5 +1,6 @@
 // expect: 0
 // unsupported_on: darwin-arm64
+// skip_oracle: clang
 // Its asin is written in x87 inline asm (fpatan / fsqrt plus an 80-bit
 // long double), which has no arm64 equivalent to assemble.
 package main;

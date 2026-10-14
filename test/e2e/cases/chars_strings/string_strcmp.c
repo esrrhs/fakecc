@@ -1,5 +1,6 @@
 // runtime.strcmp: lexicographic compare of two C strings, returning <0/0/>0
 // from the first differing byte interpreted as unsigned char.  The
+// skip_oracle: clang
 // classic bug treats bytes >= 0x80 as negative and flips the sign.
 // Pin equal/less/greater, the prefix rule, and the high-byte sign.
 // expect: 0

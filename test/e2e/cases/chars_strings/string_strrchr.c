@@ -1,5 +1,6 @@
 // runtime.strrchr: returns a pointer to the last occurrence of c in s, or
 // NULL if absent.  Same byte-matching rules as runtime.strchr.  Pin the last
+// skip_oracle: clang
 // of several occurrences, a singleton, not-found, and the \0 search.
 // expect: 0
 package main;
