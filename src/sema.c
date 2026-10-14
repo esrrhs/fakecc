@@ -3085,10 +3085,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             int per = init_leaf_count(*target->elem_type);
             if (per > 0) len = (n + per - 1) / per;
         }
-        for (int i = 0; i < n; i++)
-            if (list->u.init_list.desig_kind[i] == 0
-                && list->u.init_list.desig_index[i] + 1 > len)
-                len = list->u.init_list.desig_index[i] + 1;
+        if (list->u.init_list.desig_kind) {
+            for (int i = 0; i < n; i++)
+                if (list->u.init_list.desig_kind[i] == 0
+                    && list->u.init_list.desig_index[i] + 1 > len)
+                    len = list->u.init_list.desig_index[i] + 1;
+        }
         if (n == 1 && list->u.init_list.elements[0]
             && list->u.init_list.elements[0]->kind == EX_STR
             && target->elem_type && target->elem_type->kind == TY_INT
@@ -3132,30 +3134,32 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         return;
     }
     /* 2. Validate designators. */
-    for (int i = 0; i < n; i++) {
-        int kind = list->u.init_list.desig_kind[i];
-        if (kind == 0) {  /* [index] */
-            if (target->kind != TY_ARRAY && !target->is_vector)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+    if (list->u.init_list.desig_kind) {
+        for (int i = 0; i < n; i++) {
+            int kind = list->u.init_list.desig_kind[i];
+            if (kind == 0) {  /* [index] */
+                if (target->kind != TY_ARRAY && !target->is_vector)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "array index designator used on a non-array type");
-                    return;
-                }
-            int idx = list->u.init_list.desig_index[i];
-            if (idx < 0 || idx >= N)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+                        return;
+                    }
+                int idx = list->u.init_list.desig_index[i];
+                if (idx < 0 || idx >= N)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "designator index %d out of range for array of length %d",
                        idx, N);
-                    return;
-                }
-        } else if (kind == 1) {  /* .member */
-            if (target->kind != TY_STRUCT)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+                        return;
+                    }
+            } else if (kind == 1) {  /* .member */
+                if (target->kind != TY_STRUCT)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "member designator used on a non-struct type");
-                    return;
-                }
+                        return;
+                    }
+            }
         }
     }
     /* 3. Build the dense array of N initialized elements.
@@ -3185,11 +3189,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     for (int i = 0; i < n; i++) {
         int pos;
         int member_idx = 0;
-        if (list->u.init_list.desig_kind[i] == 0) {
+        int dkind = list->u.init_list.desig_kind ? list->u.init_list.desig_kind[i] : -1;
+        if (dkind == 0) {
             pos = list->u.init_list.desig_index[i];
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
-        } else if (list->u.init_list.desig_kind[i] == 1) {
+        } else if (dkind == 1) {
             const char *name = list->u.init_list.desig_member[i];
             pos = designator_member_index(sd, name);
             if (pos < 0)
@@ -3219,7 +3224,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             return;
         }
         Expr *elem = list->u.init_list.elements[i];
-        if (list->u.init_list.desig_kind[i] == 1 && sd && member_idx >= 0) {
+        if (dkind == 1 && sd && member_idx >= 0) {
             const char *nm = list->u.init_list.desig_member[i];
             if (nm && !designator_is_direct_member(sd, member_idx, nm))
                 elem = wrap_anon_designator(nm, elem, loc);
@@ -3255,7 +3260,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             int want = init_leaf_count(*slot_type);
             int take = 1;
             while (take < want && i + take < n
-                   && list->u.init_list.desig_kind[i + take] == -1)
+                   && (!list->u.init_list.desig_kind || list->u.init_list.desig_kind[i + take] == -1))
                 take++;
             Expr **sub = malloc(take * sizeof(Expr *));
             for (int k = 0; k < take; k++)
