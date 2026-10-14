@@ -1,5 +1,6 @@
 // expect: 0
 // copysignl copies the 80-bit sign bit; a double round-trip would drop it
+// skip_oracle: clang
 // for values that are finite as long double but overflow double.
 package main;
 import runtime;

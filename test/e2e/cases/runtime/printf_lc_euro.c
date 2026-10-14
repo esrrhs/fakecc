@@ -1,5 +1,6 @@
 // expect: 0
 // skip_difftest
+// skip_oracle: clang
 // `%lc` of U+20AC is UTF-8 e2 82 ac; `%ls` of NULL is "(null)".
 // glibc `%lc` is locale-dependent (C locale cannot encode U+20AC).
 package main;

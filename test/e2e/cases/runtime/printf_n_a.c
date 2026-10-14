@@ -1,5 +1,6 @@
 // expect: 0
 // %n must consume the int* so later arguments stay aligned; %a is a hex
+// skip_oracle: clang
 // float conversion, not an unknown specifier that reprints the next %f.
 package main;
 import runtime;

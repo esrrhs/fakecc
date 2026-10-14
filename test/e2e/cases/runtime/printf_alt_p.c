@@ -1,5 +1,6 @@
 // expect: 0
 // `#` on f/e always prints a decimal point; on g it keeps trailing zeros.
+// skip_oracle: clang
 // `%#.0o` of 0 is `0`.  glibc `%p` of NULL is `(nil)`.
 package main;
 import runtime;

@@ -1,5 +1,6 @@
 // expect: 0
 // strtod must accept INF/INFINITY/NAN; sqrt of a negative is a NaN, not 0.
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

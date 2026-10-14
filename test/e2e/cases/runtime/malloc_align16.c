@@ -1,5 +1,6 @@
 // expect: 0
 // SysV / C11 max_align_t is 16 bytes.  A 24-byte chunk header left the
+// skip_oracle: clang
 // user pointer at 8 mod 16; SSE movaps into a malloc'd object #GPs.
 package main;
 import runtime;

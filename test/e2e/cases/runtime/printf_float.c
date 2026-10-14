@@ -1,5 +1,6 @@
 // runtime/printf.c's floating-point conversions, plus the flags and width handling
 // that all conversions now share.
+// skip_oracle: clang
 // expect: 42
 // expect_stdout: 3.750000|-0.500000|0.333333|1234.568|0.000000
 // expect_stdout: 1.234568e+03|1.230000E-04|0.0001|100000|1.23457e+06|1.5

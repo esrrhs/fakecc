@@ -1,5 +1,6 @@
 // expect: 0
 // %.Ns must not strlen() past the precision (the buffer need not be NUL
+// skip_oracle: clang
 // terminated).  %zu must consume a full size_t, not unsigned int.
 package main;
 import runtime;

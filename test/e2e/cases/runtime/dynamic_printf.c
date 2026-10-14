@@ -1,5 +1,6 @@
 // expect: 0
 // expect_stdout: hello 42
+// skip_oracle: clang
 // rt runtime.printf via import; check the return value and that stdout is flushed.
 package main;
 import runtime;

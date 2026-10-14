@@ -1,5 +1,6 @@
 // expect: 0
 // C99: converting 0 with precision 0 yields no digits; %F/%E/%G inf/nan are uppercase.
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

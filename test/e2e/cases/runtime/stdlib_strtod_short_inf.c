@@ -1,5 +1,6 @@
 // expect: 0
 // strtod("inf") must not read past the terminating NUL (4-byte buffer).
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

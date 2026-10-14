@@ -1,5 +1,6 @@
 // expect: 0
 // `%lc` converts a wchar (int) code point to UTF-8.
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

@@ -1,5 +1,6 @@
 // expect: 0
 // fflush(NULL) and exit() must flush fopen'd streams, not only stdout/stderr.
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

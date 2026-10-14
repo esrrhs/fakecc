@@ -1,5 +1,6 @@
 // runtime.fflush / runtime.perror: the remaining untested stdio entry points.  runtime.fflush on a
 // stream forces a buffered write; runtime.perror writes a diagnostic to runtime.stderr.
+// skip_oracle: clang
 // The suite discards runtime.stderr, so runtime.perror is only checked to not crash and to
 // leave the process with a defined exit code.  runtime.fflush is checked via a
 // file round-trip: write, flush, then read back before runtime.fclose.

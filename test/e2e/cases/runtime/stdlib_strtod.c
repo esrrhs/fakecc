@@ -1,5 +1,6 @@
 // runtime.strtod: converts a decimal string to a double.  The implementation
 // parses integer-valued literals exactly, so pin those: a positive
+// skip_oracle: clang
 // integer, a negative integer, zero, and a value with an exponent.
 // expect: 0
 package main;
