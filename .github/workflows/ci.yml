@@ -318,6 +318,7 @@ jobs:
               bash test/e2e/run_dylib_e2e.sh build/fakecc -O0
               bash test/e2e/run_dylib_e2e.sh build/fakecc -O1
               bash test/e2e/run_cli_e2e.sh build/fakecc
+              bash test/e2e/run_lldb_e2e.sh build/fakecc
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh build/fakecc -O0
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh build/fakecc -O1
               bash test/app_ports/run_all.sh build/fakecc -O0
