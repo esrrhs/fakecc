@@ -27,13 +27,18 @@ float fabsf(float x) {
     ux.u = ux.u & 0x7fffffffU;
     return ux.f;
 }
+/* The sign bit is the top bit of the last byte the target uses to hold the
+ * value: byte 9 of x86's 80-bit extended (inside a 16-byte object), byte 7
+ * of the 8-byte double arm64 gives long double.  Naming a bit position in a
+ * union instead means naming x86's layout, which arm64 does not share. */
+static int rt_ld_sign_byte(void) {
+    return (int)sizeof(long double) >= 10 ? 9 : (int)sizeof(long double) - 1;
+}
+
 long double fabsl(long double x) {
-    /* The sign bit sits at the top of the *last* word, which is bit 15 of
-     * the second word in x86's 80-bit layout but bit 63 of the only word
-     * arm64 gives long double.  Comparing against zero flips the sign the
-     * same way on both without naming a bit position. */
-    if (x < 0.0L) return -x;
-    if (x > 0.0L) return x;
+    int sb = rt_ld_sign_byte();
+    unsigned char *bx = (unsigned char *)&x;
+    bx[sb] = (unsigned char)(bx[sb] & 0x7f);
     return x;
 }
 
@@ -54,13 +59,13 @@ float copysignf(float x, float y) {
 }
 
 long double copysignl(long double x, long double y) {
-    /* See fabsl: naming the sign bit would mean naming x86's 80-bit layout,
-     * which arm64 does not share.  Building the magnitude by hand instead
-     * works on both. */
-    long double mag = (x < 0.0L) ? -x : x;
-    if (y < 0.0L) return -mag;
-    if (y > 0.0L) return mag;
-    return x;                      /* y is -0.0 or +0.0: keep x's sign */
+    /* Comparing against zero cannot see the sign of a NaN or of -0.0, and
+     * copysign copies both, so move the bit itself (see rt_ld_sign_byte). */
+    int sb = rt_ld_sign_byte();
+    unsigned char *bx = (unsigned char *)&x;
+    unsigned char *by = (unsigned char *)&y;
+    bx[sb] = (unsigned char)((bx[sb] & 0x7f) | (by[sb] & 0x80));
+    return x;
 }
 
 double floor(double x) {
