@@ -3712,10 +3712,15 @@ static IRValue bos_lower_va_list_arg(IRFunction *fn, IRSymTable *st,
     return v;
 }
 
-/* va_first >= 0 marks args[va_first..] as anonymous variadic arguments:
- * under fakecc's Darwin convention those ride 8-byte outgoing stack slots
- * (never registers), exactly like the normal EX_CALL variadic path, so the
- * callee's va_start/va_arg see them. */
+/* va_first >= 0 marks args[va_first..] as anonymous variadic arguments.
+ *
+ * Only the Darwin convention puts unnamed arguments in 8-byte outgoing
+ * stack slots; SysV keeps the normal register assignment and promotes a
+ * float to double in an XMM register.  Marking them CALL_ARG_STACK there
+ * would leave the callee's va_start reading register homes the caller never
+ * filled -- a %s then dereferences garbage and the program faults.  This is
+ * the same !abi_sret_uses_gp() gate darwin_unnamed_va() uses on the normal
+ * EX_CALL path. */
 static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
                                      IRValue *args, int nargs, SourceLoc loc,
                                      int width, int is_unsigned, int va_first) {
@@ -3732,13 +3737,14 @@ static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
     ir_call_reserve_args(&inst, nargs);
+    int darwin_va = (va_first >= 0) && !abi_sret_uses_gp();
     for (int i = 0; i < nargs; i++) {
         IRValue av = args[i];
-        if (va_first >= 0 && i >= va_first)
+        if (darwin_va && i >= va_first) {
             av = va_float_bits(fn, av, loc);
-        inst.call_args[i] = av;
-        if (va_first >= 0 && i >= va_first)
             inst.call_arg_on_stack[i] = CALL_ARG_STACK;
+        }
+        inst.call_args[i] = av;
     }
     inst.width = width;
     inst.is_unsigned = is_unsigned;
