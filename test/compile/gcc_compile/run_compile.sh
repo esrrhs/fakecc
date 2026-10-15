@@ -34,6 +34,11 @@ shift || true
 CC_FLAGS="${CC_FLAGS:-} $*"
 CC_TIMEOUT=${CC_TIMEOUT:-60}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+# An empty or non-numeric JOBS used to reach `xargs -P ""`, which fails after
+# collecting nothing -- the suite then reported 0 cases and exited 0, so ctest
+# showed a green test that had checked nothing.  Never let that happen again.
+case "$JOBS" in ''|*[!0-9]*) JOBS=4 ;; esac
+[ "$JOBS" -ge 1 ] || JOBS=4
 COMPILE_DIR="$ROOT/test/compile/gcc_compile"
 
 if [ ! -x "$FAKECC" ]; then
@@ -182,5 +187,13 @@ if [ "$fail_cnt" -gt 0 ]; then
     exit 1
 fi
 
-echo "PASS compile suite (${#files[@]} cases passed)"
+# The count printed below used to come from ${#files[@]} rather than from the
+# results, so a fan-out that never ran still reported every case as passed --
+# which is how this suite stayed green on Linux while testing nothing.
+if [ "$ok_cnt" -eq 0 ]; then
+    echo "FAIL: compile suite collected ${#files[@]} cases but none of them ran" >&2
+    exit 1
+fi
+
+echo "PASS compile suite ($ok_cnt of ${#files[@]} cases passed)"
 exit 0

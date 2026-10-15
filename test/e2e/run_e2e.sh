@@ -19,6 +19,11 @@ shift || true
 CC_TIMEOUT=${CC_TIMEOUT:-60}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+# An empty or non-numeric JOBS used to reach `xargs -P ""`, which fails after
+# collecting nothing -- the suite then reported 0 cases and exited 0, so ctest
+# showed a green test that had checked nothing.  Never let that happen again.
+case "$JOBS" in ''|*[!0-9]*) JOBS=4 ;; esac
+[ "$JOBS" -ge 1 ] || JOBS=4
 
 CC_EXTRA="${CC_FLAGS:-} $*"
 CC_EXTRA=$(echo "$CC_EXTRA" | tr -s ' ' | sed 's/^ //; s/ $//')
@@ -129,7 +134,16 @@ n_skip=$(grep -c '^SKIP ' "$WORK/results.log" || true)
 
 cat "$WORK/results.log" | sort
 
-echo "--- e2e${label:+ ($label)}: $n_pass passed, $n_fail failed, $n_skip skipped, $((n_pass + n_fail + n_skip)) total ---"
+n_total=$((n_pass + n_fail + n_skip))
+echo "--- e2e${label:+ ($label)}: $n_pass passed, $n_fail failed, $n_skip skipped, $n_total total ---"
+
+# Zero cases is never a passing run: it is what a broken fan-out looks like
+# (`xargs -P ""`, a missing case directory, ...).  Reporting it as success is
+# how this suite spent weeks green on Linux while testing nothing.
+if [ "$n_total" -eq 0 ]; then
+    echo "e2e: no cases were collected from $CASE_DIR -- refusing to pass" >&2
+    exit 1
+fi
 
 if [ "$n_fail" -ne 0 ]; then
     exit 1

@@ -15,10 +15,14 @@
 # Number of parallel jobs to use.  Falls back through the tools macOS does have
 # (sysctl) before resorting to a conservative constant.
 nproc() {
-    # `command -v` would find this very function and recurse, so probe for the
-    # real binary with `type -P` (which skips shell functions).
-    if type -P nproc >/dev/null 2>&1; then
-        nproc
+    # Neither `command -v` nor a bare `nproc` may be used to reach the real
+    # binary: both resolve to this very function and recurse.  `type -P` forces
+    # a PATH lookup, and what it returns has to be invoked *through that path*
+    # -- naming the tool again lands back here.
+    local real
+    real=$(type -P nproc 2>/dev/null) || real=""
+    if [ -n "$real" ]; then
+        "$real"
         return
     fi
     local n
@@ -42,6 +46,18 @@ nproc() {
 # GNU timeout also accepts suffixes (30s, 5m); accept them so a caller can pass
 # either form.
 timeout() {
+    # Same trap as nproc(): naming `timeout` here would reach this function, so
+    # the real binary has to be invoked through the path `type -P` reports.
+    # It matters for more than cosmetics -- the polling fallback below costs a
+    # whole second per call, which on a Linux host turns a 16-second compile
+    # suite into one that takes ten minutes.
+    local real
+    real=$(type -P timeout 2>/dev/null) || real=""
+    if [ -n "$real" ]; then
+        "$real" "$@"
+        return $?
+    fi
+
     local spec="${1:-}"
     [ $# -gt 0 ] && shift
 
