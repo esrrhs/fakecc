@@ -32,8 +32,12 @@ int main() {
     runtime.printf("%f|%f\n", inf, -inf);
     char nanbuf[32];
     runtime.snprintf(nanbuf, sizeof nanbuf, "%f", inf - inf);
-    if (nanbuf[0] != 'n' && nanbuf[0] != 'N') return 4;
-    if (nanbuf[1] != 'a' && nanbuf[1] != 'A') return 5;
+    /* The sign is part of that same difference, so step over it: x86-64
+     * renders "-nan" where arm64 renders "nan". */
+    const char *nanp = nanbuf;
+    if (*nanp == '-' || *nanp == '+') nanp++;
+    if (nanp[0] != 'n' && nanp[0] != 'N') return 4;
+    if (nanp[1] != 'a' && nanp[1] != 'A') return 5;
 
     /* Ties round to even, the way the default FP rounding mode leaves them,
      * and a value that only looks like a tie in fewer digits does not. */
