@@ -145,6 +145,13 @@ typedef struct {
     int rbp_offset;     /* DBG_LOC_FBREG */
     int dwarf_reg;      /* DBG_LOC_REG (x86-64 DWARF numbering) */
     char *sym_name;     /* DBG_LOC_ADDR: ELF symbol name */
+    /* DBG_LOC_ADDR's other spelling: the section the object lives in and its
+     * offset there.  The ELF linker rebases m->syms[].value onto the linked
+     * image and needs only sym_name, but a lone single-TU Mach-O image
+     * carries no symbol table at all, so the home has to travel with the
+     * variable and be turned into an address once the sections have vaddrs. */
+    int addr_sect;      /* SECT_*, or 0 when sym_name is the way in */
+    size_t addr_off;
     /* Location-list form: non-empty when the variable moves between homes.
      * Takes precedence over loc_kind when num_ranges > 0. */
     DebugLocRange *ranges;
@@ -190,9 +197,14 @@ typedef struct {
     /* Where the frame is established, so call-frame info can describe the
      * prologue step by step.  gdb routinely stops mid-prologue (`break f`
      * skips `push %rbp; mov %rsp,%rbp` on its own), and a single CFI rule for
-     * the whole prologue makes it unwind into a bogus frame there. */
-    size_t after_push_rbp_pc;   /* just past `push %rbp` */
-    size_t after_mov_rbp_pc;    /* just past `mov %rsp,%rbp` */
+     * the whole prologue makes it unwind into a bogus frame there.
+     * On arm64 the two steps are `stp x29,x30,[sp,#-frame_size]!` and
+     * `add x29,sp,#0`. */
+    size_t after_push_rbp_pc;   /* just past `push %rbp` / `stp x29,x30` */
+    size_t after_mov_rbp_pc;    /* just past `mov %rsp,%rbp` / `add x29,sp` */
+    /* arm64: bytes the prologue pushed, i.e. CFA - sp once it is set up.
+     * 0 on x86-64, where the CFA offset is a fixed 16. */
+    size_t frame_size;
     DebugVar *vars;
     size_t num_vars, cap_vars;
     DebugCallSite *call_sites;

@@ -1,5 +1,6 @@
 #include "fakecc/macho.h"
 #include "fakecc/a64.h"
+#include "fakecc/debug.h"
 #include "fakecc/emit.h"
 #include "fakecc/reg_arm64.h"
 
@@ -63,6 +64,7 @@
 #define S_REGULAR                  0x00u
 #define S_ZEROFILL                 0x01u
 #define S_ATTR_PURE_INSTRUCTIONS   0x80000000u
+#define S_ATTR_DEBUG               0x02000000u
 #define S_ATTR_SOME_INSTRUCTIONS   0x00000400u
 /* Thread-local storage section types.  dyld finds the descriptor table and
  * the per-thread template by type, not by name: renaming __thread_vars to
@@ -584,13 +586,50 @@ int macho_write_exec_text(const Buffer *text, uint64_t entry_off,
     memset(&em, 0, sizeof em);
     buffer_init(&em.text);
     buffer_append(&em.text, text->data, text->len);
-    int rc = macho_write_exec(&em, entry_off, path, 0);
+    int rc = macho_write_exec(&em, entry_off, path, 0, NULL);
     buffer_free(&em.text);
     return rc;
 }
 
+/* Build the DWARF sections for one module.  `text_vaddr` is the address of
+ * offset 0 of the image's __text -- what every code address in the debug
+ * information is written relative to. */
+static void macho_debug_build(const EmitModule *em, uint64_t text_vaddr,
+                              const uint64_t *sec_vaddr, MachoDebug *out) {
+    buffer_init(&out->abbrev);
+    buffer_init(&out->info);
+    buffer_init(&out->str);
+    buffer_init(&out->line);
+    buffer_init(&out->frame);
+    buffer_init(&out->loc);
+    debug_emit_dwarf(em, text_vaddr, &out->abbrev, &out->info, &out->str,
+                     &out->line, &out->frame, &out->loc, sec_vaddr);
+}
+
+static void macho_debug_free(MachoDebug *d) {
+    buffer_free(&d->abbrev);
+    buffer_free(&d->info);
+    buffer_free(&d->str);
+    buffer_free(&d->line);
+    buffer_free(&d->frame);
+    buffer_free(&d->loc);
+}
+
+static int macho_module_has_debug(const EmitModule *em) {
+    return em && (em->num_dbg_lines > 0 || em->num_dbg_funcs > 0
+                  || em->num_dbg_globals > 0 || em->dbg_tu_name != NULL);
+}
+
+/* One __DWARF section: name, file range and size. */
+typedef struct {
+    const char *name;
+    Buffer     *buf;
+    uint64_t    off;
+} MachoDwarfSec;
+
 int macho_write_exec(const EmitModule *em, uint64_t entry_off,
-                     const char *path, int skip_libsystem) {
+                     const char *path, int skip_libsystem,
+                     const MachoDebug *dbg) {
     const Buffer *text = &em->text;
     const Buffer *rodata = &em->rodata;
     const Buffer *data = &em->data;
@@ -632,12 +671,62 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     uint64_t data_vm = data_file + bss_vm + tbss_vm;
     uint64_t tv_off = data_page + (uint64_t)data->len;
     uint64_t td_off = tv_off + (uint64_t)thread_vars->len;
-    /* __LINKEDIT begins on the next page after the whole __DATA VM image
-     * (its file offset doubles as the codesignature injection site). */
-    uint64_t link_off = data_present
+    /* Where __LINKEDIT used to begin: the next page after the whole __DATA VM
+     * image.  With debug information, __DWARF takes that slot and pushes
+     * __LINKEDIT past it -- the signature has to stay last in the file, so
+     * nothing may be appended after it. */
+    uint64_t dwarf_off = data_present
         ? data_page + ((data_vm + MACHO_PAGE_SIZE - 1)
                        & ~(uint64_t)(MACHO_PAGE_SIZE - 1))
         : text_pages;
+
+    /* ── DWARF ── */
+    /* A multi-module link hands in the merged sections; a single-module image
+     * (freestanding, or one -c module) builds them from `em` itself. */
+    MachoDebug built;
+    int built_dbg = 0;
+    if (!dbg && macho_module_has_debug(em)) {
+        /* m->syms[].value is a section offset this far into the link, but
+         * DW_OP_addr is absolute, so hand the section bases down. */
+        uint64_t sec_vaddr[16];
+        memset(sec_vaddr, 0, sizeof sec_vaddr);
+        sec_vaddr[SECT_TEXT]   = MACHO_BASE_VA + text_off;
+        sec_vaddr[SECT_RODATA] = MACHO_BASE_VA + ro_off;
+        sec_vaddr[SECT_DATA]   = MACHO_BASE_VA + data_page;
+        sec_vaddr[SECT_BSS]    = MACHO_BASE_VA + data_page + data_file;
+        sec_vaddr[SECT_TDATA]  = MACHO_BASE_VA + td_off;
+        sec_vaddr[SECT_TVARS]  = MACHO_BASE_VA + tv_off;
+        sec_vaddr[SECT_TBSS]   = MACHO_BASE_VA + data_page + data_file + bss_vm;
+        macho_debug_build(em, MACHO_BASE_VA + MACHO_TEXT_OFF, sec_vaddr,
+                          &built);
+        dbg = &built;
+        built_dbg = 1;
+    }
+    MachoDwarfSec dwsec[6];
+    size_t ndsec = 0;
+    uint64_t dwarf_bytes = 0;
+    if (dbg) {
+        /* Order matters only for readability: dyld never looks at these, and
+         * a debugger finds each section by name. */
+        MachoDwarfSec raw[6] = {
+            { "__debug_abbrev", (Buffer *)&dbg->abbrev, 0 },
+            { "__debug_info",   (Buffer *)&dbg->info,   0 },
+            { "__debug_str",    (Buffer *)&dbg->str,    0 },
+            { "__debug_line",   (Buffer *)&dbg->line,   0 },
+            { "__debug_loc",    (Buffer *)&dbg->loc,    0 },
+            { "__debug_frame",  (Buffer *)&dbg->frame,  0 },
+        };
+        for (size_t i = 0; i < 6; i++) {
+            if (!raw[i].buf->len) continue;
+            raw[i].off = dwarf_bytes;
+            dwsec[ndsec++] = raw[i];
+            dwarf_bytes += raw[i].buf->len;
+        }
+    }
+    uint64_t link_off = dwarf_off
+        + (dwarf_bytes ? ((dwarf_bytes + MACHO_PAGE_SIZE - 1)
+                          & ~(uint64_t)(MACHO_PAGE_SIZE - 1))
+                       : 0);
 
     char *data_img = NULL;
     Buffer fixblob, trieblob;
@@ -714,18 +803,23 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     size_t nrpath_cmds = nrpaths < MACHO_MAX_DYLIBS ? nrpaths
                                                     : (size_t)MACHO_MAX_DYLIBS;
 
-    /* PAGEZERO, __TEXT, [__DATA], __LINKEDIT + the non-segment commands
-     * (build version, uuid, main, dylinker, the dylibs this image loads, and
-     * any -rpath).  Pointer initializers add LC_DYLD_CHAINED_FIXUPS and an
-     * empty LC_DYLD_EXPORTS_TRIE (dyld wants the pair). */
+    /* PAGEZERO, __TEXT, [__DATA], [__DWARF], __LINKEDIT + the non-segment
+     * commands (build version, uuid, main, dylinker, the dylibs this image
+     * loads, and any -rpath).  Pointer initializers add
+     * LC_DYLD_CHAINED_FIXUPS and an empty LC_DYLD_EXPORTS_TRIE (dyld wants
+     * the pair). */
+    const uint32_t seg_dwarf_cmd = ndsec
+        ? sizeof(segment_command_64) + (uint32_t)ndsec * sizeof(section_64)
+        : 0;
     const uint32_t ncmds = (data_present ? 4u : 3u) + 4u
+                         + (ndsec ? 1u : 0u)
                          + (uint32_t)ndylibs + (uint32_t)nrpath_cmds
                          + (has_fix ? 2u : 0u);
     const uint32_t uuid_cmd = 24;
     const uint32_t sizeofcmds =
         seg_plain_cmd + seg_text_cmd + seg_data_cmd + seg_plain_cmd
         + build_cmd + uuid_cmd + main_cmd
-        + dylinker_cmdsz + dylib_bytes + rpath_bytes
+        + dylinker_cmdsz + dylib_bytes + rpath_bytes + seg_dwarf_cmd
         + (has_fix ? 32u : 0u);
 
     const uint32_t cmds_end = (uint32_t)sizeof(mach_header_64) + sizeofcmds;
@@ -894,6 +988,41 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         }
     }
 
+    /* ── LC_SEGMENT_64 __DWARF (debug sections; never mapped) ── */
+    /* Nothing in the loader reads this segment -- dyld skips it and the
+     * kernel never maps it, since both protections are 0.  It exists so a
+     * debugger can find the line table and the variable descriptions in the
+     * image itself: on Darwin a compiler's -g normally leaves a debug map for
+     * dsymutil instead, and fakecc has no dsymutil step, so without this the
+     * binary carries no debug information at all and lldb cannot resolve a
+     * breakpoint by file and line. */
+    if (ndsec) {
+        segment_command_64 dw = {0};
+        dw.cmd = LC_SEGMENT_64;
+        dw.cmdsize = seg_dwarf_cmd;
+        memcpy(dw.segname, "__DWARF", 7);
+        dw.vmaddr = MACHO_BASE_VA + dwarf_off;
+        dw.vmsize = (dwarf_bytes + MACHO_PAGE_SIZE - 1)
+                    & ~(uint64_t)(MACHO_PAGE_SIZE - 1);
+        dw.fileoff = dwarf_off;
+        dw.filesize = dwarf_bytes;
+        dw.maxprot = 0;
+        dw.initprot = 0;
+        dw.nsects = (uint32_t)ndsec;
+        APPEND_BYTES(&dw, sizeof dw);
+        for (size_t i = 0; i < ndsec; i++) {
+            section_64 s = {0};
+            memcpy(s.sectname, dwsec[i].name, strlen(dwsec[i].name));
+            memcpy(s.segname, "__DWARF", 7);
+            s.addr = MACHO_BASE_VA + dwarf_off + dwsec[i].off;
+            s.size = dwsec[i].buf->len;
+            s.offset = (uint32_t)(dwarf_off + dwsec[i].off);
+            s.align = 0;                 /* byte-aligned: nothing relocates it */
+            s.flags = S_ATTR_DEBUG;
+            APPEND_BYTES(&s, sizeof s);
+        }
+    }
+
     /* ── LC_SEGMENT_64 __LINKEDIT (codesign fills it) ── */
     segment_command_64 le = {0};
     le.cmd = LC_SEGMENT_64;
@@ -1001,9 +1130,17 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
             if (tdata->len)
                 buffer_append(&out, tdata->data, tdata->len);
         }
-        while ((uint64_t)out.len < link_off)
-            APPEND_ZERO((size_t)(link_off - out.len));
     }
+    /* Pad to wherever the tail of the file begins -- __DWARF when there is
+     * debug information, __LINKEDIT otherwise. */
+    while ((uint64_t)out.len < dwarf_off)
+        APPEND_ZERO((size_t)(dwarf_off - out.len));
+    /* __DWARF sits between __DATA and __LINKEDIT: the code signature has to
+     * stay at the end of the file, so it cannot be appended after it. */
+    for (size_t i = 0; i < ndsec; i++)
+        buffer_append(&out, dwsec[i].buf->data, dwsec[i].buf->len);
+    while ((uint64_t)out.len < link_off)
+        APPEND_ZERO((size_t)(link_off - out.len));
     if (has_fix) {
         buffer_append(&out, fixblob.data, fixblob.len);
         buffer_append(&out, trieblob.data, trieblob.len);
@@ -1012,6 +1149,7 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     buffer_free(&fixblob);
     buffer_free(&trieblob);
     data_img = NULL;
+    if (built_dbg) macho_debug_free(&built);
 
 #undef APPEND_BYTES
 #undef APPEND_ZERO
@@ -3262,8 +3400,85 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
             if (patch_bl(&w, pc, tgt) != 0) { rc = -1; break; }
             memcpy(out.text.data + dtor_at[i], &w, 4);
         }
+        /* Debug records live on the input modules, not on the merged one: a
+         * module's line entries and function ranges are offsets into its own
+         * text, so they have to be rebased by where that text landed in the
+         * linked image, exactly the way the ELF linker does it. */
+        MachoDebug dbg;
+        int have_dbg = 0;
+        for (size_t i = 0; i < n && !have_dbg; i++)
+            have_dbg = macho_module_has_debug(mods[i]);
+        if (rc == 0 && have_dbg) {
+            EmitModule dm;
+            emit_module_init(&dm);
+            for (size_t i = 0; i < n; i++) {
+                EmitModule *m = mods[i];
+                if (!dm.dbg_tu_name && m->dbg_tu_name)
+                    dm.dbg_tu_name = xstrdup(m->dbg_tu_name);
+                for (size_t j = 0; j < m->num_dbg_lines; j++) {
+                    const DebugLineEntry *line = &m->dbg_lines[j];
+                    emit_module_add_dbg_line(&dm, line->file, line->line,
+                                             line->col,
+                                             text_base[i] + line->pc_off);
+                }
+                for (size_t j = 0; j < m->num_dbg_funcs; j++) {
+                    const DebugFunc *f = &m->dbg_funcs[j];
+                    int fi = emit_module_add_dbg_func(
+                        &dm, f->name, f->file, f->line,
+                        text_base[i] + f->start_pc);
+                    emit_module_dbg_func_end(
+                        &dm, fi, text_base[i] + f->end_pc,
+                        text_base[i] + f->prologue_end_pc);
+                    for (size_t k = 0; k < f->num_vars; k++) {
+                        emit_module_add_dbg_var(&dm, fi, &f->vars[k]);
+                        DebugVar *dv =
+                            &dm.dbg_funcs[fi].vars[dm.dbg_funcs[fi].num_vars - 1];
+                        for (size_t r = 0; r < dv->num_ranges; r++) {
+                            dv->ranges[r].pc_start += text_base[i];
+                            dv->ranges[r].pc_end += text_base[i];
+                        }
+                    }
+                    for (size_t k = 0; k < f->num_call_sites; k++) {
+                        DebugCallSite cs = f->call_sites[k];
+                        cs.call_pc += text_base[i];
+                        cs.return_pc += text_base[i];
+                        emit_module_add_dbg_call_site(&dm, fi, &cs);
+                    }
+                }
+                /* A global's address was recorded as an offset inside its own
+                 * module's section; the merged image puts that module's bytes
+                 * somewhere else, so rebase it the way the code addresses
+                 * above are rebased. */
+                for (size_t j = 0; j < m->num_dbg_globals; j++) {
+                    DebugVar gv = m->dbg_globals[j];
+                    switch (gv.addr_sect) {
+                    case SECT_RODATA: gv.addr_off += ro_base[i]; break;
+                    case SECT_DATA:   gv.addr_off += data_base[i]; break;
+                    case SECT_BSS:    gv.addr_off += bss_base[i]; break;
+                    case SECT_TDATA:  gv.addr_off += tdata_base[i]; break;
+                    case SECT_TBSS:   gv.addr_off += tbss_base[i]; break;
+                    default: break;
+                    }
+                    emit_module_add_dbg_global(&dm, &gv);
+                }
+            }
+            uint64_t sec_vaddr[16];
+            memset(sec_vaddr, 0, sizeof sec_vaddr);
+            sec_vaddr[SECT_TEXT]   = MACHO_BASE_VA + macho_text_offset();
+            sec_vaddr[SECT_RODATA] = MACHO_BASE_VA + so.ro;
+            sec_vaddr[SECT_DATA]   = MACHO_BASE_VA + so.data;
+            sec_vaddr[SECT_BSS]    = MACHO_BASE_VA + so.bss;
+            sec_vaddr[SECT_TDATA]  = MACHO_BASE_VA + so.tdata;
+            sec_vaddr[SECT_TBSS]   = MACHO_BASE_VA + so.tbss;
+            macho_debug_build(&dm, MACHO_BASE_VA + macho_text_offset(),
+                              sec_vaddr, &dbg);
+            emit_module_free(&dm);
+        }
         if (rc == 0)
-            rc = macho_write_exec(&out, macho_text_offset(), path, skip_libsystem);
+            rc = macho_write_exec(&out, macho_text_offset(), path,
+                                  skip_libsystem,
+                                  have_dbg ? &dbg : NULL);
+        if (have_dbg) macho_debug_free(&dbg);
     }
 
     for (size_t i = 0; i < n; i++) free(adj[i]);

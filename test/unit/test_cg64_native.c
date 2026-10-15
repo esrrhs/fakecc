@@ -51,7 +51,7 @@ static int compile_and_run_ex(const char *source, char *const extra_argv[],
     codegen(&ir, &em, 0);
 
     const char *path = "/tmp/fakecc_cg64_native_test";
-    if (macho_write_exec(&em, macho_text_offset(), path, 0) != 0)
+    if (macho_write_exec(&em, macho_text_offset(), path, 0, NULL) != 0)
         return -1005;
     emit_module_free(&em);
     ir_module_free(&ir);
@@ -445,7 +445,7 @@ static int compile_image(const char *source) {
     emit_module_init(&em);
     codegen(&ir, &em, 0);
     const char *path = "/tmp/fakecc_cg64_native_test";
-    int rc = macho_write_exec(&em, macho_text_offset(), path, 0);
+    int rc = macho_write_exec(&em, macho_text_offset(), path, 0, NULL);
     emit_module_free(&em);
     ir_module_free(&ir);
     tu_free(&tu);

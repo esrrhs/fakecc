@@ -17,14 +17,31 @@
 
 struct EmitModule;
 
+/* DWARF4 sections, emitted into a __DWARF segment when the module carries
+ * debug records.  Every field is a whole section; an empty one is simply not
+ * written.  Produced by debug_emit_dwarf. */
+typedef struct {
+    Buffer abbrev;
+    Buffer info;
+    Buffer str;
+    Buffer line;
+    Buffer frame;
+    Buffer loc;
+} MachoDebug;
+
 /* Write an arm64 Mach-O PIE executable from an emitted module:
  *   __TEXT : __text + __const (read-only globals/string literals)
  *   __DATA : __data (initialized globals) + __bss (zero-fill)
  * LC_MAIN entry_off is a file offset within __text.
  * If skip_libsystem is non-zero, omit the LC_LOAD_DYLIB for libSystem
- * (used for -nostdlib/-nodefaultlibs freestanding builds). */
+ * (used for -nostdlib/-nodefaultlibs freestanding builds).
+ * `dbg` carries already-built DWARF sections (a multi-module link merges the
+ * debug records of every module and passes them here).  When it is NULL the
+ * sections are built from `em` itself, which is all a single-module image
+ * needs. */
 int macho_write_exec(const struct EmitModule *em, uint64_t entry_off,
-                     const char *path, int skip_libsystem);
+                     const char *path, int skip_libsystem,
+                     const MachoDebug *dbg);
 
 /* Read a linked Mach-O dynamic library (MH_DYLIB) back far enough to link
  * against it: its install name from LC_ID_DYLIB, and the C spellings of the

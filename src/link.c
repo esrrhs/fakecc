@@ -542,7 +542,8 @@ static void finalize_sections(
             }
         }
         debug_emit_dwarf(&dbg, code_vaddr, &debug_abbrev, &debug_info,
-                         &debug_str, &debug_line, &debug_frame, &debug_loc);
+                         &debug_str, &debug_line, &debug_frame, &debug_loc,
+                         NULL);
     }
 
     buf_u8(&shstrtab, 0);
@@ -1073,7 +1074,8 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         if (from_objects)
             rc = macho_link_objects(mods, n, path, skip_libsystem);
         else
-            rc = macho_write_exec(mods[0], macho_text_offset(), path, skip_libsystem);
+            rc = macho_write_exec(mods[0], macho_text_offset(), path,
+                                  skip_libsystem, NULL);
         if (rc != 0) exit(1);
         if (macho_codesign(path) != 0) exit(1);
         return;

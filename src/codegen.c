@@ -2635,7 +2635,9 @@ static int synth_call_value(const IRFunction *fn, IRValue v, size_t at,
     }
 }
 
-static DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
+/* Both backends turn a TypeKind into the DWARF type tag their debug records
+ * carry, so this lives with the rest of the debug plumbing. */
+DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
     if (is_bool) return DBG_TY_BOOL;
     switch (type_kind) {
     case TY_VOID: return DBG_TY_VOID;
