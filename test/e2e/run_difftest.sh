@@ -19,7 +19,9 @@ MANIFEST=${MANIFEST:-"$ROOT/test/e2e/difftest_manifest.txt"}
 SUITE_DIR="$ROOT/test/e2e/cases"
 # Same `<os>-<arch>` tag run_e2e.sh uses for `unsupported_on:` (darwin-arm64).
 HOST_TAG="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m)"
-# Oracle compiler: gcc by default, clang on macOS (pass --oracle clang).
+# Oracle compiler: host gcc.  CI installs one on every platform (Homebrew on
+# macOS), so both ctest and the workflow legs compare against the same oracle.
+# --oracle clang is kept for local experiments only.
 ORACLE="gcc"
 EXTRA_FLAGS=()
 while [ $# -gt 0 ]; do

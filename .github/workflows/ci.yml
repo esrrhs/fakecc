@@ -70,9 +70,9 @@ jobs:
       # difftest hardcodes host `gcc` as the oracle.  Runner images ship GCC
       # 13.2 (no uabs builtins; tree-optimization/123864).  Install GCC 16 so
       # the oracle matches local GCC 16.2.0 (also used when matrix.cc is gcc).
-      # macOS does not have GCC 16 available; skip this step on Darwin.
+      # macOS gets a Homebrew gcc (any modern major) -- the same oracle the
+      # macos-suite difftest legs already use, so ctest is 1:1 with Linux.
       - name: Install host GCC 16
-        if: runner.os != 'macOS'
         run: bash tools/ci_install_host_gcc.sh
 
       - name: Setup lcov

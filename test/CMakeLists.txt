@@ -135,17 +135,12 @@ foreach(lvl O0 O1)
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_multi_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-    # gcc-oracle differential suite over a curated e2e manifest.
-    # macOS uses clang as the oracle (no gcc on CI runners).
-    if(APPLE)
-        add_test(NAME difftest_${lvl}
-                 COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl} --oracle clang
-                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    else()
-        add_test(NAME difftest_${lvl}
-                 COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl}
-                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    endif()
+    # gcc-oracle differential suite over a curated e2e manifest.  Every
+    # platform installs a host gcc in CI (Homebrew on macOS), so the oracle
+    # is the same everywhere -- ctest stays 1:1 across Linux and macOS.
+    add_test(NAME difftest_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     # Shared-library linking: -l / -l: / -nodefaultlibs / .so path.
     add_test(NAME e2e_shlib_${lvl}
