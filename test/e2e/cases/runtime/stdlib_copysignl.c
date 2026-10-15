@@ -13,5 +13,11 @@ int main(void) {
     long double huge = 1.0e4930L;
     long double nhuge = runtime.copysignl(huge, -1.0L);
     if (!(nhuge < 0.0L)) return 3;
+    /* -0.0 has no sign any comparison can see, so building the magnitude by
+     * hand cannot copy it either: 1.0L/-0.0L is -inf, 1.0L/+0.0L is +inf. */
+    long double nz = runtime.copysignl(0.0L, -2.0L);
+    if (!(1.0L / nz < 0.0L)) return 4;
+    long double pz = runtime.copysignl(-0.0L, 2.0L);
+    if (!(1.0L / pz > 0.0L)) return 5;
     return 0;
 }
