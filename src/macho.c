@@ -3301,7 +3301,17 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
                     uint64_t slot = (slot_tdata ? so.tdata : data_off)
                                   + (slot_tdata ? tdata_base[i] : data_base[i])
                                   + r->offset;
-                    emit_module_add_rebase(&out, slot, tgt);
+                    /* A pointer slot that names an import has to be bound,
+                     * not rebased.  `tgt` is meaningless here: an imported
+                     * symbol has no section, so `base` above fell through
+                     * to bss_off and the slot would be rebased to the first
+                     * byte of __bss -- a call through a table of function
+                     * pointers then lands in zero-filled memory and faults.
+                     * dyld is the only thing that knows the real address. */
+                    if (found == 3 && es->name)
+                        emit_module_add_bind(&out, slot, es->name);
+                    else
+                        emit_module_add_rebase(&out, slot, tgt);
                 } else {
                     fprintf(stderr, "fakecc: unsupported data reloc %u\n", r->type);
                     rc = -1;

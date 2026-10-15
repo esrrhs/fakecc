@@ -241,12 +241,22 @@ void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name) {
  * executable already carries LC_LOAD_DYLIB for it, so dyld has the library
  * mapped; what was missing was any way to name one of its symbols.
  *
- * Only what the runtime actually needs is listed.  fakecc has its own
- * printf, malloc and string functions, so adding those would only widen
- * the set of typos that compile.  Threads are the one thing that cannot be
- * built from syscalls here: bsdthread_create and bsdthread_register both
- * return EINVAL from any thread libpthread did not create, including one
- * that already called pthread_create successfully -- measured, not assumed. */
+ * The rule for what belongs here: libSystem supplies it and the runtime
+ * does not.  fakecc has its own printf, malloc, string and ctype functions,
+ * so adding those would only widen the set of typos that compile.  The same
+ * goes for the math core the runtime implements by hand -- sin, cos, tan,
+ * asin, acos, atan, atan2, exp, log, log10, pow, sqrt, floor, ceil, fabs and
+ * copysign -- which stay off the list so a program keeps using fakecc's
+ * versions.  What is listed below is the rest of C99 <math.h> plus the
+ * pseudo-random numbers: real entry points the runtime has no version of,
+ * so without them the same source that links on ELF (where an undefined
+ * symbol is simply left for the dynamic linker) fails here with
+ * "undefined symbol".
+ *
+ * Threads are the one thing that cannot be built from syscalls here:
+ * bsdthread_create and bsdthread_register both return EINVAL from any
+ * thread libpthread did not create, including one that already called
+ * pthread_create successfully -- measured, not assumed. */
 static const char *const emit_darwin_imports[] = {
     "pthread_create",
     "pthread_join",
@@ -276,6 +286,29 @@ static const char *const emit_darwin_imports[] = {
      * references it.  libSystem exports it (__dso_handle, which the stub
      * also names, does not -- the linker synthesises that one instead). */
     "__cxa_atexit",
+
+    /* ---- C99 <math.h> minus the core the runtime implements ---- */
+    /* Hyperbolic, and their inverses.  The runtime has tan but no tanh. */
+    "sinh", "cosh", "tanh",
+    "asinh", "acosh", "atanh",
+    /* Exponential and logarithmic: exp, log and log10 are the runtime's. */
+    "exp2", "expm1", "log2", "log1p", "logb", "ilogb",
+    /* Roots: sqrt and pow are the runtime's. */
+    "cbrt", "hypot",
+    /* Remainder and value decomposition. */
+    "fmod", "remainder", "remquo", "modf", "frexp", "ldexp",
+    "scalbn", "scalbln", "nextafter", "nexttoward",
+    /* Rounding: floor and ceil are the runtime's. */
+    "round", "lround", "llround", "rint", "lrint", "llrint",
+    "nearbyint", "trunc",
+    /* Min/max, positive difference, fused multiply-add. */
+    "fmin", "fmax", "fdim", "fma",
+    /* Error and gamma functions. */
+    "erf", "erfc", "tgamma", "lgamma",
+    "nan",
+    /* The runtime has no random-number generator of its own, and a ported
+     * program that seeds one expects the libc sequence. */
+    "rand", "srand",
 };
 
 /* ------------------------------------------------------------------ */
