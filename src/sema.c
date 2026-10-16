@@ -1915,16 +1915,30 @@ static Type check_expr_inner(Expr *e) {
         }
         /* GCC integer bit builtins — codegen expands these inline (lzcnt /
          * tzcnt / popcnt / bswap) and reads their single argument directly, so
-         * the argument count has to be right before we get there. */
+         * the argument count has to be right before we get there.
+         *
+         * The type-generic *g forms are the exception: clzg/ctzg take an
+         * optional second argument, the value returned when x is zero
+         * (__builtin_clzg(0, 99) is 99).  bitg_builtin_info() is the table
+         * that already knows their arity. */
         if (e->u.call.callee->kind == EX_VAR) {
             const char *bn = e->u.call.callee->u.var.name;
-            if (strncmp(bn, "__builtin_", 10) == 0 && e->u.call.args.len != 1
+            if (strncmp(bn, "__builtin_", 10) == 0
                 && (strstr(bn, "clz") || strstr(bn, "ctz") || strstr(bn, "ffs")
                     || strstr(bn, "popcount") || strstr(bn, "parity")
                     || strstr(bn, "clrsb") || strstr(bn, "bswap"))) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "'%s' takes exactly 1 argument", bn);
-                return type_make_void();
+                int bg_max = 0;
+                int bg = bitg_builtin_info(bn, &bg_max);
+                int nargs = (int)e->u.call.args.len;
+                int bad = bg ? (nargs < 1 || nargs > bg_max) : (nargs != 1);
+                if (bad) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           bg && bg_max > 1
+                               ? "'%s' takes 1 or %d arguments"
+                               : "'%s' takes exactly 1 argument",
+                           bn, bg ? bg_max : 0);
+                    return type_make_void();
+                }
             }
         }
         /* __builtin_ctzll(x) — count trailing zeros of a nonzero uint64.  The
