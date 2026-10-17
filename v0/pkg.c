@@ -8,6 +8,7 @@ static void __fakecc_va_copy(void *dst, void *src){
     for(int i = 0; i < 24; i++) d[i] = s[i];
 }
 
+
 typedef long ptrdiff_t;
 typedef unsigned long size_t;
 typedef long ssize_t;
@@ -40,6 +41,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -179,6 +181,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
     unsigned is_decimal : 1;
+    unsigned is_long_double : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
@@ -186,7 +189,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -200,8 +204,10 @@ static inline Type type_make_float(long long width) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
+Type type_make_long_double(void);
 static inline Type type_make_decimal(long long width) {
     Type t = type_make_float(width);
     t.is_decimal = 1;
@@ -219,7 +225,8 @@ static inline Type type_make_void(void) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -237,6 +244,13 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
+int abi_gp_nregs(void);
+int type_long_double_width(void);
+int abi_sret_uses_gp(void);
+int abi_indirect_agg(Type t);
+int abi_is_hfa(Type t);
+int abi_hfa_elem_count(Type t);
+int abi_hfa_elem_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -436,7 +450,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -451,7 +465,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -496,6 +510,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     char *alias_target;
     int align;
     int no_instrument;
@@ -687,22 +704,42 @@ struct PkgContext;
 int parse(const TokenArray *tokens, TranslationUnit *tu);
 int parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
                  struct PkgContext *ctx);
+
+enum TargetArch {
+    TARGET_ARCH_UNKNOWN = 0,
+    TARGET_ARCH_X86_64 = 1,
+    TARGET_ARCH_ARM64 = 2,
+};typedef enum TargetArch TargetArch;
+enum TargetOS {
+    TOS_UNKNOWN = 0,
+    TOS_LINUX = 1,
+    TOS_MACOS = 2,
+};typedef enum TargetOS TargetOS;
+enum TargetObjFmt {
+    TARGET_OBJFMT_UNKNOWN = 0,
+    TARGET_OBJFMT_ELF = 1,
+    TARGET_OBJFMT_MACHO = 2,
+};typedef enum TargetObjFmt TargetObjFmt;
+struct TargetDesc {
+    TargetArch arch;
+    TargetOS os;
+    TargetObjFmt objfmt;
+    int ptr_bits;
+    int native_vector_bytes;
+    const char *triple;
+    int gp_arg_regs;
+    int sret_uses_gp;
+};typedef struct TargetDesc TargetDesc;
+const TargetDesc *target_current(void);
+void target_set_current(const TargetDesc *t);
+const TargetDesc *target_default(void);
+const TargetDesc *target_parse(const char *triple);
+const TargetDesc *target_x86_64_linux(void);
+const TargetDesc *target_arm64_macos(void);
+int target_backend_ready(const TargetDesc *t);
+
 typedef struct FILE FILE;
 typedef long fpos_t;
-static long pkg_open(const char *path, long flags) {
-    return __syscall(2, (long)path, flags, 0);
-}
-static long pkg_close(long fd) { return __syscall(3, fd); }
-static long pkg_getdents(long fd, void *buf, long n) {
-    return __syscall(217, fd, (long)buf, n);
-}
-struct pkg_dirent64 {
-    unsigned long long d_ino;
-    long long d_off;
-    unsigned short d_reclen;
-    unsigned char d_type;
-    char d_name[1];
-};
 void pkg_ctx_init(PkgContext *ctx) {
     runtime.memset(ctx, 0, sizeof(*ctx));
 }
@@ -863,33 +900,29 @@ static char *read_file(const char *path) {
     runtime.fclose(f);
     return buf;
 }
+static void *pkg_dir_open(const char *path) { return runtime.__fakecc_dir_open(path); }
+static const char *pkg_dir_next(void *dir) { return runtime.__fakecc_dir_next(dir); }
+static void pkg_dir_close(void *dir) { (void)runtime.__fakecc_dir_close(dir); }
 static int ends_with_c(const char *name) {
     size_t n = runtime.strlen(name);
     return n >= 2 && name[n - 2] == '.' && name[n - 1] == 'c';
 }
 static int is_dir(const char *path) {
-    long fd = pkg_open(path, 0 | 65536);
-    if (fd < 0) return 0;
-    pkg_close(fd);
+    void *d = pkg_dir_open(path);
+    if (!d) return 0;
+    pkg_dir_close(d);
     return 1;
 }
+static int c_file_matches_target(const char *name);
 static int dir_has_c(const char *dir) {
-    long fd = pkg_open(dir, 0 | 65536);
-    if (fd < 0) return 0;
-    char buf[2048];
+    void *d = pkg_dir_open(dir);
+    if (!d) return 0;
     int found = 0;
-    for (;;) {
-        long nread = pkg_getdents(fd, buf, (long)sizeof buf);
-        if (nread <= 0) break;
-        long off = 0;
-        while (off < nread) {
-            struct pkg_dirent64 *e = (struct pkg_dirent64 *)(buf + off);
-            if (ends_with_c(e->d_name)) { found = 1; break; }
-            off = off + e->d_reclen;
-        }
-        if (found) break;
+    const char *name;
+    while ((name = pkg_dir_next(d)) != ((void*)0)) {
+        if (ends_with_c(name) && c_file_matches_target(name)) { found = 1; break; }
     }
-    pkg_close(fd);
+    pkg_dir_close(d);
     return found;
 }
 static char *find_pkg_dir(PkgContext *ctx, const char *name) {
@@ -924,32 +957,67 @@ static void pkgs_push(PkgContext *ctx, Package *p) {
     }
     ctx->pkgs[ctx->npkgs++] = p;
 }
+static int c_file_matches_target(const char *name) {
+    size_t n = runtime.strlen(name);
+    if (n < 2 || runtime.strcmp(name + n - 2, ".c") != 0) return 0;
+    const TargetDesc *t = target_current();
+    static const char * os_tags[] = { "linux", "darwin" };
+    static const char * arch_tags[] = { "amd64", "arm64" };
+    size_t end = n - 2;
+    int want_os = t->os == TOS_LINUX ? 0
+                : t->os == TOS_MACOS ? 1 : -1;
+    int want_arch = t->arch == TARGET_ARCH_X86_64 ? 0
+                  : t->arch == TARGET_ARCH_ARM64 ? 1 : -1;
+    for (int step = 0; step < 2; step++) {
+        size_t i = end;
+        while (i > 0 && name[i - 1] != '_') i--;
+        if (i == 0 || i == end) break;
+        size_t tlen = end - i;
+        const char *tag = name + i;
+        int matched = 0;
+        for (size_t k = 0; k < sizeof os_tags / sizeof *os_tags; k++)
+            if (runtime.strlen(os_tags[k]) == tlen
+                && runtime.memcmp(tag, os_tags[k], tlen) == 0) {
+                if (want_os < 0 || want_os != (int)k) return 0;
+                want_os = -1;
+                matched = 1;
+                break;
+            }
+        if (!matched) {
+            for (size_t k = 0; k < sizeof arch_tags / sizeof *arch_tags; k++)
+                if (runtime.strlen(arch_tags[k]) == tlen
+                    && runtime.memcmp(tag, arch_tags[k], tlen) == 0) {
+                    if (want_arch < 0 || want_arch != (int)k) return 0;
+                    want_arch = -1;
+                    matched = 1;
+                    break;
+                }
+        }
+        if (!matched) break;
+        end = i - 1;
+        if (end == 0) return 0;
+    }
+    return 1;
+}
 static char **list_c_files(const char *dir, size_t *nout) {
-    long fd = pkg_open(dir, 0 | 65536);
-    if (fd < 0) {
+    char **names = ((void*)0);
+    size_t n = 0, cap = 0;
+    void *d = pkg_dir_open(dir);
+    if (!d) {
         runtime.fprintf(runtime.stderr, "fakecc: cannot open package directory '%s'\n", dir);
         runtime.exit(1);
     }
-    char **names = ((void*)0);
-    size_t n = 0, cap = 0;
-    char buf[2048];
-    for (;;) {
-        long nread = pkg_getdents(fd, buf, (long)sizeof buf);
-        if (nread <= 0) break;
-        long off = 0;
-        while (off < nread) {
-            struct pkg_dirent64 *e = (struct pkg_dirent64 *)(buf + off);
-            if (ends_with_c(e->d_name)) {
-                if (n >= cap) {
-                    cap = cap ? cap * 2 : 4;
-                    names = xrealloc(names, cap * sizeof(char *));
-                }
-                names[n++] = xstrdup(e->d_name);
+    const char *name;
+    while ((name = pkg_dir_next(d)) != ((void*)0)) {
+        if (ends_with_c(name) && c_file_matches_target(name)) {
+            if (n >= cap) {
+                cap = cap ? cap * 2 : 4;
+                names = xrealloc(names, cap * sizeof(char *));
             }
-            off = off + e->d_reclen;
+            names[n++] = xstrdup(name);
         }
     }
-    pkg_close(fd);
+    pkg_dir_close(d);
     for (size_t i = 1; i < n; i++) {
         char *key = names[i];
         size_t j = i;

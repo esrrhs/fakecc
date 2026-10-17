@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -49,6 +50,14 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
+struct EmitRebase {
+    uint64_t slot;
+    uint64_t target;
+};typedef struct EmitRebase EmitRebase;
+struct EmitBind {
+    uint64_t slot;
+    char *name;
+};typedef struct EmitBind EmitBind;
 struct EmitSymbol {
     char *name;
     uint8_t binding;
@@ -56,6 +65,7 @@ struct EmitSymbol {
     uint16_t shndx;
     size_t value;
     size_t size;
+    uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
 struct EmitReloc {
     size_t offset;
@@ -118,6 +128,8 @@ struct DebugVar {
     int rbp_offset;
     int dwarf_reg;
     char *sym_name;
+    int addr_sect;
+    size_t addr_off;
     DebugLocRange *ranges;
     size_t num_ranges;
     size_t cap_ranges;
@@ -152,6 +164,7 @@ struct DebugFunc {
     size_t prologue_end_pc;
     size_t after_push_rbp_pc;
     size_t after_mov_rbp_pc;
+    size_t frame_size;
     DebugVar *vars;
     size_t num_vars;
     size_t cap_vars;
@@ -160,12 +173,15 @@ struct DebugFunc {
     size_t cap_call_sites;
 };typedef struct DebugFunc DebugFunc;
 struct EmitModule {
+    int is_user_tu;
     Buffer text;
     Buffer rodata;
     Buffer data;
     size_t bss_size;
     Buffer tdata;
     size_t tbss_size;
+    Buffer thread_vars;
+    size_t thread_vars_align;
     size_t text_align;
     size_t rodata_align;
     size_t data_align;
@@ -187,6 +203,12 @@ struct EmitModule {
     EmitReloc *data_relocs;
     size_t num_data_relocs;
     size_t cap_data_relocs;
+    EmitRebase *rebases;
+    size_t num_rebases;
+    size_t cap_rebases;
+    EmitBind *binds;
+    size_t num_binds;
+    size_t cap_binds;
     char *dbg_tu_name;
     DebugLineEntry *dbg_lines;
     size_t num_dbg_lines;
@@ -211,17 +233,38 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
+void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+int emit_is_darwin_import(const char *name);
+struct EmitAuxLib {
+    char *install_name;
+    char **syms;
+    size_t nsyms;
+};typedef struct EmitAuxLib EmitAuxLib;
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms);
+void emit_aux_rpath_add(const char *path);
+const EmitAuxLib *emit_aux_libs(size_t *n);
+const char * *emit_aux_rpaths(size_t *n);
+void emit_aux_reset(void);
+int emit_aux_lib_of(const char *name);
 void emit_obj(const EmitModule *m, const char *path);
+void emit_set_object_mode(int on);
+int emit_object_mode(void);
+void emit_set_multi_tu(int on);
+int emit_multi_tu(void);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
+
+DebugTypeTag ir_type_tag(int type_kind, int is_bool);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
                       Buffer *debug_str, Buffer *debug_line,
-                      Buffer *debug_frame, Buffer *debug_loc);
+                      Buffer *debug_frame, Buffer *debug_loc,
+                      const uint64_t *sec_vaddr);
 void debug_serialize(const EmitModule *m, Buffer *out);
 int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len);
 void emit_module_add_dbg_line(EmitModule *m, const char *file, int line,
@@ -233,12 +276,81 @@ void emit_module_dbg_func_end(EmitModule *m, int func_idx, size_t end_pc,
 void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
                                 size_t after_push_rbp_pc,
                                 size_t after_mov_rbp_pc);
+void emit_module_dbg_func_frame64(EmitModule *m, int func_idx,
+                                  size_t after_stp_pc,
+                                  size_t after_mov_fp_pc,
+                                  size_t frame_size);
 void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v);
 void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v);
 void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
                                    const DebugCallSite *cs);
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
+enum TargetArch {
+    TARGET_ARCH_UNKNOWN = 0,
+    TARGET_ARCH_X86_64 = 1,
+    TARGET_ARCH_ARM64 = 2,
+};typedef enum TargetArch TargetArch;
+enum TargetOS {
+    TOS_UNKNOWN = 0,
+    TOS_LINUX = 1,
+    TOS_MACOS = 2,
+};typedef enum TargetOS TargetOS;
+enum TargetObjFmt {
+    TARGET_OBJFMT_UNKNOWN = 0,
+    TARGET_OBJFMT_ELF = 1,
+    TARGET_OBJFMT_MACHO = 2,
+};typedef enum TargetObjFmt TargetObjFmt;
+struct TargetDesc {
+    TargetArch arch;
+    TargetOS os;
+    TargetObjFmt objfmt;
+    int ptr_bits;
+    int native_vector_bytes;
+    const char *triple;
+    int gp_arg_regs;
+    int sret_uses_gp;
+};typedef struct TargetDesc TargetDesc;
+const TargetDesc *target_current(void);
+void target_set_current(const TargetDesc *t);
+const TargetDesc *target_default(void);
+const TargetDesc *target_parse(const char *triple);
+const TargetDesc *target_x86_64_linux(void);
+const TargetDesc *target_arm64_macos(void);
+int target_backend_ready(const TargetDesc *t);
+struct EmitModule;
+struct MachoDebug {
+    Buffer abbrev;
+    Buffer info;
+    Buffer str;
+    Buffer line;
+    Buffer frame;
+    Buffer loc;
+};typedef struct MachoDebug MachoDebug;
+int macho_write_exec(const struct EmitModule *em, uint64_t entry_off,
+                     const char *path, int skip_libsystem,
+                     const MachoDebug *dbg);
+int macho_read_dylib(const char *path, char **install_name_out,
+                     char ***syms_out, size_t *nsyms_out);
+int macho_write_object(const struct EmitModule *em, const char *path);
+int macho_read_object(const char *path, struct EmitModule *em);
+int macho_link_objects(struct EmitModule **mods, size_t n, const char *path,
+                       int skip_libsystem);
+int macho_write_exec_text(const Buffer *text, uint64_t entry_off,
+                          const char *path);
+uint32_t macho_text_offset(void);
+struct MachoSectOffsets {
+    uint64_t ro;
+    uint64_t data;
+    uint64_t bss;
+    uint64_t thread_vars;
+    uint64_t tdata;
+    uint64_t tbss;
+};typedef struct MachoSectOffsets MachoSectOffsets;
+void macho_section_offsets(const struct EmitModule *em, size_t text_len,
+                           MachoSectOffsets *off);
+size_t macho_tlv_block_tbss_base(size_t tdata_len, size_t max_align);
+int macho_codesign(const char *path);
 typedef struct FILE FILE;
 typedef long fpos_t;
 struct CommonEnt { const char *name; size_t align, size, off; };
@@ -645,7 +757,8 @@ Buffer debug_frame;
             }
         }
         debug_emit_dwarf(&dbg, code_vaddr, &debug_abbrev, &debug_info,
-                         &debug_str, &debug_line, &debug_frame, &debug_loc);
+                         &debug_str, &debug_line, &debug_frame, &debug_loc,
+                         ((void*)0));
     }
     buf_u8(&shstrtab, 0);
     uint32_t shname_text = append_string(&shstrtab, ".text");
@@ -1066,6 +1179,27 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed_in, size_t num_needed_in, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared) {
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
+        if (is_shared) {
+            runtime.fprintf(runtime.stderr,
+                    "fakecc: -shared is not implemented for the "
+                    "arm64-macos target\n");
+            runtime.exit(1);
+        }
+        int from_objects = n > 1;
+        for (size_t i = 0; i < n; i++)
+            if (mods[i]->num_syms) from_objects = 1;
+        int rc;
+        int skip_libsystem = nodefaultlibs;
+        if (from_objects)
+            rc = macho_link_objects(mods, n, path, skip_libsystem);
+        else
+            rc = macho_write_exec(mods[0], macho_text_offset(), path,
+                                  skip_libsystem, ((void*)0));
+        if (rc != 0) runtime.exit(1);
+        if (macho_codesign(path) != 0) runtime.exit(1);
+        return;
+    }
 Buffer text;
 Buffer rodata;
 Buffer data;
@@ -1810,6 +1944,16 @@ size_t mj;
     size_t hdr_size = 64 + 56 * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
+    uint64_t base = is_shared ? 0 : 0x400000;
+    uint64_t code_vaddr = base + text_offset;
+    {
+        size_t ro_va = (size_t)(code_vaddr + text.len);
+        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
+        while (extra--) {
+            char z = 0;
+            buffer_append(&text, &z, 1);
+        }
+    }
     size_t dynamic_size = 0;
     if (need_dynamic) {
         int have_rela_dyn = (num_true_data_ext > 0 || num_relative > 0
@@ -1832,7 +1976,6 @@ size_t mj;
     size_t data_file_offset = rx_filesz;
     if (data_file_offset & (0x1000 - 1))
         data_file_offset = (data_file_offset + 0x1000 - 1) & ~(size_t)(0x1000 - 1);
-    uint64_t base = is_shared ? 0 : 0x400000;
     uint64_t data_vaddr = base + data_file_offset;
     size_t got_data_off = data.len;
     while (got_data_off & 7) got_data_off++;
@@ -1872,15 +2015,6 @@ size_t mj;
     bss_data_off = pad_size_to(bss_data_off, max_bss_align);
     uint64_t bss_vaddr = data_vaddr + bss_data_off;
     size_t bss_file_offset = data_file_offset + bss_data_off;
-    uint64_t code_vaddr = base + text_offset;
-    {
-        size_t ro_va = (size_t)(code_vaddr + text.len);
-        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
-        while (extra--) {
-            char z = 0;
-            buffer_append(&text, &z, 1);
-        }
-    }
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));
     size_t tls_filesize = tdata.len;
     size_t tbss_tls_off = tdata.len;

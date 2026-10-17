@@ -74,6 +74,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -213,6 +214,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
     unsigned is_decimal : 1;
+    unsigned is_long_double : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
@@ -220,7 +222,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -234,8 +237,10 @@ static inline Type type_make_float(long long width) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
+Type type_make_long_double(void);
 static inline Type type_make_decimal(long long width) {
     Type t = type_make_float(width);
     t.is_decimal = 1;
@@ -253,7 +258,8 @@ static inline Type type_make_void(void) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -271,6 +277,13 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
+int abi_gp_nregs(void);
+int type_long_double_width(void);
+int abi_sret_uses_gp(void);
+int abi_indirect_agg(Type t);
+int abi_is_hfa(Type t);
+int abi_hfa_elem_count(Type t);
+int abi_hfa_elem_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -470,7 +483,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -485,7 +498,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -530,6 +543,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     char *alias_target;
     int align;
     int no_instrument;
@@ -664,6 +680,14 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
+struct EmitRebase {
+    uint64_t slot;
+    uint64_t target;
+};typedef struct EmitRebase EmitRebase;
+struct EmitBind {
+    uint64_t slot;
+    char *name;
+};typedef struct EmitBind EmitBind;
 struct EmitSymbol {
     char *name;
     uint8_t binding;
@@ -671,6 +695,7 @@ struct EmitSymbol {
     uint16_t shndx;
     size_t value;
     size_t size;
+    uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
 struct EmitReloc {
     size_t offset;
@@ -733,6 +758,8 @@ struct DebugVar {
     int rbp_offset;
     int dwarf_reg;
     char *sym_name;
+    int addr_sect;
+    size_t addr_off;
     DebugLocRange *ranges;
     size_t num_ranges;
     size_t cap_ranges;
@@ -767,6 +794,7 @@ struct DebugFunc {
     size_t prologue_end_pc;
     size_t after_push_rbp_pc;
     size_t after_mov_rbp_pc;
+    size_t frame_size;
     DebugVar *vars;
     size_t num_vars;
     size_t cap_vars;
@@ -775,12 +803,15 @@ struct DebugFunc {
     size_t cap_call_sites;
 };typedef struct DebugFunc DebugFunc;
 struct EmitModule {
+    int is_user_tu;
     Buffer text;
     Buffer rodata;
     Buffer data;
     size_t bss_size;
     Buffer tdata;
     size_t tbss_size;
+    Buffer thread_vars;
+    size_t thread_vars_align;
     size_t text_align;
     size_t rodata_align;
     size_t data_align;
@@ -802,6 +833,12 @@ struct EmitModule {
     EmitReloc *data_relocs;
     size_t num_data_relocs;
     size_t cap_data_relocs;
+    EmitRebase *rebases;
+    size_t num_rebases;
+    size_t cap_rebases;
+    EmitBind *binds;
+    size_t num_binds;
+    size_t cap_binds;
     char *dbg_tu_name;
     DebugLineEntry *dbg_lines;
     size_t num_dbg_lines;
@@ -826,7 +863,25 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
+void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+int emit_is_darwin_import(const char *name);
+struct EmitAuxLib {
+    char *install_name;
+    char **syms;
+    size_t nsyms;
+};typedef struct EmitAuxLib EmitAuxLib;
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms);
+void emit_aux_rpath_add(const char *path);
+const EmitAuxLib *emit_aux_libs(size_t *n);
+const char * *emit_aux_rpaths(size_t *n);
+void emit_aux_reset(void);
+int emit_aux_lib_of(const char *name);
 void emit_obj(const EmitModule *m, const char *path);
+void emit_set_object_mode(int on);
+int emit_object_mode(void);
+void emit_set_multi_tu(int on);
+int emit_multi_tu(void);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
@@ -905,6 +960,8 @@ struct IRInst {
     IRValue dst;
     IRValue a;
     IRValue b;
+    IRValue c;
+    IRValue d;
     int64_t imm;
     SourceLoc loc;
     char *call_name;
@@ -980,12 +1037,15 @@ struct IRFunction {
     int ret_is_float;
     int ret_is_struct;
     int ret_reg_n;
-    int ret_reg_cls[2];
+    int ret_reg_cls[4];
     int ret_is_bool;
     int ret_is_complex_ld;
     int ret_x87_bytes;
     int is_variadic;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     int is_constructor;
     int is_destructor;
     int ctor_prio;
@@ -1006,6 +1066,7 @@ struct IRFunctionArray {
 struct GlobalFixup {
     int offset;
     char *sym;
+    char *sub;
     int addend;
 };typedef struct GlobalFixup GlobalFixup;
 struct IRGlobal {
@@ -1013,7 +1074,11 @@ struct IRGlobal {
     int size;
     char *init_bytes;
     int is_readonly;
+    int is_const_obj;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     int is_tls;
     int align;
     SourceLoc loc;
@@ -1030,6 +1095,7 @@ struct IRAlias {
     char *name;
     char *target;
     int is_static;
+    int is_weak;
     SourceLoc loc;
 };typedef struct IRAlias IRAlias;
 struct IRAliasArray {
@@ -1041,6 +1107,9 @@ struct IRModule {
     IRFunctionArray functions;
     IRGlobalArray globals;
     IRAliasArray aliases;
+    char **weak_refs;
+    size_t n_weak_refs;
+    size_t cap_weak_refs;
 };typedef struct IRModule IRModule;
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
@@ -1127,6 +1196,7 @@ int sema_error_count(void);
 int sema_warning_count(void);
 typedef struct FILE FILE;
 typedef long fpos_t;
+
 static int file_readable(const char *path) {
     FILE *f = runtime.fopen(path, "rb");
     if (!f) return 0;
@@ -1223,6 +1293,8 @@ static int lower_one_tu(TranslationUnit *tu, const char *filename,
     if (want_debug) out->dbg_tu_name = xstrdup(filename);
     codegen(&ir, out, want_debug);
     ir_module_free(&ir);
+    if (fakecc_had_error())
+        return FAKECC_ERR;
     return FAKECC_OK;
 }
 static int compile_parse_string(const char *source, const char *filename,
@@ -1253,7 +1325,10 @@ int fakecc_compile_string_to_obj(const char *source,
     if (compile_parse_string(source, "input.c", &tu, ((void*)0)) != FAKECC_OK)
         return FAKECC_ERR;
     EmitModule em;
-    if (lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, ((void*)0)) != FAKECC_OK) {
+    emit_set_object_mode(1);
+    int low = lower_one_tu(&tu, "input.c", &em, opt_level, want_debug, ((void*)0));
+    emit_set_object_mode(0);
+    if (low != FAKECC_OK) {
         tu_free(&tu);
         return FAKECC_ERR;
     }

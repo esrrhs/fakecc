@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -179,6 +180,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
     unsigned is_decimal : 1;
+    unsigned is_long_double : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
@@ -186,7 +188,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -200,8 +203,10 @@ static inline Type type_make_float(long long width) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
+Type type_make_long_double(void);
 static inline Type type_make_decimal(long long width) {
     Type t = type_make_float(width);
     t.is_decimal = 1;
@@ -219,7 +224,8 @@ static inline Type type_make_void(void) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -237,6 +243,13 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
+int abi_gp_nregs(void);
+int type_long_double_width(void);
+int abi_sret_uses_gp(void);
+int abi_indirect_agg(Type t);
+int abi_is_hfa(Type t);
+int abi_hfa_elem_count(Type t);
+int abi_hfa_elem_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -436,7 +449,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -451,7 +464,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -496,6 +509,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     char *alias_target;
     int align;
     int no_instrument;
@@ -621,6 +637,7 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
+
 struct PkgContext;
 int sema_check(const TranslationUnit *tu, int require_main);
 int sema_check_in_pkg(const TranslationUnit *tu, int require_main,
@@ -711,6 +728,79 @@ int sema_has_errors(void) {
 int sema_error_count(void) {
     if (fakecc_had_error()) return FAKECC_ERR;
     return g_sema_error_count;
+}
+static int bitg_builtin_info(const char *name, int *max_args) {
+    if (!name) return 0;
+    if (runtime.strcmp(name, "__builtin_clzg") == 0 || runtime.strcmp(name, "__builtin_ctzg") == 0) {
+        *max_args = 2;
+        return 1;
+    }
+    if (runtime.strcmp(name, "__builtin_clrsbg") == 0 || runtime.strcmp(name, "__builtin_ffsg") == 0
+        || runtime.strcmp(name, "__builtin_popcountg") == 0 || runtime.strcmp(name, "__builtin_parityg") == 0) {
+        *max_args = 1;
+        return 1;
+    }
+    return 0;
+}
+static int stdc_builtin_info(const char *name, int *same_ty, int *nargs) {
+    if (!name || runtime.strncmp(name, "__builtin_stdc_", 15) != 0) return 0;
+    const char *op = name + 15;
+    *same_ty = 0;
+    *nargs = 1;
+    if (runtime.strcmp(op, "rotate_left") == 0 || runtime.strcmp(op, "rotate_right") == 0) {
+        *same_ty = 1;
+        *nargs = 2;
+        return 1;
+    }
+    if (runtime.strcmp(op, "bit_floor") == 0 || runtime.strcmp(op, "bit_ceil") == 0) {
+        *same_ty = 1;
+        return 1;
+    }
+    static const char * cnt[] = {
+        "leading_zeros", "leading_ones", "trailing_zeros", "trailing_ones",
+        "first_leading_zero", "first_leading_one",
+        "first_trailing_zero", "first_trailing_one",
+        "count_ones", "count_zeros", "has_single_bit", "bit_width",
+    };
+    for (size_t i = 0; i < sizeof cnt / sizeof cnt[0]; i++)
+        if (runtime.strcmp(op, cnt[i]) == 0) return 1;
+    return 0;
+}
+static int stdio_named_arity(const char *n) {
+    if (runtime.strncmp(n, "__builtin_", 10) == 0) n += 10;
+    size_t len = runtime.strlen(n);
+    if (len > 9 && runtime.strcmp(n + len - 9, "_unlocked") == 0) len -= 9;
+    else if (len > 5 && runtime.strcmp(n + len - 5, "_chk") == 0) len -= 5;
+    char base[40];
+    if (len >= sizeof base) return 0;
+    runtime.memcpy(base, n, len);
+    base[len] = 0;
+    if (runtime.strcmp(base, "printf") == 0 || runtime.strcmp(base, "scanf") == 0) return 1;
+    if (runtime.strcmp(base, "fprintf") == 0 || runtime.strcmp(base, "sprintf") == 0
+        || runtime.strcmp(base, "fscanf") == 0 || runtime.strcmp(base, "sscanf") == 0) return 2;
+    if (runtime.strcmp(base, "snprintf") == 0) return 3;
+    return 0;
+}
+static int math_builtin_width(const char *n, int *nargs) {
+    const char *b = n;
+    if (runtime.strncmp(b, "__builtin_", 10) == 0) b += 10;
+    static const struct { const char *root; int narg; } tab[] = {
+        {"nearbyint", 1}, {"floor", 1}, {"trunc", 1}, {"round", 1},
+        {"ceil", 1}, {"sqrt", 1}, {"fmin", 2}, {"fmax", 2},
+        {"fma", 3}, {"rint", 1}, {"nextafter", 2},
+    };
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+        size_t L = runtime.strlen(tab[i].root);
+        if (runtime.strncmp(b, tab[i].root, L) != 0) continue;
+        char s = b[L];
+        if (s == '\0') { *nargs = tab[i].narg; return 8; }
+        if (s == 'f' && b[L + 1] == '\0') { *nargs = tab[i].narg; return 4; }
+        if (s == 'l' && b[L + 1] == '\0') {
+            *nargs = tab[i].narg;
+            return type_long_double_width();
+        }
+    }
+    return -1;
 }
 static void sema_report_error(const SourceLoc *loc, const char *fmt, ...) {
     if (fakecc_had_error()) return;
@@ -1151,7 +1241,7 @@ static int type_rank(Type t) {
     return t.width;
 }
 static Type integer_promote(Type t) {
-    if (t.kind == TY_FLOAT) return t;
+    if (t.kind == TY_FLOAT) return type_clone(t);
     if (t.bitfield_width > 0) {
         if (!t.is_unsigned) {
             if (t.bitfield_width <= 32)
@@ -1170,7 +1260,7 @@ static Type integer_promote(Type t) {
         }
     }
     if (t.width < 4) return type_make_int(4, 0);
-    return t;
+    return type_clone(t);
 }
 static Type usual_arith_conv(Type a, Type b) {
     a = integer_promote(a);
@@ -1779,10 +1869,39 @@ static Type check_expr_inner(Expr *e) {
         }
         if (runtime.strncmp(e->u.var.name, "__builtin_", 10) == 0 || runtime.strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
+            if (runtime.strncmp(bname, "__builtin_", 10) == 0) {
+                const char *plain = bname + 10;
+                const Sym *ps = symtable_find(st, plain);
+                Type pt = ps ? ps->type : type_make_void();
+                while (pt.kind == TY_PTR && pt.pointee) pt = *pt.pointee;
+                if (pt.kind == TY_FUNC) {
+                    set_type(e, type_clone(ps->type));
+                    return type_clone(e->type);
+                }
+                const FunSig *fsig = ftab_lookup(plain);
+                if (fsig) {
+                    const Type **ptys = ((void*)0);
+                    if (fsig->arity > 0) {
+                        ptys = runtime.malloc(fsig->arity * sizeof(Type *));
+                        if (!ptys) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                        for (int qi = 0; qi < fsig->arity; qi++)
+                            ptys[qi] = &fsig->param_types[qi];
+                    }
+                    Type fn2 = type_make_func_var(fsig->ret_type, (Type **)ptys,
+                                                  fsig->arity, fsig->is_variadic);
+                    fn2.func_is_unprototyped = fsig->is_unprototyped;
+                    runtime.free(ptys);
+                    Type fp2 = type_make_ptr(fn2);
+                    type_free(&fn2);
+                    set_type(e, fp2);
+                    return type_clone(e->type);
+                }
+            }
+            int math_narg = 0, math_w = 0;
             Type ret = type_default_int();
-            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0 || runtime.strcmp(bname, "__builtin_prefetch") == 0 || runtime.strcmp(bname, "__builtin_stack_restore") == 0 || runtime.strcmp(bname, "__builtin_longjmp") == 0 || runtime.strcmp(bname, "__builtin_return") == 0)
+            if (runtime.strcmp(bname, "__builtin_abort") == 0 || runtime.strcmp(bname, "__builtin_exit") == 0 || runtime.strcmp(bname, "__builtin_trap") == 0 || runtime.strcmp(bname, "__builtin_debugtrap") == 0 || runtime.strcmp(bname, "__builtin_assume") == 0 || runtime.strcmp(bname, "__builtin_clear_cache") == 0 || runtime.strcmp(bname, "__builtin_arm_dmb") == 0 || runtime.strcmp(bname, "__builtin_arm_dsb") == 0 || runtime.strcmp(bname, "__builtin_arm_isb") == 0 || runtime.strcmp(bname, "__builtin_prefetch") == 0 || runtime.strcmp(bname, "__builtin_stack_restore") == 0 || runtime.strcmp(bname, "__builtin_longjmp") == 0 || runtime.strcmp(bname, "__builtin_return") == 0)
                 ret = type_make_void();
-            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_memmove") == 0 || runtime.strcmp(bname, "__builtin_mempcpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0 || runtime.strcmp(bname, "alloca") == 0 || runtime.strcmp(bname, "__builtin_frame_address") == 0 || runtime.strcmp(bname, "__builtin_return_address") == 0 || runtime.strcmp(bname, "__builtin_stack_save") == 0 || runtime.strcmp(bname, "__builtin_apply_args") == 0 || runtime.strcmp(bname, "__builtin_apply") == 0 || runtime.strcmp(bname, "__builtin___memcpy_chk") == 0 || runtime.strcmp(bname, "__builtin___memmove_chk") == 0 || runtime.strcmp(bname, "__builtin___mempcpy_chk") == 0 || runtime.strcmp(bname, "__builtin___memset_chk") == 0)
+            else if (runtime.strcmp(bname, "__builtin_memset") == 0 || runtime.strcmp(bname, "__builtin_memcpy") == 0 || runtime.strcmp(bname, "__builtin_memmove") == 0 || runtime.strcmp(bname, "__builtin_mempcpy") == 0 || runtime.strcmp(bname, "__builtin_memccpy") == 0 || runtime.strcmp(bname, "__builtin_alloca") == 0 || runtime.strcmp(bname, "__builtin_alloca_with_align") == 0 || runtime.strcmp(bname, "alloca") == 0 || runtime.strcmp(bname, "__builtin_frame_address") == 0 || runtime.strcmp(bname, "__builtin_return_address") == 0 || runtime.strcmp(bname, "__builtin_stack_save") == 0 || runtime.strcmp(bname, "__builtin_apply_args") == 0 || runtime.strcmp(bname, "__builtin_apply") == 0 || runtime.strcmp(bname, "__builtin___memcpy_chk") == 0 || runtime.strcmp(bname, "__builtin___memmove_chk") == 0 || runtime.strcmp(bname, "__builtin___mempcpy_chk") == 0 || runtime.strcmp(bname, "__builtin___memset_chk") == 0)
                 ret = type_make_ptr(type_make_void());
             else if (runtime.strcmp(bname, "__builtin_bcopy") == 0)
                 ret = type_make_void();
@@ -1793,33 +1912,63 @@ static Type check_expr_inner(Expr *e) {
                      runtime.strcmp(bname, "__builtin_strncat") == 0 || runtime.strcmp(bname, "__builtin___strncat_chk") == 0 ||
                      runtime.strcmp(bname, "__builtin_strncpy") == 0 || runtime.strcmp(bname, "__builtin___strncpy_chk") == 0)
                 ret = type_make_ptr(type_make_int(1, 0));
-            else if (runtime.strcmp(bname, "__builtin_strlen") == 0 || runtime.strcmp(bname, "__builtin_strspn") == 0 || runtime.strcmp(bname, "__builtin_object_size") == 0)
+            else if (runtime.strcmp(bname, "__builtin_strsep") == 0)
+                ret = type_make_ptr(type_make_int(1, 0));
+            else if (runtime.strcmp(bname, "__builtin_strlen") == 0 || runtime.strcmp(bname, "__builtin_strnlen") == 0 || runtime.strcmp(bname, "__builtin_strspn") == 0 || runtime.strcmp(bname, "__builtin_strcspn") == 0 || runtime.strcmp(bname, "__builtin_strlcpy") == 0 || runtime.strcmp(bname, "__builtin_strlcat") == 0 || runtime.strcmp(bname, "__builtin_object_size") == 0)
                 ret = type_make_int(8, 1);
+            else if (runtime.strcmp(bname, "__builtin_memchr") == 0 || runtime.strcmp(bname, "__builtin_strchr") == 0 || runtime.strcmp(bname, "__builtin_strrchr") == 0 || runtime.strcmp(bname, "__builtin_index") == 0 || runtime.strcmp(bname, "__builtin_rindex") == 0 || runtime.strcmp(bname, "__builtin_strpbrk") == 0 || runtime.strcmp(bname, "__builtin_strchrnul") == 0 || runtime.strcmp(bname, "__builtin_memrchr") == 0 || runtime.strcmp(bname, "__builtin_rawmemchr") == 0 || runtime.strcmp(bname, "__builtin_strstr") == 0)
+                ret = type_make_ptr(type_make_int(1, 0));
             else if (runtime.strcmp(bname, "__builtin_fabs") == 0)
                 ret = type_make_float(8);
             else if (runtime.strcmp(bname, "__builtin_fabsf") == 0)
                 ret = type_make_float(4);
             else if (runtime.strcmp(bname, "__builtin_fabsl") == 0)
-                ret = type_make_float(16);
+                ret = type_make_long_double();
+            else if (runtime.strcmp(bname, "__builtin_powi") == 0 || runtime.strcmp(bname, "powi") == 0)
+                ret = type_make_float(8);
+            else if (runtime.strcmp(bname, "__builtin_powif") == 0 || runtime.strcmp(bname, "powif") == 0)
+                ret = type_make_float(4);
+            else if (runtime.strcmp(bname, "__builtin_powil") == 0 || runtime.strcmp(bname, "powil") == 0)
+                ret = type_make_long_double();
+            else if ((math_w = math_builtin_width(bname, &math_narg)) > 0)
+                ret = type_make_float(math_w);
             else if (runtime.strcmp(bname, "__builtin_copysign") == 0 || runtime.strcmp(bname, "copysign") == 0)
                 ret = type_make_float(8);
             else if (runtime.strcmp(bname, "__builtin_copysignf") == 0 || runtime.strcmp(bname, "copysignf") == 0)
                 ret = type_make_float(4);
             else if (runtime.strcmp(bname, "__builtin_copysignl") == 0 || runtime.strcmp(bname, "copysignl") == 0)
-                ret = type_make_float(16);
-            else if (runtime.strcmp(bname, "__builtin_inf") == 0 || runtime.strcmp(bname, "__builtin_huge_val") == 0 || runtime.strcmp(bname, "__builtin_nan") == 0)
+                ret = type_make_long_double();
+            else if (runtime.strcmp(bname, "__builtin_inf") == 0 || runtime.strcmp(bname, "__builtin_huge_val") == 0 || runtime.strcmp(bname, "__builtin_nan") == 0 || runtime.strcmp(bname, "__builtin_nans") == 0)
                 ret = type_make_float(8);
-            else if (runtime.strcmp(bname, "__builtin_inff") == 0 || runtime.strcmp(bname, "__builtin_huge_valf") == 0 || runtime.strcmp(bname, "__builtin_nanf") == 0)
+            else if (runtime.strcmp(bname, "__builtin_inff") == 0 || runtime.strcmp(bname, "__builtin_huge_valf") == 0 || runtime.strcmp(bname, "__builtin_nanf") == 0 || runtime.strcmp(bname, "__builtin_nansf") == 0)
                 ret = type_make_float(4);
-            else if (runtime.strcmp(bname, "__builtin_infl") == 0 || runtime.strcmp(bname, "__builtin_huge_vall") == 0 || runtime.strcmp(bname, "__builtin_nanl") == 0)
-                ret = type_make_float(16);
+            else if (runtime.strcmp(bname, "__builtin_infl") == 0 || runtime.strcmp(bname, "__builtin_huge_vall") == 0 || runtime.strcmp(bname, "__builtin_nanl") == 0 || runtime.strcmp(bname, "__builtin_nansl") == 0)
+                ret = type_make_long_double();
             else if (runtime.strcmp(bname, "__builtin_bswap64") == 0)
+                ret = type_make_int(8, 1);
+            else if (runtime.strcmp(bname, "__builtin_readcyclecounter") == 0)
                 ret = type_make_int(8, 1);
             else if (runtime.strcmp(bname, "__builtin_bswap32") == 0)
                 ret = type_make_int(4, 1);
             else if (runtime.strcmp(bname, "__builtin_bswap16") == 0)
                 ret = type_make_int(2, 1);
-            else if (runtime.strcmp(bname, "__builtin_classify_type") == 0)
+            else if (runtime.strcmp(bname, "__builtin_rotateleft64") == 0 || runtime.strcmp(bname, "__builtin_rotateright64") == 0)
+                ret = type_make_int(8, 1);
+            else if (runtime.strcmp(bname, "__builtin_rotateleft32") == 0 || runtime.strcmp(bname, "__builtin_rotateright32") == 0)
+                ret = type_make_int(4, 1);
+            else if (runtime.strcmp(bname, "__builtin_rotateleft16") == 0 || runtime.strcmp(bname, "__builtin_rotateright16") == 0)
+                ret = type_make_int(2, 1);
+            else if (runtime.strcmp(bname, "__builtin_rotateleft8") == 0 || runtime.strcmp(bname, "__builtin_rotateright8") == 0)
+                ret = type_make_int(1, 1);
+            else if (runtime.strcmp(bname, "__builtin_bitreverse64") == 0)
+                ret = type_make_int(8, 1);
+            else if (runtime.strcmp(bname, "__builtin_bitreverse32") == 0)
+                ret = type_make_int(4, 1);
+            else if (runtime.strcmp(bname, "__builtin_bitreverse16") == 0)
+                ret = type_make_int(2, 1);
+            else if (runtime.strcmp(bname, "__builtin_bitreverse8") == 0)
+                ret = type_make_int(1, 1);
+            else if (runtime.strcmp(bname, "__builtin_classify_type") == 0 || runtime.strcmp(bname, "__builtin_fpclassify") == 0)
                 ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_signbit") == 0 || runtime.strcmp(bname, "__builtin_signbitf") == 0 || runtime.strcmp(bname, "__builtin_signbitl") == 0 || runtime.strcmp(bname, "signbit") == 0)
                 ret = type_make_int(4, 0);
@@ -1828,6 +1977,8 @@ static Type check_expr_inner(Expr *e) {
             else if (runtime.strcmp(bname, "__builtin_isfinite") == 0 || runtime.strcmp(bname, "__builtin_isfinitef") == 0 || runtime.strcmp(bname, "__builtin_isfinitel") == 0 || runtime.strcmp(bname, "isfinite") == 0)
                 ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_isinf") == 0 || runtime.strcmp(bname, "__builtin_isinff") == 0 || runtime.strcmp(bname, "__builtin_isinfl") == 0 || runtime.strcmp(bname, "isinf") == 0)
+                ret = type_make_int(4, 0);
+            else if (runtime.strcmp(bname, "__builtin_isnormal") == 0 || runtime.strcmp(bname, "__builtin_isnormalf") == 0 || runtime.strcmp(bname, "__builtin_isnormall") == 0 || runtime.strcmp(bname, "isnormal") == 0)
                 ret = type_make_int(4, 0);
             else if (runtime.strcmp(bname, "__builtin_isgreater") == 0 || runtime.strcmp(bname, "__builtin_isgreaterequal") == 0 ||
                      runtime.strcmp(bname, "__builtin_isless") == 0 || runtime.strcmp(bname, "__builtin_islessequal") == 0 ||
@@ -1845,8 +1996,10 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_default_int();
 Type p0;
 Type p1;
-            Type *params[2];
+Type p2;
+            Type *params[3];
             int num_params = 0;
+            int nstdio = 0;
             if (runtime.strcmp(bname, "__builtin_copysignf") == 0 || runtime.strcmp(bname, "copysignf") == 0) {
                 p0 = type_make_float(4);
                 p1 = type_make_float(4);
@@ -1858,8 +2011,8 @@ Type p1;
                 params[0] = &p0; params[1] = &p1;
                 num_params = 2;
             } else if (runtime.strcmp(bname, "__builtin_copysignl") == 0 || runtime.strcmp(bname, "copysignl") == 0) {
-                p0 = type_make_float(16);
-                p1 = type_make_float(16);
+                p0 = type_make_long_double();
+                p1 = type_make_long_double();
                 params[0] = &p0; params[1] = &p1;
                 num_params = 2;
             } else if (runtime.strcmp(bname, "__builtin_fabsf") == 0) {
@@ -1871,12 +2024,59 @@ Type p1;
                 params[0] = &p0;
                 num_params = 1;
             } else if (runtime.strcmp(bname, "__builtin_fabsl") == 0) {
-                p0 = type_make_float(16);
+                p0 = type_make_long_double();
                 params[0] = &p0;
                 num_params = 1;
+            } else if (runtime.strcmp(bname, "__builtin_powif") == 0 || runtime.strcmp(bname, "powif") == 0) {
+                p0 = type_make_float(4);
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (runtime.strcmp(bname, "__builtin_powi") == 0 || runtime.strcmp(bname, "powi") == 0) {
+                p0 = type_make_float(8);
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (runtime.strcmp(bname, "__builtin_powil") == 0 || runtime.strcmp(bname, "powil") == 0) {
+                p0 = type_make_long_double();
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if ((nstdio = stdio_named_arity(bname)) > 0) {
+                p0 = type_make_ptr(type_make_void());
+                params[0] = &p0;
+                num_params = 1;
+                if (nstdio >= 2) {
+                    p1 = type_make_ptr(type_make_void());
+                    params[1] = &p1;
+                    num_params = 2;
+                }
+                if (nstdio >= 3) {
+                    p2 = type_make_int(8, 1);
+                    params[2] = &p2;
+                    num_params = 3;
+                }
+            } else {
+                int narg = 0;
+                int w = math_builtin_width(bname, &narg);
+                if (w > 0) {
+                    p0 = type_make_float(w);
+                    params[0] = &p0;
+                    num_params = 1;
+                    if (narg >= 2) {
+                        p1 = type_make_float(w);
+                        params[1] = &p1;
+                        num_params = 2;
+                    }
+                    if (narg >= 3) {
+                        p2 = type_make_float(w);
+                        params[2] = &p2;
+                        num_params = 3;
+                    }
+                }
             }
             Type fn = type_make_func(ret, num_params > 0 ? (Type * *)params : ((void*)0), num_params);
-            if (num_params == 0)
+            if (num_params == 0 || nstdio > 0)
                 fn.func_is_variadic = 1;
             Type fp = type_make_ptr(fn);
             type_free(&fn);
@@ -2065,7 +2265,7 @@ Type p1;
                 }
                 type_free(&at);
                 if (is_crealf) set_type(e, type_make_float(4));
-                else if (is_creall) set_type(e, type_make_float(16));
+                else if (is_creall) set_type(e, type_make_long_double());
                 else set_type(e, type_make_float(8));
                 return type_clone(e->type);
             }
@@ -2083,6 +2283,132 @@ Type p1;
             }
             set_type(e, t0);
             return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_arm_dmb") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_arm_dsb") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_arm_isb") == 0)) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes 1 argument", e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            if (at.kind != TY_INT) {
+                type_free(&at);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s operand must be an integer",
+                       e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            type_free(&at);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_clear_cache") == 0) {
+            if (e->u.call.args.len != 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_clear_cache takes 2 arguments");
+                return type_make_void();
+            }
+            Type cs = check_expr_inner(e->u.call.args.data[0]);
+            Type ce = check_expr_inner(e->u.call.args.data[1]);
+            type_free(&cs);
+            type_free(&ce);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_assume") == 0) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_assume takes 1 argument");
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            type_free(&at);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_align_down") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_assume_aligned") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_expect_with_probability") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_unpredictable") == 0)) {
+            if (e->u.call.args.len < 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "builtin takes at least 1 argument");
+                return type_make_void();
+            }
+            Type t0 = check_expr_inner(e->u.call.args.data[0]);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type ti = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&ti);
+            }
+            set_type(e, t0);
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_fshl") == 0 ||
+             runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_fshr") == 0)) {
+            if (e->u.call.args.len != 3) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "funnel shift takes 3 arguments");
+                return type_make_void();
+            }
+            Type t0 = check_expr_inner(e->u.call.args.data[0]);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type ti = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&ti);
+            }
+            set_type(e, t0);
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR) {
+            static const char * one_arg[] = {
+                "__builtin_isnan", "__builtin_isnanf", "__builtin_isnanl", "isnan",
+                "__builtin_isinf", "__builtin_isinff", "__builtin_isinfl", "isinf",
+                "__builtin_isfinite", "__builtin_isfinitef", "__builtin_isfinitel",
+                "isfinite", ((void*)0) };
+            static const char * two_arg[] = {
+                "__builtin_isgreater", "__builtin_isgreaterequal",
+                "__builtin_isless", "__builtin_islessequal",
+                "__builtin_islessgreater", "__builtin_isunordered", ((void*)0) };
+            const char *bn = e->u.call.callee->u.var.name;
+            for (int k = 0; one_arg[k]; k++)
+                if (runtime.strcmp(bn, one_arg[k]) == 0 && e->u.call.args.len != 1) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "'%s' takes exactly 1 argument", bn);
+                    return type_make_void();
+                }
+            for (int k = 0; two_arg[k]; k++)
+                if (runtime.strcmp(bn, two_arg[k]) == 0 && e->u.call.args.len != 2) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "'%s' takes exactly 2 arguments", bn);
+                    return type_make_void();
+                }
+        }
+        if (e->u.call.callee->kind == EX_VAR) {
+            const char *bn = e->u.call.callee->u.var.name;
+            if (runtime.strncmp(bn, "__builtin_", 10) == 0
+                && (runtime.strstr(bn, "clz") || runtime.strstr(bn, "ctz") || runtime.strstr(bn, "ffs")
+                    || runtime.strstr(bn, "popcount") || runtime.strstr(bn, "parity")
+                    || runtime.strstr(bn, "clrsb") || runtime.strstr(bn, "bswap"))) {
+                int bg_max = 0;
+                int bg = bitg_builtin_info(bn, &bg_max);
+                int nargs = (int)e->u.call.args.len;
+                int bad = bg ? (nargs < 1 || nargs > bg_max) : (nargs != 1);
+                if (bad) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           bg && bg_max > 1
+                               ? "'%s' takes 1 or %d arguments"
+                               : "'%s' takes exactly 1 argument",
+                           bn, bg ? bg_max : 0);
+                    return type_make_void();
+                }
+            }
         }
         if (e->u.call.callee->kind == EX_VAR
             && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_ctzll") == 0) {
@@ -2134,6 +2460,15 @@ Type p1;
         if (e->u.call.callee->kind == EX_VAR
             && runtime.strncmp(e->u.call.callee->u.var.name, "__atomic_", 9) == 0) {
             const char *sname = e->u.call.callee->u.var.name;
+            if (runtime.strcmp(sname, "__atomic_thread_fence") == 0
+                || runtime.strcmp(sname, "__atomic_signal_fence") == 0) {
+                for (size_t i = 0; i < e->u.call.args.len; i++) {
+                    Type at = check_expr_inner(e->u.call.args.data[i]);
+                    type_free(&at);
+                }
+                set_type(e, type_make_void());
+                return type_clone(e->type);
+            }
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__atomic builtin takes at least 1 argument");
@@ -2152,9 +2487,17 @@ Type p1;
                 type_free(&at);
             }
             if (runtime.strcmp(sname, "__atomic_store_n") == 0
-                || runtime.strcmp(sname, "__atomic_clear") == 0) {
+                || runtime.strcmp(sname, "__atomic_store") == 0
+                || runtime.strcmp(sname, "__atomic_clear") == 0
+                || runtime.strcmp(sname, "__atomic_load") == 0
+                || runtime.strcmp(sname, "__atomic_exchange") == 0) {
                 type_free(&val_ty);
                 set_type(e, type_make_void());
+            } else if (runtime.strcmp(sname, "__atomic_compare_exchange_n") == 0
+                       || runtime.strcmp(sname, "__atomic_compare_exchange") == 0
+                       || runtime.strcmp(sname, "__atomic_test_and_set") == 0) {
+                type_free(&val_ty);
+                set_type(e, type_make_int(4, 0));
             } else {
                 set_type(e, val_ty);
             }
@@ -2295,6 +2638,143 @@ Type p1;
             set_type(e, type_make_void());
             return type_clone(e->type);
         }
+        if (e->u.call.callee->kind == EX_VAR) {
+            int max_args = 0;
+            if (bitg_builtin_info(e->u.call.callee->u.var.name, &max_args)) {
+                int n = (int)e->u.call.args.len;
+                if (n < 1 || n > max_args) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s takes 1 argument%s",
+                           e->u.call.callee->u.var.name,
+                           max_args == 2 ? " or 2" : "");
+                    return type_make_void();
+                }
+                Type at = check_expr_inner(e->u.call.args.data[0]);
+                if (at.kind != TY_INT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s argument must be an integer",
+                           e->u.call.callee->u.var.name);
+                    return type_make_void();
+                }
+                type_free(&at);
+                if (n == 2) {
+                    Type ft = check_expr_inner(e->u.call.args.data[1]);
+                    if (ft.kind != TY_INT) {
+                        type_free(&ft);
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "%s fallback must be an integer",
+                               e->u.call.callee->u.var.name);
+                        return type_make_void();
+                    }
+                    type_free(&ft);
+                }
+                set_type(e, type_make_int(4, 0));
+                return type_clone(e->type);
+            }
+        }
+        if (e->u.call.callee->kind == EX_VAR) {
+            int same_ty = 0, nargs = 0;
+            if (stdc_builtin_info(e->u.call.callee->u.var.name, &same_ty, &nargs)) {
+                if ((int)e->u.call.args.len != nargs) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s takes %d argument%s",
+                           e->u.call.callee->u.var.name, nargs,
+                           nargs == 1 ? "" : "s");
+                    return type_make_void();
+                }
+                Type at = check_expr_inner(e->u.call.args.data[0]);
+                if (at.kind != TY_INT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s argument must be an integer",
+                           e->u.call.callee->u.var.name);
+                    return type_make_void();
+                }
+                if (nargs == 2) {
+                    Type cty = check_expr_inner(e->u.call.args.data[1]);
+                    if (cty.kind != TY_INT) {
+                        type_free(&at);
+                        type_free(&cty);
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "%s count must be an integer",
+                               e->u.call.callee->u.var.name);
+                        return type_make_void();
+                    }
+                    type_free(&cty);
+                }
+                if (same_ty) set_type(e, type_clone(at));
+                else set_type(e, type_make_int(4, 1));
+                type_free(&at);
+                return type_clone(e->type);
+            }
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_add_sat") == 0
+                || runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_sub_sat") == 0
+                || runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_mul_sat") == 0)) {
+            if (e->u.call.args.len != 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes 2 arguments", e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            Type bt = check_expr_inner(e->u.call.args.data[1]);
+            if (at.kind != TY_INT || bt.kind != TY_INT) {
+                type_free(&at);
+                type_free(&bt);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s arguments must be integers",
+                       e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            set_type(e, type_clone(at));
+            type_free(&at);
+            type_free(&bt);
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_isnormal") == 0
+                || runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_isnormalf") == 0
+                || runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_isnormall") == 0
+                || runtime.strcmp(e->u.call.callee->u.var.name, "isnormal") == 0)) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes 1 argument", e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            if (at.kind != TY_FLOAT) {
+                type_free(&at);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s argument must be a floating type",
+                       e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            type_free(&at);
+            set_type(e, type_make_int(4, 0));
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR
+            && runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_fpclassify") == 0) {
+            if (e->u.call.args.len != 6) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_fpclassify takes 6 arguments");
+                return type_make_void();
+            }
+            for (size_t i = 0; i < e->u.call.args.len; i++) {
+                Type at = check_expr_inner(e->u.call.args.data[i]);
+                if (i == 5 && at.kind != TY_FLOAT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "__builtin_fpclassify value must be a floating type");
+                    return type_make_void();
+                }
+                type_free(&at);
+            }
+            set_type(e, type_make_int(4, 0));
+            return type_clone(e->type);
+        }
         Type callee_ty = check_expr_inner(e->u.call.callee);
         if (e->u.call.callee->kind == EX_VAR) {
             const Sym *local_fn_sym = symtable_find(st, e->u.call.callee->u.var.name);
@@ -2330,22 +2810,27 @@ Type p1;
                 return type_clone(e->type);
             }
             if (sig) {
+                int sig_arity = sig->arity;
+                int sig_variadic = sig->is_variadic;
+                int sig_unprototyped = sig->is_unprototyped;
+                Type *sig_param_types = sig->param_types;
+                Type sig_ret = sig->ret_type;
                 type_free(&callee_ty);
                 check_call_arity(e->loc, e->u.call.callee->u.var.name,
-                                 sig->arity, sig->is_variadic,
+                                 sig_arity, sig_variadic,
                                  e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if ((int)i < sig->arity && !sig->is_unprototyped)
+                    if ((int)i < sig_arity && !sig_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
-                                            &sig->param_types[i]);
-                    else if (sig->is_variadic)
+                                            &sig_param_types[i]);
+                    else if (sig_variadic)
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
-                    else if (sig->is_unprototyped)
+                    else if (sig_unprototyped)
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
-                set_type(e, type_clone(sig->ret_type));
+                set_type(e, type_clone(sig_ret));
                 return type_clone(e->type);
             }
             const Sym *extern_sym = symtable_find(st, e->u.call.callee->u.var.name);
@@ -2741,7 +3226,9 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
             runtime.strcmp(name, "__builtin_infl") == 0 || runtime.strcmp(name, "__builtin_huge_val") == 0 ||
             runtime.strcmp(name, "__builtin_huge_valf") == 0 || runtime.strcmp(name, "__builtin_huge_vall") == 0 ||
             runtime.strcmp(name, "__builtin_nan") == 0 || runtime.strcmp(name, "__builtin_nanf") == 0 ||
-            runtime.strcmp(name, "__builtin_nanl") == 0)
+            runtime.strcmp(name, "__builtin_nanl") == 0 ||
+            runtime.strcmp(name, "__builtin_nans") == 0 || runtime.strcmp(name, "__builtin_nansf") == 0 ||
+            runtime.strcmp(name, "__builtin_nansl") == 0)
             return 1;
     }
     if (e->kind == EX_UNARY
@@ -2937,10 +3424,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             int per = init_leaf_count(*target->elem_type);
             if (per > 0) len = (n + per - 1) / per;
         }
-        for (int i = 0; i < n; i++)
-            if (list->u.init_list.desig_kind[i] == 0
-                && list->u.init_list.desig_index[i] + 1 > len)
-                len = list->u.init_list.desig_index[i] + 1;
+        if (list->u.init_list.desig_kind) {
+            for (int i = 0; i < n; i++)
+                if (list->u.init_list.desig_kind[i] == 0
+                    && list->u.init_list.desig_index[i] + 1 > len)
+                    len = list->u.init_list.desig_index[i] + 1;
+        }
         if (n == 1 && list->u.init_list.elements[0]
             && list->u.init_list.elements[0]->kind == EX_STR
             && target->elem_type && target->elem_type->kind == TY_INT
@@ -2980,35 +3469,41 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         }
         return;
     }
-    for (int i = 0; i < n; i++) {
-        int kind = list->u.init_list.desig_kind[i];
-        if (kind == 0) {
-            if (target->kind != TY_ARRAY && !target->is_vector)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+    if (list->u.init_list.desig_kind) {
+        for (int i = 0; i < n; i++) {
+            int kind = list->u.init_list.desig_kind[i];
+            if (kind == 0) {
+                if (target->kind != TY_ARRAY && !target->is_vector)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "array index designator used on a non-array type");
-                    return;
-                }
-            int idx = list->u.init_list.desig_index[i];
-            if (idx < 0 || idx >= N)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+                        return;
+                    }
+                int idx = list->u.init_list.desig_index[i];
+                if (idx < 0 || idx >= N)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "designator index %d out of range for array of length %d",
                        idx, N);
-                    return;
-                }
-        } else if (kind == 1) {
-            if (target->kind != TY_STRUCT)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+                        return;
+                    }
+            } else if (kind == 1) {
+                if (target->kind != TY_STRUCT)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "member designator used on a non-struct type");
-                    return;
-                }
+                        return;
+                    }
+            }
         }
     }
+    if (N < 0) {
+        die_at(loc.file, loc.line, loc.col,
+               "initialization of an incomplete array");
+        return;
+    }
     Expr **out = runtime.calloc((size_t)N, sizeof(Expr *));
-    if (!out) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
-    if (target->kind != TY_ARRAY && !target->is_vector) {
+    if (!out) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); } if (target->kind != TY_ARRAY && !target->is_vector) {
         for (int i = 0; i < N; i++)
             out[i] = expr_new_int(0, loc);
     }
@@ -3017,11 +3512,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     for (int i = 0; i < n; i++) {
         int pos;
         int member_idx = 0;
-        if (list->u.init_list.desig_kind[i] == 0) {
+        int dkind = list->u.init_list.desig_kind ? list->u.init_list.desig_kind[i] : -1;
+        if (dkind == 0) {
             pos = list->u.init_list.desig_index[i];
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
-        } else if (list->u.init_list.desig_kind[i] == 1) {
+        } else if (dkind == 1) {
             const char *name = list->u.init_list.desig_member[i];
             pos = designator_member_index(sd, name);
             if (pos < 0)
@@ -3051,7 +3547,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             return;
         }
         Expr *elem = list->u.init_list.elements[i];
-        if (list->u.init_list.desig_kind[i] == 1 && sd && member_idx >= 0) {
+        if (dkind == 1 && sd && member_idx >= 0) {
             const char *nm = list->u.init_list.desig_member[i];
             if (nm && !designator_is_direct_member(sd, member_idx, nm))
                 elem = wrap_anon_designator(nm, elem, loc);
@@ -3077,7 +3573,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             int want = init_leaf_count(*slot_type);
             int take = 1;
             while (take < want && i + take < n
-                   && list->u.init_list.desig_kind[i + take] == -1)
+                   && (!list->u.init_list.desig_kind || list->u.init_list.desig_kind[i + take] == -1))
                 take++;
             Expr **sub = runtime.malloc(take * sizeof(Expr *));
             for (int k = 0; k < take; k++)
@@ -3133,7 +3629,8 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     if (keep_union_desig) {
         if (last_union_member_idx < 0 || last_union_member_idx >= sd->num_members)
             last_union_member_idx = 0;
-        const char *mn = sd->members[last_union_member_idx].name;
+        const char *mn = sd->num_members > 0
+            ? sd->members[last_union_member_idx].name : ((void*)0);
         if (mn && mn[0]) {
             union_member_name = xstrdup(mn);
             union_desig_kind = 1;
@@ -3485,8 +3982,8 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
         break;
     }
 }
-int sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
-                       PkgContext *ctx) {
+static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_main,
+                                  PkgContext *ctx) {
     fakecc_clear_error();
     g_sema_error_count = 0;
     TranslationUnit *tu = (TranslationUnit *)tu_const;
@@ -3730,11 +4227,16 @@ int sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
     }
     ftab_cur_free();
     symtable_free(&globals);
+    if (fakecc_had_error() || g_sema_error_count > 0) return FAKECC_ERR;
+    return FAKECC_OK;
+}
+int sema_check_in_pkg(const TranslationUnit *tu_const, int require_main,
+                       PkgContext *ctx) {
+    int rc = sema_check_in_pkg_impl(tu_const, require_main, ctx);
     g_sema_pkg = ((void*)0);
     g_sema_tu = ((void*)0);
     g_sema_structs = ((void*)0);
-    if (fakecc_had_error() || g_sema_error_count > 0) return FAKECC_ERR;
-    return FAKECC_OK;
+    return rc;
 }
 int sema_check(const TranslationUnit *tu, int require_main) {
     return sema_check_in_pkg(tu, require_main, ((void*)0));

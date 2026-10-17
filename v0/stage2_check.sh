@@ -29,6 +29,32 @@ MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | tr '\n' ' ')
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# Succeeds (exit 0) when $1 is a 64-bit Mach-O image carrying no
+# LC_CODE_SIGNATURE, so `if macho_unsigned f` reads as "sign it".  Note the
+# polarity: a shell `if` treats status 0 as true, so "needs signing" has to be
+# the success status, not a failure one.
+macho_unsigned() {
+    python3 - "$1" <<'PY'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+if d[:4] != b'\xcf\xfa\xed\xfe':
+    sys.exit(1)          # not a little-endian 64-bit Mach-O: leave it alone
+ncmds = struct.unpack_from('<I', d, 16)[0]
+off = 32
+for _ in range(ncmds):
+    cmd, cmdsize = struct.unpack_from('<II', d, off)
+    if cmd == 0x1d:      # LC_CODE_SIGNATURE
+        sys.exit(1)      # already signed: nothing to do
+    off += cmdsize
+sys.exit(0)              # unsigned: the caller should stamp it
+PY
+}
+
+# `stat -c%s` is GNU-only; BSD/macOS spells the same query `stat -f%z`.
+file_size() {
+    stat -f%z "$1" 2>/dev/null || stat -c%s "$1"
+}
+
 echo "=== translating src/*.c -> v0/*.c ==="
 python3 "$ROOT/v0/translate.py" >/dev/null || exit 1
 
@@ -43,6 +69,19 @@ build_with() {
         echo "  BUILD FAIL: $(head -1 "$outdir/build.err")" >&2
         return 1
     }
+    # An arm64-macos image will not run until it carries an ad-hoc signature,
+    # and a selfhosted fakecc has no fork/execl to invoke codesign(1) itself,
+    # so stage-2 output arrives unsigned.  Stamp it here with the very
+    # invocation the stage-0 driver uses, which puts both binaries in the same
+    # state before they are compared.  Only an image that is still unsigned
+    # gets signed: codesign is not idempotent, because the signature it writes
+    # covers the file length, so re-signing stage 1 would alter it.
+    if [ "$(uname -s)" = "Darwin" ] && macho_unsigned "$outdir/fakecc"; then
+        /usr/bin/codesign -s - -f "$outdir/fakecc" 2>>"$outdir/build.err" || {
+            echo "  CODESIGN FAIL: $(tail -1 "$outdir/build.err")" >&2
+            return 1
+        }
+    fi
 }
 
 echo "=== stage 1: Stage 0 compiles fakecc ==="
@@ -66,8 +105,8 @@ if cmp -s "$WORK/s1/fakecc" "$WORK/s2/fakecc"; then
     echo "binaries byte-identical"
 else
     echo "NOT a fixed point — stage 1 and stage 2 binaries differ"
-    echo "  stage 1: $(stat -c%s "$WORK/s1/fakecc") bytes"
-    echo "  stage 2: $(stat -c%s "$WORK/s2/fakecc") bytes"
+    echo "  stage 1: $(file_size "$WORK/s1/fakecc") bytes"
+    echo "  stage 2: $(file_size "$WORK/s2/fakecc") bytes"
     echo "  first differing bytes (cmp -l):"
     cmp -l "$WORK/s1/fakecc" "$WORK/s2/fakecc" | head -20
     cp "$WORK/s1/fakecc" "$ROOT/v0/fakecc-1"
