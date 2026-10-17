@@ -1915,8 +1915,10 @@ static void emit_inst_f(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
 static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
     char name[32];
     runtime.snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
+    size_t have = sizeof(long double) < 10 ? sizeof(long double) : 10;
     char *init = runtime.malloc(10);
-    runtime.memcpy(init, &val, 10);
+    runtime.memcpy(init, &val, have);
+    if (have < 10) runtime.memset(init + have, 0, 10 - have);
     IRGlobal *lg = ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
     lg->align = 16;
     IRValue v = new_value(fn);

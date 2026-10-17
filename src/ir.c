@@ -1183,8 +1183,18 @@ static void emit_inst_f(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
 static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
     char name[32];
     snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
+    /* The 80-bit x87 form is ten bytes wide, but long double is only that
+     * wide on x86-64: on arm64 it is a plain double, and copying ten bytes
+     * out of `val` reads two bytes past the end of it (AddressSanitizer:
+     * stack-buffer-overflow in emit_ld_const, from the ir test that builds
+     * an x87 aggregate return on an arm64 host).  Take the bytes that exist
+     * and zero the rest.  The tail is never read where long double is
+     * narrower -- cg64 rejects a width-16 float IR_CONST outright -- and on
+     * x86-64 `have` is 10, so this copies exactly what it always did. */
+    size_t have = sizeof(long double) < 10 ? sizeof(long double) : 10;
     char *init = malloc(10);
-    memcpy(init, &val, 10);
+    memcpy(init, &val, have);
+    if (have < 10) memset(init + have, 0, 10 - have);
     IRGlobal *lg = ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
     lg->align = 16;
     IRValue v = new_value(fn);
