@@ -672,6 +672,11 @@ static int emit_alloc_builtin(C64 *c, const char *name) {
     int is_calloc = strcmp(name, "calloc") == 0;
     int is_realloc = strcmp(name, "realloc") == 0;
     if (!is_malloc && !is_free && !is_calloc && !is_realloc) return 0;
+    /* runtime/malloc.c is a sibling TU, so find_function below cannot see it
+     * and would happily inline a fresh mmap for every call.  A linked
+     * allocator always wins: this fallback is one page per allocation, which
+     * turns a self-hosted compile into a 13 GB footprint. */
+    if (emit_runtime_alloc()) return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
     A64Asm *a = c->as;
@@ -1474,6 +1479,13 @@ static int emit_dup_builtin(C64 *c, const char *name) {
         int mfi = 0;
         if (find_function(c->ir, "malloc", &mfi) == 0)
             a64_bl(a, c->fn_label[mfi]);
+        else if (emit_runtime_alloc())
+            /* The allocator lives in another TU (runtime/malloc.c), so
+             * allocate through the very symbol free() resolves to.  Mapping
+             * a block inline here and then handing it to that free() gives
+             * it a pointer that is not one of its chunks, which is how the
+             * strdup case died with SIGBUS. */
+            a64_bl(a, c64_stub_label(c, "malloc"));
         else
             emit_mmap_bytes(a);
     }

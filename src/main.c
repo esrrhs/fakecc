@@ -729,6 +729,13 @@ int main(int argc, char **argv) {
         nsource_tus++;
     }
     emit_set_multi_tu(nsource_tus + nlinked_files > 1);
+    /* runtime/malloc.c is linked together with these TUs, so it owns
+     * malloc/free/calloc/realloc.  FAKECC_ARM64_RUNTIME=0 drops the runtime
+     * files from the link even when !nostdlib (arm64_freestanding above), and
+     * then the inline fallback is all there is. */
+    emit_set_runtime_alloc(nrt
+                           && !(target_current()->arch == TARGET_ARCH_ARM64
+                                && !arm64_link_runtime));
 
     EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));

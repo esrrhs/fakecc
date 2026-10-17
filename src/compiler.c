@@ -286,6 +286,9 @@ int fakecc_compile_string_to_executable(const char *source,
         return -1;
     }
 
+    /* The runtime package is loaded above, so runtime/malloc.c owns the
+     * allocator and the arm64 inline fallback must not shadow it. */
+    emit_set_runtime_alloc(1);
     if (lower_one_tu(&tu, "input.c", &all_mods[0], opt_level, want_debug, &pkg) != FAKECC_OK) return FAKECC_ERR;
     tu_free(&tu);
     mod_ptrs[0] = &all_mods[0];
@@ -428,6 +431,10 @@ int fakecc_compile_files(const char **input_paths,
         if (!pkg.pkgs[p]->owns_files) continue;
         nlinked += (int)pkg.pkgs[p]->nfiles;
     }
+
+    /* Same rule as fakecc_compile_string_to_executable: a linked runtime
+     * owns malloc/free/calloc/realloc. */
+    emit_set_runtime_alloc(!nostdlib);
 
     size_t total_mods = num_inputs + (size_t)nlinked;
     EmitModule *mods = malloc(total_mods * sizeof(EmitModule));

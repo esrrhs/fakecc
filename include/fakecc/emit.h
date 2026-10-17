@@ -358,6 +358,10 @@ void emit_set_object_mode(int on);
 int  emit_object_mode(void);
 void emit_set_multi_tu(int on);
 int  emit_multi_tu(void);
+/* When set, the runtime package is linked and owns the allocator, so the
+ * arm64 backend must not inline its per-page mmap fallback. */
+void emit_set_runtime_alloc(int on);
+int  emit_runtime_alloc(void);
 /* Read a relocatable object file into an EmitModule.  Returns 0 on success. */
 int  emit_obj_read(const char *path, EmitModule *m);
 

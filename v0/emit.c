@@ -252,6 +252,8 @@ void emit_set_object_mode(int on);
 int emit_object_mode(void);
 void emit_set_multi_tu(int on);
 int emit_multi_tu(void);
+void emit_set_runtime_alloc(int on);
+int emit_runtime_alloc(void);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
@@ -706,6 +708,9 @@ int emit_object_mode(void) { return g_object_mode; }
 static int g_multi_tu;
 void emit_set_multi_tu(int on) { g_multi_tu = on ? 1 : 0; }
 int emit_multi_tu(void) { return g_multi_tu; }
+static int g_rt_alloc;
+void emit_set_runtime_alloc(int on) { g_rt_alloc = on ? 1 : 0; }
+int emit_runtime_alloc(void) { return g_rt_alloc; }
 void emit_obj(const EmitModule *m, const char *path) {
     if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
         if (macho_write_object(m, path) != 0) runtime.exit(1);

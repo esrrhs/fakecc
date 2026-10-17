@@ -515,6 +515,18 @@ static int g_multi_tu;
 void emit_set_multi_tu(int on) { g_multi_tu = on ? 1 : 0; }
 int emit_multi_tu(void) { return g_multi_tu; }
 
+/* The runtime package is part of this link, so runtime/malloc.c supplies
+ * malloc/free/calloc/realloc.  The arm64 backend has an inline fallback that
+ * maps one page per allocation; it must stay out of the way whenever a real
+ * allocator is linked, because a compiler-sized workload then costs a page
+ * per live block (13 GB against 0.6 GB for the same source built by clang).
+ * The fallback is per-TU and cannot see the sibling that defines the symbol,
+ * so the decision is made once for the whole link here. */
+static int g_rt_alloc;
+
+void emit_set_runtime_alloc(int on) { g_rt_alloc = on ? 1 : 0; }
+int emit_runtime_alloc(void) { return g_rt_alloc; }
+
 void emit_obj(const EmitModule *m, const char *path) {
     if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
         if (macho_write_object(m, path) != 0) exit(1);

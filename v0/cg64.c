@@ -252,6 +252,8 @@ void emit_set_object_mode(int on);
 int emit_object_mode(void);
 void emit_set_multi_tu(int on);
 int emit_multi_tu(void);
+void emit_set_runtime_alloc(int on);
+int emit_runtime_alloc(void);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
@@ -1873,6 +1875,7 @@ static int emit_alloc_builtin(C64 *c, const char *name) {
     int is_calloc = runtime.strcmp(name, "calloc") == 0;
     int is_realloc = runtime.strcmp(name, "realloc") == 0;
     if (!is_malloc && !is_free && !is_calloc && !is_realloc) return 0;
+    if (emit_runtime_alloc()) return 0;
     int defined = 0;
     if (find_function(c->ir, name, &defined) == 0) return 0;
     A64Asm *a = c->as;
@@ -2607,6 +2610,8 @@ static int emit_dup_builtin(C64 *c, const char *name) {
         int mfi = 0;
         if (find_function(c->ir, "malloc", &mfi) == 0)
             a64_bl(a, c->fn_label[mfi]);
+        else if (emit_runtime_alloc())
+            a64_bl(a, c64_stub_label(c, "malloc"));
         else
             emit_mmap_bytes(a);
     }

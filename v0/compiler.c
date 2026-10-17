@@ -882,6 +882,8 @@ void emit_set_object_mode(int on);
 int emit_object_mode(void);
 void emit_set_multi_tu(int on);
 int emit_multi_tu(void);
+void emit_set_runtime_alloc(int on);
+int emit_runtime_alloc(void);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
@@ -1427,6 +1429,7 @@ int fakecc_compile_string_to_executable(const char *source,
         runtime.free(mod_ptrs);
         return -1;
     }
+    emit_set_runtime_alloc(1);
     if (lower_one_tu(&tu, "input.c", &all_mods[0], opt_level, want_debug, &pkg) != FAKECC_OK) return FAKECC_ERR;
     tu_free(&tu);
     mod_ptrs[0] = &all_mods[0];
@@ -1552,6 +1555,7 @@ int fakecc_compile_files(const char **input_paths,
         if (!pkg.pkgs[p]->owns_files) continue;
         nlinked += (int)pkg.pkgs[p]->nfiles;
     }
+    emit_set_runtime_alloc(!nostdlib);
     size_t total_mods = num_inputs + (size_t)nlinked;
     EmitModule *mods = runtime.malloc(total_mods * sizeof(EmitModule));
     EmitModule **mod_ptrs = runtime.malloc(total_mods * sizeof(EmitModule *));
