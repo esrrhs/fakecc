@@ -48,6 +48,79 @@ void __fakecc_set_environ(char **envp) {
     __fakecc_envp = envp;
 }
 
+/* ---- Directory listing ----
+ *
+ * The compiler enumerates a package directory's *.c files, and a
+ * self-hosted build has no libc to ask.  Darwin has no getdents64:
+ * getdirentries64 (344) instead reports the read offset through a fourth
+ * argument, and its records carry an explicit name length.  Entry names are
+ * documented as NUL-terminated, so the name can be handed back as it is.
+ *
+ * The API deliberately hides the record layout: the caller only ever wants
+ * names, and the two targets spell them differently. */
+struct __fakecc_dirent {
+    unsigned long long d_ino;
+    unsigned long long d_seekoff;
+    unsigned short d_reclen;
+    unsigned short d_namlen;
+    unsigned char d_type;
+    char d_name[1024];
+};
+
+struct __fakecc_dir {
+    long fd;
+    long long base;      /* getdirentries64's read offset, kept across calls */
+    long left;
+    long off;
+    char buf[2048];
+};
+
+void *__fakecc_dir_open(const char *path) {
+    /* open(2): O_RDONLY (0) | O_DIRECTORY (0x00100000 on Darwin).  A plain
+     * file fails this, which is what is_dir() relies on. */
+    long fd = __syscall(5, (long)path, 0x00100000L, 0);
+    if (fd < 0) return 0;
+    struct __fakecc_dir *d = (struct __fakecc_dir *)malloc(sizeof(struct __fakecc_dir));
+    if (d == 0) {
+        __syscall(6, fd);
+        return 0;
+    }
+    d->fd = fd;
+    d->base = 0;
+    d->left = 0;
+    d->off = 0;
+    return (void *)d;
+}
+
+const char *__fakecc_dir_next(void *h) {
+    struct __fakecc_dir *d = (struct __fakecc_dir *)h;
+    if (d == 0) return 0;
+    while (1) {
+        if (d->off < d->left) {
+            struct __fakecc_dirent *e =
+                (struct __fakecc_dirent *)(void *)(d->buf + d->off);
+            long reclen = (long)e->d_reclen;
+            if (reclen <= 0) return 0;
+            d->off = d->off + reclen;
+            e->d_name[e->d_namlen] = 0;
+            return (const char *)e->d_name;
+        }
+        d->left = 0;
+        d->off = 0;
+        long n = __syscall(344, d->fd, (long)d->buf, 2048, (long)&d->base);
+        if (n <= 0) return 0;
+        d->left = n;
+    }
+}
+
+int __fakecc_dir_close(void *h) {
+    struct __fakecc_dir *d = (struct __fakecc_dir *)h;
+    if (d == 0) return -1;
+    __syscall(6, d->fd);
+    free(h);
+    return 0;
+}
+
 char *getenv(const char *name) {
     char **e = __fakecc_envp;
     if (e == 0) return 0;

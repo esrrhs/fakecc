@@ -54,6 +54,9 @@ typedef struct {
     size_t        nlabels, cap_labels;
     A64Fixup     *fixups;
     size_t        nfixups, cap_fixups;
+    /* Emit every conditional branch in its wide form (see a64_bcond).  Set
+     * once per function, before that function's first word is emitted. */
+    int           wide_cond;
     /* File/VA offset at which the buffer's first word lands in the final
      * image.  Zero for raw buffers; Mach-O uses 512 (header pad) so ADRP
      * page math produces runtime addresses.  Relative B/BL deltas are
@@ -64,6 +67,10 @@ typedef struct {
 void a64_init(A64Asm *a);
 void a64_free(A64Asm *a);
 static inline void a64_set_base(A64Asm *a, uint32_t off) { a->base_off = off; }
+/* Select wide (2-word) conditional branches for the function about to be
+ * emitted.  A b.cond reaches only ±1 MB, and a single function can exceed
+ * that; see a64_bcond for what wide mode emits instead. */
+static inline void a64_set_wide_cond(A64Asm *a, int on) { a->wide_cond = !!on; }
 
 int  a64_new_label(A64Asm *a);
 void a64_bind(A64Asm *a, int label);   /* label = current emit offset */

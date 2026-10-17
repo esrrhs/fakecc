@@ -26,6 +26,72 @@ int chmod(const char *path, int mode) {
     return r < 0 ? -1 : 0;
 }
 
+/* ---- Directory listing ----
+ *
+ * The compiler enumerates a package directory's *.c files, and a
+ * self-hosted build has no libc to ask.  Linux spells this getdents64 (217)
+ * with a dirent64 record; Darwin spells it getdirentries64 (344) with a
+ * different record and a fourth argument, so both live in their own file
+ * and the caller only ever sees names. */
+struct __fakecc_dirent {
+    unsigned long long d_ino;
+    long long d_off;
+    unsigned short d_reclen;
+    unsigned char d_type;
+    char d_name[1];
+};
+
+struct __fakecc_dir {
+    long fd;
+    long left;
+    long off;
+    char buf[2048];
+};
+
+void *__fakecc_dir_open(const char *path) {
+    /* open(2): O_RDONLY (0) | O_DIRECTORY (0x10000 on Linux).  A plain file
+     * fails this, which is what is_dir() relies on. */
+    long fd = __syscall(2, (long)path, 0x10000L, 0);
+    if (fd < 0) return 0;
+    struct __fakecc_dir *d = (struct __fakecc_dir *)malloc(sizeof(struct __fakecc_dir));
+    if (d == 0) {
+        __syscall(3, fd);
+        return 0;
+    }
+    d->fd = fd;
+    d->left = 0;
+    d->off = 0;
+    return (void *)d;
+}
+
+const char *__fakecc_dir_next(void *h) {
+    struct __fakecc_dir *d = (struct __fakecc_dir *)h;
+    if (d == 0) return 0;
+    while (1) {
+        if (d->off < d->left) {
+            struct __fakecc_dirent *e =
+                (struct __fakecc_dirent *)(void *)(d->buf + d->off);
+            long reclen = (long)e->d_reclen;
+            if (reclen <= 0) return 0;
+            d->off = d->off + reclen;
+            return (const char *)e->d_name;
+        }
+        d->left = 0;
+        d->off = 0;
+        long n = __syscall(217, d->fd, (long)d->buf, 2048);
+        if (n <= 0) return 0;
+        d->left = n;
+    }
+}
+
+int __fakecc_dir_close(void *h) {
+    struct __fakecc_dir *d = (struct __fakecc_dir *)h;
+    if (d == 0) return -1;
+    __syscall(3, d->fd);
+    free(h);
+    return 0;
+}
+
 /* Scan /proc/self/environ.  Returned pointer is into a static buffer.
  * Darwin's getenv is an arm64 backend builtin walking the entry envp. */
 char *getenv(const char *name) {

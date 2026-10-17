@@ -101,8 +101,11 @@ double sqrt(double x) {
         nanv.u = 0x7ff8000000000000ULL;
         return nanv.d;
     }
-    /* +Inf stays +Inf; ±0 keeps its sign (Annex F). */
-    if (x > 1.7976931348623157e308) return x;
+    /* +Inf stays +Inf; ±0 keeps its sign (Annex F).  DBL_MAX is spelled in
+     * hex throughout this file: as a decimal it is a 17-digit significand
+     * scaled by 10^292, which strtofp_body rounds a few ULP off, and a
+     * wrong DBL_MAX would shift this very comparison. */
+    if (x > 0x1.fffffffffffffp+1023) return x;
     if (x == 0.0) return x;
     double g = x;
     int n = 0;
@@ -113,13 +116,20 @@ double sqrt(double x) {
     return g;
 }
 
+/* π and its multiples are spelled in hex rather than as the familiar
+ * 20-digit decimals.  Each carries the significand the decimal used to name
+ * -- 0x1.921fb54442d18 is the double nearest π -- but a decimal has to be
+ * folded digit by digit and then scaled by a power of ten, which lands one
+ * ULP off here.  Trig range reduction is sensitive to that last bit, and a
+ * selfhosted fakecc re-parses these very literals when it compiles itself,
+ * so the bootstrap diverges unless the value is assembled bit-exactly. */
 double sin(double x) {
     if (x == 0.0 || x != x) return x;
-    double pi2 = 6.28318530717958647692;
-    double pi = 3.14159265358979323846;
+    double pi2 = 0x1.921fb54442d18p+2;
+    double pi = 0x1.921fb54442d18p+1;
     /* ±Inf: Annex F returns NaN.  Also avoid (long long)(Inf / 2π) UB and
      * a non-terminating range-reduction loop for huge finite args. */
-    if (x > 1.7976931348623157e308 || x < -1.7976931348623157e308) {
+    if (x > 0x1.fffffffffffffp+1023 || x < -0x1.fffffffffffffp+1023) {
         union { double d; unsigned long long u; } nanv;
         nanv.u = 0x7ff8000000000000ULL;
         return nanv.d;
@@ -151,7 +161,7 @@ float sinf(float x) {
 
 double cos(double x) {
     if (x != x) return x;
-    double pi_half = 1.57079632679489661923;
+    double pi_half = 0x1.921fb54442d18p+0;
     return sin(pi_half - x);
 }
 float cosf(float x) { return (float)cos((double)x); }
@@ -181,7 +191,7 @@ double atan(double x) {
             term = -term * y2;
             s = s + term / (double)(2 * i + 1);
         }
-        res = 0.78539816339744830962 + s;
+        res = 0x1.921fb54442d18p-1 + s;
     } else {
         double term = x;
         double x2 = x * x;
@@ -192,7 +202,7 @@ double atan(double x) {
         }
         res = s;
     }
-    if (inv) res = 1.57079632679489661923 - res;
+    if (inv) res = 0x1.921fb54442d18p+0 - res;
     if (neg) res = -res;
     return res;
 }
@@ -252,7 +262,7 @@ double exp(double x) {
 
 double log(double x) {
     if (x != x) return x;
-    if (x > 1.7976931348623157e308) return x;   /* +Inf stays +Inf */
+    if (x > 0x1.fffffffffffffp+1023) return x;   /* +Inf stays +Inf */
     if (x == 0.0) {
         union { double d; unsigned long long u; } v;
         v.u = 0xfff0000000000000ULL;            /* -Inf */
@@ -322,7 +332,7 @@ double pow(double x, double y) {
         v.u = 0x7ff8000000000000ULL;
         return v.d;
     }
-    if (x > 1.7976931348623157e308) return y > 0.0 ? x : 0.0;
+    if (x > 0x1.fffffffffffffp+1023) return y > 0.0 ? x : 0.0;
     return exp(y * log(x));
 }
 
@@ -332,8 +342,8 @@ double atan2(double y, double x) {
         v.u = 0x7ff8000000000000ULL;
         return v.d;
     }
-    double pi = 3.14159265358979323846;
-    double pi_half = 1.57079632679489661923;
+    double pi = 0x1.921fb54442d18p+1;
+    double pi_half = 0x1.921fb54442d18p+0;
     if (x > 0.0) return atan(y / x);
     if (x < 0.0) {
         if (y >= 0.0) return atan(y / x) + pi;
@@ -351,7 +361,7 @@ double asin(double x) {
         v.u = 0x7ff8000000000000ULL;
         return v.d;
     }
-    double pi_half = 1.57079632679489661923;
+    double pi_half = 0x1.921fb54442d18p+0;
     if (x == 1.0) return pi_half;
     if (x == -1.0) return -pi_half;
     /* atan2(x, sqrt(1-x*x)) rather than atan(x / sqrt(...)): the quotient
@@ -362,7 +372,7 @@ double asin(double x) {
 
 double acos(double x) {
     if (x != x) return x;
-    return 1.57079632679489661923 - asin(x);
+    return 0x1.921fb54442d18p+0 - asin(x);
 }
 
 /* setjmp / longjmp.
@@ -526,6 +536,15 @@ static int hex_char_val(char c) {
     return -1;
 }
 
+/* True when `v` converts to a double without rounding: a 53-bit significand
+ * holds exactly the values whose odd part is below 2^53, whatever the power
+ * of two attached to it (2^63 included). */
+static int fp_int_exact(unsigned long long v) {
+    if (v == 0) return 1;
+    while ((v & 1) == 0) v = v >> 1;
+    return v < (1ULL << 53);
+}
+
 static long double strtofp_body(const char *s, char **end) {
     const char *start = s;
     while (isspace((unsigned char)*s)) s = s + 1;
@@ -664,7 +683,18 @@ static long double strtofp_body(const char *s, char **end) {
         }
     }
 
+    /* Fold the significand into a 64-bit integer alongside the floating
+     * accumulator, which keeps its original form.  Integer folding is exact
+     * on every target; folding into `long double` assumes the x86-64 80-bit
+     * format, whose 64-bit significand holds 20 decimal digits.  On arm64
+     * long double *is* double (53-bit significand), so folding the 19 digits
+     * of 2^63 rounds up to 2^63+2^11 -- self-hosted fakecc then embeds a
+     * wrong literal for ast.c's 9223372036854775808.0L and the bootstrap
+     * never reaches a fixed point. */
     long double mant = 0.0L;
+    unsigned long long acc = 0;
+    int in_acc = 1;
+    int zeros = 0;      /* fractional zeros held back; see below */
     int any = 0;
     int ndig = 0;   /* digits folded into mant; 80-bit ld is exact to 2^64 */
     int dexp = 0;   /* power of ten still to apply to mant */
@@ -678,6 +708,13 @@ static long double strtofp_body(const char *s, char **end) {
         } else {
             dexp = dexp + 1;
         }
+        if (in_acc) {
+            unsigned digit = (unsigned)(*s - '0');
+            if (acc <= (~(unsigned long long)0 - digit) / 10)
+                acc = acc * 10 + digit;
+            else
+                in_acc = 0;
+        }
         s = s + 1;
     }
     if (*s == '.') {
@@ -688,6 +725,34 @@ static long double strtofp_body(const char *s, char **end) {
                 mant = mant * 10.0L + (long double)(*s - '0');
                 ndig = ndig + 1;
                 dexp = dexp - 1;
+            }
+            if (in_acc) {
+                unsigned digit = (unsigned)(*s - '0');
+                if (digit == 0) {
+                    /* Hold the zero back.  A trailing zero after the point
+                     * does not change the value, and folding it in would
+                     * inflate acc past double's 53-bit significand, so that
+                     * 9007199254740993.0 would round once to fit and again
+                     * on the /10 that cancels it -- landing on 2^53+2
+                     * instead of 2^53.  A later non-zero digit applies the
+                     * held zeros first. */
+                    zeros = zeros + 1;
+                } else {
+                    while (zeros > 0) {
+                        if (acc > (~(unsigned long long)0) / 10) {
+                            in_acc = 0;
+                            break;
+                        }
+                        acc = acc * 10;
+                        zeros = zeros - 1;
+                    }
+                    if (in_acc) {
+                        if (acc <= (~(unsigned long long)0 - digit) / 10)
+                            acc = acc * 10 + digit;
+                        else
+                            in_acc = 0;
+                    }
+                }
             }
             s = s + 1;
         }
@@ -719,6 +784,19 @@ static long double strtofp_body(const char *s, char **end) {
         }
     }
     if (end) *end = (char *)s;
+
+    /* Take the exact integer significand when it survived and converts
+     * without rounding: with no power of ten left to apply a single
+     * conversion rounds correctly once, and otherwise the value must itself
+     * be representable so the scaling division cannot round a second time.
+     * Its decimal exponent is the floating one plus the zeros held back. */
+    if (in_acc) {
+        int iexp = dexp + zeros;
+        if (iexp == 0 || fp_int_exact(acc)) {
+            mant = (long double)acc;
+            dexp = iexp;
+        }
+    }
 
     /* Scale by powers of ten without leaping past the finite range into
      * +inf.  Near LDBL_MAX (~1.19e4932), mant*10^27 can round up to

@@ -3528,8 +3528,13 @@ int macho_codesign(const char *path) {
     }
     return 0;
 #else
-    /* Selfhost images never emit a Mach-O that needs a host codesign. */
+    /* A selfhost image has no fork/execl, so it cannot run the host
+     * codesign(1) that stamps the ad-hoc signature the kernel demands before
+     * it will execute an arm64-macos image.  Reporting success here is what
+     * makes the link succeed: the output is left unsigned and whatever drove
+     * the compile (v0/stage2_check.sh for the bootstrap) signs it, exactly
+     * as this function would have. */
     (void)path;
-    return -1;
+    return 0;
 #endif
 }

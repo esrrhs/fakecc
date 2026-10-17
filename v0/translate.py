@@ -593,6 +593,10 @@ def cleanup_unused_definitions(body):
 # rewritten to qualified `runtime.<name>` form so the file can drop its
 # per-file `extern` declarations and rely on `import runtime;` instead.
 RUNTIME_FUNCS = frozenset({
+    # Directory listing.  Provided per target by the runtime (getdents64 on
+    # Linux, getdirentries64 on Darwin), because the self-hosted build has
+    # no libc and the two dirent layouts do not agree.
+    "__fakecc_dir_open", "__fakecc_dir_next", "__fakecc_dir_close",
     "abort", "atoi", "atol", "calloc", "chmod", "exit", "fclose", "fflush",
     "fileno", "fopen", "fprintf", "fputc", "fputs", "fread", "free", "fseek",
     "ftell", "fwrite", "getenv", "isalnum", "isalpha", "isdigit", "isspace",

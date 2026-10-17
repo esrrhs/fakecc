@@ -6072,6 +6072,19 @@ static Buffer *c64_sect_buf(EmitModule *out, int gs) {
     }
 }
 
+/* Upper bound on the bytes one IR instruction can expand to, used to decide
+ * whether the function about to be emitted could outgrow the ±1 MB reach of
+ * a conditional branch.  See the caller for how it was calibrated. */
+#define C64_MAX_BYTES_PER_IR_INST  64u
+/* Emitting more than this puts some b.cond out of range, so a function whose
+ * size bound crosses it switches to wide branches for the whole function. */
+#define C64_WIDE_CODE_LIMIT        (900u * 1024u)
+
+static int fn_needs_wide_cond(const IRFunction *fn) {
+    size_t bound = fn->insts.len * (size_t)C64_MAX_BYTES_PER_IR_INST;
+    return bound > C64_WIDE_CODE_LIMIT;
+}
+
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
 
     int main_id = -1;
@@ -6390,7 +6403,20 @@ void codegen64(const IRModule *ir, EmitModule *out, int want_debug) {
 
     for (size_t i = 0; i < ir->functions.len; i++) {
         c.fn = &ir->functions.data[i];
+        /* A b.cond reaches ±1 MB and a single function can emit more code
+         * than that -- fakecc's own codegen() is 2.4 MB from 72k IR
+         * instructions -- so its conditional branches have to take the wide
+         * form.  Decide from an upper bound on the size before emitting,
+         * since widening is a property of the instruction and cannot be done
+         * after the fact (every recorded offset downstream would move).
+         *
+         * The bound is generous on purpose: measured density peaks near 34
+         * bytes per IR instruction, and the worst small functions reach 19.
+         * Overshooting costs four bytes per conditional branch in functions
+         * that are already megabytes; undershooting fails at assembly time. */
+        a64_set_wide_cond(&a, fn_needs_wide_cond(c.fn));
         emit_function(&c, (int)i);
+        a64_set_wide_cond(&a, 0);
     }
     if (c.udiv_label >= 0)
         emit_udivmodti4(&a, c.udiv_label);

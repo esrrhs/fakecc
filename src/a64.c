@@ -15,6 +15,7 @@ void a64_init(A64Asm *a) {
     a->fixups = NULL;
     a->nfixups = a->cap_fixups = 0;
     a->base_off = 0;
+    a->wide_cond = 0;
 }
 
 void a64_free(A64Asm *a) {
@@ -97,7 +98,11 @@ int a64_resolve(A64Asm *a) {
         } else if (f->kind == A64_FIX_B19) {
             int64_t d = (int64_t)tgt - (int64_t)f->at;
             if ((d & 3) || d < -(1LL << 20) || d >= (1LL << 20)) {
-                fprintf(stderr, "fakecc: a64 conditional branch out of range\n");
+                fprintf(stderr,
+                        "fakecc: a64 conditional branch out of range: "
+                        "%lld bytes to its target, limit %d; the function "
+                        "holding it emitted more code than %d bytes\n",
+                        (long long)d, 1 << 20, 1 << 20);
                 rc = -1;
                 continue;
             }
@@ -560,18 +565,47 @@ void a64_bl(A64Asm *a, int label) {
     word_with_fixup(a, 0x94000000u, A64_FIX_B26, 0, label);
 }
 
+/* Wide form of a conditional branch: invert the condition so that taking it
+ * skips one instruction, then reach the real target with an unconditional
+ * branch, whose ±128 MB range covers anything this compiler can emit.
+ *
+ *     b.<inv cond> over      taken => skip the b below (original: fall thru)
+ *     b           target
+ *   over:
+ *
+ * `over` is eight bytes past the inverted branch, so that one always fits in
+ * the short form.  Costs one extra word per conditional branch, which is why
+ * it is opt-in per function rather than the default.
+ */
+static void wide_branch_over(A64Asm *a, uint32_t inv_word, int label) {
+    int over = a64_new_label(a);
+    word_with_fixup(a, inv_word, A64_FIX_B19, 0, over);
+    a64_b(a, label);
+    a64_bind(a, over);
+}
+
 void a64_bcond(A64Asm *a, int cond, int label) {
-    word_with_fixup(a, 0x54000000u | (cond & 15), A64_FIX_B19, 0, label);
+    /* Inverting the condition is flipping its low bit: EQ<->NE, CS<->CC, ... */
+    if (a->wide_cond)
+        wide_branch_over(a, 0x54000000u | ((cond ^ 1) & 15), label);
+    else
+        word_with_fixup(a, 0x54000000u | (cond & 15), A64_FIX_B19, 0, label);
 }
 
 void a64_cbz(A64Asm *a, int rt, int label, int is64) {
-    word_with_fixup(a, (is64 ? 0xB4000000u : 0x34000000u) | RD(rt),
-                    A64_FIX_B19, 0, label);
+    if (a->wide_cond)
+        wide_branch_over(a, (is64 ? 0xB5000000u : 0x35000000u) | RD(rt), label);
+    else
+        word_with_fixup(a, (is64 ? 0xB4000000u : 0x34000000u) | RD(rt),
+                        A64_FIX_B19, 0, label);
 }
 
 void a64_cbnz(A64Asm *a, int rt, int label, int is64) {
-    word_with_fixup(a, (is64 ? 0xB5000000u : 0x35000000u) | RD(rt),
-                    A64_FIX_B19, 0, label);
+    if (a->wide_cond)
+        wide_branch_over(a, (is64 ? 0xB4000000u : 0x34000000u) | RD(rt), label);
+    else
+        word_with_fixup(a, (is64 ? 0xB5000000u : 0x35000000u) | RD(rt),
+                        A64_FIX_B19, 0, label);
 }
 
 void a64_ret(A64Asm *a, int rn) {

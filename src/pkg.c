@@ -13,25 +13,14 @@
  * the self-hosted dialect has no libc, so translate.py defines
  * FAKECC_SELFHOST and we go through raw Linux __syscall. */
 #ifdef FAKECC_SELFHOST
-#define PKG_O_RDONLY    0
-#define PKG_O_DIRECTORY 65536
-static long pkg_open(const char *path, long flags) {
-    return __syscall(2, (long)path, flags, 0);
-}
-static long pkg_close(long fd) { return __syscall(3, fd); }
-static long pkg_getdents(long fd, void *buf, long n) {
-    return __syscall(217, fd, (long)buf, n);
-}
-
-/* Linux dirent64 layout (getdents64). d_name is a flexible trailing field;
- * we declare [1] so both gcc and the FakeCC dialect accept the type. */
-struct pkg_dirent64 {
-    unsigned long long d_ino;
-    long long d_off;
-    unsigned short d_reclen;
-    unsigned char d_type;
-    char d_name[1];
-};
+/* No libc when fakecc compiles itself, so directory listing comes from the
+ * runtime package, which spells it per target: getdents64 on Linux,
+ * getdirentries64 on Darwin (see runtime/stdlib_*.c).  Keeping the two
+ * targets' record layouts out here is the point -- Linux's dirent64 and
+ * Darwin's dirent disagree on the fields after the inode. */
+extern void *__fakecc_dir_open(const char *path);
+extern const char *__fakecc_dir_next(void *dir);
+extern int __fakecc_dir_close(void *dir);
 #else
 #include <dirent.h>
 #endif
@@ -226,64 +215,55 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/* Directory listing, per target rather than per compiler: the self-hosted
+ * build has no libc, so the runtime supplies these three (getdents64 on
+ * Linux, getdirentries64 on Darwin -- see runtime/stdlib_*.c).  Wrapping
+ * libc's version the same way keeps every caller below a single path, and
+ * keeps the two dirent layouts out of this file. */
+#ifdef FAKECC_SELFHOST
+extern void *__fakecc_dir_open(const char *path);
+extern const char *__fakecc_dir_next(void *dir);
+extern int __fakecc_dir_close(void *dir);
+static void *pkg_dir_open(const char *path) { return __fakecc_dir_open(path); }
+static const char *pkg_dir_next(void *dir) { return __fakecc_dir_next(dir); }
+static void pkg_dir_close(void *dir) { (void)__fakecc_dir_close(dir); }
+#else
+static void *pkg_dir_open(const char *path) { return (void *)opendir(path); }
+static const char *pkg_dir_next(void *dir) {
+    struct dirent *e = readdir((DIR *)dir);
+    return e ? (const char *)e->d_name : 0;
+}
+static void pkg_dir_close(void *dir) { closedir((DIR *)dir); }
+#endif
+
 static int ends_with_c(const char *name) {
     size_t n = strlen(name);
     return n >= 2 && name[n - 2] == '.' && name[n - 1] == 'c';
 }
 
 static int is_dir(const char *path) {
-#ifdef FAKECC_SELFHOST
-    long fd = pkg_open(path, PKG_O_RDONLY | PKG_O_DIRECTORY);
-    if (fd < 0) return 0;
-    pkg_close(fd);
-    return 1;
-#else
-    DIR *d = opendir(path);
+    void *d = pkg_dir_open(path);
     if (!d) return 0;
-    closedir(d);
+    pkg_dir_close(d);
     return 1;
-#endif
 }
 
 /* Defined below; declared here because the self-host directory probe runs
  * before it in this file. */
 static int c_file_matches_target(const char *name);
 
-#ifdef FAKECC_SELFHOST
 /* True if dir contains at least one *.c file for the current target. */
 static int dir_has_c(const char *dir) {
-    long fd = pkg_open(dir, PKG_O_RDONLY | PKG_O_DIRECTORY);
-    if (fd < 0) return 0;
-    char buf[2048];
-    int found = 0;
-    for (;;) {
-        long nread = pkg_getdents(fd, buf, (long)sizeof buf);
-        if (nread <= 0) break;
-        long off = 0;
-        while (off < nread) {
-            struct pkg_dirent64 *e = (struct pkg_dirent64 *)(buf + off);
-            if (ends_with_c(e->d_name) && c_file_matches_target(e->d_name)) { found = 1; break; }
-            off = off + e->d_reclen;
-        }
-        if (found) break;
-    }
-    pkg_close(fd);
-    return found;
-}
-#else
-/* True if dir contains at least one *.c file. */
-static int dir_has_c(const char *dir) {
-    DIR *d = opendir(dir);
+    void *d = pkg_dir_open(dir);
     if (!d) return 0;
     int found = 0;
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        if (ends_with_c(e->d_name) && c_file_matches_target(e->d_name)) { found = 1; break; }
+    const char *name;
+    while ((name = pkg_dir_next(d)) != NULL) {
+        if (ends_with_c(name) && c_file_matches_target(name)) { found = 1; break; }
     }
-    closedir(d);
+    pkg_dir_close(d);
     return found;
 }
-#endif
 
 /* Find <search>/name/ that contains at least one .c file. Caller frees. */
 static char *find_pkg_dir(PkgContext *ctx, const char *name) {
@@ -399,48 +379,22 @@ static int c_file_matches_target(const char *name) {
 static char **list_c_files(const char *dir, size_t *nout) {
     char **names = NULL;
     size_t n = 0, cap = 0;
-#ifdef FAKECC_SELFHOST
-    long fd = pkg_open(dir, PKG_O_RDONLY | PKG_O_DIRECTORY);
-    if (fd < 0) {
-        fprintf(stderr, "fakecc: cannot open package directory '%s'\n", dir);
-        exit(1);
-    }
-    char buf[2048];
-    for (;;) {
-        long nread = pkg_getdents(fd, buf, (long)sizeof buf);
-        if (nread <= 0) break;
-        long off = 0;
-        while (off < nread) {
-            struct pkg_dirent64 *e = (struct pkg_dirent64 *)(buf + off);
-            if (ends_with_c(e->d_name) && c_file_matches_target(e->d_name)) {
-                if (n >= cap) {
-                    cap = cap ? cap * 2 : 4;
-                    names = xrealloc(names, cap * sizeof(char *));
-                }
-                names[n++] = xstrdup(e->d_name);
-            }
-            off = off + e->d_reclen;
-        }
-    }
-    pkg_close(fd);
-#else
-    DIR *d = opendir(dir);
+    void *d = pkg_dir_open(dir);
     if (!d) {
         fprintf(stderr, "fakecc: cannot open package directory '%s'\n", dir);
         exit(1);
     }
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        if (ends_with_c(e->d_name) && c_file_matches_target(e->d_name)) {
+    const char *name;
+    while ((name = pkg_dir_next(d)) != NULL) {
+        if (ends_with_c(name) && c_file_matches_target(name)) {
             if (n >= cap) {
                 cap = cap ? cap * 2 : 4;
                 names = xrealloc(names, cap * sizeof(char *));
             }
-            names[n++] = xstrdup(e->d_name);
+            names[n++] = xstrdup(name);
         }
     }
-    closedir(d);
-#endif
+    pkg_dir_close(d);
     /* Insertion sort — packages are tiny. */
     for (size_t i = 1; i < n; i++) {
         char *key = names[i];
