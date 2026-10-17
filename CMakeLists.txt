@@ -55,6 +55,7 @@ add_library(fakecc_core
     src/emit.c
     src/link.c
     src/macho.c
+    src/sha256.c
     src/pkg.c
     src/compiler.c
 )

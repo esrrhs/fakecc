@@ -3,19 +3,13 @@
 #include "fakecc/debug.h"
 #include "fakecc/emit.h"
 #include "fakecc/reg_arm64.h"
+#include "fakecc/sha256.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-/* The bootstrap (FAKECC_SELFHOST) preprocesses with the minimal v0/fakeinc
- * stubs, which lack these headers; the selfhost image never invokes
- * codesign (see macho_codesign). */
-#ifndef FAKECC_SELFHOST
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
 
 /* Mach-O 64-bit structures and constants (Apple loader/mach-o headers).
  * Layout below was validated against lld/ld64 output and by executing
@@ -41,6 +35,7 @@
 #define LC_SEGMENT_64      0x19u
 #define LC_BUILD_VERSION   0x32u
 #define LC_UUID           0x1Bu
+#define LC_CODE_SIGNATURE 0x1Du
 #define LC_LOAD_DYLINKER   0x0Eu
 #define LC_LOAD_DYLIB      0x0Cu
 #define LC_MAIN            0x80000028u
@@ -3508,33 +3503,286 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
     return rc;
 }
 
+/* ── Ad-hoc code signature ──────────────────────────────────────────────
+ *
+ * The kernel refuses to run an arm64-macos image that carries no code
+ * signature: the process is killed before main, which looks like a crash
+ * with no diagnostic whatsoever (exit 137, SIGKILL).  Signing used to mean
+ * fork/execl of the host's /usr/bin/codesign(1), which a selfhosted fakecc
+ * cannot do, so a selfhosted compiler produced binaries that could not run
+ * at all and the bootstrap had to be signed by hand before it could be
+ * compared.
+ *
+ * An ad-hoc signature needs no key.  It is a SuperBlob holding a
+ * CodeDirectory -- the SHA-256 of every page of the signed region -- plus the
+ * empty requirement set and the empty CMS blob that codesign(1) also writes,
+ * and it is built here instead.  That makes the compiler self-contained, and
+ * because both bootstrap stages run this identical code the two binaries
+ * agree without any help from the driver.
+ */
+#define CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0u
+#define CSMAGIC_CODEDIRECTORY      0xfade0c02u
+#define CSMAGIC_REQUIREMENTS       0xfade0c01u
+#define CSMAGIC_BLOBWRAPPER        0xfade0b01u
+#define CSSLOT_CODEDIRECTORY       0x00000000u
+#define CSSLOT_REQUIREMENTS        0x00000002u
+#define CSSLOT_SIGNATURESLOT       0x00010000u
+#define CS_ADHOC                   0x00000002u
+#define CS_VERSION_SHA256          0x00020400u
+#define CS_HASHTYPE_SHA256         2u
+#define CS_EXECSEG_MAIN_BINARY     1u
+/* 16 KB pages, the size codesign(1) picks for an image this big; the shift
+ * is what goes in the CodeDirectory's pageSize field. */
+#define CS_PAGE_SHIFT              14u
+#define CS_PAGE_SIZE               ((uint64_t)1 << CS_PAGE_SHIFT)
+/* Slot -2 carries the requirements blob, slot -1 the (empty) CMS signature.
+ * Both live *below* hashOffset: negative slots count backwards from it. */
+#define CS_SPECIAL_SLOTS           2u
+/* Size of the CodeDirectory header for version 0x20400: the fixed part plus
+ * spare3, codeLimit64 and the three exec-segment words.  Getting this wrong
+ * silently overlaps the identifier string, which is exactly the kind of bug
+ * that only shows up as an inexplicable SIGKILL. */
+#define CS_CD_HEADER               88u
+/* An empty requirement set and an empty CMS blob, both of which codesign(1)
+ * emits even for an ad-hoc signature. */
+#define CS_REQ_LEN                 12u
+#define CS_CMS_LEN                 8u
+
+/* Everything in the signature is big-endian, unlike the rest of a Mach-O. */
+static void cs_put_be32(unsigned char *p, uint32_t v) {
+    p[0] = (unsigned char)(v >> 24);
+    p[1] = (unsigned char)(v >> 16);
+    p[2] = (unsigned char)(v >> 8);
+    p[3] = (unsigned char)v;
+}
+
+static uint32_t cs_get_le32(const unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static void cs_put_le32(unsigned char *p, uint32_t v) {
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
+/* The exec-segment words are the only 64-bit fields in the blob, and they
+ * are little-endian like the rest of the Mach-O. */
+static void cs_put_le64(unsigned char *p, uint64_t v) {
+    for (int i = 0; i < 8; i++) p[i] = (unsigned char)(v >> (8 * i));
+}
+
+static void cs_get_le64(const unsigned char *p, uint64_t *out) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
+    *out = v;
+}
+
+/* The signature identifier is just the file's basename.  It must not depend
+ * on the directory: the bootstrap links stage 1 and stage 2 in different
+ * temporary directories, and anything path- or time-derived would make two
+ * otherwise identical binaries differ. */
+static const char *cs_ident_of(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
 int macho_codesign(const char *path) {
-#ifndef FAKECC_SELFHOST
-    pid_t pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "fakecc: fork failed for codesign\n");
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "fakecc: cannot reopen '%s' to sign it\n", path);
         return -1;
     }
-    if (pid == 0) {
-        execl("/usr/bin/codesign", "codesign", "-s", "-", "-f", path,
-              (char *)NULL);
-        _exit(127);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long fsize_l = ftell(f);
+    if (fsize_l < (long)sizeof(mach_header_64)) { fclose(f); return -1; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
+    size_t fsize = (size_t)fsize_l;
+    unsigned char *buf = (unsigned char *)malloc(fsize);
+    if (!buf) { fclose(f); return -1; }
+    if (fread(buf, 1, fsize, f) != fsize) {
+        fclose(f); free(buf); return -1;
     }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "fakecc: ad-hoc codesign failed for '%s'\n", path);
+    fclose(f);
+
+    /* Walk the load commands for __TEXT, __LINKEDIT and any signature that is
+     * already there.  __TEXT supplies the executable segment range. */
+    uint32_t ncmds = cs_get_le32(buf + 16);
+    uint32_t sizeofcmds = cs_get_le32(buf + 20);
+    size_t le_off = 0, text_off = 0;
+    int have_le = 0, have_sig = 0, have_text = 0;
+    size_t off = 32;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t cmd = cs_get_le32(buf + off);
+        uint32_t cmdsize = cs_get_le32(buf + off + 4);
+        if (cmdsize < 8 || off + cmdsize > fsize) break;
+        if (cmd == LC_SEGMENT_64) {
+            if (!have_le && memcmp(buf + off + 8, "__LINKEDIT", 10) == 0) {
+                le_off = off; have_le = 1;
+            } else if (!have_text &&
+                       memcmp(buf + off + 8, "__TEXT", 6) == 0) {
+                text_off = off; have_text = 1;
+            }
+        } else if (cmd == LC_CODE_SIGNATURE) {
+            have_sig = 1;
+        }
+        off += cmdsize;
+    }
+    if (!have_le) { free(buf); return -1; }
+    if (have_sig) { free(buf); return 0; }   /* nothing to do */
+
+    /* The new command goes into the padding just past the load commands --
+     * the writer starts every section on a page boundary, so there is room.
+     * Refuse rather than overwrite bytes that mean something. */
+    size_t cmd_end = 32 + (size_t)sizeofcmds;
+    if (cmd_end + 16 > fsize) {
+        fprintf(stderr, "fakecc: no room for LC_CODE_SIGNATURE in '%s'\n", path);
+        free(buf); return -1;
+    }
+    for (size_t k = 0; k < 16; k++) {
+        if (buf[cmd_end + k] != 0) {
+            fprintf(stderr, "fakecc: no room for LC_CODE_SIGNATURE in '%s'\n",
+                    path);
+            free(buf); return -1;
+        }
+    }
+
+    uint64_t le_fileoff;
+    memcpy(&le_fileoff, buf + le_off + 40, 8);
+
+    /* The executable segment is __TEXT's file range.  codesign(1) reports it
+     * here and the kernel honours it, so it has to be the real thing. */
+    uint64_t exec_base = 0, exec_limit = 0;
+    if (have_text) {
+        cs_get_le64(buf + text_off + 40, &exec_base);    /* fileoff  */
+        cs_get_le64(buf + text_off + 48, &exec_limit);   /* filesize */
+    }
+
+    const char *ident = cs_ident_of(path);
+    size_t ident_len = strlen(ident);
+    /* Full 88-byte header, then the identifier, then -- 4-aligned -- the two
+     * special slots and the page hashes. */
+    size_t slots_at = CS_CD_HEADER + ident_len + 1;
+    slots_at = (slots_at + 3u) & ~(size_t)3u;
+    size_t hash_off = slots_at + CS_SPECIAL_SLOTS * SHA256_DIGEST_LEN;
+
+    /* The signature starts on the first 8-byte boundary past the image.
+     * Everything below it is what gets hashed -- including the signature
+     * command itself, once its dataoff and datasize are filled in. */
+    uint64_t dataoff = ((uint64_t)fsize + 7u) & ~(uint64_t)7u;
+    if (dataoff > 0xffffffffu) { free(buf); return -1; }
+    uint32_t nslots = (uint32_t)((dataoff + CS_PAGE_SIZE - 1) >> CS_PAGE_SHIFT);
+    if (nslots == 0) nslots = 1;
+
+    size_t cd_len = hash_off + (size_t)nslots * SHA256_DIGEST_LEN;
+    /* SuperBlob header plus its three index entries, the CodeDirectory, an
+     * empty requirement set and an empty CMS blob -- exactly the set of
+     * blobs codesign(1) writes for an ad-hoc signature. */
+    size_t sb_hdr = 12 + 3 * 8;
+    size_t blob_len = sb_hdr + cd_len + CS_REQ_LEN + CS_CMS_LEN;
+    uint64_t total = dataoff + blob_len;
+
+    unsigned char *nb = (unsigned char *)realloc(buf, (size_t)total);
+    if (!nb) { free(buf); return -1; }
+    buf = nb;
+    memset(buf + fsize, 0, (size_t)total - fsize);
+
+    /* These all live below dataoff, so they have to be settled before the
+     * page hashes are taken. */
+    cs_put_le32(buf + cmd_end, LC_CODE_SIGNATURE);
+    cs_put_le32(buf + cmd_end + 4, 16);
+    cs_put_le32(buf + cmd_end + 8, (uint32_t)dataoff);
+    cs_put_le32(buf + cmd_end + 12, (uint32_t)blob_len);
+    cs_put_le32(buf + 16, ncmds + 1);
+    cs_put_le32(buf + 20, sizeofcmds + 16);
+
+    uint64_t new_filesize = total - le_fileoff;
+    memcpy(buf + le_off + 48, &new_filesize, 8);
+    uint64_t le_vmsize;
+    memcpy(&le_vmsize, buf + le_off + 32, 8);
+    if (le_vmsize < new_filesize)    /* dyld maps at least the file bytes */
+        memcpy(buf + le_off + 32, &new_filesize, 8);
+
+    unsigned char *blob = buf + (size_t)dataoff;
+    cs_put_be32(blob, CSMAGIC_EMBEDDED_SIGNATURE);
+    cs_put_be32(blob + 4, (uint32_t)blob_len);
+    cs_put_be32(blob + 8, 3);                   /* three index entries */
+    cs_put_be32(blob + 12, CSSLOT_CODEDIRECTORY);
+    cs_put_be32(blob + 16, (uint32_t)sb_hdr);
+    cs_put_be32(blob + 20, CSSLOT_REQUIREMENTS);
+    cs_put_be32(blob + 24, (uint32_t)(sb_hdr + cd_len));
+    cs_put_be32(blob + 28, CSSLOT_SIGNATURESLOT);
+    cs_put_be32(blob + 32, (uint32_t)(sb_hdr + cd_len + CS_REQ_LEN));
+
+    unsigned char *cd = blob + sb_hdr;
+    cs_put_be32(cd, CSMAGIC_CODEDIRECTORY);
+    cs_put_be32(cd + 4, (uint32_t)cd_len);
+    cs_put_be32(cd + 8, CS_VERSION_SHA256);
+    cs_put_be32(cd + 12, CS_ADHOC);
+    cs_put_be32(cd + 16, (uint32_t)hash_off);
+    cs_put_be32(cd + 20, CS_CD_HEADER);         /* identOffset */
+    cs_put_be32(cd + 24, CS_SPECIAL_SLOTS);
+    cs_put_be32(cd + 28, nslots);
+    cs_put_be32(cd + 32, (uint32_t)dataoff);    /* codeLimit */
+    cd[36] = SHA256_DIGEST_LEN;
+    cd[37] = CS_HASHTYPE_SHA256;
+    cd[38] = 0;                                 /* platform */
+    cd[39] = CS_PAGE_SHIFT;
+    cs_put_be32(cd + 40, 0);                    /* spare2 */
+    cs_put_be32(cd + 44, 0);                    /* scatterOffset */
+    cs_put_be32(cd + 48, 0);                    /* teamOffset */
+    cs_put_be32(cd + 52, 0);                    /* spare3 */
+    cs_put_le64(cd + 56, 0);                    /* codeLimit64 */
+    cs_put_le64(cd + 64, exec_base);
+    cs_put_le64(cd + 72, exec_limit);
+    cs_put_le64(cd + 80, CS_EXECSEG_MAIN_BINARY);
+    memcpy(cd + CS_CD_HEADER, ident, ident_len + 1);
+
+    /* Slot -2 hashes the requirement set; slot -1 is the CMS blob, which an
+     * ad-hoc signature leaves empty, so it stays zero. */
+    unsigned char *req = cd + cd_len;
+    cs_put_be32(req, CSMAGIC_REQUIREMENTS);
+    cs_put_be32(req + 4, (uint32_t)CS_REQ_LEN);
+    cs_put_be32(req + 8, 0);                    /* no requirements */
+    unsigned char *cms = req + CS_REQ_LEN;
+    cs_put_be32(cms, CSMAGIC_BLOBWRAPPER);
+    cs_put_be32(cms + 4, (uint32_t)CS_CMS_LEN);
+    memset(cd + slots_at, 0, CS_SPECIAL_SLOTS * SHA256_DIGEST_LEN);
+    sha256_buf(req, CS_REQ_LEN, cd + slots_at);
+
+    /* Hash each page.  The last one is usually short: only the bytes below
+     * codeLimit are signed, which is precisely what lets the signature sit
+     * past the end of the region it describes. */
+    for (uint32_t i = 0; i < nslots; i++) {
+        uint64_t start = (uint64_t)i << CS_PAGE_SHIFT;
+        uint64_t avail = dataoff - start;
+        size_t n = avail > CS_PAGE_SIZE ? (size_t)CS_PAGE_SIZE : (size_t)avail;
+        sha256_buf(buf + (size_t)start, n,
+                   cd + hash_off + (size_t)i * SHA256_DIGEST_LEN);
+    }
+
+    /* Replace the file rather than overwriting it.  The kernel caches a
+     * validated code signature on the vnode, and rewriting the same inode in
+     * place does not reliably drop it: the next exec then checks the new
+     * bytes against the old signature and kills the process before main,
+     * which is the one symptom (exit 137, no diagnostic at all) that looks
+     * like a compiler bug.  codesign(1) swaps in a fresh inode for exactly
+     * this reason -- `codesign -f` reports "replacing existing signature"
+     * because it really does write a new file -- and so do we. */
+    remove(path);
+    f = fopen(path, "wb");
+    if (!f) { free(buf); return -1; }
+    size_t wrote = fwrite(buf, 1, (size_t)total, f);
+    fclose(f);
+    /* A file created afresh carries the umask, not the exec bit the linker
+     * just put on the image it wrote. */
+    chmod(path, 0755);
+    free(buf);
+    if (wrote != (size_t)total) {
+        fprintf(stderr, "fakecc: short write signing '%s'\n", path);
         return -1;
     }
     return 0;
-#else
-    /* A selfhost image has no fork/execl, so it cannot run the host
-     * codesign(1) that stamps the ad-hoc signature the kernel demands before
-     * it will execute an arm64-macos image.  Reporting success here is what
-     * makes the link succeed: the output is left unsigned and whatever drove
-     * the compile (v0/stage2_check.sh for the bootstrap) signs it, exactly
-     * as this function would have. */
-    (void)path;
-    return 0;
-#endif
 }

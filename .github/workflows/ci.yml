@@ -237,6 +237,52 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  # arm64 macOS is the target this backend actually emits, and it used to be the
+  # one platform where the bootstrap could not be checked at all: the selfhost
+  # image has no fork/execl, so it could not run the host's codesign(1), which
+  # left stage 2 holding an image the kernel refuses to execute.  fakecc now
+  # stamps the ad-hoc signature itself, so the fixed point is reachable here --
+  # and it is a genuinely different check, because arm64 has no 80-bit long
+  # double and a different call ABI.
+  bootstrap-macos:
+    name: bootstrap (fixed point, macOS arm64)
+    runs-on: macos-latest
+    # Two full self-compiles of the compiler.  The Linux leg allows 30 min;
+    # macOS runners are slower, so leave more room.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build stage 0
+        run: |
+          clang --version
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_C_FLAGS="-O0"
+          cmake --build build --parallel
+
+      - name: Stage 2 fixed point
+        run: bash v0/stage2_check.sh
+
+      # The whole point of signing in-process: what a selfhosted fakecc links
+      # has to run.  With no signature the kernel kills the process before main
+      # (exit 137, SIGKILL), so this step is the regression guard for it.
+      - name: Selfhosted output runs
+        run: |
+          ./v0/fakecc-1 examples/return0.c -o /tmp/selfhost-return0
+          /tmp/selfhost-return0
+
+      - name: Upload mismatch binaries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-macos-mismatch
+          path: |
+            v0/fakecc-1
+            v0/fakecc-2
+          if-no-files-found: ignore
+          retention-days: 3
+
   # A fixed point alone does not prove correctness — a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
   # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are

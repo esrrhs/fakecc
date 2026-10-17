@@ -3623,6 +3623,23 @@ static void test_getenv(void) {
         "int main(void) { return getenv(\"PATH\") ? 1 : 7; }\n", 7);
 }
 
+/* The signature fakecc stamps itself has to be one codesign(1) accepts, not
+ * merely one the kernel happens to tolerate: a malformed CodeDirectory still
+ * lets the process start and then dies with SIGKILL and no diagnostic, which
+ * is indistinguishable from a miscompilation.  Verifying the blob with the
+ * host tool is the only cheap way to catch that. */
+static void test_codesign(void) {
+    expect("codesign_runs",
+           "package main;\nint main(void){ return 7; }", 7);
+    T_ASSERT_EQ_INT(
+        system("/usr/bin/codesign -v /tmp/fakecc_cg64_native_test"), 0);
+    /* Signing an image that is already signed must be a no-op, leaving the
+     * verified signature intact rather than appending a second one. */
+    T_ASSERT_EQ_INT(macho_codesign("/tmp/fakecc_cg64_native_test"), 0);
+    T_ASSERT_EQ_INT(
+        system("/usr/bin/codesign -v /tmp/fakecc_cg64_native_test"), 0);
+}
+
 static void test_macho_link(void) {
     expect("label_addr",
         "package main;\n"
@@ -5308,6 +5325,7 @@ int main(void) {
     test_syscall_translation();
     test_getenv();
     test_macho_link();
+    test_codesign();
     return t_finalize();
 }
 

@@ -1375,6 +1375,17 @@ enum A64VecReg {
     A64_V_NONE = -1,
 };typedef enum A64VecReg A64VecReg;
 const RaRegClasses *ra_classes_arm64(void);
+struct SHA256Ctx {
+    uint32_t h[8];
+    uint64_t bit_len;
+    unsigned char block[64];
+    size_t used;
+};typedef struct SHA256Ctx SHA256Ctx;
+void sha256_init(SHA256Ctx *ctx);
+void sha256_update(SHA256Ctx *ctx, const void *data, size_t len);
+void sha256_final(SHA256Ctx *ctx, unsigned char out[32]);
+void sha256_buf(const void *data, size_t len,
+                unsigned char out[32]);
 typedef struct FILE FILE;
 typedef long fpos_t;
 typedef struct __attribute__((packed)) {
@@ -4190,7 +4201,181 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
     emit_module_free(&out);
     return rc;
 }
+static void cs_put_be32(unsigned char *p, uint32_t v) {
+    p[0] = (unsigned char)(v >> 24);
+    p[1] = (unsigned char)(v >> 16);
+    p[2] = (unsigned char)(v >> 8);
+    p[3] = (unsigned char)v;
+}
+static uint32_t cs_get_le32(const unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+static void cs_put_le32(unsigned char *p, uint32_t v) {
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+static void cs_put_le64(unsigned char *p, uint64_t v) {
+    for (int i = 0; i < 8; i++) p[i] = (unsigned char)(v >> (8 * i));
+}
+static void cs_get_le64(const unsigned char *p, uint64_t *out) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
+    *out = v;
+}
+static const char *cs_ident_of(const char *path) {
+    const char *slash = runtime.strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
 int macho_codesign(const char *path) {
-    (void)path;
+    FILE *f = runtime.fopen(path, "rb");
+    if (!f) {
+        runtime.fprintf(runtime.stderr, "fakecc: cannot reopen '%s' to sign it\n", path);
+        return -1;
+    }
+    if (runtime.fseek(f, 0, 2) != 0) { runtime.fclose(f); return -1; }
+    long fsize_l = runtime.ftell(f);
+    if (fsize_l < (long)sizeof(mach_header_64)) { runtime.fclose(f); return -1; }
+    if (runtime.fseek(f, 0, 0) != 0) { runtime.fclose(f); return -1; }
+    size_t fsize = (size_t)fsize_l;
+    unsigned char *buf = (unsigned char *)runtime.malloc(fsize);
+    if (!buf) { runtime.fclose(f); return -1; }
+    if (runtime.fread(buf, 1, fsize, f) != fsize) {
+        runtime.fclose(f); runtime.free(buf); return -1;
+    }
+    runtime.fclose(f);
+    uint32_t ncmds = cs_get_le32(buf + 16);
+    uint32_t sizeofcmds = cs_get_le32(buf + 20);
+    size_t le_off = 0, text_off = 0;
+    int have_le = 0, have_sig = 0, have_text = 0;
+    size_t off = 32;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t cmd = cs_get_le32(buf + off);
+        uint32_t cmdsize = cs_get_le32(buf + off + 4);
+        if (cmdsize < 8 || off + cmdsize > fsize) break;
+        if (cmd == 0x19u) {
+            if (!have_le && runtime.memcmp(buf + off + 8, "__LINKEDIT", 10) == 0) {
+                le_off = off; have_le = 1;
+            } else if (!have_text &&
+                       runtime.memcmp(buf + off + 8, "__TEXT", 6) == 0) {
+                text_off = off; have_text = 1;
+            }
+        } else if (cmd == 0x1Du) {
+            have_sig = 1;
+        }
+        off += cmdsize;
+    }
+    if (!have_le) { runtime.free(buf); return -1; }
+    if (have_sig) { runtime.free(buf); return 0; }
+    size_t cmd_end = 32 + (size_t)sizeofcmds;
+    if (cmd_end + 16 > fsize) {
+        runtime.fprintf(runtime.stderr, "fakecc: no room for LC_CODE_SIGNATURE in '%s'\n", path);
+        runtime.free(buf); return -1;
+    }
+    for (size_t k = 0; k < 16; k++) {
+        if (buf[cmd_end + k] != 0) {
+            runtime.fprintf(runtime.stderr, "fakecc: no room for LC_CODE_SIGNATURE in '%s'\n",
+                    path);
+            runtime.free(buf); return -1;
+        }
+    }
+    uint64_t le_fileoff;
+    runtime.memcpy(&le_fileoff, buf + le_off + 40, 8);
+    uint64_t exec_base = 0, exec_limit = 0;
+    if (have_text) {
+        cs_get_le64(buf + text_off + 40, &exec_base);
+        cs_get_le64(buf + text_off + 48, &exec_limit);
+    }
+    const char *ident = cs_ident_of(path);
+    size_t ident_len = runtime.strlen(ident);
+    size_t slots_at = 88u + ident_len + 1;
+    slots_at = (slots_at + 3u) & ~(size_t)3u;
+    size_t hash_off = slots_at + 2u * 32;
+    uint64_t dataoff = ((uint64_t)fsize + 7u) & ~(uint64_t)7u;
+    if (dataoff > 0xffffffffu) { runtime.free(buf); return -1; }
+    uint32_t nslots = (uint32_t)((dataoff + ((uint64_t)1 << 14u) - 1) >> 14u);
+    if (nslots == 0) nslots = 1;
+    size_t cd_len = hash_off + (size_t)nslots * 32;
+    size_t sb_hdr = 12 + 3 * 8;
+    size_t blob_len = sb_hdr + cd_len + 12u + 8u;
+    uint64_t total = dataoff + blob_len;
+    unsigned char *nb = (unsigned char *)runtime.realloc(buf, (size_t)total);
+    if (!nb) { runtime.free(buf); return -1; }
+    buf = nb;
+    runtime.memset(buf + fsize, 0, (size_t)total - fsize);
+    cs_put_le32(buf + cmd_end, 0x1Du);
+    cs_put_le32(buf + cmd_end + 4, 16);
+    cs_put_le32(buf + cmd_end + 8, (uint32_t)dataoff);
+    cs_put_le32(buf + cmd_end + 12, (uint32_t)blob_len);
+    cs_put_le32(buf + 16, ncmds + 1);
+    cs_put_le32(buf + 20, sizeofcmds + 16);
+    uint64_t new_filesize = total - le_fileoff;
+    runtime.memcpy(buf + le_off + 48, &new_filesize, 8);
+    uint64_t le_vmsize;
+    runtime.memcpy(&le_vmsize, buf + le_off + 32, 8);
+    if (le_vmsize < new_filesize)
+        runtime.memcpy(buf + le_off + 32, &new_filesize, 8);
+    unsigned char *blob = buf + (size_t)dataoff;
+    cs_put_be32(blob, 0xfade0cc0u);
+    cs_put_be32(blob + 4, (uint32_t)blob_len);
+    cs_put_be32(blob + 8, 3);
+    cs_put_be32(blob + 12, 0x00000000u);
+    cs_put_be32(blob + 16, (uint32_t)sb_hdr);
+    cs_put_be32(blob + 20, 0x00000002u);
+    cs_put_be32(blob + 24, (uint32_t)(sb_hdr + cd_len));
+    cs_put_be32(blob + 28, 0x00010000u);
+    cs_put_be32(blob + 32, (uint32_t)(sb_hdr + cd_len + 12u));
+    unsigned char *cd = blob + sb_hdr;
+    cs_put_be32(cd, 0xfade0c02u);
+    cs_put_be32(cd + 4, (uint32_t)cd_len);
+    cs_put_be32(cd + 8, 0x00020400u);
+    cs_put_be32(cd + 12, 0x00000002u);
+    cs_put_be32(cd + 16, (uint32_t)hash_off);
+    cs_put_be32(cd + 20, 88u);
+    cs_put_be32(cd + 24, 2u);
+    cs_put_be32(cd + 28, nslots);
+    cs_put_be32(cd + 32, (uint32_t)dataoff);
+    cd[36] = 32;
+    cd[37] = 2u;
+    cd[38] = 0;
+    cd[39] = 14u;
+    cs_put_be32(cd + 40, 0);
+    cs_put_be32(cd + 44, 0);
+    cs_put_be32(cd + 48, 0);
+    cs_put_be32(cd + 52, 0);
+    cs_put_le64(cd + 56, 0);
+    cs_put_le64(cd + 64, exec_base);
+    cs_put_le64(cd + 72, exec_limit);
+    cs_put_le64(cd + 80, 1u);
+    runtime.memcpy(cd + 88u, ident, ident_len + 1);
+    unsigned char *req = cd + cd_len;
+    cs_put_be32(req, 0xfade0c01u);
+    cs_put_be32(req + 4, (uint32_t)12u);
+    cs_put_be32(req + 8, 0);
+    unsigned char *cms = req + 12u;
+    cs_put_be32(cms, 0xfade0b01u);
+    cs_put_be32(cms + 4, (uint32_t)8u);
+    runtime.memset(cd + slots_at, 0, 2u * 32);
+    sha256_buf(req, 12u, cd + slots_at);
+    for (uint32_t i = 0; i < nslots; i++) {
+        uint64_t start = (uint64_t)i << 14u;
+        uint64_t avail = dataoff - start;
+        size_t n = avail > ((uint64_t)1 << 14u) ? (size_t)((uint64_t)1 << 14u) : (size_t)avail;
+        sha256_buf(buf + (size_t)start, n,
+                   cd + hash_off + (size_t)i * 32);
+    }
+    runtime.remove(path);
+    f = runtime.fopen(path, "wb");
+    if (!f) { runtime.free(buf); return -1; }
+    size_t wrote = runtime.fwrite(buf, 1, (size_t)total, f);
+    runtime.fclose(f);
+    runtime.chmod(path, 0755);
+    runtime.free(buf);
+    if (wrote != (size_t)total) {
+        runtime.fprintf(runtime.stderr, "fakecc: short write signing '%s'\n", path);
+        return -1;
+    }
     return 0;
 }
