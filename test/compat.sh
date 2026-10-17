@@ -82,14 +82,23 @@ timeout() {
 
     # Poll for completion.  `wait` cannot be interrupted portably in bash 3.2
     # (the version macOS ships), so poll `kill -0` and then reap.
+    #
+    # The poll interval used to be a whole second, which is not a rounding
+    # error here: a suite calls this twice per case (compile, then run), so
+    # on a host with no real timeout binary every single case paid two
+    # seconds of pure sleeping -- ~5400 s of sleep across the e2e corpus,
+    # which is what nearly all of a macOS e2e run's wall clock was.  Tenths
+    # of a second still round up, but by 0.1 s per call instead of 1 s.
+    # `waited` counts tenths of a second; the deadline is secs*10 of them.
     local waited=0
+    local deadline=$(( secs * 10 ))
     while kill -0 "$pid" 2>/dev/null; do
-        if [ "$waited" -ge "$secs" ]; then
+        if [ "$waited" -ge "$deadline" ]; then
             kill -TERM "$pid" 2>/dev/null || true
             # Give it a moment to die politely, then insist.
             local grace=0
-            while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 5 ]; do
-                sleep 1
+            while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 50 ]; do
+                sleep 0.1
                 grace=$(( grace + 1 ))
                 kill -TERM "$pid" 2>/dev/null || true
             done
@@ -97,7 +106,7 @@ timeout() {
             wait "$pid" 2>/dev/null
             return 124
         fi
-        sleep 1
+        sleep 0.1
         waited=$(( waited + 1 ))
     done
 
