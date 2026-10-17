@@ -17,6 +17,15 @@
 # succeed).
 #
 set -uo pipefail
+# Portability helpers (timeout/nproc/readelf shims for non-GNU hosts).
+_COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# Abort if the shims could not be sourced: a silently missing `timeout` turns
+# every case into a confusing "command not found" instead of a clear error.
+. "$_COMPAT_DIR/compat.sh" || { echo "cannot source compat.sh from $_COMPAT_DIR" >&2; exit 2; }
+# run_e2e fans cases out to `xargs bash -c` workers, which only see exported
+# functions, so re-export the shims this script's workers rely on.
+export -f timeout nproc 2>/dev/null || true
+
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 FAKECC=${1:-"$ROOT/build/fakecc"}
@@ -25,6 +34,11 @@ shift || true
 CC_FLAGS="${CC_FLAGS:-} $*"
 CC_TIMEOUT=${CC_TIMEOUT:-60}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+# An empty or non-numeric JOBS used to reach `xargs -P ""`, which fails after
+# collecting nothing -- the suite then reported 0 cases and exited 0, so ctest
+# showed a green test that had checked nothing.  Never let that happen again.
+case "$JOBS" in ''|*[!0-9]*) JOBS=4 ;; esac
+[ "$JOBS" -ge 1 ] || JOBS=4
 COMPILE_DIR="$ROOT/test/compile/gcc_compile"
 
 if [ ! -x "$FAKECC" ]; then
@@ -173,5 +187,13 @@ if [ "$fail_cnt" -gt 0 ]; then
     exit 1
 fi
 
-echo "PASS compile suite (${#files[@]} cases passed)"
+# The count printed below used to come from ${#files[@]} rather than from the
+# results, so a fan-out that never ran still reported every case as passed --
+# which is how this suite stayed green on Linux while testing nothing.
+if [ "$ok_cnt" -eq 0 ]; then
+    echo "FAIL: compile suite collected ${#files[@]} cases but none of them ran" >&2
+    exit 1
+fi
+
+echo "PASS compile suite ($ok_cnt of ${#files[@]} cases passed)"
 exit 0

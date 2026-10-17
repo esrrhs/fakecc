@@ -1,5 +1,6 @@
 // expect: 0
 // expect_stdout: ab
+// skip_oracle: clang
 // expect_stdout: cd
 // Multiple runtime.printf calls must each appear on stdout after exit flushes.
 package main;

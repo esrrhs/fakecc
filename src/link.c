@@ -1,6 +1,8 @@
 #include "fakecc/emit.h"
 #include "fakecc/common.h"
 #include "fakecc/debug.h"
+#include "fakecc/target.h"
+#include "fakecc/macho.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -540,7 +542,8 @@ static void finalize_sections(
             }
         }
         debug_emit_dwarf(&dbg, code_vaddr, &debug_abbrev, &debug_info,
-                         &debug_str, &debug_line, &debug_frame, &debug_loc);
+                         &debug_str, &debug_line, &debug_frame, &debug_loc,
+                         NULL);
     }
 
     buf_u8(&shstrtab, 0);
@@ -1043,6 +1046,40 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed_in, size_t num_needed_in, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared) {
+    /* Linker dispatch: the arm64-macos backend emits an ad-hoc signed
+     * Mach-O PIE; everything below is the ELF executable/DSO linker. */
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
+        /* -shared on Mach-O is refused in main(), before anything is
+         * compiled, so that the diagnostic names the real reason instead of
+         * surfacing as "no 'main' function found" from whichever stage
+         * happened to look first.  This is the backstop for any caller that
+         * reaches the linker directly rather than through the driver. */
+        if (is_shared) {
+            fprintf(stderr,
+                    "fakecc: -shared is not implemented for the "
+                    "arm64-macos target\n");
+            exit(1);
+        }
+        /* The direct-write fast path packs exactly one module and has no room
+         * to relocate anything, so it is only valid for a lone freestanding
+         * TU whose text already starts with the LC_MAIN stub.  Modules that
+         * recorded symbols (-c, hence also anything a multi-TU link leaves
+         * behind) need the relocating link instead. */
+        int from_objects = n > 1;
+        for (size_t i = 0; i < n; i++)
+            if (mods[i]->num_syms) from_objects = 1;
+        int rc;
+        /* -nostdlib or -nodefaultlibs: skip the libSystem LC_LOAD_DYLIB. */
+        int skip_libsystem = nodefaultlibs;
+        if (from_objects)
+            rc = macho_link_objects(mods, n, path, skip_libsystem);
+        else
+            rc = macho_write_exec(mods[0], macho_text_offset(), path,
+                                  skip_libsystem, NULL);
+        if (rc != 0) exit(1);
+        if (macho_codesign(path) != 0) exit(1);
+        return;
+    }
     /* ---- Merge sections ---- */
     Buffer text, rodata, data, tdata, initarr, finiarr;
     buffer_init(&text); buffer_init(&rodata); buffer_init(&data);
@@ -1876,6 +1913,24 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
+    uint64_t base = is_shared ? 0 : ELF_BASE;
+    uint64_t code_vaddr = base + text_offset;
+    /* Combined .rodata follows .text; pad .text so rodata's vaddr matches
+     * max_ro_align even when text_offset is not 16-aligned
+     * (hdr + _start = 0x16e).  This MUST happen before the layout sizes
+     * below: the pad grows the physical rx content, so computing file
+     * offsets first and padding afterwards desynchronizes the physical
+     * image from the declared layout (the GOT would then be written a
+     * few bytes after its resolved slots, which crashes lazy glibc loaders
+     * while eager musl/gcompat loaders paper over it). */
+    {
+        size_t ro_va = (size_t)(code_vaddr + text.len);
+        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
+        while (extra--) {
+            char z = 0;
+            buffer_append(&text, &z, 1);
+        }
+    }
     /* .dynamic size: num_needed×DT_NEEDED + [DT_SONAME] + [DT_RUNPATH] + 9 fixed tags +
      * DT_NULL, plus DT_RELA/RELASZ/RELENT when .rela.dyn is non-empty. */
     size_t dynamic_size = 0;
@@ -1902,7 +1957,6 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t data_file_offset = rx_filesz;
     if (data_file_offset & (PAGE_SIZE - 1))
         data_file_offset = (data_file_offset + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
-    uint64_t base = is_shared ? 0 : ELF_BASE;
     uint64_t data_vaddr = base + data_file_offset;
     size_t got_data_off = data.len;
     while (got_data_off & 7) got_data_off++;
@@ -1947,17 +2001,6 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     bss_data_off = pad_size_to(bss_data_off, max_bss_align);
     uint64_t bss_vaddr = data_vaddr + bss_data_off;
     size_t bss_file_offset = data_file_offset + bss_data_off;
-    uint64_t code_vaddr = base + text_offset;
-    /* Combined .rodata follows .text; pad so its vaddr matches max_ro_align
-     * even when text_offset is not 16-aligned (hdr + _start = 0x16e). */
-    {
-        size_t ro_va = (size_t)(code_vaddr + text.len);
-        size_t extra = pad_size_to(ro_va, max_ro_align) - ro_va;
-        while (extra--) {
-            char z = 0;
-            buffer_append(&text, &z, 1);
-        }
-    }
 
     /* ---- Compute final symbol addresses ---- */
     size_t *sym_addr = xcalloc(total_syms, sizeof(size_t));

@@ -1,6 +1,7 @@
 #include "fakecc/lexer.h"
 #include "fakecc/common.h"
 #include "fakecc/token.h"
+#include "fakecc/ast.h"
 
 #include <ctype.h>
 #include <stddef.h>
@@ -33,15 +34,25 @@ static const char *predefined_macro_literal(const char *text, int *out_is_float)
     if (strcmp(text, "__SIZEOF_POINTER__") == 0) return "8";
     if (strcmp(text, "__SIZEOF_FLOAT__") == 0) return "4";
     if (strcmp(text, "__SIZEOF_DOUBLE__") == 0) return "8";
-    if (strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0) return "16";
+    /* arm64 Darwin follows the platform ABI: long double is the 8-byte
+     * double type.  Every other target uses 16 bytes (SysV x87). */
+    if (strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0)
+        return type_long_double_width() == 8 ? "8" : "16";
     if (strcmp(text, "__SIZEOF_SIZE_T__") == 0) return "8";
     if (strcmp(text, "__SIZEOF_WCHAR_T__") == 0) return "4";
     if (strcmp(text, "__SIZEOF_WINT_T__") == 0) return "4";
     if (strcmp(text, "__SIZEOF_PTRDIFF_T__") == 0) return "8";
     if (strcmp(text, "__FLT_MAX__") == 0) { *out_is_float = 1; return "3.40282347e+38f"; }
-    if (strcmp(text, "__DBL_MAX__") == 0) { *out_is_float = 1; return "1.7976931348623157e+308"; }
+    /* The DBL_* extremes are spelled in hex rather than decimal.  A decimal
+     * significand is folded digit by digit and then scaled by powers of ten,
+     * which cannot land 17 significant digits on the right double once the
+     * exponent is large: DBL_MAX came back a few ULP low, and DBL_MIN a few
+     * ULP off, on both the host's parser and our own.  Hex builds these two
+     * bit-exactly, which matters because a selfhosted fakecc re-parses these
+     * very tokens when it compiles itself. */
+    if (strcmp(text, "__DBL_MAX__") == 0) { *out_is_float = 1; return "0x1.fffffffffffffp+1023"; }
     if (strcmp(text, "__FLT_MIN__") == 0) { *out_is_float = 1; return "1.17549435e-38f"; }
-    if (strcmp(text, "__DBL_MIN__") == 0) { *out_is_float = 1; return "2.2250738585072014e-308"; }
+    if (strcmp(text, "__DBL_MIN__") == 0) { *out_is_float = 1; return "0x1p-1022"; }
     if (strcmp(text, "__FLT_EPSILON__") == 0) { *out_is_float = 1; return "1.19209290e-7f"; }
     if (strcmp(text, "__DBL_EPSILON__") == 0) { *out_is_float = 1; return "2.2204460492503131e-16"; }
     return NULL;

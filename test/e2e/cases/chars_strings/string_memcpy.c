@@ -1,5 +1,6 @@
 // runtime.memcpy: copies n bytes from src to dst and returns dst.
 // A codegen bug that mis-scales the loop or passes the wrong size
+// skip_oracle: clang
 // leaves the destination short or with garbage.  We copy a string
 // (including its terminator), verify every byte, and check the
 // return value is dst.

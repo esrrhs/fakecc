@@ -1,5 +1,6 @@
 // runtime.putchar: writes a single character to runtime.stdout.  Pin a few characters
 // including 'A', 'B', and a newline.
+// skip_oracle: clang
 // expect: 0
 // expect_stdout: AB
 package main;

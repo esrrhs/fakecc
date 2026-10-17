@@ -1,4 +1,6 @@
 // expect: 0
+// Darwin: the port's libc entry points are undefined symbols here.
+// skip_oracle: darwin
 package main;
 
 extern void* memcpy(void*, const void*, unsigned long);

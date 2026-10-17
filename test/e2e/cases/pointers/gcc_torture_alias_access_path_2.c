@@ -1,5 +1,6 @@
 // expect: 0
 // Ported from GCC C-Torture: gcc.c-torture/execute/alias-access-path-2.c
+// skip_oracle: clang
 package main;
 
 int

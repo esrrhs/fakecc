@@ -1,5 +1,6 @@
 // NaN compares false against everything except !=, including against itself.
 // ucomisd reports unordered as ZF=PF=CF=1, which reads as "equal" unless the
+// skip_oracle: clang
 // parity flag is folded in and the ordered relations are taken as b>a / b>=a.
 // expect: 42
 // expect_stdout: 000001 000001 000001

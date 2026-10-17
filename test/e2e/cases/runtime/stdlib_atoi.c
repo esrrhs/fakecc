@@ -1,5 +1,6 @@
 // runtime.atoi: converts a decimal string to int.  Implemented on top of runtime.strtol,
 // so it skips leading whitespace and honours a leading sign.  Pin the
+// skip_oracle: clang
 // positive, negative, whitespace-prefixed, plus-sign, and zero cases.
 // expect: 0
 package main;

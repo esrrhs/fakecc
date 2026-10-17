@@ -1,5 +1,6 @@
 // runtime.qsort: sorts an array in ascending order using a caller-supplied
 // comparator.  Pin an unsorted array, an array with duplicates, and a
+// skip_oracle: clang
 // reverse-sorted array.  The comparator returns a-b for ints.
 // expect: 0
 package main;

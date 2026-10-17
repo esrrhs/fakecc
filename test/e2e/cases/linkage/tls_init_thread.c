@@ -1,5 +1,13 @@
 // expect: 0
 // gcc_flags: -pthread
+// skip_oracle: clang
+
+// Darwin has no per-thread __thread object of its own to fall back on, so
+// this goes through the native TLV path: a tlv_descriptor in
+// __DATA,__thread_vars with its thunk bound to _tlv_bootstrap, which dyld
+// rewrites into a function returning this thread's block.  The storage is
+// the copy of __thread_data each thread gets at bootstrap, so main's copy
+// survives the workers untouched.
 package main;
 
 import runtime;

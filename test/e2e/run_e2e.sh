@@ -4,12 +4,26 @@
 # with a diagnostic.
 
 set -uo pipefail
+# Portability helpers (timeout/nproc/readelf shims for non-GNU hosts).
+_COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Abort if the shims could not be sourced: a silently missing `timeout` turns
+# every case into a confusing "command not found" instead of a clear error.
+. "$_COMPAT_DIR/compat.sh" || { echo "cannot source compat.sh from $_COMPAT_DIR" >&2; exit 2; }
+# run_e2e fans cases out to `xargs bash -c` workers, which only see exported
+# functions, so re-export the shims this script's workers rely on.
+export -f timeout nproc 2>/dev/null || true
+
 
 FAKECC=${1:-./build/fakecc}
 shift || true
 CC_TIMEOUT=${CC_TIMEOUT:-60}
 RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+# An empty or non-numeric JOBS used to reach `xargs -P ""`, which fails after
+# collecting nothing -- the suite then reported 0 cases and exited 0, so ctest
+# showed a green test that had checked nothing.  Never let that happen again.
+case "$JOBS" in ''|*[!0-9]*) JOBS=4 ;; esac
+[ "$JOBS" -ge 1 ] || JOBS=4
 
 CC_EXTRA="${CC_FLAGS:-} $*"
 CC_EXTRA=$(echo "$CC_EXTRA" | tr -s ' ' | sed 's/^ //; s/ $//')
@@ -40,6 +54,21 @@ run_single_case() {
     local run_want="$WORK/$(echo "${name%.c}" | tr / _).run_want"
     local extra_flags
     extra_flags=$(sed -n 's|^//[[:space:]]*link:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*flags:[[:space:]]*\(.*\)|\1|p; s|^//[[:space:]]*libs:[[:space:]]*\(.*\)|\1|p' "$src" | head -1)
+
+    # Platform-intrinsic skips, e.g. a test keyed to x87 80-bit long double
+    # (memcmp of 10 bytes, literals beyond double range) that the platform
+    # ABI genuinely cannot satisfy — the host toolchain fails it the same
+    # way.  Tag is `<os>-<machine>` from uname (darwin-arm64, linux-x86_64).
+    local host_tag
+    host_tag="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m)"
+    local skipped=0
+    for t in $(sed -n 's|^//[[:space:]]*unsupported_on:[[:space:]]*\(.*\)|\1|p' "$src" | head -1); do
+        if [ "$t" = "$host_tag" ]; then skipped=1; fi
+    done
+    if [ "$skipped" = "1" ]; then
+        echo "SKIP $name (unsupported on $host_tag)"
+        return 0
+    fi
 
     timeout "$CC_TIMEOUT" "$FAKECC" $CC_EXTRA $extra_flags "$src" -o "$out" 2>"$cc_err"
     local cc_rc=$?
@@ -101,10 +130,20 @@ find "$CASE_DIR" -name '*.c' | sort | xargs -P "$JOBS" -n 1 bash -c 'run_single_
 
 n_pass=$(grep -c '^PASS ' "$WORK/results.log" || true)
 n_fail=$(grep -c '^FAIL ' "$WORK/results.log" || true)
+n_skip=$(grep -c '^SKIP ' "$WORK/results.log" || true)
 
 cat "$WORK/results.log" | sort
 
-echo "--- e2e${label:+ ($label)}: $n_pass passed, $n_fail failed, $((n_pass + n_fail)) total ---"
+n_total=$((n_pass + n_fail + n_skip))
+echo "--- e2e${label:+ ($label)}: $n_pass passed, $n_fail failed, $n_skip skipped, $n_total total ---"
+
+# Zero cases is never a passing run: it is what a broken fan-out looks like
+# (`xargs -P ""`, a missing case directory, ...).  Reporting it as success is
+# how this suite spent weeks green on Linux while testing nothing.
+if [ "$n_total" -eq 0 ]; then
+    echo "e2e: no cases were collected from $CASE_DIR -- refusing to pass" >&2
+    exit 1
+fi
 
 if [ "$n_fail" -ne 0 ]; then
     exit 1

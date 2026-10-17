@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -121,6 +122,8 @@ struct IRInst {
     IRValue dst;
     IRValue a;
     IRValue b;
+    IRValue c;
+    IRValue d;
     int64_t imm;
     SourceLoc loc;
     char *call_name;
@@ -196,12 +199,15 @@ struct IRFunction {
     int ret_is_float;
     int ret_is_struct;
     int ret_reg_n;
-    int ret_reg_cls[2];
+    int ret_reg_cls[4];
     int ret_is_bool;
     int ret_is_complex_ld;
     int ret_x87_bytes;
     int is_variadic;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     int is_constructor;
     int is_destructor;
     int ctor_prio;
@@ -222,6 +228,7 @@ struct IRFunctionArray {
 struct GlobalFixup {
     int offset;
     char *sym;
+    char *sub;
     int addend;
 };typedef struct GlobalFixup GlobalFixup;
 struct IRGlobal {
@@ -229,7 +236,11 @@ struct IRGlobal {
     int size;
     char *init_bytes;
     int is_readonly;
+    int is_const_obj;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     int is_tls;
     int align;
     SourceLoc loc;
@@ -246,6 +257,7 @@ struct IRAlias {
     char *name;
     char *target;
     int is_static;
+    int is_weak;
     SourceLoc loc;
 };typedef struct IRAlias IRAlias;
 struct IRAliasArray {
@@ -257,6 +269,9 @@ struct IRModule {
     IRFunctionArray functions;
     IRGlobalArray globals;
     IRAliasArray aliases;
+    char **weak_refs;
+    size_t n_weak_refs;
+    size_t cap_weak_refs;
 };typedef struct IRModule IRModule;
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
@@ -401,6 +416,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
     unsigned is_decimal : 1;
+    unsigned is_long_double : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
@@ -408,7 +424,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -422,8 +439,10 @@ static inline Type type_make_float(long long width) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
+Type type_make_long_double(void);
 static inline Type type_make_decimal(long long width) {
     Type t = type_make_float(width);
     t.is_decimal = 1;
@@ -441,7 +460,8 @@ static inline Type type_make_void(void) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -459,6 +479,13 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
+int abi_gp_nregs(void);
+int type_long_double_width(void);
+int abi_sret_uses_gp(void);
+int abi_indirect_agg(Type t);
+int abi_is_hfa(Type t);
+int abi_hfa_elem_count(Type t);
+int abi_hfa_elem_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -658,7 +685,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -673,7 +700,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -718,6 +745,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     char *alias_target;
     int align;
     int no_instrument;

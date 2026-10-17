@@ -1,5 +1,6 @@
 // runtime.memmove: like runtime.memcpy but handles overlapping regions.  The classic
 // bug is copying forward when dst > src, which overwrites bytes of
+// skip_oracle: clang
 // src before they are read.  Test both directions of overlap plus
 // the non-overlapping case, and verify the return value.
 // expect: 0

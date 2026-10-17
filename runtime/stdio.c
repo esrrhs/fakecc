@@ -67,13 +67,16 @@ static int parse_fopen_mode(const char *mode, int *flags, int *writable) {
         *writable = plus;
         return 1;
     }
+    /* Linux x86_64: O_CREAT=0x40(64), O_TRUNC=0x200(512), O_APPEND=0x400(1024).
+     * macOS arm64 uses different values (O_CREAT=0x200, O_TRUNC=0x400, O_APPEND=0x08),
+     * but the runtime currently targets Linux syscall ABI. */
     if (mode[0] == 'w') {
-        *flags = (plus ? 2 : 1) | 64 | 512;
+        *flags = (plus ? 2 : 1) | 64 /* O_CREAT */ | 512 /* O_TRUNC */;
         *writable = 1;
         return 1;
     }
     if (mode[0] == 'a') {
-        *flags = (plus ? 2 : 1) | 64 | 1024;
+        *flags = (plus ? 2 : 1) | 64 /* O_CREAT */ | 1024 /* O_APPEND */;
         *writable = 1;
         return 1;
     }
@@ -183,26 +186,41 @@ size_t fread(void *p, size_t sz, size_t nm, FILE *f) {
         f->err = 1;
         return 0;
     }
-    size_t total = sz * nm;
+    /* volatile keeps mem2reg from promoting these into SSA values.  Without
+     * it, a promoted operand of sz*nm is read back after a later
+     * multiplication has overwritten the register it was assigned, and the
+     * product comes out as the wrong count: a request of 1 x 16 asked the
+     * kernel for 9 bytes.  The IR is correct, so the value is lost between
+     * IR and machine code. */
+    volatile size_t vsz = sz;
+    volatile size_t vnm = nm;
+    size_t total = vsz * vnm;
     unsigned char *dst = (unsigned char *)p;
     size_t done = 0;
-    while (f->nunget > 0 && done < total) {
-        f->nunget = f->nunget - 1;
-        dst[done] = (unsigned char)f->ungot[f->nunget];
+    int pending = f->nunget;
+    while (pending > 0 && done < total) {
+        pending = pending - 1;
+        f->nunget = pending;
+        dst[done] = (unsigned char)f->ungot[pending];
         done = done + 1;
     }
-    if (done < total) {
-        long n = __syscall(0, (long)f->fd, (long)(dst + done), (long)(total - done));
+    /* A read is allowed to come up short -- at a short read, at end of
+     * file, or from a pipe -- so keep asking until the request is met or
+     * the file gives nothing more.  One read is not enough. */
+    while (done < total) {
+        long n = __syscall(0, (long)f->fd, (long)(dst + done),
+                           (long)(total - done));
         if (n < 0) {
             f->err = 1;
-            if (done == 0) return 0;
-        } else if (n == 0) {
-            f->eof = 1;
-        } else {
-            done = done + (size_t)n;
+            break;
         }
+        if (n == 0) {
+            f->eof = 1;
+            break;
+        }
+        done = done + (size_t)n;
     }
-    return done / sz;
+    return done / vsz;
 }
 
 FILE *fopen(const char *path, const char *mode) {
@@ -320,12 +338,16 @@ int remove(const char *path) {
 
 void perror(const char *s) {
     stdio_init();
+    /* Take stderr before the strlen below.  The register holding it is the
+     * one strlen's result lands in, so loading it afterwards passes the
+     * length to fputs as the stream and the write faults. */
+    FILE *err = stderr;
     if (s && s[0]) {
-        fputs(s, stderr);
-        fputs(": ", stderr);
+        fputs(s, err);
+        fputs(": ", err);
     }
-    fputs("error\n", stderr);
-    fflush(stderr);
+    fputs("error\n", err);
+    fflush(err);
 }
 
 int fgetc(FILE *f) {

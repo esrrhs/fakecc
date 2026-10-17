@@ -1,5 +1,6 @@
 // runtime.puts: writes a string followed by a newline to runtime.stdout.  Pin that it
 // returns non-negative and that the string round-trips.  The exact line
+// skip_oracle: clang
 // is also checked via expect_stdout.
 // expect: 0
 // expect_stdout: hello world

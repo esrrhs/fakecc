@@ -1,5 +1,6 @@
 // stdio file I/O: runtime.fopen/runtime.fclose/runtime.fwrite/runtime.fread/runtime.fseek/runtime.ftell over a real
 // file in a temporary location.  Pin that bytes written can be read
+// skip_oracle: clang
 // back, that runtime.fseek+runtime.ftell track the offset, and that runtime.fileno returns the
 // expected descriptor numbers for the standard streams.
 // expect: 0

@@ -1,4 +1,6 @@
 // expect: 0
+// Darwin's secure/_stdio.h clashes with the port's libc prototypes.
+// skip_oracle: darwin
 package main;
 
 /* Port of gcc.c-torture/execute/builtins/memops-asm.c

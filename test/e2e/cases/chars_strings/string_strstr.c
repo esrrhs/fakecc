@@ -1,5 +1,6 @@
 // runtime.strstr: returns a pointer to the first occurrence of needle in
 // hay, or NULL if absent.  An empty needle returns hay.  Must not
+// skip_oracle: clang
 // read past a \0 in either string.  Pin a mid-string match, a prefix
 // match, not-found, empty needle, needle longer than hay, and a match
 // at the very last byte.

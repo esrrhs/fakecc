@@ -75,6 +75,7 @@ def strip_attributes(text):
                 # match ((...))
                 if j+1 < len(text) and text[j+1] == "(":
                     depth = 2
+                    inner_start = j + 2
                     j += 2
                     while j < len(text) and depth > 0:
                         if text[j] == "(":
@@ -82,6 +83,11 @@ def strip_attributes(text):
                         elif text[j] == ")":
                             depth -= 1
                         j += 1
+                    # packed survives: the fakecc parser honors
+                    # __attribute__((packed)), and the compiler's own
+                    # macho.c needs packed on-disk structs after translation.
+                    if text[inner_start:j-2].strip() == "packed":
+                        out.append(text[i:j])
                     i = j
                     continue
         out.append(text[i])
@@ -587,11 +593,16 @@ def cleanup_unused_definitions(body):
 # rewritten to qualified `runtime.<name>` form so the file can drop its
 # per-file `extern` declarations and rely on `import runtime;` instead.
 RUNTIME_FUNCS = frozenset({
+    # Directory listing.  Provided per target by the runtime (getdents64 on
+    # Linux, getdirentries64 on Darwin), because the self-hosted build has
+    # no libc and the two dirent layouts do not agree.
+    "__fakecc_dir_open", "__fakecc_dir_next", "__fakecc_dir_close",
     "abort", "atoi", "atol", "calloc", "chmod", "exit", "fclose", "fflush",
     "fileno", "fopen", "fprintf", "fputc", "fputs", "fread", "free", "fseek",
     "ftell", "fwrite", "getenv", "isalnum", "isalpha", "isdigit", "isspace",
     "isxdigit", "malloc", "memcmp", "memcpy", "memmove", "memset", "perror",
-    "printf", "putchar", "puts", "qsort", "realloc", "snprintf", "sprintf",
+    "printf", "putchar", "puts", "qsort", "realloc", "remove", "snprintf",
+    "sprintf",
     "strcmp", "strchr", "strcpy", "strdup", "strerror", "strlen", "strncmp",
     "strncpy", "strrchr", "strstr", "strtod", "strtof", "strtold", "strtol",
     "strtoll", "strtoul", "strtoull", "vfprintf", "vsnprintf", "vsprintf",

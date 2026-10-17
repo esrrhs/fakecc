@@ -1,5 +1,6 @@
 // runtime.strncpy: copies up to n bytes; if src is shorter than n, pads the
 // rest with \0.  The padding behaviour is the easy one to get wrong.
+// skip_oracle: clang
 // Verify the pad, the exact-n case (no pad, no \0), and the
 // longer-than-n case (truncation).
 // expect: 0

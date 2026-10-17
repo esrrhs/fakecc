@@ -1,5 +1,6 @@
 // runtime.getenv: looks up an environment variable by reading
 // /proc/self/environ.  Pin that a known variable (PATH) is found and
+// skip_oracle: clang
 // non-empty, and that a definitely-absent name returns NULL.
 // expect: 0
 package main;

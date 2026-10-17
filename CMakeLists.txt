@@ -15,7 +15,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 add_compile_options(-Wall -Wextra -Werror -Wno-unused-parameter)
 if(APPLE)
-    add_compile_definitions(SYS_getdents64=0 _DARWIN_C_SOURCE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
     add_compile_options(-Wno-deprecated-declarations)
 endif()
 
@@ -45,11 +45,17 @@ add_library(fakecc_core
     src/mem2reg.c
     src/scalar_opt.c
     src/regalloc.c
+    src/reg_arm64.c
     src/opt.c
+    src/target.c
+    src/a64.c
     src/codegen.c
+    src/cg64.c
     src/debug.c
     src/emit.c
     src/link.c
+    src/macho.c
+    src/sha256.c
     src/pkg.c
     src/compiler.c
 )

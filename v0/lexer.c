@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -148,6 +149,497 @@ void token_array_init(TokenArray *a);
 void token_array_free(TokenArray *a);
 void token_array_push(TokenArray *a, Token t);
 int lex(const char *source, const char *filename, TokenArray *out);
+enum TypeKind {
+    TY_VOID,
+    TY_INT,
+    TY_FLOAT,
+    TY_PTR,
+    TY_ARRAY,
+    TY_STRUCT,
+    TY_FUNC,
+};typedef enum TypeKind TypeKind;
+typedef struct Type Type;
+struct Type {
+    TypeKind kind;
+    long long width;
+    int is_unsigned;
+    unsigned is_const : 1;
+    unsigned is_volatile : 1;
+    unsigned is_restrict : 1;
+    unsigned is_bool : 1;
+    Type *pointee;
+    Type *elem_type;
+    long long length;
+    struct Expr *vla_dim;
+    char *tag;
+    Type *func_ret;
+    Type *func_params;
+    int func_nparams;
+    int func_is_variadic;
+    int func_is_unprototyped;
+    int enum_id;
+    int bitfield_width;
+    int is_vector;
+    unsigned is_decimal : 1;
+    unsigned is_long_double : 1;
+};
+static inline Type type_make_int(long long width, int is_unsigned) {
+    Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
+    t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
+}
+static inline Type type_make_bool(void) {
+    Type t = type_make_int(1, 1);
+    t.is_bool = 1;
+    return t;
+}
+static inline Type type_default_int(void) { return type_make_int(4, 0); }
+static inline Type type_make_float(long long width) {
+    Type t; t.kind = TY_FLOAT; t.width = width; t.is_unsigned = 0;
+    t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
+}
+Type type_make_long_double(void);
+static inline Type type_make_decimal(long long width) {
+    Type t = type_make_float(width);
+    t.is_decimal = 1;
+    return t;
+}
+static inline int type_is_decimal(Type t) {
+    return t.kind == TY_FLOAT && t.is_decimal && !t.is_vector;
+}
+static inline int type_is_decimal128(Type t) {
+    return type_is_decimal(t) && t.width == 16;
+}
+static inline Type type_make_void(void) {
+    Type t; t.kind = TY_VOID; t.width = 0; t.is_unsigned = 0;
+    t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
+    t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
+    t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0; t.enum_id = 0;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
+}
+Type type_clone(Type t);
+void type_free(Type *t);
+long long type_size(Type t);
+long long type_align(Type t);
+int type_is_complex_ldouble(Type t);
+int type_is_empty_struct(Type t);
+int type_needs_stack_align16(Type t);
+int type_stack_align(Type t);
+int host_has_avx512f(void);
+enum SysVRegClass {
+    SYSV_CLS_INTEGER = 1,
+    SYSV_CLS_SSE = 2
+};typedef enum SysVRegClass SysVRegClass;
+int sysv_classify_agg(Type t, SysVRegClass cls[2]);
+int sysv_agg_ret_x87(Type t);
+int sysv_memory_pass_as_pointer(Type t);
+int abi_gp_nregs(void);
+int type_long_double_width(void);
+int abi_sret_uses_gp(void);
+int abi_indirect_agg(Type t);
+int abi_is_hfa(Type t);
+int abi_hfa_elem_count(Type t);
+int abi_hfa_elem_size(Type t);
+Type type_make_ptr(Type pointee);
+Type type_make_array(Type elem, long long length);
+Type type_make_vector(Type elem, long long vec_size);
+Type type_make_vla(Type elem, struct Expr *dim);
+Type type_make_struct(const char *tag, long long size);
+Type type_make_func(Type ret, Type * *params, int nparams);
+Type type_make_func_var(Type ret, Type * *params, int nparams, int is_variadic);
+Type type_decay(Type t);
+int type_is_ptr_or_array(Type t);
+Type type_pointee_or_elem(Type t);
+int type_funcs_equal(Type a, Type b);
+int type_is_vla(Type t);
+int type_same_typedef(Type a, Type b);
+struct Expr *expr_clone(const struct Expr *e);
+enum ExprKind {
+    EX_INT_LIT,
+    EX_BINOP,
+    EX_UNARY,
+    EX_VAR,
+    EX_ASSIGN,
+    EX_CALL,
+    EX_STR,
+    EX_ADDR,
+    EX_DEREF,
+    EX_INDEX,
+    EX_MEMBER,
+    EX_CAST,
+    EX_SIZEOF_TYPE,
+    EX_SIZEOF_EXPR,
+    EX_ALIGNOF_TYPE,
+    EX_ALIGNOF_EXPR,
+    EX_TERNARY,
+    EX_INC_DEC,
+    EX_COMPOUND_ASSIGN,
+    EX_COMMA,
+    EX_INIT_LIST,
+    EX_FLOAT_LIT,
+    EX_COMPOUND_LITERAL,
+    EX_STMT_EXPR,
+    EX_LABEL_ADDR,
+};typedef enum ExprKind ExprKind;
+enum BinOp {
+    BOP_ADD,
+    BOP_SUB,
+    BOP_MUL,
+    BOP_DIV,
+    BOP_MOD,
+    BOP_EQ,
+    BOP_NE,
+    BOP_LT,
+    BOP_LE,
+    BOP_GT,
+    BOP_GE,
+    BOP_AND,
+    BOP_OR,
+    BOP_BITAND,
+    BOP_BITOR,
+    BOP_BITXOR,
+    BOP_SHL,
+    BOP_SHR,
+};typedef enum BinOp BinOp;
+enum UnaryOp {
+    UOP_NEG,
+    UOP_POS,
+    UOP_BITNOT,
+    UOP_NOT,
+};typedef enum UnaryOp UnaryOp;
+typedef struct StmtArray StmtArray;
+typedef struct Expr Expr;
+int fold_const_int(const Expr *e, long long *out);
+int fold_const_int128(const Expr *e, unsigned long long *lo, unsigned long long *hi);
+struct ExprArray {
+    Expr **data;
+    size_t len;
+    size_t cap;
+};typedef struct ExprArray ExprArray;
+union __anon_u_1 {
+        long long int_val;
+        struct { BinOp op; Expr *l, *r; } bin;
+        struct { UnaryOp op; Expr *operand; } un;
+        struct { char *name; char *pkg; } var;
+        struct { Expr *lvalue; Expr *rvalue; } assign;
+        struct { Expr *callee; ExprArray args; } call;
+        struct { char *bytes; int len; } str;
+        struct { Expr *operand; } addr;
+        struct { Expr *operand; } deref;
+        struct { Expr *array; Expr *index; } idx;
+        struct { Expr *obj; char *name; } member;
+        struct { Type target; Expr *operand; } cast;
+        struct { Type target; } sizeof_t;
+        struct { Expr *operand; } sizeof_e;
+        struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
+        struct { Expr *cond; Expr *then; Expr *else_; } tern;
+        struct { Expr *operand; int is_inc; int is_prefix; } incdec;
+        struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
+        struct { Expr *lhs; Expr *rhs; } comma;
+        struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
+        char *float_text;
+        struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
+    };struct Expr {
+    ExprKind kind;
+    SourceLoc loc;
+    Type type;
+    Type va_arg_type;
+    union {
+        long long int_val;
+        struct { BinOp op; Expr *l, *r; } bin;
+        struct { UnaryOp op; Expr *operand; } un;
+        struct { char *name; char *pkg; } var;
+        struct { Expr *lvalue; Expr *rvalue; } assign;
+        struct { Expr *callee; ExprArray args; } call;
+        struct { char *bytes; int len; } str;
+        struct { Expr *operand; } addr;
+        struct { Expr *operand; } deref;
+        struct { Expr *array; Expr *index; } idx;
+        struct { Expr *obj; char *name; } member;
+        struct { Type target; Expr *operand; } cast;
+        struct { Type target; } sizeof_t;
+        struct { Expr *operand; } sizeof_e;
+        struct { Type target; } alignof_t;
+        struct { Expr *operand; } alignof_e;
+        struct { Expr *cond; Expr *then; Expr *else_; } tern;
+        struct { Expr *operand; int is_inc; int is_prefix; } incdec;
+        struct { Expr *lvalue; Expr *rvalue; BinOp op; } comp;
+        struct { Expr *lhs; Expr *rhs; } comma;
+        struct { Expr **elements; int num_elements; int *desig_kind; int *desig_index; char **desig_member; } init_list;
+        char *float_text;
+        struct { Type target_type; Expr *init; } compound;
+        struct { StmtArray *stmts; } stmt_expr;
+        struct { char *label; } label_addr;
+    } u;
+    unsigned long long int_hi;
+};
+Expr *expr_new_int(long long v, SourceLoc loc);
+Expr *expr_new_int_typed(long long v, int width, int is_unsigned, SourceLoc loc);
+Expr *expr_new_int_bits(unsigned long long lo, unsigned long long hi,
+                       int width, int is_unsigned, SourceLoc loc);
+Expr *expr_new_binop(BinOp op, Expr *l, Expr *r, SourceLoc loc);
+Expr *expr_new_unary(UnaryOp op, Expr *operand, SourceLoc loc);
+Expr *expr_new_var(const char *name, SourceLoc loc);
+Expr *expr_new_var_qual(const char *pkg, const char *name, SourceLoc loc);
+Expr *expr_new_assign(Expr *lvalue, Expr *rvalue, SourceLoc loc);
+Expr *expr_new_call(Expr *callee, SourceLoc loc);
+Expr *expr_new_str(const char *bytes, int len, SourceLoc loc);
+Expr *expr_new_addr(Expr *operand, SourceLoc loc);
+Expr *expr_new_deref(Expr *operand, SourceLoc loc);
+Expr *expr_new_index(Expr *array, Expr *index, SourceLoc loc);
+Expr *expr_new_member(Expr *obj, const char *name, SourceLoc loc);
+Expr *expr_new_cast(Type target, Expr *operand, SourceLoc loc);
+Expr *expr_new_sizeof_type(Type t, SourceLoc loc);
+Expr *expr_new_sizeof_expr(Expr *operand, SourceLoc loc);
+Expr *expr_new_alignof_type(Type t, SourceLoc loc);
+Expr *expr_new_alignof_expr(Expr *operand, SourceLoc loc);
+Expr *expr_new_ternary(Expr *cond, Expr *then, Expr *else_, SourceLoc loc);
+Expr *expr_new_inc_dec(Expr *operand, int is_inc, int is_prefix, SourceLoc loc);
+Expr *expr_new_compound_assign(Expr *lvalue, Expr *rvalue, BinOp op, SourceLoc loc);
+Expr *expr_new_comma(Expr *l, Expr *r, SourceLoc loc);
+Expr *expr_new_init_list(Expr **elements, int num_elements, SourceLoc loc);
+Expr *expr_new_float_lit(const char *text, int width, SourceLoc loc);
+Expr *expr_new_compound_literal(Type target_type, Expr *init, SourceLoc loc);
+Expr *expr_new_stmt_expr(StmtArray *stmts, SourceLoc loc);
+Expr *expr_new_label_addr(const char *label, SourceLoc loc);
+void expr_call_push_arg(Expr *e, Expr *arg);
+void expr_call_set_callee(Expr *e, Expr *callee);
+void expr_free(Expr *e);
+void expr_set_type(Expr *e, Type t);
+enum StmtKind {
+    ST_DECL,
+    ST_EXPR,
+    ST_RETURN,
+    ST_IF,
+    ST_WHILE,
+    ST_FOR,
+    ST_BREAK,
+    ST_CONTINUE,
+    ST_BLOCK,
+    ST_DO_WHILE,
+    ST_GOTO,
+    ST_LABEL,
+    ST_SWITCH,
+};typedef enum StmtKind StmtKind;
+typedef struct Stmt Stmt;
+struct StmtArray {
+    Stmt *data;
+    size_t len;
+    size_t cap;
+};
+struct SwitchCase {
+    int is_default;
+    long long value;
+    long long high_value;
+    int is_range;
+    char *label_name;
+    StmtArray stmts;
+};typedef struct SwitchCase SwitchCase;
+union __anon_u_2 {
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
+        Expr *expr;
+        Expr *value;
+        struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
+        struct { Expr *cond; Stmt *body; } while_s;
+        struct { Expr *cond; Stmt *body; } do_s;
+        struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
+        StmtArray block;
+        struct { char *target; Expr *target_expr; } goto_s;
+        struct { char *name; Stmt *stmt; } label_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+    };struct Stmt {
+    StmtKind kind;
+    SourceLoc loc;
+    union {
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
+        Expr *expr;
+        Expr *value;
+        struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
+        struct { Expr *cond; Stmt *body; } while_s;
+        struct { Expr *cond; Stmt *body; } do_s;
+        struct { Stmt *init; Expr *cond; Expr *step; Stmt *body; } for_s;
+        StmtArray block;
+        struct { char *target; Expr *target_expr; } goto_s;
+        struct { char *name; Stmt *stmt; } label_s;
+        struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+    } u;
+};
+void stmt_array_init(StmtArray *a);
+void stmt_array_push(StmtArray *a, Stmt s);
+void stmt_array_free(StmtArray *a);
+void stmt_free(Stmt *s);
+Stmt stmt_clone(const Stmt *s);
+Stmt *stmt_alloc(void);
+void stmt_free_ptr(Stmt *s);
+void switch_push_case(Stmt *s, int is_default, long long value, const char *label_name);
+void switch_push_case_range(Stmt *s, int is_default, long long value, long long high_value, int is_range, const char *label_name);
+struct Param {
+    char *name;
+    Type type;
+    SourceLoc loc;
+};typedef struct Param Param;
+struct ParamArray {
+    Param *data;
+    size_t len;
+    size_t cap;
+};typedef struct ParamArray ParamArray;
+void param_array_init(ParamArray *a);
+void param_array_push(ParamArray *a, const char *name, Type type, SourceLoc loc);
+void param_array_free(ParamArray *a);
+struct FunctionDecl {
+    char *name;
+    Type ret_type;
+    ParamArray params;
+    StmtArray body;
+    SourceLoc loc;
+    int is_variadic;
+    int is_unprototyped;
+    int is_extern;
+    int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
+    char *alias_target;
+    int align;
+    int no_instrument;
+    int is_constructor;
+    int is_destructor;
+    int ctor_prio;
+    int dtor_prio;
+};typedef struct FunctionDecl FunctionDecl;
+struct PackageDecl {
+    char *name;
+    SourceLoc loc;
+};typedef struct PackageDecl PackageDecl;
+struct ImportDecl {
+    char *name;
+    SourceLoc loc;
+};typedef struct ImportDecl ImportDecl;
+struct ImportArray {
+    ImportDecl *data;
+    size_t len;
+    size_t cap;
+};typedef struct ImportArray ImportArray;
+void import_array_init(ImportArray *a);
+void import_array_push(ImportArray *a, const char *name, SourceLoc loc);
+void import_array_free(ImportArray *a);
+struct StructMember {
+    char *name;
+    Type type;
+    long long offset;
+    int bit_width;
+    int bit_offset;
+    int align;
+};typedef struct StructMember StructMember;
+struct StructDef {
+    char *tag;
+    int is_union;
+    int is_big_endian;
+    StructMember *members;
+    int num_members;
+    int cap_members;
+    long long size;
+    long long align;
+    int is_packed;
+    SourceLoc loc;
+    Type *canonical_type;
+    long long bf_unit_type;
+    int bf_unit_used;
+    long long bf_unit_offset;
+};typedef struct StructDef StructDef;
+struct StructRegistry {
+    StructDef *data;
+    size_t len;
+    size_t cap;
+};typedef struct StructRegistry StructRegistry;
+void struct_registry_init(StructRegistry *r);
+void struct_registry_free(StructRegistry *r);
+StructDef *struct_registry_add(StructRegistry *r, const char *tag, SourceLoc loc);
+StructDef *struct_registry_find(StructRegistry *r, const char *tag);
+const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag);
+void struct_def_push_member(StructDef *sd, const char *name, Type ty, int bit_width);
+void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, int bit_width, int align);
+void struct_def_finish(StructDef *sd);
+void struct_def_apply_sso(StructDef *sd, int is_big_endian);
+void struct_def_fixup_self_types(StructDef *sd);
+const StructMember *struct_lookup_member(const StructRegistry *reg,
+                                         const StructDef *sd,
+                                         const char *name,
+                                         long long *offset_out);
+struct FunctionArray {
+    FunctionDecl *data;
+    size_t len;
+    size_t cap;
+};typedef struct FunctionArray FunctionArray;
+struct EnumConstant {
+    char *name;
+    int value;
+};typedef struct EnumConstant EnumConstant;
+struct EnumDef {
+    char *tag;
+    EnumConstant *constants;
+    int num_constants;
+    int cap_constants;
+    SourceLoc loc;
+    int has_underlying_type;
+    Type underlying_type;
+};typedef struct EnumDef EnumDef;
+struct EnumRegistry {
+    EnumDef *data;
+    size_t len;
+    size_t cap;
+};typedef struct EnumRegistry EnumRegistry;
+void enum_registry_init(EnumRegistry *r);
+void enum_registry_free(EnumRegistry *r);
+EnumDef *enum_registry_add(EnumRegistry *r, const char *tag, SourceLoc loc);
+EnumDef *enum_registry_find(EnumRegistry *r, const char *tag);
+int enum_def_push_constant(EnumDef *ed, const char *name, int has_value,
+                            int value, SourceLoc loc);
+const EnumConstant *enum_registry_find_constant(const EnumRegistry *r,
+                                                const char *name);
+Type enum_def_as_type(const EnumDef *ed, int enum_id);
+struct TypedefEntry {
+    char *name;
+    Type type;
+};typedef struct TypedefEntry TypedefEntry;
+struct TypedefRegistry {
+    TypedefEntry *data;
+    size_t len;
+    size_t cap;
+};typedef struct TypedefRegistry TypedefRegistry;
+void typedef_registry_init(TypedefRegistry *r);
+void typedef_registry_free(TypedefRegistry *r);
+TypedefEntry *typedef_registry_add(TypedefRegistry *r, const char *name, Type type);
+const Type *typedef_registry_find(const TypedefRegistry *r, const char *name);
+TypedefEntry *typedef_registry_get(TypedefRegistry *r, const char *name);
+void typedef_registry_truncate(TypedefRegistry *r, size_t len);
+struct TranslationUnit {
+    PackageDecl package;
+    ImportArray imports;
+    StmtArray globals;
+    FunctionArray functions;
+    StructRegistry structs;
+    EnumRegistry enums;
+    TypedefRegistry typedefs;
+};typedef struct TranslationUnit TranslationUnit;
+void tu_init(TranslationUnit *tu);
+void tu_free(TranslationUnit *tu);
+
+
 typedef struct FILE FILE;
 typedef long fpos_t;
 static const char *predefined_macro_literal(const char *text, int *out_is_float) {
@@ -164,15 +656,16 @@ static const char *predefined_macro_literal(const char *text, int *out_is_float)
     if (runtime.strcmp(text, "__SIZEOF_POINTER__") == 0) return "8";
     if (runtime.strcmp(text, "__SIZEOF_FLOAT__") == 0) return "4";
     if (runtime.strcmp(text, "__SIZEOF_DOUBLE__") == 0) return "8";
-    if (runtime.strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0) return "16";
+    if (runtime.strcmp(text, "__SIZEOF_LONG_DOUBLE__") == 0)
+        return type_long_double_width() == 8 ? "8" : "16";
     if (runtime.strcmp(text, "__SIZEOF_SIZE_T__") == 0) return "8";
     if (runtime.strcmp(text, "__SIZEOF_WCHAR_T__") == 0) return "4";
     if (runtime.strcmp(text, "__SIZEOF_WINT_T__") == 0) return "4";
     if (runtime.strcmp(text, "__SIZEOF_PTRDIFF_T__") == 0) return "8";
     if (runtime.strcmp(text, "__FLT_MAX__") == 0) { *out_is_float = 1; return "3.40282347e+38f"; }
-    if (runtime.strcmp(text, "__DBL_MAX__") == 0) { *out_is_float = 1; return "1.7976931348623157e+308"; }
+    if (runtime.strcmp(text, "__DBL_MAX__") == 0) { *out_is_float = 1; return "0x1.fffffffffffffp+1023"; }
     if (runtime.strcmp(text, "__FLT_MIN__") == 0) { *out_is_float = 1; return "1.17549435e-38f"; }
-    if (runtime.strcmp(text, "__DBL_MIN__") == 0) { *out_is_float = 1; return "2.2250738585072014e-308"; }
+    if (runtime.strcmp(text, "__DBL_MIN__") == 0) { *out_is_float = 1; return "0x1p-1022"; }
     if (runtime.strcmp(text, "__FLT_EPSILON__") == 0) { *out_is_float = 1; return "1.19209290e-7f"; }
     if (runtime.strcmp(text, "__DBL_EPSILON__") == 0) { *out_is_float = 1; return "2.2204460492503131e-16"; }
     return ((void*)0);

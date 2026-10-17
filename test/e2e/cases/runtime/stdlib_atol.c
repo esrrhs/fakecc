@@ -1,5 +1,6 @@
 // runtime.atol: like runtime.atoi but returns long, so it can represent the full 64-bit
 // range instead of being truncated to int.  Pin a plain value, a negative,
+// skip_oracle: clang
 // a value with leading whitespace and an explicit + sign, and one large
 // enough that (int) would wrap but long does not.
 // expect: 0

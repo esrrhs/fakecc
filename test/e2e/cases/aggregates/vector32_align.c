@@ -1,4 +1,7 @@
 // expect: 0
+// Over-aligned vector frame slots: gcc's arm64 layout does not match the
+// x86 assumption this case pins.
+// skip_oracle: darwin
 // vector_size(32) aligns to 32, so a leading char pads the vector to offset 32.
 package main;
 typedef int V __attribute__((vector_size(32)));

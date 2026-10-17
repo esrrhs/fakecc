@@ -10,6 +10,7 @@
 /* ------------------------------------------------------------------ */
 
 #define SECT_UNDEF  0
+#define SHN_COMMON  0xfff2 /* tentative def: st_value is alignment, st_size is size */
 #define SECT_TEXT   1
 #define SECT_RODATA 2
 #define SECT_DATA   3
@@ -18,11 +19,32 @@
 #define SECT_TBSS   6  /* zero-initialized __thread variables (SHF_TLS) */
 #define SECT_INIT_ARRAY 7 /* .init_array constructor pointers */
 #define SECT_FINI_ARRAY 8 /* .fini_array destructor pointers */
+#define SECT_TVARS   9  /* Mach-O tlv_descriptor table (reader-internal:
+                        *   never carries bytes into an image) */
 #define INIT_PRIO_DEFAULT 65535
 
 /* ------------------------------------------------------------------ */
 /* Symbol table entry                                                  */
 /* ------------------------------------------------------------------ */
+
+/* arm64 Mach-O internal rebase.  `slot` and `target` are offsets from
+ * the mach header.  dyld's chained fixups add the load slide so the
+ * slot holds the runtime address.  The ELF path leaves this empty. */
+typedef struct {
+    uint64_t slot;
+    uint64_t target;
+} EmitRebase;
+
+/* arm64 Mach-O import.  Where a rebase names an address inside the image,
+ * a bind names one outside it: `slot` is a pointer-sized cell in __DATA
+ * (an offset from the mach header) that dyld overwrites with the address
+ * of `name` as it loads the dylibs.  The cell is what makes a call to a
+ * library function possible at all -- there is no displacement a direct
+ * branch could hold, because the distance is not known until load time. */
+typedef struct {
+    uint64_t slot;
+    char    *name;     /* Mach-O spelling, i.e. already "_"-prefixed */
+} EmitBind;
 
 typedef struct {
     char *name;        /* symbol name (NULL for section symbols) */
@@ -31,6 +53,7 @@ typedef struct {
     uint16_t shndx;    /* section index, or SHN_UNDEF(0) for undefined */
     size_t value;      /* offset within section (defined symbols) */
     size_t size;       /* byte size (0 for undefined symbols) */
+    uint16_t macho_desc; /* Mach-O n_desc bits the ELF writer ignores */
 } EmitSymbol;
 
 /* ------------------------------------------------------------------ */
@@ -122,6 +145,13 @@ typedef struct {
     int rbp_offset;     /* DBG_LOC_FBREG */
     int dwarf_reg;      /* DBG_LOC_REG (x86-64 DWARF numbering) */
     char *sym_name;     /* DBG_LOC_ADDR: ELF symbol name */
+    /* DBG_LOC_ADDR's other spelling: the section the object lives in and its
+     * offset there.  The ELF linker rebases m->syms[].value onto the linked
+     * image and needs only sym_name, but a lone single-TU Mach-O image
+     * carries no symbol table at all, so the home has to travel with the
+     * variable and be turned into an address once the sections have vaddrs. */
+    int addr_sect;      /* SECT_*, or 0 when sym_name is the way in */
+    size_t addr_off;
     /* Location-list form: non-empty when the variable moves between homes.
      * Takes precedence over loc_kind when num_ranges > 0. */
     DebugLocRange *ranges;
@@ -167,9 +197,14 @@ typedef struct {
     /* Where the frame is established, so call-frame info can describe the
      * prologue step by step.  gdb routinely stops mid-prologue (`break f`
      * skips `push %rbp; mov %rsp,%rbp` on its own), and a single CFI rule for
-     * the whole prologue makes it unwind into a bogus frame there. */
-    size_t after_push_rbp_pc;   /* just past `push %rbp` */
-    size_t after_mov_rbp_pc;    /* just past `mov %rsp,%rbp` */
+     * the whole prologue makes it unwind into a bogus frame there.
+     * On arm64 the two steps are `stp x29,x30,[sp,#-frame_size]!` and
+     * `add x29,sp,#0`. */
+    size_t after_push_rbp_pc;   /* just past `push %rbp` / `stp x29,x30` */
+    size_t after_mov_rbp_pc;    /* just past `mov %rsp,%rbp` / `add x29,sp` */
+    /* arm64: bytes the prologue pushed, i.e. CFA - sp once it is set up.
+     * 0 on x86-64, where the CFA offset is a fixed 16. */
+    size_t frame_size;
     DebugVar *vars;
     size_t num_vars, cap_vars;
     DebugCallSite *call_sites;
@@ -180,13 +215,25 @@ typedef struct {
 /* Object module — the in-memory representation of one compiled TU     */
 /* ------------------------------------------------------------------ */
 
-typedef struct {
+typedef struct EmitModule {
+    /* Set for a translation unit the user wrote, as opposed to one loaded
+     * from a package.  A user definition overrides a package's definition of
+     * the same name -- that is how a program replaces fputs or memcpy, and
+     * the C library is expected to lose.  */
+    int      is_user_tu;
     Buffer   text;     /* .text */
     Buffer   rodata;   /* .rodata (string literals, long double constants) */
     Buffer   data;     /* .data (mutable globals) */
     size_t   bss_size; /* .bss total bytes (zero-initialized globals) */
     Buffer   tdata;    /* .tdata — initialized __thread variables */
     size_t   tbss_size;/* .tbss total bytes (zero-init __thread variables) */
+    /* Darwin thread-local variables.  tdata/tbss_size above hold the same
+     * storage for the ELF path; this is the descriptor table the Mach-O
+     * loader needs on top of it -- one 24-byte tlv_descriptor per
+     * __thread object, whose thunk field dyld rebinds to _tlv_bootstrap.
+     * Written as __DATA,__thread_vars. */
+    Buffer   thread_vars;
+    size_t   thread_vars_align;
     /* Max sh_addralign of each output section (gcc objects often use 16). */
     size_t   text_align;
     size_t   rodata_align;
@@ -208,6 +255,12 @@ typedef struct {
     size_t num_relocs, cap_relocs;
     EmitReloc  *data_relocs; /* relocations within .data (pointer fixups) */
     size_t num_data_relocs, cap_data_relocs;
+    /* Pointer slots dyld must rebase (arm64 Mach-O PIE). */
+    EmitRebase *rebases;
+    size_t num_rebases, cap_rebases;
+    /* Pointer slots dyld must bind to a dylib symbol (arm64 Mach-O). */
+    EmitBind *binds;
+    size_t num_binds, cap_binds;
 
     /* Debug info (-g).  Empty when compiled without -g. */
     char *dbg_tu_name;           /* primary source file name */
@@ -251,13 +304,64 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
+/* Record one arm64 image-relative pointer rebase (see EmitRebase). */
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
+/* Record one arm64 dylib import (see EmitBind).  `name` is the C spelling;
+ * the Mach-O "_" prefix is added here, so callers pass "pthread_create". */
+void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+
+/* True when `name` is a function the arm64 backend may import from a dylib
+ * instead of requiring a definition in the program.  Two sources feed it:
+ * a fixed list of libSystem names, and every symbol exported by a dylib the
+ * driver was told to link against (see emit_aux_lib_add).  Both are
+ * deliberately closed sets — an undefined call that is not in them still
+ * fails at compile time, which is what keeps a misspelled name a diagnostic
+ * rather than a launch-time "symbol not found" from dyld. */
+int emit_is_darwin_import(const char *name);
+
+/* ------------------------------------------------------------------ */
+/* Auxiliary dylibs (-l / .dylib on the command line)                  */
+/* ------------------------------------------------------------------ */
+
+/* One dylib the driver was asked to link against.  install_name is what an
+ * LC_LOAD_DYLIB has to name (the library's own LC_ID_DYLIB, e.g.
+ * "@rpath/libadd.dylib"); syms are its exported symbols, i.e. the names a
+ * reference may leave undefined and still link. */
+typedef struct {
+    char  *install_name;
+    char **syms;
+    size_t nsyms;
+} EmitAuxLib;
+
+/* Register one dylib, taking ownership of install_name and syms. */
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms);
+/* Add one LC_RPATH entry (ownership retained by the caller until exit). */
+void emit_aux_rpath_add(const char *path);
+/* Read back what the driver registered. */
+const EmitAuxLib *emit_aux_libs(size_t *n);
+const char *const *emit_aux_rpaths(size_t *n);
+/* Free everything registered above. */
+void emit_aux_reset(void);
+/* Index of the aux lib exporting `name`, or -1 when none does.  An ordinal
+ * 2+n in the imports table addresses emit_aux_libs()[n]. */
+int emit_aux_lib_of(const char *name);
 
 /* ------------------------------------------------------------------ */
 /* Output                                                              */
 /* ------------------------------------------------------------------ */
 
-/* Write a relocatable object file (ET_REL) to path. */
+/* Write a relocatable object file (ET_REL or Mach-O MH_OBJECT) to path. */
 void emit_obj(const EmitModule *m, const char *path);
+/* When set, arm64 codegen emits a relocatable object body (no LC_MAIN
+ * stub) instead of a freestanding executable image. */
+void emit_set_object_mode(int on);
+int  emit_object_mode(void);
+void emit_set_multi_tu(int on);
+int  emit_multi_tu(void);
+/* When set, the runtime package is linked and owns the allocator, so the
+ * arm64 backend must not inline its per-page mmap fallback. */
+void emit_set_runtime_alloc(int on);
+int  emit_runtime_alloc(void);
 /* Read a relocatable object file into an EmitModule.  Returns 0 on success. */
 int  emit_obj_read(const char *path, EmitModule *m);
 

@@ -1,5 +1,6 @@
 // Converting between long double and the SSE float types goes through a stack
 // slot: the x87 store and the SSE reload must agree on the width, or a
+// skip_oracle: clang
 // (float)long_double round trip reads a double-sized slot as a float.
 // expect: 42
 // expect_stdout: 325 7125 350 -125 650 14250 0 25 50

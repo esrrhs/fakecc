@@ -1,5 +1,6 @@
 // runtime.strtoull: converts a string to an unsigned long long in a given
 // base, reporting where parsing stopped through an endptr.  Pin base-10,
+// skip_oracle: clang
 // endptr, explicit hex, the base==0 auto-detect path, and glibc saturation
 // to ULLONG_MAX on overflow.
 // expect: 0

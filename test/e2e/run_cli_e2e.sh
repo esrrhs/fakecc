@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Exercise fakecc CLI error paths and less-used flags (coverage of src/main.c).
 set -uo pipefail
+# Portability helpers (timeout/nproc/readelf shims for non-GNU hosts).
+_COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Abort if the shims could not be sourced: a silently missing `timeout` turns
+# every case into a confusing "command not found" instead of a clear error.
+. "$_COMPAT_DIR/compat.sh" || { echo "cannot source compat.sh from $_COMPAT_DIR" >&2; exit 2; }
+# run_e2e fans cases out to `xargs bash -c` workers, which only see exported
+# functions, so re-export the shims this script's workers rely on.
+export -f timeout nproc 2>/dev/null || true
+
 
 FAKECC=${1:-./build/fakecc}
 shift || true
@@ -41,7 +50,16 @@ expect_fail "empty -l" "$FAKECC" "$TMP/t.c" -l "" -o "$TMP/out"
 
 expect_ok "-c -O2" "$FAKECC" $CC_EXTRA -c -O2 "$TMP/t.c" -o "$TMP/t.o"
 expect_ok "-c -O3" "$FAKECC" $CC_EXTRA -c -O3 "$TMP/t.c" -o "$TMP/t.o"
-expect_ok "-c -mavx" "$FAKECC" $CC_EXTRA -c -mavx "$TMP/t.c" -o "$TMP/t.o"
+# -mavx selects 32-byte YMM vectors, which only exist on the x86-64 backend.
+# arm64 always uses 16-byte NEON vectors, so there the flag is correctly
+# rejected; assert whichever contract the host target actually has instead of
+# hard-coding the x86 answer.
+if [ "$(uname -m)" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then
+    expect_fail "-c -mavx (rejected on arm64)" "$FAKECC" $CC_EXTRA -c -mavx "$TMP/t.c" -o "$TMP/t.o"
+    expect_ok "-c -mno-avx (no-op on arm64)" "$FAKECC" $CC_EXTRA -c -mno-avx "$TMP/t.c" -o "$TMP/t.o"
+else
+    expect_ok "-c -mavx" "$FAKECC" $CC_EXTRA -c -mavx "$TMP/t.c" -o "$TMP/t.o"
+fi
 expect_ok "-c -fno-builtin" "$FAKECC" $CC_EXTRA -c -fno-builtin "$TMP/t.c" -o "$TMP/t.o"
 expect_ok "-c -fsanitize=undefined,address" "$FAKECC" $CC_EXTRA -c -fsanitize=undefined,address "$TMP/t.c" -o "$TMP/t.o"
 expect_ok "-c -g" "$FAKECC" $CC_EXTRA -c -g "$TMP/t.c" -o "$TMP/t.o"

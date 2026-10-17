@@ -5,6 +5,9 @@
 # miscompiles __builtin_mul_overflow_p for tree-optimization/123864.
 # Prefer GCC 16 from the Ubuntu toolchain test PPA so the oracle matches
 # the GCC 16.2.0 c-torture ports (same as local).
+#
+# On macOS, install gcc via Homebrew (the version varies but is modern
+# enough to be a correct oracle for our difftest suite).
 set -euo pipefail
 
 # Retry helper: run a command up to N times with a sleep between attempts.
@@ -22,6 +25,32 @@ retry() {
         n=$((n + 1))
     done
 }
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    # macOS: install gcc via Homebrew. `brew install gcc` gives us gcc-N
+    # (currently gcc-15 on arm64 macos-latest).  Symlink the versioned names
+    # to plain `gcc`/`g++`/`gcov` so test scripts that call `gcc` work.
+    if ! command -v brew >/dev/null 2>&1; then
+        echo "Homebrew not found on macOS runner" >&2
+        exit 1
+    fi
+    brew install gcc
+    gcc_ver=$(brew list --versions gcc | awk '{print $2}')
+    major=$(echo "$gcc_ver" | cut -d. -f1)
+    mkdir -p "$HOME/.local/bin"
+    ln -sfn "$(brew --prefix)/bin/gcc-$major" "$HOME/.local/bin/gcc"
+    ln -sfn "$(brew --prefix)/bin/g++-$major" "$HOME/.local/bin/g++"
+    if command -v "$(brew --prefix)/bin/gcov-$major" >/dev/null 2>&1; then
+        ln -sfn "$(brew --prefix)/bin/gcov-$major" "$HOME/.local/bin/gcov"
+    fi
+    if [ -n "${GITHUB_PATH:-}" ]; then
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    fi
+    export PATH="$HOME/.local/bin:$PATH"
+    gcc --version
+    echo "macOS: host gcc oracle installed via Homebrew"
+    exit 0
+fi
 
 sudo apt-get update
 sudo apt-get install -y software-properties-common

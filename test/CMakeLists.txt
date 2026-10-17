@@ -94,6 +94,22 @@ add_executable(test_rare unit/test_rare.c)
 target_link_libraries(test_rare PRIVATE fakecc_core test_framework)
 add_test(NAME test_rare COMMAND test_rare)
 
+add_executable(test_target unit/test_target.c)
+target_link_libraries(test_target PRIVATE fakecc_core test_framework)
+add_test(NAME test_target COMMAND test_target)
+
+add_executable(test_a64 unit/test_a64.c)
+target_link_libraries(test_a64 PRIVATE fakecc_core test_framework)
+add_test(NAME test_a64 COMMAND test_a64)
+
+add_executable(test_macho unit/test_macho.c)
+target_link_libraries(test_macho PRIVATE fakecc_core test_framework)
+add_test(NAME test_macho COMMAND test_macho)
+
+add_executable(test_cg64_native unit/test_cg64_native.c)
+target_link_libraries(test_cg64_native PRIVATE fakecc_core test_framework)
+add_test(NAME test_cg64_native COMMAND test_cg64_native)
+
 # --- app_ports tests ---
 # Each application port runs once per optimization level to cover both the
 # -O0 (scalars in memory) and -O1 (SSA) compiler paths.
@@ -119,7 +135,9 @@ foreach(lvl O0 O1)
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_multi_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-    # gcc-oracle differential suite over a curated e2e manifest.
+    # gcc-oracle differential suite over a curated e2e manifest.  Every
+    # platform installs a host gcc in CI (Homebrew on macOS), so the oracle
+    # is the same everywhere -- ctest stays 1:1 across Linux and macOS.
     add_test(NAME difftest_${lvl}
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_difftest.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
@@ -127,6 +145,15 @@ foreach(lvl O0 O1)
     # Shared-library linking: -l / -l: / -nodefaultlibs / .so path.
     add_test(NAME e2e_shlib_${lvl}
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_shlib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # Mach-O counterpart of the shared-library suite: -dynamiclib,
+    # -install_name, LC_LOAD_DYLIB and LC_RPATH.  The script refuses to run
+    # off Darwin on its own, so keeping it registered here leaves the ctest
+    # roster identical on both platforms while the cases are real on macOS
+    # (where e2e_shlib_* has nothing but ELF checks to skip).
+    add_test(NAME e2e_dylib_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_dylib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     # Compile-only robustness suite (2,003 GCC edge-case tests).
@@ -139,6 +166,12 @@ endforeach()
 # expected answers differ between them.  Skipped gracefully if gdb is absent.
 add_test(NAME e2e_gdb
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_gdb_e2e.sh $<TARGET_FILE:fakecc>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# DWARF against a real lldb, the macOS counterpart of the gdb suite above.
+# Same deal as e2e_dylib: registered everywhere, meaningful on Darwin.
+add_test(NAME e2e_lldb
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_lldb_e2e.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_test(NAME e2e_cli

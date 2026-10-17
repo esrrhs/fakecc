@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -121,6 +122,8 @@ struct IRInst {
     IRValue dst;
     IRValue a;
     IRValue b;
+    IRValue c;
+    IRValue d;
     int64_t imm;
     SourceLoc loc;
     char *call_name;
@@ -196,12 +199,15 @@ struct IRFunction {
     int ret_is_float;
     int ret_is_struct;
     int ret_reg_n;
-    int ret_reg_cls[2];
+    int ret_reg_cls[4];
     int ret_is_bool;
     int ret_is_complex_ld;
     int ret_x87_bytes;
     int is_variadic;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     int is_constructor;
     int is_destructor;
     int ctor_prio;
@@ -222,6 +228,7 @@ struct IRFunctionArray {
 struct GlobalFixup {
     int offset;
     char *sym;
+    char *sub;
     int addend;
 };typedef struct GlobalFixup GlobalFixup;
 struct IRGlobal {
@@ -229,7 +236,11 @@ struct IRGlobal {
     int size;
     char *init_bytes;
     int is_readonly;
+    int is_const_obj;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     int is_tls;
     int align;
     SourceLoc loc;
@@ -246,6 +257,7 @@ struct IRAlias {
     char *name;
     char *target;
     int is_static;
+    int is_weak;
     SourceLoc loc;
 };typedef struct IRAlias IRAlias;
 struct IRAliasArray {
@@ -257,6 +269,9 @@ struct IRModule {
     IRFunctionArray functions;
     IRGlobalArray globals;
     IRAliasArray aliases;
+    char **weak_refs;
+    size_t n_weak_refs;
+    size_t cap_weak_refs;
 };typedef struct IRModule IRModule;
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
@@ -401,6 +416,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
     unsigned is_decimal : 1;
+    unsigned is_long_double : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
@@ -408,7 +424,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -422,8 +439,10 @@ static inline Type type_make_float(long long width) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
+Type type_make_long_double(void);
 static inline Type type_make_decimal(long long width) {
     Type t = type_make_float(width);
     t.is_decimal = 1;
@@ -441,7 +460,8 @@ static inline Type type_make_void(void) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -459,6 +479,13 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
+int abi_gp_nregs(void);
+int type_long_double_width(void);
+int abi_sret_uses_gp(void);
+int abi_indirect_agg(Type t);
+int abi_is_hfa(Type t);
+int abi_hfa_elem_count(Type t);
+int abi_hfa_elem_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -658,7 +685,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -673,7 +700,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -718,6 +745,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     char *alias_target;
     int align;
     int no_instrument;
@@ -882,10 +912,78 @@ struct RAResult {
     int num_values;
     int stack_size;
 };typedef struct RAResult RAResult;
+struct RaRegClass {
+    const int *regs;
+    int nregs;
+    unsigned caller_saved;
+    int spill_bytes;
+    int exclude_16byte_ld;
+};typedef struct RaRegClass RaRegClass;
+struct RaRegClasses {
+    RaRegClass gp;
+    RaRegClass simd;
+};typedef struct RaRegClasses RaRegClasses;
+const RaRegClasses *ra_classes_current(void);
 RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
+enum A64GpReg {
+    A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
+    A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,
+    A64_X8 = 8, A64_X9 = 9, A64_X10 = 10, A64_X11 = 11,
+    A64_X12 = 12, A64_X13 = 13, A64_X14 = 14, A64_X15 = 15,
+    A64_X16 = 16, A64_X17 = 17, A64_X18 = 18,
+    A64_X19 = 19, A64_X20 = 20, A64_X21 = 21, A64_X22 = 22,
+    A64_X23 = 23, A64_X24 = 24, A64_X25 = 25, A64_X26 = 26,
+    A64_X27 = 27, A64_X28 = 28,
+    A64_FP = 29, A64_LR = 30, A64_SP = 31,
+    A64_GP_NONE = -1,
+};typedef enum A64GpReg A64GpReg;
+enum A64VecReg {
+    A64_V0 = 0, A64_V1 = 1, A64_V2 = 2, A64_V3 = 3,
+    A64_V4 = 4, A64_V5 = 5, A64_V6 = 6, A64_V7 = 7,
+    A64_V8 = 8, A64_V9 = 9, A64_V10 = 10, A64_V11 = 11,
+    A64_V12 = 12, A64_V13 = 13, A64_V14 = 14, A64_V15 = 15,
+    A64_V16 = 16, A64_V17 = 17, A64_V18 = 18, A64_V19 = 19,
+    A64_V20 = 20, A64_V21 = 21, A64_V22 = 22, A64_V23 = 23,
+    A64_V24 = 24, A64_V25 = 25, A64_V26 = 26, A64_V27 = 27,
+    A64_V28 = 28, A64_V29 = 29, A64_V30 = 30, A64_V31 = 31,
+    A64_V_NONE = -1,
+};typedef enum A64VecReg A64VecReg;
+const RaRegClasses *ra_classes_arm64(void);
+enum TargetArch {
+    TARGET_ARCH_UNKNOWN = 0,
+    TARGET_ARCH_X86_64 = 1,
+    TARGET_ARCH_ARM64 = 2,
+};typedef enum TargetArch TargetArch;
+enum TargetOS {
+    TOS_UNKNOWN = 0,
+    TOS_LINUX = 1,
+    TOS_MACOS = 2,
+};typedef enum TargetOS TargetOS;
+enum TargetObjFmt {
+    TARGET_OBJFMT_UNKNOWN = 0,
+    TARGET_OBJFMT_ELF = 1,
+    TARGET_OBJFMT_MACHO = 2,
+};typedef enum TargetObjFmt TargetObjFmt;
+struct TargetDesc {
+    TargetArch arch;
+    TargetOS os;
+    TargetObjFmt objfmt;
+    int ptr_bits;
+    int native_vector_bytes;
+    const char *triple;
+    int gp_arg_regs;
+    int sret_uses_gp;
+};typedef struct TargetDesc TargetDesc;
+const TargetDesc *target_current(void);
+void target_set_current(const TargetDesc *t);
+const TargetDesc *target_default(void);
+const TargetDesc *target_parse(const char *triple);
+const TargetDesc *target_x86_64_linux(void);
+const TargetDesc *target_arm64_macos(void);
+int target_backend_ready(const TargetDesc *t);
 struct CFGBlock {
     int id;
     int label;
@@ -908,35 +1006,59 @@ void cfg_link(CFG *g, int from, int to);
 int *cfg_rpo(const CFG *g);
 typedef struct FILE FILE;
 typedef long fpos_t;
-struct RegClass {
-    const int *regs;
-    int nregs;
-    unsigned caller_saved;
-};typedef struct RegClass RegClass;
+typedef RaRegClass RegClass;
 static int ra_reserve_va_scratch = 0;
 void ra_set_reserve_va_scratch(int on) {
     ra_reserve_va_scratch = on ? 1 : 0;
 }
-static const RegClass GP_CLASS = {
-    .regs = ALLOCATABLE_REGS,
-    .nregs = 9,
-    .caller_saved = 0x3Fu,
-};
-static const int GP_NO_R11_REGS[] = {
-    REG_RSI, REG_RDI,
-    REG_R8, REG_R9, REG_R10,
-    REG_RBX, REG_R12, REG_R13
-};
-static const RegClass GP_CLASS_NO_R11 = {
-    .regs = GP_NO_R11_REGS,
-    .nregs = 8,
-    .caller_saved = 0x1Fu,
-};
-static const RegClass XMM_CLASS = {
-    .regs = XMM_ALLOCATABLE_REGS,
-    .nregs = 14,
-    .caller_saved = ((1u << 14) - 1u),
-};
+static const RaRegClasses *ra_classes_x86(void) {
+    static const int GP_NO_R11[] = {
+        REG_RSI, REG_RDI,
+        REG_R8, REG_R9, REG_R10,
+        REG_RBX, REG_R12, REG_R13
+    };
+    static RaRegClasses c = {
+        .gp = {
+            ALLOCATABLE_REGS,
+            9,
+            0x3Fu,
+            8,
+            0,
+        },
+        .simd = {
+            XMM_ALLOCATABLE_REGS,
+            14,
+            ((1u << 14) - 1u),
+            32,
+            1,
+        },
+    };
+    static RaRegClasses c_no_r11 = {
+        .gp = {
+            GP_NO_R11,
+            8,
+            0x1Fu,
+            8,
+            0,
+        },
+        .simd = {
+            XMM_ALLOCATABLE_REGS,
+            14,
+            ((1u << 14) - 1u),
+            32,
+            1,
+        },
+    };
+    int spill = host_has_avx512f() ? 64 : 32;
+    c.simd.spill_bytes = spill;
+    c_no_r11.simd.spill_bytes = spill;
+    return ra_reserve_va_scratch ? &c_no_r11 : &c;
+}
+const RaRegClasses *ra_classes_current(void) {
+    if (target_current()->arch == TARGET_ARCH_ARM64)
+        return ra_classes_arm64();
+    return ra_classes_x86();
+}
 static int value_is_float_class(const IRFunction *fn, int v) {
     if (v < 0) return 0;
     if (!fn->value_is_float || fn->value_meta_cap <= 0) return 0;
@@ -950,11 +1072,11 @@ static int value_is_ld(const IRFunction *fn, int v) {
     if (fn->value_is_float[v] == 4) return 0;
     return fn->value_width[v] == 16;
 }
-static int value_is_xmm_float(const IRFunction *fn, int v) {
-    return value_is_float_class(fn, v) && !value_is_ld(fn, v);
-}
-static int value_in_class(const IRFunction *fn, int v, int float_class) {
-    if (float_class) return value_is_xmm_float(fn, v);
+static int value_in_class(const IRFunction *fn, int v, int float_class,
+                          int exclude_16byte_ld) {
+    if (float_class)
+        return value_is_float_class(fn, v)
+            && (!exclude_16byte_ld || !value_is_ld(fn, v));
     return !value_is_float_class(fn, v);
 }
 static int *ra_build_defs(const IRFunction *fn) {
@@ -1071,11 +1193,21 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
         if (inst->dst >= 0 && inst->dst < nv) {
             liv[inst->dst].def_point = (int)i;
         }
-        if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv)
-            liv[inst->b].def_point = (int)i;
+        if (inst->op == IR_CALL) {
+            if (inst->b >= 0 && inst->b < nv)
+                liv[inst->b].def_point = (int)i;
+            if (inst->c >= 0 && inst->c < nv)
+                liv[inst->c].def_point = (int)i;
+            if (inst->d >= 0 && inst->d < nv)
+                liv[inst->d].def_point = (int)i;
+        }
         if (inst->a >= 0 && inst->a < nv) liv_add_use(&liv[inst->a], (int)i);
         if (inst->op != IR_CBR && inst->op != IR_CALL &&
             inst->b >= 0 && inst->b < nv) liv_add_use(&liv[inst->b], (int)i);
+        if (inst->op == IR_RETURN) {
+            if (inst->c >= 0 && inst->c < nv) liv_add_use(&liv[inst->c], (int)i);
+            if (inst->d >= 0 && inst->d < nv) liv_add_use(&liv[inst->d], (int)i);
+        }
         if (inst->op == IR_CALL) {
             for (int k = 0; k < inst->call_nargs; k++) {
                 IRValue av = inst->call_args[k];
@@ -1209,6 +1341,14 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 if (!bs_test(&def_b[bi], inst->b))
                     bs_set(&use_b[bi], inst->b);
             }
+            if (inst->op == IR_RETURN) {
+                if (inst->c >= 0 && inst->c < use_b[bi].nv &&
+                    !bs_test(&def_b[bi], inst->c))
+                    bs_set(&use_b[bi], inst->c);
+                if (inst->d >= 0 && inst->d < use_b[bi].nv &&
+                    !bs_test(&def_b[bi], inst->d))
+                    bs_set(&use_b[bi], inst->d);
+            }
             if (inst->op == IR_CALL) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
@@ -1232,9 +1372,14 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
             if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
                 bs_set(&def_b[bi], inst->dst);
             }
-            if (inst->op == IR_CALL && inst->b >= 0 &&
-                inst->b < def_b[bi].nv)
-                bs_set(&def_b[bi], inst->b);
+            if (inst->op == IR_CALL) {
+                if (inst->b >= 0 && inst->b < def_b[bi].nv)
+                    bs_set(&def_b[bi], inst->b);
+                if (inst->c >= 0 && inst->c < def_b[bi].nv)
+                    bs_set(&def_b[bi], inst->c);
+                if (inst->d >= 0 && inst->d < def_b[bi].nv)
+                    bs_set(&def_b[bi], inst->d);
+            }
         }
     }
 }
@@ -1272,7 +1417,7 @@ static void compute_live_in_out(const CFG *cfg,
 }
 static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                                     int nv, InterfGraph *g,
-                                    int *forbid_mask,
+                                    uint32_t *forbid_mask,
                                     int float_class,
                                     const RegClass *cls) {
     ig_init(g, nv);
@@ -1302,30 +1447,44 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             if (inst->op == IR_CALL) {
                 for (int over = 0; over < (&live)->nv; over++) if (bs_test((&live), over)) {
                     if ((int)over != inst->dst && (int)over != inst->b &&
-                        value_in_class(fn, (int)over, float_class))
+                        (int)over != inst->c && (int)over != inst->d &&
+                        value_in_class(fn, (int)over, float_class, cls->exclude_16byte_ld))
                         forbid_mask[over] |= cls->caller_saved;
                 }
             }
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_in_class(fn, inst->dst, float_class)) {
+                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)) {
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
-            if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
-                value_in_class(fn, inst->b, float_class))
-                bs_clr(&live, inst->b);
+            if (inst->op == IR_CALL) {
+                IRValue dv[3] = { inst->b, inst->c, inst->d };
+                for (int q = 0; q < 3; q++) {
+                    if (dv[q] >= 0 && dv[q] < nv &&
+                        value_in_class(fn, dv[q], float_class, cls->exclude_16byte_ld))
+                        bs_clr(&live, dv[q]);
+                }
+            }
             if (inst->a >= 0 && inst->a < nv &&
-                value_in_class(fn, inst->a, float_class))
+                value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->a);
             if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < nv &&
-                value_in_class(fn, inst->b, float_class))
+                value_in_class(fn, inst->b, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->b);
+            if (inst->op == IR_RETURN) {
+                if (inst->c >= 0 && inst->c < nv &&
+                    value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld))
+                    bs_set(&live, inst->c);
+                if (inst->d >= 0 && inst->d < nv &&
+                    value_in_class(fn, inst->d, float_class, cls->exclude_16byte_ld))
+                    bs_set(&live, inst->d);
+            }
             if (inst->op == IR_CALL) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&
-                        value_in_class(fn, av, float_class))
+                        value_in_class(fn, av, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, av);
                 }
             }
@@ -1334,7 +1493,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
                 for (int k = 0; k < n; k++) {
                     IRValue v = extra[k];
-                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class))
+                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, v);
                 }
             }
@@ -1349,9 +1508,11 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 if (inst->op != IR_COPY) continue;
                 int d = inst->dst, a = inst->a;
                 if (d < 0 || d >= nv || a < 0 || a >= nv) continue;
-                if (!value_in_class(fn, d, float_class)) continue;
-                if (!value_in_class(fn, a, float_class)) continue;
-                int m = forbid_mask[d] | forbid_mask[a];
+                if (!value_in_class(fn, d, float_class, cls->exclude_16byte_ld))
+                    continue;
+                if (!value_in_class(fn, a, float_class, cls->exclude_16byte_ld))
+                    continue;
+                uint32_t m = forbid_mask[d] | forbid_mask[a];
                 if (forbid_mask[d] != m) { forbid_mask[d] = m; changed = 1; }
                 if (forbid_mask[a] != m) { forbid_mask[a] = m; changed = 1; }
             }
@@ -1365,9 +1526,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_in_class(fn, inst->dst, float_class)) {
+                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)) {
                 for (int other = 0; other < (&live)->nv; other++) if (bs_test((&live), other)) {
-                    if (!value_in_class(fn, (int)other, float_class))
+                    if (!value_in_class(fn, (int)other, float_class, cls->exclude_16byte_ld))
                         continue;
                     if ((int)other != inst->dst) {
                         ig_add_edge(g, inst->dst, (int)other);
@@ -1376,28 +1537,54 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
-            if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
-                value_in_class(fn, inst->b, float_class)) {
-                for (int other = 0; other < (&live)->nv; other++) if (bs_test((&live), other)) {
-                    if (!value_in_class(fn, (int)other, float_class))
+            if (inst->op == IR_CALL) {
+                IRValue rv[3] = { inst->b, inst->c, inst->d };
+                for (int r = 0; r < 3; r++) {
+                    if (rv[r] < 0 || rv[r] >= nv) continue;
+                    if (!value_in_class(fn, rv[r], float_class,
+                                        cls->exclude_16byte_ld))
                         continue;
-                    if ((int)other != inst->b)
-                        ig_add_edge(g, inst->b, (int)other);
+                    for (int other = 0; other < (&live)->nv; other++) if (bs_test((&live), other)) {
+                        if (!value_in_class(fn, (int)other, float_class,
+                                            cls->exclude_16byte_ld))
+                            continue;
+                        if ((int)other != rv[r])
+                            ig_add_edge(g, rv[r], (int)other);
+                    }
                 }
-                bs_clr(&live, inst->b);
+                for (int r = 0; r < 3; r++)
+                    for (int q = r + 1; q < 3; q++) {
+                        if (rv[r] < 0 || rv[r] >= nv ||
+                            rv[q] < 0 || rv[q] >= nv) continue;
+                        ig_add_edge(g, rv[r], rv[q]);
+                    }
+                for (int r = 0; r < 3; r++) {
+                    if (rv[r] >= 0 && rv[r] < nv &&
+                        value_in_class(fn, rv[r], float_class,
+                                       cls->exclude_16byte_ld))
+                        bs_clr(&live, rv[r]);
+                }
             }
             if (inst->a >= 0 && inst->a < nv &&
-                value_in_class(fn, inst->a, float_class))
+                value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->a);
             if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < nv &&
-                value_in_class(fn, inst->b, float_class))
+                value_in_class(fn, inst->b, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->b);
+            if (inst->op == IR_RETURN) {
+                if (inst->c >= 0 && inst->c < nv &&
+                    value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld))
+                    bs_set(&live, inst->c);
+                if (inst->d >= 0 && inst->d < nv &&
+                    value_in_class(fn, inst->d, float_class, cls->exclude_16byte_ld))
+                    bs_set(&live, inst->d);
+            }
             if (inst->op == IR_CALL) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&
-                        value_in_class(fn, av, float_class))
+                        value_in_class(fn, av, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, av);
                 }
             }
@@ -1406,11 +1593,24 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
                 for (int k = 0; k < n; k++) {
                     IRValue v = extra[k];
-                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class))
+                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, v);
                 }
             }
         }
+    }
+    if (!float_class && target_current()->arch == TARGET_ARCH_ARM64) {
+        int gp[8], ngp = 0;
+        for (size_t i = 0; i < (size_t)nv && i < fn->insts.len && ngp < 8
+                       && fn->insts.data[i].op == IR_PARAM; i++) {
+            IRValue pv = fn->insts.data[i].dst;
+            if (!fn->insts.data[i].force_stack && pv >= 0 && pv < nv &&
+                value_in_class(fn, pv, 0, cls->exclude_16byte_ld))
+                gp[ngp++] = pv;
+        }
+        for (int a = 0; a < ngp; a++)
+            for (int b = a + 1; b < ngp; b++)
+                ig_add_edge(g, gp[a], gp[b]);
     }
     bs_free(&live);
     for (size_t bi = 0; bi < cfg->num; bi++) {
@@ -1511,11 +1711,15 @@ static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg) {
 }
 static void greedy_color(const InterfGraph *g, const int *order,
                          const LiveInfo *liv, const CFG *cfg,
-                         const int *forbid_mask,
+                         const uint32_t *forbid_mask,
                          int *colors, int *spill_slots, int *num_spills,
                          const RegClass *cls) {
     int n = g->n;
     int k = cls->nregs;
+    if (k > 32) {
+        runtime.fprintf(runtime.stderr, "fakecc: register class has %d regs (max 32)\n", k);
+        runtime.exit(1);
+    }
     int *spill_cost = xmalloc(n * sizeof(int));
     for (int v = 0; v < n; v++)
         spill_cost[v] = compute_spill_cost(v, liv, cfg);
@@ -1528,11 +1732,11 @@ static void greedy_color(const InterfGraph *g, const int *order,
             spill_slots[v] = next_spill++;
             continue;
         }
-        int used = forbid_mask[v];
+        uint32_t used = forbid_mask[v];
         for (size_t j = 0; j < g->nodes[v].degree; j++) {
             int w = g->nodes[v].neighbors[j];
             if (colors[w] >= 0 && colors[w] < k)
-                used |= (1 << colors[w]);
+                used |= (1u << colors[w]);
         }
         int c;
         for (c = 0; c < k; c++)
@@ -1544,14 +1748,14 @@ static void greedy_color(const InterfGraph *g, const int *order,
             for (size_t j = 0; j < g->nodes[v].degree; j++) {
                 int w = g->nodes[v].neighbors[j];
                 if (colors[w] >= 0 && colors[w] < k &&
-                    !(forbid_mask[v] & (1 << colors[w])))
+                    !(forbid_mask[v] & (1u << colors[w])))
                     color_count[colors[w]]++;
             }
             int victim = -1, victim_cost = 0x7fffffff;
             for (size_t j = 0; j < g->nodes[v].degree; j++) {
                 int w = g->nodes[v].neighbors[j];
                 if (colors[w] < 0 || colors[w] >= k) continue;
-                if (forbid_mask[v] & (1 << colors[w])) continue;
+                if (forbid_mask[v] & (1u << colors[w])) continue;
                 if (color_count[colors[w]] != 1) continue;
                 if (spill_cost[w] < victim_cost) {
                     victim = w;
@@ -1582,7 +1786,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     {
         int any = 0;
         for (int v = 0; v < nv; v++) {
-            if (value_in_class(fn, v, float_class)) { any = 1; break; }
+            if (value_in_class(fn, v, float_class, cls->exclude_16byte_ld)) { any = 1; break; }
         }
         if (!any) return ((void*)0);
     }
@@ -1591,7 +1795,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     CFG cfg;
     cfg_build(&cfg, &fn->insts);
     InterfGraph g;
-    int *forbid_mask = xmalloc(nv * sizeof(int));
+    uint32_t *forbid_mask = xmalloc(nv * sizeof(uint32_t));
     build_interf_graph_cfg(fn, &cfg, nv, &g, forbid_mask,
                             float_class, cls);
     int *order = compute_mcs_order(&g);
@@ -1603,7 +1807,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
                  colors, spill_slots, &num_spills, cls);
     runtime.free(forbid_mask);
     for (int v = 0; v < nv; v++) {
-        if (!value_in_class(fn, v, float_class)) {
+        if (!value_in_class(fn, v, float_class, cls->exclude_16byte_ld)) {
             colors[v] = REG_NONE;
         } else if (colors[v] >= 0 && colors[v] < cls->nregs) {
             colors[v] = cls->regs[colors[v]];
@@ -1617,11 +1821,11 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     ra->num_spill_slots = num_spills;
     ra->num_values = nv;
     if (float_class)
-        ra->stack_size = (host_has_avx512f() ? 64 : 32) * num_spills;
+        ra->stack_size = cls->spill_bytes * num_spills;
     else {
         int slots = num_spills;
         if (slots % 2 != 0) slots++;
-        ra->stack_size = 8 * slots;
+        ra->stack_size = cls->spill_bytes * slots;
     }
     runtime.free(order);
     ig_free(&g);
@@ -1630,11 +1834,12 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     return ra;
 }
 RAResult *reg_alloc(const IRFunction *fn) {
-    return ra_alloc_class(fn, 0,
-                          ra_reserve_va_scratch ? &GP_CLASS_NO_R11 : &GP_CLASS);
+    const RaRegClasses *cls = ra_classes_current();
+    return ra_alloc_class(fn, 0, &cls->gp);
 }
 RAResult *reg_alloc_xmm(const IRFunction *fn) {
-    return ra_alloc_class(fn, 1, &XMM_CLASS);
+    const RaRegClasses *cls = ra_classes_current();
+    return ra_alloc_class(fn, 1, &cls->simd);
 }
 void ra_result_free(RAResult *ra) {
     if (!ra) return;

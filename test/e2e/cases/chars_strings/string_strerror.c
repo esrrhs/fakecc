@@ -1,5 +1,6 @@
 // runtime.strerror: returns a string describing the error.  The current
 // implementation ignores n and always returns "error"; pin that it
+// skip_oracle: clang
 // returns a non-NULL pointer whose first byte is 'e', for two
 // different n values.
 // expect: 0

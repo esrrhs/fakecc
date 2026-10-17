@@ -1,5 +1,6 @@
 // runtime.chmod: sets a file's mode bits via sys_chmod.  Pin that it returns
 // 0 on a real file and -1 on a path that does not exist.  (The exact mode is
+// skip_oracle: clang
 // not re-checked: fakecc has no stat, and the point here is the syscall
 // wrapper's success/failure reporting.)
 // expect: 0

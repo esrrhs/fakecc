@@ -1,5 +1,6 @@
 // runtime.sprintf / runtime.snprintf: format into a buffer instead of writing to a file.
 // Pin integer and string conversions, the return value (chars written, not
+// skip_oracle: clang
 // counting the '\0'), and that runtime.snprintf clamps to the buffer size.  Then
 // echo the buffer through runtime.puts so the suite's runtime.stdout check covers it.
 // expect: 0

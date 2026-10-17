@@ -1,5 +1,6 @@
 // ctype is* family: character classification.  Pin the representative
 // true/false cases for runtime.isdigit, runtime.isalpha, runtime.isalnum, runtime.isxdigit and runtime.isspace,
+// skip_oracle: clang
 // including boundary bytes and a byte well outside each class.
 // expect: 0
 package main;

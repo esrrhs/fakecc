@@ -645,7 +645,8 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
             unsigned long long dbits = 0;
             unsigned char lb[16];
             int have_ld = 0;
-            if (long_dbl) {
+            if (long_dbl && (int)sizeof(long double) >= 10) {
+                /* x86-64: 80 bits in a 16-byte slot. */
                 a = va_arg(ap, long double);
                 memcpy((void *)lb, (void *)&a, 16);
                 have_ld = 1;
@@ -657,6 +658,17 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                     is_inf = !is_nan;
                 }
                 if (neg) a = -a;
+            } else if (long_dbl) {
+                /* arm64: long double is a double, so the argument and the
+                 * bits are the same as in the non-L case.  Reading it as the
+                 * x87 layout would decode the 8 bytes past it. */
+                double dv = va_arg(ap, long double);
+                memcpy((void *)&dbits, (void *)&dv, 8);
+                neg = (dbits >> 63) != 0;
+                a = (long double)dv;
+                if (neg) a = -a;
+                if (dv != dv) is_nan = 1;
+                else if (dv - dv != 0.0) is_inf = 1;
             } else {
                 double dv = va_arg(ap, double);
                 memcpy((void *)&dbits, (void *)&dv, 8);
@@ -678,7 +690,11 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap) {
                 body[2] = up ? 'F' : 'f';
                 blen = 3;
             } else if (spec == 'a' || spec == 'A') {
-                if (have_ld)
+                /* The L modifier picks the *argument's* type, which is long
+                 * double -- 80 bits on x86-64 but the same 64 as double on
+                 * arm64.  Reading an arm64 long double as the x87 layout
+                 * decodes whatever the value happens to look like. */
+                if (have_ld && (int)sizeof(long double) >= 10)
                     blen = fmt_a_ld80(body, lb, precision, up, f_alt);
                 else
                     blen = fmt_a_double(body, dbits, precision, up, f_alt);

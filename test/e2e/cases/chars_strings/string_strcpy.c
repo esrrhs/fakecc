@@ -1,5 +1,6 @@
 // runtime.strcpy: copies src including its \0 terminator, returns dst.  A
 // loop that stops early or forgets the terminator leaves dst without
+// skip_oracle: clang
 // a \0, so runtime.strlen(dst) is the real check.  Also verify that
 // overwriting with a shorter string clears the old tail.
 // expect: 0

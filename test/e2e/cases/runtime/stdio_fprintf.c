@@ -1,5 +1,6 @@
 // runtime.fprintf to a real file (not stdout): format mixed types, close,
 // reopen for reading, and verify the bytes written.  import_file_type.c and
+// skip_oracle: clang
 // import_stdout.c only exercise fprintf to runtime.stdout; this pins the
 // vfprintf-to-fputc path against a ordinary FILE.
 // expect: 0

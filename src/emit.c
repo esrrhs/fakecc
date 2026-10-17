@@ -1,6 +1,8 @@
 #include "fakecc/emit.h"
 #include "fakecc/common.h"
 #include "fakecc/debug.h"
+#include "fakecc/macho.h"
+#include "fakecc/target.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -13,12 +15,21 @@
 /* ------------------------------------------------------------------ */
 
 void emit_module_init(EmitModule *m) {
+    /* Only a TU the driver built from a command-line source is a user TU
+     * (main.c promotes it after lowering); modules codegen'd for imported
+     * packages must start at 0.  The driver's module array is malloc'd, so
+     * without this the field kept stale heap bytes and a package definition
+     * (memcpy, strlen, ...) was occasionally mistaken for a user one, which
+     * made the replaceable-symbol rule report a spurious duplicate symbol. */
+    m->is_user_tu = 0;
     buffer_init(&m->text);
     buffer_init(&m->rodata);
     buffer_init(&m->data);
     m->bss_size = 0;
     buffer_init(&m->tdata);
     m->tbss_size = 0;
+    buffer_init(&m->thread_vars);
+    m->thread_vars_align = 8;
     m->text_align = 16;
     m->rodata_align = 8;
     m->data_align = 8;
@@ -34,6 +45,8 @@ void emit_module_init(EmitModule *m) {
     m->syms = NULL; m->num_syms = 0; m->cap_syms = 0;
     m->relocs = NULL; m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = NULL; m->num_data_relocs = 0; m->cap_data_relocs = 0;
+    m->rebases = NULL; m->num_rebases = 0; m->cap_rebases = 0;
+    m->binds = NULL; m->num_binds = 0; m->cap_binds = 0;
     m->dbg_tu_name = NULL;
     m->dbg_lines = NULL; m->num_dbg_lines = 0; m->cap_dbg_lines = 0;
     m->dbg_funcs = NULL; m->num_dbg_funcs = 0; m->cap_dbg_funcs = 0;
@@ -49,10 +62,14 @@ void emit_module_free(EmitModule *m) {
     free(m->syms);
     free(m->relocs);
     free(m->data_relocs);
+    free(m->rebases);
+    for (size_t i = 0; i < m->num_binds; i++) free(m->binds[i].name);
+    free(m->binds);
     buffer_free(&m->text);
     buffer_free(&m->rodata);
     buffer_free(&m->data);
     buffer_free(&m->tdata);
+    buffer_free(&m->thread_vars);
     buffer_free(&m->init_array);
     free(m->init_prio);
     buffer_free(&m->fini_array);
@@ -92,6 +109,7 @@ int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
                 m->syms[i].shndx = shndx;
                 m->syms[i].value = value;
                 m->syms[i].size = size;
+                m->syms[i].macho_desc = 0;
                 return (int)i;
             }
         }
@@ -109,6 +127,7 @@ int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
     s->shndx = shndx;
     s->value = value;
     s->size = size;
+    s->macho_desc = 0;
     return (int)m->num_syms++;
 }
 
@@ -186,6 +205,185 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
     r->sym = (uint32_t)sym;
     r->addend = addend;
     r->shndx = SECT_DATA;
+}
+
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target) {
+    if (m->num_rebases >= m->cap_rebases) {
+        size_t nc = m->cap_rebases ? m->cap_rebases * 2 : 8;
+        m->rebases = realloc(m->rebases, nc * sizeof(EmitRebase));
+        if (!m->rebases) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_rebases = nc;
+    }
+    m->rebases[m->num_rebases].slot = slot;
+    m->rebases[m->num_rebases].target = target;
+    m->num_rebases++;
+}
+
+void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name) {
+    if (!name) return;
+    if (m->num_binds >= m->cap_binds) {
+        size_t nc = m->cap_binds ? m->cap_binds * 2 : 8;
+        m->binds = realloc(m->binds, nc * sizeof(EmitBind));
+        if (!m->binds) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_binds = nc;
+    }
+    size_t nlen = strlen(name);
+    char *mach = malloc(nlen + 2);
+    if (!mach) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    mach[0] = '_';
+    memcpy(mach + 1, name, nlen + 1);
+    m->binds[m->num_binds].slot = slot;
+    m->binds[m->num_binds].name = mach;
+    m->num_binds++;
+}
+
+/* Functions a freestanding image may reach for in libSystem.  Every
+ * executable already carries LC_LOAD_DYLIB for it, so dyld has the library
+ * mapped; what was missing was any way to name one of its symbols.
+ *
+ * The rule for what belongs here: libSystem supplies it and the runtime
+ * does not.  fakecc has its own printf, malloc, string and ctype functions,
+ * so adding those would only widen the set of typos that compile.  The same
+ * goes for the math core the runtime implements by hand -- sin, cos, tan,
+ * asin, acos, atan, atan2, exp, log, log10, pow, sqrt, floor, ceil, fabs and
+ * copysign -- which stay off the list so a program keeps using fakecc's
+ * versions.  What is listed below is the rest of C99 <math.h> plus the
+ * pseudo-random numbers: real entry points the runtime has no version of,
+ * so without them the same source that links on ELF (where an undefined
+ * symbol is simply left for the dynamic linker) fails here with
+ * "undefined symbol".
+ *
+ * Threads are the one thing that cannot be built from syscalls here:
+ * bsdthread_create and bsdthread_register both return EINVAL from any
+ * thread libpthread did not create, including one that already called
+ * pthread_create successfully -- measured, not assumed. */
+static const char *const emit_darwin_imports[] = {
+    "pthread_create",
+    "pthread_join",
+    "pthread_self",
+    "pthread_exit",
+    "pthread_detach",
+    "pthread_equal",
+    "pthread_once",
+    "pthread_mutex_init",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
+    "pthread_mutex_destroy",
+    "pthread_cond_init",
+    "pthread_cond_wait",
+    "pthread_cond_signal",
+    "pthread_cond_broadcast",
+    "pthread_cond_destroy",
+    "sched_yield",
+    /* Clang's stack protector.  -fstack-protector is the distribution
+     * default, so every object it produces references these two; without
+     * them in the list a link against a stock clang .o fails with
+     * "undefined symbol". */
+    "__stack_chk_fail",
+    "__stack_chk_guard",
+    /* ld64's static-init stub registers destructors through this, so every
+     * object compiled with a destructor or a constructor that needs cleanup
+     * references it.  libSystem exports it (__dso_handle, which the stub
+     * also names, does not -- the linker synthesises that one instead). */
+    "__cxa_atexit",
+
+    /* ---- C99 <math.h> minus the core the runtime implements ---- */
+    /* Hyperbolic, and their inverses.  The runtime has tan but no tanh. */
+    "sinh", "cosh", "tanh",
+    "asinh", "acosh", "atanh",
+    /* Exponential and logarithmic: exp, log and log10 are the runtime's. */
+    "exp2", "expm1", "log2", "log1p", "logb", "ilogb",
+    /* Roots: sqrt and pow are the runtime's. */
+    "cbrt", "hypot",
+    /* Remainder and value decomposition. */
+    "fmod", "remainder", "remquo", "modf", "frexp", "ldexp",
+    "scalbn", "scalbln", "nextafter", "nexttoward",
+    /* Rounding: floor and ceil are the runtime's. */
+    "round", "lround", "llround", "rint", "lrint", "llrint",
+    "nearbyint", "trunc",
+    /* Min/max, positive difference, fused multiply-add. */
+    "fmin", "fmax", "fdim", "fma",
+    /* Error and gamma functions. */
+    "erf", "erfc", "tgamma", "lgamma",
+    "nan",
+    /* The runtime has no random-number generator of its own, and a ported
+     * program that seeds one expects the libc sequence. */
+    "rand", "srand",
+};
+
+/* ------------------------------------------------------------------ */
+/* Auxiliary dylibs                                                    */
+/* ------------------------------------------------------------------ */
+
+static EmitAuxLib *g_aux_libs = NULL;
+static size_t g_aux_n = 0, g_aux_cap = 0;
+static char **g_rpaths = NULL;
+static size_t g_nrpath = 0, g_rpath_cap = 0;
+
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms) {
+    if (g_aux_n == g_aux_cap) {
+        g_aux_cap = g_aux_cap ? g_aux_cap * 2 : 4;
+        g_aux_libs = realloc(g_aux_libs, g_aux_cap * sizeof *g_aux_libs);
+        if (!g_aux_libs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    g_aux_libs[g_aux_n].install_name = install_name;
+    g_aux_libs[g_aux_n].syms = syms;
+    g_aux_libs[g_aux_n].nsyms = nsyms;
+    g_aux_n++;
+}
+
+void emit_aux_rpath_add(const char *path) {
+    for (size_t i = 0; i < g_nrpath; i++)
+        if (strcmp(g_rpaths[i], path) == 0) return;
+    if (g_nrpath == g_rpath_cap) {
+        g_rpath_cap = g_rpath_cap ? g_rpath_cap * 2 : 4;
+        g_rpaths = realloc(g_rpaths, g_rpath_cap * sizeof *g_rpaths);
+        if (!g_rpaths) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+    }
+    g_rpaths[g_nrpath++] = xstrdup(path);
+}
+
+const EmitAuxLib *emit_aux_libs(size_t *n) {
+    if (n) *n = g_aux_n;
+    return g_aux_libs;
+}
+
+const char *const *emit_aux_rpaths(size_t *n) {
+    if (n) *n = g_nrpath;
+    return (const char *const *)g_rpaths;
+}
+
+void emit_aux_reset(void) {
+    for (size_t i = 0; i < g_aux_n; i++) {
+        free(g_aux_libs[i].install_name);
+        for (size_t k = 0; k < g_aux_libs[i].nsyms; k++)
+            free(g_aux_libs[i].syms[k]);
+        free(g_aux_libs[i].syms);
+    }
+    free(g_aux_libs);
+    g_aux_libs = NULL; g_aux_n = 0; g_aux_cap = 0;
+    for (size_t i = 0; i < g_nrpath; i++) free(g_rpaths[i]);
+    free(g_rpaths);
+    g_rpaths = NULL; g_nrpath = 0; g_rpath_cap = 0;
+}
+
+int emit_aux_lib_of(const char *name) {
+    if (!name) return -1;
+    for (size_t i = 0; i < g_aux_n; i++)
+        for (size_t k = 0; k < g_aux_libs[i].nsyms; k++)
+            if (strcmp(g_aux_libs[i].syms[k], name) == 0) return (int)i;
+    return -1;
+}
+
+int emit_is_darwin_import(const char *name) {
+    if (!name) return 0;
+    for (size_t i = 0; i < sizeof emit_darwin_imports
+                            / sizeof *emit_darwin_imports; i++)
+        if (strcmp(emit_darwin_imports[i], name) == 0) return 1;
+    /* Anything a dylib named on the command line exports resolves the same
+     * way a libSystem symbol does: dyld binds it at load time from an
+     * LC_LOAD_DYLIB the image carries because that library was requested. */
+    return emit_aux_lib_of(name) >= 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -303,7 +501,43 @@ static uint32_t append_array_shname(Buffer *shstrtab, const char *base,
 /* emit_obj — write a relocatable object file (ET_REL)                 */
 /* ------------------------------------------------------------------ */
 
+static int g_object_mode;
+
+void emit_set_object_mode(int on) { g_object_mode = on ? 1 : 0; }
+int emit_object_mode(void) { return g_object_mode; }
+
+/* Multi-TU link: more than one translation unit contributes to the output.
+ * The arm64 backend emits its LC_MAIN entry stub inside the TU that defines
+ * main, so it needs to know a TU without main is legitimate rather than an
+ * error -- which is only true once another TU can supply it. */
+static int g_multi_tu;
+
+void emit_set_multi_tu(int on) { g_multi_tu = on ? 1 : 0; }
+int emit_multi_tu(void) { return g_multi_tu; }
+
+/* The runtime package is part of this link, so runtime/malloc.c supplies
+ * malloc/free/calloc/realloc.  The arm64 backend has an inline fallback that
+ * maps one page per allocation; it must stay out of the way whenever a real
+ * allocator is linked, because a compiler-sized workload then costs a page
+ * per live block (13 GB against 0.6 GB for the same source built by clang).
+ * The fallback is per-TU and cannot see the sibling that defines the symbol,
+ * so the decision is made once for the whole link here. */
+static int g_rt_alloc;
+
+void emit_set_runtime_alloc(int on) { g_rt_alloc = on ? 1 : 0; }
+int emit_runtime_alloc(void) { return g_rt_alloc; }
+
 void emit_obj(const EmitModule *m, const char *path) {
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
+        if (macho_write_object(m, path) != 0) exit(1);
+        return;
+    }
+    if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
+        fprintf(stderr,
+                "fakecc: object emission for target '%s' is not implemented yet\n",
+                target_current()->triple);
+        exit(1);
+    }
     /* Section layout: .text, .rodata, .data, .bss, .symtab, .strtab,
      * .shstrtab, .rela.text.  We build the section data first, then the
      * section headers, then patch e_shoff + e_shstrndx into the ehdr. */
@@ -692,6 +926,14 @@ static void prio_fill_slots(int **prio, size_t byte_off, size_t byte_sz, int p) 
 }
 
 int emit_obj_read(const char *path, EmitModule *m) {
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO)
+        return macho_read_object(path, m);
+    if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
+        fprintf(stderr,
+                "fakecc: object reading for target '%s' is not implemented yet\n",
+                target_current()->triple);
+        return -1;
+    }
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "fakecc: cannot open '%s'\n", path); return -1; }
     fseek(f, 0, SEEK_END);

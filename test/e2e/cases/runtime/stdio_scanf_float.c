@@ -1,6 +1,9 @@
 // runtime.sscanf / runtime.fscanf floating conversions: %f/%e/%g/%le/%lf/%a,
 // field width, leftover input, inf/nan, and a fprintf/fscanf file round-trip.
+// skip_oracle: clang
 // expect: 0
+// Darwin libc scanf conversions differ from glibc/fakecc's runtime.
+// skip_oracle: darwin
 package main;
 import runtime;
 int main() {

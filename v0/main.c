@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -49,6 +50,14 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
+struct EmitRebase {
+    uint64_t slot;
+    uint64_t target;
+};typedef struct EmitRebase EmitRebase;
+struct EmitBind {
+    uint64_t slot;
+    char *name;
+};typedef struct EmitBind EmitBind;
 struct EmitSymbol {
     char *name;
     uint8_t binding;
@@ -56,6 +65,7 @@ struct EmitSymbol {
     uint16_t shndx;
     size_t value;
     size_t size;
+    uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
 struct EmitReloc {
     size_t offset;
@@ -118,6 +128,8 @@ struct DebugVar {
     int rbp_offset;
     int dwarf_reg;
     char *sym_name;
+    int addr_sect;
+    size_t addr_off;
     DebugLocRange *ranges;
     size_t num_ranges;
     size_t cap_ranges;
@@ -152,6 +164,7 @@ struct DebugFunc {
     size_t prologue_end_pc;
     size_t after_push_rbp_pc;
     size_t after_mov_rbp_pc;
+    size_t frame_size;
     DebugVar *vars;
     size_t num_vars;
     size_t cap_vars;
@@ -160,12 +173,15 @@ struct DebugFunc {
     size_t cap_call_sites;
 };typedef struct DebugFunc DebugFunc;
 struct EmitModule {
+    int is_user_tu;
     Buffer text;
     Buffer rodata;
     Buffer data;
     size_t bss_size;
     Buffer tdata;
     size_t tbss_size;
+    Buffer thread_vars;
+    size_t thread_vars_align;
     size_t text_align;
     size_t rodata_align;
     size_t data_align;
@@ -187,6 +203,12 @@ struct EmitModule {
     EmitReloc *data_relocs;
     size_t num_data_relocs;
     size_t cap_data_relocs;
+    EmitRebase *rebases;
+    size_t num_rebases;
+    size_t cap_rebases;
+    EmitBind *binds;
+    size_t num_binds;
+    size_t cap_binds;
     char *dbg_tu_name;
     DebugLineEntry *dbg_lines;
     size_t num_dbg_lines;
@@ -211,7 +233,27 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
+void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+int emit_is_darwin_import(const char *name);
+struct EmitAuxLib {
+    char *install_name;
+    char **syms;
+    size_t nsyms;
+};typedef struct EmitAuxLib EmitAuxLib;
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms);
+void emit_aux_rpath_add(const char *path);
+const EmitAuxLib *emit_aux_libs(size_t *n);
+const char * *emit_aux_rpaths(size_t *n);
+void emit_aux_reset(void);
+int emit_aux_lib_of(const char *name);
 void emit_obj(const EmitModule *m, const char *path);
+void emit_set_object_mode(int on);
+int emit_object_mode(void);
+void emit_set_multi_tu(int on);
+int emit_multi_tu(void);
+void emit_set_runtime_alloc(int on);
+int emit_runtime_alloc(void);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
@@ -290,6 +332,8 @@ struct IRInst {
     IRValue dst;
     IRValue a;
     IRValue b;
+    IRValue c;
+    IRValue d;
     int64_t imm;
     SourceLoc loc;
     char *call_name;
@@ -365,12 +409,15 @@ struct IRFunction {
     int ret_is_float;
     int ret_is_struct;
     int ret_reg_n;
-    int ret_reg_cls[2];
+    int ret_reg_cls[4];
     int ret_is_bool;
     int ret_is_complex_ld;
     int ret_x87_bytes;
     int is_variadic;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     int is_constructor;
     int is_destructor;
     int ctor_prio;
@@ -391,6 +438,7 @@ struct IRFunctionArray {
 struct GlobalFixup {
     int offset;
     char *sym;
+    char *sub;
     int addend;
 };typedef struct GlobalFixup GlobalFixup;
 struct IRGlobal {
@@ -398,7 +446,11 @@ struct IRGlobal {
     int size;
     char *init_bytes;
     int is_readonly;
+    int is_const_obj;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     int is_tls;
     int align;
     SourceLoc loc;
@@ -415,6 +467,7 @@ struct IRAlias {
     char *name;
     char *target;
     int is_static;
+    int is_weak;
     SourceLoc loc;
 };typedef struct IRAlias IRAlias;
 struct IRAliasArray {
@@ -426,6 +479,9 @@ struct IRModule {
     IRFunctionArray functions;
     IRGlobalArray globals;
     IRAliasArray aliases;
+    char **weak_refs;
+    size_t n_weak_refs;
+    size_t cap_weak_refs;
 };typedef struct IRModule IRModule;
 void ir_module_init(IRModule *m);
 void ir_module_free(IRModule *m);
@@ -570,6 +626,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
     unsigned is_decimal : 1;
+    unsigned is_long_double : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
@@ -577,7 +634,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -591,8 +649,10 @@ static inline Type type_make_float(long long width) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
+Type type_make_long_double(void);
 static inline Type type_make_decimal(long long width) {
     Type t = type_make_float(width);
     t.is_decimal = 1;
@@ -610,7 +670,8 @@ static inline Type type_make_void(void) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -628,6 +689,13 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
+int abi_gp_nregs(void);
+int type_long_double_width(void);
+int abi_sret_uses_gp(void);
+int abi_indirect_agg(Type t);
+int abi_is_hfa(Type t);
+int abi_hfa_elem_count(Type t);
+int abi_hfa_elem_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -827,7 +895,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -842,7 +910,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -887,6 +955,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     char *alias_target;
     int align;
     int no_instrument;
@@ -1018,6 +1089,39 @@ int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 int lex(const char *source, const char *filename, TokenArray *out);
+struct EmitModule;
+struct MachoDebug {
+    Buffer abbrev;
+    Buffer info;
+    Buffer str;
+    Buffer line;
+    Buffer frame;
+    Buffer loc;
+};typedef struct MachoDebug MachoDebug;
+int macho_write_exec(const struct EmitModule *em, uint64_t entry_off,
+                     const char *path, int skip_libsystem,
+                     const MachoDebug *dbg);
+int macho_read_dylib(const char *path, char **install_name_out,
+                     char ***syms_out, size_t *nsyms_out);
+int macho_write_object(const struct EmitModule *em, const char *path);
+int macho_read_object(const char *path, struct EmitModule *em);
+int macho_link_objects(struct EmitModule **mods, size_t n, const char *path,
+                       int skip_libsystem);
+int macho_write_exec_text(const Buffer *text, uint64_t entry_off,
+                          const char *path);
+uint32_t macho_text_offset(void);
+struct MachoSectOffsets {
+    uint64_t ro;
+    uint64_t data;
+    uint64_t bss;
+    uint64_t thread_vars;
+    uint64_t tdata;
+    uint64_t tbss;
+};typedef struct MachoSectOffsets MachoSectOffsets;
+void macho_section_offsets(const struct EmitModule *em, size_t text_len,
+                           MachoSectOffsets *off);
+size_t macho_tlv_block_tbss_base(size_t tdata_len, size_t max_align);
+int macho_codesign(const char *path);
 void opt(IRModule *ir, int opt_level, int want_debug);
 struct PkgContext;
 int parse(const TokenArray *tokens, TranslationUnit *tu);
@@ -1091,6 +1195,38 @@ int sema_check_in_pkg(const TranslationUnit *tu, int require_main,
 int sema_has_errors(void);
 int sema_error_count(void);
 int sema_warning_count(void);
+enum TargetArch {
+    TARGET_ARCH_UNKNOWN = 0,
+    TARGET_ARCH_X86_64 = 1,
+    TARGET_ARCH_ARM64 = 2,
+};typedef enum TargetArch TargetArch;
+enum TargetOS {
+    TOS_UNKNOWN = 0,
+    TOS_LINUX = 1,
+    TOS_MACOS = 2,
+};typedef enum TargetOS TargetOS;
+enum TargetObjFmt {
+    TARGET_OBJFMT_UNKNOWN = 0,
+    TARGET_OBJFMT_ELF = 1,
+    TARGET_OBJFMT_MACHO = 2,
+};typedef enum TargetObjFmt TargetObjFmt;
+struct TargetDesc {
+    TargetArch arch;
+    TargetOS os;
+    TargetObjFmt objfmt;
+    int ptr_bits;
+    int native_vector_bytes;
+    const char *triple;
+    int gp_arg_regs;
+    int sret_uses_gp;
+};typedef struct TargetDesc TargetDesc;
+const TargetDesc *target_current(void);
+void target_set_current(const TargetDesc *t);
+const TargetDesc *target_default(void);
+const TargetDesc *target_parse(const char *triple);
+const TargetDesc *target_x86_64_linux(void);
+const TargetDesc *target_arm64_macos(void);
+int target_backend_ready(const TargetDesc *t);
 typedef struct FILE FILE;
 typedef long fpos_t;
 const char *__asan_default_options(void) {
@@ -1147,6 +1283,8 @@ static int lower_tu(TranslationUnit *tu, const char *filename,
         out->dbg_tu_name = xstrdup(filename);
     codegen(&ir, out, want_debug);
     ir_module_free(&ir);
+    if (fakecc_had_error())
+        return FAKECC_ERR;
     return FAKECC_OK;
 }
 static void module_free(EmitModule *m) {
@@ -1173,6 +1311,9 @@ static void usage(void) {
             "  -LDIR           add DIR to the shared-library search path\n"
             "                  (link-time check for -l; also DT_RUNPATH)\n"
             "  -nodefaultlibs  accepted for compatibility (default already skips libc)\n"
+            "  --target=T      code generation target: x86_64-linux (default on\n"
+            "                  Linux hosts) or arm64-macos (default on Apple Silicon;\n"
+            "                  accepted spellings: x86_64-linux, arm64-apple-darwin, ...)\n"
             "  FAKECC_RT       override path to the runtime/ directory\n"
             "  FAKECC_PKG      colon-separated package search path\n");
     runtime.exit(1);
@@ -1185,26 +1326,36 @@ static int is_system_soname(const char *soname) {
     return runtime.strcmp(soname, "libc.so.6") == 0
         || runtime.strcmp(soname, "libm.so.6") == 0
         || runtime.strcmp(soname, "libdl.so.2") == 0
-        || runtime.strcmp(soname, "libpthread.so.0") == 0;
+        || runtime.strcmp(soname, "libpthread.so.0") == 0
+        || runtime.strcmp(soname, "libSystem.B.dylib") == 0;
 }
-static char *soname_from_l(const char *arg) {
+static char *soname_from_l(const char *arg, int is_macho) {
     if (!arg || !*arg) {
         runtime.fprintf(runtime.stderr, "fakecc: -l requires a library name\n");
         runtime.exit(1);
     }
     if (arg[0] == ':')
         return xstrdup(arg + 1);
-    if (runtime.strcmp(arg, "c") == 0) return xstrdup("libc.so.6");
-    if (runtime.strcmp(arg, "m") == 0) return xstrdup("libm.so.6");
-    if (runtime.strcmp(arg, "dl") == 0) return xstrdup("libdl.so.2");
-    if (runtime.strcmp(arg, "pthread") == 0) return xstrdup("libpthread.so.0");
+    if (is_macho) {
+        if (runtime.strcmp(arg, "c") == 0) return xstrdup("libSystem.B.dylib");
+        if (runtime.strcmp(arg, "m") == 0) return xstrdup("libSystem.B.dylib");
+        if (runtime.strcmp(arg, "dl") == 0) return xstrdup("libSystem.B.dylib");
+        if (runtime.strcmp(arg, "pthread") == 0) return xstrdup("libSystem.B.dylib");
+    } else {
+        if (runtime.strcmp(arg, "c") == 0) return xstrdup("libc.so.6");
+        if (runtime.strcmp(arg, "m") == 0) return xstrdup("libm.so.6");
+        if (runtime.strcmp(arg, "dl") == 0) return xstrdup("libdl.so.2");
+        if (runtime.strcmp(arg, "pthread") == 0) return xstrdup("libpthread.so.0");
+    }
     {
         size_t n = runtime.strlen(arg);
-        char *s = runtime.malloc(n + 8);
+        const char *ext = is_macho ? ".dylib" : ".so";
+        size_t ext_len = runtime.strlen(ext);
+        char *s = runtime.malloc(3 + n + ext_len + 1);
         if (!s) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
         runtime.memcpy(s, "lib", 3);
         runtime.memcpy(s + 3, arg, n);
-        runtime.memcpy(s + 3 + n, ".so", 4);
+        runtime.memcpy(s + 3 + n, ext, ext_len + 1);
         return s;
     }
 }
@@ -1279,6 +1430,32 @@ static char *path_join(const char *a, const char *b) {
     if (slash) p[na++] = '/';
     runtime.memcpy(p + na, b, nb + 1);
     return p;
+}
+static char *find_lib_file(const char *soname, char **lib_paths,
+                           int num_lib_paths) {
+    if (runtime.strchr(soname, '/'))
+        return file_readable(soname) ? xstrdup(soname) : ((void*)0);
+    for (int d = 0; d < num_lib_paths; d++) {
+        char *path = path_join(lib_paths[d], soname);
+        if (file_readable(path)) return path;
+        runtime.free(path);
+    }
+    return ((void*)0);
+}
+static void register_aux_dylibs(char **needed, int num_needed,
+                                char **lib_paths, int num_lib_paths) {
+    if (target_current()->objfmt != TARGET_OBJFMT_MACHO) return;
+    for (int i = 0; i < num_needed; i++) {
+        if (is_system_soname(needed[i])) continue;
+        char *path = find_lib_file(needed[i], lib_paths, num_lib_paths);
+        if (!path) continue;
+        char *iname = ((void*)0);
+        char **syms = ((void*)0);
+        size_t nsyms = 0;
+        if (macho_read_dylib(path, &iname, &syms, &nsyms) == 0)
+            emit_aux_lib_add(iname, syms, nsyms);
+        runtime.free(path);
+    }
 }
 static const char *rt_pkg_name(void) { return "runtime"; }
 static char *find_rt_dir(const char *argv0) {
@@ -1355,6 +1532,33 @@ int main(int argc, char **argv) {
     int num_needed = 0;
     char **lib_paths = ((void*)0);
     int num_lib_paths = 0;
+    const char *target_arg = ((void*)0);
+    int x86_vec_enable = 0;
+    for (int i = 1; i < argc; i++) {
+        if (runtime.strcmp(argv[i], "--target") == 0 ||
+            runtime.strcmp(argv[i], "-target") == 0) {
+            if (i + 1 < argc) target_arg = argv[i + 1];
+        } else if (runtime.strncmp(argv[i], "--target=", 9) == 0) {
+            target_arg = argv[i] + 9;
+        } else if (runtime.strncmp(argv[i], "-target=", 8) == 0) {
+            target_arg = argv[i] + 8;
+        }
+    }
+    const TargetDesc *target;
+    if (target_arg) {
+        target = target_parse(target_arg);
+        if (!target) {
+            runtime.fprintf(runtime.stderr,
+                    "fakecc: unrecognized target triple '%s' "
+                    "(supported: x86_64-linux, arm64-macos)\n",
+                    target_arg);
+            runtime.exit(1);
+        }
+    } else {
+        target = target_default();
+    }
+    target_set_current(target);
+    int is_macho = (target->objfmt == TARGET_OBJFMT_MACHO);
     for (int i = 1; i < argc; i++) {
         if (runtime.strcmp(argv[i], "-c") == 0) {
             compile_only = 1;
@@ -1374,16 +1578,28 @@ int main(int argc, char **argv) {
             if (runtime.strstr(argv[i], "address")) g_sanitize_address = 1;
         } else if (runtime.strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
+        } else if (runtime.strcmp(argv[i], "-pthread") == 0 ||
+                   runtime.strcmp(argv[i], "-pthreads") == 0) {
         } else if (runtime.strcmp(argv[i], "-mno-avx") == 0) {
             g_no_avx = 1;
             g_avx512f = 0;
         } else if (runtime.strcmp(argv[i], "-mavx") == 0) {
             g_no_avx = 0;
+            x86_vec_enable = 1;
         } else if (runtime.strcmp(argv[i], "-mno-avx512f") == 0) {
             g_avx512f = 0;
         } else if (runtime.strcmp(argv[i], "-mavx512f") == 0) {
             g_avx512f = 1;
             g_no_avx = 0;
+            x86_vec_enable = 1;
+        } else if (runtime.strcmp(argv[i], "--target") == 0 ||
+                   runtime.strcmp(argv[i], "-target") == 0) {
+            if (i + 1 >= argc) usage();
+            target_arg = argv[++i];
+        } else if (runtime.strncmp(argv[i], "--target=", 9) == 0) {
+            target_arg = argv[i] + 9;
+        } else if (runtime.strncmp(argv[i], "-target=", 8) == 0) {
+            target_arg = argv[i] + 8;
         } else if (runtime.strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
@@ -1401,17 +1617,39 @@ int main(int argc, char **argv) {
         } else if (runtime.strcmp(argv[i], "-l") == 0) {
             if (i + 1 >= argc) usage();
             needed = runtime.realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
-            needed[num_needed++] = soname_from_l(argv[++i]);
+            needed[num_needed++] = soname_from_l(argv[++i], is_macho);
         } else if (argv[i][0] == '-' && argv[i][1] == 'l') {
             needed = runtime.realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
-            needed[num_needed++] = soname_from_l(argv[i] + 2);
-        } else if (ends_with(argv[i], ".so")) {
+            needed[num_needed++] = soname_from_l(argv[i] + 2, is_macho);
+        } else if (ends_with(argv[i], ".so") || ends_with(argv[i], ".dylib")) {
             needed = runtime.realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
             needed[num_needed++] = soname_from_so_path(argv[i]);
             {
                 char *d = dir_of(argv[i]);
                 paths_add(&lib_paths, &num_lib_paths, d);
                 runtime.free(d);
+            }
+        } else if (runtime.strncmp(argv[i], "-Wl,", 4) == 0) {
+            const char *opt = argv[i] + 4;
+            while (*opt) {
+                if (runtime.strncmp(opt, "-rpath,", 7) == 0) {
+                    opt += 7;
+                    const char *end = runtime.strchr(opt, ',');
+                    size_t len = end ? (size_t)(end - opt) : runtime.strlen(opt);
+                    char *rpath = runtime.malloc(len + 1);
+                    if (!rpath) { runtime.fprintf(runtime.stderr, "fakecc: out of memory\n"); runtime.exit(1); }
+                    runtime.memcpy(rpath, opt, len);
+                    rpath[len] = '\0';
+                    paths_add(&lib_paths, &num_lib_paths, rpath);
+                    emit_aux_rpath_add(rpath);
+                    runtime.free(rpath);
+                    opt += len;
+                    if (*opt == ',') opt++;
+                } else {
+                    const char *end = runtime.strchr(opt, ',');
+                    if (end) opt = end + 1;
+                    else break;
+                }
             }
         } else if (argv[i][0] == '-') {
             runtime.fprintf(runtime.stderr, "fakecc: unknown option '%s'\n", argv[i]);
@@ -1422,6 +1660,18 @@ int main(int argc, char **argv) {
         }
     }
     if (ninputs == 0 || output_path == ((void*)0)) usage();
+    if (target->arch == TARGET_ARCH_ARM64 && x86_vec_enable) {
+        runtime.fprintf(runtime.stderr,
+                "fakecc: -mavx/-mavx512f apply only to the x86-64 target; "
+                "arm64 always uses 16-byte NEON vectors\n");
+        runtime.exit(1);
+    }
+    if (!target_backend_ready(target)) {
+        runtime.fprintf(runtime.stderr,
+                "fakecc: target '%s' is not supported by this build yet\n",
+                target->triple);
+        runtime.exit(1);
+    }
     PkgContext pkg;
     pkg_ctx_init(&pkg);
     add_pkg_env_paths(&pkg);
@@ -1455,7 +1705,10 @@ int main(int argc, char **argv) {
         }
         runtime.free(src);
         EmitModule em;
-        if (lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg) != FAKECC_OK) {
+        emit_set_object_mode(1);
+        int low = lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+        emit_set_object_mode(0);
+        if (low != FAKECC_OK) {
             tu_free(&tu);
             runtime.exit(1);
         }
@@ -1471,6 +1724,7 @@ int main(int argc, char **argv) {
         nostdlib = 1;
     }
     require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
+    register_aux_dylibs(needed, num_needed, lib_paths, num_lib_paths);
     int nrt = 0;
     if (!nostdlib) {
         if (!rt_dir) {
@@ -1529,7 +1783,31 @@ int main(int argc, char **argv) {
         if (!pp->owns_files) continue;
         nlinked_files += (int)pp->nfiles;
     }
+    const char *arm64_rt = runtime.getenv("FAKECC_ARM64_RUNTIME");
+    int arm64_link_runtime = !arm64_rt || runtime.strcmp(arm64_rt, "0") != 0;
+    if (target_current()->arch == TARGET_ARCH_ARM64
+        && !arm64_link_runtime)
+        nlinked_files = 0;
+    if (is_shared && target_current()->objfmt == TARGET_OBJFMT_MACHO
+        && !compile_only) {
+        runtime.fprintf(runtime.stderr,
+                "fakecc: -shared is not implemented for the arm64-macos "
+                "target: it needs an MH_DYLIB with LC_ID_DYLIB and an export "
+                "trie, and there is no -l or dlopen here to consume it\n");
+        runtime.exit(1);
+    }
     int nmods = ninputs + nlinked_files;
+    int nsource_tus = 0;
+    for (int i = 0; i < ninputs; i++) {
+        size_t len = runtime.strlen(inputs[i]);
+        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o')
+            continue;
+        nsource_tus++;
+    }
+    emit_set_multi_tu(nsource_tus + nlinked_files > 1);
+    emit_set_runtime_alloc(nrt
+                           && !(target_current()->arch == TARGET_ARCH_ARM64
+                                && !arm64_link_runtime));
     EmitModule *mods = runtime.malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = runtime.malloc((size_t)nmods * sizeof(EmitModule *));
     if (!mods || !mod_ptrs) {
@@ -1546,13 +1824,19 @@ int main(int argc, char **argv) {
             tu_free(&user_tus[i]);
         }
         mod_ptrs[i] = &mods[i];
+        mods[i].is_user_tu = 1;
     }
     runtime.free(user_tus);
+    int arm64_freestanding =
+        target_current()->arch == TARGET_ARCH_ARM64
+        && !nostdlib
+        && !arm64_link_runtime;
     int mi = ninputs;
     for (size_t p = 0; p < pkg.npkgs; p++) {
         Package *pp = pkg.pkgs[p];
         if (!pp->owns_files) continue;
         for (size_t f = 0; f < pp->nfiles; f++) {
+            if (arm64_freestanding) break;
             char *fake = path_join(pp->dir, "_.c");
             if (lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK)
                 runtime.exit(1);
@@ -1562,7 +1846,8 @@ int main(int argc, char **argv) {
         }
     }
     emit_link(mod_ptrs, (size_t)nmods, output_path,
-              (const char **)needed, (size_t)num_needed, nodefaultlibs,
+              (const char **)needed, (size_t)num_needed,
+              nodefaultlibs || nostdlib,
               (const char **)lib_paths, (size_t)num_lib_paths, want_debug,
               is_shared);
     for (int i = 0; i < nmods; i++) module_free(&mods[i]);
@@ -1574,6 +1859,7 @@ int main(int argc, char **argv) {
     runtime.free(needed);
     for (int i = 0; i < num_lib_paths; i++) runtime.free(lib_paths[i]);
     runtime.free(lib_paths);
+    emit_aux_reset();
     pkg_ctx_free(&pkg);
     return 0;
 }

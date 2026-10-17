@@ -3,10 +3,12 @@
 #include "fakecc/emit.h"
 #include "fakecc/ir.h"
 #include "fakecc/lexer.h"
+#include "fakecc/macho.h"
 #include "fakecc/opt.h"
 #include "fakecc/parser.h"
 #include "fakecc/pkg.h"
 #include "fakecc/sema.h"
+#include "fakecc/target.h"
 #include "fakecc/token.h"
 
 #include <stdio.h>
@@ -81,6 +83,8 @@ static int lower_tu(TranslationUnit *tu, const char *filename,
     codegen(&ir, out, want_debug);
 
     ir_module_free(&ir);
+    if (fakecc_had_error())
+        return FAKECC_ERR;
     return FAKECC_OK;
 }
 
@@ -109,6 +113,9 @@ static void usage(void) {
             "  -LDIR           add DIR to the shared-library search path\n"
             "                  (link-time check for -l; also DT_RUNPATH)\n"
             "  -nodefaultlibs  accepted for compatibility (default already skips libc)\n"
+            "  --target=T      code generation target: x86_64-linux (default on\n"
+            "                  Linux hosts) or arm64-macos (default on Apple Silicon;\n"
+            "                  accepted spellings: x86_64-linux, arm64-apple-darwin, ...)\n"
             "  FAKECC_RT       override path to the runtime/ directory\n"
             "  FAKECC_PKG      colon-separated package search path\n");
     exit(1);
@@ -123,29 +130,42 @@ static int is_system_soname(const char *soname) {
     return strcmp(soname, "libc.so.6") == 0
         || strcmp(soname, "libm.so.6") == 0
         || strcmp(soname, "libdl.so.2") == 0
-        || strcmp(soname, "libpthread.so.0") == 0;
+        || strcmp(soname, "libpthread.so.0") == 0
+        || strcmp(soname, "libSystem.B.dylib") == 0;
 }
 
-/* Map a -l argument to a DT_NEEDED soname string (caller frees). */
-static char *soname_from_l(const char *arg) {
+/* Map a -l argument to a DT_NEEDED/LC_LOAD_DYLIB soname string (caller frees).
+ * On Mach-O targets, use .dylib extension; on ELF, use .so. */
+static char *soname_from_l(const char *arg, int is_macho) {
     if (!arg || !*arg) {
         fprintf(stderr, "fakecc: -l requires a library name\n");
         exit(1);
     }
     if (arg[0] == ':')
         return xstrdup(arg + 1);
-    /* Common glibc ABI sonames — `libNAME.so` is often a linker script. */
-    if (strcmp(arg, "c") == 0) return xstrdup("libc.so.6");
-    if (strcmp(arg, "m") == 0) return xstrdup("libm.so.6");
-    if (strcmp(arg, "dl") == 0) return xstrdup("libdl.so.2");
-    if (strcmp(arg, "pthread") == 0) return xstrdup("libpthread.so.0");
+    /* Common system library sonames — platform-specific. */
+    if (is_macho) {
+        /* macOS: libSystem.B.dylib covers libc, libm, libpthread, libdl. */
+        if (strcmp(arg, "c") == 0) return xstrdup("libSystem.B.dylib");
+        if (strcmp(arg, "m") == 0) return xstrdup("libSystem.B.dylib");
+        if (strcmp(arg, "dl") == 0) return xstrdup("libSystem.B.dylib");
+        if (strcmp(arg, "pthread") == 0) return xstrdup("libSystem.B.dylib");
+    } else {
+        /* Linux: glibc ABI sonames. */
+        if (strcmp(arg, "c") == 0) return xstrdup("libc.so.6");
+        if (strcmp(arg, "m") == 0) return xstrdup("libm.so.6");
+        if (strcmp(arg, "dl") == 0) return xstrdup("libdl.so.2");
+        if (strcmp(arg, "pthread") == 0) return xstrdup("libpthread.so.0");
+    }
     {
         size_t n = strlen(arg);
-        char *s = malloc(n + 8);
+        const char *ext = is_macho ? ".dylib" : ".so";
+        size_t ext_len = strlen(ext);
+        char *s = malloc(3 + n + ext_len + 1);
         if (!s) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
         memcpy(s, "lib", 3);
         memcpy(s + 3, arg, n);
-        memcpy(s + 3 + n, ".so", 4);
+        memcpy(s + 3 + n, ext, ext_len + 1);
         return s;
     }
 }
@@ -233,6 +253,45 @@ static char *path_join(const char *a, const char *b) {
     return p;
 }
 
+/* Locate -l NAME (or a name given directly with -l:) among the search dirs.
+ * Returns a malloc'd path, or NULL when nothing of that name is there. */
+static char *find_lib_file(const char *soname, char **lib_paths,
+                           int num_lib_paths) {
+    if (strchr(soname, '/'))
+        return file_readable(soname) ? xstrdup(soname) : NULL;
+    for (int d = 0; d < num_lib_paths; d++) {
+        char *path = path_join(lib_paths[d], soname);
+        if (file_readable(path)) return path;
+        free(path);
+    }
+    return NULL;
+}
+
+/* Tell the Mach-O backend about every dylib named on the command line: its
+ * install name and the symbols it exports.  This has to run before any code
+ * is generated, because codegen decides whether a call it cannot see is legal
+ * by asking whether some registered library supplies the name -- and the
+ * alternative to knowing is refusing every one of them.
+ *
+ * A library that does not parse as Mach-O (an ELF .so, say) is skipped rather
+ * than diagnosed: the ELF side of the linker has never needed this table. */
+static void register_aux_dylibs(char **needed, int num_needed,
+                                char **lib_paths, int num_lib_paths) {
+    if (target_current()->objfmt != TARGET_OBJFMT_MACHO) return;
+    for (int i = 0; i < num_needed; i++) {
+        /* libSystem is already covered by the static list in emit.c. */
+        if (is_system_soname(needed[i])) continue;
+        char *path = find_lib_file(needed[i], lib_paths, num_lib_paths);
+        if (!path) continue;
+        char *iname = NULL;
+        char **syms = NULL;
+        size_t nsyms = 0;
+        if (macho_read_dylib(path, &iname, &syms, &nsyms) == 0)
+            emit_aux_lib_add(iname, syms, nsyms);
+        free(path);
+    }
+}
+
 /* Builtin freestanding runtime: one package, directory runtime/. */
 static const char *rt_pkg_name(void) { return "runtime"; }
 
@@ -315,6 +374,37 @@ int main(int argc, char **argv) {
     int num_needed = 0;
     char **lib_paths = NULL;
     int num_lib_paths = 0;
+    const char *target_arg = NULL;   /* explicit --target value, or host default */
+    int x86_vec_enable = 0;          /* -mavx / -mavx512f explicitly requested */
+
+    /* Pre-scan for --target so library name resolution (-l, .so/.dylib) can be
+     * target-aware before the main argument parsing loop. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--target") == 0 ||
+            strcmp(argv[i], "-target") == 0) {
+            if (i + 1 < argc) target_arg = argv[i + 1];
+        } else if (strncmp(argv[i], "--target=", 9) == 0) {
+            target_arg = argv[i] + 9;
+        } else if (strncmp(argv[i], "-target=", 8) == 0) {
+            target_arg = argv[i] + 8;
+        }
+    }
+    /* Resolve target early for library extension selection. */
+    const TargetDesc *target;
+    if (target_arg) {
+        target = target_parse(target_arg);
+        if (!target) {
+            fprintf(stderr,
+                    "fakecc: unrecognized target triple '%s' "
+                    "(supported: x86_64-linux, arm64-macos)\n",
+                    target_arg);
+            exit(1);
+        }
+    } else {
+        target = target_default();
+    }
+    target_set_current(target);
+    int is_macho = (target->objfmt == TARGET_OBJFMT_MACHO);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0) {
@@ -336,16 +426,31 @@ int main(int argc, char **argv) {
             if (strstr(argv[i], "address")) g_sanitize_address = 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
+        } else if (strcmp(argv[i], "-pthread") == 0 ||
+                   strcmp(argv[i], "-pthreads") == 0) {
+            /* Accepted and ignored: nothing to do on a host where threads are
+             * part of libc (Darwin keeps them in libSystem).  Taking it as an
+             * error only pushed callers to spell the flag differently. */
         } else if (strcmp(argv[i], "-mno-avx") == 0) {
             g_no_avx = 1;
             g_avx512f = 0;
         } else if (strcmp(argv[i], "-mavx") == 0) {
             g_no_avx = 0;
+            x86_vec_enable = 1;
         } else if (strcmp(argv[i], "-mno-avx512f") == 0) {
             g_avx512f = 0;
         } else if (strcmp(argv[i], "-mavx512f") == 0) {
             g_avx512f = 1;
             g_no_avx = 0;
+            x86_vec_enable = 1;
+        } else if (strcmp(argv[i], "--target") == 0 ||
+                   strcmp(argv[i], "-target") == 0) {
+            if (i + 1 >= argc) usage();
+            target_arg = argv[++i];
+        } else if (strncmp(argv[i], "--target=", 9) == 0) {
+            target_arg = argv[i] + 9;
+        } else if (strncmp(argv[i], "-target=", 8) == 0) {
+            target_arg = argv[i] + 8;
         } else if (strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
@@ -364,18 +469,51 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-l") == 0) {
             if (i + 1 >= argc) usage();
             needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
-            needed[num_needed++] = soname_from_l(argv[++i]);
+            needed[num_needed++] = soname_from_l(argv[++i], is_macho);
         } else if (argv[i][0] == '-' && argv[i][1] == 'l') {
             needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
-            needed[num_needed++] = soname_from_l(argv[i] + 2);
-        } else if (ends_with(argv[i], ".so")) {
-            /* Pass a .so path: DT_NEEDED = basename; its dir joins -L/RUNPATH. */
+            needed[num_needed++] = soname_from_l(argv[i] + 2, is_macho);
+        } else if (ends_with(argv[i], ".so") || ends_with(argv[i], ".dylib")) {
+            /* Pass a .so/.dylib path: DT_NEEDED/LC_LOAD_DYLIB = basename;
+             * its dir joins -L/RUNPATH/LC_RPATH. */
             needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
             needed[num_needed++] = soname_from_so_path(argv[i]);
             {
                 char *d = dir_of(argv[i]);
                 paths_add(&lib_paths, &num_lib_paths, d);
                 free(d);
+            }
+        } else if (strncmp(argv[i], "-Wl,", 4) == 0) {
+            /* Pass linker options through: -Wl,-rpath,/path etc. */
+            const char *opt = argv[i] + 4;
+            /* Parse comma-separated linker options. */
+            while (*opt) {
+                if (strncmp(opt, "-rpath,", 7) == 0) {
+                    opt += 7;
+                    /* rpath value runs until next comma or end. */
+                    const char *end = strchr(opt, ',');
+                    size_t len = end ? (size_t)(end - opt) : strlen(opt);
+                    char *rpath = malloc(len + 1);
+                    if (!rpath) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+                    memcpy(rpath, opt, len);
+                    rpath[len] = '\0';
+                    /* On Mach-O an rpath is its own load command: dyld reads
+                     * the list from the image and substitutes each entry for
+                     * the @rpath prefix in a dylib's install name.  It is
+                     * still added to the link-time search dirs, which is what
+                     * the ELF side wants for DT_RUNPATH and lets a later -l
+                     * resolve out of the same directory. */
+                    paths_add(&lib_paths, &num_lib_paths, rpath);
+                    emit_aux_rpath_add(rpath);
+                    free(rpath);
+                    opt += len;
+                    if (*opt == ',') opt++;
+                } else {
+                    /* Skip unknown linker options silently (gcc-like). */
+                    const char *end = strchr(opt, ',');
+                    if (end) opt = end + 1;
+                    else break;
+                }
             }
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "fakecc: unknown option '%s'\n", argv[i]);
@@ -387,6 +525,25 @@ int main(int argc, char **argv) {
     }
 
     if (ninputs == 0 || output_path == NULL) usage();
+
+    /* x86-only vector-width switches: arm64 always passes 16-byte NEON
+     * vectors; -mavx/-mavx512f are meaningless there.  The -mno-* forms
+     * are accepted as no-ops (gcc-like). */
+    if (target->arch == TARGET_ARCH_ARM64 && x86_vec_enable) {
+        fprintf(stderr,
+                "fakecc: -mavx/-mavx512f apply only to the x86-64 target; "
+                "arm64 always uses 16-byte NEON vectors\n");
+        exit(1);
+    }
+
+    /* Fail early while the arm64/Mach-O backend is being built out, rather
+     * than emitting an ELF file under the wrong assumption. */
+    if (!target_backend_ready(target)) {
+        fprintf(stderr,
+                "fakecc: target '%s' is not supported by this build yet\n",
+                target->triple);
+        exit(1);
+    }
 
     PkgContext pkg;
     pkg_ctx_init(&pkg);
@@ -425,7 +582,10 @@ int main(int argc, char **argv) {
         }
         free(src);
         EmitModule em;
-        if (lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg) != FAKECC_OK) {
+        emit_set_object_mode(1);
+        int low = lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+        emit_set_object_mode(0);
+        if (low != FAKECC_OK) {
             tu_free(&tu);
             exit(1);
         }
@@ -445,6 +605,7 @@ int main(int argc, char **argv) {
     }
 
     require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
+    register_aux_dylibs(needed, num_needed, lib_paths, num_lib_paths);
 
     int nrt = 0;
     if (!nostdlib) {
@@ -522,8 +683,60 @@ int main(int argc, char **argv) {
         if (!pp->owns_files) continue;
         nlinked_files += (int)pp->nfiles;
     }
+    /* The Darwin runtime is linked by default.  It has to be: without it a
+     * program has no printf, no malloc, no string functions, and e2e -O1
+     * scores 2474 against 2536 with it (see docs/t16-darwin-runtime-port.md
+     * for how that gap closed).  FAKECC_ARM64_RUNTIME=0 still links
+     * freestanding user code, which is the older behaviour and useful when
+     * bisecting a runtime problem.  Both gates below read this one value --
+     * when they were separate expressions they drifted, and the second one
+     * filling modules the first had not reserved produced a segfault rather
+     * than anything resembling the real fault. */
+    const char *arm64_rt = getenv("FAKECC_ARM64_RUNTIME");
+    int arm64_link_runtime = !arm64_rt || strcmp(arm64_rt, "0") != 0;
+    if (target_current()->arch == TARGET_ARCH_ARM64
+        && !arm64_link_runtime)
+        nlinked_files = 0;
+
+    /* -shared means something different on Mach-O, and this backend cannot
+     * build it: a dylib is MH_DYLIB with an LC_ID_DYLIB and no entry stub,
+     * its exports reach dyld through an LC_DYLD_INFO export trie, and --
+     * the part that decides whether it is worth building at all -- nothing
+     * could consume the result: the Mach-O link path has no -l, and the
+     * runtime exposes no dlopen.  Refused here, before any compilation,
+     * because otherwise the message the user sees is "no 'main' function
+     * found", which sends them looking for a main function that was never
+     * the problem. */
+    if (is_shared && target_current()->objfmt == TARGET_OBJFMT_MACHO
+        && !compile_only) {
+        fprintf(stderr,
+                "fakecc: -shared is not implemented for the arm64-macos "
+                "target: it needs an MH_DYLIB with LC_ID_DYLIB and an export "
+                "trie, and there is no -l or dlopen here to consume it\n");
+        exit(1);
+    }
 
     int nmods = ninputs + nlinked_files;
+    /* A TU that defines no main is legal as soon as more than one module
+     * contributes to the link -- the arm64 backend emits its entry stub in
+     * whichever TU owns main, so it must not reject the others.  Count only
+     * real source TUs: a prebuilt .o input never carries one. */
+    int nsource_tus = 0;
+    for (int i = 0; i < ninputs; i++) {
+        size_t len = strlen(inputs[i]);
+        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o')
+            continue;
+        nsource_tus++;
+    }
+    emit_set_multi_tu(nsource_tus + nlinked_files > 1);
+    /* runtime/malloc.c is linked together with these TUs, so it owns
+     * malloc/free/calloc/realloc.  FAKECC_ARM64_RUNTIME=0 drops the runtime
+     * files from the link even when !nostdlib (arm64_freestanding above), and
+     * then the inline fallback is all there is. */
+    emit_set_runtime_alloc(nrt
+                           && !(target_current()->arch == TARGET_ARCH_ARM64
+                                && !arm64_link_runtime));
+
     EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
     if (!mods || !mod_ptrs) {
@@ -542,8 +755,21 @@ int main(int argc, char **argv) {
             tu_free(&user_tus[i]);
         }
         mod_ptrs[i] = &mods[i];
+        /* A definition here outranks the same name from a package, so a
+         * program can replace memcpy or fputs with its own. */
+        mods[i].is_user_tu = 1;
     }
     free(user_tus);
+
+    /* Must agree exactly with the nlinked_files reservation above.  The two
+     * used to differ (that one was unconditional, this one carried
+     * !nostdlib), so arm64 + -nostdlib let Phase 3 fill modules into an array
+     * that was never sized for them and the tail reached emit_link
+     * uninitialized. */
+    int arm64_freestanding =
+        target_current()->arch == TARGET_ARCH_ARM64
+        && !nostdlib
+        && !arm64_link_runtime;
 
     /* Phase 3: codegen already-parsed package files (builtin rt + any package
      * pulled in by `import`).  The user's own package is skipped: it has
@@ -553,6 +779,7 @@ int main(int argc, char **argv) {
         Package *pp = pkg.pkgs[p];
         if (!pp->owns_files) continue;
         for (size_t f = 0; f < pp->nfiles; f++) {
+            if (arm64_freestanding) break;     /* runtime ported in T16+ */
             char *fake = path_join(pp->dir, "_.c");
             if (lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK)
                 exit(1);
@@ -563,7 +790,8 @@ int main(int argc, char **argv) {
     }
 
     emit_link(mod_ptrs, (size_t)nmods, output_path,
-              (const char **)needed, (size_t)num_needed, nodefaultlibs,
+              (const char **)needed, (size_t)num_needed,
+              nodefaultlibs || nostdlib,
               (const char **)lib_paths, (size_t)num_lib_paths, want_debug,
               is_shared);
 
@@ -576,6 +804,10 @@ int main(int argc, char **argv) {
     free(needed);
     for (int i = 0; i < num_lib_paths; i++) free(lib_paths[i]);
     free(lib_paths);
+    /* The dylib table outlives every link that could consult it, so nothing
+     * inside the compiler releases it.  Freed here because the ASan build
+     * treats a reachable allocation at exit exactly like a lost one. */
+    emit_aux_reset();
     pkg_ctx_free(&pkg);
     return 0;
 }

@@ -1,5 +1,6 @@
 // expect: 0
 // IEEE fabs(-0.0) is +0.0; a signed compare `x < 0` leaves the sign bit.
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

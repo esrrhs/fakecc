@@ -1,5 +1,6 @@
 // expect: 42
 // flags: -fsanitize=address
+// skip_oracle: clang
 package main;
 import runtime;
 

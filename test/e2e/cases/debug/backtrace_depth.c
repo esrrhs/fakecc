@@ -13,6 +13,15 @@ package main;
 // gdb_expect: #3 +0x[0-9a-f]+ in main \(\) at
 // gdb_reject: Backtrace stopped
 // gdb_reject: \?\? \(\)
+// lldb does not evaluate DW_OP_entry_value, so an outer frame's parameter
+// reads back as <unavailable> there -- the same thing it prints for the
+// identical program built by clang.  Frame 0 still has the real value.
+// lldb_expect: #0 +inner \(v=39\) at
+// lldb_expect: #1 +0x[0-9a-f]+ in middle \(v=(<unavailable>|39)\) at
+// lldb_expect: #2 +0x[0-9a-f]+ in outer \(v=(<unavailable>|39)\) at
+// lldb_expect: #3 +0x[0-9a-f]+ in main \(\) at
+// lldb_reject: Backtrace stopped
+// lldb_reject: \?\? \(\)
 int inner(int v) {
     return v + 1;   // BRK
 }

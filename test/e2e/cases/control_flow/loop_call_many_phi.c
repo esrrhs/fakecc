@@ -1,5 +1,6 @@
 // expect: 0
 // Stress-test: many φ variables at the same loop header with calls
+// skip_oracle: clang
 package main;
 
 

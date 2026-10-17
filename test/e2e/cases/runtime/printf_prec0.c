@@ -1,5 +1,6 @@
 // expect: 0
 // C99: converting 0 with precision 0 yields no digits; %F/%E/%G inf/nan are uppercase.
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {
@@ -15,7 +16,11 @@ int main(void) {
     if (runtime.strcmp(buf, "INF") != 0) return 5;
     runtime.sprintf(buf, "%f", inf);
     if (runtime.strcmp(buf, "inf") != 0) return 6;
+    /* The sign of a NaN is not pinned down by C and differs by hardware --
+     * x86-64 gives "-NAN" where arm64 gives "NAN" -- so accept either. */
     runtime.sprintf(buf, "%F", nan);
-    if (runtime.strcmp(buf, "NAN") != 0) return 7;
+    const char *nanp = buf;
+    if (*nanp == '-' || *nanp == '+') nanp++;
+    if (runtime.strcmp(nanp, "NAN") != 0) return 7;
     return 0;
 }

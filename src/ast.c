@@ -1,4 +1,5 @@
 #include "fakecc/ast.h"
+#include "fakecc/target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -583,10 +584,17 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
             const StructMember *m = &sd->members[mi];
             /* Zero-width `: 0` only forces alignment; it is not an ABI object. */
             if (m->bit_width == 0) continue;
-            /* GNU union with a true FAM (`char d[]`, length < 0) is MEMORY.
-             * `[0]` is not a FAM and does not force this. */
+            /* A union carrying a true flexible array member is passed in
+             * memory -- but only under SysV/x86-64, which is where that rule
+             * comes from.  AAPCS64 has no such clause: clang hands
+             * `union U { int n; char d[]; }` to a callee in a general
+             * register, and a fixed 4-byte union classifies like any other
+             * small aggregate.  Applying the SysV rule on arm64 puts the
+             * argument on the stack where the callee is not looking, and the
+             * callee reads whatever the register happened to hold. */
             if (sd->is_union && m->type.kind == TY_ARRAY && m->type.length < 0
-                && !m->type.vla_dim)
+                && !m->type.vla_dim
+                && target_current()->arch != TARGET_ARCH_ARM64)
                 return 1;
             int moff = offset + m->offset;
             int msz = m->bit_width > 0 ? 0 : type_size(m->type);
@@ -768,12 +776,128 @@ int sysv_agg_ret_x87(Type t) {
     return type_is_pure_x87(t);
 }
 
+static int abi_is_arm64(void);
+
 int sysv_memory_pass_as_pointer(Type t) {
     /* SysV MEMORY arguments are copied onto the outgoing stack.  GCC's
      * `__va_list_tag` (array-of-1) is the exception: it decays to a
-     * pointer, matching libc. */
+     * pointer, matching libc.  Darwin's va_list is an 8-byte cursor and
+     * travels in a GP register like any other small aggregate. */
+    if (abi_is_arm64()) return 0;
     return t.kind == TY_STRUCT && t.tag
         && strcmp(t.tag, "__va_list_tag") == 0;
+}
+
+static int abi_is_arm64(void) {
+    const TargetDesc *t = target_current();
+    return t && t->arch == TARGET_ARCH_ARM64;
+}
+
+int type_long_double_width(void) {
+    const TargetDesc *t = target_current();
+    if (t && t->arch == TARGET_ARCH_ARM64) return 8;
+    return 16;
+}
+
+/* On Darwin arm64 this is plain `double` in every respect that matters to
+ * codegen -- same width, same ABI class, same instructions -- but C keeps it
+ * a distinct type, and so does clang:
+ *
+ *   $ cc -x c - <<< '__builtin_types_compatible_p(long double, double)'
+ *   0
+ *
+ * The width alone cannot answer that, hence the flag.
+ */
+Type type_make_long_double(void) {
+    Type t = type_make_float(type_long_double_width());
+    t.is_long_double = 1;
+    return t;
+}
+
+int abi_gp_nregs(void) {
+    const TargetDesc *t = target_current();
+    if (t && t->gp_arg_regs > 0) return t->gp_arg_regs;
+    return 6;
+}
+
+int abi_sret_uses_gp(void) {
+    const TargetDesc *t = target_current();
+    if (!t) return 1;
+    return t->sret_uses_gp;
+}
+
+/* Element count of a homogeneous float/double aggregate, or -1.
+ * `kind` is 0 on entry and becomes 4 (float) or 8 (double). */
+static int hfa_elems(Type t, int *kind) {
+    if (t.is_vector || t.is_decimal) return -1;
+    if (t.kind == TY_FLOAT) {
+        if (t.width != 4 && t.width != 8) return -1;
+        if (*kind == 0) *kind = t.width;
+        if (*kind != t.width) return -1;
+        return 1;
+    }
+    if (t.kind == TY_ARRAY && t.elem_type && t.length > 0) {
+        int n = hfa_elems(*t.elem_type, kind);
+        if (n <= 0) return -1;
+        long long tot = (long long)n * t.length;
+        if (tot > 4) return -1;
+        return (int)tot;
+    }
+    if (t.kind != TY_STRUCT || !t.tag) return -1;
+    const StructRegistry *reg = get_ir_structs();
+    if (!reg) reg = get_sema_structs();
+    if (!reg) reg = get_parser_structs();
+    const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : NULL;
+    if (!sd || sd->is_union) return -1;
+    int total = 0, any = 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        if (sd->members[i].bit_width == 0) continue;
+        if (sd->members[i].bit_width > 0) return -1;
+        Type mt = sd->members[i].type;
+        if (mt.kind == TY_ARRAY && mt.length <= 0 && !mt.vla_dim) continue;
+        int n = hfa_elems(mt, kind);
+        if (n <= 0) return -1;
+        total += n;
+        any = 1;
+        if (total > 4) return -1;
+    }
+    return any ? total : -1;
+}
+
+int abi_hfa_elem_count(Type t) {
+    if (!abi_is_arm64()) return -1;
+    int kind = 0;
+    int n = hfa_elems(t, &kind);
+    return (n >= 1 && n <= 4) ? n : -1;
+}
+
+int abi_is_hfa(Type t) {
+    return abi_hfa_elem_count(t) > 0;
+}
+
+/* Width of one element of a homogeneous float/double aggregate, or -1.
+ * An HFA's eightbytes hold one element each, which is not the aggregate's
+ * size: `struct __attribute__((aligned(16))) { double d; }` is 16 bytes
+ * carrying a single 8-byte element, and sizing its parameter from
+ * type_size made the incoming V->GP move 32-bit, so the high half of the
+ * double was lost and `(int)s.d` read 0. */
+int abi_hfa_elem_size(Type t) {
+    if (!abi_is_arm64()) return -1;
+    int kind = 0;
+    int n = hfa_elems(t, &kind);
+    if (n < 1 || n > 4) return -1;
+    return kind ? kind : -1;
+}
+
+int abi_indirect_agg(Type t) {
+    /* Darwin: a non-HFA aggregate larger than 16 bytes is passed and
+     * returned through a pointer.  HFAs use V registers instead. */
+    if (!abi_is_arm64()) return 0;
+    /* Darwin has no YMM/ZMM.  A vector wider than 16 bytes is a pointer. */
+    if (t.is_vector) return type_size(t) > 16;
+    if (t.kind != TY_STRUCT) return 0;
+    if (abi_is_hfa(t)) return 0;
+    return type_size(t) > 16;
 }
 
 int g_no_avx = 0;
@@ -1688,14 +1812,22 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_init(&tu->typedefs);
 
     /* Predeclare the `va_list` type used by the va_start/va_arg/va_end
-     * builtins. It mirrors the SysV AMD64 va_list layout so sizeof and field
-     * layout resolve, even though user code never constructs one directly. */
+     * builtins.  SysV AMD64 is the 24-byte four-field struct.  Darwin
+     * arm64 (clang) is an 8-byte cursor: anonymous arguments live on the
+     * stack, and va_list is just the pointer to the next one. */
     SourceLoc vloc = {0};
     StructDef *va = struct_registry_add(&tu->structs, "__va_list_tag", vloc);
-    struct_def_push_member(va, "gp_offset", type_make_int(4, 1), -1);
-    struct_def_push_member(va, "fp_offset", type_make_int(4, 1), -1);
-    struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()), -1);
-    struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()), -1);
+    if (abi_is_arm64()) {
+        struct_def_push_member(va, "overflow_arg_area",
+                               type_make_ptr(type_make_void()), -1);
+    } else {
+        struct_def_push_member(va, "gp_offset", type_make_int(4, 1), -1);
+        struct_def_push_member(va, "fp_offset", type_make_int(4, 1), -1);
+        struct_def_push_member(va, "overflow_arg_area",
+                               type_make_ptr(type_make_void()), -1);
+        struct_def_push_member(va, "reg_save_area",
+                               type_make_ptr(type_make_void()), -1);
+    }
     struct_def_finish(va);
     Type va_type = type_make_struct("__va_list_tag", va->size);
     typedef_registry_add(&tu->typedefs, "va_list", va_type);

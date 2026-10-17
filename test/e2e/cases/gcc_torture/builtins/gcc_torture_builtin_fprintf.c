@@ -1,4 +1,6 @@
 // expect: 0
+// Darwin's include-fixed <stdio.h> clashes with the port's libc prototypes.
+// skip_oracle: darwin
 package main;
 
 int inside_main = 0;
