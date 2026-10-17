@@ -3216,7 +3216,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
                     die_at(loc.file, loc.line, loc.col,
                        "struct '%s' has no member named '%s'",
                        target->tag, name);
-                    return;
+                    goto fail;
                 }
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
@@ -3235,7 +3235,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         if (pos < 0 || pos >= N) {
             die_at(loc.file, loc.line, loc.col,
                    "excess elements in initializer");
-            return;
+            goto fail;
         }
         Expr *elem = list->u.init_list.elements[i];
         if (dkind == 1 && sd && member_idx >= 0) {
@@ -3280,6 +3280,11 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             for (int k = 0; k < take; k++)
                 sub[k] = list->u.init_list.elements[i + k];
             elem = expr_new_init_list(sub, take, elem->loc);
+            /* The wrapper owns those elements now.  Detach them from the
+             * old buffer so teardown cannot free them a second time (see
+             * `fail:` below). */
+            for (int k = 0; k < take; k++)
+                list->u.init_list.elements[i + k] = NULL;
             i += take - 1;
         }
 
@@ -3318,6 +3323,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             expr_free(out[pos]); /* drop the gap-fill zero (or previous element) */
             out[pos] = elem;
         }
+        /* Whatever happened above, this element is no longer owned by the
+         * original buffer: it was moved into `out`, folded into an existing
+         * slot, or freed.  Clear the slot so that a later expr_free(list) --
+         * which still walks the old buffer on an error path, since only the
+         * success path swaps it for `out` -- frees it exactly once. */
+        list->u.init_list.elements[i] = NULL;
         /* C99 6.7.8p17: after a designator the next current object is the one
          * following the designated slot, so the cursor always advances to
          * pos+1 (for positional inits pos == cursor, so this is just +1). */
@@ -3378,6 +3389,16 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         list->u.init_list.desig_index = NULL;
         list->u.init_list.desig_member = NULL;
     }
+    return;
+
+    /* An error once left `list` holding a half-consumed element buffer:
+     * some elements had already been folded into `out` (or freed outright)
+     * while `list->u.init_list.elements` still pointed at them, so the
+     * teardown after the diagnostic freed them again.  Detach every element
+     * we take ownership of as we go, and release the partial result here. */
+fail:
+    for (int i = 0; i < N; i++) expr_free(out[i]);
+    free(out);
 }
 
 /* Parser-time folding cannot see object types, so `T a[sizeof g / sizeof *g]`

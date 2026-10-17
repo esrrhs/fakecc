@@ -3525,7 +3525,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
                     die_at(loc.file, loc.line, loc.col,
                        "struct '%s' has no member named '%s'",
                        target->tag, name);
-                    return;
+                    goto fail;
                 }
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
@@ -3544,7 +3544,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         if (pos < 0 || pos >= N) {
             die_at(loc.file, loc.line, loc.col,
                    "excess elements in initializer");
-            return;
+            goto fail;
         }
         Expr *elem = list->u.init_list.elements[i];
         if (dkind == 1 && sd && member_idx >= 0) {
@@ -3579,6 +3579,8 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             for (int k = 0; k < take; k++)
                 sub[k] = list->u.init_list.elements[i + k];
             elem = expr_new_init_list(sub, take, elem->loc);
+            for (int k = 0; k < take; k++)
+                list->u.init_list.elements[i + k] = ((void*)0);
             i += take - 1;
         }
         if (elem->kind == EX_INIT_LIST) {
@@ -3611,6 +3613,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             expr_free(out[pos]);
             out[pos] = elem;
         }
+        list->u.init_list.elements[i] = ((void*)0);
         cursor = pos + 1;
         last_union_member_idx = member_idx;
         if (sd && !sd->is_union) {
@@ -3665,6 +3668,10 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         list->u.init_list.desig_index = ((void*)0);
         list->u.init_list.desig_member = ((void*)0);
     }
+    return;
+fail:
+    for (int i = 0; i < N; i++) expr_free(out[i]);
+    runtime.free(out);
 }
 static void try_fold_vla_type(Type *t) {
     while (t && t->kind == TY_ARRAY) {
