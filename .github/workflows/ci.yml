@@ -64,15 +64,17 @@ jobs:
             cxx: clang++
             cflags: "-O2"
           # arm64 under ASan/UBSan, matching what the Linux side has had all
-          # along.  It earns its keep: UBSan found a shift-by-64 in the arm64
-          # immediate encoder (a64.c) on the very first run.  See the Test
-          # step for why this leg runs a subset of ctest.
+          # along, and running the same full ctest they do.  It earns its
+          # keep: UBSan found a shift-by-64 in the arm64 immediate encoder
+          # (a64.c) on the very first run.  It used to run only a subset
+          # because a plain macOS ctest took ~2.9 h, which ASan multiplied
+          # past the 6 h cap -- but nearly all of that wall clock turned out
+          # to be test/compat.sh polling in one-second sleeps, not compiling.
           - label: macos-latest · clang ASan (arm64)
             os: macos-latest
             cc: clang
             cxx: clang++
             cflags: "-fsanitize=address,undefined -g"
-            unit_only: true
 
     steps:
       - uses: actions/checkout@v4
@@ -131,19 +133,7 @@ jobs:
 
       - name: Test
         run: |
-          if [ "${{ matrix.config.unit_only }}" = "true" ]; then
-            # A plain macOS ctest already takes ~2.9 h and ASan multiplies
-            # that past GitHub's 6 h job cap, so this leg runs the part that
-            # fits: unit tests plus the quick e2e suites (cli, gdb/lldb,
-            # shlib/dylib).  They cover the compiler's own internals, which
-            # is where sanitizer findings actually show up -- the corpus-wide
-            # ones (e2e, difftest, gcc_compile) stay on the non-sanitized
-            # macOS legs and on Linux ASan, where they still fit.
-            ctest --test-dir build --output-on-failure \
-              -E "^(e2e_O|e2e_multi|difftest_|compile_)"
-          else
-            ctest --test-dir build --output-on-failure
-          fi
+          ctest --test-dir build --output-on-failure
 
       - name: Coverage report
         if: matrix.config.cov
