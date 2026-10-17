@@ -67,6 +67,12 @@ read_annotations() {
 check_text_identical() {
   local src="$1" flags="$2" name="$3"
   local plain="$TMP/id_plain" dbg="$TMP/id_dbg"
+  # Comparing .text needs binutils.  Say so instead of comparing two files
+  # that were never produced, which would report itself as "identical".
+  if ! command -v objcopy >/dev/null 2>&1; then
+    echo "note $name [$flags] (-g/.text comparison skipped, no objcopy)"
+    return 0
+  fi
   if ! timeout "$CC_TIMEOUT" "$FAKECC" $flags "$src" -o "$plain" 2>"$TMP/e1"; then
     echo "FAIL $name [$flags] (compile without -g failed: $(head -1 "$TMP/e1"))"
     return 1
@@ -190,6 +196,15 @@ if echo "$out" | grep -q "Breakpoint 1"; then
 else
   echo "FAIL break main without -g"; echo "$out" | sed 's/^/  /'
   n_fail=$((n_fail + 1)); FAIL=1
+fi
+
+# A green suite that executed nothing is indistinguishable from a broken one
+# unless it says so.  Right now nothing above ever produces this state, but
+# that is the failure mode this whole suite used to have: every Linux runner
+# reported success for years without running a single case.
+if [ "$n_pass" = "0" ] && [ "$n_fail" = "0" ]; then
+  echo "FAIL gdb suite ran no cases"
+  exit 2
 fi
 
 echo "--- gdb e2e: $n_pass passed, $n_fail failed ---"

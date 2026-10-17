@@ -262,7 +262,15 @@ static int encode_limm(uint64_t v, int is64,
          * (welem = 2^(S+1)-1).  The decoder applies ROR(welem, R), so
          * the field R is the complement of pat's own rotation. */
         for (int r = 0; r < esize; r++) {
-            uint64_t w = ((pat >> r) | (pat << (esize - r))) & emask;
+            /* Rotate pat right by r within an esize-bit field.  Writing the
+             * common form unconditionally is UB when esize is 64 and r is 0:
+             * `pat << (esize - r)` shifts a uint64_t by 64, which UBSan
+             * aborts on.  A rotation by zero is pat itself, and for r > 0
+             * the shift distance is at most esize-1, so this is safe with
+             * no change in what either branch computes. */
+            uint64_t w = r == 0
+                             ? (pat & emask)
+                             : ((pat >> r) | (pat << (esize - r))) & emask;
             if (w == 0) continue;
             if ((w & (w + 1)) != 0) continue;
             /* w = (1 << k) - 1; S = k - 1. */

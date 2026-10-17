@@ -300,5 +300,12 @@ for src in "$CASE_DIR"/*.c; do
   run_case "$src" "-O1"
 done
 
+# Same guard as run_gdb_e2e.sh: a suite that quietly ran no cases must not
+# look like one that passed.
+if [ "$n_pass" = "0" ] && [ "$n_fail" = "0" ]; then
+  echo "FAIL lldb suite ran no cases"
+  exit 2
+fi
+
 echo "lldb: $n_pass passed, $n_fail failed"
 exit $FAIL

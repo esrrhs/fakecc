@@ -147,6 +147,15 @@ foreach(lvl O0 O1)
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_shlib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+    # Mach-O counterpart of the shared-library suite: -dynamiclib,
+    # -install_name, LC_LOAD_DYLIB and LC_RPATH.  The script refuses to run
+    # off Darwin on its own, so keeping it registered here leaves the ctest
+    # roster identical on both platforms while the cases are real on macOS
+    # (where e2e_shlib_* has nothing but ELF checks to skip).
+    add_test(NAME e2e_dylib_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_dylib_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     # Compile-only robustness suite (2,003 GCC edge-case tests).
     add_test(NAME compile_${lvl}
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/compile/gcc_compile/run_compile.sh $<TARGET_FILE:fakecc> -${lvl}
@@ -157,6 +166,12 @@ endforeach()
 # expected answers differ between them.  Skipped gracefully if gdb is absent.
 add_test(NAME e2e_gdb
          COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_gdb_e2e.sh $<TARGET_FILE:fakecc>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# DWARF against a real lldb, the macOS counterpart of the gdb suite above.
+# Same deal as e2e_dylib: registered everywhere, meaningful on Darwin.
+add_test(NAME e2e_lldb
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_lldb_e2e.sh $<TARGET_FILE:fakecc>
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_test(NAME e2e_cli

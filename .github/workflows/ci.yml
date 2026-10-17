@@ -63,9 +63,35 @@ jobs:
             cc: clang
             cxx: clang++
             cflags: "-O2"
+          # arm64 under ASan/UBSan, matching what the Linux side has had all
+          # along.  It earns its keep: UBSan found a shift-by-64 in the arm64
+          # immediate encoder (a64.c) on the very first run.  See the Test
+          # step for why this leg runs a subset of ctest.
+          - label: macos-latest · clang ASan (arm64)
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+            cflags: "-fsanitize=address,undefined -g"
+            unit_only: true
 
     steps:
       - uses: actions/checkout@v4
+
+      # Both debugger suites (gdb here, lldb on macOS) skip themselves when
+      # their debugger is missing.  On Linux that turned `e2e_gdb` into a
+      # permanent no-op that still reported success -- the DWARF assertions
+      # had never actually run here.  Install gdb so the suite is real, and
+      # refuse to go quietly if the install does not take.
+      - name: Install gdb (Linux DWARF tests)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y gdb
+          if ! command -v gdb >/dev/null 2>&1; then
+            echo "::error::gdb install failed; the DWARF suite would silently pass"
+            exit 1
+          fi
+          gdb --version | head -1
 
       # difftest hardcodes host `gcc` as the oracle.  Runner images ship GCC
       # 13.2 (no uabs builtins; tree-optimization/123864).  Install GCC 16 so
@@ -104,7 +130,20 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          if [ "${{ matrix.config.unit_only }}" = "true" ]; then
+            # A plain macOS ctest already takes ~2.9 h and ASan multiplies
+            # that past GitHub's 6 h job cap, so this leg runs the part that
+            # fits: unit tests plus the quick e2e suites (cli, gdb/lldb,
+            # shlib/dylib).  They cover the compiler's own internals, which
+            # is where sanitizer findings actually show up -- the corpus-wide
+            # ones (e2e, difftest, gcc_compile) stay on the non-sanitized
+            # macOS legs and on Linux ASan, where they still fit.
+            ctest --test-dir build --output-on-failure \
+              -E "^(e2e_O|e2e_multi|difftest_|compile_)"
+          else
+            ctest --test-dir build --output-on-failure
+          fi
 
       - name: Coverage report
         if: matrix.config.cov
@@ -223,15 +262,30 @@ jobs:
           - label: difftest -O1
             suite: difftest
             opt: -O1
-          - label: multi/shlib/gdb
+          # Same set of scripts the macOS leg below runs, minus the two that
+          # need Mach-O.  The label names the whole mix, so the two legs can
+          # be compared at a glance.
+          - label: multi/shlib/gdb/cli/compile/ports
             suite: misc
             opt: ""
     steps:
       - uses: actions/checkout@v4
 
       # Needed for the difftest matrix legs (host gcc is the oracle).
+      # gdb too: the misc leg runs the DWARF suite, which otherwise skips
+      # itself and reports success without having executed a single case.
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
+
+      - name: Install gdb (Linux DWARF tests)
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y gdb
+          if ! command -v gdb >/dev/null 2>&1; then
+            echo "::error::gdb install failed; the DWARF suite would silently pass"
+            exit 1
+          fi
+          gdb --version | head -1
 
       - name: Download self-hosted compiler
         uses: actions/download-artifact@v4
@@ -250,7 +304,7 @@ jobs:
               CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 "$OPT"
               ;;
             difftest)
-              bash test/e2e/run_difftest.sh v0/fakecc-1 "$OPT"
+              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh v0/fakecc-1 "$OPT"
               ;;
             misc)
               bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O0
@@ -292,7 +346,7 @@ jobs:
           - label: difftest -O1
             opt: -O1
             suite: difftest
-          - label: multi/cli/compile/ports
+          - label: multi/dylib/lldb/cli/compile/ports
             opt: ""
     steps:
       - uses: actions/checkout@v4
