@@ -107,5 +107,8 @@ void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
 /* Suggest which package exports `name` (for "did you mean?" diagnostics).
  * Searches loaded packages only. Returns package name or NULL. */
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
+/* Every .c in a package directory, sorted by name (see pkg.c).  Caller frees
+ * the array and each element.  *n_out is set even on failure. */
+char **pkg_list_sources(const char *dir, size_t *n_out);
 
 #endif /* FAKECC_PKG_H */

@@ -1189,6 +1189,7 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src);
 void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
                         const Package *pkg);
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
+char **pkg_list_sources(const char *dir, size_t *n_out);
 struct PkgContext;
 int sema_check(const TranslationUnit *tu, int require_main);
 int sema_check_in_pkg(const TranslationUnit *tu, int require_main,

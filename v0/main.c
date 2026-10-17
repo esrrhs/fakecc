@@ -1188,6 +1188,7 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src);
 void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
                         const Package *pkg);
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
+char **pkg_list_sources(const char *dir, size_t *n_out);
 struct PkgContext;
 int sema_check(const TranslationUnit *tu, int require_main);
 int sema_check_in_pkg(const TranslationUnit *tu, int require_main,
@@ -1195,6 +1196,17 @@ int sema_check_in_pkg(const TranslationUnit *tu, int require_main,
 int sema_has_errors(void);
 int sema_error_count(void);
 int sema_warning_count(void);
+struct SHA256Ctx {
+    uint32_t h[8];
+    uint64_t bit_len;
+    unsigned char block[64];
+    size_t used;
+};typedef struct SHA256Ctx SHA256Ctx;
+void sha256_init(SHA256Ctx *ctx);
+void sha256_update(SHA256Ctx *ctx, const void *data, size_t len);
+void sha256_final(SHA256Ctx *ctx, unsigned char out[32]);
+void sha256_buf(const void *data, size_t len,
+                unsigned char out[32]);
 enum TargetArch {
     TARGET_ARCH_UNKNOWN = 0,
     TARGET_ARCH_X86_64 = 1,
@@ -1504,6 +1516,115 @@ static char *find_rt_dir(const char *argv0) {
     runtime.free(basedir);
     return ((void*)0);
 }
+static char *rt_cache_base(void) {
+    const char *env = runtime.getenv("FAKECC_RTCACHE");
+    if (env && env[0]) return runtime.strcmp(env, "0") == 0 ? ((void*)0) : xstrdup(env);
+    const char *xdg = runtime.getenv("XDG_CACHE_HOME");
+    if (xdg && xdg[0]) return path_join(xdg, "fakecc");
+    const char *home = runtime.getenv("HOME");
+    if (home && home[0]) {
+        char *a = path_join(home, ".cache");
+        char *b = path_join(a, "fakecc");
+        runtime.free(a);
+        return b;
+    }
+    return ((void*)0);
+}
+static int rt_mkdir_p(const char *path) {
+    char *copy = xstrdup(path);
+    size_t n = runtime.strlen(copy);
+    for (size_t i = 1; i <= n; i++) {
+        if (copy[i] != '/' && copy[i] != '\0') continue;
+        char save = copy[i];
+        copy[i] = '\0';
+        runtime.mkdir(copy, 0755);
+        copy[i] = save;
+    }
+    runtime.free(copy);
+    return 1;
+}
+static char *rt_self_path(const char *argv0) {
+    if (!argv0 || !argv0[0]) return ((void*)0);
+    if (runtime.strchr(argv0, '/')) return file_readable(argv0) ? xstrdup(argv0) : ((void*)0);
+    const char *path = runtime.getenv("PATH");
+    if (!path || !path[0]) return ((void*)0);
+    char *copy = xstrdup(path);
+    char *p = copy;
+    char *found = ((void*)0);
+    while (*p) {
+        char *colon = runtime.strchr(p, ':');
+        if (colon) *colon = '\0';
+        if (*p) {
+            char *cand = path_join(p, argv0);
+            if (file_readable(cand)) { found = cand; break; }
+            runtime.free(cand);
+        }
+        if (!colon) break;
+        p = colon + 1;
+    }
+    runtime.free(copy);
+    return found;
+}
+static void rt_hash_file(SHA256Ctx *c, const char *path) {
+    FILE *f = runtime.fopen(path, "rb");
+    if (!f) return;
+    char buf[65536];
+    size_t n;
+    while ((n = runtime.fread(buf, 1, sizeof buf, f)) > 0) sha256_update(c, buf, n);
+    runtime.fclose(f);
+}
+static void rt_hash_str(SHA256Ctx *c, const char *s) {
+    sha256_update(c, s, runtime.strlen(s));
+    sha256_update(c, "\x1f", 1);
+}
+static int rt_cache_key(int argc, char **argv, const char *rt_dir,
+                        int opt_level, int want_debug, int multi_tu,
+                        int rt_alloc, int arm64_link_runtime, char *key) {
+    char *self = rt_self_path(argv[0]);
+    if (!self) return 0;
+    SHA256Ctx c;
+    sha256_init(&c);
+    const TargetDesc *t = target_current();
+    rt_hash_str(&c, t->triple);
+    sha256_update(&c, &opt_level, sizeof opt_level);
+    sha256_update(&c, &want_debug, sizeof want_debug);
+    sha256_update(&c, &multi_tu, sizeof multi_tu);
+    sha256_update(&c, &rt_alloc, sizeof rt_alloc);
+    sha256_update(&c, &arm64_link_runtime, sizeof arm64_link_runtime);
+    rt_hash_file(&c, self);
+    runtime.free(self);
+    sha256_update(&c, &g_instrument_functions, sizeof g_instrument_functions);
+    sha256_update(&c, &g_no_builtin, sizeof g_no_builtin);
+    sha256_update(&c, &g_sanitize_address, sizeof g_sanitize_address);
+    sha256_update(&c, &g_no_avx, sizeof g_no_avx);
+    sha256_update(&c, &g_avx512f, sizeof g_avx512f);
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] != '-') continue;
+        if (a[1] == 'o') {
+            if (a[2] == '\0' && i + 1 < argc) i++;
+            continue;
+        }
+        if (a[1] == 'O') continue;
+        rt_hash_str(&c, a);
+    }
+    size_t n = 0;
+    char **names = pkg_list_sources(rt_dir, &n);
+    if (!names) return 0;
+    for (size_t i = 0; i < n; i++) {
+        rt_hash_str(&c, names[i]);
+        char *src = path_join(rt_dir, names[i]);
+        rt_hash_file(&c, src);
+        runtime.free(src);
+        runtime.free(names[i]);
+    }
+    runtime.free(names);
+    unsigned char d[32];
+    sha256_final(&c, d);
+    for (int i = 0; i < 8; i++) runtime.snprintf(key + i * 2, 3, "%02x", d[i]);
+    key[16] = '\0';
+    return 1;
+}
 static void add_pkg_env_paths(PkgContext *ctx) {
     const char *env = runtime.getenv("FAKECC_PKG");
     if (!env || !env[0]) return;
@@ -1804,10 +1925,12 @@ int main(int argc, char **argv) {
             continue;
         nsource_tus++;
     }
-    emit_set_multi_tu(nsource_tus + nlinked_files > 1);
-    emit_set_runtime_alloc(nrt
-                           && !(target_current()->arch == TARGET_ARCH_ARM64
-                                && !arm64_link_runtime));
+    int multi_tu = nsource_tus + nlinked_files > 1;
+    emit_set_multi_tu(multi_tu);
+    int runtime_alloc = nrt
+                        && !(target_current()->arch == TARGET_ARCH_ARM64
+                             && !arm64_link_runtime);
+    emit_set_runtime_alloc(runtime_alloc);
     EmitModule *mods = runtime.malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = runtime.malloc((size_t)nmods * sizeof(EmitModule *));
     if (!mods || !mod_ptrs) {
@@ -1831,20 +1954,84 @@ int main(int argc, char **argv) {
         target_current()->arch == TARGET_ARCH_ARM64
         && !nostdlib
         && !arm64_link_runtime;
+    char *rt_cache_dir = ((void*)0);
+    if (nrt && !arm64_freestanding) {
+        int npkg_files = 0;
+        for (size_t p = 0; p < pkg.npkgs; p++)
+            if (pkg.pkgs[p]->owns_files) npkg_files++;
+        if (npkg_files == 1) {
+            char key[17];
+            char *base = rt_cache_base();
+            int ok = base
+                     && rt_cache_key(argc, argv, rt_dir, opt_level, want_debug,
+                                     multi_tu, runtime_alloc, arm64_link_runtime,
+                                     key);
+            if (runtime.getenv("FAKECC_RTCACHE_DEBUG")) {
+                runtime.fprintf(runtime.stderr, "[rtcache] base=%s npkg_files=%d ok=%d key=%s "
+                        "opt=%d dbg=%d multi=%d alloc=%d arm64rt=%d\n",
+                        base ? base : "(null)", npkg_files, ok,
+                        ok ? key : "-", opt_level, want_debug, multi_tu,
+                        runtime_alloc, arm64_link_runtime);
+                for (int ai = 0; ai < argc; ai++)
+                    runtime.fprintf(runtime.stderr, "[rtcache] argv[%d]=%s\n", ai, argv[ai]);
+            }
+            if (base && ok) {
+                char *sub = runtime.malloc(runtime.strlen(base) + 24);
+                if (sub) {
+                    runtime.snprintf(sub, runtime.strlen(base) + 24, "%s/rt-%s", base, key);
+                    if (rt_mkdir_p(sub)) rt_cache_dir = sub;
+                    else runtime.free(sub);
+                }
+            }
+            runtime.free(base);
+        }
+    }
     int mi = ninputs;
     for (size_t p = 0; p < pkg.npkgs; p++) {
         Package *pp = pkg.pkgs[p];
         if (!pp->owns_files) continue;
+        int is_rt = rt_cache_dir != ((void*)0)
+                 && runtime.strcmp(pp->name, rt_pkg_name()) == 0;
         for (size_t f = 0; f < pp->nfiles; f++) {
             if (arm64_freestanding) break;
+            char objname[32];
+            runtime.snprintf(objname, sizeof objname, "%u.o", (unsigned)f);
+            if (is_rt) {
+                char *cached = path_join(rt_cache_dir, objname);
+                if (file_readable(cached) && emit_obj_read(cached, &mods[mi]) == 0) {
+                    runtime.free(cached);
+                    mod_ptrs[mi] = &mods[mi];
+                    mi++;
+                    continue;
+                }
+                runtime.free(cached);
+            }
             char *fake = path_join(pp->dir, "_.c");
+            if (is_rt) emit_set_object_mode(1);
             if (lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK)
                 runtime.exit(1);
+            if (is_rt) {
+                emit_set_object_mode(0);
+                char *cached = path_join(rt_cache_dir, objname);
+                const char *tn = runtime.tmpnam(((void*)0));
+                const char *slash = tn ? runtime.strrchr(tn, '/') : ((void*)0);
+                const char *tbase = slash ? slash + 1 : (tn ? tn : "tmp");
+                size_t tlen = runtime.strlen(rt_cache_dir) + runtime.strlen(tbase) + 2;
+                char *tmp = runtime.malloc(tlen);
+                if (tmp) {
+                    runtime.snprintf(tmp, tlen, "%s/%s", rt_cache_dir, tbase);
+                    emit_obj(&mods[mi], tmp);
+                    if (runtime.rename(tmp, cached) != 0) runtime.remove(tmp);
+                    runtime.free(tmp);
+                }
+                runtime.free(cached);
+            }
             runtime.free(fake);
             mod_ptrs[mi] = &mods[mi];
             mi++;
         }
     }
+    runtime.free(rt_cache_dir);
     emit_link(mod_ptrs, (size_t)nmods, output_path,
               (const char **)needed, (size_t)num_needed,
               nodefaultlibs || nostdlib,

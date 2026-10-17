@@ -8,12 +8,14 @@
 #include "fakecc/parser.h"
 #include "fakecc/pkg.h"
 #include "fakecc/sema.h"
+#include "fakecc/sha256.h"
 #include "fakecc/target.h"
 #include "fakecc/token.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #if defined(__SANITIZE_ADDRESS__) || defined(__has_feature)
 const char *__asan_default_options(void) {
@@ -342,6 +344,157 @@ static char *find_rt_dir(const char *argv0) {
     }
     free(basedir);
     return NULL;
+}
+
+/* --- compile cache for the builtin runtime --------------------------------
+ *
+ * Phase 3 lowers every runtime module from source on every single
+ * invocation: 16 files, 5409 lines, ~262 of the ~277 ms one small case
+ * costs, on every target, because this path is shared by all of them.
+ * Cache the lowered modules as object files and read them back.
+ *
+ * The key covers everything that can change the bytes: the target triple,
+ * the optimization level, whether debug info is on, the compiler's own
+ * binary (a codegen change makes it a different compiler) and the runtime
+ * sources.  When any of those cannot be read the cache turns off instead of
+ * guessing -- a stale runtime is a silent miscompile, and 262 ms is not
+ * worth that risk.  FAKECC_RTCACHE=0 disables it, FAKECC_RTCACHE=<dir>
+ * names the directory.
+ */
+static char *rt_cache_base(void) {
+    const char *env = getenv("FAKECC_RTCACHE");
+    if (env && env[0]) return strcmp(env, "0") == 0 ? NULL : xstrdup(env);
+    const char *xdg = getenv("XDG_CACHE_HOME");
+    if (xdg && xdg[0]) return path_join(xdg, "fakecc");
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        char *a = path_join(home, ".cache");
+        char *b = path_join(a, "fakecc");
+        free(a);
+        return b;
+    }
+    return NULL;
+}
+
+/* Create every missing component.  mkdir failing because the component is
+ * already there is the common case and is not an error; anything else just
+ * leaves the directory absent, which the read/write path below treats as a
+ * cache miss.  No errno: the self-hosted build has no <errno.h>. */
+static int rt_mkdir_p(const char *path) {
+    char *copy = xstrdup(path);
+    size_t n = strlen(copy);
+    for (size_t i = 1; i <= n; i++) {
+        if (copy[i] != '/' && copy[i] != '\0') continue;
+        char save = copy[i];
+        copy[i] = '\0';
+        mkdir(copy, 0755);
+        copy[i] = save;
+    }
+    free(copy);
+    return 1;
+}
+
+/* Absolute path of the running compiler, or NULL when argv[0] does not
+ * resolve to a file.  Without it there is nothing to fingerprint the
+ * compiler with, so the cache stays off. */
+static char *rt_self_path(const char *argv0) {
+    if (!argv0 || !argv0[0]) return NULL;
+    if (strchr(argv0, '/')) return file_readable(argv0) ? xstrdup(argv0) : NULL;
+    const char *path = getenv("PATH");
+    if (!path || !path[0]) return NULL;
+    char *copy = xstrdup(path);
+    char *p = copy;
+    char *found = NULL;
+    while (*p) {
+        char *colon = strchr(p, ':');
+        if (colon) *colon = '\0';
+        if (*p) {
+            char *cand = path_join(p, argv0);
+            if (file_readable(cand)) { found = cand; break; }
+            free(cand);
+        }
+        if (!colon) break;
+        p = colon + 1;
+    }
+    free(copy);
+    return found;
+}
+
+static void rt_hash_file(SHA256Ctx *c, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    char buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) sha256_update(c, buf, n);
+    fclose(f);
+}
+
+/* Hash a NUL-terminated string, used for both flags and file contents. */
+static void rt_hash_str(SHA256Ctx *c, const char *s) {
+    sha256_update(c, s, strlen(s));
+    sha256_update(c, "\x1f", 1);
+}
+
+/* Fills key with 16 hex digits + NUL; returns 0 when the fingerprint cannot
+ * be computed. */
+static int rt_cache_key(int argc, char **argv, const char *rt_dir,
+                        int opt_level, int want_debug, int multi_tu,
+                        int rt_alloc, int arm64_link_runtime, char *key) {
+    char *self = rt_self_path(argv[0]);
+    if (!self) return 0;
+    SHA256Ctx c;
+    sha256_init(&c);
+    const TargetDesc *t = target_current();
+    rt_hash_str(&c, t->triple);
+    sha256_update(&c, &opt_level, sizeof opt_level);
+    sha256_update(&c, &want_debug, sizeof want_debug);
+    sha256_update(&c, &multi_tu, sizeof multi_tu);
+    sha256_update(&c, &rt_alloc, sizeof rt_alloc);
+    sha256_update(&c, &arm64_link_runtime, sizeof arm64_link_runtime);
+    rt_hash_file(&c, self);
+    free(self);
+
+    /* The switches below are globals read during codegen, so each one can
+     * change the bytes of a runtime module. */
+    sha256_update(&c, &g_instrument_functions, sizeof g_instrument_functions);
+    sha256_update(&c, &g_no_builtin, sizeof g_no_builtin);
+    sha256_update(&c, &g_sanitize_address, sizeof g_sanitize_address);
+    sha256_update(&c, &g_no_avx, sizeof g_no_avx);
+    sha256_update(&c, &g_avx512f, sizeof g_avx512f);
+
+    /* Catch-all: every remaining flag, so a switch added later that this
+     * list does not know about still gets a fresh directory.  The output
+     * path and the input files are left out on purpose -- the output name
+     * differs for every case in a suite and would empty the cache, and the
+     * inputs cannot reach runtime codegen (their *number* can, which is
+     * what multi_tu above records). */
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] != '-') continue;                  /* positional input */
+        if (a[1] == 'o') {                          /* -o path / -opath */
+            if (a[2] == '\0' && i + 1 < argc) i++;
+            continue;
+        }
+        if (a[1] == 'O') continue;                  /* folded into opt_level */
+        rt_hash_str(&c, a);
+    }
+
+    size_t n = 0;
+    char **names = pkg_list_sources(rt_dir, &n);
+    if (!names) return 0;
+    for (size_t i = 0; i < n; i++) {
+        rt_hash_str(&c, names[i]);
+        char *src = path_join(rt_dir, names[i]);
+        rt_hash_file(&c, src);
+        free(src);
+        free(names[i]);
+    }
+    free(names);
+    unsigned char d[SHA256_DIGEST_LEN];
+    sha256_final(&c, d);
+    for (int i = 0; i < 8; i++) snprintf(key + i * 2, 3, "%02x", d[i]);
+    key[16] = '\0';
+    return 1;
 }
 
 /* FAKECC_PKG is a colon-separated list of package-root directories. */
@@ -728,14 +881,16 @@ int main(int argc, char **argv) {
             continue;
         nsource_tus++;
     }
-    emit_set_multi_tu(nsource_tus + nlinked_files > 1);
+    int multi_tu = nsource_tus + nlinked_files > 1;
+    emit_set_multi_tu(multi_tu);
     /* runtime/malloc.c is linked together with these TUs, so it owns
      * malloc/free/calloc/realloc.  FAKECC_ARM64_RUNTIME=0 drops the runtime
      * files from the link even when !nostdlib (arm64_freestanding above), and
      * then the inline fallback is all there is. */
-    emit_set_runtime_alloc(nrt
-                           && !(target_current()->arch == TARGET_ARCH_ARM64
-                                && !arm64_link_runtime));
+    int runtime_alloc = nrt
+                        && !(target_current()->arch == TARGET_ARCH_ARM64
+                             && !arm64_link_runtime);
+    emit_set_runtime_alloc(runtime_alloc);
 
     EmitModule *mods = malloc((size_t)nmods * sizeof(EmitModule));
     EmitModule **mod_ptrs = malloc((size_t)nmods * sizeof(EmitModule *));
@@ -771,6 +926,43 @@ int main(int argc, char **argv) {
         && !nostdlib
         && !arm64_link_runtime;
 
+    /* Resolve the runtime cache directory.  Only the builtin runtime is ever
+     * cached, and only when it is the sole package contributing files: an
+     * object-mode runtime module linked next to a whole-program package
+     * module is a combination nothing else produces. */
+    char *rt_cache_dir = NULL;
+    if (nrt && !arm64_freestanding) {
+        int npkg_files = 0;
+        for (size_t p = 0; p < pkg.npkgs; p++)
+            if (pkg.pkgs[p]->owns_files) npkg_files++;
+        if (npkg_files == 1) {
+            char key[17];
+            char *base = rt_cache_base();
+            int ok = base
+                     && rt_cache_key(argc, argv, rt_dir, opt_level, want_debug,
+                                     multi_tu, runtime_alloc, arm64_link_runtime,
+                                     key);
+            if (getenv("FAKECC_RTCACHE_DEBUG")) {
+                fprintf(stderr, "[rtcache] base=%s npkg_files=%d ok=%d key=%s "
+                        "opt=%d dbg=%d multi=%d alloc=%d arm64rt=%d\n",
+                        base ? base : "(null)", npkg_files, ok,
+                        ok ? key : "-", opt_level, want_debug, multi_tu,
+                        runtime_alloc, arm64_link_runtime);
+                for (int ai = 0; ai < argc; ai++)
+                    fprintf(stderr, "[rtcache] argv[%d]=%s\n", ai, argv[ai]);
+            }
+            if (base && ok) {
+                char *sub = malloc(strlen(base) + 24);
+                if (sub) {
+                    snprintf(sub, strlen(base) + 24, "%s/rt-%s", base, key);
+                    if (rt_mkdir_p(sub)) rt_cache_dir = sub;
+                    else free(sub);
+                }
+            }
+            free(base);
+        }
+    }
+
     /* Phase 3: codegen already-parsed package files (builtin rt + any package
      * pulled in by `import`).  The user's own package is skipped: it has
      * owns_files == 0 (its TUs were the CLI inputs, codegen'd in Phase 2). */
@@ -778,16 +970,65 @@ int main(int argc, char **argv) {
     for (size_t p = 0; p < pkg.npkgs; p++) {
         Package *pp = pkg.pkgs[p];
         if (!pp->owns_files) continue;
+        int is_rt = rt_cache_dir != NULL
+                 && strcmp(pp->name, rt_pkg_name()) == 0;
         for (size_t f = 0; f < pp->nfiles; f++) {
             if (arm64_freestanding) break;     /* runtime ported in T16+ */
+            char objname[32];
+            snprintf(objname, sizeof objname, "%u.o", (unsigned)f);
+            if (is_rt) {
+                char *cached = path_join(rt_cache_dir, objname);
+                /* Probe first: emit_obj_read reports a missing file on
+                 * stderr, and a cold cache misses 14 times per invocation. */
+                if (file_readable(cached) && emit_obj_read(cached, &mods[mi]) == 0) {
+                    free(cached);
+                    mod_ptrs[mi] = &mods[mi];
+                    mi++;
+                    continue;
+                }
+                free(cached);
+            }
             char *fake = path_join(pp->dir, "_.c");
+            /* Object mode only for the cached module: a .o has to carry its
+             * own relocations, and this is exactly what a `-c` input looks
+             * like to the rest of the link. */
+            if (is_rt) emit_set_object_mode(1);
             if (lower_tu(&pp->files[f], fake, &mods[mi], opt_level, want_debug, &pkg) != FAKECC_OK)
                 exit(1);
+            if (is_rt) {
+                emit_set_object_mode(0);
+                /* Publish with rename(2): a test suite fans cases out with
+                 * xargs -P, so several compilers race on the same file, and
+                 * a half-written .o read back by one of them would be a
+                 * miscompile that looks like a codegen bug.  rename is the
+                 * only step here that another process cannot observe
+                 * half-done.  A failed publish just means the next run
+                 * rebuilds this module. */
+                char *cached = path_join(rt_cache_dir, objname);
+                /* tmpnam is pid+sequence, so two compilers racing on the
+                 * same module write different scratch names; only the
+                 * basename is used, which keeps the scratch file in the
+                 * cache directory so the rename below cannot cross a
+                 * filesystem. */
+                const char *tn = tmpnam(NULL);
+                const char *slash = tn ? strrchr(tn, '/') : NULL;
+                const char *tbase = slash ? slash + 1 : (tn ? tn : "tmp");
+                size_t tlen = strlen(rt_cache_dir) + strlen(tbase) + 2;
+                char *tmp = malloc(tlen);
+                if (tmp) {
+                    snprintf(tmp, tlen, "%s/%s", rt_cache_dir, tbase);
+                    emit_obj(&mods[mi], tmp);
+                    if (rename(tmp, cached) != 0) remove(tmp);
+                    free(tmp);
+                }
+                free(cached);
+            }
             free(fake);
             mod_ptrs[mi] = &mods[mi];
             mi++;
         }
     }
+    free(rt_cache_dir);
 
     emit_link(mod_ptrs, (size_t)nmods, output_path,
               (const char **)needed, (size_t)num_needed,

@@ -241,6 +241,47 @@ static int ends_with_c(const char *name) {
     return n >= 2 && name[n - 2] == '.' && name[n - 1] == 'c';
 }
 
+/* Every .c in a package directory, sorted by name.  The compile cache needs a
+ * stable list to fingerprint the package's bytes with; going through
+ * pkg_dir_* keeps the selfhost build working, where opendir(3) does not
+ * exist.  Returns a malloc'd array of malloc'd names, or NULL if the
+ * directory cannot be opened.  Every .c is listed, including ones the target
+ * would skip (c_file_matches_target): a fingerprint that changed when an
+ * unrelated file changed only costs a cache miss. */
+char **pkg_list_sources(const char *dir, size_t *n_out) {
+    *n_out = 0;
+    void *d = pkg_dir_open(dir);
+    if (!d) return NULL;
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+    const char *e;
+    while ((e = pkg_dir_next(d))) {
+        if (!ends_with_c(e)) continue;
+        if (n == cap) {
+            size_t ncap = cap ? cap * 2 : 8;
+            char **t = realloc(names, ncap * sizeof *names);
+            if (!t) break;
+            names = t;
+            cap = ncap;
+        }
+        names[n] = xstrdup(e);
+        if (!names[n]) break;
+        n++;
+    }
+    pkg_dir_close(d);
+    for (size_t i = 1; i < n; i++) {   /* insertion sort: n is small */
+        char *v = names[i];
+        size_t j = i;
+        while (j > 0 && strcmp(names[j - 1], v) > 0) {
+            names[j] = names[j - 1];
+            j--;
+        }
+        names[j] = v;
+    }
+    *n_out = n;
+    return names;
+}
+
 static int is_dir(const char *path) {
     void *d = pkg_dir_open(path);
     if (!d) return 0;

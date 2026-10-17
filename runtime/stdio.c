@@ -335,6 +335,20 @@ int remove(const char *path) {
     return r == 0 ? 0 : -1;
 }
 
+/* mkdir / rename.  The numbers are the Linux x86-64 ones the rest of the
+ * runtime is written against (83 and 82); the arm64 backend remaps them to
+ * Darwin's 136 and 128, verified against the Darwin arm64 syscall table by
+ * calling each one and checking the directory existed afterwards. */
+int mkdir(const char *path, int mode) {
+    long r = __syscall(83, (long)path, (long)mode);
+    return r == 0 ? 0 : -1;
+}
+
+int rename(const char *from, const char *to) {
+    long r = __syscall(82, (long)from, (long)to);
+    return r == 0 ? 0 : -1;
+}
+
 
 void perror(const char *s) {
     stdio_init();

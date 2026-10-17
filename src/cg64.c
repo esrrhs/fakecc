@@ -4002,6 +4002,8 @@ static int64_t c64_darwin_syscall(int64_t num) {
     case 11: return 73;  /* munmap */
     case 39: return 20;  /* getpid */
     case 60: return 1;   /* exit */
+    case 82: return 128; /* rename */
+    case 83: return 136; /* mkdir */
     case 87: return 10;  /* unlink */
     case 90: return 15;  /* chmod (Linux dup2 is 33, not 90) */
     case 102: return 24; /* getuid */

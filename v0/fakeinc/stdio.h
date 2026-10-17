@@ -21,6 +21,8 @@ extern size_t fread(void *p, size_t n, size_t m, FILE *f);
 extern void perror(const char *s);
 extern int fileno(FILE *f);
 extern int remove(const char *p);
+extern int rename(const char *from, const char *to);
+extern char *tmpnam(char *s);
 extern int fseek(FILE *f, long off, int whence);
 extern long ftell(FILE *f);
 typedef long fpos_t;

@@ -4768,6 +4768,8 @@ static int64_t c64_darwin_syscall(int64_t num) {
     case 11: return 73;
     case 39: return 20;
     case 60: return 1;
+    case 82: return 128;
+    case 83: return 136;
     case 87: return 10;
     case 90: return 15;
     case 102: return 24;

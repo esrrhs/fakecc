@@ -699,6 +699,7 @@ void pkg_clone_struct_into(StructRegistry *dst, const StructDef *src);
 void pkg_import_typedef(TranslationUnit *tu, const char *name, const Type *src,
                         const Package *pkg);
 const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
+char **pkg_list_sources(const char *dir, size_t *n_out);
 int lex(const char *source, const char *filename, TokenArray *out);
 struct PkgContext;
 int parse(const TokenArray *tokens, TranslationUnit *tu);
@@ -906,6 +907,39 @@ static void pkg_dir_close(void *dir) { (void)runtime.__fakecc_dir_close(dir); }
 static int ends_with_c(const char *name) {
     size_t n = runtime.strlen(name);
     return n >= 2 && name[n - 2] == '.' && name[n - 1] == 'c';
+}
+char **pkg_list_sources(const char *dir, size_t *n_out) {
+    *n_out = 0;
+    void *d = pkg_dir_open(dir);
+    if (!d) return ((void*)0);
+    char **names = ((void*)0);
+    size_t n = 0, cap = 0;
+    const char *e;
+    while ((e = pkg_dir_next(d))) {
+        if (!ends_with_c(e)) continue;
+        if (n == cap) {
+            size_t ncap = cap ? cap * 2 : 8;
+            char **t = runtime.realloc(names, ncap * sizeof *names);
+            if (!t) break;
+            names = t;
+            cap = ncap;
+        }
+        names[n] = xstrdup(e);
+        if (!names[n]) break;
+        n++;
+    }
+    pkg_dir_close(d);
+    for (size_t i = 1; i < n; i++) {
+        char *v = names[i];
+        size_t j = i;
+        while (j > 0 && runtime.strcmp(names[j - 1], v) > 0) {
+            names[j] = names[j - 1];
+            j--;
+        }
+        names[j] = v;
+    }
+    *n_out = n;
+    return names;
 }
 static int is_dir(const char *path) {
     void *d = pkg_dir_open(path);
