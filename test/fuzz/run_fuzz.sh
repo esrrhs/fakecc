@@ -21,6 +21,15 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 FAKECC=${1:-"$ROOT/build/fakecc"}
 NUM=${2:-${FUZZ_SEEDS:-300}}
 FIRST=${3:-${FUZZ_FIRST_SEED:-1}}
+
+# macOS ships neither `timeout` nor `nproc`.  Both are used below, and both are
+# used inside the per-seed worker shells that `xargs bash -c` spawns, which only
+# inherit exported functions -- so the shims have to be sourced *and* exported
+# here, not just defined.  Without this the run reports every seed as FAIL
+# ("traps under UBSan") because `timeout` is simply "command not found" (127).
+. "$ROOT/test/compat.sh" || { echo "cannot source compat.sh" >&2; exit 2; }
+export -f timeout nproc 2>/dev/null || true
+
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 DIR="$ROOT/test/fuzz"
 WORK=$(mktemp -d)

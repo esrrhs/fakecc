@@ -21,18 +21,34 @@ permissions:
 
 jobs:
   fuzz:
-    name: libFuzzer · ${{ matrix.target }}
-    runs-on: ubuntu-24.04
+    name: libFuzzer · ${{ matrix.target }}${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_compile, fuzz_differential]
+        include:
+          - os: ubuntu-24.04
+            target: fuzz_compile
+            suffix: ""
+          - os: ubuntu-24.04
+            target: fuzz_differential
+            suffix: ""
+          # arm64 macOS is the backend this branch is actually about, and ASan
+          # plus the arm64 codegen is a different enough combination that
+          # fuzzing Linux alone leaves it unchecked.
+          - os: macos-latest
+            target: fuzz_compile
+            suffix: " (macOS arm64)"
+          - os: macos-latest
+            target: fuzz_differential
+            suffix: " (macOS arm64)"
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install clang
+        if: runner.os == 'Linux'
         run: |
           # ubuntu-24.04 runners ship clang; only fall back to apt when it is
           # missing, because the apt mirrors stall often enough to matter here.
@@ -44,8 +60,36 @@ jobs:
                  -o Dpkg::Options::="--force-confold" clang
           fi
 
+      # Apple's clang ships no libFuzzer runtime: libclang_rt.fuzzer_osx.a is
+      # absent from both the Command Line Tools and the Xcode toolchain, so
+      # `-fsanitize=fuzzer` dies at link time.  Probe for one that works first
+      # (a future image may ship it), then fall back to Homebrew's llvm, which
+      # does.  The failure path is a hard error on purpose -- a fuzz leg that
+      # never linked the fuzzer must not report green.
+      - name: Select a libFuzzer-capable clang (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -x
+          printf 'int main(void){return 0;}' > /tmp/fz_probe.c
+          probe() { "$1" -fsanitize=fuzzer /tmp/fz_probe.c -o /tmp/fz_probe 2>/dev/null; }
+          if probe clang; then
+            echo "CLANG=clang" >> "$GITHUB_ENV"
+            echo "system clang links libFuzzer"
+            exit 0
+          fi
+          echo "system clang has no libFuzzer runtime; installing Homebrew llvm"
+          brew install llvm
+          llvm_prefix=$(brew --prefix llvm)
+          probe "$llvm_prefix/bin/clang" || {
+            echo "::error::no libFuzzer-capable clang available on this macOS image"
+            exit 1
+          }
+          echo "CLANG=$llvm_prefix/bin/clang" >> "$GITHUB_ENV"
+
+      # CLANG is set by the macOS selection step above; on Linux it is unset and
+      # build_fuzz.sh falls back to the system clang.
       - name: Build fuzz target
-        run: bash fuzz/build_fuzz.sh
+        run: CLANG="${CLANG:-clang}" bash fuzz/build_fuzz.sh
 
       - name: Run fuzz (${{ matrix.target }})
         timeout-minutes: 70
@@ -103,7 +147,9 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: crash-${{ matrix.target }}-${{ github.run_id }}
+          # runner.os keeps the Linux and macOS legs from overwriting each
+          # other's artifact -- both now fuzz the same two targets per run.
+          name: crash-${{ matrix.target }}-${{ runner.os }}-${{ github.run_id }}
           path: |
             build_fuzz/crash-*
             build_fuzz/oom-*

@@ -98,8 +98,10 @@ jobs:
       # difftest hardcodes host `gcc` as the oracle.  Runner images ship GCC
       # 13.2 (no uabs builtins; tree-optimization/123864).  Install GCC 16 so
       # the oracle matches local GCC 16.2.0 (also used when matrix.cc is gcc).
-      # macOS gets a Homebrew gcc (any modern major) -- the same oracle the
-      # macos-suite difftest legs already use, so ctest is 1:1 with Linux.
+      # macOS gets a Homebrew gcc, which currently resolves to 16.2.0 -- the
+      # same version as the Linux oracle, and the same one the
+      # bootstrap-suite-macos difftest legs use.  An oracle that differed by
+      # major version would make the two platforms' verdicts incomparable.
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
 
@@ -154,10 +156,21 @@ jobs:
 
   # Differential fuzzing: random C programs, gcc is the oracle.  Programs in
   # test/fuzz/known_failures are known miscompiles (reported, not failing).
+  # Both platforms, same seed count: a miscompile that only shows up under one
+  # ABI (arm64 has no 80-bit long double, and a different sret rule) is exactly
+  # what this catches, so running it on Linux alone hides half of it.
   fuzz:
-    name: random program difftest
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: random program difftest${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: ""
+          - os: macos-latest
+            suffix: " (macOS arm64)"
     steps:
       - uses: actions/checkout@v4
 
@@ -172,9 +185,11 @@ jobs:
       - name: Random program difftest
         run: bash test/fuzz/run_fuzz.sh build/fakecc 300 1
 
-  # Wall-clock of this job is dominated by self-hosted e2e and difftest
-  # (each run twice, -O0 then -O1).  -O0 finishes around 33 min; -O1 needs
-  # the 75-minute job budget (40 min cancelled the -O1 legs).
+  # Wall-clock of the *downstream* bootstrap-suite job is dominated by e2e and
+  # difftest with the self-hosted binary, each run twice (-O0 then -O1).
+  # Measured on a 4-vCPU runner: e2e ~9-11 min per leg, difftest ~10 min,
+  # misc ~3 min -- all well inside the 75 min budget.  This job itself is ~5
+  # min: two full self-compiles of the compiler.
   bootstrap:
     name: bootstrap (fixed point)
     runs-on: ubuntu-latest
@@ -273,6 +288,17 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      # Consumed by bootstrap-suite-macos below, which re-runs the functional
+      # suites with this binary -- the self-hosted compiler has to work, not
+      # merely reproduce itself.
+      - name: Upload self-hosted compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: fakecc-1-macos
+          path: v0/fakecc-1
+          if-no-files-found: error
+          retention-days: 3
+
   # A fixed point alone does not prove correctness — a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
   # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are
@@ -360,29 +386,46 @@ jobs:
               ;;
           esac
 
-  # macOS e2e suites: same coverage as Linux bootstrap-suite, but using the
-  # host-built compiler (bootstrap on arm64 hits a conditional-branch-range
-  # limitation that is being investigated separately). Uses gcc as the
-  # difftest oracle (same as Linux).
-  macos-suite:
-    name: macos · ${{ matrix.label }}
+  # The macOS twin of bootstrap-suite: same matrix shape, same scripts, same
+  # self-hosted binary (downloaded from bootstrap-macos).  Running the
+  # host-built compiler here instead would leave arm64 as the one platform
+  # where the fixed point is checked but nothing proves it still *works*.
+  #
+  # Exactly two substitutions, both forced by the file formats rather than by
+  # convenience: shlib -> dylib (Mach-O has no ELF .so) and gdb -> lldb (macOS
+  # has no gdb).  Keeping the rest identical means a diff between the two legs
+  # is a real coverage gap instead of a naming accident.
+  #
+  # The previous version of this job matched on `${{ matrix.label }}` while the
+  # label carried the full script list, so the `multi/*` branch never matched
+  # and the leg finished in 36 s having executed nothing -- a green check that
+  # covered zero tests.  Dispatch on the `suite` field and fail on an unknown
+  # one so that can't come back.
+  bootstrap-suite-macos:
+    name: bootstrap (macOS) · ${{ matrix.label }}
+    needs: bootstrap-macos
     runs-on: macos-latest
-    timeout-minutes: 75
+    # Linux needs 75 min for the slowest leg; the macOS runner is slower still,
+    # so leave headroom rather than race the cancellation.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
           - label: e2e -O0
+            suite: e2e
             opt: -O0
           - label: e2e -O1
+            suite: e2e
             opt: -O1
           - label: difftest -O0
+            suite: difftest
             opt: -O0
-            suite: difftest
           - label: difftest -O1
-            opt: -O1
             suite: difftest
+            opt: -O1
           - label: multi/dylib/lldb/cli/compile/ports
+            suite: misc
             opt: ""
     steps:
       - uses: actions/checkout@v4
@@ -391,30 +434,50 @@ jobs:
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
 
-      - name: Build
+      # lldb stands in for the Linux leg's gdb, and for the same reason that
+      # guard exists: run_lldb_e2e.sh reports success when lldb is absent, so
+      # without this check the DWARF suite would pass having run nothing.
+      - name: Check lldb is present
         run: |
-          cmake -S . -B build
-          cmake --build build --parallel
+          if ! command -v lldb >/dev/null 2>&1; then
+            echo "::error::lldb missing; the DWARF suite would silently pass"
+            exit 1
+          fi
+          lldb --version | head -1
+
+      - name: Download self-hosted compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: fakecc-1-macos
+          path: v0
 
       - name: Run suite
+        env:
+          SUITE: ${{ matrix.suite }}
+          OPT: ${{ matrix.opt }}
         run: |
-          case "${{ matrix.label }}" in
-            e2e*)
-              CC_TIMEOUT=300 bash test/e2e/run_e2e.sh build/fakecc ${{ matrix.opt }}
+          chmod +x v0/fakecc-1
+          case "$SUITE" in
+            e2e)
+              CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 "$OPT"
               ;;
-            difftest*)
-              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh build/fakecc ${{ matrix.opt }}
+            difftest)
+              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh v0/fakecc-1 "$OPT"
               ;;
-            multi/cli/compile/ports)
-              bash test/e2e/run_multi_e2e.sh build/fakecc -O0
-              bash test/e2e/run_multi_e2e.sh build/fakecc -O1
-              bash test/e2e/run_dylib_e2e.sh build/fakecc -O0
-              bash test/e2e/run_dylib_e2e.sh build/fakecc -O1
-              bash test/e2e/run_cli_e2e.sh build/fakecc
-              bash test/e2e/run_lldb_e2e.sh build/fakecc
-              CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh build/fakecc -O0
-              CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh build/fakecc -O1
-              bash test/app_ports/run_all.sh build/fakecc -O0
-              bash test/app_ports/run_all.sh build/fakecc -O1
+            misc)
+              bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O0
+              bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O1
+              bash test/e2e/run_dylib_e2e.sh v0/fakecc-1 -O0
+              bash test/e2e/run_dylib_e2e.sh v0/fakecc-1 -O1
+              bash test/e2e/run_lldb_e2e.sh v0/fakecc-1
+              bash test/e2e/run_cli_e2e.sh v0/fakecc-1
+              CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O0
+              CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O1
+              bash test/app_ports/run_all.sh v0/fakecc-1 -O0
+              bash test/app_ports/run_all.sh v0/fakecc-1 -O1
+              ;;
+            *)
+              echo "unknown suite: $SUITE" >&2
+              exit 2
               ;;
           esac
