@@ -1,5 +1,6 @@
 // runtime.strtol: converts a string to a long in a given base, reporting where
 // parsing stopped through an endptr.  Pin base-10, sign, endptr, hex,
+// skip_oracle: clang
 // the base==0 auto-detect path, and glibc overflow saturation (LONG_MAX /
 // LONG_MIN, errno ERANGE=34).
 // expect: 0

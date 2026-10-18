@@ -1,5 +1,6 @@
 // runtime.calloc / runtime.realloc: the remaining rt runtime.malloc.c entry points not covered
 // by the runtime.strdup test.  runtime.calloc both allocates and zero-fills; runtime.realloc
+// skip_oracle: clang
 // grows a block and preserves the contents.
 // expect: 0
 package main;

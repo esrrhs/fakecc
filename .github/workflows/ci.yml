@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: ${{ matrix.config.label }}
@@ -50,18 +53,78 @@ jobs:
             cxx: g++
             cflags: ""
             cov: true
+            cov_flag: linux
+          - label: macos-latest · clang (arm64)
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+            cflags: ""
+          - label: macos-latest · clang -O2 (arm64)
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+            cflags: "-O2"
+          # arm64 under ASan/UBSan, matching what the Linux side has had all
+          # along, and running the same full ctest they do.  It earns its
+          # keep: UBSan found a shift-by-64 in the arm64 immediate encoder
+          # (a64.c) on the very first run.  It used to run only a subset
+          # because a plain macOS ctest took ~2.9 h, which ASan multiplied
+          # past the 6 h cap -- but nearly all of that wall clock turned out
+          # to be test/compat.sh polling in one-second sleeps, not compiling.
+          - label: macos-latest · clang ASan (arm64)
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+            cflags: "-fsanitize=address,undefined -g"
+          # Coverage on arm64 is not a duplicate of the Linux leg -- it is the
+          # other half of it.  The two backends are mutually exclusive at
+          # runtime: src/cg64.c, src/a64.c and src/macho.c only execute when
+          # fakecc itself is running on arm64, and src/codegen.c (x86-64) only
+          # on Linux.  Measured on arm64: cg64 42%, macho 52%, a64 71%, and
+          # codegen 0.10% -- so either leg alone reports its counterpart as
+          # entirely dead code.  Codecov merges the two flags.
+          - label: macos-latest · clang coverage (arm64)
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+            cflags: ""
+            cov: true
+            cov_flag: macos
 
     steps:
       - uses: actions/checkout@v4
 
+      # Both debugger suites (gdb here, lldb on macOS) skip themselves when
+      # their debugger is missing.  On Linux that turned `e2e_gdb` into a
+      # permanent no-op that still reported success -- the DWARF assertions
+      # had never actually run here.  Install gdb so the suite is real, and
+      # refuse to go quietly if the install does not take.
+      - name: Install gdb (Linux DWARF tests)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y gdb
+          if ! command -v gdb >/dev/null 2>&1; then
+            echo "::error::gdb install failed; the DWARF suite would silently pass"
+            exit 1
+          fi
+          gdb --version | head -1
+
       # difftest hardcodes host `gcc` as the oracle.  Runner images ship GCC
       # 13.2 (no uabs builtins; tree-optimization/123864).  Install GCC 16 so
       # the oracle matches local GCC 16.2.0 (also used when matrix.cc is gcc).
+      # macOS gets a Homebrew gcc, which currently resolves to 16.2.0 -- the
+      # same version as the Linux oracle, and the same one the
+      # bootstrap-suite-macos difftest legs use.  An oracle that differed by
+      # major version would make the two platforms' verdicts incomparable.
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
 
+      # lcov is what the Linux leg turns .gcda into Codecov's lcov format.  The
+      # macOS leg does not use it: there is no gcov-format runtime for clang on
+      # macOS, and lcov itself wants a perl toolchain the runner does not have.
       - name: Setup lcov
-        if: matrix.config.cov
+        if: matrix.config.cov && runner.os == 'Linux'
         run: |
           wget https://github.com/linux-test-project/lcov/releases/download/v2.0/lcov-2.0.tar.gz
           tar -xf lcov-2.0.tar.gz
@@ -89,10 +152,20 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        env:
+          # clang's instrumented processes all default to ./default.profraw, so
+          # the ~15k fakecc invocations in a full ctest would each clobber the
+          # last one's counters.  %m is the merge-pool pattern: every process
+          # folds its counters into one shared file as it exits.  300 compiles
+          # produced a single 277 KB pool instead of 300 files totalling 83 MB.
+          # (Inert on the Linux leg, which uses gcov's .gcda instead.)
+          LLVM_PROFILE_FILE: ${{ github.workspace }}/build/prof/pool-%m.profraw
+        run: |
+          mkdir -p build/prof
+          ctest --test-dir build --output-on-failure
 
-      - name: Coverage report
-        if: matrix.config.cov
+      - name: Coverage report (lcov)
+        if: matrix.config.cov && runner.os == 'Linux'
         run: |
           set -x
           cd build
@@ -100,20 +173,66 @@ jobs:
           ls -l coverage.info
           lcov --list coverage.info
 
+      # Same destination format as the Linux leg, different road.  The Command
+      # Line Tools ship llvm-profdata and llvm-cov at the same version as their
+      # clang, so the counters clang's own instrumentation collected come back
+      # out as lcov.  Refuse to go quietly if the tools are not there: a
+      # coverage leg that produced no report must not report success.
+      - name: Coverage report (llvm-cov)
+        if: matrix.config.cov && runner.os == 'macOS'
+        run: |
+          set -x
+          cd build
+          if ! xcrun --find llvm-profdata >/dev/null 2>&1 ||
+             ! xcrun --find llvm-cov >/dev/null 2>&1; then
+            echo "::error::llvm-profdata/llvm-cov missing; cannot build a coverage report"
+            exit 1
+          fi
+          find prof -name '*.profraw' > profraw.txt
+          wc -l < profraw.txt
+          # -input-files keeps the merge to a single invocation.  xargs would
+          # batch the list, and each batch overwrites the previous one's output.
+          xcrun llvm-profdata merge -sparse -input-files=profraw.txt \
+              -o coverage.profdata
+          xcrun llvm-cov export ./fakecc -instr-profile=coverage.profdata \
+              --format=lcov > coverage.info
+          ls -l coverage.info
+          # Full table, not a tail: the interesting rows here are the arm64
+          # ones (cg64/a64/macho are the reason this leg exists) and they sit
+          # in the middle, so `tail` used to cut them out of the log.
+          xcrun llvm-cov report ./fakecc -instr-profile=coverage.profdata
+          # Nothing downstream reads the raw counters, and the pool is a few MB.
+          rm -rf prof profraw.txt
+
+      # Both legs upload, so Codecov sees the ELF backend's coverage and the
+      # Mach-O one's under separate flags -- without that split, one leg's
+      # zeros would drag the other's real numbers down.
       - name: Upload coverage reports to Codecov
         if: matrix.config.cov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: build/coverage.info
+          flags: ${{ matrix.config.cov_flag }}
           fail_ci_if_error: true
 
   # Differential fuzzing: random C programs, gcc is the oracle.  Programs in
   # test/fuzz/known_failures are known miscompiles (reported, not failing).
+  # Both platforms, same seed count: a miscompile that only shows up under one
+  # ABI (arm64 has no 80-bit long double, and a different sret rule) is exactly
+  # what this catches, so running it on Linux alone hides half of it.
   fuzz:
-    name: random program difftest
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: random program difftest${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: ""
+          - os: macos-latest
+            suffix: " (macOS arm64)"
     steps:
       - uses: actions/checkout@v4
 
@@ -128,13 +247,18 @@ jobs:
       - name: Random program difftest
         run: bash test/fuzz/run_fuzz.sh build/fakecc 300 1
 
-  # Wall-clock of this job is dominated by self-hosted e2e and difftest
-  # (each run twice, -O0 then -O1).  -O0 finishes around 33 min; -O1 needs
-  # the 75-minute job budget (40 min cancelled the -O1 legs).
+  # Wall-clock of the *downstream* bootstrap-suite job is dominated by e2e and
+  # difftest with the self-hosted binary, each run twice (-O0 then -O1).
+  # Measured on a 4-vCPU runner: e2e ~9-11 min per leg, difftest ~10 min,
+  # misc ~3 min -- all well inside the 75 min budget.  This job itself is ~5
+  # min: two full self-compiles of the compiler.
   bootstrap:
     name: bootstrap (fixed point)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The self-hosting pass (stage 2) runs the -O0 bootstrapped fakecc against
+    # the full compiler and is inherently slow; stage 1 took ~1 min while stage 2
+    # alone ran past 14 min under runner contention, so 15 min was too tight.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -180,6 +304,63 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  # arm64 macOS is the target this backend actually emits, and it used to be the
+  # one platform where the bootstrap could not be checked at all: the selfhost
+  # image has no fork/execl, so it could not run the host's codesign(1), which
+  # left stage 2 holding an image the kernel refuses to execute.  fakecc now
+  # stamps the ad-hoc signature itself, so the fixed point is reachable here --
+  # and it is a genuinely different check, because arm64 has no 80-bit long
+  # double and a different call ABI.
+  bootstrap-macos:
+    name: bootstrap (fixed point, macOS arm64)
+    runs-on: macos-latest
+    # Two full self-compiles of the compiler.  The Linux leg allows 30 min;
+    # macOS runners are slower, so leave more room.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build stage 0
+        run: |
+          clang --version
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_C_FLAGS="-O0"
+          cmake --build build --parallel
+
+      - name: Stage 2 fixed point
+        run: bash v0/stage2_check.sh
+
+      # The whole point of signing in-process: what a selfhosted fakecc links
+      # has to run.  With no signature the kernel kills the process before main
+      # (exit 137, SIGKILL), so this step is the regression guard for it.
+      - name: Selfhosted output runs
+        run: |
+          ./v0/fakecc-1 examples/return0.c -o /tmp/selfhost-return0
+          /tmp/selfhost-return0
+
+      - name: Upload mismatch binaries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-macos-mismatch
+          path: |
+            v0/fakecc-1
+            v0/fakecc-2
+          if-no-files-found: ignore
+          retention-days: 3
+
+      # Consumed by bootstrap-suite-macos below, which re-runs the functional
+      # suites with this binary -- the self-hosted compiler has to work, not
+      # merely reproduce itself.
+      - name: Upload self-hosted compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: fakecc-1-macos
+          path: v0/fakecc-1
+          if-no-files-found: error
+          retention-days: 3
+
   # A fixed point alone does not prove correctness — a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
   # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are
@@ -205,15 +386,30 @@ jobs:
           - label: difftest -O1
             suite: difftest
             opt: -O1
-          - label: multi/shlib/gdb
+          # Same set of scripts the macOS leg below runs, minus the two that
+          # need Mach-O.  The label names the whole mix, so the two legs can
+          # be compared at a glance.
+          - label: multi/shlib/gdb/cli/compile/ports
             suite: misc
             opt: ""
     steps:
       - uses: actions/checkout@v4
 
       # Needed for the difftest matrix legs (host gcc is the oracle).
+      # gdb too: the misc leg runs the DWARF suite, which otherwise skips
+      # itself and reports success without having executed a single case.
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
+
+      - name: Install gdb (Linux DWARF tests)
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y gdb
+          if ! command -v gdb >/dev/null 2>&1; then
+            echo "::error::gdb install failed; the DWARF suite would silently pass"
+            exit 1
+          fi
+          gdb --version | head -1
 
       - name: Download self-hosted compiler
         uses: actions/download-artifact@v4
@@ -232,7 +428,7 @@ jobs:
               CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 "$OPT"
               ;;
             difftest)
-              bash test/e2e/run_difftest.sh v0/fakecc-1 "$OPT"
+              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh v0/fakecc-1 "$OPT"
               ;;
             misc)
               bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O0
@@ -240,6 +436,103 @@ jobs:
               bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O0
               bash test/e2e/run_shlib_e2e.sh v0/fakecc-1 -O1
               bash test/e2e/run_gdb_e2e.sh v0/fakecc-1
+              bash test/e2e/run_cli_e2e.sh v0/fakecc-1
+              CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O0
+              CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O1
+              bash test/app_ports/run_all.sh v0/fakecc-1 -O0
+              bash test/app_ports/run_all.sh v0/fakecc-1 -O1
+              ;;
+            *)
+              echo "unknown suite: $SUITE" >&2
+              exit 2
+              ;;
+          esac
+
+  # The macOS twin of bootstrap-suite: same matrix shape, same scripts, same
+  # self-hosted binary (downloaded from bootstrap-macos).  Running the
+  # host-built compiler here instead would leave arm64 as the one platform
+  # where the fixed point is checked but nothing proves it still *works*.
+  #
+  # Exactly two substitutions, both forced by the file formats rather than by
+  # convenience: shlib -> dylib (Mach-O has no ELF .so) and gdb -> lldb (macOS
+  # has no gdb).  Keeping the rest identical means a diff between the two legs
+  # is a real coverage gap instead of a naming accident.
+  #
+  # The previous version of this job matched on `${{ matrix.label }}` while the
+  # label carried the full script list, so the `multi/*` branch never matched
+  # and the leg finished in 36 s having executed nothing -- a green check that
+  # covered zero tests.  Dispatch on the `suite` field and fail on an unknown
+  # one so that can't come back.
+  bootstrap-suite-macos:
+    name: bootstrap (macOS) · ${{ matrix.label }}
+    needs: bootstrap-macos
+    runs-on: macos-latest
+    # Linux needs 75 min for the slowest leg; the macOS runner is slower still,
+    # so leave headroom rather than race the cancellation.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: e2e -O0
+            suite: e2e
+            opt: -O0
+          - label: e2e -O1
+            suite: e2e
+            opt: -O1
+          - label: difftest -O0
+            suite: difftest
+            opt: -O0
+          - label: difftest -O1
+            suite: difftest
+            opt: -O1
+          - label: multi/dylib/lldb/cli/compile/ports
+            suite: misc
+            opt: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      # Needed for the difftest matrix legs (host gcc is the oracle).
+      - name: Install host GCC 16
+        run: bash tools/ci_install_host_gcc.sh
+
+      # lldb stands in for the Linux leg's gdb, and for the same reason that
+      # guard exists: run_lldb_e2e.sh reports success when lldb is absent, so
+      # without this check the DWARF suite would pass having run nothing.
+      - name: Check lldb is present
+        run: |
+          if ! command -v lldb >/dev/null 2>&1; then
+            echo "::error::lldb missing; the DWARF suite would silently pass"
+            exit 1
+          fi
+          lldb --version | head -1
+
+      - name: Download self-hosted compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: fakecc-1-macos
+          path: v0
+
+      - name: Run suite
+        env:
+          SUITE: ${{ matrix.suite }}
+          OPT: ${{ matrix.opt }}
+        run: |
+          chmod +x v0/fakecc-1
+          case "$SUITE" in
+            e2e)
+              CC_TIMEOUT=300 bash test/e2e/run_e2e.sh v0/fakecc-1 "$OPT"
+              ;;
+            difftest)
+              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh v0/fakecc-1 "$OPT"
+              ;;
+            misc)
+              bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O0
+              bash test/e2e/run_multi_e2e.sh v0/fakecc-1 -O1
+              bash test/e2e/run_dylib_e2e.sh v0/fakecc-1 -O0
+              bash test/e2e/run_dylib_e2e.sh v0/fakecc-1 -O1
+              bash test/e2e/run_lldb_e2e.sh v0/fakecc-1
+              bash test/e2e/run_cli_e2e.sh v0/fakecc-1
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O0
               CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh v0/fakecc-1 -O1
               bash test/app_ports/run_all.sh v0/fakecc-1 -O0

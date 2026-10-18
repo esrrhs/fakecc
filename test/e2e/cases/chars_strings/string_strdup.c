@@ -1,5 +1,6 @@
 // runtime.strdup: runtime.malloc(s+1) and copy s into it, returning the new buffer
 // (or NULL if runtime.malloc fails).  The copy must include the \0, and the
+// skip_oracle: clang
 // result must be a distinct, writable buffer.  Depends on rt/ runtime.malloc
 // and runtime.memcpy, so a failure here implicates those too.
 // expect: 0

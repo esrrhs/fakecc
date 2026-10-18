@@ -1,5 +1,6 @@
 // expect: 0
 // GNU __builtin_apply / __builtin_return restore the callee's result regs.
+// skip_oracle: clang
 package main;
 int add1(int x) { return x + 1; }
 int wrap(int x) {

@@ -39,6 +39,104 @@ int sema_error_count(void) {
     return g_sema_error_count;
 }
 
+/* libm-style builtins the arm64 backend lowers directly.  Width is 4
+ * (f), 8, or long double (l).  *nargs is 1, 2, or 3.  -1 if unrelated. */
+/* GCC __builtin_*g forms are type-generic.  clzg/ctzg may take a
+ * second argument, returned when the value is zero. */
+static int bitg_builtin_info(const char *name, int *max_args) {
+    if (!name) return 0;
+    if (strcmp(name, "__builtin_clzg") == 0 || strcmp(name, "__builtin_ctzg") == 0) {
+        *max_args = 2;
+        return 1;
+    }
+    if (strcmp(name, "__builtin_clrsbg") == 0 || strcmp(name, "__builtin_ffsg") == 0
+        || strcmp(name, "__builtin_popcountg") == 0 || strcmp(name, "__builtin_parityg") == 0) {
+        *max_args = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* C23 stdc_* are type-generic.  same_ty means the result type is the
+ * argument type (bit_floor, bit_ceil, rotate); the rest return unsigned int. */
+static int stdc_builtin_info(const char *name, int *same_ty, int *nargs) {
+    if (!name || strncmp(name, "__builtin_stdc_", 15) != 0) return 0;
+    const char *op = name + 15;
+    *same_ty = 0;
+    *nargs = 1;
+    if (strcmp(op, "rotate_left") == 0 || strcmp(op, "rotate_right") == 0) {
+        *same_ty = 1;
+        *nargs = 2;
+        return 1;
+    }
+    if (strcmp(op, "bit_floor") == 0 || strcmp(op, "bit_ceil") == 0) {
+        *same_ty = 1;
+        return 1;
+    }
+    static const char *const cnt[] = {
+        "leading_zeros", "leading_ones", "trailing_zeros", "trailing_ones",
+        "first_leading_zero", "first_leading_one",
+        "first_trailing_zero", "first_trailing_one",
+        "count_ones", "count_zeros", "has_single_bit", "bit_width",
+    };
+    for (size_t i = 0; i < sizeof cnt / sizeof cnt[0]; i++)
+        if (strcmp(op, cnt[i]) == 0) return 1;
+    return 0;
+}
+
+/* How many parameters the formatted-I/O family takes *before* its `...`, or 0
+ * when `n` is not one of them (suffixes `_unlocked` / `_chk` are stripped).
+ *
+ * A `__builtin_printf` with no visible prototype used to be synthesised as a
+ * zero-prototype variadic, and on arm64 Darwin that pushes *every* argument --
+ * the format string and the destination included -- onto the anonymous vararg
+ * stack slots, while the callee reads its named parameters from x0/x1.  The
+ * call landed somewhere valid and then jumped through a wild pointer, so the
+ * simplest case in the suite,
+ *
+ *     __builtin_printf("hello\n");
+ *
+ * died with SIGSEGV.  Naming the leading parameters fixes both the arity and
+ * the register assignment.  The v* forms need four named parameters and
+ * params[] holds three, so they are left to the generic path. */
+static int stdio_named_arity(const char *n) {
+    if (strncmp(n, "__builtin_", 10) == 0) n += 10;
+    size_t len = strlen(n);
+    if (len > 9 && strcmp(n + len - 9, "_unlocked") == 0) len -= 9;
+    else if (len > 5 && strcmp(n + len - 5, "_chk") == 0) len -= 5;
+    char base[40];
+    if (len >= sizeof base) return 0;
+    memcpy(base, n, len);
+    base[len] = 0;
+    if (strcmp(base, "printf") == 0 || strcmp(base, "scanf") == 0) return 1;
+    if (strcmp(base, "fprintf") == 0 || strcmp(base, "sprintf") == 0
+        || strcmp(base, "fscanf") == 0 || strcmp(base, "sscanf") == 0) return 2;
+    if (strcmp(base, "snprintf") == 0) return 3;
+    return 0;
+}
+
+static int math_builtin_width(const char *n, int *nargs) {
+    const char *b = n;
+    if (strncmp(b, "__builtin_", 10) == 0) b += 10;
+    static const struct { const char *root; int narg; } tab[] = {
+        {"nearbyint", 1}, {"floor", 1}, {"trunc", 1}, {"round", 1},
+        {"ceil", 1}, {"sqrt", 1}, {"fmin", 2}, {"fmax", 2},
+        {"fma", 3}, {"rint", 1}, {"nextafter", 2},
+    };
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+        size_t L = strlen(tab[i].root);
+        if (strncmp(b, tab[i].root, L) != 0) continue;
+        char s = b[L];
+        if (s == '\0') { *nargs = tab[i].narg; return 8; }
+        if (s == 'f' && b[L + 1] == '\0') { *nargs = tab[i].narg; return 4; }
+        if (s == 'l' && b[L + 1] == '\0') {
+            *nargs = tab[i].narg;
+            return type_long_double_width();
+        }
+    }
+    return -1;
+}
+
 static void sema_report_error(const SourceLoc *loc, const char *fmt, ...) {
     if (fakecc_had_error()) return;
     va_list ap;
@@ -1269,10 +1367,46 @@ static Type check_expr_inner(Expr *e) {
         }
         if (strncmp(e->u.var.name, "__builtin_", 10) == 0 || strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
+            /* A __builtin_X reference mirrors a user-visible declaration of
+             * X when one is in scope (fprintf, fprintf_unlocked, ...).  The
+             * generic synthesizer below builds a zero-prototype variadic
+             * function, which on arm64 Darwin pushes every argument through
+             * the anonymous-arg stack slots and corrupts the call; adopt the
+             * declared prototype instead.  Only the type is borrowed — IR
+             * still lowers the call under its __builtin_ name. */
+            if (strncmp(bname, "__builtin_", 10) == 0) {
+                const char *plain = bname + 10;
+                const Sym *ps = symtable_find(st, plain);
+                Type pt = ps ? ps->type : type_make_void();
+                while (pt.kind == TY_PTR && pt.pointee) pt = *pt.pointee;
+                if (pt.kind == TY_FUNC) {
+                    set_type(e, type_clone(ps->type));
+                    return type_clone(e->type);
+                }
+                const FunSig *fsig = ftab_lookup(plain);
+                if (fsig) {
+                    const Type **ptys = NULL;
+                    if (fsig->arity > 0) {
+                        ptys = malloc(fsig->arity * sizeof(Type *));
+                        if (!ptys) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                        for (int qi = 0; qi < fsig->arity; qi++)
+                            ptys[qi] = &fsig->param_types[qi];
+                    }
+                    Type fn2 = type_make_func_var(fsig->ret_type, (Type **)ptys,
+                                                  fsig->arity, fsig->is_variadic);
+                    fn2.func_is_unprototyped = fsig->is_unprototyped;
+                    free(ptys);
+                    Type fp2 = type_make_ptr(fn2);
+                    type_free(&fn2);
+                    set_type(e, fp2);
+                    return type_clone(e->type);
+                }
+            }
+            int math_narg = 0, math_w = 0;
             Type ret = type_default_int();
-            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)
+            if (strcmp(bname, "__builtin_abort") == 0 || strcmp(bname, "__builtin_exit") == 0 || strcmp(bname, "__builtin_trap") == 0 || strcmp(bname, "__builtin_debugtrap") == 0 || strcmp(bname, "__builtin_assume") == 0 || strcmp(bname, "__builtin_clear_cache") == 0 || strcmp(bname, "__builtin_arm_dmb") == 0 || strcmp(bname, "__builtin_arm_dsb") == 0 || strcmp(bname, "__builtin_arm_isb") == 0 || strcmp(bname, "__builtin_prefetch") == 0 || strcmp(bname, "__builtin_stack_restore") == 0 || strcmp(bname, "__builtin_longjmp") == 0 || strcmp(bname, "__builtin_return") == 0)
                 ret = type_make_void();
-            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_memmove") == 0 || strcmp(bname, "__builtin_mempcpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0 || strcmp(bname, "__builtin___memcpy_chk") == 0 || strcmp(bname, "__builtin___memmove_chk") == 0 || strcmp(bname, "__builtin___mempcpy_chk") == 0 || strcmp(bname, "__builtin___memset_chk") == 0)
+            else if (strcmp(bname, "__builtin_memset") == 0 || strcmp(bname, "__builtin_memcpy") == 0 || strcmp(bname, "__builtin_memmove") == 0 || strcmp(bname, "__builtin_mempcpy") == 0 || strcmp(bname, "__builtin_memccpy") == 0 || strcmp(bname, "__builtin_alloca") == 0 || strcmp(bname, "__builtin_alloca_with_align") == 0 || strcmp(bname, "alloca") == 0 || strcmp(bname, "__builtin_frame_address") == 0 || strcmp(bname, "__builtin_return_address") == 0 || strcmp(bname, "__builtin_stack_save") == 0 || strcmp(bname, "__builtin_apply_args") == 0 || strcmp(bname, "__builtin_apply") == 0 || strcmp(bname, "__builtin___memcpy_chk") == 0 || strcmp(bname, "__builtin___memmove_chk") == 0 || strcmp(bname, "__builtin___mempcpy_chk") == 0 || strcmp(bname, "__builtin___memset_chk") == 0)
                 ret = type_make_ptr(type_make_void());
             else if (strcmp(bname, "__builtin_bcopy") == 0)
                 ret = type_make_void();
@@ -1283,33 +1417,63 @@ static Type check_expr_inner(Expr *e) {
                      strcmp(bname, "__builtin_strncat") == 0 || strcmp(bname, "__builtin___strncat_chk") == 0 ||
                      strcmp(bname, "__builtin_strncpy") == 0 || strcmp(bname, "__builtin___strncpy_chk") == 0)
                 ret = type_make_ptr(type_make_int(1, 0));
-            else if (strcmp(bname, "__builtin_strlen") == 0 || strcmp(bname, "__builtin_strspn") == 0 || strcmp(bname, "__builtin_object_size") == 0)
+            else if (strcmp(bname, "__builtin_strsep") == 0)
+                ret = type_make_ptr(type_make_int(1, 0));
+            else if (strcmp(bname, "__builtin_strlen") == 0 || strcmp(bname, "__builtin_strnlen") == 0 || strcmp(bname, "__builtin_strspn") == 0 || strcmp(bname, "__builtin_strcspn") == 0 || strcmp(bname, "__builtin_strlcpy") == 0 || strcmp(bname, "__builtin_strlcat") == 0 || strcmp(bname, "__builtin_object_size") == 0)
                 ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_memchr") == 0 || strcmp(bname, "__builtin_strchr") == 0 || strcmp(bname, "__builtin_strrchr") == 0 || strcmp(bname, "__builtin_index") == 0 || strcmp(bname, "__builtin_rindex") == 0 || strcmp(bname, "__builtin_strpbrk") == 0 || strcmp(bname, "__builtin_strchrnul") == 0 || strcmp(bname, "__builtin_memrchr") == 0 || strcmp(bname, "__builtin_rawmemchr") == 0 || strcmp(bname, "__builtin_strstr") == 0)
+                ret = type_make_ptr(type_make_int(1, 0));
             else if (strcmp(bname, "__builtin_fabs") == 0)
                 ret = type_make_float(8);
             else if (strcmp(bname, "__builtin_fabsf") == 0)
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_fabsl") == 0)
-                ret = type_make_float(16);
+                ret = type_make_long_double();
+            else if (strcmp(bname, "__builtin_powi") == 0 || strcmp(bname, "powi") == 0)
+                ret = type_make_float(8);
+            else if (strcmp(bname, "__builtin_powif") == 0 || strcmp(bname, "powif") == 0)
+                ret = type_make_float(4);
+            else if (strcmp(bname, "__builtin_powil") == 0 || strcmp(bname, "powil") == 0)
+                ret = type_make_long_double();
+            else if ((math_w = math_builtin_width(bname, &math_narg)) > 0)
+                ret = type_make_float(math_w);
             else if (strcmp(bname, "__builtin_copysign") == 0 || strcmp(bname, "copysign") == 0)
                 ret = type_make_float(8);
             else if (strcmp(bname, "__builtin_copysignf") == 0 || strcmp(bname, "copysignf") == 0)
                 ret = type_make_float(4);
             else if (strcmp(bname, "__builtin_copysignl") == 0 || strcmp(bname, "copysignl") == 0)
-                ret = type_make_float(16);
-            else if (strcmp(bname, "__builtin_inf") == 0 || strcmp(bname, "__builtin_huge_val") == 0 || strcmp(bname, "__builtin_nan") == 0)
+                ret = type_make_long_double();
+            else if (strcmp(bname, "__builtin_inf") == 0 || strcmp(bname, "__builtin_huge_val") == 0 || strcmp(bname, "__builtin_nan") == 0 || strcmp(bname, "__builtin_nans") == 0)
                 ret = type_make_float(8);
-            else if (strcmp(bname, "__builtin_inff") == 0 || strcmp(bname, "__builtin_huge_valf") == 0 || strcmp(bname, "__builtin_nanf") == 0)
+            else if (strcmp(bname, "__builtin_inff") == 0 || strcmp(bname, "__builtin_huge_valf") == 0 || strcmp(bname, "__builtin_nanf") == 0 || strcmp(bname, "__builtin_nansf") == 0)
                 ret = type_make_float(4);
-            else if (strcmp(bname, "__builtin_infl") == 0 || strcmp(bname, "__builtin_huge_vall") == 0 || strcmp(bname, "__builtin_nanl") == 0)
-                ret = type_make_float(16);
+            else if (strcmp(bname, "__builtin_infl") == 0 || strcmp(bname, "__builtin_huge_vall") == 0 || strcmp(bname, "__builtin_nanl") == 0 || strcmp(bname, "__builtin_nansl") == 0)
+                ret = type_make_long_double();
             else if (strcmp(bname, "__builtin_bswap64") == 0)
+                ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_readcyclecounter") == 0)
                 ret = type_make_int(8, 1);
             else if (strcmp(bname, "__builtin_bswap32") == 0)
                 ret = type_make_int(4, 1);
             else if (strcmp(bname, "__builtin_bswap16") == 0)
                 ret = type_make_int(2, 1);
-            else if (strcmp(bname, "__builtin_classify_type") == 0)
+            else if (strcmp(bname, "__builtin_rotateleft64") == 0 || strcmp(bname, "__builtin_rotateright64") == 0)
+                ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_rotateleft32") == 0 || strcmp(bname, "__builtin_rotateright32") == 0)
+                ret = type_make_int(4, 1);
+            else if (strcmp(bname, "__builtin_rotateleft16") == 0 || strcmp(bname, "__builtin_rotateright16") == 0)
+                ret = type_make_int(2, 1);
+            else if (strcmp(bname, "__builtin_rotateleft8") == 0 || strcmp(bname, "__builtin_rotateright8") == 0)
+                ret = type_make_int(1, 1);
+            else if (strcmp(bname, "__builtin_bitreverse64") == 0)
+                ret = type_make_int(8, 1);
+            else if (strcmp(bname, "__builtin_bitreverse32") == 0)
+                ret = type_make_int(4, 1);
+            else if (strcmp(bname, "__builtin_bitreverse16") == 0)
+                ret = type_make_int(2, 1);
+            else if (strcmp(bname, "__builtin_bitreverse8") == 0)
+                ret = type_make_int(1, 1);
+            else if (strcmp(bname, "__builtin_classify_type") == 0 || strcmp(bname, "__builtin_fpclassify") == 0)
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_signbit") == 0 || strcmp(bname, "__builtin_signbitf") == 0 || strcmp(bname, "__builtin_signbitl") == 0 || strcmp(bname, "signbit") == 0)
                 ret = type_make_int(4, 0);
@@ -1318,6 +1482,8 @@ static Type check_expr_inner(Expr *e) {
             else if (strcmp(bname, "__builtin_isfinite") == 0 || strcmp(bname, "__builtin_isfinitef") == 0 || strcmp(bname, "__builtin_isfinitel") == 0 || strcmp(bname, "isfinite") == 0)
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_isinf") == 0 || strcmp(bname, "__builtin_isinff") == 0 || strcmp(bname, "__builtin_isinfl") == 0 || strcmp(bname, "isinf") == 0)
+                ret = type_make_int(4, 0);
+            else if (strcmp(bname, "__builtin_isnormal") == 0 || strcmp(bname, "__builtin_isnormalf") == 0 || strcmp(bname, "__builtin_isnormall") == 0 || strcmp(bname, "isnormal") == 0)
                 ret = type_make_int(4, 0);
             else if (strcmp(bname, "__builtin_isgreater") == 0 || strcmp(bname, "__builtin_isgreaterequal") == 0 ||
                      strcmp(bname, "__builtin_isless") == 0 || strcmp(bname, "__builtin_islessequal") == 0 ||
@@ -1333,9 +1499,10 @@ static Type check_expr_inner(Expr *e) {
                 ret = type_make_int(8, 1);
             else if (strcmp(bname, "__builtin_va_arg_pack") == 0 || strcmp(bname, "__builtin_va_arg_pack_len") == 0)
                 ret = type_default_int();
-            Type p0, p1;
-            Type *params[2];
+            Type p0, p1, p2;
+            Type *params[3];
             int num_params = 0;
+            int nstdio = 0;
             if (strcmp(bname, "__builtin_copysignf") == 0 || strcmp(bname, "copysignf") == 0) {
                 p0 = type_make_float(4);
                 p1 = type_make_float(4);
@@ -1347,8 +1514,8 @@ static Type check_expr_inner(Expr *e) {
                 params[0] = &p0; params[1] = &p1;
                 num_params = 2;
             } else if (strcmp(bname, "__builtin_copysignl") == 0 || strcmp(bname, "copysignl") == 0) {
-                p0 = type_make_float(16);
-                p1 = type_make_float(16);
+                p0 = type_make_long_double();
+                p1 = type_make_long_double();
                 params[0] = &p0; params[1] = &p1;
                 num_params = 2;
             } else if (strcmp(bname, "__builtin_fabsf") == 0) {
@@ -1360,15 +1527,66 @@ static Type check_expr_inner(Expr *e) {
                 params[0] = &p0;
                 num_params = 1;
             } else if (strcmp(bname, "__builtin_fabsl") == 0) {
-                p0 = type_make_float(16);
+                p0 = type_make_long_double();
                 params[0] = &p0;
                 num_params = 1;
+            } else if (strcmp(bname, "__builtin_powif") == 0 || strcmp(bname, "powif") == 0) {
+                p0 = type_make_float(4);
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (strcmp(bname, "__builtin_powi") == 0 || strcmp(bname, "powi") == 0) {
+                p0 = type_make_float(8);
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if (strcmp(bname, "__builtin_powil") == 0 || strcmp(bname, "powil") == 0) {
+                p0 = type_make_long_double();
+                p1 = type_make_int(4, 0);
+                params[0] = &p0; params[1] = &p1;
+                num_params = 2;
+            } else if ((nstdio = stdio_named_arity(bname)) > 0) {
+                /* Destination/stream and format are named parameters; the
+                 * conversion specifiers are the anonymous ones.  void* for
+                 * both leading pointers accepts char*, FILE* and a user's
+                 * own stream declaration alike. */
+                p0 = type_make_ptr(type_make_void());
+                params[0] = &p0;
+                num_params = 1;
+                if (nstdio >= 2) {
+                    p1 = type_make_ptr(type_make_void());
+                    params[1] = &p1;
+                    num_params = 2;
+                }
+                if (nstdio >= 3) {
+                    p2 = type_make_int(8, 1);   /* snprintf's size_t bound */
+                    params[2] = &p2;
+                    num_params = 3;
+                }
+            } else {
+                int narg = 0;
+                int w = math_builtin_width(bname, &narg);
+                if (w > 0) {
+                    p0 = type_make_float(w);
+                    params[0] = &p0;
+                    num_params = 1;
+                    if (narg >= 2) {
+                        p1 = type_make_float(w);
+                        params[1] = &p1;
+                        num_params = 2;
+                    }
+                    if (narg >= 3) {
+                        p2 = type_make_float(w);
+                        params[2] = &p2;
+                        num_params = 3;
+                    }
+                }
             }
             Type fn = type_make_func(ret, num_params > 0 ? (Type * const *)params : NULL, num_params);
             /* Builtins without a recorded prototype (memcpy, snprintf_chk, …)
              * used to look like `T (*)()`.  Mark them variadic so the strict
              * function-pointer arity check does not reject real builtin calls. */
-            if (num_params == 0)
+            if (num_params == 0 || nstdio > 0)
                 fn.func_is_variadic = 1;
             Type fp = type_make_ptr(fn);
             type_free(&fn);
@@ -1565,7 +1783,7 @@ static Type check_expr_inner(Expr *e) {
                 }
                 type_free(&at);
                 if (is_crealf) set_type(e, type_make_float(4));
-                else if (is_creall) set_type(e, type_make_float(16));
+                else if (is_creall) set_type(e, type_make_long_double());
                 else set_type(e, type_make_float(8));
                 return type_clone(e->type);
             }
@@ -1574,6 +1792,88 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 2 || e->u.call.args.len > 3) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_shuffle takes 2 or 3 arguments");
+                return type_make_void();
+            }
+            Type t0 = check_expr_inner(e->u.call.args.data[0]);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type ti = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&ti);
+            }
+            set_type(e, t0);
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_arm_dmb") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_arm_dsb") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_arm_isb") == 0)) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes 1 argument", e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            if (at.kind != TY_INT) {
+                type_free(&at);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s operand must be an integer",
+                       e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            type_free(&at);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            strcmp(e->u.call.callee->u.var.name, "__builtin_clear_cache") == 0) {
+            if (e->u.call.args.len != 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_clear_cache takes 2 arguments");
+                return type_make_void();
+            }
+            Type cs = check_expr_inner(e->u.call.args.data[0]);
+            Type ce = check_expr_inner(e->u.call.args.data[1]);
+            type_free(&cs);
+            type_free(&ce);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            strcmp(e->u.call.callee->u.var.name, "__builtin_assume") == 0) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_assume takes 1 argument");
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            type_free(&at);
+            set_type(e, type_make_void());
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_align_down") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_assume_aligned") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_expect_with_probability") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_unpredictable") == 0)) {
+            if (e->u.call.args.len < 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "builtin takes at least 1 argument");
+                return type_make_void();
+            }
+            Type t0 = check_expr_inner(e->u.call.args.data[0]);
+            for (size_t i = 1; i < e->u.call.args.len; i++) {
+                Type ti = check_expr_inner(e->u.call.args.data[i]);
+                type_free(&ti);
+            }
+            set_type(e, t0);
+            return type_clone(e->type);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_fshl") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_fshr") == 0)) {
+            if (e->u.call.args.len != 3) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "funnel shift takes 3 arguments");
                 return type_make_void();
             }
             Type t0 = check_expr_inner(e->u.call.args.data[0]);
@@ -1615,15 +1915,30 @@ static Type check_expr_inner(Expr *e) {
         }
         /* GCC integer bit builtins — codegen expands these inline (lzcnt /
          * tzcnt / popcnt / bswap) and reads their single argument directly, so
-         * the argument count has to be right before we get there. */        if (e->u.call.callee->kind == EX_VAR) {
+         * the argument count has to be right before we get there.
+         *
+         * The type-generic *g forms are the exception: clzg/ctzg take an
+         * optional second argument, the value returned when x is zero
+         * (__builtin_clzg(0, 99) is 99).  bitg_builtin_info() is the table
+         * that already knows their arity. */
+        if (e->u.call.callee->kind == EX_VAR) {
             const char *bn = e->u.call.callee->u.var.name;
-            if (strncmp(bn, "__builtin_", 10) == 0 && e->u.call.args.len != 1
+            if (strncmp(bn, "__builtin_", 10) == 0
                 && (strstr(bn, "clz") || strstr(bn, "ctz") || strstr(bn, "ffs")
                     || strstr(bn, "popcount") || strstr(bn, "parity")
                     || strstr(bn, "clrsb") || strstr(bn, "bswap"))) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "'%s' takes exactly 1 argument", bn);
-                return type_make_void();
+                int bg_max = 0;
+                int bg = bitg_builtin_info(bn, &bg_max);
+                int nargs = (int)e->u.call.args.len;
+                int bad = bg ? (nargs < 1 || nargs > bg_max) : (nargs != 1);
+                if (bad) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           bg && bg_max > 1
+                               ? "'%s' takes 1 or %d arguments"
+                               : "'%s' takes exactly 1 argument",
+                           bn, bg ? bg_max : 0);
+                    return type_make_void();
+                }
             }
         }
         /* __builtin_ctzll(x) — count trailing zeros of a nonzero uint64.  The
@@ -1676,17 +1991,21 @@ static Type check_expr_inner(Expr *e) {
             }
             return type_clone(e->type);
         }
-        /* C11 __atomic_* family — accept the call and lower it as an
-         * ordinary (non-atomic) load/store.  fakecc does not implement
-         * atomic memory ordering; this is enough to compile code that uses
-         * these builtins for portability (e.g. GCC torture tests that
-         * exercise __thread + atomic load).  The IR layer treats the call
-         * as a normal function call — the symbol is left undefined and the
-         * linker resolves it from libc's libatomic when present, or the
-         * harness's compile-only test passes regardless. */
+        /* C11 __atomic_* family.  fakecc does not implement memory
+         * ordering; IR lowers these as ordinary loads and stores so a
+         * freestanding image does not need libatomic. */
         if (e->u.call.callee->kind == EX_VAR
             && strncmp(e->u.call.callee->u.var.name, "__atomic_", 9) == 0) {
             const char *sname = e->u.call.callee->u.var.name;
+            if (strcmp(sname, "__atomic_thread_fence") == 0
+                || strcmp(sname, "__atomic_signal_fence") == 0) {
+                for (size_t i = 0; i < e->u.call.args.len; i++) {
+                    Type at = check_expr_inner(e->u.call.args.data[i]);
+                    type_free(&at);
+                }
+                set_type(e, type_make_void());
+                return type_clone(e->type);
+            }
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__atomic builtin takes at least 1 argument");
@@ -1704,13 +2023,21 @@ static Type check_expr_inner(Expr *e) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&at);
             }
-            /* __atomic_load_n returns the loaded value; __atomic_store_n
-             * returns void; __atomic_*_fetch / fetch_* return the prior
-             * value (same type as the pointee). */
+            /* __atomic_load_n returns the loaded value.  store/clear and
+             * the pointer forms of load/store/exchange are void.
+             * compare_exchange and test_and_set return a boolean. */
             if (strcmp(sname, "__atomic_store_n") == 0
-                || strcmp(sname, "__atomic_clear") == 0) {
+                || strcmp(sname, "__atomic_store") == 0
+                || strcmp(sname, "__atomic_clear") == 0
+                || strcmp(sname, "__atomic_load") == 0
+                || strcmp(sname, "__atomic_exchange") == 0) {
                 type_free(&val_ty);
                 set_type(e, type_make_void());
+            } else if (strcmp(sname, "__atomic_compare_exchange_n") == 0
+                       || strcmp(sname, "__atomic_compare_exchange") == 0
+                       || strcmp(sname, "__atomic_test_and_set") == 0) {
+                type_free(&val_ty);
+                set_type(e, type_make_int(4, 0));
             } else {
                 set_type(e, val_ty);
             }
@@ -1862,6 +2189,154 @@ static Type check_expr_inner(Expr *e) {
             set_type(e, type_make_void());
             return type_clone(e->type);
         }
+        /* __builtin_*g keeps the argument width.  Promoting unsigned
+         * long long or unsigned char would count the wrong number of bits. */
+        if (e->u.call.callee->kind == EX_VAR) {
+            int max_args = 0;
+            if (bitg_builtin_info(e->u.call.callee->u.var.name, &max_args)) {
+                int n = (int)e->u.call.args.len;
+                if (n < 1 || n > max_args) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s takes 1 argument%s",
+                           e->u.call.callee->u.var.name,
+                           max_args == 2 ? " or 2" : "");
+                    return type_make_void();
+                }
+                Type at = check_expr_inner(e->u.call.args.data[0]);
+                if (at.kind != TY_INT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s argument must be an integer",
+                           e->u.call.callee->u.var.name);
+                    return type_make_void();
+                }
+                type_free(&at);
+                if (n == 2) {
+                    Type ft = check_expr_inner(e->u.call.args.data[1]);
+                    if (ft.kind != TY_INT) {
+                        type_free(&ft);
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "%s fallback must be an integer",
+                               e->u.call.callee->u.var.name);
+                        return type_make_void();
+                    }
+                    type_free(&ft);
+                }
+                set_type(e, type_make_int(4, 0));
+                return type_clone(e->type);
+            }
+        }
+        /* __builtin_stdc_* keep the argument width.  Promoting an
+         * unsigned char to int would report 24 extra leading zeros. */
+        if (e->u.call.callee->kind == EX_VAR) {
+            int same_ty = 0, nargs = 0;
+            if (stdc_builtin_info(e->u.call.callee->u.var.name, &same_ty, &nargs)) {
+                if ((int)e->u.call.args.len != nargs) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s takes %d argument%s",
+                           e->u.call.callee->u.var.name, nargs,
+                           nargs == 1 ? "" : "s");
+                    return type_make_void();
+                }
+                Type at = check_expr_inner(e->u.call.args.data[0]);
+                if (at.kind != TY_INT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s argument must be an integer",
+                           e->u.call.callee->u.var.name);
+                    return type_make_void();
+                }
+                if (nargs == 2) {
+                    Type cty = check_expr_inner(e->u.call.args.data[1]);
+                    if (cty.kind != TY_INT) {
+                        type_free(&at);
+                        type_free(&cty);
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "%s count must be an integer",
+                               e->u.call.callee->u.var.name);
+                        return type_make_void();
+                    }
+                    type_free(&cty);
+                }
+                if (same_ty) set_type(e, type_clone(at));
+                else set_type(e, type_make_int(4, 1));
+                type_free(&at);
+                return type_clone(e->type);
+            }
+        }
+        /* __builtin_*_sat saturates in the argument type.  Promoting an
+         * unsigned char to int would wrap 200+100 to 44 instead of 255. */
+        if (e->u.call.callee->kind == EX_VAR
+            && (strcmp(e->u.call.callee->u.var.name, "__builtin_add_sat") == 0
+                || strcmp(e->u.call.callee->u.var.name, "__builtin_sub_sat") == 0
+                || strcmp(e->u.call.callee->u.var.name, "__builtin_mul_sat") == 0)) {
+            if (e->u.call.args.len != 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes 2 arguments", e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            Type bt = check_expr_inner(e->u.call.args.data[1]);
+            if (at.kind != TY_INT || bt.kind != TY_INT) {
+                type_free(&at);
+                type_free(&bt);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s arguments must be integers",
+                       e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            set_type(e, type_clone(at));
+            type_free(&at);
+            type_free(&bt);
+            return type_clone(e->type);
+        }
+        /* __builtin_isnormal is type-generic.  Promoting float to double
+         * would turn a float subnormal into a normal double. */
+        if (e->u.call.callee->kind == EX_VAR
+            && (strcmp(e->u.call.callee->u.var.name, "__builtin_isnormal") == 0
+                || strcmp(e->u.call.callee->u.var.name, "__builtin_isnormalf") == 0
+                || strcmp(e->u.call.callee->u.var.name, "__builtin_isnormall") == 0
+                || strcmp(e->u.call.callee->u.var.name, "isnormal") == 0)) {
+            if (e->u.call.args.len != 1) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes 1 argument", e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            Type at = check_expr_inner(e->u.call.args.data[0]);
+            if (at.kind != TY_FLOAT) {
+                type_free(&at);
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s argument must be a floating type",
+                       e->u.call.callee->u.var.name);
+                return type_make_void();
+            }
+            type_free(&at);
+            set_type(e, type_make_int(4, 0));
+            return type_clone(e->type);
+        }
+        /* __builtin_fpclassify is type-generic in its last argument. A
+         * variadic prototype would promote float to double and hide a
+         * float subnormal. Leave that argument's type alone. */
+        if (e->u.call.callee->kind == EX_VAR
+            && strcmp(e->u.call.callee->u.var.name, "__builtin_fpclassify") == 0) {
+            if (e->u.call.args.len != 6) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "__builtin_fpclassify takes 6 arguments");
+                return type_make_void();
+            }
+            for (size_t i = 0; i < e->u.call.args.len; i++) {
+                Type at = check_expr_inner(e->u.call.args.data[i]);
+                if (i == 5 && at.kind != TY_FLOAT) {
+                    type_free(&at);
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "__builtin_fpclassify value must be a floating type");
+                    return type_make_void();
+                }
+                type_free(&at);
+            }
+            set_type(e, type_make_int(4, 0));
+            return type_clone(e->type);
+        }
         /* Type-check the callee expression. */
         Type callee_ty = check_expr_inner(e->u.call.callee);
         /* Direct call: callee is `EX_VAR` naming a known function. */
@@ -1904,22 +2379,34 @@ static Type check_expr_inner(Expr *e) {
                 return type_clone(e->type);
             }
             if (sig) {
+                /* Snapshot the signature before checking arguments: a nested
+                 * package-qualified call inside an argument expression can
+                 * lazily grow (realloc) the function table via
+                 * ftab_push_export(), which would otherwise leave `sig`
+                 * dangling. param_types is a separately heap-allocated array
+                 * and ret_type's nested Type pointers are owned elsewhere, so
+                 * these shallow copies stay valid across the realloc. */
+                int sig_arity = sig->arity;
+                int sig_variadic = sig->is_variadic;
+                int sig_unprototyped = sig->is_unprototyped;
+                Type *sig_param_types = sig->param_types;
+                Type sig_ret = sig->ret_type;
                 type_free(&callee_ty);
                 check_call_arity(e->loc, e->u.call.callee->u.var.name,
-                                 sig->arity, sig->is_variadic,
+                                 sig_arity, sig_variadic,
                                  e->u.call.args.len);
                 for (size_t i = 0; i < e->u.call.args.len; i++) {
                     Type at = check_expr_inner(e->u.call.args.data[i]);
                     type_free(&at);
-                    if ((int)i < sig->arity && !sig->is_unprototyped)
+                    if ((int)i < sig_arity && !sig_unprototyped)
                         coerce_arg_to_param(&e->u.call.args.data[i],
-                                            &sig->param_types[i]);
-                    else if (sig->is_variadic)
+                                            &sig_param_types[i]);
+                    else if (sig_variadic)
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
-                    else if (sig->is_unprototyped)
+                    else if (sig_unprototyped)
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
-                set_type(e, type_clone(sig->ret_type));
+                set_type(e, type_clone(sig_ret));
                 return type_clone(e->type);
             }
             /* Not in function table — check the symbol table for an extern
@@ -2367,7 +2854,9 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
             strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_val") == 0 ||
             strcmp(name, "__builtin_huge_valf") == 0 || strcmp(name, "__builtin_huge_vall") == 0 ||
             strcmp(name, "__builtin_nan") == 0 || strcmp(name, "__builtin_nanf") == 0 ||
-            strcmp(name, "__builtin_nanl") == 0)
+            strcmp(name, "__builtin_nanl") == 0 ||
+            strcmp(name, "__builtin_nans") == 0 || strcmp(name, "__builtin_nansf") == 0 ||
+            strcmp(name, "__builtin_nansl") == 0)
             return 1;
     }
     if (e->kind == EX_UNARY
@@ -2610,10 +3099,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             int per = init_leaf_count(*target->elem_type);
             if (per > 0) len = (n + per - 1) / per;
         }
-        for (int i = 0; i < n; i++)
-            if (list->u.init_list.desig_kind[i] == 0
-                && list->u.init_list.desig_index[i] + 1 > len)
-                len = list->u.init_list.desig_index[i] + 1;
+        if (list->u.init_list.desig_kind) {
+            for (int i = 0; i < n; i++)
+                if (list->u.init_list.desig_kind[i] == 0
+                    && list->u.init_list.desig_index[i] + 1 > len)
+                    len = list->u.init_list.desig_index[i] + 1;
+        }
         if (n == 1 && list->u.init_list.elements[0]
             && list->u.init_list.elements[0]->kind == EX_STR
             && target->elem_type && target->elem_type->kind == TY_INT
@@ -2657,30 +3148,32 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         return;
     }
     /* 2. Validate designators. */
-    for (int i = 0; i < n; i++) {
-        int kind = list->u.init_list.desig_kind[i];
-        if (kind == 0) {  /* [index] */
-            if (target->kind != TY_ARRAY && !target->is_vector)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+    if (list->u.init_list.desig_kind) {
+        for (int i = 0; i < n; i++) {
+            int kind = list->u.init_list.desig_kind[i];
+            if (kind == 0) {  /* [index] */
+                if (target->kind != TY_ARRAY && !target->is_vector)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "array index designator used on a non-array type");
-                    return;
-                }
-            int idx = list->u.init_list.desig_index[i];
-            if (idx < 0 || idx >= N)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+                        return;
+                    }
+                int idx = list->u.init_list.desig_index[i];
+                if (idx < 0 || idx >= N)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "designator index %d out of range for array of length %d",
                        idx, N);
-                    return;
-                }
-        } else if (kind == 1) {  /* .member */
-            if (target->kind != TY_STRUCT)
-                {
-                    die_at(loc.file, loc.line, loc.col,
+                        return;
+                    }
+            } else if (kind == 1) {  /* .member */
+                if (target->kind != TY_STRUCT)
+                    {
+                        die_at(loc.file, loc.line, loc.col,
                        "member designator used on a non-struct type");
-                    return;
-                }
+                        return;
+                    }
+            }
         }
     }
     /* 3. Build the dense array of N initialized elements.
@@ -2710,11 +3203,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     for (int i = 0; i < n; i++) {
         int pos;
         int member_idx = 0;
-        if (list->u.init_list.desig_kind[i] == 0) {
+        int dkind = list->u.init_list.desig_kind ? list->u.init_list.desig_kind[i] : -1;
+        if (dkind == 0) {
             pos = list->u.init_list.desig_index[i];
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
-        } else if (list->u.init_list.desig_kind[i] == 1) {
+        } else if (dkind == 1) {
             const char *name = list->u.init_list.desig_member[i];
             pos = designator_member_index(sd, name);
             if (pos < 0)
@@ -2722,7 +3216,7 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
                     die_at(loc.file, loc.line, loc.col,
                        "struct '%s' has no member named '%s'",
                        target->tag, name);
-                    return;
+                    goto fail;
                 }
             member_idx = pos;
             if (sd && sd->is_union) pos = 0;
@@ -2741,10 +3235,10 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         if (pos < 0 || pos >= N) {
             die_at(loc.file, loc.line, loc.col,
                    "excess elements in initializer");
-            return;
+            goto fail;
         }
         Expr *elem = list->u.init_list.elements[i];
-        if (list->u.init_list.desig_kind[i] == 1 && sd && member_idx >= 0) {
+        if (dkind == 1 && sd && member_idx >= 0) {
             const char *nm = list->u.init_list.desig_member[i];
             if (nm && !designator_is_direct_member(sd, member_idx, nm))
                 elem = wrap_anon_designator(nm, elem, loc);
@@ -2780,12 +3274,17 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             int want = init_leaf_count(*slot_type);
             int take = 1;
             while (take < want && i + take < n
-                   && list->u.init_list.desig_kind[i + take] == -1)
+                   && (!list->u.init_list.desig_kind || list->u.init_list.desig_kind[i + take] == -1))
                 take++;
             Expr **sub = malloc(take * sizeof(Expr *));
             for (int k = 0; k < take; k++)
                 sub[k] = list->u.init_list.elements[i + k];
             elem = expr_new_init_list(sub, take, elem->loc);
+            /* The wrapper owns those elements now.  Detach them from the
+             * old buffer so teardown cannot free them a second time (see
+             * `fail:` below). */
+            for (int k = 0; k < take; k++)
+                list->u.init_list.elements[i + k] = NULL;
             i += take - 1;
         }
 
@@ -2824,6 +3323,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             expr_free(out[pos]); /* drop the gap-fill zero (or previous element) */
             out[pos] = elem;
         }
+        /* Whatever happened above, this element is no longer owned by the
+         * original buffer: it was moved into `out`, folded into an existing
+         * slot, or freed.  Clear the slot so that a later expr_free(list) --
+         * which still walks the old buffer on an error path, since only the
+         * success path swaps it for `out` -- frees it exactly once. */
+        list->u.init_list.elements[i] = NULL;
         /* C99 6.7.8p17: after a designator the next current object is the one
          * following the designated slot, so the cursor always advances to
          * pos+1 (for positional inits pos == cursor, so this is just +1). */
@@ -2884,6 +3389,16 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
         list->u.init_list.desig_index = NULL;
         list->u.init_list.desig_member = NULL;
     }
+    return;
+
+    /* An error once left `list` holding a half-consumed element buffer:
+     * some elements had already been folded into `out` (or freed outright)
+     * while `list->u.init_list.elements` still pointed at them, so the
+     * teardown after the diagnostic freed them again.  Detach every element
+     * we take ownership of as we go, and release the partial result here. */
+fail:
+    for (int i = 0; i < N; i++) expr_free(out[i]);
+    free(out);
 }
 
 /* Parser-time folding cannot see object types, so `T a[sizeof g / sizeof *g]`

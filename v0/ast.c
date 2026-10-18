@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -179,6 +180,7 @@ struct Type {
     int bitfield_width;
     int is_vector;
     unsigned is_decimal : 1;
+    unsigned is_long_double : 1;
 };
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
@@ -186,7 +188,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -200,8 +203,10 @@ static inline Type type_make_float(long long width) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
+Type type_make_long_double(void);
 static inline Type type_make_decimal(long long width) {
     Type t = type_make_float(width);
     t.is_decimal = 1;
@@ -219,7 +224,8 @@ static inline Type type_make_void(void) {
     t.pointee = ((void*)0); t.elem_type = ((void*)0); t.length = 0; t.vla_dim = ((void*)0); t.tag = ((void*)0);
     t.func_ret = ((void*)0); t.func_params = ((void*)0); t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 Type type_clone(Type t);
 void type_free(Type *t);
@@ -237,6 +243,13 @@ enum SysVRegClass {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]);
 int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
+int abi_gp_nregs(void);
+int type_long_double_width(void);
+int abi_sret_uses_gp(void);
+int abi_indirect_agg(Type t);
+int abi_is_hfa(Type t);
+int abi_hfa_elem_count(Type t);
+int abi_hfa_elem_size(Type t);
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
 Type type_make_vector(Type elem, long long vec_size);
@@ -436,7 +449,7 @@ struct SwitchCase {
     StmtArray stmts;
 };typedef struct SwitchCase SwitchCase;
 union __anon_u_2 {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -451,7 +464,7 @@ union __anon_u_2 {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;
         Expr *expr;
         Expr *value;
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s;
@@ -496,6 +509,9 @@ struct FunctionDecl {
     int is_unprototyped;
     int is_extern;
     int is_static;
+    int is_weak;
+    int is_hidden;
+    int is_used;
     char *alias_target;
     int align;
     int no_instrument;
@@ -621,6 +637,39 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
+enum TargetArch {
+    TARGET_ARCH_UNKNOWN = 0,
+    TARGET_ARCH_X86_64 = 1,
+    TARGET_ARCH_ARM64 = 2,
+};typedef enum TargetArch TargetArch;
+enum TargetOS {
+    TOS_UNKNOWN = 0,
+    TOS_LINUX = 1,
+    TOS_MACOS = 2,
+};typedef enum TargetOS TargetOS;
+enum TargetObjFmt {
+    TARGET_OBJFMT_UNKNOWN = 0,
+    TARGET_OBJFMT_ELF = 1,
+    TARGET_OBJFMT_MACHO = 2,
+};typedef enum TargetObjFmt TargetObjFmt;
+struct TargetDesc {
+    TargetArch arch;
+    TargetOS os;
+    TargetObjFmt objfmt;
+    int ptr_bits;
+    int native_vector_bytes;
+    const char *triple;
+    int gp_arg_regs;
+    int sret_uses_gp;
+};typedef struct TargetDesc TargetDesc;
+const TargetDesc *target_current(void);
+void target_set_current(const TargetDesc *t);
+const TargetDesc *target_default(void);
+const TargetDesc *target_parse(const char *triple);
+const TargetDesc *target_x86_64_linux(void);
+const TargetDesc *target_arm64_macos(void);
+int target_backend_ready(const TargetDesc *t);
+
 typedef struct FILE FILE;
 typedef long fpos_t;
 Type type_clone(Type t) {
@@ -701,6 +750,12 @@ void type_free(Type *t) {
         runtime.free(t->func_params); t->func_params = ((void*)0);
     }
 }
+static const StructRegistry *current_structs(void) {
+    const StructRegistry *reg = get_parser_structs();
+    if (!reg) reg = get_sema_structs();
+    if (!reg) reg = get_ir_structs();
+    return reg;
+}
 long long type_size(Type t) {
     if (t.is_vector) return t.width;
     const Type *p = &t;
@@ -719,9 +774,7 @@ long long type_size(Type t) {
     case TY_ARRAY: return 0;
     case TY_STRUCT: {
         if (p->tag) {
-            const StructRegistry *reg = get_ir_structs();
-            if (!reg) reg = get_sema_structs();
-            if (!reg) reg = get_parser_structs();
+            const StructRegistry *reg = current_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
                 if (sd && sd->size > 0) return count * sd->size;
@@ -739,9 +792,7 @@ int type_is_complex_ldouble(Type t) {
 }
 int type_is_empty_struct(Type t) {
     if (t.kind != TY_STRUCT) return 0;
-    const StructRegistry *reg = get_ir_structs();
-    if (!reg) reg = get_sema_structs();
-    if (!reg) reg = get_parser_structs();
+    const StructRegistry *reg = current_structs();
     if (t.tag && reg) {
         const StructDef *sd = struct_registry_find_c(reg, t.tag);
         if (sd) return sd->size <= 0 || sd->num_members == 0;
@@ -1027,9 +1078,7 @@ long long type_align(Type t) {
     case TY_ARRAY: return 1;
     case TY_STRUCT: {
         if (p->tag) {
-            const StructRegistry *reg = get_ir_structs();
-            if (!reg) reg = get_sema_structs();
-            if (!reg) reg = get_parser_structs();
+            const StructRegistry *reg = current_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
                 if (sd && sd->align > 0) return sd->align;
@@ -1094,7 +1143,7 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
         return 0;
     }
     if (t.kind == TY_STRUCT && t.tag) {
-        const StructRegistry *reg = get_ir_structs();
+        const StructRegistry *reg = current_structs();
         const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : ((void*)0);
         if (!sd) {
             int sz = type_size(t);
@@ -1110,7 +1159,8 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
             const StructMember *m = &sd->members[mi];
             if (m->bit_width == 0) continue;
             if (sd->is_union && m->type.kind == TY_ARRAY && m->type.length < 0
-                && !m->type.vla_dim)
+                && !m->type.vla_dim
+                && target_current()->arch != TARGET_ARCH_ARM64)
                 return 1;
             int moff = offset + m->offset;
             int msz = m->bit_width > 0 ? 0 : type_size(m->type);
@@ -1196,7 +1246,7 @@ int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     if (t.kind != TY_STRUCT || !t.tag) return 0;
     int sz = type_size(t);
     if (sz <= 0 || sz > 64) return 0;
-    const StructRegistry *reg = get_ir_structs();
+    const StructRegistry *reg = current_structs();
     const StructDef *sd = ((void*)0);
     if (reg) sd = struct_registry_find_c(reg, t.tag);
     if (!sd) {
@@ -1245,9 +1295,7 @@ static int type_is_pure_x87(Type t) {
         return type_is_pure_x87(*t.elem_type);
     }
     if (t.kind != TY_STRUCT || !t.tag) return 0;
-    const StructRegistry *reg = get_ir_structs();
-    if (!reg) reg = get_sema_structs();
-    if (!reg) reg = get_parser_structs();
+    const StructRegistry *reg = current_structs();
     const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : ((void*)0);
     if (!sd) return 0;
     int any = 0;
@@ -1268,9 +1316,93 @@ int sysv_agg_ret_x87(Type t) {
     if (sysv_classify_agg(t, cls) != 0) return 0;
     return type_is_pure_x87(t);
 }
+static int abi_is_arm64(void);
 int sysv_memory_pass_as_pointer(Type t) {
+    if (abi_is_arm64()) return 0;
     return t.kind == TY_STRUCT && t.tag
         && runtime.strcmp(t.tag, "__va_list_tag") == 0;
+}
+static int abi_is_arm64(void) {
+    const TargetDesc *t = target_current();
+    return t && t->arch == TARGET_ARCH_ARM64;
+}
+int type_long_double_width(void) {
+    const TargetDesc *t = target_current();
+    if (t && t->arch == TARGET_ARCH_ARM64) return 8;
+    return 16;
+}
+Type type_make_long_double(void) {
+    Type t = type_make_float(type_long_double_width());
+    t.is_long_double = 1;
+    return t;
+}
+int abi_gp_nregs(void) {
+    const TargetDesc *t = target_current();
+    if (t && t->gp_arg_regs > 0) return t->gp_arg_regs;
+    return 6;
+}
+int abi_sret_uses_gp(void) {
+    const TargetDesc *t = target_current();
+    if (!t) return 1;
+    return t->sret_uses_gp;
+}
+static int hfa_elems(Type t, int *kind) {
+    if (t.is_vector || t.is_decimal) return -1;
+    if (t.kind == TY_FLOAT) {
+        if (t.width != 4 && t.width != 8) return -1;
+        if (*kind == 0) *kind = t.width;
+        if (*kind != t.width) return -1;
+        return 1;
+    }
+    if (t.kind == TY_ARRAY && t.elem_type && t.length > 0) {
+        int n = hfa_elems(*t.elem_type, kind);
+        if (n <= 0) return -1;
+        long long tot = (long long)n * t.length;
+        if (tot > 4) return -1;
+        return (int)tot;
+    }
+    if (t.kind != TY_STRUCT || !t.tag) return -1;
+    const StructRegistry *reg = get_ir_structs();
+    if (!reg) reg = get_sema_structs();
+    if (!reg) reg = get_parser_structs();
+    const StructDef *sd = reg ? struct_registry_find_c(reg, t.tag) : ((void*)0);
+    if (!sd || sd->is_union) return -1;
+    int total = 0, any = 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        if (sd->members[i].bit_width == 0) continue;
+        if (sd->members[i].bit_width > 0) return -1;
+        Type mt = sd->members[i].type;
+        if (mt.kind == TY_ARRAY && mt.length <= 0 && !mt.vla_dim) continue;
+        int n = hfa_elems(mt, kind);
+        if (n <= 0) return -1;
+        total += n;
+        any = 1;
+        if (total > 4) return -1;
+    }
+    return any ? total : -1;
+}
+int abi_hfa_elem_count(Type t) {
+    if (!abi_is_arm64()) return -1;
+    int kind = 0;
+    int n = hfa_elems(t, &kind);
+    return (n >= 1 && n <= 4) ? n : -1;
+}
+int abi_is_hfa(Type t) {
+    return abi_hfa_elem_count(t) > 0;
+}
+int abi_hfa_elem_size(Type t) {
+    if (!abi_is_arm64()) return -1;
+    int kind = 0;
+    int n = hfa_elems(t, &kind);
+    if (n < 1 || n > 4) return -1;
+    return kind ? kind : -1;
+}
+int abi_indirect_agg(Type t) {
+    if (!abi_is_arm64()) return 0;
+    if (t.is_vector) return type_size(t) > 16;
+    if (t.kind != TY_STRUCT) return 0;
+    if (abi_is_hfa(t)) return 0;
+    return type_size(t) > 16;
 }
 int g_no_avx = 0;
 int g_avx512f = 0;
@@ -2078,10 +2210,17 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_init(&tu->typedefs);
     SourceLoc vloc = {0};
     StructDef *va = struct_registry_add(&tu->structs, "__va_list_tag", vloc);
-    struct_def_push_member(va, "gp_offset", type_make_int(4, 1), -1);
-    struct_def_push_member(va, "fp_offset", type_make_int(4, 1), -1);
-    struct_def_push_member(va, "overflow_arg_area", type_make_ptr(type_make_void()), -1);
-    struct_def_push_member(va, "reg_save_area", type_make_ptr(type_make_void()), -1);
+    if (abi_is_arm64()) {
+        struct_def_push_member(va, "overflow_arg_area",
+                               type_make_ptr(type_make_void()), -1);
+    } else {
+        struct_def_push_member(va, "gp_offset", type_make_int(4, 1), -1);
+        struct_def_push_member(va, "fp_offset", type_make_int(4, 1), -1);
+        struct_def_push_member(va, "overflow_arg_area",
+                               type_make_ptr(type_make_void()), -1);
+        struct_def_push_member(va, "reg_save_area",
+                               type_make_ptr(type_make_void()), -1);
+    }
     struct_def_finish(va);
     Type va_type = type_make_struct("__va_list_tag", va->size);
     typedef_registry_add(&tu->typedefs, "va_list", va_type);
@@ -2364,7 +2503,10 @@ int fold_const_int(const Expr *e, long long *out) {
     if (fakecc_had_error()) return FAKECC_ERR;
     if (!e) return 0;
     if (e->kind == EX_FLOAT_LIT && e->u.float_text) {
-        *out = (long long)runtime.strtold(e->u.float_text, ((void*)0));
+        long double d = runtime.strtold(e->u.float_text, ((void*)0));
+        if (d >= 9223372036854775808.0L) *out = 9223372036854775807LL;
+        else if (d < -9223372036854775807.0L - 1.0L) *out = (-9223372036854775807LL - 1);
+        else *out = (long long)d;
         return 1;
     }
     if (e->kind == EX_INT_LIT) {
@@ -2414,7 +2556,7 @@ int fold_const_int(const Expr *e, long long *out) {
         long long v;
         if (!fold_const_int(e->u.un.operand, &v)) return 0;
         switch (e->u.un.op) {
-        case UOP_NEG: *out = -v; return 1;
+        case UOP_NEG: *out = (long long)(0ull - (unsigned long long)v); return 1;
         case UOP_POS: *out = v; return 1;
         case UOP_BITNOT: *out = ~v; return 1;
         case UOP_NOT: *out = !v ? 1 : 0; return 1;
@@ -2456,32 +2598,34 @@ long long r;
         int trunc_result = 1;
         switch (e->u.bin.op) {
         case BOP_ADD:
-            res = is_u ? (long long)(ul + ur) : l + r;
+            res = (long long)((unsigned long long)l + (unsigned long long)r);
             if (!is_u) trunc_result = 0;
             break;
         case BOP_SUB:
-            res = is_u ? (long long)(ul - ur) : l - r;
+            res = (long long)((unsigned long long)l - (unsigned long long)r);
             if (!is_u) trunc_result = 0;
             break;
         case BOP_MUL:
-            res = is_u ? (long long)(ul * ur) : l * r;
+            res = (long long)((unsigned long long)l * (unsigned long long)r);
             if (!is_u) trunc_result = 0;
             break;
         case BOP_DIV:
             if (r == 0) { *out = 0; return 1; }
-            res = is_u ? (ur ? (long long)(ul / ur) : 0) : l / r;
+            res = (long long)((unsigned long long)l / (unsigned long long)r);
             break;
         case BOP_MOD:
             if (r == 0) { *out = 0; return 1; }
-            res = is_u ? (ur ? (long long)(ul % ur) : 0) : l % r;
+            res = (long long)((unsigned long long)l % (unsigned long long)r);
             break;
         case BOP_BITAND: res = (long long)(ul & ur); break;
         case BOP_BITOR: res = (long long)(ul | ur); break;
         case BOP_BITXOR: res = (long long)(ul ^ ur); break;
-        case BOP_SHL: res = is_u ? (long long)(ul << (r & 63)) : (l << r); break;
+        case BOP_SHL:
+            res = (long long)((unsigned long long)l << (r & 63));
+            break;
         case BOP_SHR:
             if (is_u) res = (long long)(ul >> (r & 63));
-            else res = l >> r;
+            else res = l >> (r & 63);
             break;
         case BOP_EQ: res = is_u ? (ul == ur) : (l == r); break;
         case BOP_NE: res = is_u ? (ul != ur) : (l != r); break;

@@ -1,5 +1,6 @@
 #include "fakecc/debug.h"
 #include "fakecc/common.h"
+#include "fakecc/target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -193,6 +194,17 @@ void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
     if (func_idx < 0 || (size_t)func_idx >= m->num_dbg_funcs) return;
     m->dbg_funcs[func_idx].after_push_rbp_pc = after_push_rbp_pc;
     m->dbg_funcs[func_idx].after_mov_rbp_pc = after_mov_rbp_pc;
+    m->dbg_funcs[func_idx].frame_size = 0;
+}
+
+void emit_module_dbg_func_frame64(EmitModule *m, int func_idx,
+                                  size_t after_stp_pc,
+                                  size_t after_mov_fp_pc,
+                                  size_t frame_size) {
+    if (func_idx < 0 || (size_t)func_idx >= m->num_dbg_funcs) return;
+    m->dbg_funcs[func_idx].after_push_rbp_pc = after_stp_pc;
+    m->dbg_funcs[func_idx].after_mov_rbp_pc = after_mov_fp_pc;
+    m->dbg_funcs[func_idx].frame_size = frame_size;
 }
 
 static void debug_members_copy(DebugMember **dst, size_t *ndst,
@@ -235,6 +247,8 @@ static void debug_var_copy(DebugVar *dst, const DebugVar *src) {
     dst->alloca_ssa = src->alloca_ssa;
     dst->param_idx = src->param_idx;
     dst->entry_dwarf_reg = src->entry_dwarf_reg;
+    dst->addr_sect = src->addr_sect;
+    dst->addr_off = src->addr_off;
     if (src->num_ranges > 0) {
         dst->ranges = xmalloc(src->num_ranges * sizeof(DebugLocRange));
         memcpy(dst->ranges, src->ranges,
@@ -391,6 +405,8 @@ static void ser_var(Buffer *b, const DebugVar *v) {
     d_u32(b, (uint32_t)v->alloca_ssa);
     d_u32(b, (uint32_t)v->param_idx);
     d_u32(b, (uint32_t)v->entry_dwarf_reg);
+    d_u32(b, (uint32_t)v->addr_sect);
+    d_u64(b, (uint64_t)v->addr_off);
     d_u32(b, (uint32_t)v->num_ranges);
     for (size_t i = 0; i < v->num_ranges; i++) {
         const DebugLocRange *r = &v->ranges[i];
@@ -454,6 +470,10 @@ static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar
     if (*p + 4 > end) return -1;
     v->entry_dwarf_reg = (int)rd32(p);
     if (*p + 4 > end) return -1;
+    v->addr_sect = (int)rd32(p);
+    if (*p + 8 > end) return -1;
+    v->addr_off = (size_t)rd64(p);
+    if (*p + 4 > end) return -1;
     uint32_t nranges = rd32(p);
     if (nranges > 0) {
         v->ranges = xmalloc(nranges * sizeof(DebugLocRange));
@@ -474,7 +494,7 @@ static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar
 
 void debug_serialize(const EmitModule *m, Buffer *out) {
     d_bytes(out, "FDBG", 4);
-    d_u32(out, 3);   /* v3: call sites + entry_dwarf_reg */
+    d_u32(out, 4);   /* v4: frame_size + prologue step PCs */
     ser_str(out, m->dbg_tu_name);
     d_u32(out, (uint32_t)m->num_dbg_lines);
     for (size_t i = 0; i < m->num_dbg_lines; i++) {
@@ -493,6 +513,9 @@ void debug_serialize(const EmitModule *m, Buffer *out) {
         d_u64(out, (uint64_t)f->start_pc);
         d_u64(out, (uint64_t)f->end_pc);
         d_u64(out, (uint64_t)f->prologue_end_pc);
+        d_u64(out, (uint64_t)f->frame_size);
+        d_u64(out, (uint64_t)f->after_push_rbp_pc);
+        d_u64(out, (uint64_t)f->after_mov_rbp_pc);
         d_u32(out, (uint32_t)f->num_vars);
         for (size_t j = 0; j < f->num_vars; j++) ser_var(out, &f->vars[j]);
         d_u32(out, (uint32_t)f->num_call_sites);
@@ -520,7 +543,7 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
     const unsigned char *p = data, *end = data + len;
     if (len < 8 || memcmp(p, "FDBG", 4) != 0) return -1;
     p += 4;
-    if (rd32(&p) != 3) return -1;
+    if (rd32(&p) != 4) return -1;
     if (deser_str(&p, end, &m->dbg_tu_name) < 0) return -1;
     if (p + 4 > end) return -1;
     uint32_t nlines = rd32(&p);
@@ -539,12 +562,15 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
         char *name = NULL, *file = NULL;
         if (deser_str(&p, end, &name) < 0) return -1;
         if (deser_str(&p, end, &file) < 0) { free(name); return -1; }
-        if (p + 4 + 24 + 4 > end) { free(name); free(file); return -1; }
+        if (p + 4 + 24 + 24 + 4 > end) { free(name); free(file); return -1; }
         int line = (int)rd32(&p);
         uint64_t start = rd64(&p), endpc = rd64(&p), prol = rd64(&p);
+        uint64_t fsize = rd64(&p), apush = rd64(&p), amov = rd64(&p);
         uint32_t nvars = rd32(&p);
         int fi = emit_module_add_dbg_func(m, name, file, line, (size_t)start);
         emit_module_dbg_func_end(m, fi, (size_t)endpc, (size_t)prol);
+        emit_module_dbg_func_frame64(m, fi, (size_t)apush, (size_t)amov,
+                                     (size_t)fsize);
         free(name); free(file);
         for (uint32_t j = 0; j < nvars; j++) {
             DebugVar v;
@@ -600,12 +626,17 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
 }
 
 static uint64_t resolve_sym_addr(const EmitModule *m, const char *name,
-                                 uint64_t text_base) {
+                                 uint64_t text_base,
+                                 const uint64_t *sec_vaddr) {
     (void)text_base;
     if (!name) return 0;
     for (size_t i = 0; i < m->num_syms; i++) {
         if (!m->syms[i].name || strcmp(m->syms[i].name, name) != 0) continue;
-        if (m->syms[i].shndx == SECT_UNDEF) continue;
+        unsigned sh = m->syms[i].shndx;
+        if (sh == SECT_UNDEF) continue;
+        /* SHN_COMMON (0xfff2) and friends are not section indices at all, so
+         * they must not reach sec_vaddr[]. */
+        if (sec_vaddr && sh < 16) return sec_vaddr[sh] + m->syms[i].value;
         return m->syms[i].value;
     }
     return 0;
@@ -823,10 +854,16 @@ static void emit_loc_bytes(Buffer *expr, DebugLocKind kind, int rbp_offset,
 }
 
 static void emit_location_expr(Buffer *b, const DebugVar *v,
-                               const EmitModule *m, uint64_t text_base) {
+                               const EmitModule *m, uint64_t text_base,
+                               const uint64_t *sec_vaddr) {
     Buffer expr; buffer_init(&expr);
     if (v->loc_kind == DBG_LOC_ADDR) {
-        uint64_t addr = resolve_sym_addr(m, v->sym_name ? v->sym_name : v->name, text_base);
+        uint64_t addr;
+        if (sec_vaddr && v->addr_sect > 0)
+            addr = sec_vaddr[v->addr_sect] + (uint64_t)v->addr_off;
+        else
+            addr = resolve_sym_addr(m, v->sym_name ? v->sym_name : v->name,
+                                    text_base, sec_vaddr);
         d_u8(&expr, DW_OP_addr); d_u64(&expr, addr);
     } else {
         emit_loc_bytes(&expr, v->loc_kind, v->rbp_offset, v->dwarf_reg);
@@ -1077,7 +1114,68 @@ static void cfa_advance(Buffer *frame, size_t delta) {
     }
 }
 
+/* arm64 call-frame information.  The x86 rules below are not wrong so much
+ * as about a different machine: there the return address is pushed by CALL
+ * and the frame is `push %rbp; mov %rsp,%rbp`.  Here the return address
+ * arrives in x30 and the prologue is `stp x29,x30,[sp,#-N]!` followed by
+ * `add x29,sp,#0`, so:
+ *
+ *   entry:                CFA = sp + 0          (nothing pushed yet)
+ *   after stp:            CFA = sp + N, x29 at CFA-N,    x30 at CFA-(N-8)
+ *   after add x29,sp,#0:  CFA = x29 + N
+ *
+ * N is not a constant the way 16 is on x86 — it grows with the callee-saved
+ * registers — which is why DebugFunc carries it.
+ *
+ * The other encoding difference: `DW_CFA_advance_loc` counts *instructions*
+ * scaled by the CIE's code alignment factor, and every A64 instruction is
+ * 4 bytes, not the 1 that x86-64 assumes. */
+static void emit_debug_frame_arm64(const EmitModule *m, uint64_t text_base,
+                                   Buffer *frame) {
+    size_t cie_start = frame->len;
+    d_u32(frame, 0);
+    d_u32(frame, 0xffffffff);
+    d_u8(frame, 1);
+    d_u8(frame, 0);
+    d_uleb(frame, 4);          /* code alignment factor */
+    d_sleb(frame, -8);
+    d_uleb(frame, 30);         /* x30 / LR */
+    d_u8(frame, DW_CFA_def_cfa); d_uleb(frame, 31); d_uleb(frame, 0);  /* sp */
+    while ((frame->len - cie_start) & 7) d_u8(frame, DW_CFA_nop);
+    uint32_t cie_len = (uint32_t)(frame->len - cie_start - 4);
+    memcpy(frame->data + cie_start, &cie_len, 4);
+
+    for (size_t i = 0; i < m->num_dbg_funcs; i++) {
+        const DebugFunc *f = &m->dbg_funcs[i];
+        size_t fde_start = frame->len;
+        d_u32(frame, 0);
+        d_u32(frame, (uint32_t)cie_start);
+        d_u64(frame, text_base + f->start_pc);
+        d_u64(frame, f->end_pc > f->start_pc ? f->end_pc - f->start_pc : 0);
+
+        size_t n = f->frame_size ? f->frame_size : 16;
+        size_t stp_end = f->after_push_rbp_pc > f->start_pc
+                         ? f->after_push_rbp_pc - f->start_pc : 4;
+        size_t mov_end = f->after_mov_rbp_pc > f->after_push_rbp_pc
+                         ? f->after_mov_rbp_pc - f->after_push_rbp_pc : 4;
+        cfa_advance(frame, stp_end / 4);
+        d_u8(frame, DW_CFA_def_cfa_offset); d_uleb(frame, n);
+        d_u8(frame, (uint8_t)(DW_CFA_offset | 29)); d_uleb(frame, n / 8);
+        d_u8(frame, (uint8_t)(DW_CFA_offset | 30)); d_uleb(frame, (n - 8) / 8);
+        cfa_advance(frame, mov_end / 4);
+        d_u8(frame, DW_CFA_def_cfa_register); d_uleb(frame, 29);
+
+        while ((frame->len - fde_start) & 7) d_u8(frame, DW_CFA_nop);
+        uint32_t fde_len = (uint32_t)(frame->len - fde_start - 4);
+        memcpy(frame->data + fde_start, &fde_len, 4);
+    }
+}
+
 static void emit_debug_frame(const EmitModule *m, uint64_t text_base, Buffer *frame) {
+    if (target_current()->arch == TARGET_ARCH_ARM64) {
+        emit_debug_frame_arm64(m, text_base, frame);
+        return;
+    }
     size_t cie_start = frame->len;
     d_u32(frame, 0);
     d_u32(frame, 0xffffffff);
@@ -1126,6 +1224,15 @@ static void emit_debug_frame(const EmitModule *m, uint64_t text_base, Buffer *fr
 }
 
 static int dwarf_reg_is_caller_saved(int dreg) {
+    /* AAPCS64: x0..x18 are temporary (x18 is the platform register, also
+     * caller-saved) and v0..v31 are caller-saved except the low 64 bits of
+     * v8..v15.  x19..x28, x29 (fp) and x30 (lr) belong to the callee, so a
+     * value parked in one of them survives a call and needs no entry value. */
+    if (target_current()->arch == TARGET_ARCH_ARM64) {
+        if (dreg <= 18) return 1;
+        if (dreg >= 64 && dreg <= 95) return !(dreg >= 72 && dreg <= 79);
+        return 0;
+    }
     if (dreg >= 17 && dreg <= 32) return 1; /* XMM0..15 */
     switch (dreg) {
     case 0: case 1: case 2: case 4: case 5:   /* rax rdx rcx rsi rdi */
@@ -1252,10 +1359,19 @@ static void refine_param_ranges(DebugVar *out, const DebugVar *v,
     out->loc_kind = DBG_LOC_NONE;
 }
 
+/* DWARF register number of the frame pointer the current target's backend
+ * lays its frames out around: rbp (6) on x86-64, x29 (29) on arm64.  The two
+ * name their frame slots from different anchors, so a frame base that picks
+ * the wrong one makes every variable read the wrong address. */
+static int dbg_frame_reg(void) {
+    return target_current()->arch == TARGET_ARCH_ARM64 ? 29 : 6;
+}
+
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
                       Buffer *debug_str, Buffer *debug_line,
-                      Buffer *debug_frame, Buffer *debug_loc) {
+                      Buffer *debug_frame, Buffer *debug_loc,
+                      const uint64_t *sec_vaddr) {
     emit_abbrevs(debug_abbrev);
     Strtab strs; strtab_init(&strs);
     uint32_t tu_name = strtab_add(&strs, m->dbg_tu_name ? m->dbg_tu_name : "unknown.c");
@@ -1296,7 +1412,7 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
         d_uleb(debug_info, 10);
         d_u32(debug_info, nm);
         d_u32(debug_info, ty);
-        emit_location_expr(debug_info, v, m, text_base_vaddr);
+        emit_location_expr(debug_info, v, m, text_base_vaddr, sec_vaddr);
     }
 
     /* Map function name → DIE offset (relative to CU info start) for
@@ -1322,7 +1438,13 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
         d_u32(debug_info, nm);
         d_u64(debug_info, text_base_vaddr + f->start_pc);
         d_u64(debug_info, f->end_pc >= f->start_pc ? f->end_pc - f->start_pc : 0);
-        { Buffer expr; buffer_init(&expr); d_u8(&expr, DW_OP_reg0 + 6);
+        /* DW_AT_frame_base: the register every DW_OP_fbreg offset is relative
+         * to.  It is rbp on x86-64 (DWARF 6) and the frame pointer x29 on
+         * arm64 (DWARF 29) -- the two backends lay their frames out around
+         * different anchors, and a frame base naming the wrong one makes every
+         * variable read the wrong address. */
+        { Buffer expr; buffer_init(&expr);
+          d_u8(&expr, DW_OP_reg0 + dbg_frame_reg());
           d_uleb(debug_info, expr.len); d_bytes(debug_info, expr.data, expr.len); buffer_free(&expr); }
         for (size_t vi = 0; vi < f->num_vars; vi++) {
             const DebugVar *v = &f->vars[vi];
@@ -1347,7 +1469,7 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                 d_uleb(debug_info, is_param ? 8 : 9);
                 d_u32(debug_info, vnm);
                 d_u32(debug_info, ty);
-                emit_location_expr(debug_info, use, m, text_base_vaddr);
+                emit_location_expr(debug_info, use, m, text_base_vaddr, sec_vaddr);
             }
             if (free_refined) free(refined.ranges);
         }

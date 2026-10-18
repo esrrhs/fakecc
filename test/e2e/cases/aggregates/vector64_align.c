@@ -1,4 +1,7 @@
 // expect: 0
+// Over-aligned vector frame slots: gcc's arm64 layout does not match the
+// x86 assumption this case pins.
+// skip_oracle: darwin
 // vector_size(64) aligns to 64.  Passing may use ZMM or MEMORY.
 package main;
 typedef int V __attribute__((vector_size(64)));

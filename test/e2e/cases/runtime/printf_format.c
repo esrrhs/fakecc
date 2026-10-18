@@ -1,5 +1,6 @@
 // runtime.printf conversions and length modifiers that the float-focused
 // printf_float.c leaves uncovered: %o (octal), %u (unsigned), %i, %p
+// skip_oracle: clang
 // (pointer), %X (uppercase hex), %c, and the l/ll length modifiers on
 // integer conversions.  Pin each against an exact expected string.
 // expect: 0

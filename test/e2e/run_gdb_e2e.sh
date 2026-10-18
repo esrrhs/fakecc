@@ -28,6 +28,15 @@
 # compared byte for byte.  -g must be purely additive; fakecc regressed here
 # once by pinning scalars to memory under -g, which cost ~30% runtime.
 set -uo pipefail
+# Portability helpers (timeout/nproc/readelf shims for non-GNU hosts).
+_COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Abort if the shims could not be sourced: a silently missing `timeout` turns
+# every case into a confusing "command not found" instead of a clear error.
+. "$_COMPAT_DIR/compat.sh" || { echo "cannot source compat.sh from $_COMPAT_DIR" >&2; exit 2; }
+# run_e2e fans cases out to `xargs bash -c` workers, which only see exported
+# functions, so re-export the shims this script's workers rely on.
+export -f timeout nproc 2>/dev/null || true
+
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAKECC="${1:-$ROOT/build/fakecc}"
@@ -58,6 +67,12 @@ read_annotations() {
 check_text_identical() {
   local src="$1" flags="$2" name="$3"
   local plain="$TMP/id_plain" dbg="$TMP/id_dbg"
+  # Comparing .text needs binutils.  Say so instead of comparing two files
+  # that were never produced, which would report itself as "identical".
+  if ! command -v objcopy >/dev/null 2>&1; then
+    echo "note $name [$flags] (-g/.text comparison skipped, no objcopy)"
+    return 0
+  fi
   if ! timeout "$CC_TIMEOUT" "$FAKECC" $flags "$src" -o "$plain" 2>"$TMP/e1"; then
     echo "FAIL $name [$flags] (compile without -g failed: $(head -1 "$TMP/e1"))"
     return 1
@@ -181,6 +196,15 @@ if echo "$out" | grep -q "Breakpoint 1"; then
 else
   echo "FAIL break main without -g"; echo "$out" | sed 's/^/  /'
   n_fail=$((n_fail + 1)); FAIL=1
+fi
+
+# A green suite that executed nothing is indistinguishable from a broken one
+# unless it says so.  Right now nothing above ever produces this state, but
+# that is the failure mode this whole suite used to have: every Linux runner
+# reported success for years without running a single case.
+if [ "$n_pass" = "0" ] && [ "$n_fail" = "0" ]; then
+  echo "FAIL gdb suite ran no cases"
+  exit 2
 fi
 
 echo "--- gdb e2e: $n_pass passed, $n_fail failed ---"

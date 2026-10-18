@@ -1,4 +1,6 @@
 // expect: 0
+// Darwin: the asm port leaves undefined symbols.
+// skip_oracle: darwin
 package main;
 
 /* Port of gcc.c-torture/execute/builtins/strstr-asm.c

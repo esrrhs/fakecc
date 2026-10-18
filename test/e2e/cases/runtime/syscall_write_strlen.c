@@ -1,4 +1,7 @@
 // expect: 5
+// Darwin's syscall numbers differ from Linux, so the oracle's __syscall(1,
+// ...) is a different call.
+// skip_oracle: darwin
 // strlen via loop over a string literal, then confirm write returns the
 // same length.
 package main;

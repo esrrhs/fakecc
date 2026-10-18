@@ -234,17 +234,39 @@ void mem2reg_writeback(
                          * align16 / x87_pair from the stack would leak into
                          * DCE and codegen, and stage0 vs stage1 have different
                          * stack dirt so the compiler would not be a fixed point. */
-                        IRInst copy;
-                        memset(&copy, 0, sizeof(copy));
-                        copy.op = IR_COPY;
-                        copy.dst = phi->dst;
-                        copy.a = phi->args[ai].val;
-                        copy.b = -1;
-                        copy.loc = phi->loc;
-                        copy.width = (phi->dst < fn->value_meta_cap && fn->value_width) ? fn->value_width[phi->dst] : 8;
-                        copy.is_unsigned = (phi->dst < fn->value_meta_cap && fn->value_is_unsigned) ? fn->value_is_unsigned[phi->dst] : 0;
-                        copy.is_float = (phi->dst < fn->value_meta_cap && fn->value_is_float) ? fn->value_is_float[phi->dst] : 0;
-                        inst_array_push(&out, copy);
+                        int dst_isfloat = (phi->dst < fn->value_meta_cap
+                                           && fn->value_is_float)
+                                          ? fn->value_is_float[phi->dst] : 0;
+                        IRInst mv;
+                        memset(&mv, 0, sizeof(mv));
+                        if (phi->args[ai].val < 0 && dst_isfloat) {
+                            /* Undefined incoming edge to a FLOAT phi: emit a
+                             * typed zero.  Aliasing it onto integer SSA value
+                             * 0 fed an int into the FP allocator, which crashed
+                             * arm64 codegen (pr50310).  Integer phis keep the
+                             * historical value-0 placeholder below: it is the
+                             * same width class, and changing it perturbs register
+                             * allocation in variadic stack code (stdarg-4). */
+                            mv.op = IR_CONST;
+                            mv.dst = phi->dst;
+                            mv.a = -1; mv.b = -1;
+                            mv.imm = 0;
+                        } else if (phi->args[ai].val < 0) {
+                            mv.op = IR_COPY;
+                            mv.dst = phi->dst;
+                            mv.a = 0;
+                            mv.b = -1;
+                        } else {
+                            mv.op = IR_COPY;
+                            mv.dst = phi->dst;
+                            mv.a = phi->args[ai].val;
+                            mv.b = -1;
+                        }
+                        mv.loc = phi->loc;
+                        mv.width = (phi->dst < fn->value_meta_cap && fn->value_width) ? fn->value_width[phi->dst] : 8;
+                        mv.is_unsigned = (phi->dst < fn->value_meta_cap && fn->value_is_unsigned) ? fn->value_is_unsigned[phi->dst] : 0;
+                        mv.is_float = (char)dst_isfloat;
+                        inst_array_push(&out, mv);
                         break;
                     }
                 }
@@ -389,7 +411,12 @@ static void mem2reg_rename_dfs(
             size_t ai = find_alloca_slot(alloca_slots, num_alloca, phi->alloca_slot);
             if (ai != (size_t)-1) {
                 IRValue val = rstack_top(&stacks[ai]);
-                if (val < 0) val = 0;
+                /* Keep -1 ("no reaching definition on this edge") as a
+                 * sentinel: writeback turns it into a typed zero constant.
+                 * Aliasing it onto SSA value 0 reused whatever unrelated
+                 * value happened to own that id -- after renumbering an
+                 * integer value could feed a floating-point phi, and the
+                 * arm64 backend routed it through the FP allocator. */
                 phi_add_arg(phi, val, b);
             }
         }

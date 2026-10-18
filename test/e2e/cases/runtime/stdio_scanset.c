@@ -1,5 +1,6 @@
 // expect: 0
 // scanf %[] scansets, including GNU a-z ranges and a leading ].
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

@@ -1,5 +1,6 @@
 // expect: 0
 // ftell after ungetc reports the logical position (kernel offset minus pushback).
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

@@ -1,4 +1,6 @@
 #include "fakecc/regalloc.h"
+#include "fakecc/reg_arm64.h"
+#include "fakecc/target.h"
 #include "fakecc/cfg.h"
 #include "fakecc/common.h"
 #include "fakecc/ast.h"
@@ -9,18 +11,13 @@
 #include <string.h>
 
 /* ================================================================== */
-/* Register-class abstraction                                           */
+/* Register-class selection per compilation target                     */
 /*                                                                      */
-/* The allocator is run once per register class.  Each class owns a    */
-/* set of allocatable registers and a bitmask describing which of those */
-/* are caller-saved (and so forbidden for values live across a call).   */
+/* The allocation algorithm below is architecture neutral; only the     */
+/* register file descriptors and class membership policies differ.      */
 /* ================================================================== */
 
-typedef struct {
-    const int *regs;           /* native register codes, indexed 0..nregs-1 */
-    int        nregs;          /* number of allocatable registers */
-    unsigned   caller_saved;   /* bitmask over regs[] indices */
-} RegClass;
+typedef RaRegClass RegClass;
 
 /* -O1 reserves R11 so the inline va_arg sequence cannot clobber a
  * mem2reg-promoted pointer that stays live across the builtin. */
@@ -30,30 +27,60 @@ void ra_set_reserve_va_scratch(int on) {
     ra_reserve_va_scratch = on ? 1 : 0;
 }
 
-static const RegClass GP_CLASS = {
-    .regs = ALLOCATABLE_REGS,
-    .nregs = REG_ALLOCATABLE,
-    .caller_saved = GP_CALLER_SAVED_MASK,
-};
+/* x86-64 SysV classes (the historical defaults):
+ *   GP  = the 9-register allocatable set in regalloc.h
+ *   XMM = xmm0..xmm13, width 32 (YMM) or 64 (ZMM with -mavx512f),
+ *         with the x87 long-double exclusion.
+ * When ra_reserve_va_scratch is set, R11 drops out of the GP set. */
+static const RaRegClasses *ra_classes_x86(void) {
+    static const int GP_NO_R11[] = {
+        REG_RSI, REG_RDI,
+        REG_R8,  REG_R9,  REG_R10,
+        REG_RBX, REG_R12, REG_R13
+    };
+    static RaRegClasses c = {
+        .gp = {
+            ALLOCATABLE_REGS,
+            REG_ALLOCATABLE,
+            GP_CALLER_SAVED_MASK,
+            8,
+            0,
+        },
+        .simd = {
+            XMM_ALLOCATABLE_REGS,
+            REG_XMM_ALLOCATABLE,
+            XMM_CALLER_SAVED_MASK,
+            32,   /* updated to 64 when -mavx512f is in effect */
+            1,    /* width-16 floats are x87 long doubles, not XMM */
+        },
+    };
+    static RaRegClasses c_no_r11 = {
+        .gp = {
+            GP_NO_R11,
+            8,
+            0x1Fu, /* RSI/RDI/R8/R9/R10 */
+            8,
+            0,
+        },
+        .simd = {
+            XMM_ALLOCATABLE_REGS,
+            REG_XMM_ALLOCATABLE,
+            XMM_CALLER_SAVED_MASK,
+            32,
+            1,
+        },
+    };
+    int spill = host_has_avx512f() ? 64 : 32;
+    c.simd.spill_bytes = spill;
+    c_no_r11.simd.spill_bytes = spill;
+    return ra_reserve_va_scratch ? &c_no_r11 : &c;
+}
 
-/* GP set without R11 (index 5 in ALLOCATABLE_REGS).  Caller-saved mask
- * covers RSI/RDI/R8/R9/R10 only. */
-static const int GP_NO_R11_REGS[] = {
-    REG_RSI, REG_RDI,
-    REG_R8,  REG_R9,  REG_R10,
-    REG_RBX, REG_R12, REG_R13
-};
-static const RegClass GP_CLASS_NO_R11 = {
-    .regs = GP_NO_R11_REGS,
-    .nregs = 8,
-    .caller_saved = 0x1Fu,
-};
-
-static const RegClass XMM_CLASS = {
-    .regs = XMM_ALLOCATABLE_REGS,
-    .nregs = REG_XMM_ALLOCATABLE,
-    .caller_saved = XMM_CALLER_SAVED_MASK,
-};
+const RaRegClasses *ra_classes_current(void) {
+    if (target_current()->arch == TARGET_ARCH_ARM64)
+        return ra_classes_arm64();
+    return ra_classes_x86();
+}
 
 /* True if SSA value `v` belongs to the float class in this function.
  * When the function has no per-value float metadata (value_is_float is
@@ -79,18 +106,16 @@ static int value_is_ld(const IRFunction *fn, int v) {
     return fn->value_width[v] == 16;
 }
 
-/* True if SSA value `v` belongs to the XMM-allocatable float class: float
- * or double, but NOT long double (which uses x87). */
-static int value_is_xmm_float(const IRFunction *fn, int v) {
-    return value_is_float_class(fn, v) && !value_is_ld(fn, v);
-}
-
 /* True if SSA value `v` belongs to the register class being allocated in
- * this run: GP (float_class 0) = non-float; XMM (float_class 1) = float but
- * not long double.  Encapsulates the long-double exclusion so the XMM run
- * leaves ld values uncolored (REG_NONE) — their home is an x87 stack slot. */
-static int value_in_class(const IRFunction *fn, int v, int float_class) {
-    if (float_class) return value_is_xmm_float(fn, v);
+ * this run: GP (float_class 0) = non-float; SIMD (float_class 1) = float,
+ * with width-16 long doubles excluded only when the target keeps them on a
+ * special stack path (x86 x87).  Encapsulates the exclusion so a SIMD run
+ * leaves such values uncolored (REG_NONE) — their home is a stack slot. */
+static int value_in_class(const IRFunction *fn, int v, int float_class,
+                          int exclude_16byte_ld) {
+    if (float_class)
+        return value_is_float_class(fn, v)
+            && (!exclude_16byte_ld || !value_is_ld(fn, v));
     return !value_is_float_class(fn, v);
 }
 
@@ -239,14 +264,26 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
         if (inst->dst >= 0 && inst->dst < nv) {
             liv[inst->dst].def_point = (int)i;
         }
-        /* IR_CALL.b is a second return eightbyte (def), not a use. */
-        if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv)
-            liv[inst->b].def_point = (int)i;
+        /* IR_CALL.b/c/d are return eightbytes (defs), not uses.  c and d
+         * carry the third and fourth eightbyte of a wide HFA result, which
+         * AAPCS64 returns in v2/v3; other calls leave them at -1. */
+        if (inst->op == IR_CALL) {
+            if (inst->b >= 0 && inst->b < nv)
+                liv[inst->b].def_point = (int)i;
+            if (inst->c >= 0 && inst->c < nv)
+                liv[inst->c].def_point = (int)i;
+            if (inst->d >= 0 && inst->d < nv)
+                liv[inst->d].def_point = (int)i;
+        }
 
         /* Uses */
         if (inst->a >= 0 && inst->a < nv) liv_add_use(&liv[inst->a], (int)i);
         if (inst->op != IR_CBR && inst->op != IR_CALL &&
             inst->b >= 0 && inst->b < nv) liv_add_use(&liv[inst->b], (int)i);
+        if (inst->op == IR_RETURN) {
+            if (inst->c >= 0 && inst->c < nv) liv_add_use(&liv[inst->c], (int)i);
+            if (inst->d >= 0 && inst->d < nv) liv_add_use(&liv[inst->d], (int)i);
+        }
 
         /* IR_CALL: each call_args[k] is a use. */
         if (inst->op == IR_CALL) {
@@ -436,6 +473,14 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 if (!bs_test(&def_b[bi], inst->b))
                     bs_set(&use_b[bi], inst->b);
             }
+            if (inst->op == IR_RETURN) {
+                if (inst->c >= 0 && inst->c < use_b[bi].nv &&
+                    !bs_test(&def_b[bi], inst->c))
+                    bs_set(&use_b[bi], inst->c);
+                if (inst->d >= 0 && inst->d < use_b[bi].nv &&
+                    !bs_test(&def_b[bi], inst->d))
+                    bs_set(&use_b[bi], inst->d);
+            }
             if (inst->op == IR_CALL) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
@@ -459,10 +504,15 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
             if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
                 bs_set(&def_b[bi], inst->dst);
             }
-            /* IR_CALL.b: second return eightbyte. */
-            if (inst->op == IR_CALL && inst->b >= 0 &&
-                inst->b < def_b[bi].nv)
-                bs_set(&def_b[bi], inst->b);
+            /* IR_CALL.b/c/d: second, third and fourth return eightbyte. */
+            if (inst->op == IR_CALL) {
+                if (inst->b >= 0 && inst->b < def_b[bi].nv)
+                    bs_set(&def_b[bi], inst->b);
+                if (inst->c >= 0 && inst->c < def_b[bi].nv)
+                    bs_set(&def_b[bi], inst->c);
+                if (inst->d >= 0 && inst->d < def_b[bi].nv)
+                    bs_set(&def_b[bi], inst->d);
+            }
         }
     }
 }
@@ -527,7 +577,7 @@ static void compute_live_in_out(const CFG *cfg,
  * IR_CALL — which cannot occupy a caller-saved register. */
 static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                                     int nv, InterfGraph *g,
-                                    int *forbid_mask,
+                                    uint32_t *forbid_mask,
                                     int float_class,
                                     const RegClass *cls) {
     ig_init(g, nv);
@@ -567,32 +617,48 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             if (inst->op == IR_CALL) {
                 BS_FOREACH(&live, over) {
                     if ((int)over != inst->dst && (int)over != inst->b &&
-                        value_in_class(fn, (int)over, float_class))
+                        (int)over != inst->c && (int)over != inst->d &&
+                        value_in_class(fn, (int)over, float_class, cls->exclude_16byte_ld))
                         forbid_mask[over] |= cls->caller_saved;
                 }
             }
 
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_in_class(fn, inst->dst, float_class)) {
+                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)) {
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
-            if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
-                value_in_class(fn, inst->b, float_class))
-                bs_clr(&live, inst->b);
+            /* An IR_CALL's b/c/d are return eightbytes -- all defined here,
+             * all live on to the matching IR_RETURN.  Clear them as defs. */
+            if (inst->op == IR_CALL) {
+                IRValue dv[3] = { inst->b, inst->c, inst->d };
+                for (int q = 0; q < 3; q++) {
+                    if (dv[q] >= 0 && dv[q] < nv &&
+                        value_in_class(fn, dv[q], float_class, cls->exclude_16byte_ld))
+                        bs_clr(&live, dv[q]);
+                }
+            }
 
             if (inst->a >= 0 && inst->a < nv &&
-                value_in_class(fn, inst->a, float_class))
+                value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->a);
             if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < nv &&
-                value_in_class(fn, inst->b, float_class))
+                value_in_class(fn, inst->b, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->b);
+            if (inst->op == IR_RETURN) {
+                if (inst->c >= 0 && inst->c < nv &&
+                    value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld))
+                    bs_set(&live, inst->c);
+                if (inst->d >= 0 && inst->d < nv &&
+                    value_in_class(fn, inst->d, float_class, cls->exclude_16byte_ld))
+                    bs_set(&live, inst->d);
+            }
             if (inst->op == IR_CALL) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&
-                        value_in_class(fn, av, float_class))
+                        value_in_class(fn, av, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, av);
                 }
             }
@@ -601,7 +667,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
                 for (int k = 0; k < n; k++) {
                     IRValue v = extra[k];
-                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class))
+                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, v);
                 }
             }
@@ -621,9 +687,11 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 if (inst->op != IR_COPY) continue;
                 int d = inst->dst, a = inst->a;
                 if (d < 0 || d >= nv || a < 0 || a >= nv) continue;
-                if (!value_in_class(fn, d, float_class)) continue;
-                if (!value_in_class(fn, a, float_class)) continue;
-                int m = forbid_mask[d] | forbid_mask[a];
+                if (!value_in_class(fn, d, float_class, cls->exclude_16byte_ld))
+                    continue;
+                if (!value_in_class(fn, a, float_class, cls->exclude_16byte_ld))
+                    continue;
+                uint32_t m = forbid_mask[d] | forbid_mask[a];
                 if (forbid_mask[d] != m) { forbid_mask[d] = m; changed = 1; }
                 if (forbid_mask[a] != m) { forbid_mask[a] = m; changed = 1; }
             }
@@ -642,9 +710,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             inst->op == IR_DBG_VALUE) continue;
 
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_in_class(fn, inst->dst, float_class)) {
+                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)) {
                 BS_FOREACH(&live, other) {
-                    if (!value_in_class(fn, (int)other, float_class))
+                    if (!value_in_class(fn, (int)other, float_class, cls->exclude_16byte_ld))
                         continue;
                     if ((int)other != inst->dst) {
                         ig_add_edge(g, inst->dst, (int)other);
@@ -653,29 +721,64 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
-            if (inst->op == IR_CALL && inst->b >= 0 && inst->b < nv &&
-                value_in_class(fn, inst->b, float_class)) {
-                BS_FOREACH(&live, other) {
-                    if (!value_in_class(fn, (int)other, float_class))
+            /* An IR_CALL's b/c/d are return eightbytes -- all defined here,
+             * all live on to the matching IR_RETURN.  c and d carry the
+             * third and fourth eightbyte of a wide HFA result.
+             *
+             * They must also interfere with *each other*: the edges to the
+             * live set only reach what was already live, and none of them is
+             * live yet at its own definition point.  Without the pairwise
+             * edges two of the four came back sharing a register, so the
+             * third and fourth elements both held the second's bits. */
+            if (inst->op == IR_CALL) {
+                IRValue rv[3] = { inst->b, inst->c, inst->d };
+                for (int r = 0; r < 3; r++) {
+                    if (rv[r] < 0 || rv[r] >= nv) continue;
+                    if (!value_in_class(fn, rv[r], float_class,
+                                        cls->exclude_16byte_ld))
                         continue;
-                    if ((int)other != inst->b)
-                        ig_add_edge(g, inst->b, (int)other);
+                    BS_FOREACH(&live, other) {
+                        if (!value_in_class(fn, (int)other, float_class,
+                                            cls->exclude_16byte_ld))
+                            continue;
+                        if ((int)other != rv[r])
+                            ig_add_edge(g, rv[r], (int)other);
+                    }
                 }
-                bs_clr(&live, inst->b);
+                for (int r = 0; r < 3; r++)
+                    for (int q = r + 1; q < 3; q++) {
+                        if (rv[r] < 0 || rv[r] >= nv ||
+                            rv[q] < 0 || rv[q] >= nv) continue;
+                        ig_add_edge(g, rv[r], rv[q]);
+                    }
+                for (int r = 0; r < 3; r++) {
+                    if (rv[r] >= 0 && rv[r] < nv &&
+                        value_in_class(fn, rv[r], float_class,
+                                       cls->exclude_16byte_ld))
+                        bs_clr(&live, rv[r]);
+                }
             }
 
             if (inst->a >= 0 && inst->a < nv &&
-                value_in_class(fn, inst->a, float_class))
+                value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->a);
             if (inst->op != IR_CBR && inst->op != IR_CALL &&
                 inst->b >= 0 && inst->b < nv &&
-                value_in_class(fn, inst->b, float_class))
+                value_in_class(fn, inst->b, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->b);
+            if (inst->op == IR_RETURN) {
+                if (inst->c >= 0 && inst->c < nv &&
+                    value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld))
+                    bs_set(&live, inst->c);
+                if (inst->d >= 0 && inst->d < nv &&
+                    value_in_class(fn, inst->d, float_class, cls->exclude_16byte_ld))
+                    bs_set(&live, inst->d);
+            }
             if (inst->op == IR_CALL) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&
-                        value_in_class(fn, av, float_class))
+                        value_in_class(fn, av, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, av);
                 }
             }
@@ -684,11 +787,38 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
                 for (int k = 0; k < n; k++) {
                     IRValue v = extra[k];
-                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class))
+                    if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
                         bs_set(&live, v);
                 }
             }
         }
+    }
+
+    /* Pass 2b (arm64 GP only): all integer arguments arrive simultaneously in
+     * x0..x7 and the prologue routes each incoming register to its home.  The
+     * normal backward walk only connects a parameter's SSA value to what it
+     * meets inside the body, so two parameters whose short live ranges never
+     * overlap there could be given the SAME home (e.g. an arg resident in x2
+     * and another routed x1->x2); the prologue then overwrites the resident
+     * value before the body reads it.  Register-passed parameters therefore
+     * pairwise interfere: their homes must be distinct so the entry shuffle is
+     * an injective permutation it can realise.  Stack parameters are not in a
+     * register and are left out. */
+    if (!float_class && target_current()->arch == TARGET_ARCH_ARM64) {
+        int gp[8], ngp = 0;
+        for (size_t i = 0; i < (size_t)nv && i < fn->insts.len && ngp < 8
+                       && fn->insts.data[i].op == IR_PARAM; i++) {
+            IRValue pv = fn->insts.data[i].dst;
+            /* Any two integer arguments not passed on the stack arrive in two
+             * distinct x registers, so their homes must differ too.  The GP
+             * class already excludes float/vector params. */
+            if (!fn->insts.data[i].force_stack && pv >= 0 && pv < nv &&
+                value_in_class(fn, pv, 0, cls->exclude_16byte_ld))
+                gp[ngp++] = pv;
+        }
+        for (int a = 0; a < ngp; a++)
+            for (int b = a + 1; b < ngp; b++)
+                ig_add_edge(g, gp[a], gp[b]);
     }
 
     bs_free(&live);
@@ -856,11 +986,16 @@ static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg) {
 
 static void greedy_color(const InterfGraph *g, const int *order,
                          const LiveInfo *liv, const CFG *cfg,
-                         const int *forbid_mask,
+                         const uint32_t *forbid_mask,
                          int *colors, int *spill_slots, int *num_spills,
                          const RegClass *cls) {
     int n = g->n;
     int k = cls->nregs;
+    if (k > 32) {
+        /* Color masks are 32 bits wide. */
+        fprintf(stderr, "fakecc: register class has %d regs (max 32)\n", k);
+        exit(1);
+    }
 
     /* Track spill costs for eviction decisions. */
     int *spill_cost = xmalloc(n * sizeof(int));
@@ -884,11 +1019,11 @@ static void greedy_color(const InterfGraph *g, const int *order,
 
         /* Find which colors are used by already-colored neighbors, plus
          * any colors this value has been forbidden from. */
-        int used = forbid_mask[v];
+        uint32_t used = forbid_mask[v];
         for (size_t j = 0; j < g->nodes[v].degree; j++) {
             int w = g->nodes[v].neighbors[j];
             if (colors[w] >= 0 && colors[w] < k)
-                used |= (1 << colors[w]);
+                used |= (1u << colors[w]);
         }
 
         /* Find first free register. */
@@ -915,14 +1050,14 @@ static void greedy_color(const InterfGraph *g, const int *order,
             for (size_t j = 0; j < g->nodes[v].degree; j++) {
                 int w = g->nodes[v].neighbors[j];
                 if (colors[w] >= 0 && colors[w] < k &&
-                    !(forbid_mask[v] & (1 << colors[w])))
+                    !(forbid_mask[v] & (1u << colors[w])))
                     color_count[colors[w]]++;
             }
             int victim = -1, victim_cost = 0x7fffffff;
             for (size_t j = 0; j < g->nodes[v].degree; j++) {
                 int w = g->nodes[v].neighbors[j];
                 if (colors[w] < 0 || colors[w] >= k) continue;
-                if (forbid_mask[v] & (1 << colors[w])) continue; /* v can't use it */
+                if (forbid_mask[v] & (1u << colors[w])) continue; /* v can't use it */
                 if (color_count[colors[w]] != 1) continue; /* shared — unsafe */
                 if (spill_cost[w] < victim_cost) {
                     victim = w;
@@ -977,7 +1112,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     {
         int any = 0;
         for (int v = 0; v < nv; v++) {
-            if (value_in_class(fn, v, float_class)) { any = 1; break; }
+            if (value_in_class(fn, v, float_class, cls->exclude_16byte_ld)) { any = 1; break; }
         }
         if (!any) return NULL;
     }
@@ -992,7 +1127,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     /* Build interference graph using CFG-aware backward walk — restricted
      * to values of the target class.  Correct across loop back edges. */
     InterfGraph g;
-    int *forbid_mask = xmalloc(nv * sizeof(int));
+    uint32_t *forbid_mask = xmalloc(nv * sizeof(uint32_t));
     build_interf_graph_cfg(fn, &cfg, nv, &g, forbid_mask,
                             float_class, cls);
 
@@ -1008,11 +1143,12 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
                  colors, spill_slots, &num_spills, cls);
     free(forbid_mask);
 
-    /* Map color indices (0..cls->nregs-1) to actual x86-64 register
-     * encodings that codegen uses for ModRM.  Values not in this class
-     * get REG_NONE (their real home is the other class's result). */
+    /* Map color indices (0..cls->nregs-1) to the backend's native register
+     * codes (x86 ModRM codes or A64 register numbers).  Values not in this
+     * class get -1 (REG_NONE == A64_*_NONE), their real home being the
+     * other class's result or a stack slot. */
     for (int v = 0; v < nv; v++) {
-        if (!value_in_class(fn, v, float_class)) {
+        if (!value_in_class(fn, v, float_class, cls->exclude_16byte_ld)) {
             colors[v] = REG_NONE;
         } else if (colors[v] >= 0 && colors[v] < cls->nregs) {
             colors[v] = cls->regs[colors[v]];
@@ -1031,13 +1167,15 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     ra->num_spill_slots = num_spills;
     ra->num_values = nv;
 
-    /* GP spills are 8 bytes; XMM spills are 32 (YMM) or 64 (ZMM, -mavx512f). */
+    /* SIMD slots are one class-width each (32/64 bytes on x86 with YMM/ZMM,
+     * 16 bytes for an arm64 Q register); GP slots are 8 bytes and kept in
+     * 16-byte pairs so the frame stays ABI aligned. */
     if (float_class)
-        ra->stack_size = (host_has_avx512f() ? 64 : 32) * num_spills;
+        ra->stack_size = cls->spill_bytes * num_spills;
     else {
         int slots = num_spills;
         if (slots % 2 != 0) slots++;
-        ra->stack_size = 8 * slots;
+        ra->stack_size = cls->spill_bytes * slots;
     }
 
     /* Cleanup. */
@@ -1054,12 +1192,13 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
 /* ================================================================== */
 
 RAResult *reg_alloc(const IRFunction *fn) {
-    return ra_alloc_class(fn, 0,
-                          ra_reserve_va_scratch ? &GP_CLASS_NO_R11 : &GP_CLASS);
+    const RaRegClasses *cls = ra_classes_current();
+    return ra_alloc_class(fn, 0, &cls->gp);
 }
 
 RAResult *reg_alloc_xmm(const IRFunction *fn) {
-    return ra_alloc_class(fn, 1, &XMM_CLASS);
+    const RaRegClasses *cls = ra_classes_current();
+    return ra_alloc_class(fn, 1, &cls->simd);
 }
 
 void ra_result_free(RAResult *ra) {

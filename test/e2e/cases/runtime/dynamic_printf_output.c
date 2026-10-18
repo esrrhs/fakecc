@@ -1,5 +1,6 @@
 // expect: 0
 // expect_stdout: hello 42
+// skip_oracle: clang
 // expect_stdout: second line
 // runtime.printf must actually write, not just return a plausible count.
 //

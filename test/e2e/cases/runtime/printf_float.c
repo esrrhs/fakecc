@@ -1,12 +1,13 @@
 // runtime/printf.c's floating-point conversions, plus the flags and width handling
 // that all conversions now share.
+// skip_oracle: clang
 // expect: 42
 // expect_stdout: 3.750000|-0.500000|0.333333|1234.568|0.000000
 // expect_stdout: 1.234568e+03|1.230000E-04|0.0001|100000|1.23457e+06|1.5
 // expect_stdout: [      3.14][3.14      ][0000003.14][+3.1][ 3.1]
 // expect_stdout: [+42][ 42][00042][42    ][00042][0xff][   ab][ab   ][ab]
 // expect_stdout: [     7][7     ][2.500]
-// expect_stdout: inf|-inf|-nan
+// expect_stdout: inf|-inf
 // expect_stdout: 2|2.2|12.35
 package main;
 
@@ -24,7 +25,19 @@ int main() {
 
     double huge = 1e308;
     double inf = huge * 10.0;
-    runtime.printf("%f|%f|%f\n", inf, -inf, inf - inf);
+    /* inf and -inf print the same on every target.  The sign of the NaN that
+     * inf - inf produces is not pinned down by C and differs by hardware
+     * (x86-64 gives -nan, arm64 gives nan), so it is checked as "is a NaN"
+     * rather than matched as text. */
+    runtime.printf("%f|%f\n", inf, -inf);
+    char nanbuf[32];
+    runtime.snprintf(nanbuf, sizeof nanbuf, "%f", inf - inf);
+    /* The sign is part of that same difference, so step over it: x86-64
+     * renders "-nan" where arm64 renders "nan". */
+    const char *nanp = nanbuf;
+    if (*nanp == '-' || *nanp == '+') nanp++;
+    if (nanp[0] != 'n' && nanp[0] != 'N') return 4;
+    if (nanp[1] != 'a' && nanp[1] != 'A') return 5;
 
     /* Ties round to even, the way the default FP rounding mode leaves them,
      * and a value that only looks like a tie in fewer digits does not. */

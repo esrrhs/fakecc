@@ -27,11 +27,19 @@ float fabsf(float x) {
     ux.u = ux.u & 0x7fffffffU;
     return ux.f;
 }
+/* The sign bit is the top bit of the last byte the target uses to hold the
+ * value: byte 9 of x86's 80-bit extended (inside a 16-byte object), byte 7
+ * of the 8-byte double arm64 gives long double.  Naming a bit position in a
+ * union instead means naming x86's layout, which arm64 does not share. */
+static int rt_ld_sign_byte(void) {
+    return (int)sizeof(long double) >= 10 ? 9 : (int)sizeof(long double) - 1;
+}
+
 long double fabsl(long double x) {
-    union { long double ld; unsigned long long u[2]; } ux;
-    ux.ld = x;
-    ux.u[1] = ux.u[1] & ~0x8000ULL;
-    return ux.ld;
+    int sb = rt_ld_sign_byte();
+    unsigned char *bx = (unsigned char *)&x;
+    bx[sb] = (unsigned char)(bx[sb] & 0x7f);
+    return x;
 }
 
 double copysign(double x, double y) {
@@ -51,12 +59,13 @@ float copysignf(float x, float y) {
 }
 
 long double copysignl(long double x, long double y) {
-    union { long double ld; unsigned long long u[2]; } ux, uy;
-    ux.ld = x;
-    uy.ld = y;
-    /* 80-bit sign is bit 15 of the exponent word (the low 16 bits of u[1]). */
-    ux.u[1] = (ux.u[1] & ~0x8000ULL) | (uy.u[1] & 0x8000ULL);
-    return ux.ld;
+    /* Comparing against zero cannot see the sign of a NaN or of -0.0, and
+     * copysign copies both, so move the bit itself (see rt_ld_sign_byte). */
+    int sb = rt_ld_sign_byte();
+    unsigned char *bx = (unsigned char *)&x;
+    unsigned char *by = (unsigned char *)&y;
+    bx[sb] = (unsigned char)((bx[sb] & 0x7f) | (by[sb] & 0x80));
+    return x;
 }
 
 double floor(double x) {
@@ -92,8 +101,11 @@ double sqrt(double x) {
         nanv.u = 0x7ff8000000000000ULL;
         return nanv.d;
     }
-    /* +Inf stays +Inf; ±0 keeps its sign (Annex F). */
-    if (x > 1.7976931348623157e308) return x;
+    /* +Inf stays +Inf; ±0 keeps its sign (Annex F).  DBL_MAX is spelled in
+     * hex throughout this file: as a decimal it is a 17-digit significand
+     * scaled by 10^292, which strtofp_body rounds a few ULP off, and a
+     * wrong DBL_MAX would shift this very comparison. */
+    if (x > 0x1.fffffffffffffp+1023) return x;
     if (x == 0.0) return x;
     double g = x;
     int n = 0;
@@ -104,13 +116,20 @@ double sqrt(double x) {
     return g;
 }
 
+/* π and its multiples are spelled in hex rather than as the familiar
+ * 20-digit decimals.  Each carries the significand the decimal used to name
+ * -- 0x1.921fb54442d18 is the double nearest π -- but a decimal has to be
+ * folded digit by digit and then scaled by a power of ten, which lands one
+ * ULP off here.  Trig range reduction is sensitive to that last bit, and a
+ * selfhosted fakecc re-parses these very literals when it compiles itself,
+ * so the bootstrap diverges unless the value is assembled bit-exactly. */
 double sin(double x) {
     if (x == 0.0 || x != x) return x;
-    double pi2 = 6.28318530717958647692;
-    double pi = 3.14159265358979323846;
+    double pi2 = 0x1.921fb54442d18p+2;
+    double pi = 0x1.921fb54442d18p+1;
     /* ±Inf: Annex F returns NaN.  Also avoid (long long)(Inf / 2π) UB and
      * a non-terminating range-reduction loop for huge finite args. */
-    if (x > 1.7976931348623157e308 || x < -1.7976931348623157e308) {
+    if (x > 0x1.fffffffffffffp+1023 || x < -0x1.fffffffffffffp+1023) {
         union { double d; unsigned long long u; } nanv;
         nanv.u = 0x7ff8000000000000ULL;
         return nanv.d;
@@ -142,7 +161,7 @@ float sinf(float x) {
 
 double cos(double x) {
     if (x != x) return x;
-    double pi_half = 1.57079632679489661923;
+    double pi_half = 0x1.921fb54442d18p+0;
     return sin(pi_half - x);
 }
 float cosf(float x) { return (float)cos((double)x); }
@@ -172,7 +191,7 @@ double atan(double x) {
             term = -term * y2;
             s = s + term / (double)(2 * i + 1);
         }
-        res = 0.78539816339744830962 + s;
+        res = 0x1.921fb54442d18p-1 + s;
     } else {
         double term = x;
         double x2 = x * x;
@@ -183,13 +202,207 @@ double atan(double x) {
         }
         res = s;
     }
-    if (inv) res = 1.57079632679489661923 - res;
+    if (inv) res = 0x1.921fb54442d18p+0 - res;
     if (neg) res = -res;
     return res;
 }
 float atanf(float x) {
     if (x == 0.0f || x != x) return x;
     return (float)atan((double)x);
+}
+
+/* exp / log / pow / atan2 / asin / acos.
+ *
+ * pow is what the x86 build got from the host libm and a freestanding arm64
+ * image has to carry itself: gcc_torture declares it extern and really calls
+ * it, and the Mach-O linker turns an unresolved symbol into a hard error
+ * instead of deferring to dyld.  exp and log are the pair it is built from.
+ *
+ * Both need range reduction.  A Taylor series for e^x only converges near
+ * the origin, so the exponent is split off and re-applied as an exact power
+ * of two; log reduces its argument to [1,2) before using the atanh series,
+ * whose argument then stays below 1/3. */
+
+/* 2^k, exact.  Scaling by repeated multiplication would overflow for the k a
+ * large argument produces, so write the biased exponent directly; a k below
+ * the normal range is built from the smallest normal times the remainder. */
+static double rt_pow2(int k) {
+    union { double d; unsigned long long u; } v;
+    if (k > 1023) {
+        v.u = 0x7ff0000000000000ULL;
+        return v.d;
+    }
+    if (k < -1074) return 0.0;
+    if (k < -1022) {
+        v.u = 0x0010000000000000ULL;          /* 2^-1022 */
+        return v.d * rt_pow2(k + 1022);
+    }
+    v.u = (unsigned long long)(k + 1023) << 52;
+    return v.d;
+}
+
+double exp(double x) {
+    if (x != x) return x;
+    if (x == 0.0) return 1.0;
+    union { double d; unsigned long long u; } inf;
+    inf.u = 0x7ff0000000000000ULL;
+    if (x > 709.7827128933840) return inf.d;
+    if (x < -745.1332191019411) return 0.0;
+    double ln2 = 0.69314718055994530942;
+    int k = (int)floor(x / ln2 + 0.5);
+    double r = x - (double)k * ln2;           /* |r| <= ln2/2 */
+    double term = 1.0;
+    double sum = 1.0;
+    for (int i = 1; i <= 30; i++) {
+        term = term * r / (double)i;
+        sum = sum + term;
+    }
+    return sum * rt_pow2(k);
+}
+
+double log(double x) {
+    if (x != x) return x;
+    if (x > 0x1.fffffffffffffp+1023) return x;   /* +Inf stays +Inf */
+    if (x == 0.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0xfff0000000000000ULL;            /* -Inf */
+        return v.d;
+    }
+    if (x < 0.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0x7ff8000000000000ULL;            /* NaN */
+        return v.d;
+    }
+    union { double d; unsigned long long u; } v;
+    v.d = x;
+    int be = (int)((v.u >> 52) & 0x7ffULL);
+    int e2 = 0;
+    if (be == 0) {                              /* subnormal */
+        v.d = x * 4503599627370496.0;           /* 2^52, brings it into range */
+        e2 = -52;
+        be = (int)((v.u >> 52) & 0x7ffULL);
+    }
+    e2 = e2 + be - 1023;
+    v.u = (v.u & 0x000fffffffffffffULL) | (1023ULL << 52);
+    double m = v.d;                             /* [1,2) */
+    /* log(m) = 2*atanh((m-1)/(m+1)). */
+    double z = (m - 1.0) / (m + 1.0);
+    double z2 = z * z;
+    double term = z;
+    double sum = z;
+    for (int i = 1; i <= 40; i++) {
+        term = term * z2;
+        sum = sum + term / (double)(2 * i + 1);
+    }
+    return (double)e2 * 0.69314718055994530942 + 2.0 * sum;
+}
+
+double log10(double x) {
+    return log(x) / 2.30258509299404568402;
+}
+
+double pow(double x, double y) {
+    if (y == 0.0) return 1.0;
+    if (x != x) return x;
+    if (y != y) return y;
+    if (x == 1.0) return 1.0;
+    /* An integral exponent is exact under repeated squaring, and it is the
+     * only case where a negative base has a real result at all. */
+    if (y > -1024.0 && y < 1024.0 && y == floor(y)) {
+        long long n = (long long)y;
+        int neg = 0;
+        if (n < 0) { neg = 1; n = -n; }
+        double base = x;
+        double r = 1.0;
+        while (n > 0) {
+            if (n & 1) r = r * base;
+            base = base * base;
+            n = n >> 1;
+        }
+        if (neg) r = 1.0 / r;
+        return r;
+    }
+    if (x == 0.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = y > 0.0 ? 0x0000000000000000ULL : 0x7ff0000000000000ULL;
+        return v.d;
+    }
+    if (x < 0.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0x7ff8000000000000ULL;
+        return v.d;
+    }
+    if (x > 0x1.fffffffffffffp+1023) return y > 0.0 ? x : 0.0;
+    return exp(y * log(x));
+}
+
+double atan2(double y, double x) {
+    if (x != x || y != y) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0x7ff8000000000000ULL;
+        return v.d;
+    }
+    double pi = 0x1.921fb54442d18p+1;
+    double pi_half = 0x1.921fb54442d18p+0;
+    if (x > 0.0) return atan(y / x);
+    if (x < 0.0) {
+        if (y >= 0.0) return atan(y / x) + pi;
+        return atan(y / x) - pi;
+    }
+    if (y > 0.0) return pi_half;
+    if (y < 0.0) return -pi_half;
+    return 0.0;
+}
+
+double asin(double x) {
+    if (x != x) return x;
+    if (x > 1.0 || x < -1.0) {
+        union { double d; unsigned long long u; } v;
+        v.u = 0x7ff8000000000000ULL;
+        return v.d;
+    }
+    double pi_half = 0x1.921fb54442d18p+0;
+    if (x == 1.0) return pi_half;
+    if (x == -1.0) return -pi_half;
+    /* atan2(x, sqrt(1-x*x)) rather than atan(x / sqrt(...)): the quotient
+     * has no quadrant, and (1-x)*(1+x) keeps the cancellation away from
+     * x = 1, where 1-x*x has already lost half its digits. */
+    return atan2(x, sqrt((1.0 - x) * (1.0 + x)));
+}
+
+double acos(double x) {
+    if (x != x) return x;
+    return 0x1.921fb54442d18p+0 - asin(x);
+}
+
+/* setjmp / longjmp.
+ *
+ * Saving the frame pointer and the return address is not expressible in the
+ * language, so the backend lowers __builtin_setjmp / __builtin_longjmp
+ * itself (IR_FRAME_ADDR / IR_RETURN_ADDR / IR_LONGJMP, all of which cg64
+ * implements) and the libc names are one-line wrappers.  jmp_buf belongs to
+ * the caller: an array of long large enough for the saved frame, fp, lr and
+ * the callee-saved registers. */
+int setjmp(long *env) {
+    return __builtin_setjmp((void *)env);
+}
+void longjmp(long *env, int val) {
+    __builtin_longjmp((void *)env, val);
+}
+
+/* gcc_torture's link-time assertion.  A case calls link_error() only on a
+ * path that is supposed to be unreachable -- dead after constant folding, or
+ * guarded by a condition the optimiser must prove false -- and on ELF the
+ * unresolved symbol is what reports failure: the link breaks if the call
+ * survives.
+ *
+ * A static Mach-O link has nowhere to defer an undefined symbol to, so it
+ * would reject every such case whether or not the compiler got it right.
+ * Give the name the body the idiom already implies instead: reaching it *is*
+ * the failure, and abort() says so.  The two cases this unblocks still fail
+ * if their guard is ever taken. */
+void link_error(void) {
+    abort();
 }
 
 
@@ -323,6 +536,15 @@ static int hex_char_val(char c) {
     return -1;
 }
 
+/* True when `v` converts to a double without rounding: a 53-bit significand
+ * holds exactly the values whose odd part is below 2^53, whatever the power
+ * of two attached to it (2^63 included). */
+static int fp_int_exact(unsigned long long v) {
+    if (v == 0) return 1;
+    while ((v & 1) == 0) v = v >> 1;
+    return v < (1ULL << 53);
+}
+
 static long double strtofp_body(const char *s, char **end) {
     const char *start = s;
     while (isspace((unsigned char)*s)) s = s + 1;
@@ -357,15 +579,15 @@ static long double strtofp_body(const char *s, char **end) {
             if (w0 == 'i' && w1 == 'n' && w2 == 'i' && w3 == 't' && w4 == 'y')
                 s = s + 5;
             if (end) *end = (char *)s;
-            union { long double ld; unsigned long long u[2]; } infv;
-            infv.u[0] = 0;
-            infv.u[1] = 0;
-            infv.ld = 0.0L;
-            /* 80-bit +inf: exponent all-ones, mantissa 1<<63 */
-            infv.u[0] = 0x8000000000000000ULL;
-            infv.u[1] = 0x7fff;
-            if (neg) infv.u[1] = infv.u[1] | 0x8000;
-            return infv.ld;
+            /* long double is 80-bit on x86-64 but the same 64 bits as double
+             * on arm64, so a fixed bit pattern cannot serve both.  Dividing
+             * a non-zero by zero raises the trap the hardware defines, which
+             * every target agrees on. */
+            {
+                long double one = 1.0L;
+                long double inf = one / 0.0L;
+                return neg ? -inf : inf;
+            }
         }
         if (c0 == 'n' && c1 == 'a' && c2 == 'n') {
             s = s + 3;
@@ -376,11 +598,11 @@ static long double strtofp_body(const char *s, char **end) {
                 /* else leave s at '(' so endptr is after "nan", matching C99 */
             }
             if (end) *end = (char *)s;
-            union { long double ld; unsigned long long u[2]; } nanv;
-            nanv.u[0] = 0xc000000000000000ULL;
-            nanv.u[1] = 0x7fff;
-            if (neg) nanv.u[1] = nanv.u[1] | 0x8000;
-            return nanv.ld;
+            {
+                long double zero = 0.0L;
+                long double nan = zero / zero;
+                return neg ? -nan : nan;
+            }
         }
     }
 
@@ -461,7 +683,18 @@ static long double strtofp_body(const char *s, char **end) {
         }
     }
 
+    /* Fold the significand into a 64-bit integer alongside the floating
+     * accumulator, which keeps its original form.  Integer folding is exact
+     * on every target; folding into `long double` assumes the x86-64 80-bit
+     * format, whose 64-bit significand holds 20 decimal digits.  On arm64
+     * long double *is* double (53-bit significand), so folding the 19 digits
+     * of 2^63 rounds up to 2^63+2^11 -- self-hosted fakecc then embeds a
+     * wrong literal for ast.c's 9223372036854775808.0L and the bootstrap
+     * never reaches a fixed point. */
     long double mant = 0.0L;
+    unsigned long long acc = 0;
+    int in_acc = 1;
+    int zeros = 0;      /* fractional zeros held back; see below */
     int any = 0;
     int ndig = 0;   /* digits folded into mant; 80-bit ld is exact to 2^64 */
     int dexp = 0;   /* power of ten still to apply to mant */
@@ -475,6 +708,13 @@ static long double strtofp_body(const char *s, char **end) {
         } else {
             dexp = dexp + 1;
         }
+        if (in_acc) {
+            unsigned digit = (unsigned)(*s - '0');
+            if (acc <= (~(unsigned long long)0 - digit) / 10)
+                acc = acc * 10 + digit;
+            else
+                in_acc = 0;
+        }
         s = s + 1;
     }
     if (*s == '.') {
@@ -485,6 +725,34 @@ static long double strtofp_body(const char *s, char **end) {
                 mant = mant * 10.0L + (long double)(*s - '0');
                 ndig = ndig + 1;
                 dexp = dexp - 1;
+            }
+            if (in_acc) {
+                unsigned digit = (unsigned)(*s - '0');
+                if (digit == 0) {
+                    /* Hold the zero back.  A trailing zero after the point
+                     * does not change the value, and folding it in would
+                     * inflate acc past double's 53-bit significand, so that
+                     * 9007199254740993.0 would round once to fit and again
+                     * on the /10 that cancels it -- landing on 2^53+2
+                     * instead of 2^53.  A later non-zero digit applies the
+                     * held zeros first. */
+                    zeros = zeros + 1;
+                } else {
+                    while (zeros > 0) {
+                        if (acc > (~(unsigned long long)0) / 10) {
+                            in_acc = 0;
+                            break;
+                        }
+                        acc = acc * 10;
+                        zeros = zeros - 1;
+                    }
+                    if (in_acc) {
+                        if (acc <= (~(unsigned long long)0 - digit) / 10)
+                            acc = acc * 10 + digit;
+                        else
+                            in_acc = 0;
+                    }
+                }
             }
             s = s + 1;
         }
@@ -516,6 +784,19 @@ static long double strtofp_body(const char *s, char **end) {
         }
     }
     if (end) *end = (char *)s;
+
+    /* Take the exact integer significand when it survived and converts
+     * without rounding: with no power of ten left to apply a single
+     * conversion rounds correctly once, and otherwise the value must itself
+     * be representable so the scaling division cannot round a second time.
+     * Its decimal exponent is the floating one plus the zeros held back. */
+    if (in_acc) {
+        int iexp = dexp + zeros;
+        if (iexp == 0 || fp_int_exact(acc)) {
+            mant = (long double)acc;
+            dexp = iexp;
+        }
+    }
 
     /* Scale by powers of ten without leaping past the finite range into
      * +inf.  Near LDBL_MAX (~1.19e4932), mant*10^27 can round up to
@@ -621,55 +902,14 @@ void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void 
     qsort_rec((char *)base, n, sz, cmp);
 }
 
-int chmod(const char *path, int mode) {
-    long r = __syscall(90, (long)path, (long)mode);
-    return r < 0 ? -1 : 0;
-}
+/* chmod() and getenv() are platform-specific:
+ *   - Linux builds use the raw syscall numbers / /proc/self/environ
+ *     (see stdlib_linux.c);
+ *   - Darwin builds leave the names undefined so the arm64 backend emits
+ *     its own chmod syscall and the envp-scanning getenv builtin.
+ * Keeping the Linux bodies here would be selected on every target (this
+ * file is un-suffixed) and shadow the correct Darwin implementations. */
 
-/* Scan /proc/self/environ.  Returned pointer is into a static buffer. */
-char *getenv(const char *name) {
-    static char block[8192];
-    size_t nlen = 0;
-    while (name[nlen]) nlen = nlen + 1;
-    long fd = __syscall(2, (long)"/proc/self/environ", 0, 0);
-    if (fd < 0) return 0;
-    long n = __syscall(0, fd, (long)block, 8191);
-    __syscall(3, fd);
-    if (n <= 0) return 0;
-    if (n > 8191) n = 8191;
-    block[n] = 0;
-    char *p = block;
-    while ((unsigned long)(p - block) < (unsigned long)n) {
-        if (*p == 0) {
-            p = p + 1;
-            continue;
-        }
-        size_t i = 0;
-        while (p[i] && p[i] != '=') i = i + 1;
-        if (p[i] == '=' && i == nlen) {
-            int match = 1;
-            size_t j = 0;
-            while (j < nlen) {
-                if (p[j] != name[j]) {
-                    match = 0;
-                    break;
-                }
-                j = j + 1;
-            }
-            if (match) return p + i + 1;
-        }
-        while (*p) p = p + 1;
-        p = p + 1;
-    }
-    return 0;
-}
-
-void __fakecc_va_copy(void *dst, void *src) {
-    char *d = (char *)dst;
-    char *s = (char *)src;
-    int i = 0;
-    while (i < 24) {
-        d[i] = s[i];
-        i = i + 1;
-    }
-}
+/* The va_copy helper is target-specific and lives in stdlib_darwin.c /
+ * stdlib_linux.c: a va_list is 24 bytes on x86-64 but a single pointer on
+ * arm64, so the copy width cannot be shared. */

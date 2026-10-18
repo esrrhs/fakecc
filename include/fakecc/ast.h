@@ -41,6 +41,10 @@ struct Type {
     int   bitfield_width; /* 0 = not a bit-field; else width in bits (promotions) */
     int   is_vector;   /* 1 = GCC vector extension (__attribute__((vector_size(N)))) */
     unsigned is_decimal : 1; /* TY_FLOAT: IEEE 754 decimal (_Decimal32/64/128) */
+    unsigned is_long_double : 1; /* TY_FLOAT: the `long double` specifier, even
+                                  * where it shares double's size and
+                                  * representation (Darwin arm64 gives it
+                                  * width 8).  It is still a distinct type. */
 };
 
 static inline Type type_make_int(long long width, int is_unsigned) {
@@ -49,7 +53,8 @@ static inline Type type_make_int(long long width, int is_unsigned) {
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 static inline Type type_make_bool(void) {
     Type t = type_make_int(1, 1);
@@ -63,8 +68,13 @@ static inline Type type_make_float(long long width) {
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
+/* The `long double` specifier.  Darwin arm64 hands it double's width and
+ * representation, but it stays a type of its own: clang there answers 0 for
+ * __builtin_types_compatible_p(long double, double), and so must we. */
+Type type_make_long_double(void);
 static inline Type type_make_decimal(long long width) {
     Type t = type_make_float(width);
     t.is_decimal = 1;
@@ -82,7 +92,8 @@ static inline Type type_make_void(void) {
     t.pointee = NULL; t.elem_type = NULL; t.length = 0; t.vla_dim = NULL; t.tag = NULL;
     t.func_ret = NULL; t.func_params = NULL; t.func_nparams = 0; t.func_is_variadic = 0;
     t.func_is_unprototyped = 0; t.enum_id = 0;
-    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0; return t;
+    t.bitfield_width = 0; t.is_vector = 0; t.is_decimal = 0;
+    t.is_long_double = 0; return t;
 }
 
 /* Deep-clone a Type (recursing into pointee/elem_type). */
@@ -127,6 +138,27 @@ int sysv_agg_ret_x87(Type t);
  * (SysV); 1 = pass a pointer to a copy.  Pointer is used only for
  * `__va_list_tag` (matches libc/GCC array decay). */
 int sysv_memory_pass_as_pointer(Type t);
+/* Integer argument registers for the current target (6 SysV, 8 AAPCS64). */
+int abi_gp_nregs(void);
+/* 16 on SysV x86 (80-bit x87 in a 16-byte slot).  8 on Darwin arm64,
+ * where long double is IEEE double. */
+int type_long_double_width(void);
+/* 1 when a hidden struct-return pointer consumes a GP argument register. */
+int abi_sret_uses_gp(void);
+/* 1 when a MEMORY aggregate is passed as a pointer to a copy (Darwin
+ * aggregates larger than 16 bytes that are not HFAs). */
+int abi_indirect_agg(Type t);
+/* 1 when `t` is an AAPCS64 homogeneous float/double aggregate of 1–4
+ * elements.  Always 0 on SysV x86. */
+int abi_is_hfa(Type t);
+/* Element count of that aggregate (1-4), or -1 when `t` is not one.
+ * An HFA of three or four elements is 24 / 32 bytes, which AAPCS64 still
+ * passes one V register per element. */
+int abi_hfa_elem_count(Type t);
+/* Width of one element of that aggregate (4 or 8), or -1.  Not the size of
+ * `t`: an aligned(16) `struct { double d; }` is 16 bytes with one 8-byte
+ * element.  -1 on SysV x86. */
+int abi_hfa_elem_size(Type t);
 
 Type type_make_ptr(Type pointee);
 Type type_make_array(Type elem, long long length);
@@ -341,7 +373,7 @@ struct Stmt {
     StmtKind kind;
     SourceLoc loc;
     union {
-        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; } decl;   /* ST_DECL: init may be NULL; storage_class: 0=default, 1=static, 2=extern; is_tls: __thread/__Thread_local */
+        struct { char *name; Type type; Expr *init; int storage_class; char *alias_target; int align; int is_tls; int is_weak; int is_hidden; int is_used; } decl;   /* ST_DECL */
         Expr *expr;                                 /* ST_EXPR */
         Expr *value;                                /* ST_RETURN */
         struct { Expr *cond; Stmt *then_s; Stmt *else_s; } if_s; /* ST_IF: else_s may be NULL */
@@ -399,6 +431,9 @@ typedef struct {
     int    is_unprototyped; /* 1 = K&R `foo()` empty identifier list */
     int    is_extern;   /* 1 = no standalone copy (`extern int f();`, or GNU89 extern inline) */
     int    is_static;   /* 1 = `static` function — LOCAL linkage */
+    int    is_weak;     /* 1 = __attribute__((weak)) */
+    int    is_hidden;   /* 1 = visibility("hidden") or "internal" */
+    int    is_used;     /* 1 = __attribute__((used)) */
     char  *alias_target; /* __attribute__((alias("..."))) or NULL */
     int    align;       /* alignment attribute */
     int    no_instrument; /* 1 = __attribute__((no_instrument_function)) */

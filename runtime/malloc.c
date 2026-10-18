@@ -5,8 +5,18 @@ struct chunk {
     size_t size;
     size_t user_size;
     struct chunk *next_free;
-    size_t pad; /* 32-byte header so the user pointer is 16-byte aligned */
+    /* Doubles as the alignment padding that keeps the user pointer 16-byte
+     * aligned (the header has to stay 32 bytes) and as the free flag below.
+     * Checking a flag beats walking freelist_head: a caller that frees in a
+     * loop otherwise pays one full list traversal per free, and a self-hosted
+     * compile was spending 2.4e10 steps there. */
+    size_t state;
 };
+
+/* state == 1 while a chunk sits on freelist_head, 0 once malloc hands it out.
+ * Reading it is how free() recognises a double free in O(1); a chunk carved
+ * out of a bigger one is born 0.  (No #define here: runtime/ is written in
+ * the FakeCC dialect, which has no preprocessor.) */
 
 static struct chunk *freelist_head;
 
@@ -15,8 +25,12 @@ static size_t align16(size_t n) {
     return (n + 15) & ~((size_t)15);
 }
 
+/* The flags are per-target: MAP_ANONYMOUS is 0x20 on Linux and 0x1000 on
+ * Darwin, so Linux's 0x22 names an undefined bit to Darwin and the mapping
+ * is refused.  The address is left to the kernel here, so only MAP_PRIVATE
+ * and MAP_ANONYMOUS are needed. */
 static void *map_anon(size_t n) {
-    long p = __syscall(9, 0, (long)n, 3, 0x22, -1, 0);
+    long p = __syscall(9, 0, (long)n, 3, __fakecc_map_private_anon, -1, 0);
     if (p < 0) return 0;
     return (void *)p;
 }
@@ -37,6 +51,7 @@ static void heap_grow(size_t need) {
     struct chunk *c = (struct chunk *)p;
     c->size = region - sizeof(struct chunk);
     c->user_size = 0;
+    c->state = 1;
     /* Insert by address so later frees can coalesce with this region. */
     struct chunk **prev = &freelist_head;
     struct chunk *n = freelist_head;
@@ -49,16 +64,14 @@ static void heap_grow(size_t need) {
     if (n && chunks_adjacent(c, n)) {
         c->size = c->size + sizeof(struct chunk) + n->size;
         c->next_free = n->next_free;
+        n->state = 0; /* absorbed: no longer a chunk of its own */
     }
 }
 
+/* O(1) double-free guard.  The old version walked the whole freelist, which
+ * turned every free into a traversal of it. */
 static int already_free(struct chunk *c) {
-    struct chunk *p = freelist_head;
-    while (p) {
-        if (p == c) return 1;
-        p = p->next_free;
-    }
-    return 0;
+    return c->state == 1;
 }
 
 void *malloc(size_t n) {
@@ -89,6 +102,7 @@ void *malloc(size_t n) {
         struct chunk *rest = (struct chunk *)(base + sizeof(struct chunk) + n);
         rest->size = c->size - n - sizeof(struct chunk);
         rest->user_size = 0;
+        rest->state = 1;
         rest->next_free = c->next_free;
         *prev = rest;
         c->size = n;
@@ -96,6 +110,7 @@ void *malloc(size_t n) {
         *prev = c->next_free;
     }
     c->next_free = 0;
+    c->state = 0;
     c->user_size = orig_n;
     void *ret = (char *)c + sizeof(struct chunk);
     __asan_unpoison_memory_region(ret, n);
@@ -116,16 +131,19 @@ void free(void *p) {
         left = n;
         n = n->next_free;
     }
+    c->state = 1;
     c->next_free = n;
     if (left) left->next_free = c;
     else freelist_head = c;
     if (n && chunks_adjacent(c, n)) {
         c->size = c->size + sizeof(struct chunk) + n->size;
         c->next_free = n->next_free;
+        n->state = 0; /* absorbed into c */
     }
     if (left && chunks_adjacent(left, c)) {
         left->size = left->size + sizeof(struct chunk) + c->size;
         left->next_free = c->next_free;
+        c->state = 0; /* absorbed into left */
     }
 }
 

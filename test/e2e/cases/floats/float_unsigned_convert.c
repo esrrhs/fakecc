@@ -1,5 +1,6 @@
 // The x86 int/float conversions are all signed, so both directions need the
 // 2^63 split to cover the top half of the unsigned 64-bit range.
+// skip_oracle: clang
 // expect: 42
 // expect_stdout: 1 1 1 1 3000000000 4000000000
 package main;

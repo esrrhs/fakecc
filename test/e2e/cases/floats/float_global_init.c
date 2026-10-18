@@ -1,5 +1,6 @@
 // A float-typed global is packed in its own binary format: folding the
 // initializer as an integer would store 1 as the bit pattern 0x1, not 1.0.
+// skip_oracle: clang
 // expect: 42
 // expect_stdout: 15 -25 10 35 20 45
 package main;

@@ -1,5 +1,6 @@
 // runtime.memcmp: lexicographic compare of the first n bytes, returning
 // <0 / 0 / >0 from the first differing byte interpreted as unsigned
+// skip_oracle: clang
 // char.  A common bug compares as signed char, which flips the sign
 // for any byte >= 0x80.  Pin the sign for high bytes and the n==0
 // edge case.

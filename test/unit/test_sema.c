@@ -146,6 +146,34 @@ static void test_int128_const_ops(void) {
         "}"));
 }
 
+/* Teardown after a semantic error walks AST nodes that normalize_init_list
+ * had already folded into its dense output and freed; list->u.init_list.
+ * elements still named them, so expr_free() hit freed memory.  Only a
+ * sanitizer notices -- which is exactly how the fuzzer found it -- and the
+ * unit legs run under ASan/UBSan on both platforms, so this is the guard. */
+static void test_init_list_error_teardown(void) {
+    const char *src =
+        "package main;\n"
+        "struct T { int a; int b; int c; };\n"
+        "struct U { struct T t; };\n"
+        "int main(void) {\n"
+        "  struct U u = { .t.a = 1, .t.c = 3, .tnb = 2 };\n"
+        "  return 0;\n"
+        "}\n";
+    fakecc_clear_error();
+    TokenArray arr;
+    token_array_init(&arr);
+    T_ASSERT_EQ_INT(lex(src, "test.c", &arr), FAKECC_OK);
+    TranslationUnit tu;
+    tu_init(&tu);
+    T_ASSERT_EQ_INT(parse(&arr, &tu), FAKECC_OK);
+    token_array_free(&arr);
+    sema_check(&tu, 1);
+    T_ASSERT(fakecc_had_error() || sema_has_errors());
+    tu_free(&tu);
+    fakecc_clear_error();
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -166,5 +194,6 @@ int main(void) {
     test_valid_struct();
     test_valid_bitfield();
     test_int128_const_ops();
+    test_init_list_error_teardown();
     return t_finalize();
 }

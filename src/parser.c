@@ -127,6 +127,9 @@ static void expect_kind(Parser *p, TokenKind kind, const char *msg) {
 }
 
 static char *g_parsed_alias = NULL;
+static int g_parsed_weak = 0;
+static int g_parsed_hidden = 0;
+static int g_parsed_used = 0;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
 static int g_parsed_constructor = 0;
@@ -275,6 +278,33 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                         depth--;
                     }
                 }
+                continue;
+            } else if (strcmp(name, "weak") == 0 || strcmp(name, "__weak__") == 0) {
+                g_parsed_weak = 1;
+                advance(p);
+                continue;
+            } else if (strcmp(name, "visibility") == 0 || strcmp(name, "__visibility__") == 0) {
+                advance(p);
+                if (peek(p)->kind == TK_LPAREN) {
+                    advance(p);
+                    depth++;
+                    if (peek(p)->kind == TK_STRING_LITERAL) {
+                        const char *src = peek(p)->text;
+                        if (strstr(src, "hidden") || strstr(src, "internal"))
+                            g_parsed_hidden = 1;
+                        else if (strstr(src, "default"))
+                            g_parsed_hidden = 0;
+                        advance(p);
+                    }
+                    if (peek(p)->kind == TK_RPAREN) {
+                        advance(p);
+                        depth--;
+                    }
+                }
+                continue;
+            } else if (strcmp(name, "used") == 0 || strcmp(name, "__used__") == 0) {
+                g_parsed_used = 1;
+                advance(p);
                 continue;
             } else if (strcmp(name, "alias") == 0 || strcmp(name, "__alias__") == 0) {
                 advance(p);
@@ -1124,16 +1154,17 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
         Type t = type_make_float(8);
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
-    /* long double — TY_FLOAT with width 16 (x87 80-bit extended).  Detected by
-     * a `long` keyword immediately followed by `double` (lookahead without
-     * consuming on mismatch, since `long` alone begins an integer type). */
+    /* long double.  x87 targets use width 16; Darwin arm64 uses width 8
+     * (the same IEEE double).  Detected by a `long` keyword immediately
+     * followed by `double` (lookahead without consuming on mismatch, since
+     * `long` alone begins an integer type). */
     if (peek(p)->kind == TK_KW_LONG
         && p->pos + 1 < p->tokens->len
         && p->tokens->data[p->pos + 1].kind == TK_KW_DOUBLE) {
         advance(p); /* consume `long` */
         advance(p); /* consume `double` */
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
-        Type t = type_make_float(16);
+        Type t = type_make_long_double();
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     /* GNU decimal floating types: _Decimal32/64/128. */
@@ -1289,9 +1320,16 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
 
     if (!has_type) {
         if (is_complex) {
-            /* Bare _Complex defaults to _Complex double */
+            /* Bare _Complex defaults to _Complex double.  The type is built
+             * here, so finish_specifiers must be told the complex wrapping is
+             * already done: handing it is_complex again wraps a second time
+             * and yields a struct of two _Complex double, i.e. 32 bytes and a
+             * four-element HFA.  That is how bare _Complex ended up a
+             * different size from _Complex double (32 against 16) and why
+             * taking it by value died with "HFA wider than two eightbytes". */
             Type t = get_or_create_complex_type(p, type_make_float(8));
-            return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
+            return finish_specifiers(t, is_const, is_volatile, is_restrict, 0,
+                                     attr_vec, p);
         }
         const Token *t = peek(p);
         die_at(t->loc.file, t->loc.line, t->loc.col,
@@ -2306,7 +2344,11 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
         return (a->width == b->width && a->is_unsigned == b->is_unsigned);
     }
     if (a->kind == TY_FLOAT) {
-        return (a->width == b->width);
+        /* `long double` shares double's width on Darwin arm64, so compare the
+         * specifier too -- the two are not compatible types. */
+        if (a->width != b->width) return 0;
+        return (a->is_decimal == b->is_decimal
+                && a->is_long_double == b->is_long_double);
     }
     if (a->kind == TY_PTR) {
         if (!a->pointee || !b->pointee) return 0;
@@ -2712,7 +2754,7 @@ static void float_literal_width(const char *text, int *out_width, int *out_decim
         if (last == 'f' || last == 'F')
             *out_width = 4;
         else if (last == 'l' || last == 'L')
-            *out_width = 16;
+            *out_width = type_long_double_width();
     }
 }
 
@@ -2995,7 +3037,7 @@ static Expr *make_imag_literal(Parser *p, const char *text, SourceLoc loc) {
         if (*s == 'f' || *s == 'F') is_float = 1;
         if (*s == 'l' || *s == 'L') is_ld = 1;
     }
-    Type base = is_float ? type_make_float(4) : (is_ld ? type_make_float(16) : type_make_float(8));
+    Type base = is_float ? type_make_float(4) : (is_ld ? type_make_long_double() : type_make_float(8));
     Type cty = get_or_create_complex_type(p, base);
 
     /* Clean imag string by stripping i/I/j/J */
@@ -4026,6 +4068,12 @@ static Stmt parse_stmt_impl(Parser *p) {
                 free(g_parsed_alias);
                 g_parsed_alias = NULL;
             }
+            s.u.decl.is_weak = g_parsed_weak;
+            g_parsed_weak = 0;
+            s.u.decl.is_hidden = g_parsed_hidden;
+            g_parsed_hidden = 0;
+            s.u.decl.is_used = g_parsed_used;
+            g_parsed_used = 0;
             stmt_array_push(&decls, s);
             if (peek(p)->kind == TK_COMMA) {
                 advance(p);
@@ -4932,6 +4980,12 @@ static FunctionDecl parse_function_decl(Parser *p) {
         free(g_parsed_alias);
         g_parsed_alias = NULL;
     }
+    fn.is_weak = g_parsed_weak;
+    g_parsed_weak = 0;
+    fn.is_hidden = g_parsed_hidden;
+    g_parsed_hidden = 0;
+    fn.is_used = g_parsed_used;
+    g_parsed_used = 0;
     if (g_parsed_no_instrument) {
         fn.no_instrument = 1;
         g_parsed_no_instrument = 0;

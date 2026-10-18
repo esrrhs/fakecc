@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -49,6 +50,14 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
+struct EmitRebase {
+    uint64_t slot;
+    uint64_t target;
+};typedef struct EmitRebase EmitRebase;
+struct EmitBind {
+    uint64_t slot;
+    char *name;
+};typedef struct EmitBind EmitBind;
 struct EmitSymbol {
     char *name;
     uint8_t binding;
@@ -56,6 +65,7 @@ struct EmitSymbol {
     uint16_t shndx;
     size_t value;
     size_t size;
+    uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
 struct EmitReloc {
     size_t offset;
@@ -118,6 +128,8 @@ struct DebugVar {
     int rbp_offset;
     int dwarf_reg;
     char *sym_name;
+    int addr_sect;
+    size_t addr_off;
     DebugLocRange *ranges;
     size_t num_ranges;
     size_t cap_ranges;
@@ -152,6 +164,7 @@ struct DebugFunc {
     size_t prologue_end_pc;
     size_t after_push_rbp_pc;
     size_t after_mov_rbp_pc;
+    size_t frame_size;
     DebugVar *vars;
     size_t num_vars;
     size_t cap_vars;
@@ -160,12 +173,15 @@ struct DebugFunc {
     size_t cap_call_sites;
 };typedef struct DebugFunc DebugFunc;
 struct EmitModule {
+    int is_user_tu;
     Buffer text;
     Buffer rodata;
     Buffer data;
     size_t bss_size;
     Buffer tdata;
     size_t tbss_size;
+    Buffer thread_vars;
+    size_t thread_vars_align;
     size_t text_align;
     size_t rodata_align;
     size_t data_align;
@@ -187,6 +203,12 @@ struct EmitModule {
     EmitReloc *data_relocs;
     size_t num_data_relocs;
     size_t cap_data_relocs;
+    EmitRebase *rebases;
+    size_t num_rebases;
+    size_t cap_rebases;
+    EmitBind *binds;
+    size_t num_binds;
+    size_t cap_binds;
     char *dbg_tu_name;
     DebugLineEntry *dbg_lines;
     size_t num_dbg_lines;
@@ -211,17 +233,40 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
+void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+int emit_is_darwin_import(const char *name);
+struct EmitAuxLib {
+    char *install_name;
+    char **syms;
+    size_t nsyms;
+};typedef struct EmitAuxLib EmitAuxLib;
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms);
+void emit_aux_rpath_add(const char *path);
+const EmitAuxLib *emit_aux_libs(size_t *n);
+const char * *emit_aux_rpaths(size_t *n);
+void emit_aux_reset(void);
+int emit_aux_lib_of(const char *name);
 void emit_obj(const EmitModule *m, const char *path);
+void emit_set_object_mode(int on);
+int emit_object_mode(void);
+void emit_set_multi_tu(int on);
+int emit_multi_tu(void);
+void emit_set_runtime_alloc(int on);
+int emit_runtime_alloc(void);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
+
+DebugTypeTag ir_type_tag(int type_kind, int is_bool);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
                       Buffer *debug_str, Buffer *debug_line,
-                      Buffer *debug_frame, Buffer *debug_loc);
+                      Buffer *debug_frame, Buffer *debug_loc,
+                      const uint64_t *sec_vaddr);
 void debug_serialize(const EmitModule *m, Buffer *out);
 int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len);
 void emit_module_add_dbg_line(EmitModule *m, const char *file, int line,
@@ -233,21 +278,93 @@ void emit_module_dbg_func_end(EmitModule *m, int func_idx, size_t end_pc,
 void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
                                 size_t after_push_rbp_pc,
                                 size_t after_mov_rbp_pc);
+void emit_module_dbg_func_frame64(EmitModule *m, int func_idx,
+                                  size_t after_stp_pc,
+                                  size_t after_mov_fp_pc,
+                                  size_t frame_size);
 void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v);
 void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v);
 void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
                                    const DebugCallSite *cs);
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
+struct EmitModule;
+struct MachoDebug {
+    Buffer abbrev;
+    Buffer info;
+    Buffer str;
+    Buffer line;
+    Buffer frame;
+    Buffer loc;
+};typedef struct MachoDebug MachoDebug;
+int macho_write_exec(const struct EmitModule *em, uint64_t entry_off,
+                     const char *path, int skip_libsystem,
+                     const MachoDebug *dbg);
+int macho_read_dylib(const char *path, char **install_name_out,
+                     char ***syms_out, size_t *nsyms_out);
+int macho_write_object(const struct EmitModule *em, const char *path);
+int macho_read_object(const char *path, struct EmitModule *em);
+int macho_link_objects(struct EmitModule **mods, size_t n, const char *path,
+                       int skip_libsystem);
+int macho_write_exec_text(const Buffer *text, uint64_t entry_off,
+                          const char *path);
+uint32_t macho_text_offset(void);
+struct MachoSectOffsets {
+    uint64_t ro;
+    uint64_t data;
+    uint64_t bss;
+    uint64_t thread_vars;
+    uint64_t tdata;
+    uint64_t tbss;
+};typedef struct MachoSectOffsets MachoSectOffsets;
+void macho_section_offsets(const struct EmitModule *em, size_t text_len,
+                           MachoSectOffsets *off);
+size_t macho_tlv_block_tbss_base(size_t tdata_len, size_t max_align);
+int macho_codesign(const char *path);
+enum TargetArch {
+    TARGET_ARCH_UNKNOWN = 0,
+    TARGET_ARCH_X86_64 = 1,
+    TARGET_ARCH_ARM64 = 2,
+};typedef enum TargetArch TargetArch;
+enum TargetOS {
+    TOS_UNKNOWN = 0,
+    TOS_LINUX = 1,
+    TOS_MACOS = 2,
+};typedef enum TargetOS TargetOS;
+enum TargetObjFmt {
+    TARGET_OBJFMT_UNKNOWN = 0,
+    TARGET_OBJFMT_ELF = 1,
+    TARGET_OBJFMT_MACHO = 2,
+};typedef enum TargetObjFmt TargetObjFmt;
+struct TargetDesc {
+    TargetArch arch;
+    TargetOS os;
+    TargetObjFmt objfmt;
+    int ptr_bits;
+    int native_vector_bytes;
+    const char *triple;
+    int gp_arg_regs;
+    int sret_uses_gp;
+};typedef struct TargetDesc TargetDesc;
+const TargetDesc *target_current(void);
+void target_set_current(const TargetDesc *t);
+const TargetDesc *target_default(void);
+const TargetDesc *target_parse(const char *triple);
+const TargetDesc *target_x86_64_linux(void);
+const TargetDesc *target_arm64_macos(void);
+int target_backend_ready(const TargetDesc *t);
 typedef struct FILE FILE;
 typedef long fpos_t;
 void emit_module_init(EmitModule *m) {
+    m->is_user_tu = 0;
     buffer_init(&m->text);
     buffer_init(&m->rodata);
     buffer_init(&m->data);
     m->bss_size = 0;
     buffer_init(&m->tdata);
     m->tbss_size = 0;
+    buffer_init(&m->thread_vars);
+    m->thread_vars_align = 8;
     m->text_align = 16;
     m->rodata_align = 8;
     m->data_align = 8;
@@ -263,6 +380,8 @@ void emit_module_init(EmitModule *m) {
     m->syms = ((void*)0); m->num_syms = 0; m->cap_syms = 0;
     m->relocs = ((void*)0); m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = ((void*)0); m->num_data_relocs = 0; m->cap_data_relocs = 0;
+    m->rebases = ((void*)0); m->num_rebases = 0; m->cap_rebases = 0;
+    m->binds = ((void*)0); m->num_binds = 0; m->cap_binds = 0;
     m->dbg_tu_name = ((void*)0);
     m->dbg_lines = ((void*)0); m->num_dbg_lines = 0; m->cap_dbg_lines = 0;
     m->dbg_funcs = ((void*)0); m->num_dbg_funcs = 0; m->cap_dbg_funcs = 0;
@@ -276,10 +395,14 @@ void emit_module_free(EmitModule *m) {
     runtime.free(m->syms);
     runtime.free(m->relocs);
     runtime.free(m->data_relocs);
+    runtime.free(m->rebases);
+    for (size_t i = 0; i < m->num_binds; i++) runtime.free(m->binds[i].name);
+    runtime.free(m->binds);
     buffer_free(&m->text);
     buffer_free(&m->rodata);
     buffer_free(&m->data);
     buffer_free(&m->tdata);
+    buffer_free(&m->thread_vars);
     buffer_free(&m->init_array);
     runtime.free(m->init_prio);
     buffer_free(&m->fini_array);
@@ -314,6 +437,7 @@ int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
                 m->syms[i].shndx = shndx;
                 m->syms[i].value = value;
                 m->syms[i].size = size;
+                m->syms[i].macho_desc = 0;
                 return (int)i;
             }
         }
@@ -331,6 +455,7 @@ int emit_module_add_symbol(EmitModule *m, const char *name, uint8_t binding,
     s->shndx = shndx;
     s->value = value;
     s->size = size;
+    s->macho_desc = 0;
     return (int)m->num_syms++;
 }
 int emit_module_find_symbol(EmitModule *m, const char *name) {
@@ -390,6 +515,128 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
     r->sym = (uint32_t)sym;
     r->addend = addend;
     r->shndx = 3;
+}
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target) {
+    if (m->num_rebases >= m->cap_rebases) {
+        size_t nc = m->cap_rebases ? m->cap_rebases * 2 : 8;
+        m->rebases = runtime.realloc(m->rebases, nc * sizeof(EmitRebase));
+        if (!m->rebases) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        m->cap_rebases = nc;
+    }
+    m->rebases[m->num_rebases].slot = slot;
+    m->rebases[m->num_rebases].target = target;
+    m->num_rebases++;
+}
+void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name) {
+    if (!name) return;
+    if (m->num_binds >= m->cap_binds) {
+        size_t nc = m->cap_binds ? m->cap_binds * 2 : 8;
+        m->binds = runtime.realloc(m->binds, nc * sizeof(EmitBind));
+        if (!m->binds) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+        m->cap_binds = nc;
+    }
+    size_t nlen = runtime.strlen(name);
+    char *mach = runtime.malloc(nlen + 2);
+    if (!mach) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    mach[0] = '_';
+    runtime.memcpy(mach + 1, name, nlen + 1);
+    m->binds[m->num_binds].slot = slot;
+    m->binds[m->num_binds].name = mach;
+    m->num_binds++;
+}
+static const char * emit_darwin_imports[] = {
+    "pthread_create",
+    "pthread_join",
+    "pthread_self",
+    "pthread_exit",
+    "pthread_detach",
+    "pthread_equal",
+    "pthread_once",
+    "pthread_mutex_init",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
+    "pthread_mutex_destroy",
+    "pthread_cond_init",
+    "pthread_cond_wait",
+    "pthread_cond_signal",
+    "pthread_cond_broadcast",
+    "pthread_cond_destroy",
+    "sched_yield",
+    "__stack_chk_fail",
+    "__stack_chk_guard",
+    "__cxa_atexit",
+    "sinh", "cosh", "tanh",
+    "asinh", "acosh", "atanh",
+    "exp2", "expm1", "log2", "log1p", "logb", "ilogb",
+    "cbrt", "hypot",
+    "fmod", "remainder", "remquo", "modf", "frexp", "ldexp",
+    "scalbn", "scalbln", "nextafter", "nexttoward",
+    "round", "lround", "llround", "rint", "lrint", "llrint",
+    "nearbyint", "trunc",
+    "fmin", "fmax", "fdim", "fma",
+    "erf", "erfc", "tgamma", "lgamma",
+    "nan",
+    "rand", "srand",
+};
+static EmitAuxLib *g_aux_libs = ((void*)0);
+static size_t g_aux_n = 0, g_aux_cap = 0;
+static char **g_rpaths = ((void*)0);
+static size_t g_nrpath = 0, g_rpath_cap = 0;
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms) {
+    if (g_aux_n == g_aux_cap) {
+        g_aux_cap = g_aux_cap ? g_aux_cap * 2 : 4;
+        g_aux_libs = runtime.realloc(g_aux_libs, g_aux_cap * sizeof *g_aux_libs);
+        if (!g_aux_libs) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    }
+    g_aux_libs[g_aux_n].install_name = install_name;
+    g_aux_libs[g_aux_n].syms = syms;
+    g_aux_libs[g_aux_n].nsyms = nsyms;
+    g_aux_n++;
+}
+void emit_aux_rpath_add(const char *path) {
+    for (size_t i = 0; i < g_nrpath; i++)
+        if (runtime.strcmp(g_rpaths[i], path) == 0) return;
+    if (g_nrpath == g_rpath_cap) {
+        g_rpath_cap = g_rpath_cap ? g_rpath_cap * 2 : 4;
+        g_rpaths = runtime.realloc(g_rpaths, g_rpath_cap * sizeof *g_rpaths);
+        if (!g_rpaths) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+    }
+    g_rpaths[g_nrpath++] = xstrdup(path);
+}
+const EmitAuxLib *emit_aux_libs(size_t *n) {
+    if (n) *n = g_aux_n;
+    return g_aux_libs;
+}
+const char * *emit_aux_rpaths(size_t *n) {
+    if (n) *n = g_nrpath;
+    return (const char * *)g_rpaths;
+}
+void emit_aux_reset(void) {
+    for (size_t i = 0; i < g_aux_n; i++) {
+        runtime.free(g_aux_libs[i].install_name);
+        for (size_t k = 0; k < g_aux_libs[i].nsyms; k++)
+            runtime.free(g_aux_libs[i].syms[k]);
+        runtime.free(g_aux_libs[i].syms);
+    }
+    runtime.free(g_aux_libs);
+    g_aux_libs = ((void*)0); g_aux_n = 0; g_aux_cap = 0;
+    for (size_t i = 0; i < g_nrpath; i++) runtime.free(g_rpaths[i]);
+    runtime.free(g_rpaths);
+    g_rpaths = ((void*)0); g_nrpath = 0; g_rpath_cap = 0;
+}
+int emit_aux_lib_of(const char *name) {
+    if (!name) return -1;
+    for (size_t i = 0; i < g_aux_n; i++)
+        for (size_t k = 0; k < g_aux_libs[i].nsyms; k++)
+            if (runtime.strcmp(g_aux_libs[i].syms[k], name) == 0) return (int)i;
+    return -1;
+}
+int emit_is_darwin_import(const char *name) {
+    if (!name) return 0;
+    for (size_t i = 0; i < sizeof emit_darwin_imports
+                            / sizeof *emit_darwin_imports; i++)
+        if (runtime.strcmp(emit_darwin_imports[i], name) == 0) return 1;
+    return emit_aux_lib_of(name) >= 0;
 }
 static void buf_u8(Buffer *b, uint8_t v) { buffer_append(b, (const char *)&v, 1); }
 static void buf_bytes(Buffer *b, const char *d, size_t n) { buffer_append(b, d, n); }
@@ -455,7 +702,26 @@ static uint32_t append_array_shname(Buffer *shstrtab, const char *base,
     buf_bytes(shstrtab, nm, runtime.strlen(nm) + 1);
     return off;
 }
+static int g_object_mode;
+void emit_set_object_mode(int on) { g_object_mode = on ? 1 : 0; }
+int emit_object_mode(void) { return g_object_mode; }
+static int g_multi_tu;
+void emit_set_multi_tu(int on) { g_multi_tu = on ? 1 : 0; }
+int emit_multi_tu(void) { return g_multi_tu; }
+static int g_rt_alloc;
+void emit_set_runtime_alloc(int on) { g_rt_alloc = on ? 1 : 0; }
+int emit_runtime_alloc(void) { return g_rt_alloc; }
 void emit_obj(const EmitModule *m, const char *path) {
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO) {
+        if (macho_write_object(m, path) != 0) runtime.exit(1);
+        return;
+    }
+    if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
+        runtime.fprintf(runtime.stderr,
+                "fakecc: object emission for target '%s' is not implemented yet\n",
+                target_current()->triple);
+        runtime.exit(1);
+    }
     Buffer shstrtab;
     buffer_init(&shstrtab);
     buf_u8(&shstrtab, 0);
@@ -762,6 +1028,14 @@ static void prio_fill_slots(int **prio, size_t byte_off, size_t byte_sz, int p) 
         (*prio)[i0 + i] = p;
 }
 int emit_obj_read(const char *path, EmitModule *m) {
+    if (target_current()->objfmt == TARGET_OBJFMT_MACHO)
+        return macho_read_object(path, m);
+    if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
+        runtime.fprintf(runtime.stderr,
+                "fakecc: object reading for target '%s' is not implemented yet\n",
+                target_current()->triple);
+        return -1;
+    }
     FILE *f = runtime.fopen(path, "rb");
     if (!f) { runtime.fprintf(runtime.stderr, "fakecc: cannot open '%s'\n", path); return -1; }
     runtime.fseek(f, 0, 2);

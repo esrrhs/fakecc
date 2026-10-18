@@ -1,5 +1,8 @@
 // expect: 0
+// Mach-O supports only weak aliases; the oracle rejects strong ones.
+// skip_oracle: darwin
 package main;
+// skip_oracle: clang
 /* { dg-require-alias "" } */
 int a = 1;
 extern int b __attribute__ ((alias ("a")));

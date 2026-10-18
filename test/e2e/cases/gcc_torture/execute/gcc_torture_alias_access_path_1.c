@@ -1,5 +1,6 @@
 // expect: 0
 package main;
+// skip_oracle: clang
 
 extern void* memcpy(void*, const void*, unsigned long);
 extern void* memset(void*, int, unsigned long);

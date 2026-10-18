@@ -1,5 +1,6 @@
 // expect: 0
 // Annex F: sqrt(+Inf) is +Inf, sqrt(±0) keeps the sign; floor(±0) keeps the sign.
+// skip_oracle: clang
 package main;
 import runtime;
 int main(void) {

@@ -40,6 +40,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -49,6 +50,14 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
+struct EmitRebase {
+    uint64_t slot;
+    uint64_t target;
+};typedef struct EmitRebase EmitRebase;
+struct EmitBind {
+    uint64_t slot;
+    char *name;
+};typedef struct EmitBind EmitBind;
 struct EmitSymbol {
     char *name;
     uint8_t binding;
@@ -56,6 +65,7 @@ struct EmitSymbol {
     uint16_t shndx;
     size_t value;
     size_t size;
+    uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
 struct EmitReloc {
     size_t offset;
@@ -118,6 +128,8 @@ struct DebugVar {
     int rbp_offset;
     int dwarf_reg;
     char *sym_name;
+    int addr_sect;
+    size_t addr_off;
     DebugLocRange *ranges;
     size_t num_ranges;
     size_t cap_ranges;
@@ -152,6 +164,7 @@ struct DebugFunc {
     size_t prologue_end_pc;
     size_t after_push_rbp_pc;
     size_t after_mov_rbp_pc;
+    size_t frame_size;
     DebugVar *vars;
     size_t num_vars;
     size_t cap_vars;
@@ -160,12 +173,15 @@ struct DebugFunc {
     size_t cap_call_sites;
 };typedef struct DebugFunc DebugFunc;
 struct EmitModule {
+    int is_user_tu;
     Buffer text;
     Buffer rodata;
     Buffer data;
     size_t bss_size;
     Buffer tdata;
     size_t tbss_size;
+    Buffer thread_vars;
+    size_t thread_vars_align;
     size_t text_align;
     size_t rodata_align;
     size_t data_align;
@@ -187,6 +203,12 @@ struct EmitModule {
     EmitReloc *data_relocs;
     size_t num_data_relocs;
     size_t cap_data_relocs;
+    EmitRebase *rebases;
+    size_t num_rebases;
+    size_t cap_rebases;
+    EmitBind *binds;
+    size_t num_binds;
+    size_t cap_binds;
     char *dbg_tu_name;
     DebugLineEntry *dbg_lines;
     size_t num_dbg_lines;
@@ -211,17 +233,39 @@ void emit_module_add_reloc(EmitModule *m, size_t offset, uint32_t type,
                            int sym, int32_t addend);
 void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
+void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
+void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+int emit_is_darwin_import(const char *name);
+struct EmitAuxLib {
+    char *install_name;
+    char **syms;
+    size_t nsyms;
+};typedef struct EmitAuxLib EmitAuxLib;
+void emit_aux_lib_add(char *install_name, char **syms, size_t nsyms);
+void emit_aux_rpath_add(const char *path);
+const EmitAuxLib *emit_aux_libs(size_t *n);
+const char * *emit_aux_rpaths(size_t *n);
+void emit_aux_reset(void);
+int emit_aux_lib_of(const char *name);
 void emit_obj(const EmitModule *m, const char *path);
+void emit_set_object_mode(int on);
+int emit_object_mode(void);
+void emit_set_multi_tu(int on);
+int emit_multi_tu(void);
+void emit_set_runtime_alloc(int on);
+int emit_runtime_alloc(void);
 int emit_obj_read(const char *path, EmitModule *m);
 void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **needed, size_t num_needed, int nodefaultlibs,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
+DebugTypeTag ir_type_tag(int type_kind, int is_bool);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
                       Buffer *debug_str, Buffer *debug_line,
-                      Buffer *debug_frame, Buffer *debug_loc);
+                      Buffer *debug_frame, Buffer *debug_loc,
+                      const uint64_t *sec_vaddr);
 void debug_serialize(const EmitModule *m, Buffer *out);
 int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len);
 void emit_module_add_dbg_line(EmitModule *m, const char *file, int line,
@@ -233,12 +277,50 @@ void emit_module_dbg_func_end(EmitModule *m, int func_idx, size_t end_pc,
 void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
                                 size_t after_push_rbp_pc,
                                 size_t after_mov_rbp_pc);
+void emit_module_dbg_func_frame64(EmitModule *m, int func_idx,
+                                  size_t after_stp_pc,
+                                  size_t after_mov_fp_pc,
+                                  size_t frame_size);
 void emit_module_add_dbg_var(EmitModule *m, int func_idx, const DebugVar *v);
 void emit_module_add_dbg_global(EmitModule *m, const DebugVar *v);
 void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
                                    const DebugCallSite *cs);
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
+
+enum TargetArch {
+    TARGET_ARCH_UNKNOWN = 0,
+    TARGET_ARCH_X86_64 = 1,
+    TARGET_ARCH_ARM64 = 2,
+};typedef enum TargetArch TargetArch;
+enum TargetOS {
+    TOS_UNKNOWN = 0,
+    TOS_LINUX = 1,
+    TOS_MACOS = 2,
+};typedef enum TargetOS TargetOS;
+enum TargetObjFmt {
+    TARGET_OBJFMT_UNKNOWN = 0,
+    TARGET_OBJFMT_ELF = 1,
+    TARGET_OBJFMT_MACHO = 2,
+};typedef enum TargetObjFmt TargetObjFmt;
+struct TargetDesc {
+    TargetArch arch;
+    TargetOS os;
+    TargetObjFmt objfmt;
+    int ptr_bits;
+    int native_vector_bytes;
+    const char *triple;
+    int gp_arg_regs;
+    int sret_uses_gp;
+};typedef struct TargetDesc TargetDesc;
+const TargetDesc *target_current(void);
+void target_set_current(const TargetDesc *t);
+const TargetDesc *target_default(void);
+const TargetDesc *target_parse(const char *triple);
+const TargetDesc *target_x86_64_linux(void);
+const TargetDesc *target_arm64_macos(void);
+int target_backend_ready(const TargetDesc *t);
+
 typedef struct FILE FILE;
 typedef long fpos_t;
 struct FuncDieRef { char *name; uint32_t off; };
@@ -334,6 +416,16 @@ void emit_module_dbg_func_frame(EmitModule *m, int func_idx,
     if (func_idx < 0 || (size_t)func_idx >= m->num_dbg_funcs) return;
     m->dbg_funcs[func_idx].after_push_rbp_pc = after_push_rbp_pc;
     m->dbg_funcs[func_idx].after_mov_rbp_pc = after_mov_rbp_pc;
+    m->dbg_funcs[func_idx].frame_size = 0;
+}
+void emit_module_dbg_func_frame64(EmitModule *m, int func_idx,
+                                  size_t after_stp_pc,
+                                  size_t after_mov_fp_pc,
+                                  size_t frame_size) {
+    if (func_idx < 0 || (size_t)func_idx >= m->num_dbg_funcs) return;
+    m->dbg_funcs[func_idx].after_push_rbp_pc = after_stp_pc;
+    m->dbg_funcs[func_idx].after_mov_rbp_pc = after_mov_fp_pc;
+    m->dbg_funcs[func_idx].frame_size = frame_size;
 }
 static void debug_members_copy(DebugMember **dst, size_t *ndst,
                                const DebugMember *src, size_t nsrc) {
@@ -373,6 +465,8 @@ static void debug_var_copy(DebugVar *dst, const DebugVar *src) {
     dst->alloca_ssa = src->alloca_ssa;
     dst->param_idx = src->param_idx;
     dst->entry_dwarf_reg = src->entry_dwarf_reg;
+    dst->addr_sect = src->addr_sect;
+    dst->addr_off = src->addr_off;
     if (src->num_ranges > 0) {
         dst->ranges = xmalloc(src->num_ranges * sizeof(DebugLocRange));
         runtime.memcpy(dst->ranges, src->ranges,
@@ -519,6 +613,8 @@ static void ser_var(Buffer *b, const DebugVar *v) {
     d_u32(b, (uint32_t)v->alloca_ssa);
     d_u32(b, (uint32_t)v->param_idx);
     d_u32(b, (uint32_t)v->entry_dwarf_reg);
+    d_u32(b, (uint32_t)v->addr_sect);
+    d_u64(b, (uint64_t)v->addr_off);
     d_u32(b, (uint32_t)v->num_ranges);
     for (size_t i = 0; i < v->num_ranges; i++) {
         const DebugLocRange *r = &v->ranges[i];
@@ -581,6 +677,10 @@ static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar
     if (*p + 4 > end) return -1;
     v->entry_dwarf_reg = (int)rd32(p);
     if (*p + 4 > end) return -1;
+    v->addr_sect = (int)rd32(p);
+    if (*p + 8 > end) return -1;
+    v->addr_off = (size_t)rd64(p);
+    if (*p + 4 > end) return -1;
     uint32_t nranges = rd32(p);
     if (nranges > 0) {
         v->ranges = xmalloc(nranges * sizeof(DebugLocRange));
@@ -600,7 +700,7 @@ static int deser_var(const unsigned char **p, const unsigned char *end, DebugVar
 }
 void debug_serialize(const EmitModule *m, Buffer *out) {
     d_bytes(out, "FDBG", 4);
-    d_u32(out, 3);
+    d_u32(out, 4);
     ser_str(out, m->dbg_tu_name);
     d_u32(out, (uint32_t)m->num_dbg_lines);
     for (size_t i = 0; i < m->num_dbg_lines; i++) {
@@ -619,6 +719,9 @@ void debug_serialize(const EmitModule *m, Buffer *out) {
         d_u64(out, (uint64_t)f->start_pc);
         d_u64(out, (uint64_t)f->end_pc);
         d_u64(out, (uint64_t)f->prologue_end_pc);
+        d_u64(out, (uint64_t)f->frame_size);
+        d_u64(out, (uint64_t)f->after_push_rbp_pc);
+        d_u64(out, (uint64_t)f->after_mov_rbp_pc);
         d_u32(out, (uint32_t)f->num_vars);
         for (size_t j = 0; j < f->num_vars; j++) ser_var(out, &f->vars[j]);
         d_u32(out, (uint32_t)f->num_call_sites);
@@ -645,7 +748,7 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
     const unsigned char *p = data, *end = data + len;
     if (len < 8 || runtime.memcmp(p, "FDBG", 4) != 0) return -1;
     p += 4;
-    if (rd32(&p) != 3) return -1;
+    if (rd32(&p) != 4) return -1;
     if (deser_str(&p, end, &m->dbg_tu_name) < 0) return -1;
     if (p + 4 > end) return -1;
     uint32_t nlines = rd32(&p);
@@ -664,12 +767,15 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
         char *name = ((void*)0), *file = ((void*)0);
         if (deser_str(&p, end, &name) < 0) return -1;
         if (deser_str(&p, end, &file) < 0) { runtime.free(name); return -1; }
-        if (p + 4 + 24 + 4 > end) { runtime.free(name); runtime.free(file); return -1; }
+        if (p + 4 + 24 + 24 + 4 > end) { runtime.free(name); runtime.free(file); return -1; }
         int line = (int)rd32(&p);
         uint64_t start = rd64(&p), endpc = rd64(&p), prol = rd64(&p);
+        uint64_t fsize = rd64(&p), apush = rd64(&p), amov = rd64(&p);
         uint32_t nvars = rd32(&p);
         int fi = emit_module_add_dbg_func(m, name, file, line, (size_t)start);
         emit_module_dbg_func_end(m, fi, (size_t)endpc, (size_t)prol);
+        emit_module_dbg_func_frame64(m, fi, (size_t)apush, (size_t)amov,
+                                     (size_t)fsize);
         runtime.free(name); runtime.free(file);
         for (uint32_t j = 0; j < nvars; j++) {
             DebugVar v;
@@ -724,12 +830,15 @@ int debug_deserialize(EmitModule *m, const unsigned char *data, size_t len) {
     return 0;
 }
 static uint64_t resolve_sym_addr(const EmitModule *m, const char *name,
-                                 uint64_t text_base) {
+                                 uint64_t text_base,
+                                 const uint64_t *sec_vaddr) {
     (void)text_base;
     if (!name) return 0;
     for (size_t i = 0; i < m->num_syms; i++) {
         if (!m->syms[i].name || runtime.strcmp(m->syms[i].name, name) != 0) continue;
-        if (m->syms[i].shndx == 0) continue;
+        unsigned sh = m->syms[i].shndx;
+        if (sh == 0) continue;
+        if (sec_vaddr && sh < 16) return sec_vaddr[sh] + m->syms[i].value;
         return m->syms[i].value;
     }
     return 0;
@@ -930,10 +1039,16 @@ static void emit_loc_bytes(Buffer *expr, DebugLocKind kind, int rbp_offset,
     }
 }
 static void emit_location_expr(Buffer *b, const DebugVar *v,
-                               const EmitModule *m, uint64_t text_base) {
+                               const EmitModule *m, uint64_t text_base,
+                               const uint64_t *sec_vaddr) {
     Buffer expr; buffer_init(&expr);
     if (v->loc_kind == DBG_LOC_ADDR) {
-        uint64_t addr = resolve_sym_addr(m, v->sym_name ? v->sym_name : v->name, text_base);
+        uint64_t addr;
+        if (sec_vaddr && v->addr_sect > 0)
+            addr = sec_vaddr[v->addr_sect] + (uint64_t)v->addr_off;
+        else
+            addr = resolve_sym_addr(m, v->sym_name ? v->sym_name : v->name,
+                                    text_base, sec_vaddr);
         d_u8(&expr, 0x03); d_u64(&expr, addr);
     } else {
         emit_loc_bytes(&expr, v->loc_kind, v->rbp_offset, v->dwarf_reg);
@@ -1144,7 +1259,48 @@ static void cfa_advance(Buffer *frame, size_t delta) {
         d_u8(frame, 0x04); d_u32(frame, (uint32_t)delta);
     }
 }
+static void emit_debug_frame_arm64(const EmitModule *m, uint64_t text_base,
+                                   Buffer *frame) {
+    size_t cie_start = frame->len;
+    d_u32(frame, 0);
+    d_u32(frame, 0xffffffff);
+    d_u8(frame, 1);
+    d_u8(frame, 0);
+    d_uleb(frame, 4);
+    d_sleb(frame, -8);
+    d_uleb(frame, 30);
+    d_u8(frame, 0x0c); d_uleb(frame, 31); d_uleb(frame, 0);
+    while ((frame->len - cie_start) & 7) d_u8(frame, 0x00);
+    uint32_t cie_len = (uint32_t)(frame->len - cie_start - 4);
+    runtime.memcpy(frame->data + cie_start, &cie_len, 4);
+    for (size_t i = 0; i < m->num_dbg_funcs; i++) {
+        const DebugFunc *f = &m->dbg_funcs[i];
+        size_t fde_start = frame->len;
+        d_u32(frame, 0);
+        d_u32(frame, (uint32_t)cie_start);
+        d_u64(frame, text_base + f->start_pc);
+        d_u64(frame, f->end_pc > f->start_pc ? f->end_pc - f->start_pc : 0);
+        size_t n = f->frame_size ? f->frame_size : 16;
+        size_t stp_end = f->after_push_rbp_pc > f->start_pc
+                         ? f->after_push_rbp_pc - f->start_pc : 4;
+        size_t mov_end = f->after_mov_rbp_pc > f->after_push_rbp_pc
+                         ? f->after_mov_rbp_pc - f->after_push_rbp_pc : 4;
+        cfa_advance(frame, stp_end / 4);
+        d_u8(frame, 0x0e); d_uleb(frame, n);
+        d_u8(frame, (uint8_t)(0x80 | 29)); d_uleb(frame, n / 8);
+        d_u8(frame, (uint8_t)(0x80 | 30)); d_uleb(frame, (n - 8) / 8);
+        cfa_advance(frame, mov_end / 4);
+        d_u8(frame, 0x0d); d_uleb(frame, 29);
+        while ((frame->len - fde_start) & 7) d_u8(frame, 0x00);
+        uint32_t fde_len = (uint32_t)(frame->len - fde_start - 4);
+        runtime.memcpy(frame->data + fde_start, &fde_len, 4);
+    }
+}
 static void emit_debug_frame(const EmitModule *m, uint64_t text_base, Buffer *frame) {
+    if (target_current()->arch == TARGET_ARCH_ARM64) {
+        emit_debug_frame_arm64(m, text_base, frame);
+        return;
+    }
     size_t cie_start = frame->len;
     d_u32(frame, 0);
     d_u32(frame, 0xffffffff);
@@ -1180,6 +1336,11 @@ static void emit_debug_frame(const EmitModule *m, uint64_t text_base, Buffer *fr
     }
 }
 static int dwarf_reg_is_caller_saved(int dreg) {
+    if (target_current()->arch == TARGET_ARCH_ARM64) {
+        if (dreg <= 18) return 1;
+        if (dreg >= 64 && dreg <= 95) return !(dreg >= 72 && dreg <= 79);
+        return 0;
+    }
     if (dreg >= 17 && dreg <= 32) return 1;
     switch (dreg) {
     case 0: case 1: case 2: case 4: case 5:
@@ -1291,10 +1452,14 @@ static void refine_param_ranges(DebugVar *out, const DebugVar *v,
     runtime.free(clipped);
     out->loc_kind = DBG_LOC_NONE;
 }
+static int dbg_frame_reg(void) {
+    return target_current()->arch == TARGET_ARCH_ARM64 ? 29 : 6;
+}
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
                       Buffer *debug_str, Buffer *debug_line,
-                      Buffer *debug_frame, Buffer *debug_loc) {
+                      Buffer *debug_frame, Buffer *debug_loc,
+                      const uint64_t *sec_vaddr) {
     emit_abbrevs(debug_abbrev);
     Strtab strs; strtab_init(&strs);
     uint32_t tu_name = strtab_add(&strs, m->dbg_tu_name ? m->dbg_tu_name : "unknown.c");
@@ -1331,7 +1496,7 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
         d_uleb(debug_info, 10);
         d_u32(debug_info, nm);
         d_u32(debug_info, ty);
-        emit_location_expr(debug_info, v, m, text_base_vaddr);
+        emit_location_expr(debug_info, v, m, text_base_vaddr, sec_vaddr);
     }
     FuncDieRef *frefs = ((void*)0);
     size_t nfrefs = 0, cfrefs = 0;
@@ -1352,7 +1517,8 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
         d_u32(debug_info, nm);
         d_u64(debug_info, text_base_vaddr + f->start_pc);
         d_u64(debug_info, f->end_pc >= f->start_pc ? f->end_pc - f->start_pc : 0);
-        { Buffer expr; buffer_init(&expr); d_u8(&expr, 0x50 + 6);
+        { Buffer expr; buffer_init(&expr);
+          d_u8(&expr, 0x50 + dbg_frame_reg());
           d_uleb(debug_info, expr.len); d_bytes(debug_info, expr.data, expr.len); buffer_free(&expr); }
         for (size_t vi = 0; vi < f->num_vars; vi++) {
             const DebugVar *v = &f->vars[vi];
@@ -1377,7 +1543,7 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                 d_uleb(debug_info, is_param ? 8 : 9);
                 d_u32(debug_info, vnm);
                 d_u32(debug_info, ty);
-                emit_location_expr(debug_info, use, m, text_base_vaddr);
+                emit_location_expr(debug_info, use, m, text_base_vaddr, sec_vaddr);
             }
             if (free_refined) runtime.free(refined.ranges);
         }

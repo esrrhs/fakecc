@@ -1,9 +1,11 @@
 #include "fakecc/codegen.h"
+#include "fakecc/cg64.h"
 #include "fakecc/common.h"
 #include "fakecc/debug.h"
 #include "fakecc/emit.h"
 #include "fakecc/ir.h"
 #include "fakecc/regalloc.h"
+#include "fakecc/target.h"
 #include "fakecc/ast.h"
 
 #include <stdint.h>
@@ -543,6 +545,31 @@ static void emit_movq_xmm_gp(Buffer *b, int xmm, int gp) {
     emit_rex_wrb(b, 1, xmm, gp);
     emit_byte(b, 0x0F);
     emit_byte(b, 0x6E);
+    emit_modrm(b, 3, xmm & 7, gp & 7);
+}
+
+/* movd/movq the other way: GP gets the low 4 or 8 bytes of an XMM. */
+static void emit_movd_xmm_gp(Buffer *b, int xmm, int gp) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, xmm, gp);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x6E);
+    emit_modrm(b, 3, xmm & 7, gp & 7);
+}
+
+static void emit_movd_gp_xmm(Buffer *b, int gp, int xmm) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, xmm, gp);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x7E);
+    emit_modrm(b, 3, xmm & 7, gp & 7);
+}
+
+static void emit_movq_gp_xmm(Buffer *b, int gp, int xmm) {
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 1, xmm, gp);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x7E);
     emit_modrm(b, 3, xmm & 7, gp & 7);
 }
 
@@ -1235,73 +1262,75 @@ static void emit_load_via_ptr(Buffer *b, int dst, int ptr, int width, int is_uns
     }
 }
 
-/* SIB [base+index] (+ optional disp).  r13/rbp (rm=5) always take a disp. */
-static void emit_modrm_sib_disp(Buffer *b, int reg_field, int base, int index, int off) {
+/* SIB [base+index*2^scale+off].  r13/rbp (rm=5) always take a disp. */
+static void emit_modrm_sib_disp(Buffer *b, int reg_field, int base, int index,
+                                int scale2, int off) {
     int rm_b = base & 7;
     int mod;
     if (off == 0 && rm_b != 5) mod = 0;
     else if (off >= -128 && off <= 127) mod = 1;
     else mod = 2;
     emit_modrm(b, mod, reg_field, 4);
-    emit_byte(b, (uint8_t)(((index & 7) << 3) | rm_b));
+    emit_byte(b, (uint8_t)(((scale2 & 3) << 6) | ((index & 7) << 3) | rm_b));
     if (mod == 1) emit_byte(b, (uint8_t)(off & 0xFF));
     else if (mod == 2) emit_int32(b, off);
 }
 
-static void emit_load_sib(Buffer *b, int dst, int base, int index, int off,
-                          int width, int is_unsigned) {
+static void emit_load_sib(Buffer *b, int dst, int base, int index, int scale2,
+                          int off, int width, int is_unsigned) {
     switch (width) {
     case 1:
         emit_rex_if(b, 1, dst, index, base);
         emit_byte(b, 0x0F);
         emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
-        emit_modrm_sib_disp(b, dst, base, index, off);
+        emit_modrm_sib_disp(b, dst, base, index, scale2, off);
         break;
     case 2:
         emit_rex_if(b, 1, dst, index, base);
         emit_byte(b, 0x0F);
         emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
-        emit_modrm_sib_disp(b, dst, base, index, off);
+        emit_modrm_sib_disp(b, dst, base, index, scale2, off);
         break;
     case 4:
         emit_rex_if(b, 0, dst, index, base);
         emit_byte(b, 0x8B);
-        emit_modrm_sib_disp(b, dst, base, index, off);
+        emit_modrm_sib_disp(b, dst, base, index, scale2, off);
         break;
     case 8:
     default:
         emit_rex_if(b, 1, dst, index, base);
         emit_byte(b, 0x8B);
-        emit_modrm_sib_disp(b, dst, base, index, off);
+        emit_modrm_sib_disp(b, dst, base, index, scale2, off);
         break;
     }
 }
 
-static void emit_store_sib(Buffer *b, int base, int index, int off, int src, int width) {
+static void emit_store_sib(Buffer *b, int base, int index, int scale2,
+                           int off, int src, int width) {
     switch (width) {
     case 1: {
         uint8_t rex = 0x40 | ((src & 8) >> 1) | ((index & 8) >> 2) | ((base & 8) >> 3);
         emit_byte(b, rex);
         emit_byte(b, 0x88);
-        emit_modrm_sib_disp(b, src, base, index, off);
+        emit_modrm_sib_disp(b, src, base, index, scale2, off);
         break;
     }
     case 2:
         emit_byte(b, 0x66);
         emit_rex_if(b, 0, src, index, base);
         emit_byte(b, 0x89);
-        emit_modrm_sib_disp(b, src, base, index, off);
+        emit_modrm_sib_disp(b, src, base, index, scale2, off);
         break;
     case 4:
         emit_rex_if(b, 0, src, index, base);
         emit_byte(b, 0x89);
-        emit_modrm_sib_disp(b, src, base, index, off);
+        emit_modrm_sib_disp(b, src, base, index, scale2, off);
         break;
     case 8:
     default:
         emit_rex_if(b, 1, src, index, base);
         emit_byte(b, 0x89);
-        emit_modrm_sib_disp(b, src, base, index, off);
+        emit_modrm_sib_disp(b, src, base, index, scale2, off);
         break;
     }
 }
@@ -2606,7 +2635,9 @@ static int synth_call_value(const IRFunction *fn, IRValue v, size_t at,
     }
 }
 
-static DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
+/* Both backends turn a TypeKind into the DWARF type tag their debug records
+ * carry, so this lives with the rest of the debug plumbing. */
+DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
     if (is_bool) return DBG_TY_BOOL;
     switch (type_kind) {
     case TY_VOID: return DBG_TY_VOID;
@@ -2712,12 +2743,6 @@ static int imm_fits_i32(int64_t imm) {
     return imm == (int64_t)(int32_t)imm;
 }
 
-static int is_gaddr_def(const IRFunction *fn, const int *def, IRValue v) {
-    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
-    int op = fn->insts.data[def[v]].op;
-    return op == IR_GADDR || op == IR_GADDR_TLS;
-}
-
 /* True if v is a non-address integer offset: peel COPY/SEXT/ZEXT, then
  * reject CONST (those GEPs stay as add+const) and address-producing ops. */
 static int isel_ok_index(const IRFunction *fn, const int *def, IRValue v) {
@@ -2730,28 +2755,6 @@ static int isel_ok_index(const IRFunction *fn, const int *def, IRValue v) {
         }
         return op != IR_CONST && op != IR_ADDR && op != IR_GADDR
             && op != IR_GADDR_TLS && op != IR_FADDR;
-    }
-    return 0;
-}
-
-/* ADD of GADDR and an integer offset → [base+index]. */
-static int fold_sib_add(const IRFunction *fn, const int *def, IRValue v,
-                        IRValue *base, IRValue *index) {
-    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
-    const IRInst *d = &fn->insts.data[def[v]];
-    if (d->op != IR_ADD) return 0;
-    int64_t imm;
-    if (ssa_const_imm(fn, def, d->a, &imm) || ssa_const_imm(fn, def, d->b, &imm))
-        return 0;
-    if (is_gaddr_def(fn, def, d->a) && isel_ok_index(fn, def, d->b)) {
-        *base = d->a;
-        *index = d->b;
-        return 1;
-    }
-    if (is_gaddr_def(fn, def, d->b) && isel_ok_index(fn, def, d->a)) {
-        *base = d->b;
-        *index = d->a;
-        return 1;
     }
     return 0;
 }
@@ -2779,6 +2782,205 @@ static int fold_rbp_index(const IRFunction *fn, const int *def, const int *alloc
         return 1;
     }
     return 0;
+}
+
+/* SIB encodable scale: x86 supports *1,*2,*4,*8. */
+static int sib_scale_log2(int64_t s) {
+    if (s == 1) return 0;
+    if (s == 2) return 1;
+    if (s == 4) return 2;
+    if (s == 8) return 3;
+    return -1;
+}
+
+/* v's definition is MUL(idx, C) with C a power of two in {1,2,4,8} — the
+ * scaled GEP stride emit_pointee_stride produces for p[i].  The MUL result
+ * itself is returned as the index (used with SIB scale 1): it is live up to
+ * the address ADD right next to the dereference, whereas the MUL's inner
+ * operand's register may already have been recycled at that point. */
+static int gep_scaled_index(const IRFunction *fn, const int *def, IRValue v,
+                            IRValue *idx, int *scale2) {
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op != IR_MUL) return 0;
+    int64_t ca, cb;
+    if ((ssa_const_imm(fn, def, d->b, &cb) && sib_scale_log2(cb) >= 0)
+        || (ssa_const_imm(fn, def, d->a, &ca) && sib_scale_log2(ca) >= 0)) {
+        *scale2 = 0;
+        *idx = v;
+        return 1;
+    }
+    return 0;
+}
+
+/* Decompose the address feeding a LOAD_PTR/STORE_PTR into
+ *     base + index * 2^scale2 + disp
+ * where the index*scale term comes from a MUL(idx, 1|2|4|8) GEP stride.
+ * The base is any pointer SSA (param, loaded pointer, GADDR, call result…);
+ * const-only struct GEPs accumulate in disp.  A fully constant index folds
+ * into disp and comes back with *idx_out == -1 (plain [base+disp]).
+ *
+ * Register liveness rule (the caller only guarantees the dereference sits
+ * directly after v's ADD): a register reached by peeling constants is safe
+ * to reference only while the peeled ADDs occupy CONSECUTIVE IR positions
+ * back from v, so no intervening instruction can have recycled its home.
+ * A pinned alloca address ([rbp+off]) is a frame value and stays safe
+ * regardless of position. */
+static int fold_gep(const IRFunction *fn, const int *def,
+                    const int *alloca_off, IRValue v,
+                    IRValue *base_out, IRValue *idx_out, int *scale2_out,
+                    int *disp_out) {
+    IRValue cur = v;
+    int disp = 0;
+    int expect = def[v];
+    for (int depth = 0; depth < 8; depth++) {
+        if (cur < 0 || cur >= fn->next_value_id || def[cur] < 0) return 0;
+        int cp = def[cur];
+        if (cp != expect) return 0; /* gap in the address chain */
+        const IRInst *d = &fn->insts.data[cp];
+        if (d->op != IR_ADD) return 0;
+        IRValue raw_idx = -1, other = -1;
+        int sc = -1;
+        if (gep_scaled_index(fn, def, d->a, &raw_idx, &sc))
+            other = d->b;
+        else if (gep_scaled_index(fn, def, d->b, &raw_idx, &sc))
+            other = d->a;
+        if (raw_idx >= 0) {
+            int bdisp = 0;
+            IRValue base = other;
+            int is_frame = 0;
+            int boff = 0;
+            if (base >= 0 && base < fn->next_value_id && def[base] >= 0
+                && fn->insts.data[def[base]].op == IR_ADD) {
+                /* Peel ADD(base, const) layers, demanding consecutive
+                 * positions; a non-consecutive layer is usable only when it
+                 * resolves to a pinned frame address. */
+                int bexpect = cp - 1;
+                for (;;) {
+                    if (base < 0 || base >= fn->next_value_id
+                        || def[base] < 0)
+                        return 0;
+                    int bp = def[base];
+                    const IRInst *bd = &fn->insts.data[bp];
+                    if (bd->op != IR_ADD) break;
+                    if (bp != bexpect) {
+                        if (fold_ptr_off(fn, def, alloca_off, base,
+                                         &boff, 0)) {
+                            is_frame = 1;
+                            break;
+                        }
+                        return 0;
+                    }
+                    int64_t bc;
+                    if (ssa_const_imm(fn, def, bd->b, &bc)) {
+                        base = bd->a;
+                    } else if (ssa_const_imm(fn, def, bd->a, &bc)) {
+                        base = bd->b;
+                    } else {
+                        break; /* non-const ADD: usable register base */
+                    }
+                    bdisp += (int)bc;
+                    bexpect = bp - 1;
+                }
+            }
+            if (!is_frame) {
+                int off = 0;
+                if (base < 0 || base >= fn->next_value_id || def[base] < 0)
+                    return 0;
+                if (fold_ptr_off(fn, def, alloca_off, base, &off, 0)) {
+                    is_frame = 1;
+                    boff = off;
+                }
+            }
+            int64_t total = (int64_t)disp + bdisp + boff;
+            IRValue idx = raw_idx;
+            int64_t ci;
+            if (ssa_const_imm(fn, def, raw_idx, &ci)) {
+                total += ci << sc;
+                idx = -1;
+            }
+            if (!imm_fits_i32(total)) return 0;
+            /* Register bases must be real pointer values, not constants or
+             * other scaled indices (plain integer arithmetic stays
+             * unfolded). */
+            if (!is_frame) {
+                int bop = fn->insts.data[def[base]].op;
+                if (bop == IR_CONST || bop == IR_MUL) return 0;
+            }
+            *base_out = is_frame ? -1 : base;
+            *idx_out = idx;
+            *scale2_out = sc;
+            *disp_out = (int)total;
+            return 1;
+        }
+        int64_t c;
+        IRValue inner;
+        if (ssa_const_imm(fn, def, d->b, &c))
+            inner = d->a;
+        else if (ssa_const_imm(fn, def, d->a, &c))
+            inner = d->b;
+        else
+            return 0;
+        int off = 0;
+        if (inner >= 0 && inner < fn->next_value_id
+            && fold_ptr_off(fn, def, alloca_off, inner, &off, 0)) {
+            /* Pinned frame base reached through one last const ADD: emit
+             * plain [rbp+off+disp+c] with no index. */
+            int64_t total = (int64_t)disp + c + off;
+            if (!imm_fits_i32(total)) return 0;
+            *base_out = -1;
+            *idx_out = -1;
+            *scale2_out = 0;
+            *disp_out = (int)total;
+            return 1;
+        }
+        if (inner < 0 || inner >= fn->next_value_id || def[inner] < 0)
+            return 0;
+        if (def[inner] != cp - 1) return 0; /* gap: register may be recycled */
+        disp += (int)c;
+        cur = inner;
+        expect = cp - 1;
+    }
+    return 0;
+}
+
+enum { AF_NONE = 0, AF_RBP_IDX = 1, AF_SIB = 2 };
+
+/* Classify a dereferenced address for -O0 addressing-mode folding.
+ *   AF_RBP_IDX: [rbp + idx*2^scale2 + disp]  (idx may be -1)
+ *   AF_SIB:     [base + idx*2^scale2 + disp] (idx may be -1)
+ * Only called after the plain [rbp+disp] fold_ptr_off case failed and for
+ * ordinary 1/2/4/8-byte GP accesses. */
+static int classify_ptr_addr(const IRFunction *fn, const int *def,
+                             const int *alloca_off, IRValue v,
+                             IRValue *base_out, IRValue *idx_out,
+                             int *scale2_out, int *disp_out) {
+    IRValue base = -1, idx = -1;
+    int sc = 0, disp = 0;
+    if (fold_gep(fn, def, alloca_off, v, &base, &idx, &sc, &disp)) {
+        if (base < 0) {
+            *base_out = -1;
+            *idx_out = idx;
+            *scale2_out = sc;
+            *disp_out = disp;
+            return AF_RBP_IDX;
+        }
+        *base_out = base;
+        *idx_out = idx;
+        *scale2_out = sc;
+        *disp_out = disp;
+        return AF_SIB;
+    }
+    int off = 0;
+    IRValue iv = -1;
+    if (fold_rbp_index(fn, def, alloca_off, v, &off, &iv)) {
+        *base_out = -1;
+        *idx_out = iv;
+        *scale2_out = 0;
+        *disp_out = off;
+        return AF_RBP_IDX;
+    }
+    return AF_NONE;
 }
 
 /* Operand of inst can be encoded as an immediate (gcc -O0 does this). */
@@ -2812,124 +3014,129 @@ static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
     }
 }
 
-static void mark_ssa_needed(char *needed, int nv, IRValue v) {
-    if (v >= 0 && v < nv) needed[v] = 1;
+static void mark_reg(char *needed, int *uses, int nv, IRValue v) {
+    if (v >= 0 && v < nv) {
+        needed[v] = 1;
+        uses[v]++;
+    }
 }
 
-static void mark_inst_uses_needed(const IRInst *inst, char *needed, int nv) {
+static void mark_inst_uses_needed(const IRInst *inst, char *needed,
+                                int *uses, int nv) {
     if (inst->op == IR_LABEL || inst->op == IR_BR || inst->op == IR_DBG_VALUE) return;
     if (inst->op == IR_ADDR) return; /* alloca id in `a` is not an SSA value use */
-    mark_ssa_needed(needed, nv, inst->a);
+    mark_reg(needed, uses, nv, inst->a);
     if (inst->op != IR_CBR && inst->op != IR_CALL)
-        mark_ssa_needed(needed, nv, inst->b);
+        mark_reg(needed, uses, nv, inst->b);
     if (inst->op == IR_CALL) {
-        if (inst->call_callee >= 0) mark_ssa_needed(needed, nv, inst->call_callee);
+        if (inst->call_callee >= 0) mark_reg(needed, uses, nv, inst->call_callee);
         for (int k = 0; k < inst->call_nargs; k++)
-            mark_ssa_needed(needed, nv, inst->call_args[k]);
+            mark_reg(needed, uses, nv, inst->call_args[k]);
     }
+}
+
+/* Mark the SSA operands one instruction actually requires at -O0, taking
+ * addressing-mode folds into account (a folded dereference needs base/index,
+ * not the intermediate address/Gep value). */
+static void codegen_mark_inst_roots(char *needed, int *uses,
+                                    const int *raw_uses, int nv,
+                                    const IRFunction *fn,
+                                    const int *def, const int *alloca_off,
+                                    const IRInst *inst, size_t ii) {
+    int dummy;
+    if (inst->op == IR_LOAD_PTR) {
+            IRValue ab = -1, ai = -1;
+            int asc = 0, adisp = 0;
+            if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
+                return;
+            /* Fold a fresh GEP only when the address ADD is immediately
+             * before the dereference AND the address value is not used
+             * anywhere else: a dereference folded into [base+index*s]
+             * relies on base/index registers surviving the materialized
+             * ADD; if another instruction (e.g. the matching STORE_PTR
+             * of a pre-increment) also uses the address, the ADD is
+             * emitted and coalesces with its base register, so folding
+             * would read [addr+idx] twice. */
+            int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
+                           && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
+            int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
+            if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
+                && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                    || inst->width == 8)
+                && adjacent && sole_use
+                && classify_ptr_addr(fn, def, alloca_off, inst->a,
+                                     &ab, &ai, &asc, &adisp) != AF_NONE) {
+            if (ab >= 0) mark_reg(needed, uses, nv, ab);
+            if (ai >= 0) mark_reg(needed, uses, nv, ai);
+            return;
+        }
+        mark_reg(needed, uses, nv, inst->a);
+        return;
+    }
+    if (inst->op == IR_STORE_PTR) {
+            IRValue ab = -1, ai = -1;
+            int asc = 0, adisp = 0;
+            if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0)) {
+                mark_reg(needed, uses, nv, inst->b);
+                return;
+            }
+            int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
+                           && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
+            int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
+            if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
+                && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                    || inst->width == 8)
+                && adjacent && sole_use
+                && classify_ptr_addr(fn, def, alloca_off, inst->a,
+                                     &ab, &ai, &asc, &adisp) != AF_NONE) {
+            if (ab >= 0) mark_reg(needed, uses, nv, ab);
+            if (ai >= 0) mark_reg(needed, uses, nv, ai);
+            mark_reg(needed, uses, nv, inst->b);
+            return;
+        }
+        mark_reg(needed, uses, nv, inst->a);
+        mark_reg(needed, uses, nv, inst->b);
+        return;
+    }
+    if (alu_folds_imm(inst, 1, fn, def)) {
+        mark_reg(needed, uses, nv, inst->a);
+        return;
+    }
+    if (alu_folds_imm(inst, 0, fn, def)) {
+        mark_reg(needed, uses, nv, inst->b);
+        return;
+    }
+    mark_inst_uses_needed(inst, needed, uses, nv);
 }
 
 /* Values that must materialize in a register (escaped pointers, arithmetic
- * operands, call args).  Address-only uses that fold to [rbp+off] are omitted
- * so a dead IR_ADDR can be skipped. */
-static char *codegen_needed_regs(const IRFunction *fn, const int *def,
-                                 const int *alloca_off, const char *skip_body) {
+ * operands, call args).  Every instruction marks the operands it actually
+ * requires; LOAD_PTR/STORE_PTR mark base/index instead of the intermediate
+ * address SSA when the dereference folds into [base+index*scale+disp].
+ *
+ * Marking is a plain forward sweep over all instructions rather than a
+ * use-def closure: post-mem2reg IR is not strictly SSA — a value id can be
+ * defined more than once (loop variables), so def[id] only names the last
+ * definition and a closure would drop the operands of the earlier ones. */
+static void codegen_mark_needed_and_uses(const IRFunction *fn, const int *def,
+                                 const int *alloca_off, const char *skip_body,
+                                 char *needed, int *ssa_uses,
+                                 const int *raw_uses) {
     int nv = fn->next_value_id > 0 ? fn->next_value_id : 1;
-    char *needed = xmalloc((size_t)nv);
-    memset(needed, 0, (size_t)nv);
-    /* Raw-IR operand use counts (no addressing folds): an address that
-     * feeds more than one dereference must materialize — folding both
-     * consumers as [base+index] double-counts the index when the ADD
-     * still emits and coalesces with its base. */
-    int *raw_uses = xmalloc((size_t)nv * sizeof(int));
-    memset(raw_uses, 0, (size_t)nv * sizeof(int));
-    for (size_t uj = 0; uj < fn->insts.len; uj++) {
-        if (skip_body && skip_body[uj]) continue;
-        const IRInst *u = &fn->insts.data[uj];
-        if (u->op == IR_LABEL || u->op == IR_BR || u->op == IR_DBG_VALUE)
-            continue;
-        if (u->op != IR_ADDR && u->a >= 0 && u->a < nv) raw_uses[u->a]++;
-        if (u->op != IR_CBR && u->op != IR_CALL && u->b >= 0 && u->b < nv)
-            raw_uses[u->b]++;
-        if (u->op == IR_CALL) {
-            if (u->call_callee >= 0 && u->call_callee < nv)
-                raw_uses[u->call_callee]++;
-            for (int k = 0; k < u->call_nargs; k++) {
-                IRValue av = u->call_args[k];
-                if (av >= 0 && av < nv) raw_uses[av]++;
-            }
-        }
-    }
     for (size_t i = 0; i < fn->insts.len; i++) {
         if (skip_body && skip_body[i]) continue;
-        const IRInst *inst = &fn->insts.data[i];
-        int dummy;
-        if (inst->op == IR_LOAD_PTR) {
-            IRValue bv, iv;
-            int off;
-            if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
-                continue;
-            int sole_use = inst->a < 0 || inst->a >= nv || raw_uses[inst->a] <= 1;
-            if (sole_use && !value_is_float_class(fn, inst->dst)
-                && !value_is_ld(fn, inst->dst)
-                && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                    || inst->width == 8)) {
-                if (fold_rbp_index(fn, def, alloca_off, inst->a, &off, &iv)) {
-                    mark_ssa_needed(needed, nv, iv);
-                    continue;
-                }
-                if (fold_sib_add(fn, def, inst->a, &bv, &iv)) {
-                    mark_ssa_needed(needed, nv, bv);
-                    mark_ssa_needed(needed, nv, iv);
-                    continue;
-                }
-            }
-            mark_ssa_needed(needed, nv, inst->a);
-            continue;
-        }
-        if (inst->op == IR_STORE_PTR) {
-            IRValue bv, iv;
-            int off;
-            if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0)) {
-                mark_ssa_needed(needed, nv, inst->b);
-                continue;
-            }
-            int sole_use = inst->a < 0 || inst->a >= nv || raw_uses[inst->a] <= 1;
-            if (sole_use && !value_is_float_class(fn, inst->b)
-                && !value_is_ld(fn, inst->b)
-                && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                    || inst->width == 8)) {
-                if (fold_rbp_index(fn, def, alloca_off, inst->a, &off, &iv)) {
-                    mark_ssa_needed(needed, nv, iv);
-                    mark_ssa_needed(needed, nv, inst->b);
-                    continue;
-                }
-                if (fold_sib_add(fn, def, inst->a, &bv, &iv)) {
-                    mark_ssa_needed(needed, nv, bv);
-                    mark_ssa_needed(needed, nv, iv);
-                    mark_ssa_needed(needed, nv, inst->b);
-                    continue;
-                }
-            }
-            mark_ssa_needed(needed, nv, inst->a);
-            mark_ssa_needed(needed, nv, inst->b);
-            continue;
-        }
-        if (alu_folds_imm(inst, 1, fn, def)) {
-            mark_ssa_needed(needed, nv, inst->a);
-            continue;
-        }
-        if (alu_folds_imm(inst, 0, fn, def)) {
-            mark_ssa_needed(needed, nv, inst->b);
-            continue;
-        }
-        mark_inst_uses_needed(inst, needed, nv);
+        codegen_mark_inst_roots(needed, ssa_uses, raw_uses, nv, fn, def,
+                                alloca_off, &fn->insts.data[i], i);
     }
-    free(raw_uses);
-    return needed;
 }
 
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
+    /* Backend dispatch point: everything below this function is the
+     * x86-64 instruction selector; the arm64 selector is codegen64(). */
+    if (target_current()->arch == TARGET_ARCH_ARM64) {
+        codegen64(ir, out, want_debug);
+        return;
+    }
     /* Emit globals into the appropriate section (.rodata for read-only,
      * .data for initialized mutable, .bss for zero-initialized) and register
      * each as a defined symbol with its linkage binding. */
@@ -3307,7 +3514,91 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             param_home_off[p] = off;
             skip_body[store_i] = 1;
         }
-        char *needed = codegen_needed_regs(fn, ssa_def, alloca_off, skip_body);
+        int nvals_f = fn->next_value_id > 0 ? fn->next_value_id : 1;
+        int *ssa_uses_f = xmalloc((size_t)nvals_f * sizeof(int));
+        memset(ssa_uses_f, 0, (size_t)nvals_f * sizeof(int));
+        char *needed = xmalloc((size_t)nvals_f);
+        memset(needed, 0, (size_t)nvals_f);
+        /* Raw-IR operand use counts (no addressing folds): gates whether a
+         * materialized address can be re-folded into [base+index] at the
+         * only adjacent dereference. */
+        int *raw_uses = xmalloc((size_t)nvals_f * sizeof(int));
+        memset(raw_uses, 0, (size_t)nvals_f * sizeof(int));
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj]) continue;
+            const IRInst *u = &fn->insts.data[uj];
+            if (u->op == IR_LABEL || u->op == IR_BR || u->op == IR_DBG_VALUE)
+                continue;
+            if (u->op != IR_ADDR && u->a >= 0)
+                raw_uses[u->a]++;
+            if (u->op != IR_CBR && u->op != IR_CALL && u->b >= 0)
+                raw_uses[u->b]++;
+            if (u->op == IR_CALL) {
+                if (u->call_callee >= 0) raw_uses[u->call_callee]++;
+                for (int uk = 0; uk < u->call_nargs; uk++)
+                    if (u->call_args[uk] >= 0) raw_uses[u->call_args[uk]]++;
+            }
+        }
+        /* Single root-marking pass: fills both the "must have a register"
+         * set and last-use counts, taking addressing-mode folds into account
+         * (a folded dereference reuses base/index SSA roots, not the
+         * intermediate address value). */
+        codegen_mark_needed_and_uses(fn, ssa_def, alloca_off, skip_body,
+                                    needed, ssa_uses_f, raw_uses);
+
+        /* ---- Fused integer-compare → conditional branch ----
+         * gcc -O0 emits `cmp; j<cc>` for `if (a < b)`.  Without fusion the
+         * comparison is materialized as 0/1 (xor/setcc/mov/test) and the
+         * CBR tests that value.  When the compare feeds ONLY the adjacent
+         * branch (optionally through one ==0 / !=0 wrapper, i.e. `!(a<b)`),
+         * skip both value-materializing instructions and branch on flags. */
+        size_t ninst_f = fn->insts.len ? fn->insts.len : 1;
+        char *fused_skip = xmalloc(ninst_f);
+        int *fused_cmp_at = xmalloc(ninst_f * sizeof(int));
+        char *fused_inv_at = xmalloc(ninst_f);
+        memset(fused_skip, 0, ninst_f);
+        for (size_t uj = 0; uj < ninst_f; uj++) fused_cmp_at[uj] = -1;
+        memset(fused_inv_at, 0, ninst_f);
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *cb = &fn->insts.data[uj];
+            if (cb->op != IR_CBR || skip_body[uj]) continue;
+            if (cb->a < 0 || cb->a >= fn->next_value_id || ssa_def[cb->a] < 0)
+                continue;
+            int wi = ssa_def[cb->a];
+            const IRInst *w = &fn->insts.data[wi];
+            int is_int_cmp = (w->op == IR_EQ || w->op == IR_NE || w->op == IR_LT
+                              || w->op == IR_LE || w->op == IR_GT || w->op == IR_GE);
+            int ci = -1, invert = 0;
+            if (is_int_cmp && (size_t)wi + 1 == uj && ssa_uses_f[w->dst] == 1) {
+                ci = wi;
+            } else if ((w->op == IR_EQ || w->op == IR_NE)
+                       && (size_t)wi + 1 == uj && ssa_uses_f[w->dst] == 1
+                       && w->a >= 0 && w->a < fn->next_value_id
+                       && ssa_def[w->a] >= 0) {
+                int64_t wz;
+                int pj = ssa_def[w->a];
+                const IRInst *p = &fn->insts.data[pj];
+                int p_cmp = (p->op == IR_EQ || p->op == IR_NE || p->op == IR_LT
+                             || p->op == IR_LE || p->op == IR_GT || p->op == IR_GE);
+                if (p_cmp && (size_t)wi == (size_t)pj + 1
+                    && ssa_uses_f[p->dst] == 1
+                    && ssa_const_imm(fn, ssa_def, w->b, &wz) && wz == 0) {
+                    ci = pj;
+                    invert = (w->op == IR_EQ);
+                }
+            }
+            if (ci < 0) continue;
+            const IRInst *cmp = &fn->insts.data[ci];
+            if (skip_body[ci]) continue;
+            fused_cmp_at[uj] = ci;
+            fused_inv_at[uj] = (char)invert;
+            fused_skip[ci] = 1;
+            if (wi != ci) fused_skip[wi] = 1;
+            mark_reg(needed, ssa_uses_f, nvals_f, cmp->a);
+            int64_t cimm;
+            if (!(ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)))
+                mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
+        }
 
         /* Variadic: compute the initial va_list field values.  The named args
          * consume the first gp_reg_idx GP and xmm_reg_idx FP register slots, so
@@ -3534,7 +3825,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 continue;
             }
-            if (skip_body[j]) continue;
+            if (skip_body[j] || fused_skip[j]) continue;
             {
                 int fold_off = 0;
                 IRValue dummy_b = -1, dummy_idx = -1;
@@ -3547,10 +3838,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         continue;
                     if (inst->op == IR_CONST && !inst->is_float && !value_is_ld(fn, inst->dst))
                         continue;
+                    /* A GEP stride multiply consumed by [base+index*scale]. */
+                    if (inst->op == IR_MUL)
+                        continue;
                     if (inst->op == IR_ADD
                         && (fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0)
-                            || fold_rbp_index(fn, ssa_def, alloca_off, inst->dst, &fold_off, &dummy_idx)
-                            || fold_sib_add(fn, ssa_def, inst->dst, &dummy_b, &dummy_idx)))
+                            || classify_ptr_addr(fn, ssa_def, alloca_off, inst->dst,
+                                                 &dummy_b, &dummy_idx,
+                                                 &fold_off, &fold_off) != AF_NONE))
                         continue;
                 }
             }
@@ -4093,19 +4388,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 /* dst = *ptr.  ptr = inst->a. */
                 int ptr_off = 0;
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
-                IRValue sib_base = -1, sib_idx = -1, rbp_idx = -1;
-                int rbp_i_off = 0;
-                int use_rbp_i = 0, use_sib = 0;
-                if (!folded && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
-                    && inst->a >= 0 && inst->a < fn->next_value_id && !needed[inst->a]
+                IRValue af_base = -1, af_idx = -1;
+                int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
+                int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
+                             && ssa_def[inst->a] >= 0
+                             && (size_t)ssa_def[inst->a] + 1 == j
+                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
+                if (!folded && af_adj
+                    && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                        || inst->width == 8)) {
-                    use_rbp_i = fold_rbp_index(fn, ssa_def, alloca_off, inst->a,
-                                               &rbp_i_off, &rbp_idx);
-                    if (!use_rbp_i)
-                        use_sib = fold_sib_add(fn, ssa_def, inst->a, &sib_base, &sib_idx);
-                }
-                if (!folded && !use_rbp_i && !use_sib)
+                        || inst->width == 8))
+                    af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
+                                                &af_base, &af_idx, &af_sc, &af_disp);
+                if (!folded && af_kind == AF_NONE)
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->dst)) {
                     if (folded)
@@ -4151,15 +4446,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (folded)
                         emit_load_disp(&out->text, dst_gp, REG_RBP, ptr_off,
                                        inst->width, inst->is_unsigned);
-                    else if (use_rbp_i) {
-                        ensure_reg(&out->text, rbp_idx, REG_RCX, ra);
-                        emit_load_sib(&out->text, dst_gp, REG_RBP, REG_RCX, rbp_i_off,
-                                      inst->width, inst->is_unsigned);
-                    } else if (use_sib) {
-                        ensure_reg(&out->text, sib_base, REG_RAX, ra);
-                        ensure_reg(&out->text, sib_idx, REG_RCX, ra);
-                        emit_load_sib(&out->text, dst_gp, REG_RAX, REG_RCX, 0,
-                                      inst->width, inst->is_unsigned);
+                    else if (af_kind == AF_RBP_IDX) {
+                        if (af_idx >= 0)
+                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
+                        if (af_idx >= 0)
+                            emit_load_sib(&out->text, dst_gp, REG_RBP, REG_RCX,
+                                          af_sc, af_disp, inst->width, inst->is_unsigned);
+                        else
+                            emit_load_disp(&out->text, dst_gp, REG_RBP, af_disp,
+                                           inst->width, inst->is_unsigned);
+                    } else if (af_kind == AF_SIB) {
+                        if (af_idx >= 0)
+                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
+                        ensure_reg(&out->text, af_base, REG_RAX, ra);
+                        if (af_idx >= 0)
+                            emit_load_sib(&out->text, dst_gp, REG_RAX, REG_RCX,
+                                          af_sc, af_disp, inst->width, inst->is_unsigned);
+                        else
+                            emit_load_disp(&out->text, dst_gp, REG_RAX, af_disp,
+                                           inst->width, inst->is_unsigned);
                     } else
                         emit_load_via_ptr(&out->text, dst_gp, REG_RCX,
                                           inst->width, inst->is_unsigned);
@@ -4172,19 +4477,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_STORE_PTR: {
                 int ptr_off = 0;
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
-                IRValue sib_base = -1, sib_idx = -1, rbp_idx = -1;
-                int rbp_i_off = 0;
-                int use_rbp_i = 0, use_sib = 0;
-                if (!folded && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
-                    && inst->a >= 0 && inst->a < fn->next_value_id && !needed[inst->a]
+                IRValue af_base = -1, af_idx = -1;
+                int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
+                int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
+                             && ssa_def[inst->a] >= 0
+                             && (size_t)ssa_def[inst->a] + 1 == j
+                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
+                if (!folded && af_adj
+                    && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                        || inst->width == 8)) {
-                    use_rbp_i = fold_rbp_index(fn, ssa_def, alloca_off, inst->a,
-                                               &rbp_i_off, &rbp_idx);
-                    if (!use_rbp_i)
-                        use_sib = fold_sib_add(fn, ssa_def, inst->a, &sib_base, &sib_idx);
-                }
-                if (!folded && !use_rbp_i && !use_sib)
+                        || inst->width == 8))
+                    af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
+                                                &af_base, &af_idx, &af_sc, &af_disp);
+                if (!folded && af_kind == AF_NONE)
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->b)) {
                     emit_ld_load(&out->text, inst->b, ld_off);
@@ -4225,17 +4530,27 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0,
                                                    is_float);
                     }
-                } else if (use_rbp_i) {
+                } else if (af_kind == AF_RBP_IDX) {
+                    if (af_idx >= 0)
+                        ensure_reg(&out->text, af_idx, REG_RCX, ra);
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
-                    ensure_reg(&out->text, rbp_idx, REG_RCX, ra);
-                    emit_store_sib(&out->text, REG_RBP, REG_RCX, rbp_i_off,
-                                   REG_RAX, inst->width);
-                } else if (use_sib) {
+                    if (af_idx >= 0)
+                        emit_store_sib(&out->text, REG_RBP, REG_RCX, af_sc, af_disp,
+                                       REG_RAX, inst->width);
+                    else
+                        emit_store_disp(&out->text, REG_RBP, REG_RAX, af_disp,
+                                        inst->width);
+                } else if (af_kind == AF_SIB) {
+                    if (af_idx >= 0)
+                        ensure_reg(&out->text, af_idx, REG_RCX, ra);
                     ensure_reg(&out->text, inst->b, REG_RDX, ra);
-                    ensure_reg(&out->text, sib_base, REG_RAX, ra);
-                    ensure_reg(&out->text, sib_idx, REG_RCX, ra);
-                    emit_store_sib(&out->text, REG_RAX, REG_RCX, 0, REG_RDX,
-                                   inst->width);
+                    ensure_reg(&out->text, af_base, REG_RAX, ra);
+                    if (af_idx >= 0)
+                        emit_store_sib(&out->text, REG_RAX, REG_RCX, af_sc, af_disp,
+                                       REG_RDX, inst->width);
+                    else
+                        emit_store_disp(&out->text, REG_RAX, REG_RDX, af_disp,
+                                        inst->width);
                 } else {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     if (folded)
@@ -4368,11 +4683,36 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
             case IR_CBR: {
                 /* CBR: a = cond, imm = true_label, b = false_label.
-                 * Emit "test cond,cond; jne true_label; jmp false_label". */
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                emit_test_rr(&out->text, REG_RAX);
-                /* jne true_label (0x85) */
-                size_t p1 = emit_jcc_rel32(&out->text, 0x85);
+                 * Fused compare: `cmp a,b; j<cc> true; jmp false`.
+                 * Otherwise test the materialized 0/1 condition. */
+                uint8_t cc = 0x85; /* jne */
+                if (fused_cmp_at[j] >= 0) {
+                    const IRInst *cmp = &fn->insts.data[fused_cmp_at[j]];
+                    int cwidth = cmp->width > 0 ? cmp->width : 8;
+                    int64_t cimmv = 0;
+                    int cfb = ssa_const_imm(fn, ssa_def, cmp->b, &cimmv)
+                              && imm_fits_i32(cimmv);
+                    ensure_reg(&out->text, cmp->a, REG_RAX, ra);
+                    if (!cfb)
+                        ensure_reg(&out->text, cmp->b, REG_RCX, ra);
+                    /* ir_cmp_to_setcc yields the SETcc opcode (0x90+cc);
+                     * jcc rel32 wants the near-branch opcode (0x80+cc). */
+                    cc = (uint8_t)(0x80 | (ir_cmp_to_setcc(cmp->op, cmp->is_unsigned)
+                                            & 0x0F));
+                    if (fused_inv_at[j])
+                        cc ^= 1;
+                    if (cfb && cimmv == 0)
+                        emit_test_r_w(&out->text, REG_RAX, cwidth);
+                    else if (cfb)
+                        emit_cmp_imm_w(&out->text, REG_RAX, (int32_t)cimmv, cwidth);
+                    else
+                        emit_cmp_rr_w(&out->text, REG_RAX, REG_RCX, cwidth);
+                } else {
+                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                    emit_test_rr(&out->text, REG_RAX);
+                }
+                /* j<cc> true_label */
+                size_t p1 = emit_jcc_rel32(&out->text, cc);
                 size_t a1 = out->text.len;
                 ADD_PATCH(p1, inst->imm, a1);
                 /* jmp false_label */
@@ -4388,6 +4728,196 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
 
             case IR_CALL: {
+                /* Arm64 memory barrier.  x86 keeps the historical no-op. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_dmb") == 0)
+                    break;
+                /* Arm64 uses SWP.  x86 keeps a plain swap of the same width. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_swp") == 0
+                    && inst->call_nargs >= 2) {
+                    int w = inst->width;
+                    if (w != 1 && w != 2 && w != 4 && w != 8) w = 4;
+                    int fp = (w == 4 || w == 8) && inst->call_args[1] >= 0
+                             && value_is_float_class(fn, inst->call_args[1]) == 1;
+                    if (fp) {
+                        ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                        emit_push_r(&out->text, REG_RCX);
+                        ensure_reg_xmm(&out->text, inst->call_args[1], 0,
+                                       ra_xmm, gp_spill_area);
+                        if (w == 8) emit_movq_gp_xmm(&out->text, REG_RDX, 0);
+                        else emit_movd_gp_xmm(&out->text, REG_RDX, 0);
+                        emit_pop_r(&out->text, REG_RCX);
+                        emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
+                        emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
+                        if (w == 8) emit_movq_xmm_gp(&out->text, 0, REG_RAX);
+                        else emit_movd_xmm_gp(&out->text, 0, REG_RAX);
+                        if (inst->dst >= 0 && value_is_float_class(fn, inst->dst) == 1) {
+                            int nbytes = w;
+                            if (dr >= 0 && dr != 0)
+                                emit_xmm_copy(&out->text, dr, 0, nbytes);
+                            else if (dr < 0)
+                                spill_if_needed_xmm(&out->text, inst->dst, 0,
+                                                    ra_xmm, gp_spill_area);
+                        }
+                        break;
+                    }
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg(&out->text, inst->call_args[1], REG_RAX, ra);
+                    emit_push_r(&out->text, REG_RAX);
+                    emit_pop_r(&out->text, REG_RDX);
+                    emit_pop_r(&out->text, REG_RCX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, inst->is_unsigned);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                    }
+                    break;
+                }
+                /* Arm64 uses LDADD.  x86 adds in a register and stores the low bytes. */
+                if (inst->call_name && inst->call_nargs >= 2 &&
+                    (strcmp(inst->call_name, "__fakecc_ldadd") == 0 ||
+                     strcmp(inst->call_name, "__fakecc_ldclr") == 0 ||
+                     strcmp(inst->call_name, "__fakecc_ldeor") == 0 ||
+                     strcmp(inst->call_name, "__fakecc_ldset") == 0)) {
+                    int w = inst->width;
+                    if (w != 1 && w != 2 && w != 4 && w != 8) w = 4;
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg(&out->text, inst->call_args[1], REG_RAX, ra);
+                    emit_push_r(&out->text, REG_RAX);
+                    emit_pop_r(&out->text, REG_RDX);
+                    emit_pop_r(&out->text, REG_RCX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, inst->is_unsigned);
+                    if (strcmp(inst->call_name, "__fakecc_ldclr") == 0)
+                        emit_and_rr(&out->text, REG_RDX, REG_RAX);
+                    else if (strcmp(inst->call_name, "__fakecc_ldeor") == 0)
+                        emit_bitxor_rr(&out->text, REG_RDX, REG_RAX);
+                    else if (strcmp(inst->call_name, "__fakecc_ldset") == 0)
+                        emit_or_rr(&out->text, REG_RDX, REG_RAX);
+                    else
+                        emit_add_rr(&out->text, REG_RDX, REG_RAX);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                    }
+                    break;
+                }
+                /* Float add/sub retries with CAS on arm64.  x86 does one
+                 * plain load, add, and store so a single thread matches. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_fadd") == 0
+                    && inst->call_nargs >= 2) {
+                    int w = inst->width;
+                    if (w != 4 && w != 8) w = 4;
+                    int sub = (inst->imm & 4) != 0;
+                    int ret_new = (inst->imm & 8) != 0;
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg_xmm(&out->text, inst->call_args[1], 1,
+                                   ra_xmm, gp_spill_area);
+                    emit_pop_r(&out->text, REG_RCX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
+                    emit_mov_rr(&out->text, REG_RDX, REG_RAX);
+                    if (w == 8) emit_movq_xmm_gp(&out->text, 0, REG_RAX);
+                    else emit_movd_xmm_gp(&out->text, 0, REG_RAX);
+                    emit_sse_arith(&out->text, sub ? 0x5C : 0x58, 0, 1, w == 4);
+                    if (w == 8) emit_movq_gp_xmm(&out->text, REG_RAX, 0);
+                    else emit_movd_gp_xmm(&out->text, REG_RAX, 0);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, w);
+                    if (!ret_new) emit_mov_rr(&out->text, REG_RAX, REG_RDX);
+                    if (w == 8) emit_movq_xmm_gp(&out->text, 0, REG_RAX);
+                    else emit_movd_xmm_gp(&out->text, 0, REG_RAX);
+                    if (inst->dst >= 0 && value_is_float_class(fn, inst->dst) == 1) {
+                        if (dr >= 0 && dr != 0)
+                            emit_xmm_copy(&out->text, dr, 0, w);
+                        else if (dr < 0)
+                            spill_if_needed_xmm(&out->text, inst->dst, 0,
+                                                ra_xmm, gp_spill_area);
+                    }
+                    break;
+                }
+                /* Arm64 uses CAS.  x86 compares and stores the low bytes. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_cas") == 0
+                    && inst->call_nargs >= 3) {
+                    int w = inst->width;
+                    if (w != 1 && w != 2 && w != 4 && w != 8) w = 4;
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg(&out->text, inst->call_args[1], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    if ((w == 4 || w == 8) && inst->call_args[2] >= 0
+                        && value_is_float_class(fn, inst->call_args[2]) == 1) {
+                        ensure_reg_xmm(&out->text, inst->call_args[2], 0,
+                                       ra_xmm, gp_spill_area);
+                        if (w == 8) emit_movq_gp_xmm(&out->text, REG_RAX, 0);
+                        else emit_movd_gp_xmm(&out->text, REG_RAX, 0);
+                    } else {
+                        ensure_reg(&out->text, inst->call_args[2], REG_RAX, ra);
+                    }
+                    emit_push_r(&out->text, REG_RAX);
+                    emit_pop_r(&out->text, REG_RDX);
+                    emit_pop_r(&out->text, REG_RSI);
+                    emit_pop_r(&out->text, REG_RCX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RSI, w, 1);
+                    emit_push_r(&out->text, REG_RAX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
+                    emit_pop_r(&out->text, REG_R8);
+                    emit_cmp_rr_w(&out->text, REG_RAX, REG_R8, w >= 8 ? 8 : 4);
+                    size_t je = emit_jcc_rel32(&out->text, 0x84);
+                    emit_store_via_ptr(&out->text, REG_RSI, REG_RAX, w);
+                    emit_xor_rr(&out->text, REG_RAX);
+                    size_t jmp = emit_jmp_rel32(&out->text);
+                    patch_rel32(&out->text, je, out->text.len);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
+                    emit_mov_imm(&out->text, REG_RAX, 1);
+                    patch_rel32(&out->text, jmp, out->text.len);
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                    }
+                    break;
+                }
+                /* Expected is a value.  The result is the previous memory
+                 * contents; a match stores the desired value. */
+                if (inst->call_name && strcmp(inst->call_name, "__fakecc_cas_old") == 0
+                    && inst->call_nargs >= 3) {
+                    int w = inst->width;
+                    if (w != 1 && w != 2 && w != 4 && w != 8) w = 4;
+                    ensure_reg(&out->text, inst->call_args[0], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg(&out->text, inst->call_args[1], REG_RCX, ra);
+                    emit_push_r(&out->text, REG_RCX);
+                    ensure_reg(&out->text, inst->call_args[2], REG_RAX, ra);
+                    emit_push_r(&out->text, REG_RAX);
+                    emit_pop_r(&out->text, REG_RDX);
+                    emit_pop_r(&out->text, REG_RSI);
+                    emit_pop_r(&out->text, REG_RCX);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
+                    emit_cmp_rr_w(&out->text, REG_RAX, REG_RSI, w >= 8 ? 8 : 4);
+                    size_t je = emit_jcc_rel32(&out->text, 0x84);
+                    size_t jmp = emit_jmp_rel32(&out->text);
+                    patch_rel32(&out->text, je, out->text.len);
+                    emit_store_via_ptr(&out->text, REG_RCX, REG_RDX, w);
+                    patch_rel32(&out->text, jmp, out->text.len);
+                    if (inst->dst >= 0) {
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                    }
+                    break;
+                }
                 /* __syscall(num, a0..a5) — emit a raw `syscall` instruction.
                  * Linux x86-64 syscall ABI: rax = num, args in rdi/rsi/rdx/r10/r8/r9.
                  * We use the same push-then-pop dance to load args safely. */
@@ -4844,85 +5374,114 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 free(arg_slot);
                 free(arg_nslots);
 
-                /* Direct copies when no source register is another arg's
-                 * target.  gcc -O0 does this; the push/pop dance is only
-                 * needed for swaps / overlapping homes. */
-                int arg_conflict = (inst->call_name == NULL);
-                if (!arg_conflict) {
-                    char tgt_gp[16], tgt_xmm[16];
-                    memset(tgt_gp, 0, sizeof(tgt_gp));
-                    memset(tgt_xmm, 0, sizeof(tgt_xmm));
+                /* Place register arguments straight into their ABI homes.
+                 * gcc -O0 emits one mov per arg; the old code push/pop-danced
+                 * EVERY register arg whenever ANY two homes formed a rotate.
+                 * Schedule the moves as a register permutation: a mov is
+                 * emitted when its target holds no other pending source;
+                 * genuine cycles get one push/pop each.
+                 *
+                 * An indirect callee is an extra GP node targeting R11:
+                 * R11 is in the allocatable register set, so the callee can
+                 * be homed in an arg target (and an arg can be homed in R11).
+                 * Scheduling it with the args makes both clobber hazards
+                 * explicit instead of loading it up front. */
+                {
+                    int has_callee = (inst->call_name == NULL);
+                    int nn = 0;
+                    for (int k = 0; k < nargs; k++)
+                        if (target_reg[k] >= 0) nn++;
+                    if (has_callee) nn++;
+                    int *node_tgt  = xmalloc((size_t)(nn > 0 ? nn : 1) * sizeof(int));
+                    char *node_xmm = xmalloc((size_t)(nn > 0 ? nn : 1));
+                    int *node_val  = xmalloc((size_t)(nn > 0 ? nn : 1) * sizeof(int));
+                    /* home: >=0 register, -1 spilled (reload into target),
+                     * -2 pushed by cycle break (pop into target), -3 done.
+                     * The allocator marks spills with a negative color (-2,
+                     * not just REG_NONE), so normalize anything <0 to -1. */
+                    int *node_home = xmalloc((size_t)(nn > 0 ? nn : 1) * sizeof(int));
+                    int n = 0;
                     for (int k = 0; k < nargs; k++) {
-                        if (target_reg[k] < 0) continue;
-                        int t = target_reg[k];
-                        if (t >= 0 && t < 16) {
-                            if (target_is_xmm[k]) tgt_xmm[t] = 1;
-                            else tgt_gp[t] = 1;
-                        }
-                    }
-                    for (int k = 0; k < nargs && !arg_conflict; k++) {
-                        if (target_reg[k] < 0) continue;
+                        if (target_reg[k] < 0) continue; /* stack-passed */
+                        node_tgt[n] = target_reg[k];
+                        node_xmm[n] = (char)target_is_xmm[k];
+                        node_val[n] = inst->call_args[k];
                         if (target_is_xmm[k]) {
-                            int h = -1;
-                            if (ra_xmm && inst->call_args[k] >= 0
-                                && inst->call_args[k] < ra_xmm->num_values)
-                                h = ra_xmm->reg[inst->call_args[k]];
-                            if (h >= 0 && h < 16 && tgt_xmm[h]
-                                && h != target_reg[k])
-                                arg_conflict = 1;
+                            int h = (ra_xmm && inst->call_args[k] >= 0
+                                     && inst->call_args[k] < ra_xmm->num_values)
+                                    ? ra_xmm->reg[inst->call_args[k]] : -1;
+                            node_home[n] = (h >= 0 && h < 16) ? h : -1;
                         } else {
-                            int h = gp_home(ra, inst->call_args[k]);
-                            if (h >= 0 && tgt_gp[h] && h != target_reg[k])
-                                arg_conflict = 1;
+                            node_home[n] = gp_home(ra, inst->call_args[k]);
                         }
+                        n++;
                     }
-                }
-                if (!arg_conflict) {
-                    for (int k = 0; k < nargs; k++) {
-                        if (target_reg[k] < 0) continue;
-                        if (target_is_xmm[k])
-                            ensure_reg_xmm(&out->text, inst->call_args[k],
-                                           target_reg[k], ra_xmm, gp_spill_area);
+                    if (has_callee) {
+                        node_tgt[n] = REG_R11;
+                        node_xmm[n] = 0;
+                        node_val[n] = inst->call_callee;
+                        node_home[n] = gp_home(ra, inst->call_callee);
+                        n++;
+                    }
+                    int npending = n;
+                    while (npending > 0) {
+                        int moved = 0;
+                        for (int k = 0; k < n && !moved; k++) {
+                            if (node_home[k] == -3) continue;
+                            int t = node_tgt[k];
+                            int blocked = 0;
+                            for (int m = 0; m < n; m++) {
+                                if (m == k || node_home[m] == -3
+                                    || node_xmm[m] != node_xmm[k])
+                                    continue;
+                                if (node_home[m] >= 0 && node_home[m] == t) {
+                                    blocked = 1;
+                                    break;
+                                }
+                            }
+                            if (blocked) continue;
+                            if (node_home[k] == -1) {
+                                if (node_xmm[k])
+                                    ensure_reg_xmm(&out->text, node_val[k], t,
+                                                   ra_xmm, gp_spill_area);
+                                else
+                                    ensure_reg(&out->text, node_val[k], t, ra);
+                            } else if (node_home[k] == -2) {
+                                if (node_xmm[k])
+                                    emit_xmm_pop(&out->text, t,
+                                                 value_vec_bytes(fn, node_val[k]));
+                                else
+                                    emit_pop_r(&out->text, t);
+                            } else if (node_home[k] != t) {
+                                if (node_xmm[k])
+                                    emit_xmm_copy(&out->text, t, node_home[k],
+                                                  value_vec_bytes(fn, node_val[k]));
+                                else
+                                    emit_mov_rr(&out->text, t, node_home[k]);
+                            }
+                            node_home[k] = -3;
+                            npending--;
+                            moved = 1;
+                        }
+                        if (moved) continue;
+                        /* Pure permutation cycle: save one blocked source and
+                         * let the greedy pass drain the rest of the cycle. */
+                        int picked = -1;
+                        for (int k = 0; k < n; k++) {
+                            if (node_home[k] >= 0) { picked = k; break; }
+                        }
+                        if (picked < 0) break; /* defensive: no infinite loop */
+                        if (node_xmm[picked])
+                            emit_xmm_push(&out->text, node_home[picked],
+                                          value_vec_bytes(fn, node_val[picked]));
                         else
-                            ensure_reg(&out->text, inst->call_args[k],
-                                       target_reg[k], ra);
+                            emit_push_r(&out->text, node_home[picked]);
+                        node_home[picked] = -2;
                     }
-                } else {
-                /* Reg-arg dance: push all reg-arg values in reverse order,
-                 * then load them into their targets in forward order.  Saving
-                 * everything to the stack first dodges cross-arg clobbers. */
-                for (int k = nargs - 1; k >= 0; k--) {
-                    if (target_reg[k] < 0) continue; /* stack-passed */
-                    if (target_is_xmm[k]) {
-                        int vb = value_vec_bytes(fn, inst->call_args[k]);
-                        ensure_reg_xmm(&out->text, inst->call_args[k],
-                                       XMM_SCRATCH0, ra_xmm, gp_spill_area);
-                        emit_xmm_push(&out->text, XMM_SCRATCH0, vb);
-                    } else {
-                        ensure_reg(&out->text, inst->call_args[k], REG_RAX, ra);
-                        emit_push_r(&out->text, REG_RAX);
-                    }
-                }
-                /* For indirect calls, push the callee on top of the dance so
-                 * it cannot clobber or be clobbered by any arg in R11/etc. */
-                if (!inst->call_name) {
-                    ensure_reg(&out->text, inst->call_callee, REG_RAX, ra);
-                    emit_push_r(&out->text, REG_RAX);
-                }
-                /* Pop callee into R11 first. */
-                if (!inst->call_name) {
-                    emit_pop_r(&out->text, REG_R11);
-                }
-                /* Distribute in forward order (arg 0 on top of the dance). */
-                for (int k = 0; k < nargs; k++) {
-                    if (target_reg[k] < 0) continue; /* stack-passed */
-                    if (target_is_xmm[k]) {
-                        emit_xmm_pop(&out->text, target_reg[k],
-                                     value_vec_bytes(fn, inst->call_args[k]));
-                    } else {
-                        emit_pop_r(&out->text, target_reg[k]);
-                    }
-                }
+                    free(node_tgt);
+                    free(node_xmm);
+                    free(node_val);
+                    free(node_home);
                 }
                 /* AL = number of vector registers used (ABI requirement for
                  * variadic callees; harmless otherwise). */

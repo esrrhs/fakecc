@@ -110,11 +110,30 @@ typedef enum {
 #define CALL_ARG_ALIGN32 4
 #define CALL_ARG_ALIGN64 8
 #define CALL_ARG_BLOB    16
+/* Darwin HFA eightbyte: the SSA value is an integer bit pattern, but the
+ * call boundary moves it through the next V register (not a GP). */
+#define CALL_ARG_HFA     32
+/* Stack argument that is an aggregate or vector: the SSA value is a pointer
+ * to it and call_arg_nbytes[] says how many bytes to copy there.  Used for
+ * anonymous variadic arguments, which take no register and so never went
+ * through the classification that used to size them. */
+#define CALL_ARG_AGG     64
+/* IR_CALL / IR_RETURN align16 on arm64.  x86 leaves these 0.
+ * HFA: result eightbytes travel in v0/v1.  SRET: call_args[0] is the
+ * indirect-result pointer and belongs in x8, not x0. */
+#define A64_MARK_HFA     4
+#define A64_MARK_SRET    8
 
 typedef struct {
     IROpcode op;
     IRValue  dst;      /* meaningless for IR_RETURN/IR_BR/IR_LABEL, fill -1 */
     IRValue  a, b;     /* source operands; IR_CONST only uses imm */
+    /* Third and fourth source operands.  Only IR_RETURN reads both, and
+     * IR_CALL defines them as its third/fourth result eightbytes, and only
+     * when the callee returns a three- or four-element HFA -- AAPCS64 brings
+     * it back in v0-v3.  Everything leaves these at -1 (set by the emit
+     * helpers), so no other opcode needs to look at them. */
+    IRValue  c, d;
     int64_t  imm;      /* CONST value, LABEL id, BR/CBR target, PARAM index */
     SourceLoc loc;
     /* IR_CALL only: callee name + argument SSA values.  NULL for other ops. */
@@ -247,7 +266,7 @@ typedef struct {
      * (1 or 2).  0 means MEMORY class — hidden sret pointer in RDI.
      * ret_reg_cls[i] holds SysVRegClass (INTEGER/SSE) for each eightbyte. */
     int   ret_reg_n;
-    int   ret_reg_cls[2];
+    int   ret_reg_cls[4];
     /* 1 if the function returns _Bool (normalize the value to 0/1). */
     int   ret_is_bool;
     /* 1 if the function returns `_Complex long double` in st0/st1. */
@@ -259,6 +278,9 @@ typedef struct {
      * emits a register-save area and the va_* builtins read/write it. */
     int   is_variadic;
     int   is_static;  /* 1 = `static` function — LOCAL linkage */
+    int   is_weak;    /* 1 = __attribute__((weak)); a strong def wins at link */
+    int   is_hidden;  /* 1 = Mach-O private-external (hidden) */
+    int   is_used;    /* 1 = __attribute__((used)); Mach-O N_NO_DEAD_STRIP */
     int   is_constructor; /* 1 = emit a .init_array pointer to this function */
     int   is_destructor;  /* 1 = emit a .fini_array pointer to this function */
     int   ctor_prio;
@@ -296,6 +318,7 @@ typedef struct {
 typedef struct {
     int   offset;       /* byte offset within the global's init_bytes */
     char *sym;          /* xstrdup'd target symbol name */
+    char *sub;          /* if set, the slot is sym - sub + addend */
     int   addend;       /* addend for relocation (e.g. &g + addend) */
 } GlobalFixup;
 
@@ -306,7 +329,12 @@ typedef struct {
     int   size;         /* bytes in .data/.bss */
     char *init_bytes;   /* NULL → zero-init (bss).  Otherwise owns `size` bytes. */
     int   is_readonly;  /* 1 = string literal → rodata; 0 = mutable → data */
+    int   is_const_obj; /* 1 = C const object.  arm64 may place it in __const
+                         * when it has no pointer fixup.  x86 ignores this. */
     int   is_static;    /* 1 = `static` global — LOCAL linkage */
+    int   is_weak;      /* 1 = __attribute__((weak)) */
+    int   is_hidden;    /* 1 = visibility("hidden"); x86 ignores this */
+    int   is_used;      /* 1 = __attribute__((used)); x86 ignores this */
     int   is_tls;       /* 1 = `__thread` / `_Thread_local` global — .tdata/.tbss */
     int   align;        /* byte alignment (`aligned(N)` / natural); ≥1 */
     SourceLoc loc;
@@ -324,6 +352,7 @@ typedef struct {
     char *name;         /* xstrdup'd */
     char *target;       /* xstrdup'd */
     int   is_static;
+    int   is_weak;      /* 1 = weak alias; x86 ignores this */
     SourceLoc loc;
 } IRAlias;
 
@@ -337,6 +366,10 @@ typedef struct {
     IRFunctionArray functions;
     IRGlobalArray   globals;
     IRAliasArray    aliases;
+    /* Names declared `__attribute__((weak))` with no definition in this TU.
+     * arm64 records them as N_WEAK_REF; x86 ignores the list. */
+    char **weak_refs;
+    size_t n_weak_refs, cap_weak_refs;
 } IRModule;
 
 void ir_module_init(IRModule *m);

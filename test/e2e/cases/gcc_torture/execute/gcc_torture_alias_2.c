@@ -1,5 +1,8 @@
 // expect: 0
+// Mach-O supports only weak aliases; the oracle rejects strong ones.
+// skip_oracle: darwin
 package main;
+// skip_oracle: clang
 /* { dg-require-alias "" } */
 /* { dg-skip-if "BSS alias" { powerpc-ibm-aix* } } */
 int a[10]={};

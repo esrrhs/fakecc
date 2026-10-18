@@ -1,5 +1,6 @@
 #include "fakecc/compiler.h"
 #include "fakecc/emit.h"
+#include "fakecc/target.h"
 #include "test_framework.h"
 
 #include <stdio.h>
@@ -94,6 +95,9 @@ static void test_compile_file_to_so_and_executable(void) {
 }
 
 int main(void) {
+    /* The high-level API cases below assert ELF output; pin the x86-64
+     * backend until the arm64-macos backend lands. */
+    target_set_current(target_x86_64_linux());
     test_options_init();
     test_compile_string_to_obj();
     test_compile_string_to_so();

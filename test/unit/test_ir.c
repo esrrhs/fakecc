@@ -1,6 +1,7 @@
 #include "fakecc/ast.h"
 #include "fakecc/common.h"
 #include "fakecc/ir.h"
+#include "fakecc/target.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
@@ -668,6 +669,10 @@ static void test_aligned16_storage_ir(void) {
 /* ---- main ---- */
 
 int main(void) {
+    /* These cases lock the SysV x86 aggregate shape.  The host default on
+     * Apple Silicon is arm64, whose aggregate ABI is different. */
+    const TargetDesc *saved = target_current();
+    target_set_current(target_x86_64_linux());
     test_return_zero();
     test_return_42();
     test_return_255();
@@ -695,5 +700,6 @@ int main(void) {
     test_mixed_ld_union_uses_sret();
     test_packed_bitfield_spill_two_gp();
     test_aligned16_storage_ir();
+    target_set_current(saved);
     return t_finalize();
 }

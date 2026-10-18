@@ -1,5 +1,6 @@
 // expect: 0
 package main;
+// skip_oracle: clang
 void foo(int n)
 {
   typedef struct

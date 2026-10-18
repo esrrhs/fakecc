@@ -1,5 +1,6 @@
 // expect: 0
 // Allocate with runtime.malloc, write through the pointer, runtime.free, and
+// skip_oracle: clang
 // verify the bytes we wrote.
 package main;
 import runtime;

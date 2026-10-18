@@ -17,6 +17,7 @@
 #include "fakecc/opt.h"
 #include "fakecc/parser.h"
 #include "fakecc/sema.h"
+#include "fakecc/target.h"
 #include "fakecc/token.h"
 #include "test_framework.h"
 
@@ -716,6 +717,8 @@ static void test_bitfield_and_anon_struct_debug(void) {
 }
 
 int main(void) {
+    /* Pins the x86-64 ELF backend and its DWARF emission. */
+    target_set_current(target_x86_64_linux());
     test_symtab_without_g();
     test_dwarf_with_g();
     test_obj_dbg_roundtrip();

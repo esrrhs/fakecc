@@ -1,3 +1,7 @@
+// unsupported_on: darwin-arm64
+// GNU decimal-floating-point extension (_Decimal32/64/128); Apple clang does
+// skip_oracle: clang
+// not support it on arm64 Darwin either ("GNU decimal type extension not supported").
 // expect: 0
 // Fold DFP global initializers: literal, negation, int, and binary ops.
 package main;

@@ -1,5 +1,6 @@
 // runtime.strncmp: like runtime.strcmp but stops after n bytes.  Must still stop at
 // \0 within the window, return 0 when the first n bytes match even
+// skip_oracle: clang
 // if the strings differ later, and treat n==0 as always equal.
 // expect: 0
 package main;

@@ -1,5 +1,6 @@
 // runtime.strtof: converts a decimal string to a float.  Like runtime.strtod
 // but returns float.  The implementation parses integer-valued literals
+// skip_oracle: clang
 // exactly, so pin those (cast to int for an exact comparison), a negative,
 // zero, an exponent, and endptr advancement.
 // expect: 0

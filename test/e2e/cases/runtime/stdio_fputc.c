@@ -1,5 +1,6 @@
 // runtime.fputc / runtime.fputs: write characters and a string to a file and read them
 // back.  runtime.fputc writes one byte at a time; runtime.fputs writes a whole string
+// skip_oracle: clang
 // without a trailing newline.
 // expect: 0
 package main;

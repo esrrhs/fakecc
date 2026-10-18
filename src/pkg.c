@@ -3,51 +3,27 @@
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/common.h"
+#include "fakecc/target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Directory listing: Stage0 (gcc) uses libc open/getdents; the self-hosted
- * dialect has no libc, so translate.py defines FAKECC_SELFHOST and we go
- * through __syscall. */
+/* Directory listing: Stage0 (gcc/clang) uses portable libc <dirent.h>;
+ * the self-hosted dialect has no libc, so translate.py defines
+ * FAKECC_SELFHOST and we go through raw Linux __syscall. */
 #ifdef FAKECC_SELFHOST
-#define PKG_O_RDONLY    0
-#define PKG_O_DIRECTORY 65536
-static long pkg_open(const char *path, long flags) {
-    return __syscall(2, (long)path, flags, 0);
-}
-static long pkg_close(long fd) { return __syscall(3, fd); }
-static long pkg_getdents(long fd, void *buf, long n) {
-    return __syscall(217, fd, (long)buf, n);
-}
+/* No libc when fakecc compiles itself, so directory listing comes from the
+ * runtime package, which spells it per target: getdents64 on Linux,
+ * getdirentries64 on Darwin (see runtime/stdlib_*.c).  Keeping the two
+ * targets' record layouts out here is the point -- Linux's dirent64 and
+ * Darwin's dirent disagree on the fields after the inode. */
+extern void *__fakecc_dir_open(const char *path);
+extern const char *__fakecc_dir_next(void *dir);
+extern int __fakecc_dir_close(void *dir);
 #else
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/syscall.h>
-#ifndef O_DIRECTORY
-#define O_DIRECTORY 65536
+#include <dirent.h>
 #endif
-#define PKG_O_RDONLY    O_RDONLY
-#define PKG_O_DIRECTORY O_DIRECTORY
-static long pkg_open(const char *path, long flags) {
-    return (long)open(path, (int)flags);
-}
-static long pkg_close(long fd) { return (long)close((int)fd); }
-static long pkg_getdents(long fd, void *buf, long n) {
-    return syscall(SYS_getdents64, (int)fd, buf, (unsigned long)n);
-}
-#endif
-
-/* Linux dirent64 layout (getdents64). d_name is a flexible trailing field;
- * we declare [1] so both gcc and the FakeCC dialect accept the type. */
-struct pkg_dirent64 {
-    unsigned long long d_ino;
-    long long d_off;
-    unsigned short d_reclen;
-    unsigned char d_type;
-    char d_name[1];
-};
 /* ------------------------------------------------------------------ */
 /* Context lifetime                                                    */
 /* ------------------------------------------------------------------ */
@@ -239,36 +215,94 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/* Directory listing, per target rather than per compiler: the self-hosted
+ * build has no libc, so the runtime supplies these three (getdents64 on
+ * Linux, getdirentries64 on Darwin -- see runtime/stdlib_*.c).  Wrapping
+ * libc's version the same way keeps every caller below a single path, and
+ * keeps the two dirent layouts out of this file. */
+#ifdef FAKECC_SELFHOST
+extern void *__fakecc_dir_open(const char *path);
+extern const char *__fakecc_dir_next(void *dir);
+extern int __fakecc_dir_close(void *dir);
+static void *pkg_dir_open(const char *path) { return __fakecc_dir_open(path); }
+static const char *pkg_dir_next(void *dir) { return __fakecc_dir_next(dir); }
+static void pkg_dir_close(void *dir) { (void)__fakecc_dir_close(dir); }
+#else
+static void *pkg_dir_open(const char *path) { return (void *)opendir(path); }
+static const char *pkg_dir_next(void *dir) {
+    struct dirent *e = readdir((DIR *)dir);
+    return e ? (const char *)e->d_name : 0;
+}
+static void pkg_dir_close(void *dir) { closedir((DIR *)dir); }
+#endif
+
 static int ends_with_c(const char *name) {
     size_t n = strlen(name);
     return n >= 2 && name[n - 2] == '.' && name[n - 1] == 'c';
 }
 
+/* Every .c in a package directory, sorted by name.  The compile cache needs a
+ * stable list to fingerprint the package's bytes with; going through
+ * pkg_dir_* keeps the selfhost build working, where opendir(3) does not
+ * exist.  Returns a malloc'd array of malloc'd names, or NULL if the
+ * directory cannot be opened.  Every .c is listed, including ones the target
+ * would skip (c_file_matches_target): a fingerprint that changed when an
+ * unrelated file changed only costs a cache miss. */
+char **pkg_list_sources(const char *dir, size_t *n_out) {
+    *n_out = 0;
+    void *d = pkg_dir_open(dir);
+    if (!d) return NULL;
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+    const char *e;
+    while ((e = pkg_dir_next(d))) {
+        if (!ends_with_c(e)) continue;
+        if (n == cap) {
+            size_t ncap = cap ? cap * 2 : 8;
+            char **t = realloc(names, ncap * sizeof *names);
+            if (!t) break;
+            names = t;
+            cap = ncap;
+        }
+        names[n] = xstrdup(e);
+        if (!names[n]) break;
+        n++;
+    }
+    pkg_dir_close(d);
+    for (size_t i = 1; i < n; i++) {   /* insertion sort: n is small */
+        char *v = names[i];
+        size_t j = i;
+        while (j > 0 && strcmp(names[j - 1], v) > 0) {
+            names[j] = names[j - 1];
+            j--;
+        }
+        names[j] = v;
+    }
+    *n_out = n;
+    return names;
+}
+
 static int is_dir(const char *path) {
-    long fd = pkg_open(path, PKG_O_RDONLY | PKG_O_DIRECTORY);
-    if (fd < 0) return 0;
-    pkg_close(fd);
+    void *d = pkg_dir_open(path);
+    if (!d) return 0;
+    pkg_dir_close(d);
     return 1;
 }
 
-/* True if dir contains at least one *.c file. */
+/* Defined below; declared here because the self-host directory probe runs
+ * before it in this file. */
+static int c_file_matches_target(const char *name);
+
+/* True if dir contains at least one *.c file for the current target. */
 static int dir_has_c(const char *dir) {
-    long fd = pkg_open(dir, PKG_O_RDONLY | PKG_O_DIRECTORY);
-    if (fd < 0) return 0;
-    char buf[2048];
+    void *d = pkg_dir_open(dir);
+    if (!d) return 0;
     int found = 0;
-    for (;;) {
-        long nread = pkg_getdents(fd, buf, (long)sizeof buf);
-        if (nread <= 0) break;
-        long off = 0;
-        while (off < nread) {
-            struct pkg_dirent64 *e = (struct pkg_dirent64 *)(buf + off);
-            if (ends_with_c(e->d_name)) { found = 1; break; }
-            off = off + e->d_reclen;
-        }
-        if (found) break;
+    const char *name;
+    while ((name = pkg_dir_next(d)) != NULL) {
+        if (ends_with_c(name) && c_file_matches_target(name)) { found = 1; break; }
     }
-    pkg_close(fd);
+    pkg_dir_close(d);
     return found;
 }
 
@@ -311,32 +345,97 @@ static void pkgs_push(PkgContext *ctx, Package *p) {
 }
 
 /* Collect *.c basenames in dir, sorted. Caller frees names and the array. */
+/* Does this file name belong to the target being built?
+ *
+ * A package may hold per-target variants of the same unit, named with the
+ * OS and/or architecture as a suffix before the .c, Go-style:
+ *
+ *   flush.c              every target
+ *   flush_linux.c        Linux only
+ *   flush_darwin.c       Darwin only
+ *   flush_arm64.c        arm64, whatever the OS
+ *   flush_darwin_arm64.c Darwin arm64 only
+ *
+ * Exactly one variant of a given basename may match, and the more specific
+ * name is the one that matches: the filter below is not a fallback chain,
+ * so a package that lists both flush_darwin.c and flush_darwin_arm64.c would
+ * include both.  Callers rely on that to keep the choice explicit.
+ *
+ * The dialect has no conditional compilation, so this is how a shared
+ * runtime expresses "the va_list here is 8 bytes, there it is 24". */
+static int c_file_matches_target(const char *name) {
+    size_t n = strlen(name);
+    if (n < 2 || strcmp(name + n - 2, ".c") != 0) return 0;
+
+    const TargetDesc *t = target_current();
+    /* Strip the .c and split the remaining underscores.  The last two
+     * components may be an OS and/or an arch tag; anything else is part of
+     * the unit's own name and never matches a tag. */
+    static const char *const os_tags[] = { "linux", "darwin" };
+    static const char *const arch_tags[] = { "amd64", "arm64" };
+
+    size_t end = n - 2;                /* exclusive end of the stem */
+    int want_os = t->os == TOS_LINUX ? 0
+                : t->os == TOS_MACOS ? 1 : -1;
+    int want_arch = t->arch == TARGET_ARCH_X86_64 ? 0
+                  : t->arch == TARGET_ARCH_ARM64 ? 1 : -1;
+
+    /* At most two trailing tags; scan from the right. */
+    for (int step = 0; step < 2; step++) {
+        size_t i = end;
+        while (i > 0 && name[i - 1] != '_') i--;
+        if (i == 0 || i == end) break;         /* no underscore: stop */
+        size_t tlen = end - i;
+        const char *tag = name + i;
+        int matched = 0;
+        for (size_t k = 0; k < sizeof os_tags / sizeof *os_tags; k++)
+            if (strlen(os_tags[k]) == tlen
+                && memcmp(tag, os_tags[k], tlen) == 0) {
+                /* k indexes the tag table; want_os was built from the same
+                 * order, so the cast is just to keep -Wsign-compare quiet. */
+                if (want_os < 0 || want_os != (int)k) return 0;  /* other OS */
+                want_os = -1;                 /* consumed; must not repeat */
+                matched = 1;
+                break;
+            }
+        if (!matched) {
+            for (size_t k = 0; k < sizeof arch_tags / sizeof *arch_tags; k++)
+                if (strlen(arch_tags[k]) == tlen
+                    && memcmp(tag, arch_tags[k], tlen) == 0) {
+                    if (want_arch < 0 || want_arch != (int)k) return 0;
+                    want_arch = -1;
+                    matched = 1;
+                    break;
+                }
+        }
+        if (!matched) break;                  /* not a tag: part of the name */
+        end = i - 1;                          /* also drop the underscore */
+        if (end == 0) return 0;
+    }
+    /* An unrecognised target has no variants to pick, so a tagged file
+     * cannot be right; an untagged one always is. */
+    return 1;
+}
+
 static char **list_c_files(const char *dir, size_t *nout) {
-    long fd = pkg_open(dir, PKG_O_RDONLY | PKG_O_DIRECTORY);
-    if (fd < 0) {
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+    void *d = pkg_dir_open(dir);
+    if (!d) {
         fprintf(stderr, "fakecc: cannot open package directory '%s'\n", dir);
         exit(1);
     }
-    char **names = NULL;
-    size_t n = 0, cap = 0;
-    char buf[2048];
-    for (;;) {
-        long nread = pkg_getdents(fd, buf, (long)sizeof buf);
-        if (nread <= 0) break;
-        long off = 0;
-        while (off < nread) {
-            struct pkg_dirent64 *e = (struct pkg_dirent64 *)(buf + off);
-            if (ends_with_c(e->d_name)) {
-                if (n >= cap) {
-                    cap = cap ? cap * 2 : 4;
-                    names = xrealloc(names, cap * sizeof(char *));
-                }
-                names[n++] = xstrdup(e->d_name);
+    const char *name;
+    while ((name = pkg_dir_next(d)) != NULL) {
+        if (ends_with_c(name) && c_file_matches_target(name)) {
+            if (n >= cap) {
+                cap = cap ? cap * 2 : 4;
+                names = xrealloc(names, cap * sizeof(char *));
             }
-            off = off + e->d_reclen;
+            names[n++] = xstrdup(name);
         }
     }
-    pkg_close(fd);
+    pkg_dir_close(d);
     /* Insertion sort — packages are tiny. */
     for (size_t i = 1; i < n; i++) {
         char *key = names[i];

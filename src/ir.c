@@ -147,6 +147,9 @@ void ir_module_init(IRModule *m) {
     m->aliases.data = NULL;
     m->aliases.len = 0;
     m->aliases.cap = 0;
+    m->weak_refs = NULL;
+    m->n_weak_refs = 0;
+    m->cap_weak_refs = 0;
 }
 
 void ir_module_free(IRModule *m) {
@@ -182,8 +185,10 @@ void ir_module_free(IRModule *m) {
     for (size_t i = 0; i < m->globals.len; i++) {
         free(m->globals.data[i].name);
         free(m->globals.data[i].init_bytes);
-        for (int f = 0; f < m->globals.data[i].num_fixups; f++)
+        for (int f = 0; f < m->globals.data[i].num_fixups; f++) {
             free(m->globals.data[i].fixups[f].sym);
+            free(m->globals.data[i].fixups[f].sub);
+        }
         free(m->globals.data[i].fixups);
     }
     free(m->globals.data);
@@ -192,6 +197,11 @@ void ir_module_free(IRModule *m) {
         free(m->aliases.data[i].target);
     }
     free(m->aliases.data);
+    for (size_t i = 0; i < m->n_weak_refs; i++) free(m->weak_refs[i]);
+    free(m->weak_refs);
+    m->weak_refs = NULL;
+    m->n_weak_refs = 0;
+    m->cap_weak_refs = 0;
     m->functions.data = NULL;
     m->functions.len = 0;
     m->functions.cap = 0;
@@ -215,7 +225,21 @@ void ir_module_push_alias(IRModule *m, const char *name, const char *target,
     al->name = xstrdup(name);
     al->target = xstrdup(target);
     al->is_static = is_static;
+    al->is_weak = 0;
     al->loc = loc;
+}
+
+static void ir_add_weak_ref(IRModule *m, const char *name) {
+    if (!name) return;
+    for (size_t i = 0; i < m->n_weak_refs; i++)
+        if (strcmp(m->weak_refs[i], name) == 0) return;
+    if (m->n_weak_refs >= m->cap_weak_refs) {
+        size_t nc = m->cap_weak_refs ? m->cap_weak_refs * 2 : 4;
+        m->weak_refs = realloc(m->weak_refs, nc * sizeof(char *));
+        if (!m->weak_refs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_weak_refs = nc;
+    }
+    m->weak_refs[m->n_weak_refs++] = xstrdup(name);
 }
 
 static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
@@ -233,7 +257,11 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->size = size;
     g->init_bytes = init_bytes;   /* takes ownership */
     g->is_readonly = is_readonly;
+    g->is_const_obj = 0;
     g->is_static = is_static;
+    g->is_weak = 0;
+    g->is_hidden = 0;
+    g->is_used = 0;
     g->is_tls = is_tls;
     g->align = 8;
     g->loc = loc;
@@ -241,6 +269,14 @@ static IRGlobal *ir_module_push_global(IRModule *m, const char *name,
     g->num_fixups = 0;
     g->cap_fixups = 0;
     return g;
+}
+
+/* `const int`, `const int a[]`, and deeper arrays.  A pointer to const
+ * is not a const object: the pointer itself can be reseated. */
+static int type_is_const_obj(Type t) {
+    while (t.kind == TY_ARRAY && t.elem_type)
+        t = *t.elem_type;
+    return t.is_const;
 }
 
 /* Record a pointer-slot fixup on global `g`: the slot at byte offset `offset`
@@ -255,6 +291,7 @@ static void add_global_fixup(IRGlobal *g, int offset, const char *sym, int adden
     }
     g->fixups[g->num_fixups].offset = offset;
     g->fixups[g->num_fixups].sym = xstrdup(sym);
+    g->fixups[g->num_fixups].sub = NULL;
     g->fixups[g->num_fixups].addend = addend;
     g->num_fixups++;
 }
@@ -347,6 +384,184 @@ static void set_value_type(IRFunction *fn, IRValue v, int width, int is_unsigned
     }
     fn->value_width[v] = width;
     fn->value_is_unsigned[v] = is_unsigned;
+}
+
+/* A real DMB.  x86 codegen ignores this call, which is what that
+ * backend already did for these builtins.  crm is the 4-bit option. */
+static void emit_fakecc_dmb(IRFunction *fn, int crm, SourceLoc loc) {
+    IRValue immv = new_value(fn);
+    emit_inst_w(fn, IR_CONST, immv, -1, -1, crm, 4, 1, loc);
+    set_value_type(fn, immv, 4, 1);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
+    inst.op = IR_CALL;
+    inst.dst = -1;
+    inst.a = -1;
+    inst.b = -1;
+    inst.loc = loc;
+    inst.call_name = xstrdup("__fakecc_dmb");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 1);
+    inst.call_args[0] = immv;
+    ir_inst_array_push(&fn->insts, inst);
+}
+
+/* Atomic exchange.  kind 0 relaxed, 1 acquire, 2 release, 3 acq_rel.
+ * x86 lowers this to a plain swap, which is what that backend already
+ * emitted.  arm64 emits SWP/SWPA/SWPL/SWPAL. */
+static IRValue emit_fakecc_swp(IRFunction *fn, IRValue addr, IRValue val,
+                               int kind, int width, int is_unsigned, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = kind;
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = is_unsigned;
+    inst.call_name = xstrdup("__fakecc_swp");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = val;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, is_unsigned);
+    return dst;
+}
+
+/* Atomic add of `val` into *addr.  Returns the previous value.
+ * kind matches SWP: 0 relaxed, 1 acquire, 2 release, 3 acq_rel. */
+static IRValue emit_fakecc_lse(IRFunction *fn, const char *name, IRValue addr, IRValue val,
+                               int kind, int width, int is_unsigned, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = kind;
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = is_unsigned;
+    inst.call_name = xstrdup(name);
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = val;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, is_unsigned);
+    return dst;
+}
+
+/* Float add/sub has no LSE op.  The backend retries with CAS.
+ * imm: kind in bits 0..1, bit 2 subtracts, bit 3 returns the new value. */
+static IRValue emit_fakecc_fadd(IRFunction *fn, IRValue addr, IRValue delta,
+                               int kind, int sub, int fetch_old, int width,
+                               SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = (kind & 3) | (sub ? 4 : 0) | (fetch_old ? 0 : 8);
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = 0;
+    inst.call_name = xstrdup("__fakecc_fadd");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 2);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = delta;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, 0);
+    return dst;
+}
+
+/* old + delta, then bring a narrow sum back to the type width.  A 32-bit
+ * ADD of a byte leaves the carry in the next byte, and a later 64-bit
+ * compare would treat that as a different value. */
+static IRValue emit_bin_w(IRFunction *fn, IROpcode op, IRValue a, IRValue b,
+                          int width, int is_unsigned, SourceLoc loc);
+static IRValue atomic_add_result(IRFunction *fn, IROpcode op, IRValue old, IRValue delta,
+                                 int sz, int is_u, SourceLoc loc) {
+    IRValue sum = emit_bin_w(fn, op, old, delta, sz, is_u, loc);
+    if (sz >= 8 || (is_u && sz == 4)) return sum;
+    IRValue n = new_value(fn);
+    emit_inst_w(fn, is_u ? IR_ZEXT : IR_SEXT, n, sum, -1, 0, 8, is_u, loc);
+    set_value_type(fn, n, sz, is_u);
+    return n;
+}
+
+/* Compare-exchange.  kind 0 relaxed, 1 acquire, 2 release, 3 acq_rel.
+ * Returns 1 on success.  On failure the observed value is written through
+ * exp_ptr.  x86 does the same with a plain compare. */
+static IRValue emit_fakecc_cas(IRFunction *fn, IRValue addr, IRValue exp_ptr,
+                               IRValue desired, int kind, int width, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = kind;
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = 1;
+    inst.call_name = xstrdup("__fakecc_cas");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 3);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = exp_ptr;
+    inst.call_args[2] = desired;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, 4, 0);
+    return dst;
+}
+
+/* Same CAS, but the expected argument is a value and the result is the
+ * previous memory contents.  Nothing is written back through a pointer. */
+static IRValue emit_fakecc_cas_old(IRFunction *fn, IRValue addr, IRValue expected,
+                                  IRValue desired, int kind, int width,
+                                  int is_unsigned, SourceLoc loc) {
+    IRValue dst = new_value(fn);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
+    inst.op = IR_CALL;
+    inst.dst = dst;
+    inst.a = -1;
+    inst.b = -1;
+    inst.imm = kind;
+    inst.loc = loc;
+    inst.width = width;
+    inst.is_unsigned = is_unsigned;
+    inst.call_name = xstrdup("__fakecc_cas_old");
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, 3);
+    inst.call_args[0] = addr;
+    inst.call_args[1] = expected;
+    inst.call_args[2] = desired;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, dst, width, is_unsigned);
+    return dst;
 }
 
 static int get_value_width(const IRFunction *fn, IRValue v) {
@@ -846,6 +1061,8 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         snprintf(hook_name, sizeof(hook_name), "__asan_%s%d", is_write ? "store" : "load", width);
         IRInst inst;
         memset(&inst, 0, sizeof(inst));
+        inst.c = -1;
+        inst.d = -1;
         inst.op = IR_CALL;
         inst.dst = -1;
         inst.a = -1;
@@ -863,6 +1080,8 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         emit_inst_w(fn, IR_CONST, sz_val, -1, -1, (int64_t)width, 8, 1, loc);
         IRInst inst;
         memset(&inst, 0, sizeof(inst));
+        inst.c = -1;
+        inst.d = -1;
         inst.op = IR_CALL;
         inst.dst = -1;
         inst.a = -1;
@@ -890,6 +1109,8 @@ static void emit_inst_w(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
     }
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = op;
     inst.dst = dst;
     inst.a = a;
@@ -930,6 +1151,8 @@ static void emit_profile_call(IRFunction *fn, const char *hook_name, const Funct
 
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = IR_CALL;
     inst.dst = -1;
     inst.a = -1;
@@ -960,8 +1183,18 @@ static void emit_inst_f(IRFunction *fn, IROpcode op, IRValue dst, IRValue a, IRV
 static IRValue emit_ld_const(IRFunction *fn, long double val, SourceLoc loc) {
     char name[32];
     snprintf(name, sizeof name, "__fld.%d", g_flt_counter++);
+    /* The 80-bit x87 form is ten bytes wide, but long double is only that
+     * wide on x86-64: on arm64 it is a plain double, and copying ten bytes
+     * out of `val` reads two bytes past the end of it (AddressSanitizer:
+     * stack-buffer-overflow in emit_ld_const, from the ir test that builds
+     * an x87 aggregate return on an arm64 host).  Take the bytes that exist
+     * and zero the rest.  The tail is never read where long double is
+     * narrower -- cg64 rejects a width-16 float IR_CONST outright -- and on
+     * x86-64 `have` is 10, so this copies exactly what it always did. */
+    size_t have = sizeof(long double) < 10 ? sizeof(long double) : 10;
     char *init = malloc(10);
-    memcpy(init, &val, 10);
+    memcpy(init, &val, have);
+    if (have < 10) memset(init + have, 0, 10 - have);
     IRGlobal *lg = ir_module_push_global(g_ir_module, name, 10, init, 1, 1, 0, loc);
     lg->align = 16;
     IRValue v = new_value(fn);
@@ -985,6 +1218,56 @@ static IRValue emit_float_const(IRFunction *fn, int width, int64_t bits, SourceL
     inst->float_imm = bits;
     set_value_float(fn, v, 1);
     return v;
+}
+
+/* Signaling NaN.  The quiet bit stays clear.  An empty tag or a zero
+ * payload uses the default signaling NaN for that width.  Darwin has no
+ * nans() in libm, so the bits are built here instead of calling out. */
+static unsigned long long nans_payload(const char *tag) {
+    char *end = NULL;
+    unsigned long long v;
+    if (!tag || !tag[0]) return 0;
+    v = strtoull(tag, &end, 0);
+    if (end == tag) return 0;
+    return v;
+}
+
+static int nans_builtin_bits(const Expr *e, int width,
+                             unsigned long long *lo, unsigned long long *hi) {
+    if (!e || e->kind != EX_CALL || !e->u.call.callee
+        || e->u.call.callee->kind != EX_VAR)
+        return 0;
+    const char *name = e->u.call.callee->u.var.name;
+    int is_f = strcmp(name, "__builtin_nansf") == 0;
+    int is_l = strcmp(name, "__builtin_nansl") == 0;
+    int is_d = strcmp(name, "__builtin_nans") == 0;
+    if (!is_f && !is_l && !is_d) return 0;
+    const char *tag = "";
+    unsigned long long p;
+    if (e->u.call.args.len > 0 && e->u.call.args.data[0]
+        && e->u.call.args.data[0]->kind == EX_STR
+        && e->u.call.args.data[0]->u.str.bytes)
+        tag = e->u.call.args.data[0]->u.str.bytes;
+    p = nans_payload(tag);
+    *lo = 0;
+    *hi = 0;
+    if (is_f || width == 4) {
+        unsigned mant = (unsigned)p & 0x3fffffu;
+        if (mant == 0) mant = 0x200000u;
+        *lo = 0x7f800000u | mant;
+        return 1;
+    }
+    if (width >= 16) {
+        unsigned long long mant = p & ((1ULL << 62) - 1);
+        if (mant == 0) mant = 1ULL << 61;
+        *lo = mant | (1ULL << 63);
+        *hi = 0x7fff;
+        return 1;
+    }
+    p &= (1ULL << 51) - 1;
+    if (p == 0) p = 1ULL << 50;
+    *lo = (0x7ffULL << 52) | p;
+    return 1;
 }
 
 /* Forward decls — bool_normalize (below) calls coerce / emit_bin_w, which are
@@ -1356,6 +1639,8 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
         emit_inst_w(fn, IR_CONST, sz_val, -1, -1, (int64_t)size, 8, 1, loc);
         IRInst inst;
         memset(&inst, 0, sizeof(inst));
+        inst.c = -1;
+        inst.d = -1;
         inst.op = IR_CALL;
         inst.dst = -1;
         inst.a = -1;
@@ -1502,6 +1787,135 @@ static void store_agg_regs(IRFunction *fn, IRValue addr, int size, int n,
     }
 }
 
+/* Darwin aggregate classes differ from SysV in two ways that the rest of
+ * this file expresses by rewriting the SysV eightbyte classes:
+ *   - a non-HFA SSE eightbyte (mixed int/float) travels in a GP register
+ *     holding the raw bits, not a V register;
+ *   - an HFA keeps its SSE classes so the backend uses v0..v7, but the
+ *     SSA values stay integer bit patterns (see CALL_ARG_HFA);
+ *   - a 16-byte vector stays one SSE class: Darwin passes it in a single
+ *     Q register (q0..q7), not as an 8-byte GP.
+ * An HFA that does not fit in two eightbytes (3–4 doubles) is not
+ * representable in the current IR and is rejected. */
+/* Sema marks a builtin that has no recorded prototype (memset, memcpy,
+ * …) as variadic with zero parameters so the arity check accepts the
+ * call.  That is usually not a Darwin varargs function: the arguments use
+ * the normal registers.  A real `f(...)` has a user name and does use the
+ * stack convention.
+ *
+ * The exception is the stdio formatted-output family (__builtin_printf,
+ * __builtin_fprintf, __builtin_sprintf_chk, the *_unlocked variants, …):
+ * those genuinely are variadic and their anonymous arguments ride the
+ * Darwin vararg stack slots.  Match the printf/scanf family by name and
+ * keep every other builtin on registers — a fixed-arity builtin such as
+ * __builtin_exit(0) otherwise sends its one argument to the stack while
+ * the callee reads w0.  (The fortify __*_chk folds mark their own stack
+ * arguments explicitly and are unaffected.) */
+static int prototype_less_builtin(const char *name) {
+    if (!name) return 0;
+    const char *n = name;
+    if (strncmp(n, "__builtin_", 10) == 0) n += 10;
+    /* Real variadic formatted-I/O: honour the Darwin anonymous-stack ABI. */
+    if (strstr(n, "printf") != NULL || strstr(n, "scanf") != NULL)
+        return 0;
+    if (strncmp(name, "__builtin_", 10) == 0)
+        return 1;
+    return strcmp(name, "memset") == 0 || strcmp(name, "memcpy") == 0
+        || strcmp(name, "memmove") == 0 || strcmp(name, "mempcpy") == 0
+        || strcmp(name, "alloca") == 0;
+}
+
+/* Darwin passes every anonymous argument on the stack, in 8-byte
+ * slots.  Named parameters keep the normal register convention. */
+static int darwin_unnamed_va(int variadic, int index, int nparams, int fake) {
+    if (fake) return 0;
+    return !abi_sret_uses_gp() && variadic && index >= nparams;
+}
+
+/* A variadic float constant is rewritten to the integer bits clang stores
+ * in the 8-byte stack slot.  A computed value stays in the V-reg file and
+ * is stored with STR S/D at the call. */
+static IRValue va_float_bits(IRFunction *fn, IRValue v, SourceLoc loc) {
+    if (!get_value_is_float(fn, v)) return v;
+    IRValue cur = v;
+    for (int hop = 0; hop < 8; hop++) {
+        const IRInst *def = NULL;
+        for (size_t i = 0; i < fn->insts.len; i++) {
+            const IRInst *d = &fn->insts.data[i];
+            if (d->dst == cur) def = d;
+        }
+        if (def && def->op == IR_CONST) {
+            IRValue bits = new_value(fn);
+            emit_inst_w(fn, IR_CONST, bits, -1, -1, def->float_imm, 8, 1, loc);
+            return bits;
+        }
+        if (def && (def->op == IR_COPY || def->op == IR_TRUNC) && def->a >= 0) {
+            cur = def->a;
+            if (!get_value_is_float(fn, cur)) return cur;
+            continue;
+        }
+        break;
+    }
+    return v;
+}
+
+/* `cls_cap` is how many SysVRegClass slots the caller owns.  AAPCS64 gives
+ * an HFA one V register per element, so a three- or four-element HFA (24 /
+ * 32 bytes) is register-passed and register-returned in v0-v3: both the call
+ * and the return paths hand in capacity 4.  A wider HFA (>4 elements) is
+ * MEMORY. */
+static void abi_adjust_cls(Type t, SysVRegClass *cls, int *nreg, int cls_cap,
+                           SourceLoc loc) {
+    if (abi_sret_uses_gp()) return;
+    if (abi_is_hfa(t)) {
+        if (*nreg == 0) {
+            int nel = abi_hfa_elem_count(t);
+            if (nel > 2 && nel <= cls_cap) {
+                for (int i = 0; i < nel; i++) cls[i] = SYSV_CLS_SSE;
+                *nreg = nel;
+                return;
+            }
+            die_at(loc.file ? loc.file : "<arm64>", loc.line, loc.col,
+                   "arm64 HFA wider than two eightbytes is not supported yet");
+        }
+        return;
+    }
+    /* vector_size(16) is one Q register on Darwin.  Wider vectors have no
+     * YMM/ZMM, so they travel as a pointer (argument in a GP, result in x8). */
+    if (t.is_vector && type_size(t) == 16) return;
+    if (t.is_vector && type_size(t) > 16) {
+        *nreg = 0;
+        return;
+    }
+    /* A 16-byte aggregate SysV folded to a single eightbyte, either because
+     * it holds a vector (SSE + SSEUP collapse to one XMM) or because the
+     * second eightbyte is padding.  arm64 has no XMM pair to merge into: a
+     * composite that is not an HFA occupies one eightbyte per double-word,
+     * so `struct { V }` has to be two of them.  Leaving it at one passed
+     * only x0, and the upper half came back zero --
+     * `struct S { V x; }; id(s).x[1]` read 0 instead of 4. */
+    /* SysV folds a wide SSE aggregate -- one YMM or ZMM -- into a single
+     * eightbyte (SSE + SSEUP*n).  arm64 has neither, so an aggregate past 16
+     * bytes is MEMORY.  Left as one INTEGER eightbyte it silently kept only
+     * the first eight bytes: `struct Box { V x; }` with a 32-byte V came back
+     * from a call with three quarters of the object missing.  A bare vector
+     * wider than 16 is handled just above; this is the same rule applied to a
+     * vector wrapped in a struct, which is not itself is_vector.
+     * abi_indirect_agg() already says these travel by pointer. */
+    if (t.kind == TY_STRUCT && *nreg == 1 && type_size(t) > 16) {
+        *nreg = 0;
+        return;
+    }
+    if (t.kind == TY_STRUCT && type_size(t) == 16 && *nreg == 1) {
+        cls[0] = SYSV_CLS_INTEGER;
+        cls[1] = SYSV_CLS_INTEGER;
+        *nreg = 2;
+        return;
+    }
+    for (int i = 0; i < *nreg && i < 2; i++)
+        if (cls[i] == SYSV_CLS_SSE) cls[i] = SYSV_CLS_INTEGER;
+}
+
 static int  new_label(IRFunction *fn);
 static void emit_label(IRFunction *fn, int label, SourceLoc loc);
 static void emit_br(IRFunction *fn, int label, SourceLoc loc);
@@ -1575,6 +1989,8 @@ static IRValue emit_runtime_call(IRFunction *fn, const char *name,
     IRValue dst = new_value(fn);
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = IR_CALL;
     inst.dst = dst;
     inst.a = -1;
@@ -1598,6 +2014,8 @@ static void emit_runtime_call_void(IRFunction *fn, const char *name,
                                    IRValue *args, int nargs, SourceLoc loc) {
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = IR_CALL;
     inst.dst = -1;
     inst.a = -1;
@@ -1953,6 +2371,8 @@ static IRValue emit_i128_to_float(IRFunction *fn, IRValue addr, int is_unsigned,
     set_value_float(fn, dst, 1);
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = IR_CALL;
     inst.dst = dst;
     inst.a = -1;
@@ -1985,6 +2405,8 @@ static IRValue emit_float_to_i128(IRFunction *fn, IRValue x, int is_unsigned,
     IRValue hip = emit_bin_w(fn, IR_ADDR, his, -1, 8, 1, loc);
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = IR_CALL;
     inst.dst = -1;
     inst.a = -1;
@@ -2313,6 +2735,8 @@ static void i128_divmod(IRFunction *fn, IRValue qdst, IRValue rdst,
     IRValue rhi_p = emit_bin_w(fn, IR_ADDR, rhi_s, -1, 8, 1, loc);
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = IR_CALL;
     inst.dst = -1;
     inst.a = -1;
@@ -3202,6 +3626,8 @@ static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
     IRValue dst = new_value(fn);
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = IR_CALL;
     inst.dst = dst;
     inst.a = -1;
@@ -3212,6 +3638,8 @@ static IRValue bos_emit_named_call(IRFunction *fn, const char *name,
     ir_call_reserve_args(&inst, nargs);
     for (int i = 0; i < nargs; i++)
         inst.call_args[i] = args[i];
+    inst.width = 8;
+    inst.is_unsigned = 1;
     ir_inst_array_push(&fn->insts, inst);
     set_value_type(fn, dst, 8, 1);
     return dst;
@@ -3277,12 +3705,40 @@ static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr
     return bos_emit_named_call(fn, bos_chk_rt_name(cn), args, 4, e->loc);
 }
 
+/* Lower a va_list forwarded to vsprintf/vsnprintf after a fortify fold.
+ * On arm64 Darwin va_list is an 8-byte by-value aggregate that rides one
+ * GP register; lower_expr yields its storage address, so load the cursor.
+ * On SysV the tag is array-of-1 and decays to a pointer, which lower_expr
+ * already provides. */
+static IRValue bos_lower_va_list_arg(IRFunction *fn, IRSymTable *st,
+                                     const Expr *arg) {
+    IRValue v = lower_expr(fn, st, arg);
+    if (!abi_sret_uses_gp() && arg->type.kind == TY_STRUCT && arg->type.tag
+        && strcmp(arg->type.tag, "__va_list_tag") == 0) {
+        IRValue m = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, m, v, -1, 0, 8, 1, arg->loc);
+        return m;
+    }
+    return v;
+}
+
+/* va_first >= 0 marks args[va_first..] as anonymous variadic arguments.
+ *
+ * Only the Darwin convention puts unnamed arguments in 8-byte outgoing
+ * stack slots; SysV keeps the normal register assignment and promotes a
+ * float to double in an XMM register.  Marking them CALL_ARG_STACK there
+ * would leave the callee's va_start reading register homes the caller never
+ * filled -- a %s then dereferences garbage and the program faults.  This is
+ * the same !abi_sret_uses_gp() gate darwin_unnamed_va() uses on the normal
+ * EX_CALL path. */
 static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
                                      IRValue *args, int nargs, SourceLoc loc,
-                                     int width, int is_unsigned) {
+                                     int width, int is_unsigned, int va_first) {
     IRValue dst = new_value(fn);
     IRInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
     inst.op = IR_CALL;
     inst.dst = dst;
     inst.a = -1;
@@ -3291,8 +3747,17 @@ static IRValue bos_emit_named_call_w(IRFunction *fn, const char *name,
     inst.call_name = xstrdup(name);
     inst.call_callee = -1;
     ir_call_reserve_args(&inst, nargs);
-    for (int i = 0; i < nargs; i++)
-        inst.call_args[i] = args[i];
+    int darwin_va = (va_first >= 0) && !abi_sret_uses_gp();
+    for (int i = 0; i < nargs; i++) {
+        IRValue av = args[i];
+        if (darwin_va && i >= va_first) {
+            av = va_float_bits(fn, av, loc);
+            inst.call_arg_on_stack[i] = CALL_ARG_STACK;
+        }
+        inst.call_args[i] = av;
+    }
+    inst.width = width;
+    inst.is_unsigned = is_unsigned;
     ir_inst_array_push(&fn->insts, inst);
     set_value_type(fn, dst, width, is_unsigned);
     return dst;
@@ -3359,9 +3824,12 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
                 fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
                 exit(1);
             }
-            args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+            args[nargs++] = (is_v && i == 5)
+                ? bos_lower_va_list_arg(fn, st, e->u.call.args.data[i])
+                : lower_expr(fn, st, e->u.call.args.data[i]);
         }
-        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0);
+        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0,
+                                     is_v ? -1 : 3);
     }
     args[nargs++] = lower_expr(fn, st, e->u.call.args.data[2]);
     IRValue szv = new_value(fn);
@@ -3377,9 +3845,12 @@ static IRValue lower_fortify_snprintf_chk_call(IRFunction *fn, IRSymTable *st,
             fprintf(stderr, "fakecc: too many snprintf_chk arguments\n");
             exit(1);
         }
-        args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+        args[nargs++] = (is_v && i == 5)
+            ? bos_lower_va_list_arg(fn, st, e->u.call.args.data[i])
+            : lower_expr(fn, st, e->u.call.args.data[i]);
     }
-    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
+    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0,
+                                 is_v ? -1 : 5);
 }
 
 /* Known C-string bytes (NUL not included in *nbytes) plus a byte offset. */
@@ -3607,9 +4078,12 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
                 fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
                 exit(1);
             }
-            args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+            args[nargs++] = (is_v && i == 4)
+                ? bos_lower_va_list_arg(fn, st, e->u.call.args.data[i])
+                : lower_expr(fn, st, e->u.call.args.data[i]);
         }
-        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0);
+        return bos_emit_named_call_w(fn, plain, args, nargs, e->loc, 4, 0,
+                                     is_v ? -1 : 2);
     }
     args[nargs++] = lower_expr(fn, st, e->u.call.args.data[1]);
     IRValue szv = new_value(fn);
@@ -3625,9 +4099,12 @@ static IRValue lower_fortify_sprintf_chk_call(IRFunction *fn, IRSymTable *st,
             fprintf(stderr, "fakecc: too many sprintf_chk arguments\n");
             exit(1);
         }
-        args[nargs++] = lower_expr(fn, st, e->u.call.args.data[i]);
+        args[nargs++] = (is_v && i == 4)
+            ? bos_lower_va_list_arg(fn, st, e->u.call.args.data[i])
+            : lower_expr(fn, st, e->u.call.args.data[i]);
     }
-    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0);
+    return bos_emit_named_call_w(fn, chk, args, nargs, e->loc, 4, 0,
+                                 is_v ? -1 : 4);
 }
 
 /* __builtin___stpcpy_chk / __builtin___strcpy_chk (dst, src, size).
@@ -4204,7 +4681,35 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
         }
         out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
     } else if (bop == BOP_DIV) {
-        if (is_float && elem_sz <= 8) {
+        if (is_float && elem_sz <= 8 && type_long_double_width() < 16) {
+            /* The platform has no float wider than double (arm64 Darwin's
+             * long double is an 8-byte double), so an 80-bit/quad scratch
+             * is unavailable.  Call the runtime's compiler-rt-style
+             * scaled division, which stays in range for exponent-limit
+             * operands.  Results return through two stack slots to avoid
+             * a complex struct-return ABI special case. */
+            const char *dn = elem_sz == 4 ? "__fakecc_divsc3"
+                                          : "__fakecc_divdc3";
+            IRValue slot_r = emit_alloca(fn, elem_sz, elem_sz, 0, e->loc);
+            IRValue slot_i = emit_alloca(fn, elem_sz, elem_sz, 0, e->loc);
+            /* The helpers take the output slots by pointer: materialise the
+             * alloca addresses as IR_ADDR values (an alloca dst is only a
+             * slot identity for IR_LOAD/STORE, not a pointer SSA). */
+            IRValue addr_r = emit_bin_w(fn, IR_ADDR, slot_r, -1, 8, 1, e->loc);
+            IRValue addr_i = emit_bin_w(fn, IR_ADDR, slot_i, -1, 8, 1, e->loc);
+            IRValue cargs[6] = {
+                addr_r, addr_i, l_real, l_imag, r_real, r_imag
+            };
+            emit_runtime_call_void(fn, dn, cargs, 6, e->loc);
+            out_r = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, out_r, slot_r, -1, 0, elem_sz, 0, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            set_value_float(fn, out_r, 1);
+            out_i = new_value(fn);
+            emit_inst_w(fn, IR_LOAD, out_i, slot_i, -1, 0, elem_sz, 0, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_float = 1;
+            set_value_float(fn, out_i, 1);
+        } else if (is_float && elem_sz <= 8) {
             /* Float/double complex division: compute via 80-bit long double (16-byte)
              * to prevent intermediate overflow/underflow in denominator and numerators. */
             IRValue a = convert_numeric(fn, l_real, elem_sz, 16, 0, 1, e->loc);
@@ -6071,6 +6576,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             strncmp(e->u.call.callee->u.var.name, "__sync_", 7) == 0) {
             const char *sname = e->u.call.callee->u.var.name;
             if (strcmp(sname, "__sync_synchronize") == 0) {
+                /* Full barrier.  This clang uses dmb ish, option 11. */
+                emit_fakecc_dmb(fn, 11, e->loc);
                 return -1;
             }
             IRValue addr = lower_expr(fn, st, e->u.call.args.data[0]);
@@ -6084,21 +6591,41 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 }
                 IRValue zero = new_value(fn);
                 emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, sz, is_u, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, 0, sz, is_u, e->loc);
+                /* Release store.  stlr covers 1/2/4/8; other sizes stay plain. */
+                int ak = (sz == 1 || sz == 2 || sz == 4 || sz == 8) ? 3 : 0;
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, ak, sz, is_u, e->loc);
                 return -1;
             }
             if (strcmp(sname, "__sync_bool_compare_and_swap") == 0 ||
                 strcmp(sname, "__sync_val_compare_and_swap") == 0) {
+                int is_bool = strcmp(sname, "__sync_bool_compare_and_swap") == 0;
                 int val_sz = sz;
                 int val_u = is_u;
-                if (strcmp(sname, "__sync_bool_compare_and_swap") == 0) {
-                    if (e->u.call.args.data[0]->type.kind == TY_PTR && e->u.call.args.data[0]->type.pointee) {
-                        val_sz = type_size(*e->u.call.args.data[0]->type.pointee);
-                        val_u = e->u.call.args.data[0]->type.pointee->is_unsigned;
-                    }
+                int is_f = 0;
+                if (e->u.call.args.data[0]->type.kind == TY_PTR && e->u.call.args.data[0]->type.pointee) {
+                    Type *pt = e->u.call.args.data[0]->type.pointee;
+                    val_sz = type_size(*pt);
+                    val_u = pt->is_unsigned;
+                    is_f = pt->kind == TY_FLOAT;
                 }
                 IRValue old_expected = lower_expr(fn, st, e->u.call.args.data[1]);
                 IRValue new_desired = lower_expr(fn, st, e->u.call.args.data[2]);
+                /* __sync is a full barrier, so this is casal.  Float and
+                 * odd sizes stay a plain pair. */
+                if (!is_f && (val_sz == 1 || val_sz == 2 || val_sz == 4 || val_sz == 8)) {
+                    IRValue oldv = emit_fakecc_cas_old(fn, addr, old_expected, new_desired,
+                                                      3, val_sz, val_u, e->loc);
+                    if (val_sz < 8 && !(val_u && val_sz == 4)) {
+                        IRValue n = new_value(fn);
+                        emit_inst_w(fn, val_u ? IR_ZEXT : IR_SEXT, n, oldv, -1, 0,
+                                    8, val_u, e->loc);
+                        set_value_type(fn, n, val_sz, val_u);
+                        oldv = n;
+                    }
+                    if (is_bool)
+                        return emit_bin_w(fn, IR_EQ, oldv, old_expected, 4, 0, e->loc);
+                    return oldv;
+                }
                 IRValue cur_val = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, cur_val, addr, -1, 0, val_sz, val_u, e->loc);
                 set_value_type(fn, cur_val, val_sz, val_u);
@@ -6117,6 +6644,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
             if (strcmp(sname, "__sync_lock_test_and_set") == 0) {
                 IRValue new_val = lower_expr(fn, st, e->u.call.args.data[1]);
+                /* Acquire exchange.  Odd sizes stay a plain pair. */
+                if (sz == 1 || sz == 2 || sz == 4 || sz == 8)
+                    return emit_fakecc_swp(fn, addr, new_val, 1, sz, is_u, e->loc);
                 IRValue old_val = new_value(fn);
                 emit_inst_w(fn, IR_LOAD_PTR, old_val, addr, -1, 0, sz, is_u, e->loc);
                 set_value_type(fn, old_val, sz, is_u);
@@ -6124,26 +6654,401 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 return old_val;
             }
             IRValue delta = lower_expr(fn, st, e->u.call.args.data[1]);
+            int op = IR_ADD;
+            int is_nand = strstr(sname, "nand") != NULL;
+            if (!is_nand) {
+                if (strstr(sname, "_sub_") || strstr(sname, "fetch_and_sub")) op = IR_SUB;
+                else if (strstr(sname, "_and_and_") || strstr(sname, "fetch_and_and")) op = IR_BAND;
+                else if (strstr(sname, "_or_and_") || strstr(sname, "fetch_and_or")) op = IR_BOR;
+                else if (strstr(sname, "_xor_and_") || strstr(sname, "fetch_and_xor")) op = IR_BXOR;
+                else if (strstr(sname, "_add_") || strstr(sname, "fetch_and_add")) op = IR_ADD;
+            }
+            int fetch_old = strncmp(sname, "__sync_fetch_", 13) == 0;
+            /* __sync_* is a full barrier, so the LSE op is the seq_cst form.
+             * nand has no single instruction and stays a plain pair. */
+            if (!is_nand && (sz == 1 || sz == 2 || sz == 4 || sz == 8)
+                && (op == IR_ADD || op == IR_SUB || op == IR_BAND
+                    || op == IR_BOR || op == IR_BXOR)) {
+                const char *lse = "__fakecc_ldadd";
+                IRValue mem_op = delta;
+                IROpcode rop = op;
+                IRValue rval = delta;
+                if (op == IR_SUB) {
+                    mem_op = new_value(fn);
+                    emit_inst_w(fn, IR_NEG, mem_op, delta, -1, 0,
+                                sz == 8 ? 8 : 4, 0, e->loc);
+                    set_value_type(fn, mem_op, sz == 8 ? 8 : 4, 0);
+                    rop = IR_ADD;
+                    rval = mem_op;
+                } else if (op == IR_BAND) {
+                    lse = "__fakecc_ldclr";
+                } else if (op == IR_BOR) {
+                    lse = "__fakecc_ldset";
+                } else if (op == IR_BXOR) {
+                    lse = "__fakecc_ldeor";
+                }
+                IRValue oldv = emit_fakecc_lse(fn, lse, addr, mem_op, 3, sz, is_u, e->loc);
+                if (fetch_old) return oldv;
+                return atomic_add_result(fn, rop, oldv, rval, sz, is_u, e->loc);
+            }
             IRValue old_val = new_value(fn);
             emit_inst_w(fn, IR_LOAD_PTR, old_val, addr, -1, 0, sz, is_u, e->loc);
             set_value_type(fn, old_val, sz, is_u);
-            int op = IR_ADD;
-            if (strstr(sname, "_sub_") || strstr(sname, "fetch_and_sub")) op = IR_SUB;
-            else if (strstr(sname, "_and_and_") || strstr(sname, "fetch_and_and")) op = IR_BAND;
-            else if (strstr(sname, "_or_and_") || strstr(sname, "fetch_and_or")) op = IR_BOR;
-            else if (strstr(sname, "_xor_and_") || strstr(sname, "fetch_and_xor")) op = IR_BXOR;
-            else if (strstr(sname, "_add_") || strstr(sname, "fetch_and_add")) op = IR_ADD;
             IRValue res = emit_bin_w(fn, op, old_val, delta, sz, is_u, e->loc);
             emit_inst_w(fn, IR_STORE_PTR, -1, addr, res, 0, sz, is_u, e->loc);
-            if (strncmp(sname, "__sync_fetch_", 13) == 0) {
-                return old_val;
-            } else {
-                return res;
+            if (fetch_old) return old_val;
+            return res;
+        }
+        /* Same model as __sync_*: plain loads and stores.  Darwin images
+         * do not link libatomic, and a missing call name used to crash
+         * the arm64 backend. */
+        if (e->u.call.callee->kind == EX_VAR &&
+            strncmp(e->u.call.callee->u.var.name, "__atomic_", 9) == 0) {
+            const char *sname = e->u.call.callee->u.var.name;
+            if (strcmp(sname, "__atomic_thread_fence") == 0 ||
+                strcmp(sname, "__atomic_signal_fence") == 0) {
+                for (size_t i = 0; i < e->u.call.args.len; i++)
+                    lower_expr(fn, st, e->u.call.args.data[i]);
+                /* signal_fence is only a compiler barrier.  thread_fence
+                 * matches this clang: relaxed is empty, acquire and consume
+                 * are dmb ishld (9), and release and stronger are dmb ish (11). */
+                if (strcmp(sname, "__atomic_thread_fence") == 0) {
+                    long long ord = 5;
+                    if (e->u.call.args.len >= 1)
+                        fold_const_int(e->u.call.args.data[0], &ord);
+                    if (ord != 0) {
+                        int crm = (ord == 1 || ord == 2) ? 9 : 11;
+                        emit_fakecc_dmb(fn, crm, e->loc);
+                    }
+                }
+                return -1;
+            }
+            if (e->u.call.args.len < 1)
+                return -1;
+            Expr *p0 = e->u.call.args.data[0];
+            int sz = 4, is_u = 0, is_f = 0;
+            if (p0->type.kind == TY_PTR && p0->type.pointee) {
+                int psz = type_size(*p0->type.pointee);
+                if (psz > 0) sz = psz;
+                is_u = p0->type.pointee->is_unsigned;
+                is_f = p0->type.pointee->kind == TY_FLOAT;
+            }
+            IRValue addr = lower_expr(fn, st, p0);
+            if (strcmp(sname, "__atomic_load_n") == 0) {
+                long long ord = 5;
+                if (e->u.call.args.len > 1) {
+                    lower_expr(fn, st, e->u.call.args.data[1]);
+                    fold_const_int(e->u.call.args.data[1], &ord);
+                }
+                /* 1 = ldapr (acquire/consume), 2 = ldar (seq_cst).
+                 * Float and double use the same integer load, then fmov. */
+                int ak = 0;
+                int barrier = !is_f || sz == 4 || sz == 8;
+                if (barrier && (ord == 1 || ord == 2)) ak = 1;
+                else if (barrier && ord >= 5) ak = 2;
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, ak, sz, is_u, e->loc);
+                set_value_type(fn, v, sz, is_u);
+                if (is_f) set_value_float(fn, v, 1);
+                return v;
+            }
+            if (strcmp(sname, "__atomic_store_n") == 0) {
+                if (e->u.call.args.len < 2) return -1;
+                IRValue val = lower_expr(fn, st, e->u.call.args.data[1]);
+                long long ord = 5;
+                if (e->u.call.args.len > 2) {
+                    lower_expr(fn, st, e->u.call.args.data[2]);
+                    fold_const_int(e->u.call.args.data[2], &ord);
+                }
+                /* 3 = stlr (release, acq_rel, seq_cst).  Float bits go via a GPR. */
+                int barrier = !is_f || sz == 4 || sz == 8;
+                int ak = (barrier && (ord == 3 || ord == 4 || ord >= 5)) ? 3 : 0;
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, ak, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_exchange_n") == 0) {
+                if (e->u.call.args.len < 2) return -1;
+                IRValue val = lower_expr(fn, st, e->u.call.args.data[1]);
+                long long ord = 5;
+                if (e->u.call.args.len > 2) {
+                    lower_expr(fn, st, e->u.call.args.data[2]);
+                    fold_const_int(e->u.call.args.data[2], &ord);
+                }
+                /* Oversized objects stay a plain pair.  Integer 1/2/4/8 and
+                 * float/double use one SWP so the read and write cannot tear. */
+                if ((is_f && sz != 4 && sz != 8) ||
+                    (!is_f && sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
+                    IRValue oldv = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
+                    set_value_type(fn, oldv, sz, is_u);
+                    if (is_f) set_value_float(fn, oldv, 1);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                    return oldv;
+                }
+                /* 0 relaxed, 1 acquire (consume too), 2 release, 3 acq_rel/seq_cst. */
+                int kind = 3;
+                if (ord == 0) kind = 0;
+                else if (ord == 1 || ord == 2) kind = 1;
+                else if (ord == 3) kind = 2;
+                IRValue oldv = emit_fakecc_swp(fn, addr, val, kind, sz, is_u, e->loc);
+                if (is_f) set_value_float(fn, oldv, 1);
+                return oldv;
+            }
+            if (strcmp(sname, "__atomic_load") == 0) {
+                if (e->u.call.args.len < 2) return -1;
+                IRValue retp = lower_expr(fn, st, e->u.call.args.data[1]);
+                long long ord = 5;
+                if (e->u.call.args.len > 2) {
+                    lower_expr(fn, st, e->u.call.args.data[2]);
+                    fold_const_int(e->u.call.args.data[2], &ord);
+                }
+                /* Same barrier as __atomic_load_n.  The copy into ret is plain. */
+                int ak = 0;
+                int barrier = !is_f || sz == 4 || sz == 8;
+                if (barrier && (ord == 1 || ord == 2)) ak = 1;
+                else if (barrier && ord >= 5) ak = 2;
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, v, addr, -1, ak, sz, is_u, e->loc);
+                set_value_type(fn, v, sz, is_u);
+                if (is_f) set_value_float(fn, v, 1);
+                emit_inst_w(fn, IR_STORE_PTR, -1, retp, v, 0, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_store") == 0) {
+                if (e->u.call.args.len < 2) return -1;
+                IRValue vp = lower_expr(fn, st, e->u.call.args.data[1]);
+                long long ord = 5;
+                if (e->u.call.args.len > 2) {
+                    lower_expr(fn, st, e->u.call.args.data[2]);
+                    fold_const_int(e->u.call.args.data[2], &ord);
+                }
+                IRValue v = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, v, vp, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, v, sz, is_u);
+                if (is_f) set_value_float(fn, v, 1);
+                /* Same barrier as __atomic_store_n.  The load of *val is plain. */
+                int barrier = !is_f || sz == 4 || sz == 8;
+                int ak = (barrier && (ord == 3 || ord == 4 || ord >= 5)) ? 3 : 0;
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, v, ak, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_exchange") == 0) {
+                if (e->u.call.args.len < 3) return -1;
+                IRValue vp = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue retp = lower_expr(fn, st, e->u.call.args.data[2]);
+                long long ord = 5;
+                if (e->u.call.args.len > 3) {
+                    lower_expr(fn, st, e->u.call.args.data[3]);
+                    fold_const_int(e->u.call.args.data[3], &ord);
+                }
+                /* *val is a plain load.  Only the object is exchanged. */
+                IRValue val = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, val, vp, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, val, sz, is_u);
+                if (is_f) set_value_float(fn, val, 1);
+                if ((is_f && sz != 4 && sz != 8) ||
+                    (!is_f && sz != 1 && sz != 2 && sz != 4 && sz != 8)) {
+                    IRValue oldv = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
+                    set_value_type(fn, oldv, sz, is_u);
+                    if (is_f) set_value_float(fn, oldv, 1);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, val, 0, sz, is_u, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, retp, oldv, 0, sz, is_u, e->loc);
+                    return -1;
+                }
+                int kind = 3;
+                if (ord == 0) kind = 0;
+                else if (ord == 1 || ord == 2) kind = 1;
+                else if (ord == 3) kind = 2;
+                IRValue oldv = emit_fakecc_swp(fn, addr, val, kind, sz, is_u, e->loc);
+                if (is_f) set_value_float(fn, oldv, 1);
+                emit_inst_w(fn, IR_STORE_PTR, -1, retp, oldv, 0, sz, is_u, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_clear") == 0) {
+                long long ord = 5;
+                if (e->u.call.args.len > 1) {
+                    lower_expr(fn, st, e->u.call.args.data[1]);
+                    fold_const_int(e->u.call.args.data[1], &ord);
+                }
+                /* The flag is one byte.  Release and stronger use stlrb. */
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 1, 1, e->loc);
+                int ak = (ord == 3 || ord == 4 || ord >= 5) ? 3 : 0;
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, zero, ak, 1, 1, e->loc);
+                return -1;
+            }
+            if (strcmp(sname, "__atomic_test_and_set") == 0) {
+                long long ord = 5;
+                if (e->u.call.args.len > 1) {
+                    lower_expr(fn, st, e->u.call.args.data[1]);
+                    fold_const_int(e->u.call.args.data[1], &ord);
+                }
+                /* Swap the byte with 1.  The result is a bool: nonzero → 1. */
+                IRValue one = new_value(fn);
+                emit_inst_w(fn, IR_CONST, one, -1, -1, 1, 1, 1, e->loc);
+                int kind = 3;
+                if (ord == 0) kind = 0;
+                else if (ord == 1 || ord == 2) kind = 1;
+                else if (ord == 3) kind = 2;
+                IRValue oldv = emit_fakecc_swp(fn, addr, one, kind, 1, 1, e->loc);
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
+                return emit_bin_w(fn, IR_NE, oldv, zero, 4, 0, e->loc);
+            }
+            if (strcmp(sname, "__atomic_compare_exchange_n") == 0 ||
+                strcmp(sname, "__atomic_compare_exchange") == 0) {
+                int is_n = strcmp(sname, "__atomic_compare_exchange_n") == 0;
+                if (e->u.call.args.len < 3) return -1;
+                IRValue exp_ptr = lower_expr(fn, st, e->u.call.args.data[1]);
+                IRValue desired;
+                if (is_n) {
+                    desired = lower_expr(fn, st, e->u.call.args.data[2]);
+                } else {
+                    IRValue dp = lower_expr(fn, st, e->u.call.args.data[2]);
+                    desired = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, desired, dp, -1, 0, sz, is_u, e->loc);
+                    set_value_type(fn, desired, sz, is_u);
+                    if (is_f) set_value_float(fn, desired, 1);
+                }
+                for (size_t i = 3; i < e->u.call.args.len; i++)
+                    lower_expr(fn, st, e->u.call.args.data[i]);
+                /* Success order picks cas/casa/casl/casal.  A strong CAS
+                 * is a valid weak CAS.  Odd sizes stay a plain pair.
+                 * Float and double compare the IEEE bits. */
+                if ((!is_f && (sz == 1 || sz == 2 || sz == 4 || sz == 8))
+                    || (is_f && (sz == 4 || sz == 8))) {
+                    long long succ = 5;
+                    if (e->u.call.args.len > 4)
+                        fold_const_int(e->u.call.args.data[4], &succ);
+                    int kind = 3;
+                    if (succ == 0) kind = 0;
+                    else if (succ == 1 || succ == 2) kind = 1;
+                    else if (succ == 3) kind = 2;
+                    return emit_fakecc_cas(fn, addr, exp_ptr, desired, kind, sz, e->loc);
+                }
+                IRValue cur = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, cur, addr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, cur, sz, is_u);
+                if (is_f) set_value_float(fn, cur, 1);
+                IRValue expv = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, expv, exp_ptr, -1, 0, sz, is_u, e->loc);
+                set_value_type(fn, expv, sz, is_u);
+                if (is_f) set_value_float(fn, expv, 1);
+                IRValue eq = emit_bin_w(fn, IR_EQ, cur, expv, 4, 0, e->loc);
+                int Lok = new_label(fn);
+                int Lfail = new_label(fn);
+                int Ldone = new_label(fn);
+                emit_inst_w(fn, IR_CBR, -1, eq, Lfail, Lok, 4, 0, e->loc);
+                emit_inst_w(fn, IR_LABEL, -1, -1, -1, Lok, 0, 0, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, desired, 0, sz, is_u, e->loc);
+                emit_inst(fn, IR_BR, -1, -1, -1, Ldone, e->loc);
+                emit_inst_w(fn, IR_LABEL, -1, -1, -1, Lfail, 0, 0, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, exp_ptr, cur, 0, sz, is_u, e->loc);
+                emit_inst_w(fn, IR_LABEL, -1, -1, -1, Ldone, 0, 0, e->loc);
+                return eq;
+            }
+            {
+                int opc = 0, fetch_old = 0, is_nand = 0, is_rmw = 1;
+                if (strcmp(sname, "__atomic_add_fetch") == 0) opc = IR_ADD;
+                else if (strcmp(sname, "__atomic_fetch_add") == 0) { opc = IR_ADD; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_sub_fetch") == 0) opc = IR_SUB;
+                else if (strcmp(sname, "__atomic_fetch_sub") == 0) { opc = IR_SUB; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_and_fetch") == 0) opc = IR_BAND;
+                else if (strcmp(sname, "__atomic_fetch_and") == 0) { opc = IR_BAND; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_or_fetch") == 0) opc = IR_BOR;
+                else if (strcmp(sname, "__atomic_fetch_or") == 0) { opc = IR_BOR; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_xor_fetch") == 0) opc = IR_BXOR;
+                else if (strcmp(sname, "__atomic_fetch_xor") == 0) { opc = IR_BXOR; fetch_old = 1; }
+                else if (strcmp(sname, "__atomic_nand_fetch") == 0) is_nand = 1;
+                else if (strcmp(sname, "__atomic_fetch_nand") == 0) { is_nand = 1; fetch_old = 1; }
+                else is_rmw = 0;
+                if (is_rmw) {
+                    if (e->u.call.args.len < 2) return -1;
+                    IRValue delta = lower_expr(fn, st, e->u.call.args.data[1]);
+                    long long ord = 5;
+                    if (e->u.call.args.len > 2) {
+                        lower_expr(fn, st, e->u.call.args.data[2]);
+                        fold_const_int(e->u.call.args.data[2], &ord);
+                    }
+                    /* Float add/sub is a CAS retry.  Integer add/sub are LDADD. */
+                    if (is_f && (sz == 4 || sz == 8)
+                        && (opc == IR_ADD || opc == IR_SUB)) {
+                        int kind = 3;
+                        if (ord == 0) kind = 0;
+                        else if (ord == 1 || ord == 2) kind = 1;
+                        else if (ord == 3) kind = 2;
+                        IRValue r = emit_fakecc_fadd(fn, addr, delta, kind,
+                                                    opc == IR_SUB, fetch_old,
+                                                    sz, e->loc);
+                        set_value_float(fn, r, 1);
+                        return r;
+                    }
+                    /* Add/sub are LDADD (sub adds the negation).  and is
+                     * LDCLR of the inverted mask, or is LDSET, xor is LDEOR.
+                     * nand has no single LSE op and stays a plain pair. */
+                    if (!is_f && !is_nand && (sz == 1 || sz == 2 || sz == 4 || sz == 8)
+                        && (opc == IR_ADD || opc == IR_SUB || opc == IR_BAND
+                            || opc == IR_BOR || opc == IR_BXOR)) {
+                        const char *lse = "__fakecc_ldadd";
+                        IRValue mem_op = delta;
+                        IROpcode rop = opc;
+                        IRValue rval = delta;
+                        if (opc == IR_SUB) {
+                            mem_op = new_value(fn);
+                            emit_inst_w(fn, IR_NEG, mem_op, delta, -1, 0,
+                                        sz == 8 ? 8 : 4, 0, e->loc);
+                            set_value_type(fn, mem_op, sz == 8 ? 8 : 4, 0);
+                            rop = IR_ADD;
+                            rval = mem_op;
+                        } else if (opc == IR_BAND) {
+                            lse = "__fakecc_ldclr";
+                        } else if (opc == IR_BOR) {
+                            lse = "__fakecc_ldset";
+                        } else if (opc == IR_BXOR) {
+                            lse = "__fakecc_ldeor";
+                        }
+                        int kind = 3;
+                        if (ord == 0) kind = 0;
+                        else if (ord == 1 || ord == 2) kind = 1;
+                        else if (ord == 3) kind = 2;
+                        IRValue oldv = emit_fakecc_lse(fn, lse, addr, mem_op, kind,
+                                                       sz, is_u, e->loc);
+                        if (fetch_old) return oldv;
+                        return atomic_add_result(fn, rop, oldv, rval, sz, is_u, e->loc);
+                    }
+                    IRValue oldv = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, oldv, addr, -1, 0, sz, is_u, e->loc);
+                    set_value_type(fn, oldv, sz, is_u);
+                    IRValue res;
+                    if (is_nand) {
+                        IRValue both = emit_bin_w(fn, IR_BAND, oldv, delta, sz, is_u, e->loc);
+                        res = new_value(fn);
+                        emit_inst_w(fn, IR_BNOT, res, both, -1, 0, sz, is_u, e->loc);
+                        set_value_type(fn, res, sz, is_u);
+                    } else {
+                        res = emit_bin_w(fn, opc, oldv, delta, sz, is_u, e->loc);
+                    }
+                    emit_inst_w(fn, IR_STORE_PTR, -1, addr, res, 0, sz, is_u, e->loc);
+                    return fetch_old ? oldv : res;
+                }
             }
         }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_prefetch") == 0) {
             for (size_t i = 0; i < e->u.call.args.len; i++)
                 lower_expr(fn, st, e->u.call.args.data[i]);
+            return -1;
+        }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_assume") == 0) {
+            /* The condition is evaluated for its side effects.  A false
+             * condition is undefined; the freestanding image does not trap. */
+            if (e->u.call.args.len >= 1)
+                lower_expr(fn, st, e->u.call.args.data[0]);
+            return -1;
+        }
+        if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_unpredictable") == 0) {
+            if (e->u.call.args.len >= 1)
+                return lower_expr(fn, st, e->u.call.args.data[0]);
             return -1;
         }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_frame_address") == 0) {
@@ -6163,10 +7068,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return v;
         }
         if (e->u.call.callee->kind == EX_VAR && (strcmp(e->u.call.callee->u.var.name, "__builtin_alloca") == 0 ||
+                                                strcmp(e->u.call.callee->u.var.name, "__builtin_alloca_with_align") == 0 ||
                                                 strcmp(e->u.call.callee->u.var.name, "alloca") == 0)) {
             IRValue sz = lower_expr(fn, st, e->u.call.args.data[0]);
+            /* Second argument is an alignment in bits.  -1 keeps the
+             * historical 16-byte bump used by plain alloca. */
+            IRValue al = -1;
+            if (strcmp(e->u.call.callee->u.var.name, "__builtin_alloca_with_align") == 0
+                && e->u.call.args.len > 1)
+                al = lower_expr(fn, st, e->u.call.args.data[1]);
             IRValue v = new_value(fn);
-            emit_inst_w(fn, IR_DYN_ALLOCA, v, sz, -1, 0, 8, 1, e->loc);
+            emit_inst_w(fn, IR_DYN_ALLOCA, v, sz, al, 0, 8, 1, e->loc);
             set_value_type(fn, v, 8, 1);
             fn->has_dyn_alloca = 1;
             return v;
@@ -6242,6 +7154,90 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             emit_inst_w(fn, IR_CONST, v, -1, -1, 0, 8, 0, e->loc);
             set_value_type(fn, v, 8, 0);
             return v;
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_expect_with_probability") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_assume_aligned") == 0)) {
+            /* Both return the first argument.  The rest are hints. */
+            for (size_t i = 1; i < e->u.call.args.len; i++)
+                lower_expr(fn, st, e->u.call.args.data[i]);
+            if (e->u.call.args.len >= 1)
+                return lower_expr(fn, st, e->u.call.args.data[0]);
+            return -1;
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_align_down") == 0)) {
+            if (e->u.call.args.len < 2) return -1;
+            int up = strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0;
+            int w = type_size(e->type);
+            if (w < 1) w = 8;
+            int uns = e->type.is_unsigned || e->type.kind == TY_PTR;
+            IRValue val = lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue al = lower_expr(fn, st, e->u.call.args.data[1]);
+            IRValue one = new_value(fn);
+            emit_inst_w(fn, IR_CONST, one, -1, -1, 1, w, uns, e->loc);
+            set_value_type(fn, one, w, uns);
+            IRValue am1 = emit_bin_w(fn, IR_SUB, al, one, w, uns, e->loc);
+            IRValue nmask = new_value(fn);
+            emit_inst_w(fn, IR_BNOT, nmask, am1, -1, 0, w, uns, e->loc);
+            set_value_type(fn, nmask, w, uns);
+            IRValue base = val;
+            if (up)
+                base = emit_bin_w(fn, IR_ADD, val, am1, w, uns, e->loc);
+            return emit_bin_w(fn, IR_BAND, base, nmask, w, uns, e->loc);
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_fshl") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_fshr") == 0)) {
+            /* Concatenate the first two arguments and shift.  A zero count
+             * returns the high half for fshl and the low half for fshr;
+             * shifting by the full width is not a hardware shift. */
+            if (e->u.call.args.len < 3) return -1;
+            int left = strcmp(e->u.call.callee->u.var.name, "__builtin_fshl") == 0;
+            int w = type_size(e->type);
+            if (w < 1) w = 4;
+            int bits = w * 8;
+            IRValue hi = lower_expr(fn, st, e->u.call.args.data[0]);
+            IRValue lo = lower_expr(fn, st, e->u.call.args.data[1]);
+            IRValue sh = lower_expr(fn, st, e->u.call.args.data[2]);
+            IRValue mask = new_value(fn);
+            emit_inst_w(fn, IR_CONST, mask, -1, -1, bits - 1, w, 1, e->loc);
+            set_value_type(fn, mask, w, 1);
+            IRValue n = emit_bin_w(fn, IR_BAND, sh, mask, w, 1, e->loc);
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, w, 1, e->loc);
+            set_value_type(fn, zero, w, 1);
+            IRValue is0 = emit_bin_w(fn, IR_EQ, n, zero, 4, 0, e->loc);
+            IRValue slot = emit_alloca(fn, w, w, 1, e->loc);
+            IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            int Lsh = new_label(fn);
+            int Lzero = new_label(fn);
+            int Ldone = new_label(fn);
+            emit_inst_w(fn, IR_CBR, -1, is0, Lsh, Lzero, 4, 0, e->loc);
+            emit_inst_w(fn, IR_LABEL, -1, -1, -1, Lzero, 0, 0, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, left ? hi : lo, 0, w, 1, e->loc);
+            emit_inst(fn, IR_BR, -1, -1, -1, Ldone, e->loc);
+            emit_inst_w(fn, IR_LABEL, -1, -1, -1, Lsh, 0, 0, e->loc);
+            IRValue widthv = new_value(fn);
+            emit_inst_w(fn, IR_CONST, widthv, -1, -1, bits, w, 1, e->loc);
+            set_value_type(fn, widthv, w, 1);
+            IRValue wn = emit_bin_w(fn, IR_SUB, widthv, n, w, 1, e->loc);
+            IRValue top, bot;
+            if (left) {
+                top = emit_bin_w(fn, IR_SHL, hi, n, w, 1, e->loc);
+                bot = emit_bin_w(fn, IR_SHR, lo, wn, w, 1, e->loc);
+            } else {
+                top = emit_bin_w(fn, IR_SHL, hi, wn, w, 1, e->loc);
+                bot = emit_bin_w(fn, IR_SHR, lo, n, w, 1, e->loc);
+            }
+            IRValue merged = emit_bin_w(fn, IR_BOR, top, bot, w, 1, e->loc);
+            emit_inst_w(fn, IR_STORE_PTR, -1, addr, merged, 0, w, 1, e->loc);
+            emit_inst_w(fn, IR_LABEL, -1, -1, -1, Ldone, 0, 0, e->loc);
+            IRValue out = new_value(fn);
+            emit_inst_w(fn, IR_LOAD_PTR, out, addr, -1, 0, w, 1, e->loc);
+            set_value_type(fn, out, w, 1);
+            return out;
         }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_longjmp") == 0) {
             IRValue buf_ptr = lower_expr(fn, st, e->u.call.args.data[0]);
@@ -6377,6 +7373,42 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     IRValue is_inf = emit_bin_w(fn, IR_BAND, exp_ok, mant_ok, 8, 1, e->loc);
                     return coerce(fn, is_inf, 8, 1, 4, 0, e->loc);
                 }
+            }
+        }
+        if (e->u.call.callee->kind == EX_VAR &&
+            (strcmp(e->u.call.callee->u.var.name, "__builtin_isnormal") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_isnormalf") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "__builtin_isnormall") == 0 ||
+             strcmp(e->u.call.callee->u.var.name, "isnormal") == 0) &&
+            e->u.call.args.len > 0) {
+            /* Normal means the exponent is neither zero nor all-ones, so
+             * zero, subnormal, infinity, and NaN are rejected together. */
+            Expr *a0 = e->u.call.args.data[0];
+            Type aty = a0->type;
+            if (aty.kind == TY_FLOAT && (aty.width == 4 || aty.width == 8)) {
+                IRValue fv = lower_expr(fn, st, a0);
+                int w = (int)aty.width;
+                IRValue slot = emit_alloca(fn, w, w, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, fv, 0, w, 1, e->loc);
+                IRValue ival = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, ival, addr, -1, 0, w, 1, e->loc);
+                int shamt = w == 4 ? 23 : 52;
+                int expmask = w == 4 ? 0xff : 0x7ff;
+                IRValue shc = new_value(fn);
+                emit_inst_w(fn, IR_CONST, shc, -1, -1, shamt, w, 1, e->loc);
+                IRValue shifted = emit_bin_w(fn, IR_SHR, ival, shc, w, 1, e->loc);
+                IRValue mask = new_value(fn);
+                emit_inst_w(fn, IR_CONST, mask, -1, -1, expmask, w, 1, e->loc);
+                IRValue exp = emit_bin_w(fn, IR_BAND, shifted, mask, w, 1, e->loc);
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, w, 1, e->loc);
+                IRValue nz = emit_bin_w(fn, IR_NE, exp, zero, w, 1, e->loc);
+                IRValue maxc = new_value(fn);
+                emit_inst_w(fn, IR_CONST, maxc, -1, -1, expmask, w, 1, e->loc);
+                IRValue nall = emit_bin_w(fn, IR_NE, exp, maxc, w, 1, e->loc);
+                IRValue both = emit_bin_w(fn, IR_BAND, nz, nall, w, 1, e->loc);
+                return coerce(fn, both, w, 1, 4, 0, e->loc);
             }
         }
         if (e->u.call.callee->kind == EX_VAR &&
@@ -6556,6 +7588,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 fn->needs_apply_args = 1;
                 IRInst inst;
                 memset(&inst, 0, sizeof(inst));
+                inst.c = -1;
+                inst.d = -1;
                 inst.op = IR_CALL;
                 inst.dst = new_value(fn);
                 inst.a = -1; inst.b = -1;
@@ -6577,6 +7611,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue asz = lower_expr(fn, st, e->u.call.args.data[2]);
                 IRInst inst;
                 memset(&inst, 0, sizeof(inst));
+                inst.c = -1;
+                inst.d = -1;
                 inst.op = IR_CALL;
                 inst.dst = new_value(fn);
                 inst.a = -1; inst.b = -1;
@@ -6597,6 +7633,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue rp = lower_expr(fn, st, e->u.call.args.data[0]);
                 IRInst inst;
                 memset(&inst, 0, sizeof(inst));
+                inst.c = -1;
+                inst.d = -1;
                 inst.op = IR_CALL;
                 inst.dst = -1;
                 inst.a = -1; inst.b = -1;
@@ -6612,7 +7650,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 || strcmp(cname, "__builtin_va_copy") == 0) {
                 IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
                 IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
-                emit_struct_copy(fn, dst, src, 24, e->loc);
+                emit_struct_copy(fn, dst, src, abi_sret_uses_gp() ? 24 : 8, e->loc);
                 return -1;
             }
             if (strcmp(cname, "__builtin_shuffle") == 0) {
@@ -6716,6 +7754,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     last = lower_expr(fn, st, e->u.call.args.data[1]);
                 IRInst inst;
                 memset(&inst, 0, sizeof(inst));
+                inst.c = -1;
+                inst.d = -1;
                 inst.op = IR_CALL;
                 inst.a = -1; inst.b = -1; inst.imm = 0;
                 inst.loc = e->loc;
@@ -6868,6 +7908,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 IRValue nan_b = emit_fcmp(fn, b, b, wb, 5 /* NE */, e->loc);
                 return emit_bin_w(fn, IR_BOR, nan_a, nan_b, 4, 0, e->loc);
             }
+            if (strcmp(name, "__builtin_nans") == 0 || strcmp(name, "__builtin_nansf") == 0 ||
+                strcmp(name, "__builtin_nansl") == 0) {
+                unsigned long long lo = 0, hi = 0;
+                int w = e->type.width ? e->type.width : 8;
+                nans_builtin_bits(e, w, &lo, &hi);
+                if (w == 16) {
+                    unsigned char buf[16];
+                    long double ld = 0;
+                    memset(buf, 0, sizeof buf);
+                    memcpy(buf, &lo, 8);
+                    memcpy(buf + 8, &hi, 8);
+                    memcpy(&ld, buf, sizeof ld < sizeof buf ? sizeof ld : sizeof buf);
+                    return emit_ld_const(fn, ld, e->loc);
+                }
+                return emit_float_const(fn, w, (int64_t)lo, e->loc);
+            }
             if (strcmp(name, "__builtin_inf") == 0 || strcmp(name, "__builtin_inff") == 0 ||
                 strcmp(name, "__builtin_infl") == 0 || strcmp(name, "__builtin_huge_val") == 0 ||
                 strcmp(name, "__builtin_huge_valf") == 0 || strcmp(name, "__builtin_huge_vall") == 0 ||
@@ -6896,7 +7952,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int is_void_pre = (e->type.kind == TY_VOID);
         int is_ret_i128_pre = !is_void_pre && type_is_pair16(e->type);
         int is_ret_struct_pre = (!is_void_pre && (e->type.kind == TY_STRUCT || e->type.is_vector || is_ret_i128_pre));
-        SysVRegClass ret_cls_pre[2];
+        SysVRegClass ret_cls_pre[4] = {0};
         int ret_nreg_pre = 0;
         if (is_ret_i128_pre) {
             ret_cls_pre[0] = SYSV_CLS_INTEGER;
@@ -6904,6 +7960,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             ret_nreg_pre = 2;
         } else if (is_ret_struct_pre) {
             ret_nreg_pre = sysv_classify_agg(e->type, ret_cls_pre);
+            /* Capacity 4: a three- or four-element HFA result comes back in
+             * v0-v3, exactly as such an aggregate is passed. */
+            abi_adjust_cls(e->type, ret_cls_pre, &ret_nreg_pre, 4, e->loc);
         }
         int ret_in_mem_pre = is_ret_struct_pre && ret_nreg_pre == 0;
         if (type_is_complex_ldouble(e->type)) {
@@ -6922,21 +7981,57 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Register-class aggregates expand into per-eightbyte SSA args.
          * MEMORY-class aggregates are one stack blob (pointer + nbytes)
          * so huge by-value structs do not explode IR_CALL. */
-        int call_used_gp = ret_in_mem_pre ? 1 : 0;
+        int call_used_gp = (ret_in_mem_pre && abi_sret_uses_gp()) ? 1 : 0;
         int call_used_xmm = 0;
         Type callee_ty = e->u.call.callee->type;
         while (callee_ty.kind == TY_PTR && callee_ty.pointee)
             callee_ty = *callee_ty.pointee;
         int call_variadic = callee_ty.kind == TY_FUNC
             && (callee_ty.func_is_variadic || callee_ty.func_is_unprototyped);
+        /* Darwin puts anonymous args on the stack only for a real
+         * variadic callee.  An unprototyped call still uses registers. */
+        int call_real_variadic = callee_ty.kind == TY_FUNC
+            && callee_ty.func_is_variadic;
         int call_nparams = callee_ty.kind == TY_FUNC ? callee_ty.func_nparams : 0;
+        const char *callee_name = NULL;
+        if (e->u.call.callee && e->u.call.callee->kind == EX_VAR)
+            callee_name = e->u.call.callee->u.var.name;
+        int call_fake_variadic = prototype_less_builtin(callee_name);
         for (int i = 0; i < (int)e->u.call.args.len; i++) {
             Expr *arg = e->u.call.args.data[i];
             IRValue av = lower_expr(fn, st, arg);
             if (arg->type.kind == TY_STRUCT || arg->type.is_vector || type_is_pair16(arg->type)) {
-                SysVRegClass cls[2];
+                SysVRegClass cls[4];
                 int nreg;
                 int asz = type_size(arg->type);
+                /* An anonymous variadic argument has no register on Darwin:
+                 * every unnamed argument rides the vararg stack slots.
+                 * Classifying it as if it were named put a __m128 in an XMM
+                 * register the callee never reads, and va_arg then picked up
+                 * whatever happened to be on the stack -- which is why the
+                 * 16-byte vector case returned its low half and nothing
+                 * else.  Structs suffered the same way. */
+                if (darwin_unnamed_va(call_real_variadic, i, call_nparams,
+                                      call_fake_variadic)) {
+                    if (asz <= 0) {
+                        /* A zero-sized aggregate consumes no slot at all --
+                         * gcc agrees, and ir.c's va_arg already skips those,
+                         * so reserving one here would shift every argument
+                         * after it. */
+                        continue;
+                    }
+                    if (nargs >= arg_limit) {
+                        fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                                IR_CALL_MAX_ARGS);
+                        exit(1);
+                    }
+                    arg_vals[nargs] = av;
+                    arg_on_stack[nargs] = (unsigned char)
+                        (sysv_stack_arg_flags(1, arg->type) | CALL_ARG_AGG);
+                    arg_nbytes[nargs] = asz;
+                    nargs++;
+                    continue;
+                }
                 if (type_is_pair16(arg->type)) {
                     cls[0] = SYSV_CLS_INTEGER;
                     cls[1] = SYSV_CLS_INTEGER;
@@ -6944,6 +8039,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     asz = 16;
                 } else {
                     nreg = sysv_classify_agg(arg->type, cls);
+                    abi_adjust_cls(arg->type, cls, &nreg, 4, e->loc);
                 }
                 int is_memory = (nreg == 0);
                 /* SysV: unnamed __m256/__m512 to a variadic or unprototyped
@@ -6957,8 +8053,47 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     /* GNU empty structs occupy no argument slots. */
                     continue;
                 }
-                if (is_memory && sysv_memory_pass_as_pointer(arg->type)) {
-                    /* va_list: pass a pointer to a stack copy (array decay). */
+                if (darwin_unnamed_va(call_real_variadic, i, call_nparams, call_fake_variadic)) {
+                    /* Anonymous Darwin argument: 8-byte stack slots.  An
+                     * aggregate larger than 16 bytes is one pointer slot;
+                     * a smaller one is its eightbytes, in order. */
+                    if (is_memory || asz > 16) {
+                        int copy_sz = asz > 0 ? asz : 1;
+                        IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
+                        IRValue tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1,
+                                                      8, 1, e->loc);
+                        emit_struct_copy(fn, tmp_addr, av, asz > 0 ? asz : 1, e->loc);
+                        if (nargs >= arg_limit) {
+                            fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                                    IR_CALL_MAX_ARGS);
+                            exit(1);
+                        }
+                        arg_vals[nargs] = tmp_addr;
+                        arg_on_stack[nargs] = CALL_ARG_STACK;
+                        nargs++;
+                        continue;
+                    }
+                    SysVRegClass icls[2] = { SYSV_CLS_INTEGER, SYSV_CLS_INTEGER };
+                    IRValue *ebs = malloc((size_t)(nreg > 0 ? nreg : 1) * sizeof(IRValue));
+                    if (!ebs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                    load_agg_regs(fn, av, asz, nreg, icls, ebs, e->loc);
+                    for (int k = 0; k < nreg; k++) {
+                        if (nargs >= arg_limit) {
+                            fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
+                                    IR_CALL_MAX_ARGS);
+                            exit(1);
+                        }
+                        arg_vals[nargs] = ebs[k];
+                        arg_on_stack[nargs] = CALL_ARG_STACK;
+                        nargs++;
+                    }
+                    free(ebs);
+                    continue;
+                }
+                if (is_memory && (sysv_memory_pass_as_pointer(arg->type)
+                                  || abi_indirect_agg(arg->type))) {
+                    /* Pointer to a stack copy: SysV va_list, or a Darwin
+                     * aggregate larger than 16 bytes. */
                     int copy_sz = asz;
                     if (copy_sz < 1) copy_sz = 1;
                     IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
@@ -6971,8 +8106,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                         exit(1);
                     }
                     arg_vals[nargs] = tmp_addr;
-                    arg_on_stack[nargs] = 0;
-                    if (call_used_gp < 6) call_used_gp++;
+                    if (call_used_gp < abi_gp_nregs()) {
+                        arg_on_stack[nargs] = 0;
+                        call_used_gp++;
+                    } else if (!abi_sret_uses_gp()) {
+                        arg_on_stack[nargs] = CALL_ARG_STACK;
+                    } else {
+                        arg_on_stack[nargs] = 0;
+                    }
                     nargs++;
                     continue;
                 }
@@ -6996,16 +8137,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     if (cls[k] == SYSV_CLS_SSE) need_fp++;
                     else need_gp++;
                 }
-                int fits_in_regs = (call_used_gp + need_gp <= 6
+                int fits_in_regs = (call_used_gp + need_gp <= abi_gp_nregs()
                                     && call_used_xmm + need_fp <= 8);
                 if (fits_in_regs) {
                     call_used_gp += need_gp;
                     call_used_xmm += need_fp;
                 }
+                int hfa = abi_is_hfa(arg->type);
                 SysVRegClass *acls = malloc((size_t)nreg * sizeof(SysVRegClass));
                 IRValue *ebs = malloc((size_t)nreg * sizeof(IRValue));
                 if (!acls || !ebs) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
-                for (int k = 0; k < nreg; k++) acls[k] = cls[k];
+                /* HFA bits stay in the GP file; the call boundary moves
+                 * them into V registers.  Loading as INTEGER keeps mem2reg
+                 * and the GP allocator on the bit pattern. */
+                for (int k = 0; k < nreg; k++)
+                    acls[k] = hfa ? SYSV_CLS_INTEGER : cls[k];
                 load_agg_regs(fn, av, asz, nreg, acls, ebs, e->loc);
                 for (int k = 0; k < nreg; k++) {
                     if (nargs >= arg_limit) {
@@ -7014,10 +8160,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                         exit(1);
                     }
                     arg_vals[nargs] = ebs[k];
-                    arg_on_stack[nargs] = !fits_in_regs
-                        ? sysv_stack_arg_flags(1, arg->type) : 0;
-                    if (k != 0 && arg_on_stack[nargs])
-                        arg_on_stack[nargs] = CALL_ARG_STACK; /* only first eightbyte aligns */
+                    if (!fits_in_regs)
+                        arg_on_stack[nargs] = (k == 0)
+                            ? sysv_stack_arg_flags(1, arg->type) : CALL_ARG_STACK;
+                    else if (hfa)
+                        arg_on_stack[nargs] = CALL_ARG_HFA;
+                    else
+                        arg_on_stack[nargs] = 0;
                     nargs++;
                 }
                 free(acls);
@@ -7029,12 +8178,20 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                         IR_CALL_MAX_ARGS);
                 exit(1);
             }
+            if (darwin_unnamed_va(call_real_variadic, i, call_nparams, call_fake_variadic)) {
+                arg_vals[nargs] = va_float_bits(fn, av, e->loc);
+                arg_on_stack[nargs] = CALL_ARG_STACK;
+                nargs++;
+                continue;
+            }
             arg_vals[nargs] = av;
             arg_on_stack[nargs] = 0;
             if (get_value_is_float(fn, av)) {
                 if (call_used_xmm < 8) call_used_xmm++;
+                else if (!abi_sret_uses_gp())
+                    arg_on_stack[nargs] = CALL_ARG_STACK;
             } else {
-                if (call_used_gp < 6) call_used_gp++;
+                if (call_used_gp < abi_gp_nregs()) call_used_gp++;
             }
             nargs++;
         }
@@ -7044,9 +8201,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Struct return: MEMORY class uses hidden sret; register class
          * returns bits in RAX(/RDX) or XMM0(/XMM1). */
         int is_ret_struct = is_ret_struct_pre;
-        SysVRegClass ret_cls[2];
-        ret_cls[0] = ret_cls_pre[0];
-        ret_cls[1] = ret_cls_pre[1];
+        SysVRegClass ret_cls[4];
+        for (int k = 0; k < 4; k++) ret_cls[k] = ret_cls_pre[k];
         int ret_nreg = ret_nreg_pre;
         int ret_in_mem = ret_in_mem_pre;
         IRValue sret_addr = -1;
@@ -7079,16 +8235,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         } else {
             v = new_value(fn);
         }
-        IRValue ret_lo = -1, ret_hi = -1;
+        IRValue ret_lo = -1, ret_hi = -1, ret_c = -1, ret_d = -1;
         int is_cld_ret = type_is_complex_ldouble(e->type);
         int is_x87_ret = is_cld_ret || is_x87_st0;
         if (is_ret_struct && ret_nreg > 0 && !is_cld_ret) {
             ret_lo = new_value(fn);
             if (ret_nreg > 1) ret_hi = new_value(fn);
+            /* A three- or four-element HFA comes back in v0-v3. */
+            if (ret_nreg > 2) ret_c = new_value(fn);
+            if (ret_nreg > 3) ret_d = new_value(fn);
         }
         int total_nargs = nargs + (ret_in_mem ? 1 : 0);
         IRInst inst;
         memset(&inst, 0, sizeof(inst));
+        inst.c = -1;
+        inst.d = -1;
         inst.op = IR_CALL;
         inst.dst = ret_in_mem ? -1
                  : is_x87_ret ? -1
@@ -7096,8 +8257,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                  : (type_is_empty_struct(e->type) ? -1 : v);
         inst.a = is_x87_ret ? slot_addr : -1;
         inst.b = ret_hi;   /* second return eightbyte, or -1 */
+        inst.c = ret_c;    /* third, for a wide HFA result */
+        inst.d = ret_d;    /* fourth */
         inst.x87_pair = is_x87_ret;
         inst.imm = is_x87_st0 ? 16 : (is_cld_ret ? 32 : 0);
+        if (ret_in_mem && !abi_sret_uses_gp())
+            inst.align16 = A64_MARK_SRET;
         inst.loc = e->loc;
         inst.call_name = NULL;
         inst.call_callee = -1;
@@ -7109,7 +8274,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             /* `__syscall` is an intrinsic — treat it as a named call so codegen
              * emits the raw `syscall` instruction.  It is not in the function
              * table, so the direct-call lookup below would miss it. */
-            if (strcmp(cname, "__syscall") == 0 || strcmp(cname, "__clone") == 0) {
+            if (strcmp(cname, "__syscall") == 0 || strcmp(cname, "__clone") == 0
+                || strcmp(cname, "__paciasp") == 0 || strcmp(cname, "__pacia") == 0
+                || strcmp(cname, "__autda") == 0 || strcmp(cname, "__retab") == 0) {
                 inst.call_name = xstrdup(cname);
             } else if (strcmp(cname, "__builtin_ctzll") == 0) {
                 /* ctz intrinsic — codegen emits a `bsf` + fixup. */
@@ -7120,9 +8287,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     || strstr(cname, "__builtin_parity") || strstr(cname, "__builtin_clrsb")
                     || strstr(cname, "__builtin_bswap"))
                     inst.call_name = xstrdup(cname);
+                /* abort() must stay distinct from __builtin_trap(): libc abort
+                 * raises SIGABRT while the builtin traps with SIGTRAP, and a
+                 * caller can observe the difference in the wait status.
+                 * __builtin_abort keeps the library meaning, so fold it onto
+                 * `abort` and leave __builtin_trap under its own name. */
                 else if (strcmp(cname, "__builtin_abort") == 0) inst.call_name = xstrdup("abort");
                 else if (strcmp(cname, "__builtin_exit") == 0) inst.call_name = xstrdup("exit");
-                else if (strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("abort");
+                else if (strcmp(cname, "__builtin_trap") == 0) inst.call_name = xstrdup("__builtin_trap");
                 else if (strcmp(cname, "__builtin_memset") == 0) inst.call_name = xstrdup("memset");
                 else if (strcmp(cname, "__builtin_memcpy") == 0) inst.call_name = xstrdup("memcpy");
                 else if (strcmp(cname, "__builtin_bzero") == 0) inst.call_name = xstrdup("bzero");
@@ -7211,24 +8383,41 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return v;
         }
         if (is_ret_struct && ret_nreg > 0) {
-            /* Result eightbytes are INTEGER (RAX/RDX) or SSE (XMM0/XMM1).
-             * Mark float class on the SSA results so codegen picks XMM.
-             * A 16-byte SSE+SSEUP vector is one XMM (width 16, kind 4). */
-            int vecw = sysv_sse_vec_bytes(ret_nreg, type_size(e->type), ret_cls);
+            /* Result eightbytes are INTEGER (RAX/RDX or x0/x1) or SSE
+             * (XMM0/XMM1).  A Darwin HFA result is bits in v0/v1; the SSA
+             * values stay integer so the GP allocator owns them and the
+             * backend fmovs at the call boundary. */
+            int hfa_ret = abi_is_hfa(e->type);
+            SysVRegClass store_cls[4];
+            for (int k = 0; k < ret_nreg && k < 4; k++)
+                store_cls[k] = hfa_ret ? SYSV_CLS_INTEGER : ret_cls[k];
+            int vecw = sysv_sse_vec_bytes(ret_nreg, type_size(e->type), store_cls);
             inst.width = vecw ? vecw : 8;
-            inst.is_float = (ret_cls[0] == SYSV_CLS_SSE);
+            inst.is_float = !hfa_ret && (ret_cls[0] == SYSV_CLS_SSE);
+            if (hfa_ret) inst.align16 = A64_MARK_HFA;
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
             set_value_type(fn, ret_lo, vecw ? vecw : 8, vecw ? 0 : 1);
-            if (ret_cls[0] == SYSV_CLS_SSE)
+            if (!hfa_ret && ret_cls[0] == SYSV_CLS_SSE)
                 set_value_float(fn, ret_lo, vecw ? 4 : 1);
             if (ret_hi >= 0) {
                 set_value_type(fn, ret_hi, 8, 1);
-                if (ret_cls[1] == SYSV_CLS_SSE) set_value_float(fn, ret_hi, 1);
+                if (!hfa_ret && ret_cls[1] == SYSV_CLS_SSE)
+                    set_value_float(fn, ret_hi, 1);
             }
-            IRValue ebs[2] = { ret_lo, ret_hi };
+            if (ret_c >= 0) {
+                set_value_type(fn, ret_c, 8, 1);
+                if (!hfa_ret && ret_cls[2] == SYSV_CLS_SSE)
+                    set_value_float(fn, ret_c, 1);
+            }
+            if (ret_d >= 0) {
+                set_value_type(fn, ret_d, 8, 1);
+                if (!hfa_ret && ret_cls[3] == SYSV_CLS_SSE)
+                    set_value_float(fn, ret_d, 1);
+            }
+            IRValue ebs[4] = { ret_lo, ret_hi, ret_c, ret_d };
             store_agg_regs(fn, slot_addr, type_size(e->type), ret_nreg,
-                           ret_cls, ebs, e->loc);
+                           store_cls, ebs, e->loc);
             free(arg_vals);
             free(arg_on_stack);
             free(arg_nbytes);
@@ -8013,7 +9202,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return -1;
         }
         IRValue dst = new_value(fn);
-        emit_inst(fn, IR_LADDR, dst, -1, -1, lbl_id, e->loc);
+        /* A label address is a code pointer, not a 32-bit int.  Width 4
+         * makes the backend sign-extend it and drop the high half. */
+        emit_inst_w(fn, IR_LADDR, dst, -1, -1, lbl_id, 8, 1, e->loc);
         return dst;
     }
     default: break;   /* EX_INIT_LIST is lowered in ST_DECL, not here */
@@ -8479,6 +9670,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 if (s->u.decl.align > al) al = s->u.decl.align;
                 if (al > 0) sg->align = al;
             }
+            if (type_is_const_obj(dty)) sg->is_const_obj = 1;
             if (s->u.decl.init) {
                 pack_init(g_ir_module, &dty, s->u.decl.init, bytes, sz,
                           s->u.decl.name, s->loc, sg);
@@ -8672,12 +9864,25 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 } else if (fn->ret_reg_n > 0) {
                     IRValue z = new_value(fn);
                     emit_inst_w(fn, IR_CONST, z, -1, -1, 0, 8, 1, s->loc);
-                    IRValue hi = -1;
+                    IRValue hi = -1, third = -1, fourth = -1;
                     if (fn->ret_reg_n > 1) {
                         hi = new_value(fn);
                         emit_inst_w(fn, IR_CONST, hi, -1, -1, 0, 8, 1, s->loc);
                     }
+                    if (fn->ret_reg_n > 2) {
+                        third = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, third, -1, -1, 0, 8, 1, s->loc);
+                    }
+                    if (fn->ret_reg_n > 3) {
+                        fourth = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, fourth, -1, -1, 0, 8, 1, s->loc);
+                    }
                     emit_inst_w(fn, IR_RETURN, -1, z, hi, 0, 8, 1, s->loc);
+                    IRInst *ri = &fn->insts.data[fn->insts.len - 1];
+                    ri->c = third;
+                    ri->d = fourth;
+                    if (g_ir_cur_fd && abi_is_hfa(g_ir_cur_fd->ret_type))
+                        ri->align16 = A64_MARK_HFA;
                 } else {
                     emit_inst_w(fn, IR_RETURN, -1, fn->sret_value, -1, 0,
                                 8, 1, s->loc);
@@ -8700,17 +9905,32 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 fn->insts.data[fn->insts.len - 1].x87_pair = 1;
             } else if (fn->ret_reg_n > 0) {
                 /* SysV register return: load eightbytes into RAX(/RDX) or
-                 * XMM0(/XMM1).  IR_RETURN.a = lo, .b = hi (or -1). */
-                SysVRegClass cls[2];
-                cls[0] = (SysVRegClass)fn->ret_reg_cls[0];
-                cls[1] = (SysVRegClass)fn->ret_reg_cls[1];
-                IRValue ebs[2];
-                load_agg_regs(fn, v, fn->ret_width, fn->ret_reg_n, cls, ebs,
+                 * XMM0(/XMM1), and for a Darwin wide HFA into v0-v3.
+                 * IR_RETURN.a/.b are the first two eightbytes; .c/.d carry
+                 * the third and fourth. */
+                SysVRegClass cls[4];
+                for (int k = 0; k < 4; k++)
+                    cls[k] = (SysVRegClass)fn->ret_reg_cls[k];
+                IRValue ebs[4];
+                int hfa_ret = g_ir_cur_fd && abi_is_hfa(g_ir_cur_fd->ret_type);
+                SysVRegClass lcls[4];
+                for (int k = 0; k < 4; k++)
+                    lcls[k] = hfa_ret ? SYSV_CLS_INTEGER : cls[k];
+                load_agg_regs(fn, v, fn->ret_width, fn->ret_reg_n, lcls, ebs,
                               s->loc);
                 IRValue hi = (fn->ret_reg_n > 1) ? ebs[1] : -1;
+                IRValue third = (fn->ret_reg_n > 2) ? ebs[2] : -1;
+                IRValue fourth = (fn->ret_reg_n > 3) ? ebs[3] : -1;
                 emit_inst_w(fn, IR_RETURN, -1, ebs[0], hi, 0, 8, 1, s->loc);
-                if (cls[0] == SYSV_CLS_SSE)
-                    fn->insts.data[fn->insts.len - 1].is_float = 1;
+                IRInst *ri = &fn->insts.data[fn->insts.len - 1];
+                if (third >= 0 || fourth >= 0) {
+                    ri->c = third;
+                    ri->d = fourth;
+                }
+                if (hfa_ret)
+                    ri->align16 = A64_MARK_HFA;
+                else if (cls[0] == SYSV_CLS_SSE)
+                    ri->is_float = 1;
             } else {
                 /* MEMORY class: copy into hidden sret slot; return pointer. */
                 emit_struct_copy(fn, fn->sret_value, v, fn->ret_width, s->loc);
@@ -9874,6 +11094,29 @@ static int fold_global_ptrdiff(const Expr *e, long long *out) {
     return 1;
 }
 
+/* `&b - &a` for two different symbols.  The Mach-O linker writes
+ * address(pos) - address(neg) + addend.  Same-symbol diffs are constants. */
+static int split_global_ptrdiff(const Expr *e, const char **pos, const char **neg,
+                                int *addend) {
+    if (!e) return 0;
+    const Expr *ce = e;
+    while (ce && ce->kind == EX_CAST) ce = ce->u.cast.operand;
+    if (!ce || ce->kind != EX_BINOP || ce->u.bin.op != BOP_SUB) return 0;
+    const char *s1 = NULL, *s2 = NULL;
+    int o1 = 0, o2 = 0;
+    if (!eval_global_addr_offset(ce->u.bin.l, &s1, &o1)) return 0;
+    if (!eval_global_addr_offset(ce->u.bin.r, &s2, &o2)) return 0;
+    if (!s1 || !s2 || strcmp(s1, s2) == 0) return 0;
+    int esz = 1;
+    if (ce->u.bin.l->type.kind == TY_PTR && ce->u.bin.l->type.pointee)
+        esz = type_size(*ce->u.bin.l->type.pointee);
+    if (esz != 1) return 0;
+    *pos = s1;
+    *neg = s2;
+    *addend = o1 - o2;
+    return 1;
+}
+
 /* If `e` is an address-constant expression whose root object is a file-scope
  * compound literal (e.g. `&((T){...})`, `&((T){...}).m`, `&((int[]){})[i]`),
  * return that literal and set *out_off to the byte offset of the referenced
@@ -10213,7 +11456,18 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             }
         }
         /* Float slots must be packed as the target's binary format, not as the
-         * integer the literal would fold to. */
+         * integer the literal would fold to.  Signaling NaNs are copied as
+         * bits so a float payload is not rewritten by a wider cast. */
+        unsigned long long nlo = 0, nhi = 0;
+        if (nans_builtin_bits(e, (int)ty->width, &nlo, &nhi)) {
+            unsigned char raw[16];
+            int n = sz < 16 ? sz : 16;
+            memset(raw, 0, sizeof raw);
+            memcpy(raw, &nlo, 8);
+            memcpy(raw + 8, &nhi, 8);
+            memcpy(bytes, raw, (size_t)n);
+            return;
+        }
         long double fv;
         if (fold_const_float(e, &fv, ir)) {
             if (ty->width == 16) {
@@ -10405,6 +11659,15 @@ static void pack_init(const IRModule *ir, const Type *ty, const Expr *e,
             for (int b = 1; b < sz; b++) bytes[b] = 0;
             return;
         }
+    }
+    const char *dpos = NULL, *dneg = NULL;
+    int dadd = 0;
+    if (g && ty->kind == TY_INT && (ty->width == 8 || ty->width == 4)
+        && split_global_ptrdiff(e, &dpos, &dneg, &dadd)) {
+        add_global_fixup(g, (int)(bytes - g->init_bytes), dpos, dadd);
+        g->fixups[g->num_fixups - 1].sub = xstrdup(dneg);
+        memset(bytes, 0, sz);
+        return;
     }
     die_at(loc.file, loc.line, loc.col,
            "global '%s' initializer must be a compile-time constant", ctx);
@@ -10609,13 +11872,17 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         if (s->u.decl.alias_target) {
             ir_module_push_alias(ir, s->u.decl.name, s->u.decl.alias_target,
                                  s->u.decl.storage_class == 1, s->loc);
+            ir->aliases.data[ir->aliases.len - 1].is_weak = s->u.decl.is_weak;
             continue;
         }
         /* extern → declaration only: skip emission entirely.
          * `extern __thread T a;` declarations are caught here too: storage_class
          * is 2 (extern) and is_tls is 1, but we still skip because extern means
          * "defined elsewhere" — the linker resolves the symbol. */
-        if (s->u.decl.storage_class == 2) continue;
+        if (s->u.decl.storage_class == 2) {
+            if (s->u.decl.is_weak) ir_add_weak_ref(ir, s->u.decl.name);
+            continue;
+        }
         int is_tls = s->u.decl.is_tls;
         int sz = type_size(s->u.decl.type);
         if (s->u.decl.init && s->u.decl.type.kind == TY_STRUCT && s->u.decl.init->kind == EX_INIT_LIST && s->u.decl.type.tag) {
@@ -10661,6 +11928,10 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             if (s->u.decl.align > al) al = s->u.decl.align;
             if (al > 0) g->align = al;
         }
+        if (type_is_const_obj(s->u.decl.type)) g->is_const_obj = 1;
+        if (s->u.decl.is_weak && !is_static) g->is_weak = 1;
+        if (s->u.decl.is_hidden && !is_static) g->is_hidden = 1;
+        if (s->u.decl.is_used) g->is_used = 1;
         if (s->u.decl.init) {
             pack_init(ir, &s->u.decl.type, s->u.decl.init, bytes, sz,
                       s->u.decl.name, s->loc, g);
@@ -10673,11 +11944,15 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         if (fd->alias_target) {
             ir_module_push_alias(ir, fd->name, fd->alias_target,
                                  fd->is_static, fd->loc);
+            ir->aliases.data[ir->aliases.len - 1].is_weak = fd->is_weak;
             continue;
         }
 
         /* `extern` declarations have no body — no IR is generated for them. */
-        if (fd->is_extern) continue;
+        if (fd->is_extern) {
+            if (fd->is_weak) ir_add_weak_ref(ir, fd->name);
+            continue;
+        }
 
         IRFunction irfn;
         memset(&irfn, 0, sizeof(irfn));
@@ -10704,23 +11979,28 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.ret_x87_bytes = 0;
         irfn.is_variadic = fd->is_variadic;
         irfn.is_static = fd->is_static;
+        irfn.is_weak = fd->is_weak;
+        irfn.is_hidden = fd->is_hidden;
+        irfn.is_used = fd->is_used;
         irfn.is_constructor = fd->is_constructor;
         irfn.is_destructor = fd->is_destructor;
         irfn.ctor_prio = fd->ctor_prio ? fd->ctor_prio : 65535;
         irfn.dtor_prio = fd->dtor_prio ? fd->dtor_prio : 65535;
         irfn.sret_value = -1;
         irfn.ret_reg_n = 0;
-        irfn.ret_reg_cls[0] = 0;
-        irfn.ret_reg_cls[1] = 0;
+        for (int k = 0; k < 4; k++) irfn.ret_reg_cls[k] = 0;
         if (type_is_pair16(fd->ret_type)) {
             irfn.ret_reg_n = 2;
             irfn.ret_reg_cls[0] = (int)SYSV_CLS_INTEGER;
             irfn.ret_reg_cls[1] = (int)SYSV_CLS_INTEGER;
             irfn.ret_width = 16;
         } else if (irfn.ret_is_struct) {
-            SysVRegClass rcls[2];
+            SysVRegClass rcls[4] = {0};
+            /* Capacity 4: a three- or four-element HFA is returned in
+             * v0-v3, exactly as it is passed. */
             irfn.ret_reg_n = sysv_classify_agg(fd->ret_type, rcls);
-            for (int i = 0; i < irfn.ret_reg_n; i++)
+            abi_adjust_cls(fd->ret_type, rcls, &irfn.ret_reg_n, 4, fd->loc);
+            for (int i = 0; i < irfn.ret_reg_n && i < 4; i++)
                 irfn.ret_reg_cls[i] = (int)rcls[i];
             /* Struct size for copy/load lives in ret_width. */
             irfn.ret_width = type_size(fd->ret_type);
@@ -10767,7 +12047,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             emit_inst_w(&irfn, IR_PARAM, irfn.sret_value, -1, -1, next_pidx++,
                         8, 1, fd->loc);
         }
-        int used_gp = (irfn.sret_value >= 0) ? 1 : 0;
+        int used_gp = (irfn.sret_value >= 0 && abi_sret_uses_gp()) ? 1 : 0;
         int used_xmm = 0;
         for (size_t p = 0; p < fd->params.len; p++) {
             Type pty = fd->params.data[p].type;
@@ -10778,7 +12058,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 continue;
             }
             if (pty.kind == TY_STRUCT || pty.is_vector || type_is_pair16(pty)) {
-                SysVRegClass cls[2];
+                SysVRegClass cls[4];
                 int nreg;
                 if (type_is_pair16(pty)) {
                     cls[0] = SYSV_CLS_INTEGER;
@@ -10786,16 +12066,20 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     nreg = 2;
                 } else {
                     nreg = sysv_classify_agg(pty, cls);
+                    abi_adjust_cls(pty, cls, &nreg, 4, ploc);
                 }
                 int is_memory = (nreg == 0);
-                if (is_memory && sysv_memory_pass_as_pointer(pty)) {
+                if (is_memory && (sysv_memory_pass_as_pointer(pty)
+                                  || abi_indirect_agg(pty))) {
                     param_nreg[p] = -1;
                     param_ebs[p] = malloc(sizeof(IRValue));
                     if (!param_ebs[p]) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                     param_ebs[p][0] = new_value(&irfn);
                     emit_inst_w(&irfn, IR_PARAM, param_ebs[p][0], -1, -1,
                                 next_pidx++, 8, 1, ploc);
-                    if (used_gp < 6) used_gp++;
+                    if (used_gp < abi_gp_nregs()) used_gp++;
+                    else if (!abi_sret_uses_gp())
+                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
                 } else if (is_memory) {
                     /* Incoming stack blob: PARAM dst is LEA [rbp+off]. */
                     int total = type_size(pty);
@@ -10821,7 +12105,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 /* SysV: an aggregate is passed entirely in registers or
                  * entirely on the stack.  Register-class that do not fit
                  * go on the stack as eightbytes. */
-                int fits = (used_gp + need_gp <= 6 && used_xmm + need_fp <= 8);
+                int hfa = abi_is_hfa(pty);
+                int fits = (used_gp + need_gp <= abi_gp_nregs()
+                            && used_xmm + need_fp <= 8);
                 if (fits) {
                     used_gp += need_gp;
                     used_xmm += need_fp;
@@ -10834,7 +12120,16 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     int is_sse = (cls[k] == SYSV_CLS_SSE);
                     int pw = 8;
                     if (is_sse && nreg == 1) {
+                        /* An HFA eightbyte carries one element, not the
+                         * whole aggregate: sizing it from type_size()
+                         * charged aligned(16) padding to the parameter, and
+                         * the backend then moved the incoming V register
+                         * into a GP one 32 bits at a time. */
                         int sz = type_size(pty);
+                        if (hfa) {
+                            int ew = abi_hfa_elem_size(pty);
+                            if (ew > 0) sz = ew;
+                        }
                         if (sz == 8 || sz == 16 || sz == 32 || sz == 64)
                             pw = sz;
                     }
@@ -10846,9 +12141,11 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                         int al = type_stack_align(pty);
                         if (al) irfn.insts.data[irfn.insts.len - 1].align16 = al;
                     }
-                    if (is_sse)
+                    if (is_sse && !hfa)
                         set_value_float(&irfn, param_ebs[p][k],
                                         (pw == 16 || pw == 32 || pw == 64) ? 4 : 1);
+                    if (hfa && fits)
+                        irfn.insts.data[irfn.insts.len - 1].is_float = 1;
                 }
                 }
             } else {
@@ -10864,8 +12161,10 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                     set_value_float(&irfn, param_ebs[p][0], pty.is_decimal ? 2 : 1);
                     /* long double is stack-only (codegen keys off value_is_ld). */
                     if (pty.width != 16 && used_xmm < 8) used_xmm++;
+                    else if (pty.width != 16 && !abi_sret_uses_gp())
+                        irfn.insts.data[irfn.insts.len - 1].force_stack = 1;
                 } else {
-                    if (used_gp < 6) used_gp++;
+                    if (used_gp < abi_gp_nregs()) used_gp++;
                 }
             }
         }
@@ -11020,6 +12319,8 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             init_inst.dst = -1;
             init_inst.a = -1;
             init_inst.b = -1;
+            init_inst.c = -1;
+            init_inst.d = -1;
             init_inst.imm = 0;
             init_inst.loc = fd->loc;
             init_inst.call_name = xstrdup("__asan_init");
@@ -11066,12 +12367,29 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             } else if (irfn.ret_is_struct && irfn.ret_reg_n > 0) {
                 IRValue z0 = new_value(&irfn);
                 emit_inst_w(&irfn, IR_CONST, z0, -1, -1, 0, 8, 1, fd->loc);
-                IRValue z1 = -1;
+                IRValue z1 = -1, z2 = -1, z3 = -1;
                 if (irfn.ret_reg_n > 1) {
                     z1 = new_value(&irfn);
                     emit_inst_w(&irfn, IR_CONST, z1, -1, -1, 0, 8, 1, fd->loc);
                 }
+                if (irfn.ret_reg_n > 2) {
+                    z2 = new_value(&irfn);
+                    emit_inst_w(&irfn, IR_CONST, z2, -1, -1, 0, 8, 1, fd->loc);
+                }
+                if (irfn.ret_reg_n > 3) {
+                    z3 = new_value(&irfn);
+                    emit_inst_w(&irfn, IR_CONST, z3, -1, -1, 0, 8, 1, fd->loc);
+                }
                 emit_inst_w(&irfn, IR_RETURN, -1, z0, z1, 0, 8, 1, fd->loc);
+                IRInst *ri = &irfn.insts.data[irfn.insts.len - 1];
+                if (z2 >= 0 || z3 >= 0) {
+                    ri->c = z2;
+                    ri->d = z3;
+                }
+                /* An HFA must leave through v0-v3; the generic pair path
+                 * would only move a/b through x0/x1. */
+                if (abi_is_hfa(fd->ret_type))
+                    ri->align16 = A64_MARK_HFA;
             } else {
                 IRValue zero = new_value(&irfn);
                 int rw = fd->ret_type.width ? fd->ret_type.width : 4;
