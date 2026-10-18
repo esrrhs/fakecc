@@ -3410,7 +3410,8 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
          * text, so they have to be rebased by where that text landed in the
          * linked image, exactly the way the ELF linker does it. */
         MachoDebug dbg;
-        int have_dbg = 0;
+        memset(&dbg, 0, sizeof(dbg));
+        int have_dbg = 0, built_dbg = 0;
         for (size_t i = 0; i < n && !have_dbg; i++)
             have_dbg = macho_module_has_debug(mods[i]);
         if (rc == 0 && have_dbg) {
@@ -3478,12 +3479,13 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
             macho_debug_build(&dm, MACHO_BASE_VA + macho_text_offset(),
                               sec_vaddr, &dbg);
             emit_module_free(&dm);
+            built_dbg = 1;
         }
         if (rc == 0)
             rc = macho_write_exec(&out, macho_text_offset(), path,
                                   skip_libsystem,
-                                  have_dbg ? &dbg : NULL);
-        if (have_dbg) macho_debug_free(&dbg);
+                                  built_dbg ? &dbg : NULL);
+        if (built_dbg) macho_debug_free(&dbg);
     }
 
     for (size_t i = 0; i < n; i++) free(adj[i]);

@@ -7,9 +7,10 @@
 /* Every platform-specific decision in the compiler (instruction set,  */
 /* syscall ABI, object file format, native vector width) hangs off a    */
 /* single TargetDesc, selected once per invocation.  Neutral layers     */
-/* (lexer/parser/sema/IR/optimizers) never inspect it; only the backend */
-/* boundary (codegen / object emit / link / platform runtime headers)  */
-/* dispatches on it.                                                    */
+/* consult it only through high-level ABI queries in AST/IR lowering    */
+/* (e.g. register counts, HFA classification, long double width); the   */
+/* backend boundary (codegen / object emit / link / platform runtime)   */
+/* dispatches on the rest.                                              */
 /* ------------------------------------------------------------------ */
 
 /* Instruction-set architecture of the code generator backend. */

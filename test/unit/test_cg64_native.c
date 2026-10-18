@@ -679,6 +679,17 @@ static void test_float(void) {
         "package main;\n"
         "double add(double a, double b){ return a+b; }\n"
         "int main(){ return (int)add(1.25, 2.75); }", 4);
+    expect("fparam_many",
+        "package main;\n"
+        "double sum17(double a1, double a2, double a3, double a4, double a5, double a6, double a7, double a8,\n"
+        "             double a9, double a10, double a11, double a12, double a13, double a14, double a15, double a16,\n"
+        "             double a17) {\n"
+        "  return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16 + a17;\n"
+        "}\n"
+        "int main(void) {\n"
+        "  double s = sum17(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17);\n"
+        "  return (int)s == 153 ? 7 : 0;\n"
+        "}", 7);
     expect("fneg",
         "package main;\n"
         "int main(){ double a=2.5; return (int)(-a + 5.0); }", 2);

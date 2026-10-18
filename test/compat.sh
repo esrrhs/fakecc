@@ -202,7 +202,7 @@ macho_has_section() {
 macho_section_align_log() {
     local bin="$1" name="$2"
     macho_section_dump "$bin" | awk -v n="$name" \
-        '{ split($1, p, ","); if (p[2] == n) { print $4; exit } }'
+        '{ split($1, p, ","); if (p[2] == n) { print $3; exit } }'
 }
 
 # List ARM64 relocation records as "section-index type symbolnum", one per line.

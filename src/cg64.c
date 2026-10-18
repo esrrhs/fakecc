@@ -4813,7 +4813,7 @@ static void emit_function(C64 *c, int fi) {
                     int is_blob; } PMove;
     PMove *mv = xmalloc((size_t)(nparams > 0 ? nparams : 1) * sizeof(PMove));
     typedef struct { int src; int dst; int spill; int isd; int stack; int done; } FIn;
-    FIn fin[16];
+    FIn *fin = xmalloc((size_t)(nparams > 0 ? nparams : 1) * sizeof(FIn));
     int nfin = 0;
     int gp_idx = 0, fp_idx = 0, stack_arg_idx = 0;
     for (int p = 0; p < nparams; p++) {
@@ -4861,9 +4861,9 @@ static void emit_function(C64 *c, int fi) {
             }
             mv[p].done = 1;
             mv[p].src_reg = -1;
-            mv[p].src_vec = -1;
+            mv[p].src_vec = from_stack ? -1 : srcv;
             mv[p].dst_reg = -1;
-            mv[p].src_mem = -1;
+            mv[p].src_mem = from_stack ? srcv : -1;
             if (param_is_used(fn, s->dst)) {
                 int dh = fp_home(c, s->dst);
                 fin[nfin].src = srcv;
@@ -4882,9 +4882,9 @@ static void emit_function(C64 *c, int fi) {
             int srcv = from_stack ? save_total + 8 * stack_arg_idx++ : fp_idx++;
             mv[p].done = 1;
             mv[p].src_reg = -1;
-            mv[p].src_vec = -1;
+            mv[p].src_vec = from_stack ? -1 : srcv;
             mv[p].dst_reg = -1;
-            mv[p].src_mem = -1;
+            mv[p].src_mem = from_stack ? srcv : -1;
             if (param_is_used(fn, s->dst)) {
                 int dh = fp_home(c, s->dst);
                 fin[nfin].src = srcv;
@@ -5117,6 +5117,7 @@ static void emit_function(C64 *c, int fi) {
         }
     }
     free(mv);
+    free(fin);
 #undef PM_EMIT
     c->vararg_off = save_total + 8 * stack_arg_idx;
 
