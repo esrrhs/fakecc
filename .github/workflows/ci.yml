@@ -197,7 +197,10 @@ jobs:
           xcrun llvm-cov export ./fakecc -instr-profile=coverage.profdata \
               --format=lcov > coverage.info
           ls -l coverage.info
-          xcrun llvm-cov report ./fakecc -instr-profile=coverage.profdata | tail -20
+          # Full table, not a tail: the interesting rows here are the arm64
+          # ones (cg64/a64/macho are the reason this leg exists) and they sit
+          # in the middle, so `tail` used to cut them out of the log.
+          xcrun llvm-cov report ./fakecc -instr-profile=coverage.profdata
           # Nothing downstream reads the raw counters, and the pool is a few MB.
           rm -rf prof profraw.txt
 

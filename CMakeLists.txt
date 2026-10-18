@@ -19,12 +19,11 @@ if(APPLE)
     add_compile_options(-Wno-deprecated-declarations)
 endif()
 
-option(ENABLE_ASAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-if(ENABLE_ASAN)
-    add_compile_options(-fsanitize=address,undefined -g)
-    add_link_options(-fsanitize=address,undefined)
-endif()
-
+# Sanitizers are selected with CMAKE_C_FLAGS (see the ASan legs in
+# .github/workflows/ci.yml), which reaches the link line too.  There used to be
+# an ENABLE_ASAN option for the same thing; nothing referenced it, and a second
+# switch for one setting is worse than none -- it reads as the canonical way in
+# when it is not wired to anything.
 option(USE_COV "use cov" OFF)
 if(USE_COV)
     message("build with cov")

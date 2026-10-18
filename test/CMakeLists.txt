@@ -126,6 +126,23 @@ endforeach()
 # -O1 promotes them to SSA, so the two take substantially different paths
 # through mem2reg, the register allocator and the debug-info emitter; passing
 # under one says little about the other.
+# The backend this host cannot execute.  fakecc emits either object format from
+# either host, but only one of them can be *run* here, so the cross-target
+# suite is compile-only by necessity -- which is exactly why the compile-only
+# corpus is the right one for it.
+#
+# This is not redundant with the host run, it is the other half of it.  Measured
+# on arm64, --target=x86_64-linux takes src/codegen.c from 0.10% to 70% line
+# coverage while cg64/a64/macho fall to zero -- the precise mirror of the host
+# run.  A single platform can therefore never see both backends' real numbers,
+# and a codegen bug in the non-host backend used to have no automated coverage
+# at all (the only check was hand-running objdump on one binary).
+if(APPLE)
+    set(CROSS_TARGET "x86_64-linux")
+else()
+    set(CROSS_TARGET "arm64-macos")
+endif()
+
 foreach(lvl O0 O1)
     add_test(NAME e2e_${lvl}
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/e2e/run_e2e.sh $<TARGET_FILE:fakecc> -${lvl}
@@ -160,7 +177,22 @@ foreach(lvl O0 O1)
     add_test(NAME compile_${lvl}
              COMMAND bash ${CMAKE_SOURCE_DIR}/test/compile/gcc_compile/run_compile.sh $<TARGET_FILE:fakecc> -${lvl}
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # Same corpus, opposite backend.  Compile-only, so it is immune to the one
+    # thing that makes cross-compiled output untestable: you cannot execute it
+    # here.  ~26 s for 1658 cases.
+    add_test(NAME compile_cross_${lvl}
+             COMMAND bash ${CMAKE_SOURCE_DIR}/test/compile/gcc_compile/run_compile.sh $<TARGET_FILE:fakecc> --target=${CROSS_TARGET} -${lvl}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endforeach()
+
+# Install layout.  Every test above drives fakecc out of the build tree, where
+# the runtime package sits next to the sources; an installed compiler reaches
+# it through a different branch of the search entirely.  Nothing else here can
+# notice when that breaks, so install into a scratch prefix and use the result.
+add_test(NAME install_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/test/install_smoke.sh ${CMAKE_BINARY_DIR}
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # DWARF against a real gdb.  Runs both -O0 and -O1 internally, since the
 # expected answers differ between them.  Skipped gracefully if gdb is absent.
