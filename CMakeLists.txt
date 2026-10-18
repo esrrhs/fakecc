@@ -28,8 +28,21 @@ endif()
 option(USE_COV "use cov" OFF)
 if(USE_COV)
     message("build with cov")
-    add_compile_options(-fprofile-arcs -ftest-coverage -O0)
-    add_link_options(-fprofile-arcs -ftest-coverage)
+    # Two flavours of instrumentation, one per compiler, because the two
+    # platforms have opposite halves of the toolchain: Linux has gcov and lcov
+    # but builds fakecc with gcc, while macOS has clang (and a matching
+    # llvm-profdata/llvm-cov in the Command Line Tools) and no lcov at all.
+    #
+    # The point of the macOS leg is coverage the Linux leg structurally cannot
+    # produce: cg64.c, a64.c and macho.c only execute when the compiler is
+    # running on arm64, so on Linux they are permanently 0%.
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+        add_compile_options(-fprofile-instr-generate -fcoverage-mapping -O0)
+        add_link_options(-fprofile-instr-generate)
+    else()
+        add_compile_options(-fprofile-arcs -ftest-coverage -O0)
+        add_link_options(-fprofile-arcs -ftest-coverage)
+    endif()
 endif()
 
 add_library(fakecc_core
@@ -76,7 +89,13 @@ set_target_properties(fakecc_core PROPERTIES
 
 target_link_libraries(fakecc_core PUBLIC m)
 if(USE_COV)
-    target_link_libraries(fakecc_core PUBLIC gcov)
+    # Same split as the flags above: gcc's gcov-format instrumentation needs an
+    # explicit -lgcov, while clang's -fprofile-instr-generate already pulls in
+    # its own profiler runtime.  Linking gcov under clang fails outright --
+    # there is no libgcov on macOS -- so it has to be conditional, not assumed.
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_link_libraries(fakecc_core PUBLIC gcov)
+    endif()
 endif()
 
 add_executable(fakecc src/main.c)

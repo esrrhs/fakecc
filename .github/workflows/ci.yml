@@ -53,6 +53,7 @@ jobs:
             cxx: g++
             cflags: ""
             cov: true
+            cov_flag: linux
           - label: macos-latest · clang (arm64)
             os: macos-latest
             cc: clang
@@ -75,6 +76,20 @@ jobs:
             cc: clang
             cxx: clang++
             cflags: "-fsanitize=address,undefined -g"
+          # Coverage on arm64 is not a duplicate of the Linux leg -- it is the
+          # other half of it.  The two backends are mutually exclusive at
+          # runtime: src/cg64.c, src/a64.c and src/macho.c only execute when
+          # fakecc itself is running on arm64, and src/codegen.c (x86-64) only
+          # on Linux.  Measured on arm64: cg64 42%, macho 52%, a64 71%, and
+          # codegen 0.10% -- so either leg alone reports its counterpart as
+          # entirely dead code.  Codecov merges the two flags.
+          - label: macos-latest · clang coverage (arm64)
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+            cflags: ""
+            cov: true
+            cov_flag: macos
 
     steps:
       - uses: actions/checkout@v4
@@ -105,8 +120,11 @@ jobs:
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
 
+      # lcov is what the Linux leg turns .gcda into Codecov's lcov format.  The
+      # macOS leg does not use it: there is no gcov-format runtime for clang on
+      # macOS, and lcov itself wants a perl toolchain the runner does not have.
       - name: Setup lcov
-        if: matrix.config.cov
+        if: matrix.config.cov && runner.os == 'Linux'
         run: |
           wget https://github.com/linux-test-project/lcov/releases/download/v2.0/lcov-2.0.tar.gz
           tar -xf lcov-2.0.tar.gz
@@ -134,11 +152,20 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Test
+        env:
+          # clang's instrumented processes all default to ./default.profraw, so
+          # the ~15k fakecc invocations in a full ctest would each clobber the
+          # last one's counters.  %m is the merge-pool pattern: every process
+          # folds its counters into one shared file as it exits.  300 compiles
+          # produced a single 277 KB pool instead of 300 files totalling 83 MB.
+          # (Inert on the Linux leg, which uses gcov's .gcda instead.)
+          LLVM_PROFILE_FILE: ${{ github.workspace }}/build/prof/pool-%m.profraw
         run: |
+          mkdir -p build/prof
           ctest --test-dir build --output-on-failure
 
-      - name: Coverage report
-        if: matrix.config.cov
+      - name: Coverage report (lcov)
+        if: matrix.config.cov && runner.os == 'Linux'
         run: |
           set -x
           cd build
@@ -146,12 +173,44 @@ jobs:
           ls -l coverage.info
           lcov --list coverage.info
 
+      # Same destination format as the Linux leg, different road.  The Command
+      # Line Tools ship llvm-profdata and llvm-cov at the same version as their
+      # clang, so the counters clang's own instrumentation collected come back
+      # out as lcov.  Refuse to go quietly if the tools are not there: a
+      # coverage leg that produced no report must not report success.
+      - name: Coverage report (llvm-cov)
+        if: matrix.config.cov && runner.os == 'macOS'
+        run: |
+          set -x
+          cd build
+          if ! xcrun --find llvm-profdata >/dev/null 2>&1 ||
+             ! xcrun --find llvm-cov >/dev/null 2>&1; then
+            echo "::error::llvm-profdata/llvm-cov missing; cannot build a coverage report"
+            exit 1
+          fi
+          find prof -name '*.profraw' > profraw.txt
+          wc -l < profraw.txt
+          # -input-files keeps the merge to a single invocation.  xargs would
+          # batch the list, and each batch overwrites the previous one's output.
+          xcrun llvm-profdata merge -sparse -input-files=profraw.txt \
+              -o coverage.profdata
+          xcrun llvm-cov export ./fakecc -instr-profile=coverage.profdata \
+              --format=lcov > coverage.info
+          ls -l coverage.info
+          xcrun llvm-cov report ./fakecc -instr-profile=coverage.profdata | tail -20
+          # Nothing downstream reads the raw counters, and the pool is a few MB.
+          rm -rf prof profraw.txt
+
+      # Both legs upload, so Codecov sees the ELF backend's coverage and the
+      # Mach-O one's under separate flags -- without that split, one leg's
+      # zeros would drag the other's real numbers down.
       - name: Upload coverage reports to Codecov
         if: matrix.config.cov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: build/coverage.info
+          flags: ${{ matrix.config.cov_flag }}
           fail_ci_if_error: true
 
   # Differential fuzzing: random C programs, gcc is the oracle.  Programs in
