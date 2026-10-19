@@ -77,18 +77,22 @@ difftest_one() {
     # not by sed: `\b` is a GNU extension, so on BSD sed (macOS) the sed pass
     # silently left every qualified call in place and gcc then rejected the
     # translation unit with "'runtime' undeclared".
+    # Prefer a header-free translation: torture ports ship their own libc
+    # prototypes (`fprintf(void*, ...)`, `isprint`) which clash with glibc
+    # headers and used to fail the gcc translation.  gcc still needs
+    # <stdarg.h> for va_arg; drop fakecc's in-source SysV va_list typedef so
+    # gcc sees its own va_list (otherwise the stdio.h fallback fights
+    # fprintf).
+    #
+    # One process, not two: `python3` start-up is ~165 ms here and this runs
+    # once per case, so the pair used to cost more wall clock than the
+    # compiles.  Writes $name.body.c and $name.prep.c.
     sed -E \
         -e 's/^package[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
         -e 's/^import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*;//' \
         "$src" \
-        | python3 "$TOOLS_DIR/strip_pkg_qualifier.py" > "$WORK/$name.body.c"
-
-    # Prefer a header-free translation: torture ports ship their own libc
-    # prototypes (`fprintf(void*, ...)`, `isprint`) which clash with glibc
-    # headers and used to fail the gcc translation.  gcc still needs <stdarg.h>
-    # for va_arg; drop fakecc's in-source SysV va_list typedef so gcc sees
-    # its own va_list (otherwise the stdio.h fallback fights fprintf).
-    python3 "$TOOLS_DIR/gcc_stdarg_prep.py" < "$WORK/$name.body.c" > "$WORK/$name.prep.c"
+        | python3 "$TOOLS_DIR/gcc_prep.py" \
+              "$WORK/$name.body.c" "$WORK/$name.prep.c"
     {
         echo '#define _GNU_SOURCE 1'
         # fakecc lexer folds these to (-MAX-1); gcc does not predefine them

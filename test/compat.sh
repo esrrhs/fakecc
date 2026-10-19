@@ -20,7 +20,10 @@ nproc() {
     # a PATH lookup, and what it returns has to be invoked *through that path*
     # -- naming the tool again lands back here.
     local real
-    real=$(type -P nproc 2>/dev/null) || real=""
+    real=$(type -P gnproc 2>/dev/null) || real=""
+    if [ -z "$real" ]; then
+        real=$(type -P nproc 2>/dev/null) || real=""
+    fi
     if [ -n "$real" ]; then
         "$real"
         return
@@ -48,11 +51,22 @@ nproc() {
 timeout() {
     # Same trap as nproc(): naming `timeout` here would reach this function, so
     # the real binary has to be invoked through the path `type -P` reports.
-    # It matters for more than cosmetics -- the polling fallback below costs a
-    # whole second per call, which on a Linux host turns a 16-second compile
-    # suite into one that takes ten minutes.
+    # It matters for more than cosmetics -- the polling fallback below has a
+    # granularity of one poll interval, so a command that finishes in 5 ms
+    # still costs the whole interval.  Measured at 109 ms per call with a 0.1 s
+    # interval, and the suites call this twice per case (compile, then run):
+    # ~590 s of pure sleeping across a 2.7k-case e2e leg before it is divided
+    # by the job count.
+    #
+    # `gtimeout` first: Homebrew's coreutils installs the GNU tools under a `g`
+    # prefix directly in /opt/homebrew/bin, while the unprefixed names live in
+    # libexec/gnubin, which is deliberately not put on PATH (it would shadow
+    # BSD sed/date/stat for every script in the repo).
     local real
-    real=$(type -P timeout 2>/dev/null) || real=""
+    real=$(type -P gtimeout 2>/dev/null) || real=""
+    if [ -z "$real" ]; then
+        real=$(type -P timeout 2>/dev/null) || real=""
+    fi
     if [ -n "$real" ]; then
         "$real" "$@"
         return $?
