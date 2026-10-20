@@ -33,12 +33,13 @@ jobs:
             cxx: g++
             cflags: "-O2"
           # ASan/UBSan legs are the slowest in the matrix (the instrumented
-          # fakecc is ~2.7x slower, and they run the full ctest).  `ctest_args`
-          # below drops difftest_O1 from them: what ASan is hunting is memory
-          # errors in fakecc, and difftest feeds fakecc a strict subset of the
-          # e2e corpus (see the coverage leg's note), so the second
-          # optimization level buys no new fakecc paths.  The oracle
-          # comparison still runs at both levels in bootstrap-suite{, -macos}.
+          # fakecc is ~2.7x slower).  `ctest_args` below drops difftest_O1
+          # from both of them: what ASan is hunting is memory errors in
+          # fakecc, and difftest feeds fakecc a strict subset of the e2e
+          # corpus (see the coverage leg's note), so the second optimization
+          # level buys no new fakecc paths.  difftest_O0 stays.  The -O1
+          # oracle comparison still runs on the six plain legs and in
+          # bootstrap-suite{, -macos}.
           - label: ubuntu-latest · gcc ASan
             os: ubuntu-latest
             cc: gcc
@@ -73,9 +74,9 @@ jobs:
             cc: clang
             cxx: clang++
             cflags: "-O2"
-          # arm64 under ASan/UBSan, matching what the Linux side has had all
-          # along, and running the same full ctest they do.  It earns its
-          # keep: UBSan found a shift-by-64 in the arm64 immediate encoder
+          # arm64 under ASan/UBSan, matching what the Linux ASan leg runs
+          # (same `-E difftest_O1`).  It earns its keep: UBSan found a
+          # shift-by-64 in the arm64 immediate encoder
           # (a64.c) on the very first run.  It used to run only a subset
           # because a plain macOS ctest took ~2.9 h, which ASan multiplied
           # past the 6 h cap -- but nearly all of that wall clock turned out
@@ -101,8 +102,9 @@ jobs:
           # so e2e's `head -1` and difftest's concatenation agree).  Its extra
           # work is the *oracle* compile and the output comparison, which
           # exercises gcc, not fakecc -- so it adds no fakecc lines while
-          # costing ~56% of this leg's wall clock.  Correctness coverage of
-          # difftest is unaffected: every other leg still runs both levels.
+          # costing ~56% of this leg's wall clock.  Both difftest levels still
+          # run on the six plain legs and in bootstrap-suite{, -macos}.  The
+          # ASan legs keep difftest_O0 and drop only difftest_O1.
           - label: macos-latest · clang coverage (arm64)
             os: macos-latest
             cc: clang
@@ -160,9 +162,13 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: 1
           HOMEBREW_NO_INSTALL_CLEANUP: 1
         run: |
-          # One retry: a cold or rate-limited tap makes `brew install` flaky,
-          # and losing this step costs minutes rather than correctness.
-          brew install coreutils || brew install coreutils
+          # One retry.  A cold or rate-limited tap makes `brew install` flaky,
+          # and losing GNU timeout costs minutes, not correctness.  The `if`
+          # matters: this step's shell is `bash -e`, so a bare `brew || brew`
+          # exits before the warning when both attempts fail.
+          if ! brew install coreutils && ! brew install coreutils; then
+            echo "::warning::coreutils install failed; suites fall back to the polling timeout"
+          fi
           # Warn, do not fail: the suites have a working (slow) fallback, and a
           # Homebrew outage should not turn into a red build.
           if ! command -v gtimeout >/dev/null 2>&1; then
