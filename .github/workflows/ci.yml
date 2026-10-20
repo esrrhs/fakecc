@@ -32,11 +32,20 @@ jobs:
             cc: gcc
             cxx: g++
             cflags: "-O2"
+          # ASan/UBSan legs are the slowest in the matrix (the instrumented
+          # fakecc is ~2.7x slower).  `ctest_args` below drops difftest_O1
+          # from both of them: what ASan is hunting is memory errors in
+          # fakecc, and difftest feeds fakecc a strict subset of the e2e
+          # corpus (see the coverage leg's note), so the second optimization
+          # level buys no new fakecc paths.  difftest_O0 stays.  The -O1
+          # oracle comparison still runs on the six plain legs and in
+          # bootstrap-suite{, -macos}.
           - label: ubuntu-latest · gcc ASan
             os: ubuntu-latest
             cc: gcc
             cxx: g++
             cflags: "-fsanitize=address,undefined -g"
+            ctest_args: "-E difftest_O1"
           - label: ubuntu-24.04 · clang
             os: ubuntu-24.04
             cc: clang
@@ -54,6 +63,7 @@ jobs:
             cflags: ""
             cov: true
             cov_flag: linux
+            ctest_args: "-E difftest"
           - label: macos-latest · clang (arm64)
             os: macos-latest
             cc: clang
@@ -64,9 +74,9 @@ jobs:
             cc: clang
             cxx: clang++
             cflags: "-O2"
-          # arm64 under ASan/UBSan, matching what the Linux side has had all
-          # along, and running the same full ctest they do.  It earns its
-          # keep: UBSan found a shift-by-64 in the arm64 immediate encoder
+          # arm64 under ASan/UBSan, matching what the Linux ASan leg runs
+          # (same `-E difftest_O1`).  It earns its keep: UBSan found a
+          # shift-by-64 in the arm64 immediate encoder
           # (a64.c) on the very first run.  It used to run only a subset
           # because a plain macOS ctest took ~2.9 h, which ASan multiplied
           # past the 6 h cap -- but nearly all of that wall clock turned out
@@ -76,6 +86,7 @@ jobs:
             cc: clang
             cxx: clang++
             cflags: "-fsanitize=address,undefined -g"
+            ctest_args: "-E difftest_O1"
           # Coverage on arm64 is not a duplicate of the Linux leg -- it is the
           # other half of it.  The two backends are mutually exclusive at
           # runtime: src/cg64.c, src/a64.c and src/macho.c only execute when
@@ -83,6 +94,17 @@ jobs:
           # on Linux.  Measured on arm64: cg64 42%, macho 52%, a64 71%, and
           # codegen 0.10% -- so either leg alone reports its counterpart as
           # entirely dead code.  Codecov merges the two flags.
+          #
+          # `-E difftest`: difftest compiles a strict subset of what e2e
+          # already compiled -- same cases (minus expect_error/skip_difftest/
+          # non-`runtime` imports/unsupported_on), same per-case flags (no case
+          # in the corpus carries more than one of `flags:`/`link:`/`libs:`,
+          # so e2e's `head -1` and difftest's concatenation agree).  Its extra
+          # work is the *oracle* compile and the output comparison, which
+          # exercises gcc, not fakecc -- so it adds no fakecc lines while
+          # costing ~56% of this leg's wall clock.  Both difftest levels still
+          # run on the six plain legs and in bootstrap-suite{, -macos}.  The
+          # ASan legs keep difftest_O0 and drop only difftest_O1.
           - label: macos-latest · clang coverage (arm64)
             os: macos-latest
             cc: clang
@@ -90,6 +112,7 @@ jobs:
             cflags: ""
             cov: true
             cov_flag: macos
+            ctest_args: "-E difftest"
 
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +142,41 @@ jobs:
       # major version would make the two platforms' verdicts incomparable.
       - name: Install host GCC 16
         run: bash tools/ci_install_host_gcc.sh
+
+      # The suites call `timeout` twice per case (compile, then run) and macOS
+      # ships no GNU coreutils, so compat.sh falls back to polling `kill -0`
+      # behind `sleep 0.1`: measured at 109 ms for a command that finishes in
+      # 5 ms.  Across a 2709-case e2e leg that is ~590 s of pure sleeping
+      # before the job count divides it -- a fixed cost paid on every macOS
+      # leg, and the reason a macOS leg ran 3x its Linux twin.
+      #
+      # Homebrew's coreutils installs the GNU tools under a `g` prefix in
+      # /opt/homebrew/bin; the unprefixed names live in libexec/gnubin, which
+      # is deliberately left off PATH so they cannot shadow BSD sed/date/stat
+      # for the rest of the suite.  compat.sh looks for gtimeout/gnproc.
+      - name: Install GNU coreutils (macOS timeout/nproc)
+        if: runner.os == 'macOS'
+        env:
+          # Without this, `brew install` first updates its own tap index,
+          # which costs more than the package does.
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          # One retry.  A cold or rate-limited tap makes `brew install` flaky,
+          # and losing GNU timeout costs minutes, not correctness.  The `if`
+          # matters: this step's shell is `bash -e`, so a bare `brew || brew`
+          # exits before the warning when both attempts fail.
+          if ! brew install coreutils && ! brew install coreutils; then
+            echo "::warning::coreutils install failed; suites fall back to the polling timeout"
+          fi
+          # Warn, do not fail: the suites have a working (slow) fallback, and a
+          # Homebrew outage should not turn into a red build.
+          if ! command -v gtimeout >/dev/null 2>&1; then
+            echo "::warning::gtimeout missing; every case pays 0.1s polling"
+          fi
+          if ! command -v gnproc >/dev/null 2>&1; then
+            echo "::warning::gnproc missing; nproc falls back to sysctl"
+          fi
 
       # lcov is what the Linux leg turns .gcda into Codecov's lcov format.  The
       # macOS leg does not use it: there is no gcov-format runtime for clang on
@@ -162,7 +220,10 @@ jobs:
           LLVM_PROFILE_FILE: ${{ github.workspace }}/build/prof/pool-%m.profraw
         run: |
           mkdir -p build/prof
-          ctest --test-dir build --output-on-failure
+          # ctest_args is empty on the legs that run everything; -E is the one
+          # knob used, and each leg that sets it says why above.
+          CTEST_ARGS="${{ matrix.config.ctest_args }}"
+          ctest --test-dir build --output-on-failure $CTEST_ARGS
 
       - name: Coverage report (lcov)
         if: matrix.config.cov && runner.os == 'Linux'

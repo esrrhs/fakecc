@@ -30,6 +30,12 @@ CC_EXTRA=$(echo "$CC_EXTRA" | tr -s ' ' | sed 's/^ //; s/ $//')
 
 SUITE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CASE_DIR="$SUITE_DIR/cases"
+# `unsupported_on:` tags are `<os>-<machine>` from uname (darwin-arm64,
+# linux-x86_64).  Resolve it once: inside run_single_case it cost two `uname`
+# forks per case, ~5.4k of them across the corpus, to compute a value that
+# cannot change during the run.
+HOST_TAG="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m)"
+export HOST_TAG
 export FAKECC_PKG="${SUITE_DIR}/pkg_fixtures${FAKECC_PKG:+:$FAKECC_PKG}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -58,15 +64,13 @@ run_single_case() {
     # Platform-intrinsic skips, e.g. a test keyed to x87 80-bit long double
     # (memcmp of 10 bytes, literals beyond double range) that the platform
     # ABI genuinely cannot satisfy — the host toolchain fails it the same
-    # way.  Tag is `<os>-<machine>` from uname (darwin-arm64, linux-x86_64).
-    local host_tag
-    host_tag="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m)"
+    # way.  HOST_TAG is computed once at the top of the script.
     local skipped=0
     for t in $(sed -n 's|^//[[:space:]]*unsupported_on:[[:space:]]*\(.*\)|\1|p' "$src" | head -1); do
-        if [ "$t" = "$host_tag" ]; then skipped=1; fi
+        if [ "$t" = "$HOST_TAG" ]; then skipped=1; fi
     done
     if [ "$skipped" = "1" ]; then
-        echo "SKIP $name (unsupported on $host_tag)"
+        echo "SKIP $name (unsupported on $HOST_TAG)"
         return 0
     fi
 

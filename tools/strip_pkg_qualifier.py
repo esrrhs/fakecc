@@ -18,10 +18,15 @@ import sys
 _QUALIFIER = re.compile(r"\b(runtime|fmt|io|ctype)\.")
 
 
+def strip(src):
+    """Strip the package qualifiers in SRC (str) and return the result."""
+    return _QUALIFIER.sub("", src)
+
+
 def main():
     # Ports may contain latin-1 bytes (e.g. `"\0\xff"` as a raw 0xFF).
     raw = sys.stdin.buffer.read()
-    out = _QUALIFIER.sub("", raw.decode("latin-1"))
+    out = strip(raw.decode("latin-1"))
     sys.stdout.buffer.write(out.encode("latin-1"))
 
 
