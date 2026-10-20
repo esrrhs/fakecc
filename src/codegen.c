@@ -2740,6 +2740,47 @@ static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_
     return 1;
 }
 
+/* Constant after COPY/SEXT/ZEXT.  The extension is applied to the source
+ * width, so a sign-extended negative index is not treated as its zero-
+ * extended bit pattern.  Used only to fold a constant GEP into a displacement;
+ * the extension instruction itself is left alone when the index is not a
+ * constant. */
+static int ssa_extended_const(const IRFunction *fn, const int *def,
+                              IRValue v, int64_t *imm) {
+    for (int depth = 0; depth < 8; depth++) {
+        if (!fn || !def || v < 0 || v >= fn->next_value_id || def[v] < 0)
+            return 0;
+        const IRInst *d = &fn->insts.data[def[v]];
+        if (d->op == IR_CONST && !d->is_float) {
+            *imm = d->imm;
+            return 1;
+        }
+        if (d->op == IR_COPY) {
+            v = d->a;
+            continue;
+        }
+        if (d->op != IR_SEXT && d->op != IR_ZEXT) return 0;
+        IRValue src = d->a;
+        int64_t raw;
+        if (!ssa_extended_const(fn, def, src, &raw)) return 0;
+        int sw = (fn->value_width && src >= 0 && src < fn->next_value_id)
+                 ? fn->value_width[src] : 0;
+        if (sw <= 0 || sw > 8) return 0;
+        if (sw >= 8) {
+            *imm = raw;
+            return 1;
+        }
+        int bits = sw * 8;
+        uint64_t mask = (1ull << bits) - 1;
+        uint64_t low = (uint64_t)raw & mask;
+        if (d->op == IR_SEXT && (low & (1ull << (bits - 1))))
+            low |= ~mask;
+        *imm = (int64_t)low;
+        return 1;
+    }
+    return 0;
+}
+
 static int imm_fits_i32(int64_t imm) {
     return imm == (int64_t)(int32_t)imm;
 }
@@ -2899,6 +2940,27 @@ static int fold_gep(const IRFunction *fn, const int *def,
             if (ssa_const_imm(fn, def, raw_idx, &ci)) {
                 total += ci << sc;
                 idx = -1;
+            } else if (def[raw_idx] >= 0) {
+                /* MUL(index, 1|2|4|8) where the index is a constant hidden
+                 * behind SEXT/ZEXT.  The byte offset is itself a constant, so
+                 * no index register is referenced and the scale-1 SIB form is
+                 * unnecessary. */
+                const IRInst *md = &fn->insts.data[def[raw_idx]];
+                int64_t iv = 0, factor = 0;
+                int ok = 0;
+                if (md->op == IR_MUL
+                    && ssa_const_imm(fn, def, md->b, &factor)
+                    && ssa_extended_const(fn, def, md->a, &iv))
+                    ok = 1;
+                else if (md->op == IR_MUL
+                         && ssa_const_imm(fn, def, md->a, &factor)
+                         && ssa_extended_const(fn, def, md->b, &iv))
+                    ok = 1;
+                if (ok && factor > 0
+                    && iv <= INT64_MAX / factor && iv >= INT64_MIN / factor) {
+                    total += iv * factor;
+                    idx = -1;
+                }
             }
             if (!imm_fits_i32(total)) return 0;
             /* Register bases must be real pointer values, not constants or
@@ -3039,9 +3101,40 @@ static void mark_inst_uses_needed(const IRInst *inst, char *needed,
 /* Mark the SSA operands one instruction actually requires at -O0, taking
  * addressing-mode folds into account (a folded dereference needs base/index,
  * not the intermediate address/Gep value). */
+static int pure_addr_op(int op) {
+    /* COPY stays rooted: mem2reg pointer selects are copies and must still
+     * be emitted when their result is live. */
+    return op == IR_ADD || op == IR_MUL || op == IR_SEXT || op == IR_ZEXT;
+}
+
+/* 1 when this dereference becomes [rbp+disp] and does not read the pointer. */
+static int deref_folds_frame_disp(const IRFunction *fn, const int *def,
+                                  const int *alloca_off, const int *raw_uses,
+                                  const IRInst *inst, size_t ii) {
+    if (!inst || (inst->op != IR_LOAD_PTR && inst->op != IR_STORE_PTR))
+        return 0;
+    IRValue v = inst->a;
+    int dummy = 0;
+    if (fold_ptr_off(fn, def, alloca_off, v, &dummy, 0)) return 1;
+    IRValue val = inst->op == IR_LOAD_PTR ? inst->dst : inst->b;
+    if (value_is_float_class(fn, val) || value_is_ld(fn, val)) return 0;
+    if (inst->width != 1 && inst->width != 2 && inst->width != 4
+        && inst->width != 8)
+        return 0;
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    if ((size_t)def[v] + 1 != ii) return 0;
+    if (raw_uses && raw_uses[v] > 1) return 0;
+    IRValue base = -1, idx = -1;
+    int sc = 0, disp = 0;
+    if (classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc, &disp)
+        != AF_RBP_IDX)
+        return 0;
+    return base < 0 && idx < 0;
+}
+
 static void codegen_mark_inst_roots(char *needed, int *uses,
-                                    const int *raw_uses, int nv,
-                                    const IRFunction *fn,
+                                    const int *raw_uses, const int *uses_left,
+                                    int nv, const IRFunction *fn,
                                     const int *def, const int *alloca_off,
                                     const IRInst *inst, size_t ii) {
     int dummy;
@@ -3099,6 +3192,13 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
         mark_reg(needed, uses, nv, inst->b);
         return;
     }
+    /* A pure address step whose result is only consumed by [rbp+disp] folds
+     * must not keep its inputs alive: otherwise the constant-index multiply
+     * and the lea of the base are emitted and then ignored by the folded
+     * load or store. */
+    if (pure_addr_op(inst->op) && inst->dst >= 0 && inst->dst < nv
+        && uses_left && uses_left[inst->dst] == 0)
+        return;
     if (alu_folds_imm(inst, 1, fn, def)) {
         mark_reg(needed, uses, nv, inst->a);
         return;
@@ -3122,12 +3222,12 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
 static void codegen_mark_needed_and_uses(const IRFunction *fn, const int *def,
                                  const int *alloca_off, const char *skip_body,
                                  char *needed, int *ssa_uses,
-                                 const int *raw_uses) {
+                                 const int *raw_uses, const int *uses_left) {
     int nv = fn->next_value_id > 0 ? fn->next_value_id : 1;
     for (size_t i = 0; i < fn->insts.len; i++) {
         if (skip_body && skip_body[i]) continue;
-        codegen_mark_inst_roots(needed, ssa_uses, raw_uses, nv, fn, def,
-                                alloca_off, &fn->insts.data[i], i);
+        codegen_mark_inst_roots(needed, ssa_uses, raw_uses, uses_left, nv, fn,
+                                def, alloca_off, &fn->insts.data[i], i);
     }
 }
 
@@ -3540,12 +3640,34 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (u->call_args[uk] >= 0) raw_uses[u->call_args[uk]]++;
             }
         }
+        /* Uses that survive addressing-mode folding.  A dereference that
+         * becomes [rbp+disp] does not read its pointer SSA, and a pure ADD /
+         * MUL / extend / COPY whose own result then has no remaining use
+         * does not read its inputs either.  Walking backward matches def-
+         * before-use order for these temporary address values. */
+        int *uses_left = xmalloc((size_t)nvals_f * sizeof(int));
+        memcpy(uses_left, raw_uses, (size_t)nvals_f * sizeof(int));
+        for (size_t uj = fn->insts.len; uj-- > 0; ) {
+            if (skip_body[uj]) continue;
+            const IRInst *u = &fn->insts.data[uj];
+            if (deref_folds_frame_disp(fn, ssa_def, alloca_off, raw_uses, u, uj)
+                && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+                uses_left[u->a]--;
+            if (!pure_addr_op(u->op) || u->dst < 0 || u->dst >= nvals_f
+                || uses_left[u->dst] != 0)
+                continue;
+            if (u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+                uses_left[u->a]--;
+            if (u->op != IR_SEXT && u->op != IR_ZEXT && u->op != IR_COPY
+                && u->b >= 0 && u->b < nvals_f && uses_left[u->b] > 0)
+                uses_left[u->b]--;
+        }
         /* Single root-marking pass: fills both the "must have a register"
          * set and last-use counts, taking addressing-mode folds into account
          * (a folded dereference reuses base/index SSA roots, not the
          * intermediate address value). */
         codegen_mark_needed_and_uses(fn, ssa_def, alloca_off, skip_body,
-                                    needed, ssa_uses_f, raw_uses);
+                                    needed, ssa_uses_f, raw_uses, uses_left);
 
         /* ---- Fused integer-compare → conditional branch ----
          * gcc -O0 emits `cmp; j<cc>` for `if (a < b)`.  Without fusion the
@@ -3839,8 +3961,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         continue;
                     if (inst->op == IR_CONST && !inst->is_float && !value_is_ld(fn, inst->dst))
                         continue;
-                    /* A GEP stride multiply consumed by [base+index*scale]. */
-                    if (inst->op == IR_MUL)
+                    /* A GEP stride multiply or the extend feeding it, consumed
+                     * by a folded [rbp+disp].  COPY is not skipped: mem2reg
+                     * pointer selects are copies. */
+                    if (inst->op == IR_MUL || inst->op == IR_SEXT
+                        || inst->op == IR_ZEXT)
                         continue;
                     if (inst->op == IR_ADD
                         && (fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0)

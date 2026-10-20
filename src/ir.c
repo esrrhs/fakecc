@@ -4417,6 +4417,123 @@ static IRValue scale_rhs(IRFunction *fn, IRSymTable *st, IRValue rhs, int is_ptr
     return coerce(fn, rhs, rw, ru, lw, lu, loc);
 }
 
+static int init_expr_is_implicit_zero(const Expr *e) {
+    /* lower_init_list treats this as a no-op and relies on emit_zero_bytes. */
+    return e && e->kind == EX_INT_LIT && e->u.int_val == 0 && e->int_hi == 0
+        && e->type.kind != TY_FLOAT && !e->type.is_decimal;
+}
+
+/* True when the initializer writes every byte, so the background zero is
+ * redundant.  Holes, padding, bitfields, unions, and implicit zeros still
+ * need it: a later store does not cover those bytes, and a bitfield update
+ * is a read-modify of the surrounding storage.  After sema, a non-union
+ * brace list is a dense positional array; a NULL element is an implicit zero. */
+static int init_covers_object(const Type *ty, const Expr *e) {
+    if (!ty || !e || init_expr_is_implicit_zero(e)) return 0;
+    if (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT && !ty->is_vector) {
+        return e->kind != EX_INIT_LIST || e->u.init_list.num_elements > 0;
+    }
+    if (e->kind != EX_INIT_LIST) {
+        if (e->kind == EX_STR && ty->kind == TY_ARRAY && ty->elem_type
+            && ty->elem_type->width == 1)
+            return ty->length > 0 && e->u.str.len >= ty->length;
+        return 0;
+    }
+    if (e->u.init_list.desig_kind) return 0;
+    if (ty->kind == TY_ARRAY || ty->is_vector) {
+        if (!ty->elem_type || ty->length < 0) return 0;
+        long long esz = type_size(*ty->elem_type);
+        if (esz <= 0 || type_size(*ty) != esz * ty->length) return 0;
+        if (e->u.init_list.num_elements != ty->length) return 0;
+        for (int i = 0; i < ty->length; i++)
+            if (!init_covers_object(ty->elem_type, e->u.init_list.elements[i]))
+                return 0;
+        return 1;
+    }
+    const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
+    if (!sd || sd->is_union || e->u.init_list.num_elements != sd->num_members)
+        return 0;
+    long long expect = 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        const StructMember *sm = &sd->members[i];
+        if (sm->bit_width >= 0 || sm->offset != expect) return 0;
+        int sz = type_size(sm->type);
+        if (sz < 0) return 0;
+        if (!init_covers_object(&sm->type, e->u.init_list.elements[i])) return 0;
+        expect += sz;
+    }
+    return expect == type_size(*ty);
+}
+
+/* Conservative: an unhandled expression form is treated as a mention, so a
+ * destination is initialized in place only when none of its reads can see it. */
+static int expr_mentions_name(const Expr *e, const char *name) {
+    if (!e || !name) return 0;
+    switch (e->kind) {
+    case EX_INT_LIT: case EX_FLOAT_LIT: case EX_STR:
+    case EX_SIZEOF_TYPE: case EX_ALIGNOF_TYPE: case EX_LABEL_ADDR:
+        return 0;
+    case EX_VAR:
+        return e->u.var.name && strcmp(e->u.var.name, name) == 0;
+    case EX_BINOP:
+        return expr_mentions_name(e->u.bin.l, name)
+            || expr_mentions_name(e->u.bin.r, name);
+    case EX_UNARY: case EX_ADDR: case EX_DEREF: case EX_SIZEOF_EXPR:
+    case EX_ALIGNOF_EXPR:
+        return expr_mentions_name(e->kind == EX_UNARY ? e->u.un.operand
+                                  : e->kind == EX_ADDR ? e->u.addr.operand
+                                  : e->kind == EX_DEREF ? e->u.deref.operand
+                                  : e->kind == EX_SIZEOF_EXPR ? e->u.sizeof_e.operand
+                                  : e->u.alignof_e.operand, name);
+    case EX_ASSIGN:
+        return expr_mentions_name(e->u.assign.lvalue, name)
+            || expr_mentions_name(e->u.assign.rvalue, name);
+    case EX_CALL:
+        if (expr_mentions_name(e->u.call.callee, name)) return 1;
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            if (expr_mentions_name(e->u.call.args.data[i], name)) return 1;
+        return 0;
+    case EX_INDEX:
+        return expr_mentions_name(e->u.idx.array, name)
+            || expr_mentions_name(e->u.idx.index, name);
+    case EX_MEMBER:
+        return expr_mentions_name(e->u.member.obj, name);
+    case EX_CAST:
+        return expr_mentions_name(e->u.cast.operand, name);
+    case EX_TERNARY:
+        return expr_mentions_name(e->u.tern.cond, name)
+            || expr_mentions_name(e->u.tern.then, name)
+            || expr_mentions_name(e->u.tern.else_, name);
+    case EX_INC_DEC:
+        return expr_mentions_name(e->u.incdec.operand, name);
+    case EX_COMPOUND_ASSIGN:
+        return expr_mentions_name(e->u.comp.lvalue, name)
+            || expr_mentions_name(e->u.comp.rvalue, name);
+    case EX_COMMA:
+        return expr_mentions_name(e->u.comma.lhs, name)
+            || expr_mentions_name(e->u.comma.rhs, name);
+    case EX_INIT_LIST:
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            if (expr_mentions_name(e->u.init_list.elements[i], name)) return 1;
+        return 0;
+    case EX_COMPOUND_LITERAL:
+        return expr_mentions_name(e->u.compound.init, name);
+    default:
+        return 1;
+    }
+}
+
+static int same_aggregate_type(const Type *a, const Type *b) {
+    if (!a || !b || a->kind != b->kind || a->is_vector != b->is_vector)
+        return 0;
+    if (a->kind == TY_ARRAY || a->is_vector)
+        return a->length == b->length && a->elem_type && b->elem_type
+            && type_size(*a->elem_type) == type_size(*b->elem_type);
+    if (a->kind == TY_STRUCT)
+        return a->tag && b->tag && strcmp(a->tag, b->tag) == 0;
+    return 0;
+}
+
 /* Materialize a compound literal's storage and return its address.
  * Used both as an lvalue (`&(int){42}`, `(struct S){}.x`) and as the
  * backing object whose scalar rvalue is then loaded. */
@@ -4428,7 +4545,8 @@ static IRValue lower_compound_literal_addr(IRFunction *fn, IRSymTable *st,
     if (total <= 0) total = 8;
     IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
     IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-    emit_zero_bytes(fn, addr, total, e->loc);
+    if (!init_covers_object(&target, e->u.compound.init))
+        emit_zero_bytes(fn, addr, total, e->loc);
     lower_init_list(fn, st, addr, &target, e->u.compound.init, e->loc);
     return addr;
 }
@@ -9722,7 +9840,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT || dty.is_vector) {
                     IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
                     int total = type_size(dty);
-                    if (total > 0) emit_zero_bytes(fn, addr, total, s->loc);
+                    if (total > 0 && !init_covers_object(&dty, s->u.decl.init))
+                        emit_zero_bytes(fn, addr, total, s->loc);
                     lower_init_list(fn, st, addr, &dty, s->u.decl.init, s->loc);
                 } else {
                     /* Scalar target with a single-element brace list
@@ -9767,6 +9886,20 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                     fake_cast.u.cast.operand = s->u.decl.init;
                     IRValue cplx_rv = lower_expr(fn, st, &fake_cast);
                     emit_struct_copy(fn, addr, cplx_rv, type_size(dty), s->loc);
+                    break;
+                }
+                /* `T x = (T){ ... }` that does not read x is the same stores
+                 * written straight into x.  The compound-literal temporary
+                 * and the following copy are pure overhead at -O0. */
+                if (s->u.decl.init->kind == EX_COMPOUND_LITERAL
+                    && same_aggregate_type(&dty,
+                                           &s->u.decl.init->u.compound.target_type)
+                    && !expr_mentions_name(s->u.decl.init, s->u.decl.name)) {
+                    Expr *ilist = s->u.decl.init->u.compound.init;
+                    int total = type_size(dty);
+                    if (total > 0 && !init_covers_object(&dty, ilist))
+                        emit_zero_bytes(fn, addr, total, s->loc);
+                    lower_init_list(fn, st, addr, &dty, ilist, s->loc);
                     break;
                 }
                 IRValue rv = lower_expr(fn, st, s->u.decl.init);
