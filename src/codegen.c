@@ -3231,6 +3231,49 @@ static void codegen_mark_needed_and_uses(const IRFunction *fn, const int *def,
     }
 }
 
+/* i128 add/sub is `lo ± lo; hi ± hi ± carry`, with the carry materialized
+ * by an unsigned compare, a zero-extend, and a second add.  When that
+ * chain is intact, x86 can keep the carry in CF and emit adc/sbb.
+ * Returns the index of the final high add, or -1. */
+static int match_i128_carry(const IRFunction *fn, const int *uses, size_t i,
+                            int *is_sub) {
+    if (!fn || i + 4 >= fn->insts.len) return -1;
+    const IRInst *lo = &fn->insts.data[i];
+    int sub = lo->op == IR_SUB;
+    if ((lo->op != IR_ADD && !sub) || lo->width != 8 || lo->is_float)
+        return -1;
+    const IRInst *lt = &fn->insts.data[i + 1];
+    const IRInst *zx = &fn->insts.data[i + 2];
+    const IRInst *mid = &fn->insts.data[i + 3];
+    const IRInst *hi = &fn->insts.data[i + 4];
+    if (lt->op != IR_LT || !lt->is_unsigned || lt->dst < 0) return -1;
+    if (sub) {
+        if (lt->a != lo->a || lt->b != lo->b) return -1;
+    } else if (lt->a != lo->dst || lt->b != lo->a) {
+        return -1;
+    }
+    /* coerce() sign-extends the 0/1 carry.  0 and 1 survive either extend. */
+    if ((zx->op != IR_ZEXT && zx->op != IR_SEXT) || zx->a != lt->dst || zx->dst < 0)
+        return -1;
+    if (mid->op != lo->op || mid->width != 8 || mid->is_float || mid->dst < 0)
+        return -1;
+    if (hi->op != lo->op || hi->width != 8 || hi->is_float || hi->dst < 0)
+        return -1;
+    if (sub) {
+        if (hi->a != mid->dst || hi->b != zx->dst) return -1;
+    } else if (!((hi->a == mid->dst && hi->b == zx->dst)
+                 || (hi->a == zx->dst && hi->b == mid->dst))) {
+        return -1;
+    }
+    if (!uses || lt->dst >= fn->next_value_id || zx->dst >= fn->next_value_id
+        || mid->dst >= fn->next_value_id)
+        return -1;
+    if (uses[lt->dst] != 1 || uses[zx->dst] != 1 || uses[mid->dst] != 1)
+        return -1;
+    *is_sub = sub;
+    return (int)(i + 4);
+}
+
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     /* Backend dispatch point: everything below this function is the
      * x86-64 instruction selector; the arm64 selector is codegen64(). */
@@ -3679,8 +3722,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         char *fused_skip = xmalloc(ninst_f);
         int *fused_cmp_at = xmalloc(ninst_f * sizeof(int));
         char *fused_inv_at = xmalloc(ninst_f);
+        int *carry_hi_at = xmalloc(ninst_f * sizeof(int));
+        char *carry_is_sub = xmalloc(ninst_f);
         memset(fused_skip, 0, ninst_f);
-        for (size_t uj = 0; uj < ninst_f; uj++) fused_cmp_at[uj] = -1;
+        memset(carry_is_sub, 0, ninst_f);
+        for (size_t uj = 0; uj < ninst_f; uj++) {
+            fused_cmp_at[uj] = -1;
+            carry_hi_at[uj] = -1;
+        }
         memset(fused_inv_at, 0, ninst_f);
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             const IRInst *cb = &fn->insts.data[uj];
@@ -3721,6 +3770,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             int64_t cimm;
             if (!(ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)))
                 mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
+        }
+        for (size_t uj = 0; uj + 4 < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            int is_sub = 0;
+            int hi = match_i128_carry(fn, raw_uses, uj, &is_sub);
+            if (hi < 0) continue;
+            int blocked = 0;
+            for (int k = 1; k <= 4; k++) {
+                if (skip_body[uj + (size_t)k] || fused_skip[uj + (size_t)k])
+                    blocked = 1;
+            }
+            if (blocked) continue;
+            carry_hi_at[uj] = hi;
+            carry_is_sub[uj] = (char)is_sub;
+            for (int k = 1; k <= 4; k++)
+                fused_skip[uj + (size_t)k] = 1;
         }
 
         /* Variadic: compute the initial va_list field values.  The named args
@@ -4042,6 +4107,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_BOR:
             case IR_BXOR:
                 isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 0);
+                if ((inst->op == IR_ADD || inst->op == IR_SUB)
+                    && carry_hi_at[j] >= 0) {
+                    /* CF still belongs to the low add/sub: finish_gp_dst
+                     * only moves the sum, and ensure_reg only moves. */
+                    const IRInst *mid = &fn->insts.data[(size_t)carry_hi_at[j] - 1];
+                    const IRInst *hi = &fn->insts.data[carry_hi_at[j]];
+                    int hdr = gp_home(ra, hi->dst);
+                    int bhome = gp_home(ra, mid->b);
+                    int acc = pick_alu_acc(hdr, bhome);
+                    ensure_reg(&out->text, mid->a, acc, ra);
+                    int br = bhome >= 0 ? bhome : REG_RCX;
+                    if (bhome < 0) ensure_reg(&out->text, mid->b, br, ra);
+                    emit_arith_rr_w(&out->text, carry_is_sub[j] ? 0x19 : 0x11,
+                                    acc, br, 8);
+                    finish_gp_dst(&out->text, acc, hdr, hi->dst, ra, 8, 1);
+                }
                 break;
 
             case IR_MUL:
