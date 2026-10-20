@@ -4281,6 +4281,9 @@ static void emit_binop(C64 *c, const IRInst *s) {
     case IR_MUL:
         a64_mul(a, d, ra, rb, is64);
         break;
+    case IR_UMULH:
+        a64_umulh(a, d, ra, rb);
+        break;
     case IR_BAND:
         a64_and_reg(a, d, ra, rb, is64);
         break;
@@ -5274,7 +5277,8 @@ static void emit_function(C64 *c, int fi) {
             commit(c, s->dst, d);
             break;
         }
-        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_UMULH:
+        case IR_DIV: case IR_MOD:
         case IR_BAND: case IR_BOR: case IR_BXOR: case IR_SHL: case IR_SHR:
         case IR_ROL:
         case IR_EQ: case IR_NE: case IR_LT: case IR_LE: case IR_GT:

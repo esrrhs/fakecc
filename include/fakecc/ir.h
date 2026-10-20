@@ -20,6 +20,7 @@ typedef enum {
     IR_ADD,         /* dst = a + b */
     IR_SUB,         /* dst = a - b */
     IR_MUL,         /* dst = a * b */
+    IR_UMULH,       /* dst = high 64 bits of unsigned 64x64 multiply */
     IR_DIV,         /* dst = a / b  (signed) */
     IR_MOD,         /* dst = a % b  (signed) */
     IR_NEG,         /* dst = -a */

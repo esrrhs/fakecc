@@ -375,6 +375,11 @@ void a64_mul(A64Asm *a, int rd, int rn, int rm, int is64) {
     a64_word(a, w);
 }
 
+void a64_umulh(A64Asm *a, int rd, int rn, int rm) {
+    /* High 64 bits of an unsigned 64x64 product. */
+    a64_word(a, 0x9BC07C00u | RM(rm) | RN(rn) | RD(rd));
+}
+
 void a64_msub(A64Asm *a, int rd, int rn, int rm, int ra, int is64) {
     /* MSUB: MADD encoding with o0 = 1 at bit 15 (not 21). */
     uint32_t w = (is64 ? 0x80000000u : 0) | 0x1B000000u | (1u << 15)

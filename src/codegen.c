@@ -1634,9 +1634,10 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
         int bhome = gp_home(ra, inst->b);
         acc = pick_alu_acc(dr, bhome);
         ensure_reg(b, inst->a, acc, ra);
-        ensure_reg(b, inst->b, REG_RCX, ra);
-        if (is_mul) emit_imul_rr_w(b, acc, REG_RCX, width);
-        else emit_arith_rr_w(b, rr_op, acc, REG_RCX, width);
+        int br = bhome >= 0 ? bhome : REG_RCX;
+        if (bhome < 0) ensure_reg(b, inst->b, br, ra);
+        if (is_mul) emit_imul_rr_w(b, acc, br, width);
+        else emit_arith_rr_w(b, rr_op, acc, br, width);
     }
     finish_gp_dst(b, acc, dr, inst->dst, ra, width, inst->is_unsigned);
 }
@@ -3922,6 +3923,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 1);
                 break;
 
+            case IR_UMULH:
+                /* MUL r/m64 writes the full unsigned product to RDX:RAX.
+                 * RAX/RCX/RDX are selector scratches, not allocatable homes. */
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                emit_rex_if(&out->text, 1, 0, 0, REG_RCX);
+                emit_byte(&out->text, 0xF7);
+                emit_modrm(&out->text, 3, 4, REG_RCX);
+                if (dr >= 0 && dr != REG_RDX)
+                    emit_mov_rr(&out->text, dr, REG_RDX);
+                spill_if_needed(&out->text, inst->dst,
+                                dr >= 0 ? dr : REG_RDX, ra);
+                break;
+
             case IR_DIV:
             case IR_MOD: {
                 int width = inst->width > 0 ? inst->width : 8;
@@ -4051,13 +4066,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     ra->reg[inst->dst] >= 0) {
                     break;
                 }
-                /* Materialize the source via ensure_reg (handles register-alloc
-                 * OR spilled sources); old_load would read the wrong slot when
-                 * `a` lives in a register.  Then move to dr or spill dst. */
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (dr >= 0) {
-                    if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                    /* ensure_reg can move register-to-register or load a
+                     * spill directly into the destination home. */
+                    ensure_reg(&out->text, inst->a, dr, ra);
                 } else {
+                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
@@ -4067,14 +4081,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_ZEXT: {
                 /* imm = source width */
                 int src_w = inst->imm;
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                int target = dr >= 0 ? dr : REG_RAX;
+                ensure_reg(&out->text, inst->a, target, ra);
                 if (inst->op == IR_SEXT)
-                    emit_movsx_rr(&out->text, REG_RAX, REG_RAX, src_w);
+                    emit_movsx_rr(&out->text, target, target, src_w);
                 else
-                    emit_movzx_rr(&out->text, REG_RAX, REG_RAX, src_w);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
+                    emit_movzx_rr(&out->text, target, target, src_w);
+                spill_if_needed(&out->text, inst->dst, target, ra);
                 break;
             }
 

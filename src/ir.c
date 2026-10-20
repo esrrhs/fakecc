@@ -2528,32 +2528,8 @@ static void i128_neg(IRFunction *fn, IRValue dst, IRValue a, SourceLoc loc) {
 
 static void mul64_wide(IRFunction *fn, IRValue a, IRValue b,
                       IRValue *lo_out, IRValue *hi_out, SourceLoc loc) {
-    IRValue mask = i64imm(fn, 0xffffffffLL, loc);
-    IRValue sh32 = i64imm(fn, 32, loc);
-    IRValue a0 = emit_bin_w(fn, IR_BAND, a, mask, 8, 1, loc);
-    IRValue a1 = emit_bin_w(fn, IR_SHR, a, sh32, 8, 1, loc);
-    IRValue b0 = emit_bin_w(fn, IR_BAND, b, mask, 8, 1, loc);
-    IRValue b1 = emit_bin_w(fn, IR_SHR, b, sh32, 8, 1, loc);
-    IRValue p0 = emit_bin_w(fn, IR_MUL, a0, b0, 8, 1, loc);
-    IRValue p1 = emit_bin_w(fn, IR_MUL, a0, b1, 8, 1, loc);
-    IRValue p2 = emit_bin_w(fn, IR_MUL, a1, b0, 8, 1, loc);
-    IRValue p3 = emit_bin_w(fn, IR_MUL, a1, b1, 8, 1, loc);
-    IRValue p0h = emit_bin_w(fn, IR_SHR, p0, sh32, 8, 1, loc);
-    IRValue p1l = emit_bin_w(fn, IR_BAND, p1, mask, 8, 1, loc);
-    IRValue p2l = emit_bin_w(fn, IR_BAND, p2, mask, 8, 1, loc);
-    IRValue m = emit_bin_w(fn, IR_ADD, p0h, p1l, 8, 1, loc);
-    m = emit_bin_w(fn, IR_ADD, m, p2l, 8, 1, loc);
-    IRValue mh = emit_bin_w(fn, IR_SHR, m, sh32, 8, 1, loc);
-    IRValue p1h = emit_bin_w(fn, IR_SHR, p1, sh32, 8, 1, loc);
-    IRValue p2h = emit_bin_w(fn, IR_SHR, p2, sh32, 8, 1, loc);
-    IRValue hi = emit_bin_w(fn, IR_ADD, p3, p1h, 8, 1, loc);
-    hi = emit_bin_w(fn, IR_ADD, hi, p2h, 8, 1, loc);
-    hi = emit_bin_w(fn, IR_ADD, hi, mh, 8, 1, loc);
-    IRValue ml = emit_bin_w(fn, IR_BAND, m, mask, 8, 1, loc);
-    IRValue mls = emit_bin_w(fn, IR_SHL, ml, sh32, 8, 1, loc);
-    IRValue p0l = emit_bin_w(fn, IR_BAND, p0, mask, 8, 1, loc);
-    *lo_out = emit_bin_w(fn, IR_BOR, mls, p0l, 8, 1, loc);
-    *hi_out = hi;
+    *lo_out = emit_bin_w(fn, IR_MUL, a, b, 8, 1, loc);
+    *hi_out = emit_bin_w(fn, IR_UMULH, a, b, 8, 1, loc);
 }
 
 static void i128_mul(IRFunction *fn, IRValue dst, IRValue a, IRValue b,
