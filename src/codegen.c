@@ -3237,6 +3237,8 @@ static int ssa_extended_const(const IRFunction *fn, const int *def,
         if (!ssa_extended_const(fn, def, src, &raw)) return 0;
         int sw = (fn->value_width && src >= 0 && src < fn->next_value_id)
                  ? fn->value_width[src] : 0;
+        /* CONST often has no value_width; IR_ZEXT/SEXT.imm is the src width. */
+        if (sw <= 0) sw = (int)d->imm;
         if (sw <= 0 || sw > 8) return 0;
         if (sw >= 8) {
             *imm = raw;
@@ -4887,6 +4889,54 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
         }
+        /* SEXT/signed-TRUNC of (x & nonneg_mask): no movsxd (bitfield). */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj] || mask_nop[uj]) continue;
+            const IRInst *d = &fn->insts.data[uj];
+            if (d->op != IR_SEXT && !(d->op == IR_TRUNC && !d->is_unsigned))
+                continue;
+            int src_w = (d->op == IR_SEXT) ? (int)d->imm : d->width;
+            if (src_w != 4 || d->a < 0 || d->a >= nvals_f) continue;
+            IRValue cur = d->a;
+            for (int depth = 0; depth < 6 && cur >= 0 && cur < nvals_f
+                 && ssa_def[cur] >= 0; depth++) {
+                const IRInst *s = &fn->insts.data[ssa_def[cur]];
+                if (s->op == IR_COPY || s->op == IR_ZEXT || s->op == IR_TRUNC) {
+                    cur = s->a;
+                    continue;
+                }
+                if (s->op != IR_BAND) break;
+                int64_t imm = 0;
+                IRValue mv = -1;
+                if (s->b >= 0) mv = s->b;
+                for (int side = 0; side < 2; side++) {
+                    IRValue cand = side ? s->a : s->b;
+                    int64_t raw = 0;
+                    IRValue v = cand;
+                    for (int k = 0; k < 4 && v >= 0 && v < nvals_f
+                         && ssa_def[v] >= 0; k++) {
+                        const IRInst *c = &fn->insts.data[ssa_def[v]];
+                        if (c->op == IR_CONST && !c->is_float) {
+                            raw = c->imm;
+                            if (raw >= 0 && (imm_fits_i32(raw)
+                                             || imm_fits_bitwise_u32(raw))
+                                && (raw & 0x80000000u) == 0)
+                                mask_nop[uj] = 1;
+                            break;
+                        }
+                        if (c->op == IR_COPY || c->op == IR_ZEXT
+                            || c->op == IR_TRUNC) {
+                            v = c->a;
+                            continue;
+                        }
+                        break;
+                    }
+                    if (mask_nop[uj]) break;
+                }
+                (void)imm; (void)mv;
+                break;
+            }
+        }
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             if (skip_body[uj] || fused_skip[uj] || mask_nop[uj]) continue;
             const IRInst *d = &fn->insts.data[uj];
@@ -5744,12 +5794,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (d->op != IR_BAND) break;
                         int64_t imm = 0;
                         int ok = 0;
-                        if (ssa_const_imm(fn, ssa_def, d->b, &imm)) ok = 1;
-                        else if (ssa_const_imm(fn, ssa_def, d->a, &imm)) ok = 1;
-                        if (ok && ((imm_fits_i32(imm) && imm >= 0
-                                    && imm <= 0x7fffffff)
-                                   || (imm_fits_bitwise_u32(imm)
-                                       && (imm & 0x80000000u) == 0)))
+                        /* Mask may be ZEXT/TRUNC of CONST (bitfield). */
+                        if (ssa_extended_const(fn, ssa_def, d->b, &imm)) ok = 1;
+                        else if (ssa_extended_const(fn, ssa_def, d->a, &imm))
+                            ok = 1;
+                        if (ok && imm >= 0
+                            && (imm_fits_i32(imm) || imm_fits_bitwise_u32(imm))
+                            && (imm & 0x80000000u) == 0)
                             already = 1;
                         break;
                     }
@@ -5794,14 +5845,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (d->op != IR_BAND) break;
                         int64_t imm = 0;
                         int ok = 0;
-                        if (ssa_const_imm(fn, ssa_def, d->b, &imm)) ok = 1;
-                        else if (ssa_const_imm(fn, ssa_def, d->a, &imm)) ok = 1;
+                        if (ssa_extended_const(fn, ssa_def, d->b, &imm)) ok = 1;
+                        else if (ssa_extended_const(fn, ssa_def, d->a, &imm))
+                            ok = 1;
                         /* Non-negative mask: 32-bit and already zero-extends;
                          * skip the retag movl (logic bump args / gcc -O0). */
-                        if (ok && ((imm_fits_i32(imm) && imm >= 0
-                                    && imm <= 0x7fffffff)
-                                   || (imm_fits_bitwise_u32(imm)
-                                       && (imm & 0x80000000u) == 0))) {
+                        if (ok && imm >= 0
+                            && (imm_fits_i32(imm) || imm_fits_bitwise_u32(imm))
+                            && (imm & 0x80000000u) == 0) {
                             trunc_u = 1;
                             trunc_nop = 1;
                         }
