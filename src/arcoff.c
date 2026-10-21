@@ -561,10 +561,15 @@ static char *dll_via_head(Archive *a, const char *head_sym) {
     return dll;
 }
 
+static int ascii_lower(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c + ('a' - 'A');
+    return c;
+}
+
 static int icmp(const char *a, const char *b) {
     while (*a && *b) {
-        int ca = tolower((unsigned char)*a++);
-        int cb = tolower((unsigned char)*b++);
+        int ca = ascii_lower((unsigned char)*a++);
+        int cb = ascii_lower((unsigned char)*b++);
         if (ca != cb) return ca - cb;
     }
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
