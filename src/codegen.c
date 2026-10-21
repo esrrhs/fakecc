@@ -5640,19 +5640,47 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * register-level no-op) leaves the source's high bits behind,
                  * and the comparison opcodes issue a 64-bit `cmp` without
                  * re-masking — so `(unsigned)wide64 == 1` compared false
-                 * whenever the discarded half was non-zero. */
+                 * whenever the discarded half was non-zero.
+                 *
+                 * Same-width unsigned→signed retag ((int)(u & mask)) still
+                 * hits this path; if the source is a non-negative masked AND,
+                 * zero-extend (movl) instead of movsxd (gcc -O0). */
+                int trunc_u = inst->is_unsigned;
+                if (!trunc_u && inst->width == 4 && inst->a >= 0
+                    && inst->a < fn->next_value_id) {
+                    IRValue cur = inst->a;
+                    for (int depth = 0; depth < 6 && cur >= 0
+                         && cur < fn->next_value_id && ssa_def[cur] >= 0;
+                         depth++) {
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op == IR_COPY || d->op == IR_ZEXT) {
+                            cur = d->a;
+                            continue;
+                        }
+                        if (d->op != IR_BAND) break;
+                        int64_t imm = 0;
+                        int ok = 0;
+                        if (ssa_const_imm(fn, ssa_def, d->b, &imm)) ok = 1;
+                        else if (ssa_const_imm(fn, ssa_def, d->a, &imm)) ok = 1;
+                        if (ok && ((imm_fits_i32(imm) && imm >= 0
+                                    && imm <= 0x7fffffff)
+                                   || (imm_fits_bitwise_u32(imm)
+                                       && (imm & 0x80000000u) == 0)))
+                            trunc_u = 1;
+                        break;
+                    }
+                }
                 if (ra && inst->a >= 0 && inst->a < ra->num_values &&
                     inst->dst >= 0 && inst->dst < ra->num_values &&
                     ra->reg[inst->dst] == ra->reg[inst->a] &&
                     ra->reg[inst->dst] >= 0) {
                     mask_to_width(&out->text, ra->reg[inst->dst],
-                                  inst->width, inst->is_unsigned);
+                                  inst->width, trunc_u);
                     break;
                 }
                 if (dr >= 0) {
                     ensure_reg(&out->text, inst->a, dr, ra);
-                    mask_to_width(&out->text, dr, inst->width,
-                                  inst->is_unsigned);
+                    mask_to_width(&out->text, dr, inst->width, trunc_u);
                 } else {
                     /* Materialize the source with ensure_reg, not old_load:
                      * old_load addresses `a` at the pre-regalloc slot
@@ -5660,8 +5688,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      * outside the frame entirely (the frame is sized for the
                      * spill slots, not one slot per SSA value). */
                     ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                    mask_to_width(&out->text, REG_RAX, inst->width,
-                                  inst->is_unsigned);
+                    mask_to_width(&out->text, REG_RAX, inst->width, trunc_u);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
