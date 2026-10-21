@@ -3954,19 +3954,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (skip_body[ai] || fused_skip[ai]) continue;
             const IRInst *ad = &fn->insts.data[ai];
             int ext = -1, rop = -1;
+            int commutative = 1;
             if (ad->op == IR_ADD) { ext = 0; rop = 0x01; }
             else if (ad->op == IR_BXOR) { ext = 6; rop = 0x31; }
             else if (ad->op == IR_BAND) { ext = 4; rop = 0x21; }
             else if (ad->op == IR_BOR) { ext = 1; rop = 0x09; }
-            else if (ad->op == IR_SUB) { ext = 5; rop = 0x29; }
+            else if (ad->op == IR_SUB) { ext = 5; rop = 0x29; commutative = 0; }
             else continue;
             /* Find which operand is a load of the same stack slot
-             * (optionally widened by ZEXT/SEXT/COPY). */
+             * (optionally widened by ZEXT/SEXT/COPY).
+             * For SUB, only x = x - y (load must be LHS); x = c - x is not
+             * expressible as subl c, [x]. */
             IRValue other = -1;
             int li = -1;
             int peel_skip[4];
             int npeel = 0;
             for (int side = 0; side < 2; side++) {
+                if (!commutative && side != 0) break;
                 IRValue cand = side ? ad->b : ad->a;
                 IRValue oth = side ? ad->a : ad->b;
                 npeel = 0;
@@ -4043,7 +4047,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     && ssa_uses_f[fn->insts.data[li].a] == 1
                     && ssa_def[fn->insts.data[li].a] >= 0)
                     fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
-            } else if (ssa_uses_f[other] >= 1 && ext != 5) {
+            } else if (ssa_uses_f[other] >= 1 && commutative) {
                 /* reg form: addl/xorl %reg, mem.  Keep SUB as load/op/store. */
                 mem_rmw[uj] = (char)(10 + (rop & 0x3f)); /* mark reg form */
                 mem_rmw_imm[uj] = other; /* reuse as IRValue */
