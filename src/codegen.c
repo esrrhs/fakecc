@@ -4931,8 +4931,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 needed[cv] = 0;
             }
         }
-        /* ZEXT(TRUNC(x)) sole-use: both are no-ops when the value already
-         * sits in the low bits (sieve `(unsigned char)(1u<<k)` → and). */
+        /* ZEXT(TRUNC(x)) sole-use: skip both only when x's high bits are
+         * already clear (sieve `(unsigned char)(1u<<k)`).  A plain TRUNC
+         * of an arbitrary value still needs movzx (narrow). */
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             if (skip_body[uj] || fused_skip[uj] || mask_nop[uj]) continue;
             const IRInst *zx = &fn->insts.data[uj];
@@ -4942,6 +4943,55 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (skip_body[ti] || fused_skip[ti] || mask_nop[ti]) continue;
             const IRInst *tr = &fn->insts.data[ti];
             if (tr->op != IR_TRUNC || tr->width != (int)zx->imm) continue;
+            int tw = tr->width;
+            if (tw != 1 && tw != 2) continue;
+            IRValue cur = tr->a;
+            int safe = 0;
+            for (int depth = 0; depth < 6 && cur >= 0 && cur < nvals_f
+                 && ssa_def[cur] >= 0; depth++) {
+                const IRInst *s = &fn->insts.data[ssa_def[cur]];
+                if (s->op == IR_COPY) {
+                    cur = s->a;
+                    continue;
+                }
+                int64_t ca = 0, lim = (tw == 1) ? 0xff : 0xffff;
+                if (s->op == IR_SHL && ssa_const_imm(fn, ssa_def, s->a, &ca)
+                    && ca == 1) {
+                    /* 1u<<k fits in a byte when k is const <8 or (x&7). */
+                    int64_t csh = 0;
+                    if (ssa_const_imm(fn, ssa_def, s->b, &csh)
+                        && csh >= 0 && csh < tw * 8)
+                        safe = 1;
+                    else {
+                        IRValue sh = s->b;
+                        for (int d2 = 0; d2 < 4 && sh >= 0 && sh < nvals_f
+                             && ssa_def[sh] >= 0; d2++) {
+                            const IRInst *h = &fn->insts.data[ssa_def[sh]];
+                            if (h->op == IR_COPY || h->op == IR_ZEXT
+                                || h->op == IR_TRUNC) {
+                                sh = h->a;
+                                continue;
+                            }
+                            int64_t mask = 0;
+                            if (h->op == IR_BAND
+                                && (ssa_extended_const(fn, ssa_def, h->b, &mask)
+                                    || ssa_extended_const(fn, ssa_def, h->a,
+                                                          &mask))
+                                && mask >= 0 && mask < (1 << (tw * 8)))
+                                safe = 1;
+                            break;
+                        }
+                    }
+                } else if (s->op == IR_BAND) {
+                    int64_t mask = 0;
+                    if (ssa_extended_const(fn, ssa_def, s->b, &mask)
+                        || ssa_extended_const(fn, ssa_def, s->a, &mask)) {
+                        if (mask >= 0 && mask <= lim) safe = 1;
+                    }
+                }
+                break;
+            }
+            if (!safe) continue;
             mask_nop[uj] = 1;
             mask_nop[ti] = 1;
         }
