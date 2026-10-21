@@ -1260,6 +1260,35 @@ static void emit_arith_r32_disp(Buffer *b, int op, int base, int src, int off) {
     emit_modrm_disp(b, src, base, off);
 }
 
+/* addl/xorl $imm, symb(%rip) — returns patch offset of the disp32. */
+static size_t emit_arith_imm32_rip(Buffer *b, int ext, int32_t imm) {
+    size_t patch;
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_modrm(b, 0, ext, 5);
+        patch = b->len;
+        emit_int32(b, 0);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_modrm(b, 0, ext, 5);
+        patch = b->len;
+        emit_int32(b, 0);
+        emit_int32(b, imm);
+    }
+    return patch;
+}
+
+/* addl/xorl %src, symb(%rip) — returns patch offset of the disp32. */
+static size_t emit_arith_r32_rip(Buffer *b, int op, int src) {
+    emit_rex_if(b, 0, src, 0, 0);
+    emit_byte(b, (uint8_t)op);
+    emit_modrm(b, 0, src & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
 /* mov{b,w,l,q} $imm, off(%base) — gcc -O0 form for storing a constant. */
 static void emit_store_imm_disp(Buffer *b, int base, int32_t imm, int off,
                                 int width) {
@@ -4576,6 +4605,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         memset(mem_rmw, 0, ninst_f ? ninst_f : 1);
         int32_t *mem_rmw_imm = xmalloc((ninst_f ? ninst_f : 1) * sizeof(int32_t));
         memset(mem_rmw_imm, 0, (ninst_f ? ninst_f : 1) * sizeof(int32_t));
+        const char **mem_rmw_gname = xmalloc((ninst_f ? ninst_f : 1) * sizeof(char *));
+        memset(mem_rmw_gname, 0, (ninst_f ? ninst_f : 1) * sizeof(char *));
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             const IRInst *st = &fn->insts.data[uj];
             if (skip_body[uj] || fused_skip[uj]) continue;
@@ -4583,15 +4614,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (st->op != IR_STORE_PTR && st->op != IR_STORE) continue;
             if (st->width != 4) continue;
             int poff = 0;
+            const char *st_gname = NULL;
             if (st->op == IR_STORE) {
                 if (st->a < 0 || st->a >= nvals_f || alloca_off[st->a] == 0)
                     continue;
                 poff = alloca_off[st->a];
-            } else if (!fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0)) {
-                continue;
+            } else if (fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0)) {
+                /* frame slot */
+            } else {
+                st_gname = peel_gaddr_name_unique(fn, ssa_def, st->a);
+                if (!st_gname || !gaddr_is_local_abs(ir, st_gname))
+                    continue;
+                poff = 0; /* sentinel: match by gname */
             }
             if (st->b < 0 || st->b >= nvals_f || ssa_def[st->b] < 0
-                || raw_uses[st->b] != 1)
+                || raw_uses[st->b] != 1 || !value_unique_def(fn, st->b))
                 continue;
             int ai = ssa_def[st->b];
             if (skip_body[ai] || fused_skip[ai]) continue;
@@ -4626,14 +4663,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (skip_body[di] || fused_skip[di]) break;
                     const IRInst *d = &fn->insts.data[di];
                     if (d->op == IR_LOAD_PTR) {
-                        if (!fold_ptr_off(fn, ssa_def, alloca_off, d->a,
-                                          &loff, 0))
+                        if (st_gname) {
+                            const char *lg = peel_gaddr_name_unique(
+                                fn, ssa_def, d->a);
+                            if (!lg || strcmp(lg, st_gname) != 0) break;
+                            loff = 0;
+                        } else if (!fold_ptr_off(fn, ssa_def, alloca_off, d->a,
+                                                 &loff, 0)) {
                             break;
+                        }
                         lj = di;
                         break;
                     }
-                    if (d->op == IR_LOAD && d->a >= 0 && d->a < nvals_f
-                        && alloca_off[d->a] != 0) {
+                    if (!st_gname && d->op == IR_LOAD && d->a >= 0
+                        && d->a < nvals_f && alloca_off[d->a] != 0) {
                         loff = alloca_off[d->a];
                         lj = di;
                         break;
@@ -4645,7 +4688,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     break;
                 }
-                if (lj < 0 || loff != poff) continue;
+                if (lj < 0) continue;
+                if (st_gname) {
+                    /* gname already matched above */
+                } else if (loff != poff) {
+                    continue;
+                }
                 other = oth;
                 li = lj;
                 break;
@@ -4653,8 +4701,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (li < 0 || other < 0) continue;
             int64_t immv = 0;
             IRValue imm_src = other;
-            for (int depth = 0; depth < 3 && imm_src >= 0 && imm_src < nvals_f;
+            /* Phi-elim gives several defs of the same id; ssa_def keeps the
+             * last, so an imm peel would pick one branch (pr42721). */
+            if (!value_unique_def(fn, other))
+                imm_src = -1;
+            for (int depth = 0; imm_src >= 0 && imm_src < nvals_f && depth < 3;
                  depth++) {
+                if (!value_unique_def(fn, imm_src)) { imm_src = -1; break; }
                 if (ssa_const_imm(fn, ssa_def, imm_src, &immv)) break;
                 if (ssa_def[imm_src] < 0) { imm_src = -1; break; }
                 const IRInst *d = &fn->insts.data[ssa_def[imm_src]];
@@ -4666,6 +4719,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (imm_src >= 0 && imm_fits_i32(immv)) {
                 mem_rmw[uj] = (char)(1 + ext); /* 1..7 = imm form */
                 mem_rmw_imm[uj] = (int32_t)immv;
+                mem_rmw_gname[uj] = st_gname;
                 fused_skip[ai] = 1;
                 fused_skip[li] = 1;
                 for (int k = 0; k < npeel; k++)
@@ -4685,30 +4739,36 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                 }
                 /* Only skip a STORE_PTR address ADDR; IR_STORE's a is the
-                 * alloca itself and must stay. */
+                 * alloca itself and must stay.  Rip RMW: load+store share
+                 * the GADDR (2 uses) — skip it too. */
                 if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
-                    && raw_uses[st->a] == 1 && ssa_def[st->a] >= 0)
+                    && ssa_def[st->a] >= 0
+                    && raw_uses[st->a] <= (st_gname ? 2 : 1))
                     fused_skip[ssa_def[st->a]] = 1;
                 if (fn->insts.data[li].op == IR_LOAD_PTR
                     && fn->insts.data[li].a >= 0
                     && fn->insts.data[li].a < nvals_f
-                    && raw_uses[fn->insts.data[li].a] == 1
-                    && ssa_def[fn->insts.data[li].a] >= 0)
+                    && ssa_def[fn->insts.data[li].a] >= 0
+                    && raw_uses[fn->insts.data[li].a]
+                       <= (st_gname ? 2 : 1))
                     fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
             } else if (raw_uses[other] >= 1 && commutative) {
                 /* reg form: addl/xorl %reg, mem.  Keep SUB as load/op/store. */
                 mem_rmw[uj] = (char)(10 + (rop & 0x3f)); /* mark reg form */
                 mem_rmw_imm[uj] = other; /* reuse as IRValue */
+                mem_rmw_gname[uj] = st_gname;
                 fused_skip[ai] = 1;
                 fused_skip[li] = 1;
                 if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
-                    && raw_uses[st->a] == 1 && ssa_def[st->a] >= 0)
+                    && ssa_def[st->a] >= 0
+                    && raw_uses[st->a] <= (st_gname ? 2 : 1))
                     fused_skip[ssa_def[st->a]] = 1;
                 if (fn->insts.data[li].op == IR_LOAD_PTR
                     && fn->insts.data[li].a >= 0
                     && fn->insts.data[li].a < nvals_f
-                    && raw_uses[fn->insts.data[li].a] == 1
-                    && ssa_def[fn->insts.data[li].a] >= 0)
+                    && ssa_def[fn->insts.data[li].a] >= 0
+                    && raw_uses[fn->insts.data[li].a]
+                       <= (st_gname ? 2 : 1))
                     fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
                 mark_reg(needed, ssa_uses_f, nvals_f, other);
             }
@@ -5945,6 +6005,28 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     ensure_reg(&out->text, ov, REG_RAX, ra);
                     emit_arith_r32_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
                                         REG_RAX, ptr_off);
+                } else if (mem_rmw_gname[j] && mem_rmw[j] >= 1
+                           && mem_rmw[j] <= 7) {
+                    int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
+                    if (gsym >= 0 && out->syms[gsym].shndx != SECT_UNDEF) {
+                        int32_t imm = mem_rmw_imm[j];
+                        size_t patch = emit_arith_imm32_rip(
+                            &out->text, mem_rmw[j] - 1, imm);
+                        /* disp32 is followed by imm8 (-5) or imm32 (-8). */
+                        int addend = (imm >= -128 && imm <= 127) ? -5 : -8;
+                        emit_module_add_reloc(out, patch, R_X86_64_PC32,
+                                              gsym, addend);
+                    }
+                } else if (mem_rmw_gname[j] && mem_rmw[j] >= 10) {
+                    int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
+                    IRValue ov = (IRValue)mem_rmw_imm[j];
+                    ensure_reg(&out->text, ov, REG_RAX, ra);
+                    if (gsym >= 0 && out->syms[gsym].shndx != SECT_UNDEF) {
+                        size_t patch = emit_arith_r32_rip(
+                            &out->text, mem_rmw[j] - 10, REG_RAX);
+                        emit_module_add_reloc(out, patch, R_X86_64_PC32,
+                                              gsym, -4);
+                    }
                 } else if (folded && store_imm[j]) {
                     int64_t immv = 0;
                     IRValue cur = inst->b;
@@ -7823,6 +7905,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(store_imm);
         free(mem_rmw);
         free(mem_rmw_imm);
+        free(mem_rmw_gname);
         free(param_home_off);
         free(needed);
         free(carry_zero_hi);
