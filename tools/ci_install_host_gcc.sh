@@ -55,11 +55,38 @@ fi
 sudo apt-get update
 sudo apt-get install -y software-properties-common
 retry sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-# add-apt-repository exits 0 even when the PPA index fetch returns 503, and
-# the following install then cannot see gcc-16.  Repeat the update until the
-# package is actually listed.
-retry bash -c 'sudo apt-get update && apt-cache show gcc-16 >/dev/null'
-retry sudo apt-get install -y gcc-16 g++-16
+# add-apt-repository exits 0 even when Launchpad answers 503.  A later
+# apt-get update also returns failure when only Translation-en 503s, and
+# then discards a Packages file that already listed gcc-16.  Skip
+# translations, ignore that exit, and keep going until the package is
+# actually visible.  The pool stays flaky for several minutes at a time.
+wait_for_gcc16() {
+    local attempts=12 delay=20 n=1
+    while true; do
+        sudo apt-get update \
+            -o Acquire::Retries=6 \
+            -o Acquire::Languages=none \
+            -o Acquire::https::Timeout=30 \
+            -o Acquire::http::Timeout=30 \
+            || true
+        if apt-cache show gcc-16 >/dev/null 2>&1; then
+            return 0
+        fi
+        if [ "$n" -ge "$attempts" ]; then
+            echo "gcc-16 still missing from the toolchain PPA after $n updates" >&2
+            return 1
+        fi
+        echo "gcc-16 not listed yet (attempt $n/$attempts); retrying in ${delay}s" >&2
+        sleep "$delay"
+        n=$((n + 1))
+    done
+}
+wait_for_gcc16
+retry sudo apt-get install -y \
+    -o Acquire::Retries=8 \
+    -o Acquire::Languages=none \
+    -o Acquire::https::Timeout=60 \
+    gcc-16 g++-16
 
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$(command -v gcc-16)" "$HOME/.local/bin/gcc"
