@@ -3482,12 +3482,76 @@ static int pure_addr_op(int op) {
     return op == IR_ADD || op == IR_MUL || op == IR_SEXT || op == IR_ZEXT;
 }
 
-/* 1 when this dereference folds away the pointer SSA (uses base/index
- * instead).  Requires adjacent sole-use so shared GEPs (a[i++] load+store)
- * keep the address ADD live. */
-static int deref_folds_addr(const IRFunction *fn, const int *def,
-                            const int *alloca_off, const int *raw_uses,
-                            const IRInst *inst, size_t ii) {
+/* Reload a GEP index for abs32 remat from a pinned frame slot when possible. */
+static void ensure_abs_index(Buffer *b, const IRFunction *fn, const int *def,
+                             const int *alloca_off, IRValue idx, int dst_reg,
+                             const RAResult *ra) {
+    IRValue v = idx;
+    int sext = 0, zext = 0;
+    for (int depth = 0; depth < 8 && v >= 0 && v < fn->next_value_id
+         && def[v] >= 0; depth++) {
+        const IRInst *d = &fn->insts.data[def[v]];
+        if (d->op == IR_COPY) {
+            v = d->a;
+            continue;
+        }
+        if (d->op == IR_SEXT) {
+            sext = 1;
+            zext = 0;
+            v = d->a;
+            continue;
+        }
+        if (d->op == IR_ZEXT) {
+            zext = 1;
+            sext = 0;
+            v = d->a;
+            continue;
+        }
+        if (d->op == IR_LOAD || d->op == IR_LOAD_PTR) {
+            int off = 0;
+            if (d->op == IR_LOAD) {
+                if (d->a < 0 || d->a >= fn->next_value_id || !alloca_off
+                    || alloca_off[d->a] == 0) {
+                    ensure_reg(b, idx, dst_reg, ra);
+                    return;
+                }
+                off = alloca_off[d->a];
+            } else if (!fold_ptr_off(fn, def, alloca_off, d->a, &off, 0)) {
+                ensure_reg(b, idx, dst_reg, ra);
+                return;
+            }
+            emit_load_disp(b, dst_reg, REG_RBP, off, 4, 1);
+            if (sext)
+                emit_movsx_rr(b, dst_reg, dst_reg, 4);
+            else if (zext) {
+                emit_rex_if(b, 0, 0, 0, dst_reg);
+                emit_byte(b, 0x89);
+                emit_modrm(b, 3, dst_reg & 7, dst_reg & 7);
+            }
+            return;
+        }
+        break;
+    }
+    ensure_reg(b, idx, dst_reg, ra);
+}
+
+/* Local-abs SIB rematerializes from the GEP's index SSA at every use. */
+static int abs_remat_addr(const IRModule *ir, const IRFunction *fn,
+                          const int *def, const int *alloca_off, IRValue v) {
+    IRValue base = -1, idx = -1;
+    int sc = 0, disp = 0;
+    if (classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc, &disp)
+        != AF_SIB)
+        return 0;
+    const char *gn = peel_gaddr_name(fn, def, base);
+    return gn && gaddr_is_local_abs(ir, gn);
+}
+
+/* Fold away pointer SSA: adjacent sole-use, or local-abs SIB remat. */
+static int deref_folds_addr(const IRModule *ir, const IRFunction *fn,
+                            const int *def, const int *alloca_off,
+                            const int *raw_uses, const IRInst *inst,
+                            size_t ii) {
     if (!inst || (inst->op != IR_LOAD_PTR && inst->op != IR_STORE_PTR))
         return 0;
     IRValue v = inst->a;
@@ -3499,6 +3563,7 @@ static int deref_folds_addr(const IRFunction *fn, const int *def,
         && inst->width != 8)
         return 0;
     if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    if (abs_remat_addr(ir, fn, def, alloca_off, v)) return 1;
     if ((size_t)def[v] + 1 != ii) return 0;
     if (raw_uses && raw_uses[v] > 1) return 0;
     IRValue base = -1, idx = -1;
@@ -3530,10 +3595,11 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
             int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
+            int remat = abs_remat_addr(ir, fn, def, alloca_off, inst->a);
             if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                 && (inst->width == 1 || inst->width == 2 || inst->width == 4
                     || inst->width == 8)
-                && adjacent && sole_use
+                && (remat || (adjacent && sole_use))
                 && classify_ptr_addr(fn, def, alloca_off, inst->a,
                                      &ab, &ai, &asc, &adisp) != AF_NONE) {
             /* Local GADDR folds into R_X86_64_32S; no lea of the base.
@@ -3567,10 +3633,11 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
             int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
+            int remat = abs_remat_addr(ir, fn, def, alloca_off, inst->a);
             if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                 && (inst->width == 1 || inst->width == 2 || inst->width == 4
                     || inst->width == 8)
-                && adjacent && sole_use
+                && (remat || (adjacent && sole_use))
                 && classify_ptr_addr(fn, def, alloca_off, inst->a,
                                      &ab, &ai, &asc, &adisp) != AF_NONE) {
             if (ab >= 0) {
@@ -4159,7 +4226,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         for (size_t uj = fn->insts.len; uj-- > 0; ) {
             if (skip_body[uj]) continue;
             const IRInst *u = &fn->insts.data[uj];
-            if (deref_folds_addr(fn, ssa_def, alloca_off, raw_uses, u, uj)
+            if (deref_folds_addr(ir, fn, ssa_def, alloca_off, raw_uses, u, uj)
                 && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
                 uses_left[u->a]--;
             /* Live lea-folded GEPs read the index, not GADDR/MUL SSA. */
@@ -5386,10 +5453,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
                 IRValue af_base = -1, af_idx = -1;
                 int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
-                int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
-                             && ssa_def[inst->a] >= 0
-                             && (size_t)ssa_def[inst->a] + 1 == j
-                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
+                int af_adj = (inst->a >= 0
+                              && abs_remat_addr(ir, fn, ssa_def, alloca_off,
+                                               inst->a))
+                             || (inst->a >= 0 && inst->a < fn->next_value_id
+                                 && ssa_def[inst->a] >= 0
+                                 && (size_t)ssa_def[inst->a] + 1 == j
+                                 && raw_uses[inst->a] <= 1);
                 if (!folded && af_adj
                     && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
@@ -5467,7 +5537,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                      && out->syms[gsym].shndx != SECT_UNDEF;
                         if (abs_ok) {
                             if (af_idx >= 0)
-                                ensure_reg(&out->text, af_idx, REG_RCX, ra);
+                                ensure_abs_index(&out->text, fn, ssa_def,
+                                                 alloca_off, af_idx, REG_RCX,
+                                                 ra);
                             size_t patch = emit_load_abs32(
                                 &out->text, dst_gp,
                                 af_idx >= 0 ? REG_RCX : -1, af_sc,
@@ -5501,10 +5573,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
                 IRValue af_base = -1, af_idx = -1;
                 int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
-                int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
-                             && ssa_def[inst->a] >= 0
-                             && (size_t)ssa_def[inst->a] + 1 == j
-                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
+                int af_adj = (inst->a >= 0
+                              && abs_remat_addr(ir, fn, ssa_def, alloca_off,
+                                               inst->a))
+                             || (inst->a >= 0 && inst->a < fn->next_value_id
+                                 && ssa_def[inst->a] >= 0
+                                 && (size_t)ssa_def[inst->a] + 1 == j
+                                 && raw_uses[inst->a] <= 1);
                 if (!folded && af_adj
                     && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
@@ -5577,9 +5652,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     int abs_ok = gsym >= 0
                                  && out->syms[gsym].shndx != SECT_UNDEF;
                     if (abs_ok) {
-                        if (af_idx >= 0)
-                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
                         ensure_reg(&out->text, inst->b, REG_RDX, ra);
+                        if (af_idx >= 0)
+                            ensure_abs_index(&out->text, fn, ssa_def,
+                                             alloca_off, af_idx, REG_RCX,
+                                             ra);
                         size_t patch = emit_store_abs32(
                             &out->text, REG_RDX,
                             af_idx >= 0 ? REG_RCX : -1, af_sc, inst->width);
