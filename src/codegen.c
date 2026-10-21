@@ -3165,7 +3165,7 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int h
             emit_byte(b, 0x89);
             emit_byte(b, 0xEC);
         }
-    } else {
+    } else if (stack_size != 0) {
         emit_add_rsp_imm32(b, stack_size);
     }
     if (cs_used[2]) emit_pop_r(b, REG_R13);
@@ -4448,6 +4448,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         int aligned_call_saved_sp_rbp_off = (aligned_call_saved_sp_rsp_off >= 0)
             ? -(frame_down - aligned_call_saved_sp_rsp_off) : 0;
 
+        /* SysV red zone: leaf frames ≤128 bytes below rsp need no
+         * sub/add rsp (gcc -O0 is_prime/clear_prime). */
+        int is_leaf = 1;
+        for (size_t j = 0; j < fn->insts.len; j++) {
+            if (fn->insts.data[j].op == IR_CALL) {
+                is_leaf = 0;
+                break;
+            }
+        }
+        int use_red_zone = is_leaf && !fn->is_variadic && !fn->needs_apply_args
+            && !fn->needs_apply && !fn->has_dyn_alloca && cs_count == 0
+            && bottom_extra == 0 && frame_down > 0 && frame_down <= 128;
+        int prologue_stack = use_red_zone ? 0 : stack_size;
+
         emit_byte(&out->text, 0x55);              /* pushq %rbp */
         size_t after_push_rbp_pc = out->text.len;
         emit_rex_w(&out->text);
@@ -4917,6 +4931,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 needed[cv] = 0;
             }
         }
+        /* ZEXT(TRUNC(x)) sole-use: both are no-ops when the value already
+         * sits in the low bits (sieve `(unsigned char)(1u<<k)` → and). */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj] || mask_nop[uj]) continue;
+            const IRInst *zx = &fn->insts.data[uj];
+            if (zx->op != IR_ZEXT || zx->a < 0 || zx->a >= nvals_f) continue;
+            if (raw_uses[zx->a] != 1 || ssa_def[zx->a] < 0) continue;
+            int ti = ssa_def[zx->a];
+            if (skip_body[ti] || fused_skip[ti] || mask_nop[ti]) continue;
+            const IRInst *tr = &fn->insts.data[ti];
+            if (tr->op != IR_TRUNC || tr->width != (int)zx->imm) continue;
+            mask_nop[uj] = 1;
+            mask_nop[ti] = 1;
+        }
         /* Narrow store sole-use: TRUNC/ZEXT/SEXT can omit re-extend (still
          * copy into dst so the store reads it).  Width-4 ZEXT/unsigned TRUNC
          * after a 32-bit LOAD/ALU is also a no-op movl (narrow / gcc -O0). */
@@ -5253,8 +5281,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
 
         /* Allocate the frame.  For variadic functions this also reserves the
-         * 176-byte register-save area at the bottom. */
-        emit_sub_rsp_imm32(&out->text, stack_size); /* sub $N, %rsp */
+         * 176-byte register-save area at the bottom.  Leaf red-zone frames
+         * skip the sub (prologue_stack == 0). */
+        if (prologue_stack != 0)
+            emit_sub_rsp_imm32(&out->text, prologue_stack);
 
         /* Variadic: save the incoming argument registers into the save area at
          * the bottom of the frame BEFORE the param dance clobbers them.  The
@@ -7357,7 +7387,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 if (inst->call_name && strcmp(inst->call_name, "__builtin_return") == 0) {
-                    emit_builtin_return(&out->text, inst, ra, stack_size, cs_used,
+                    emit_builtin_return(&out->text, inst, ra, prologue_stack, cs_used,
                                         fn->has_dyn_alloca);
                     break;
                 }
@@ -8013,7 +8043,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     else
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 }
-                emit_epilogue(&out->text, stack_size, cs_used, fn->has_dyn_alloca);
+                emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca);
                 break;
             }
 
@@ -8455,7 +8485,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 needs_ret = 1;
         }
         if (needs_ret)
-            emit_epilogue(&out->text, stack_size, cs_used, fn->has_dyn_alloca);
+            emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca);
 
         if (want_debug && dbg_func_idx >= 0) {
             size_t fn_end_pc = out->text.len;
