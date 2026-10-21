@@ -4611,16 +4611,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (value_is_float_class(fn, st->b) || value_is_ld(fn, st->b))
                 continue;
             int poff = 0;
-            int abs_ok = 0;
             if (fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0)) {
-                /* frame */
+                /* frame: any width 1/2/4/8 */
             } else if (local_abs_af(ir, fn, ssa_def, alloca_off, st->a,
-                                    NULL, NULL, NULL, NULL)) {
-                abs_ok = 1;
+                                    NULL, NULL, NULL, NULL)
+                       && (st->width == 1 || st->width == 4)) {
+                /* abs32 imm store only for byte/int (emit_store_imm_abs32).
+                 * Width 8 must keep the CONST live for a GP store. */
             } else {
                 continue;
             }
-            (void)abs_ok;
             IRValue cur = st->b;
             int skip_chain[4];
             int nskip = 0;
