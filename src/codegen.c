@@ -4649,6 +4649,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
          * skip both value-materializing instructions and branch on flags. */
         size_t ninst_f = fn->insts.len ? fn->insts.len : 1;
         char *fused_skip = xmalloc(ninst_f);
+        char *mask_nop = xmalloc(ninst_f);
         int *fused_cmp_at = xmalloc(ninst_f * sizeof(int));
         char *fused_inv_at = xmalloc(ninst_f);
         int *carry_hi_at = xmalloc(ninst_f * sizeof(int));
@@ -4656,6 +4657,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         char *carry_zero_hi = xmalloc(ninst_f);
         int *mul_hi_at = xmalloc(ninst_f * sizeof(int));
         memset(fused_skip, 0, ninst_f);
+        memset(mask_nop, 0, ninst_f);
         memset(carry_is_sub, 0, ninst_f);
         memset(carry_zero_hi, 0, ninst_f);
         for (size_t uj = 0; uj < ninst_f; uj++) {
@@ -4786,6 +4788,72 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             for (int k = 0; k < nskip; k++)
                 fused_skip[skip_chain[k]] = 1;
             (void)poff;
+        }
+        /* Narrow store sole-use: TRUNC/ZEXT/SEXT can omit re-extend (still
+         * copy into dst so the store reads it).  Width-4 ZEXT/unsigned TRUNC
+         * after a 32-bit LOAD/ALU is also a no-op movl (narrow / gcc -O0). */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *st = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (st->op != IR_STORE_PTR && st->op != IR_STORE) continue;
+            if (st->width != 1 && st->width != 2) continue;
+            if (st->b < 0 || st->b >= nvals_f || raw_uses[st->b] != 1)
+                continue;
+            IRValue cur = st->b;
+            for (int depth = 0; depth < 4 && cur >= 0 && cur < nvals_f;
+                 depth++) {
+                if (raw_uses[cur] != 1 || ssa_def[cur] < 0) break;
+                int di = ssa_def[cur];
+                if (skip_body[di] || fused_skip[di]) break;
+                const IRInst *d = &fn->insts.data[di];
+                if (d->op == IR_COPY) {
+                    cur = d->a;
+                    continue;
+                }
+                if (d->op == IR_TRUNC && d->width == st->width) {
+                    mask_nop[di] = 1;
+                    break;
+                }
+                if ((d->op == IR_ZEXT || d->op == IR_SEXT)
+                    && (int)d->imm == st->width) {
+                    mask_nop[di] = 1;
+                    break;
+                }
+                break;
+            }
+        }
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj] || mask_nop[uj]) continue;
+            const IRInst *d = &fn->insts.data[uj];
+            int src_w = 0;
+            int want_u = 0;
+            if (d->op == IR_ZEXT) {
+                src_w = (int)d->imm;
+                want_u = 1;
+            } else if (d->op == IR_TRUNC && d->is_unsigned) {
+                src_w = d->width;
+                want_u = 1;
+            } else {
+                continue;
+            }
+            if (src_w != 4 || !want_u || d->a < 0 || d->a >= nvals_f)
+                continue;
+            IRValue src = d->a;
+            for (int depth = 0; depth < 4 && src >= 0 && src < nvals_f
+                 && ssa_def[src] >= 0; depth++) {
+                const IRInst *s = &fn->insts.data[ssa_def[src]];
+                if (s->op == IR_COPY) {
+                    src = s->a;
+                    continue;
+                }
+                if (((s->op == IR_LOAD || s->op == IR_LOAD_PTR) && s->width == 4)
+                    || ((s->op == IR_ADD || s->op == IR_SUB || s->op == IR_MUL
+                         || s->op == IR_BAND || s->op == IR_BOR || s->op == IR_BXOR
+                         || s->op == IR_SHL || s->op == IR_SHR)
+                        && s->width == 4))
+                    mask_nop[uj] = 1;
+                break;
+            }
         }
         /* x = x + imm / x = x ^ y into a folded stack slot → addl/xorl mem. */
         char *mem_rmw = xmalloc(ninst_f ? ninst_f : 1);
@@ -5583,7 +5651,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     spill_if_needed(&out->text, inst->dst, target, ra);
                     break;
                 }
-                int already = 0;
+                int already = mask_nop[j];
                 if ((src_w == 1 || src_w == 2) && inst->a >= 0
                     && inst->a < fn->next_value_id && ssa_def[inst->a] >= 0) {
                     const IRInst *ld = &fn->insts.data[ssa_def[inst->a]];
@@ -5646,6 +5714,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * hits this path; if the source is a non-negative masked AND,
                  * zero-extend (movl) instead of movsxd (gcc -O0). */
                 int trunc_u = inst->is_unsigned;
+                int trunc_nop = mask_nop[j];
                 if (!trunc_u && inst->width == 4 && inst->a >= 0
                     && inst->a < fn->next_value_id) {
                     IRValue cur = inst->a;
@@ -5674,13 +5743,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     inst->dst >= 0 && inst->dst < ra->num_values &&
                     ra->reg[inst->dst] == ra->reg[inst->a] &&
                     ra->reg[inst->dst] >= 0) {
-                    mask_to_width(&out->text, ra->reg[inst->dst],
-                                  inst->width, trunc_u);
+                    if (!trunc_nop)
+                        mask_to_width(&out->text, ra->reg[inst->dst],
+                                      inst->width, trunc_u);
                     break;
                 }
                 if (dr >= 0) {
                     ensure_reg(&out->text, inst->a, dr, ra);
-                    mask_to_width(&out->text, dr, inst->width, trunc_u);
+                    if (!trunc_nop)
+                        mask_to_width(&out->text, dr, inst->width, trunc_u);
                 } else {
                     /* Materialize the source with ensure_reg, not old_load:
                      * old_load addresses `a` at the pre-regalloc slot
@@ -5688,7 +5759,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      * outside the frame entirely (the frame is sized for the
                      * spill slots, not one slot per SSA value). */
                     ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                    mask_to_width(&out->text, REG_RAX, inst->width, trunc_u);
+                    if (!trunc_nop)
+                        mask_to_width(&out->text, REG_RAX, inst->width,
+                                      trunc_u);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
@@ -8289,6 +8362,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(ssa_def);
         free(skip_body);
         free(store_imm);
+        free(mask_nop);
         free(mem_rmw);
         free(mem_rmw_imm);
         free(mem_rmw_gname);
