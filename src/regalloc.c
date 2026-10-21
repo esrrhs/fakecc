@@ -167,16 +167,57 @@ static int ra_ok_index(const IRFunction *fn, const int *def, IRValue v) {
     return 0;
 }
 
+/* If idx is MUL by 2/4/8 (isel peel_sib_scale), also keep the multiplicand
+ * live — emit uses that SSA as the SIB index, not the MUL result. */
+static int ra_push_idx(const IRFunction *fn, const int *def, IRValue idx,
+                       IRValue *extra, int n, int cap) {
+    if (n >= cap || idx < 0) return n;
+    extra[n++] = idx;
+    if (idx >= fn->next_value_id || def[idx] < 0 || n >= cap) return n;
+    const IRInst *md = &fn->insts.data[def[idx]];
+    if (md->op != IR_MUL) return n;
+    int64_t factor = 0;
+    IRValue inner = -1;
+    if (def_op_is(fn, def, md->b, IR_CONST)) {
+        factor = fn->insts.data[def[md->b]].imm;
+        inner = md->a;
+    } else if (def_op_is(fn, def, md->a, IR_CONST)) {
+        factor = fn->insts.data[def[md->a]].imm;
+        inner = md->b;
+    } else {
+        return n;
+    }
+    if ((factor == 2 || factor == 4 || factor == 8) && inner >= 0 && n < cap)
+        extra[n++] = inner;
+    return n;
+}
+
 /* Extra SSA operands that must stay live at LOAD_PTR/STORE_PTR so isel
  * can emit [base+index] / [rbp+off+index] without the ADD result.  Does
  * not follow COPY (pointer selects are copies of distinct locals).
  * Only GP scalar widths — vector 16-byte loads/stores are not SIB-folded.
- * Only ADDR/GADDR bases with an integer index, matching isel. */
+ * Only ADDR/GADDR bases with an integer index, matching isel.
+ * Peels field-offset ADD(+const) layers so multi-use local-abs folds
+ * (bitfield / struct RMW) keep the index live across the load. */
 static int addr_fold_extras(const IRFunction *fn, const int *def, IRValue ptr,
-                            int width, IRValue extra[2]) {
+                            int width, IRValue *extra, int cap) {
     int n = 0;
     if (width != 1 && width != 2 && width != 4 && width != 8) return 0;
     if (!def || ptr < 0 || ptr >= fn->next_value_id || def[ptr] < 0) return 0;
+    for (int depth = 0; depth < 8; depth++) {
+        if (ptr < 0 || ptr >= fn->next_value_id || def[ptr] < 0) return 0;
+        const IRInst *pd = &fn->insts.data[def[ptr]];
+        if (pd->op != IR_ADD) break;
+        if (def_op_is(fn, def, pd->b, IR_CONST)
+            && !def_op_is(fn, def, pd->a, IR_CONST))
+            ptr = pd->a;
+        else if (def_op_is(fn, def, pd->a, IR_CONST)
+                 && !def_op_is(fn, def, pd->b, IR_CONST))
+            ptr = pd->b;
+        else
+            break;
+    }
+    if (ptr < 0 || ptr >= fn->next_value_id || def[ptr] < 0) return 0;
     const IRInst *d = &fn->insts.data[def[ptr]];
     if (d->op != IR_ADD) return 0;
     int a_const = def_op_is(fn, def, d->a, IR_CONST);
@@ -185,23 +226,17 @@ static int addr_fold_extras(const IRFunction *fn, const int *def, IRValue ptr,
     int b_stack = ra_is_stack_base(fn, def, d->b, 0);
     /* ADDR+const already folds to [rbp+off]; no extra live regs. */
     if ((a_stack && b_const) || (b_stack && a_const)) return 0;
-    if (a_stack && !b_const && ra_ok_index(fn, def, d->b)) {
-        extra[n++] = d->b;
-        return n;
-    }
-    if (b_stack && !a_const && ra_ok_index(fn, def, d->a)) {
-        extra[n++] = d->a;
-        return n;
-    }
+    if (a_stack && !b_const && ra_ok_index(fn, def, d->b))
+        return ra_push_idx(fn, def, d->b, extra, n, cap);
+    if (b_stack && !a_const && ra_ok_index(fn, def, d->a))
+        return ra_push_idx(fn, def, d->a, extra, n, cap);
     if (ra_is_gaddr(fn, def, d->a) && !b_const && ra_ok_index(fn, def, d->b)) {
-        extra[n++] = d->a;
-        extra[n++] = d->b;
-        return n;
+        if (n < cap) extra[n++] = d->a;
+        return ra_push_idx(fn, def, d->b, extra, n, cap);
     }
     if (ra_is_gaddr(fn, def, d->b) && !a_const && ra_ok_index(fn, def, d->a)) {
-        extra[n++] = d->b;
-        extra[n++] = d->a;
-        return n;
+        if (n < cap) extra[n++] = d->b;
+        return ra_push_idx(fn, def, d->a, extra, n, cap);
     }
     return 0;
 }
@@ -310,8 +345,8 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
         for (size_t i = 0; i < fn->insts.len; i++) {
             const IRInst *inst = &fn->insts.data[i];
             if (inst->op != IR_LOAD_PTR && inst->op != IR_STORE_PTR) continue;
-            IRValue extra[2];
-            int n = addr_fold_extras(fn, def, inst->a, inst->width, extra);
+            IRValue extra[4];
+            int n = addr_fold_extras(fn, def, inst->a, inst->width, extra, 4);
             for (int k = 0; k < n; k++) {
                 if (extra[k] >= 0 && extra[k] < nv)
                     liv_add_use(&liv[extra[k]], (int)i);
@@ -500,10 +535,10 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 }
             }
             if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
-                IRValue extra[2];
+                IRValue extra[4];
                 int w = inst->width;
                 if (w == 1 || w == 2 || w == 4 || w == 8) {
-                    int n = addr_fold_extras(fn, def, inst->a, inst->width, extra);
+                    int n = addr_fold_extras(fn, def, inst->a, inst->width, extra, 4);
                     for (int k = 0; k < n; k++) {
                         IRValue v = extra[k];
                         if (v >= 0 && v < use_b[bi].nv && !bs_test(&def_b[bi], v))
@@ -682,8 +717,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 }
             }
             if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
-                IRValue extra[2];
-                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
+                IRValue extra[4];
+                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra, 4);
                 for (int k = 0; k < n; k++) {
                     IRValue v = extra[k];
                     if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
@@ -806,8 +841,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 }
             }
             if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
-                IRValue extra[2];
-                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
+                IRValue extra[4];
+                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra, 4);
                 for (int k = 0; k < n; k++) {
                     IRValue v = extra[k];
                     if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
