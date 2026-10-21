@@ -3108,6 +3108,19 @@ static int looks_like_addr_base(const IRFunction *fn, const int *def,
  * back from v, so no intervening instruction can have recycled its home.
  * A pinned alloca address ([rbp+off]) is a frame value and stays safe
  * regardless of position. */
+/* True when every instruction in (lo, hi) is IR_CONST.  emit_add_const
+ * inserts a CONST immediately before the ADD; that gap is still safe for
+ * fold_gep because the CONST does not clobber the pointer SSA. */
+static int gep_const_only_gap(const IRFunction *fn, int lo, int hi) {
+    int k;
+    if (lo < 0 || hi < 0 || lo >= hi) return lo == hi;
+    for (k = lo + 1; k < hi; k++) {
+        if (fn->insts.data[k].op != IR_CONST)
+            return 0;
+    }
+    return 1;
+}
+
 static int fold_gep(const IRFunction *fn, const int *def,
                     const int *alloca_off, IRValue v,
                     IRValue *base_out, IRValue *idx_out, int *scale2_out,
@@ -3118,7 +3131,9 @@ static int fold_gep(const IRFunction *fn, const int *def,
     for (int depth = 0; depth < 8; depth++) {
         if (cur < 0 || cur >= fn->next_value_id || def[cur] < 0) return 0;
         int cp = def[cur];
-        if (cp != expect) return 0; /* gap in the address chain */
+        /* Allow CONST-only gaps (emit_add_const); reject anything else. */
+        if (cp != expect && !gep_const_only_gap(fn, cp, expect))
+            return 0;
         const IRInst *d = &fn->insts.data[cp];
         if (d->op != IR_ADD) return 0;
         IRValue raw_idx = -1, other = -1;
@@ -3145,7 +3160,7 @@ static int fold_gep(const IRFunction *fn, const int *def,
                     int bp = def[base];
                     const IRInst *bd = &fn->insts.data[bp];
                     if (bd->op != IR_ADD) break;
-                    if (bp != bexpect) {
+                    if (bp != bexpect && !gep_const_only_gap(fn, bp, bexpect)) {
                         if (fold_ptr_off(fn, def, alloca_off, base,
                                          &boff, 0)) {
                             is_frame = 1;
@@ -3271,10 +3286,14 @@ static int fold_gep(const IRFunction *fn, const int *def,
         }
         if (inner < 0 || inner >= fn->next_value_id || def[inner] < 0)
             return 0;
-        if (def[inner] != cp - 1) return 0; /* gap: register may be recycled */
+        /* CONST between pointer and ADD(ptr, imm) is emit_add_const; keep
+         * walking.  Any other gap risks a recycled register. */
+        if (def[inner] != cp - 1
+            && !gep_const_only_gap(fn, def[inner], cp - 1))
+            return 0;
         disp += (int)c;
         cur = inner;
-        expect = cp - 1;
+        expect = def[inner];
     }
     return 0;
 }
