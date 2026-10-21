@@ -3628,10 +3628,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             param_home_off = xmalloc((size_t)nparams * sizeof(int));
             memset(param_home_off, 0, (size_t)nparams * sizeof(int));
         }
-        /* Scalar -O0: PARAM is stored once into a same-sized pinned alloca.
-         * Write the incoming register into that slot in the prologue and skip
-         * the later ADDR+STORE_PTR.  Reject ADDR+const / wider allocas so
-         * __int128 and struct eightbytes keep their multi-store sequence. */
+        /* Scalar / aggregate -O0: PARAM is stored once into a pinned alloca
+         * (full slot, or one eightbyte at ADDR / ADDR+imm).  Write the
+         * incoming register there in the prologue and skip the body store. */
         for (int p = 0; p < nparams; p++) {
             const IRInst *pi = &fn->insts.data[p];
             IRValue v = pi->dst;
@@ -3665,18 +3664,47 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             const IRInst *st = &fn->insts.data[store_i];
             IRValue ptr = st->a;
             if (ptr < 0 || ptr >= fn->next_value_id || ssa_def[ptr] < 0) continue;
+            int slot = -1, field_off = 0;
             const IRInst *ad = &fn->insts.data[ssa_def[ptr]];
-            if (ad->op != IR_ADDR) continue;
-            int slot = ad->a;
+            if (ad->op == IR_ADDR) {
+                slot = ad->a;
+                field_off = 0;
+            } else if (ad->op == IR_ADD) {
+                IRValue base_ptr = -1;
+                int64_t imm = 0;
+                if (ad->a >= 0 && ad->a < fn->next_value_id && ssa_def[ad->a] >= 0
+                    && ad->b >= 0 && ad->b < fn->next_value_id && ssa_def[ad->b] >= 0) {
+                    const IRInst *xa = &fn->insts.data[ssa_def[ad->a]];
+                    const IRInst *xb = &fn->insts.data[ssa_def[ad->b]];
+                    if (xa->op == IR_ADDR && xb->op == IR_CONST && !xb->is_float) {
+                        base_ptr = ad->a;
+                        imm = xb->imm;
+                    } else if (xb->op == IR_ADDR && xa->op == IR_CONST && !xa->is_float) {
+                        base_ptr = ad->b;
+                        imm = xa->imm;
+                    }
+                }
+                if (base_ptr < 0 || ssa_def[base_ptr] < 0) continue;
+                const IRInst *ba = &fn->insts.data[ssa_def[base_ptr]];
+                if (ba->op != IR_ADDR) continue;
+                slot = ba->a;
+                field_off = (int)imm;
+            } else {
+                continue;
+            }
             if (slot < 0 || slot >= fn->next_value_id || ssa_def[slot] < 0) continue;
             const IRInst *al = &fn->insts.data[ssa_def[slot]];
             if (al->op != IR_ALLOCA) continue;
+            /* Over-aligned allocas realign at IR_ADDR; the raw slot base is
+             * not the address the body stores through (vector32 flakiness). */
+            if (alloca_dyn_align(fn, ssa_def, slot)) continue;
             int store_w = st->width ? st->width : 4;
             int param_w = pi->width ? pi->width : 4;
-            if (al->alloca_bytes != store_w || store_w != param_w) continue;
+            if (store_w != param_w) continue;
+            if (field_off < 0 || al->alloca_bytes < field_off + store_w) continue;
             int off = alloca_off[slot];
             if (off == 0) continue;
-            param_home_off[p] = off;
+            param_home_off[p] = off + field_off;
             skip_body[store_i] = 1;
         }
         int nvals_f = fn->next_value_id > 0 ? fn->next_value_id : 1;
@@ -5941,6 +5969,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_add_imm32(&out->text, REG_RCX, 16);
                         emit_x87_fstptRCX(&out->text);
                     }
+                } else if (!inst->x87_pair && inst->dst < 0 && inst->a >= 0
+                           && inst->imm >= 1 && inst->imm <= 2) {
+                    /* INTEGER register-returned struct: RAX(/RDX) → slot. */
+                    int slot_off = 0;
+                    if (fold_ptr_off(fn, ssa_def, alloca_off, inst->a,
+                                     &slot_off, 0)) {
+                        emit_store_disp(&out->text, REG_RBP, REG_RAX,
+                                        slot_off, 8);
+                        if (inst->imm > 1)
+                            emit_store_disp(&out->text, REG_RBP, REG_RDX,
+                                            slot_off + 8, 8);
+                    } else {
+                        ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                        emit_store_base_off(&out->text, REG_RCX, REG_RAX, 0);
+                        if (inst->imm > 1)
+                            emit_store_base_off(&out->text, REG_RCX, REG_RDX, 8);
+                    }
                 } else {
 
                 /* Multi-eightbyte aggregate return: SysV assigns INTEGER
@@ -6013,7 +6058,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         }
                     }
                 }
-                } /* !x87_pair */
+                } /* !x87_pair && !direct ret slot */
                 free(target_reg);
                 free(target_is_xmm);
                 break;

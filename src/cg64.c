@@ -3958,6 +3958,17 @@ static void emit_call(C64 *c, const IRInst *s) {
             a64_fmov_gp(a, SCR0, A64_V0 + i, 0, vw(c, hv[i]) == 8);
             place_from(c, hv[i], SCR0);
         }
+    } else if (s->dst < 0 && s->a >= 0 && !s->x87_pair
+               && s->imm >= 1 && s->imm <= 2) {
+        /* INTEGER register-returned struct: x0(/x1) → result slot. */
+        int p = load_ptrv(c, s->a, -1);
+        if (p == A64_X0 || p == A64_X1) {
+            a64_mov_reg(a, SCR0, p, 1);
+            p = SCR0;
+        }
+        a64_str64(a, A64_X0, p, 0);
+        if (s->imm > 1)
+            a64_str64(a, A64_X1, p, 8);
     } else if (s->dst >= 0 && vec16_val(c, s->dst)) {
         int h = fp_home(c, s->dst);
         if (h < 0) commit_q(c, s->dst, A64_V0);

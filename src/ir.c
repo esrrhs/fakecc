@@ -21,6 +21,9 @@ int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 const TranslationUnit *g_ir_tu = NULL;       /* set by ir_generate */
 static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
+/* When set, a register-returned struct call stores into this address
+ * instead of allocating a temporary and copying. */
+static IRValue g_call_ret_into = -1;
 
 static int align_up(int x, int align) {
     if (align <= 0) return x;
@@ -1629,11 +1632,12 @@ static void pack_bitfield_host(char *bytes, int nbytes, int byte_off,
  * O(1) IR.  The cutoff balances code size against memcpy call overhead. */
 #define STRUCT_COPY_MEMCPY_THRESHOLD 64
 
-static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
-                              int size, SourceLoc loc) {
-    /* A plain 16-byte blob is one XMM move.  Two 8-byte GP copies are
-     * what made vector assignment at -O0 twice as slow as gcc. */
-    if (size == 16) {
+/* Copy `size` bytes.  When `xmm16` is set and size is 16, use one movups
+ * (SIMD vectors).  Plain structs stay on GP 8-byte chunks so a call return
+ * that just wrote RAX/RDX can forward into the copy without an XMM stall. */
+static void emit_struct_copy_ex(IRFunction *fn, IRValue dst, IRValue src,
+                                int size, int xmm16, SourceLoc loc) {
+    if (xmm16 && size == 16) {
         IRValue v = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, v, src, -1, 0, 16, 1, loc);
         fn->insts.data[fn->insts.len - 1].is_float = 1;
@@ -1679,6 +1683,11 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
         off += w;
         size -= w;
     }
+}
+
+static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
+                              int size, SourceLoc loc) {
+    emit_struct_copy_ex(fn, dst, src, size, 0, loc);
 }
 
 /* Load the SysV register eightbytes of an aggregate at `addr` into SSA
@@ -4620,9 +4629,7 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
         long long off = 0;
         if (sd)
             struct_lookup_member(g_ir_structs, sd, e->u.member.name, &off);
-        IRValue off_v = new_value(fn);
-        emit_inst_w(fn, IR_CONST, off_v, -1, -1, off, 8, 1, e->loc);
-        return emit_bin_w(fn, IR_ADD, base, off_v, 8, 1, e->loc);
+        return emit_add_const(fn, base, (int)off, e->loc);
     }
     case EX_COMPOUND_LITERAL:
         /* A compound literal yields an lvalue: its address is the base for `&`
@@ -6754,6 +6761,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                                          e->u.assign.rvalue->u.bin.op, dst);
             }
         }
+        /* `p = f();` with a register-returned struct: store into p. */
+        if (e->u.assign.rvalue && e->u.assign.rvalue->kind == EX_CALL
+            && lv->type.kind == TY_STRUCT && !lv->type.is_vector
+            && !type_is_i128(lv->type)
+            && same_aggregate_type(&lv->type, &e->u.assign.rvalue->type)
+            && (lv->kind == EX_VAR || lv->kind == EX_DEREF
+                || lv->kind == EX_INDEX || lv->kind == EX_MEMBER)) {
+            IRValue dst = lower_lvalue_addr(fn, st, lv);
+            if (dst < 0) return dst;
+            g_call_ret_into = dst;
+            IRValue src = lower_expr(fn, st, e->u.assign.rvalue);
+            if (g_call_ret_into >= 0) g_call_ret_into = -1;
+            if (src != dst)
+                emit_struct_copy_ex(fn, dst, src, type_size(lv->type), 0, e->loc);
+            return dst;
+        }
         IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
         int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
         int rf = get_value_is_float(fn, rv);
@@ -6797,10 +6820,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Slice 13 — struct lvalue: both sides are pointers (a struct value is
          * its byte address), so copy the bytes instead of storing the pointer. */
         if (lv->type.kind == TY_STRUCT || lv->type.is_vector || type_is_i128(lv->type)) {
-            IRValue src = rv;
-            if (type_is_i128(lv->type))
-                src = i128_as_addr(fn, rv, e->u.assign.rvalue->type,
-                                   lv->type.is_unsigned, e->loc);
             IRValue dst;
             if (lv->kind == EX_VAR) {
                 const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
@@ -6832,7 +6851,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 emit_struct_copy(fn, dst, cplx_rv, type_size(lv->type), e->loc);
                 return dst;
             }
-            emit_struct_copy(fn, dst, src, type_size(lv->type), e->loc);
+            IRValue src = rv;
+            if (type_is_i128(lv->type))
+                src = i128_as_addr(fn, rv, e->u.assign.rvalue->type,
+                                   lv->type.is_unsigned, e->loc);
+            emit_struct_copy_ex(fn, dst, src, type_size(lv->type),
+                                lv->type.is_vector, e->loc);
             return dst;
         }
         if (lv->kind == EX_VAR) {
@@ -8643,10 +8667,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         IRValue slot_addr = -1;
         if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
-            int total = type_size(e->type);
-            if (total < 1) total = 1;
-            IRValue slot = emit_alloca_ty(fn, e->type, e->loc);
-            slot_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            if (g_call_ret_into >= 0) {
+                slot_addr = g_call_ret_into;
+                g_call_ret_into = -1;
+            } else {
+                int total = type_size(e->type);
+                if (total < 1) total = 1;
+                IRValue slot = emit_alloca_ty(fn, e->type, e->loc);
+                slot_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            }
         }
         IRValue v;
         if (ret_in_mem) {
@@ -8665,7 +8694,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue ret_lo = -1, ret_hi = -1, ret_c = -1, ret_d = -1;
         int is_cld_ret = type_is_complex_ldouble(e->type);
         int is_x87_ret = is_cld_ret || is_x87_st0;
-        if (is_ret_struct && ret_nreg > 0 && !is_cld_ret) {
+        /* INTEGER 1–2 eightbyte return: write RAX/RDX (or x0/x1) straight
+         * into the result slot instead of capturing SSA eightbytes. */
+        int direct_ret_slot = 0;
+        if (is_ret_struct && ret_nreg > 0 && ret_nreg <= 2 && !is_cld_ret
+            && slot_addr >= 0 && !abi_is_hfa(e->type)
+            && type_size(e->type) <= 16) {
+            int all_int = 1;
+            for (int k = 0; k < ret_nreg; k++)
+                if (ret_cls[k] != SYSV_CLS_INTEGER) all_int = 0;
+            direct_ret_slot = all_int;
+        }
+        if (is_ret_struct && ret_nreg > 0 && !is_cld_ret && !direct_ret_slot) {
             ret_lo = new_value(fn);
             if (ret_nreg > 1) ret_hi = new_value(fn);
             /* A three- or four-element HFA comes back in v0-v3. */
@@ -8680,14 +8720,20 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.op = IR_CALL;
         inst.dst = ret_in_mem ? -1
                  : is_x87_ret ? -1
+                 : direct_ret_slot ? -1
                  : (is_ret_struct && ret_nreg > 0) ? ret_lo
                  : (type_is_empty_struct(e->type) ? -1 : v);
-        inst.a = is_x87_ret ? slot_addr : -1;
+        inst.a = is_x87_ret ? slot_addr
+               : direct_ret_slot ? slot_addr
+               : -1;
         inst.b = ret_hi;   /* second return eightbyte, or -1 */
         inst.c = ret_c;    /* third, for a wide HFA result */
         inst.d = ret_d;    /* fourth */
         inst.x87_pair = is_x87_ret;
-        inst.imm = is_x87_st0 ? 16 : (is_cld_ret ? 32 : 0);
+        inst.imm = is_x87_st0 ? 16
+                 : is_cld_ret ? 32
+                 : direct_ret_slot ? ret_nreg
+                 : 0;
         if (ret_in_mem && !abi_sret_uses_gp())
             inst.align16 = A64_MARK_SRET;
         inst.loc = e->loc;
@@ -8810,6 +8856,20 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return v;
         }
         if (is_ret_struct && ret_nreg > 0) {
+            if (direct_ret_slot) {
+                inst.width = 8;
+                inst.is_unsigned = 1;
+                ir_inst_array_push(&fn->insts, inst);
+                /* Keep the result-slot pointer live across the call (same
+                 * trick as the X87 path) so RA spills or uses a callee-saved
+                 * home; codegen stores RAX/RDX through it after return. */
+                IRValue keep = emit_alloca(fn, 8, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, keep, slot_addr, 0, 8, 1, e->loc);
+                free(arg_vals);
+                free(arg_on_stack);
+                free(arg_nbytes);
+                return slot_addr;
+            }
             /* Result eightbytes are INTEGER (RAX/RDX or x0/x1) or SSE
              * (XMM0/XMM1).  A Darwin HFA result is bits in v0/v1; the SSA
              * values stay integer so the GP allocator owns them and the
@@ -10235,8 +10295,23 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                     lower_init_list(fn, st, addr, &dty, ilist, s->loc);
                     break;
                 }
+                /* `T x = f();` with a register-returned struct: write the
+                 * return registers straight into x. */
+                if (s->u.decl.init->kind == EX_CALL
+                    && dty.kind == TY_STRUCT && !dty.is_vector
+                    && !type_is_pair16(dty)
+                    && same_aggregate_type(&dty, &s->u.decl.init->type)) {
+                    g_call_ret_into = addr;
+                    IRValue rv = lower_expr(fn, st, s->u.decl.init);
+                    if (g_call_ret_into >= 0) g_call_ret_into = -1;
+                    if (rv != addr)
+                        emit_struct_copy_ex(fn, addr, rv, type_size(dty),
+                                            dty.is_vector, s->loc);
+                    break;
+                }
                 IRValue rv = lower_expr(fn, st, s->u.decl.init);
-                emit_struct_copy(fn, addr, rv, type_size(dty), s->loc);
+                emit_struct_copy_ex(fn, addr, rv, type_size(dty),
+                                    dty.is_vector, s->loc);
                 break;
             } else {
                 IRValue rv = lower_expr(fn, st, s->u.decl.init);
