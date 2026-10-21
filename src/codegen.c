@@ -1524,6 +1524,13 @@ static size_t emit_store_abs32(Buffer *b, int src, int index, int scale2,
 }
 
 /* movsx reg64, reg_small — sign-extend a register's low `src_w` bytes. */
+/* movsxd dst64, dword [base+off] — fused SEXT of a 32-bit frame load. */
+static void emit_movsxd_disp(Buffer *b, int dst, int base, int off) {
+    emit_rex_wrb(b, 1, dst, base);
+    emit_byte(b, 0x63);
+    emit_modrm_disp(b, dst, base, off);
+}
+
 static void emit_movsx_rr(Buffer *b, int dst, int src, int src_w) {
     if (src_w == 4) {
         /* movsxd dst64, src32 */
@@ -3563,6 +3570,25 @@ static int local_abs_af(const IRModule *ir, const IRFunction *fn,
     return 1;
 }
 
+/* SEXT of a sole-use frame LOAD_PTR → one movsx/movsxd from [rbp+off]. */
+static int sext_folds_frame_load(const IRFunction *fn, const int *def,
+                                 const int *alloca_off, const int *raw_uses,
+                                 const IRInst *sext, int *off_out, int *width_out) {
+    if (!sext || sext->op != IR_SEXT) return 0;
+    int src_w = (int)sext->imm;
+    if (src_w != 1 && src_w != 2 && src_w != 4) return 0;
+    IRValue a = sext->a;
+    if (a < 0 || a >= fn->next_value_id || def[a] < 0) return 0;
+    if (raw_uses && raw_uses[a] > 1) return 0;
+    const IRInst *ld = &fn->insts.data[def[a]];
+    if (ld->op != IR_LOAD_PTR || ld->width != src_w) return 0;
+    int off = 0;
+    if (!fold_ptr_off(fn, def, alloca_off, ld->a, &off, 0)) return 0;
+    if (off_out) *off_out = off;
+    if (width_out) *width_out = src_w;
+    return 1;
+}
+
 /* 1 when this dereference folds away the pointer SSA (uses base/index
  * instead).  Requires adjacent sole-use so shared GEPs (a[i++] load+store)
  * keep the address ADD live — except local-abs GEPs (see local_abs_af). */
@@ -3724,6 +3750,8 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
         mark_reg(needed, uses, nv, inst->b);
         return;
     }
+    if (sext_folds_frame_load(fn, def, alloca_off, raw_uses, inst, NULL, NULL))
+        return; /* frame load is folded into the SEXT; leave LOAD dead */
     mark_inst_uses_needed(inst, needed, uses, nv);
 }
 
@@ -5131,8 +5159,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_ZEXT: {
                 /* imm = source width.  Narrow (1/2-byte) LOAD_PTR/LOAD already
                  * emit movsx/movzx into the 64-bit register.  4-byte loads use
-                 * movl (zero-extends), so a following SEXT still needs movsxd. */
+                 * movl (zero-extends), so a following SEXT still needs movsxd.
+                 * A sole-use frame LOAD_PTR+SEXT fuses to one memory movsxd
+                 * (gcc -O0 cltq from stack is still two ops; we beat that). */
                 int src_w = (int)inst->imm;
+                int target = dr >= 0 ? dr : REG_RAX;
+                int fold_off = 0, fold_w = 0;
+                if (inst->op == IR_SEXT
+                    && sext_folds_frame_load(fn, ssa_def, alloca_off, raw_uses,
+                                             inst, &fold_off, &fold_w)) {
+                    if (fold_w == 4)
+                        emit_movsxd_disp(&out->text, target, REG_RBP, fold_off);
+                    else
+                        emit_load_disp(&out->text, target, REG_RBP, fold_off,
+                                       fold_w, 0);
+                    spill_if_needed(&out->text, inst->dst, target, ra);
+                    break;
+                }
                 int already = 0;
                 if ((src_w == 1 || src_w == 2) && inst->a >= 0
                     && inst->a < fn->next_value_id && ssa_def[inst->a] >= 0) {
@@ -5143,7 +5186,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             || (inst->op == IR_SEXT && !ld->is_unsigned)))
                         already = 1;
                 }
-                int target = dr >= 0 ? dr : REG_RAX;
                 ensure_reg(&out->text, inst->a, target, ra);
                 if (!already) {
                     if (inst->op == IR_SEXT)
