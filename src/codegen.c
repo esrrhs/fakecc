@@ -4856,6 +4856,41 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 fused_skip[ssa_def[st->a]] = 1;
             (void)poff;
         }
+        /* Sole-use CONST embedded as ALU/shift imm: drop materialization
+         * (chacha &st[i+k] was `mov $k; mov i; add $k`). */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            const IRInst *ad = &fn->insts.data[uj];
+            int comm = 0;
+            if (ad->op == IR_ADD || ad->op == IR_BAND || ad->op == IR_BOR
+                || ad->op == IR_BXOR || ad->op == IR_MUL)
+                comm = 1;
+            else if (ad->op == IR_SUB || ad->op == IR_SHL || ad->op == IR_SHR
+                     || ad->op == IR_ROL)
+                comm = 0;
+            else
+                continue;
+            for (int side = 0; side < (comm ? 2 : 1); side++) {
+                IRValue cv = side ? ad->a : ad->b;
+                if (cv < 0 || cv >= nvals_f || raw_uses[cv] != 1
+                    || !value_unique_def(fn, cv) || ssa_def[cv] < 0)
+                    continue;
+                int64_t imm = 0;
+                if (!ssa_const_imm(fn, ssa_def, cv, &imm)) continue;
+                int ok = imm_fits_i32(imm);
+                if ((ad->op == IR_BAND || ad->op == IR_BOR || ad->op == IR_BXOR)
+                    && imm_fits_bitwise_u32(imm))
+                    ok = 1;
+                if ((ad->op == IR_SHL || ad->op == IR_SHR || ad->op == IR_ROL)
+                    && (imm < 0 || imm >= 64))
+                    ok = 0;
+                if (!ok) continue;
+                int ci = ssa_def[cv];
+                if (!skip_body[ci] && !fused_skip[ci])
+                    fused_skip[ci] = 1;
+                needed[cv] = 0;
+            }
+        }
         /* Narrow store sole-use: TRUNC/ZEXT/SEXT can omit re-extend (still
          * copy into dst so the store reads it).  Width-4 ZEXT/unsigned TRUNC
          * after a 32-bit LOAD/ALU is also a no-op movl (narrow / gcc -O0). */
