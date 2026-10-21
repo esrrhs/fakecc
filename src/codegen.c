@@ -1193,6 +1193,64 @@ static void emit_store_disp(Buffer *b, int base, int src, int off, int width) {
     }
 }
 
+/* addl/subl/… $imm, off(%rbp) for 32-bit stack slots (gcc -O0 i++). */
+static void emit_arith_imm32_disp(Buffer *b, int ext, int base, int32_t imm,
+                                  int off) {
+    if (base >= 8) emit_byte(b, 0x41);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_modrm_disp(b, ext, base, off);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_modrm_disp(b, ext, base, off);
+        emit_int32(b, imm);
+    }
+}
+
+/* addl/xorl %src, off(%base) — 32-bit.  op: 0x01 add, 0x31 xor. */
+static void emit_arith_r32_disp(Buffer *b, int op, int base, int src, int off) {
+    if (src >= 8 || base >= 8) emit_rex_wrb(b, 0, src, base);
+    emit_byte(b, (uint8_t)op);
+    emit_modrm_disp(b, src, base, off);
+}
+
+/* mov{b,w,l,q} $imm, off(%base) — gcc -O0 form for storing a constant. */
+static void emit_store_imm_disp(Buffer *b, int base, int32_t imm, int off,
+                                int width) {
+    switch (width) {
+    case 1: {
+        if (base >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0xC6);
+        emit_modrm_disp(b, 0, base, off);
+        emit_byte(b, (uint8_t)imm);
+        break;
+    }
+    case 2:
+        emit_byte(b, 0x66);
+        if (base >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0xC7);
+        emit_modrm_disp(b, 0, base, off);
+        emit_byte(b, (uint8_t)imm);
+        emit_byte(b, (uint8_t)(imm >> 8));
+        break;
+    case 4:
+        if (base >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0xC7);
+        emit_modrm_disp(b, 0, base, off);
+        emit_int32(b, imm);
+        break;
+    case 8:
+    default:
+        /* movq $imm32, mem sign-extends — fine for small constants. */
+        emit_rex_wrb(b, 1, 0, base);
+        emit_byte(b, 0xC7);
+        emit_modrm_disp(b, 0, base, off);
+        emit_int32(b, imm);
+        break;
+    }
+}
+
 static void emit_sse_load_disp(Buffer *b, int dst, int base, int off, int is_float) {
     emit_byte(b, is_float ? 0xF3 : 0xF2);
     emit_rex_wrb(b, 0, dst, base);
@@ -3829,6 +3887,180 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (!(ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)))
                 mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
         }
+        /* STORE_PTR of a single-use CONST (possibly via ZEXT/SEXT/COPY)
+         * into [rbp+off]: emit movl $imm and skip the materialization. */
+        char *store_imm = xmalloc(ninst_f ? ninst_f : 1);
+        memset(store_imm, 0, ninst_f ? ninst_f : 1);
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *st = &fn->insts.data[uj];
+            if (st->op != IR_STORE_PTR || skip_body[uj] || fused_skip[uj])
+                continue;
+            if (st->width != 1 && st->width != 2 && st->width != 4 && st->width != 8)
+                continue;
+            if (value_is_float_class(fn, st->b) || value_is_ld(fn, st->b))
+                continue;
+            int poff = 0;
+            if (!fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0))
+                continue;
+            IRValue cur = st->b;
+            int skip_chain[4];
+            int nskip = 0;
+            int64_t immv = 0;
+            int found = 0;
+            for (int depth = 0; depth < 4 && cur >= 0 && cur < nvals_f; depth++) {
+                if (ssa_uses_f[cur] != 1) break;
+                int di = ssa_def[cur];
+                if (di < 0 || skip_body[di] || fused_skip[di]) break;
+                const IRInst *d = &fn->insts.data[di];
+                if (d->op == IR_CONST && !d->is_float) {
+                    immv = d->imm;
+                    if (!imm_fits_i32(immv)) break;
+                    skip_chain[nskip++] = di;
+                    found = 1;
+                    break;
+                }
+                if ((d->op == IR_ZEXT || d->op == IR_SEXT || d->op == IR_TRUNC
+                     || d->op == IR_COPY) && d->a >= 0) {
+                    skip_chain[nskip++] = di;
+                    cur = d->a;
+                    continue;
+                }
+                break;
+            }
+            if (!found || nskip < 1) continue;
+            store_imm[uj] = 1;
+            for (int k = 0; k < nskip; k++)
+                fused_skip[skip_chain[k]] = 1;
+            (void)poff;
+        }
+        /* x = x + imm / x = x ^ y into a folded stack slot → addl/xorl mem. */
+        char *mem_rmw = xmalloc(ninst_f ? ninst_f : 1);
+        memset(mem_rmw, 0, ninst_f ? ninst_f : 1);
+        int32_t *mem_rmw_imm = xmalloc((ninst_f ? ninst_f : 1) * sizeof(int32_t));
+        memset(mem_rmw_imm, 0, (ninst_f ? ninst_f : 1) * sizeof(int32_t));
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *st = &fn->insts.data[uj];
+            if (st->op != IR_STORE_PTR || skip_body[uj] || fused_skip[uj]
+                || store_imm[uj])
+                continue;
+            if (st->width != 4) continue;
+            int poff = 0;
+            if (!fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0))
+                continue;
+            if (st->b < 0 || st->b >= nvals_f || ssa_def[st->b] < 0
+                || ssa_uses_f[st->b] != 1)
+                continue;
+            int ai = ssa_def[st->b];
+            if (skip_body[ai] || fused_skip[ai]) continue;
+            const IRInst *ad = &fn->insts.data[ai];
+            int ext = -1, rop = -1;
+            if (ad->op == IR_ADD) { ext = 0; rop = 0x01; }
+            else if (ad->op == IR_BXOR) { ext = 6; rop = 0x31; }
+            else if (ad->op == IR_BAND) { ext = 4; rop = 0x21; }
+            else if (ad->op == IR_BOR) { ext = 1; rop = 0x09; }
+            else if (ad->op == IR_SUB) { ext = 5; rop = 0x29; }
+            else continue;
+            /* Find which operand is a load of the same stack slot
+             * (optionally widened by ZEXT/SEXT/COPY). */
+            IRValue other = -1;
+            int li = -1;
+            int peel_skip[4];
+            int npeel = 0;
+            for (int side = 0; side < 2; side++) {
+                IRValue cand = side ? ad->b : ad->a;
+                IRValue oth = side ? ad->a : ad->b;
+                npeel = 0;
+                int lj = -1;
+                int loff = 0;
+                for (int depth = 0; depth < 4 && cand >= 0 && cand < nvals_f;
+                     depth++) {
+                    if (ssa_uses_f[cand] != 1 || ssa_def[cand] < 0) break;
+                    int di = ssa_def[cand];
+                    if (skip_body[di] || fused_skip[di]) break;
+                    const IRInst *d = &fn->insts.data[di];
+                    if (d->op == IR_LOAD_PTR) {
+                        if (!fold_ptr_off(fn, ssa_def, alloca_off, d->a,
+                                          &loff, 0))
+                            break;
+                        lj = di;
+                        break;
+                    }
+                    if (d->op == IR_LOAD && d->a >= 0 && d->a < nvals_f
+                        && alloca_off[d->a] != 0) {
+                        loff = alloca_off[d->a];
+                        lj = di;
+                        break;
+                    }
+                    if (d->op == IR_ZEXT || d->op == IR_SEXT || d->op == IR_COPY) {
+                        peel_skip[npeel++] = di;
+                        cand = d->a;
+                        continue;
+                    }
+                    break;
+                }
+                if (lj < 0 || loff != poff) continue;
+                other = oth;
+                li = lj;
+                break;
+            }
+            if (li < 0 || other < 0) continue;
+            int64_t immv = 0;
+            IRValue imm_src = other;
+            for (int depth = 0; depth < 3 && imm_src >= 0 && imm_src < nvals_f;
+                 depth++) {
+                if (ssa_const_imm(fn, ssa_def, imm_src, &immv)) break;
+                if (ssa_def[imm_src] < 0) { imm_src = -1; break; }
+                const IRInst *d = &fn->insts.data[ssa_def[imm_src]];
+                if (d->op != IR_ZEXT && d->op != IR_SEXT && d->op != IR_COPY)
+                    { imm_src = -1; break; }
+                imm_src = d->a;
+            }
+            if (imm_src >= 0 && imm_fits_i32(immv)
+                && ssa_uses_f[other] == 1) {
+                mem_rmw[uj] = (char)(1 + ext); /* 1..7 = imm form */
+                mem_rmw_imm[uj] = (int32_t)immv;
+                fused_skip[ai] = 1;
+                fused_skip[li] = 1;
+                for (int k = 0; k < npeel; k++)
+                    fused_skip[peel_skip[k]] = 1;
+                /* Skip the const / zext chain. */
+                for (IRValue c = other; c >= 0 && c < nvals_f; ) {
+                    int ci = ssa_def[c];
+                    if (ci < 0 || fused_skip[ci]) break;
+                    fused_skip[ci] = 1;
+                    const IRInst *d = &fn->insts.data[ci];
+                    if (d->op == IR_CONST) break;
+                    if (d->op != IR_ZEXT && d->op != IR_SEXT && d->op != IR_COPY)
+                        break;
+                    c = d->a;
+                }
+                if (st->a >= 0 && st->a < nvals_f && ssa_uses_f[st->a] == 1
+                    && ssa_def[st->a] >= 0)
+                    fused_skip[ssa_def[st->a]] = 1;
+                if (fn->insts.data[li].op == IR_LOAD_PTR
+                    && fn->insts.data[li].a >= 0
+                    && fn->insts.data[li].a < nvals_f
+                    && ssa_uses_f[fn->insts.data[li].a] == 1
+                    && ssa_def[fn->insts.data[li].a] >= 0)
+                    fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
+            } else if (ssa_uses_f[other] >= 1 && ext != 5) {
+                /* reg form: addl/xorl %reg, mem.  Keep SUB as load/op/store. */
+                mem_rmw[uj] = (char)(10 + (rop & 0x3f)); /* mark reg form */
+                mem_rmw_imm[uj] = other; /* reuse as IRValue */
+                fused_skip[ai] = 1;
+                fused_skip[li] = 1;
+                if (st->a >= 0 && st->a < nvals_f && ssa_uses_f[st->a] == 1
+                    && ssa_def[st->a] >= 0)
+                    fused_skip[ssa_def[st->a]] = 1;
+                if (fn->insts.data[li].a >= 0
+                    && fn->insts.data[li].a < nvals_f
+                    && ssa_uses_f[fn->insts.data[li].a] == 1
+                    && ssa_def[fn->insts.data[li].a] >= 0)
+                    fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
+                mark_reg(needed, ssa_uses_f, nvals_f, other);
+            }
+            (void)rop;
+        }
         for (size_t uj = 0; uj + 3 < fn->insts.len; uj++) {
             if (skip_body[uj] || fused_skip[uj]) continue;
             int is_sub = 0, zero_hi = 0;
@@ -4876,6 +5108,29 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     else
                         emit_store_disp(&out->text, REG_RAX, REG_RDX, af_disp,
                                         inst->width);
+                } else if (folded && mem_rmw[j] >= 1 && mem_rmw[j] <= 7) {
+                    emit_arith_imm32_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
+                                          mem_rmw_imm[j], ptr_off);
+                } else if (folded && mem_rmw[j] >= 10) {
+                    IRValue ov = (IRValue)mem_rmw_imm[j];
+                    ensure_reg(&out->text, ov, REG_RAX, ra);
+                    emit_arith_r32_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
+                                        REG_RAX, ptr_off);
+                } else if (folded && store_imm[j]) {
+                    int64_t immv = 0;
+                    IRValue cur = inst->b;
+                    for (int depth = 0; depth < 4; depth++) {
+                        if (ssa_const_imm(fn, ssa_def, cur, &immv)) break;
+                        if (cur < 0 || cur >= fn->next_value_id
+                            || ssa_def[cur] < 0) break;
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op != IR_ZEXT && d->op != IR_SEXT
+                            && d->op != IR_TRUNC && d->op != IR_COPY)
+                            break;
+                        cur = d->a;
+                    }
+                    emit_store_imm_disp(&out->text, REG_RBP, (int32_t)immv,
+                                        ptr_off, inst->width);
                 } else {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     if (folded)
@@ -5000,6 +5255,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_BR: {
+                /* Fall-through: next instruction is the target label. */
+                if (j + 1 < fn->insts.len
+                    && fn->insts.data[j + 1].op == IR_LABEL
+                    && fn->insts.data[j + 1].imm == inst->imm)
+                    break;
                 size_t patch = emit_jmp_rel32(&out->text);
                 size_t after = out->text.len;
                 ADD_PATCH(patch, inst->imm, after);
@@ -5009,7 +5269,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_CBR: {
                 /* CBR: a = cond, imm = true_label, b = false_label.
                  * Fused compare: `cmp a,b; j<cc> true; jmp false`.
-                 * Otherwise test the materialized 0/1 condition. */
+                 * Otherwise test the materialized 0/1 condition.
+                 * When the true label is the next instruction, invert the
+                 * condition and fall through (gcc -O0 shape). */
                 uint8_t cc = 0x85; /* jne */
                 if (fused_cmp_at[j] >= 0) {
                     const IRInst *cmp = &fn->insts.data[fused_cmp_at[j]];
@@ -5036,14 +5298,30 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     ensure_reg(&out->text, inst->a, REG_RAX, ra);
                     emit_test_rr(&out->text, REG_RAX);
                 }
-                /* j<cc> true_label */
-                size_t p1 = emit_jcc_rel32(&out->text, cc);
-                size_t a1 = out->text.len;
-                ADD_PATCH(p1, inst->imm, a1);
-                /* jmp false_label */
-                size_t p2 = emit_jmp_rel32(&out->text);
-                size_t a2 = out->text.len;
-                ADD_PATCH(p2, inst->b, a2);
+                int true_fall = (j + 1 < fn->insts.len
+                                 && fn->insts.data[j + 1].op == IR_LABEL
+                                 && fn->insts.data[j + 1].imm == inst->imm);
+                int false_fall = (j + 1 < fn->insts.len
+                                  && fn->insts.data[j + 1].op == IR_LABEL
+                                  && (int)fn->insts.data[j + 1].imm == inst->b);
+                if (true_fall) {
+                    /* j<inv> false; fall into true. */
+                    size_t p1 = emit_jcc_rel32(&out->text, (uint8_t)(cc ^ 1));
+                    size_t a1 = out->text.len;
+                    ADD_PATCH(p1, inst->b, a1);
+                } else if (false_fall) {
+                    /* j<cc> true; fall into false. */
+                    size_t p1 = emit_jcc_rel32(&out->text, cc);
+                    size_t a1 = out->text.len;
+                    ADD_PATCH(p1, inst->imm, a1);
+                } else {
+                    size_t p1 = emit_jcc_rel32(&out->text, cc);
+                    size_t a1 = out->text.len;
+                    ADD_PATCH(p1, inst->imm, a1);
+                    size_t p2 = emit_jmp_rel32(&out->text);
+                    size_t a2 = out->text.len;
+                    ADD_PATCH(p2, inst->b, a2);
+                }
                 break;
             }
 
@@ -6683,6 +6961,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(stack_off);
         free(ssa_def);
         free(skip_body);
+        free(store_imm);
+        free(mem_rmw);
+        free(mem_rmw_imm);
         free(param_home_off);
         free(needed);
         free(carry_zero_hi);

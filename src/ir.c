@@ -3035,6 +3035,8 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 
 /* Forward decl. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
+static void lower_cond_br(IRFunction *fn, IRSymTable *st, const Expr *e,
+                          int L_true, int L_false);
 static int fold_const_float(const Expr *e, long double *out, const IRModule *ir);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceLoc loc);
@@ -6264,53 +6266,29 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return emit_dfp_arith(fn, w, aop, lv, rv, e->loc);
         }
         if (bop == BOP_AND || bop == BOP_OR) {
-            /* Short-circuit logical operators: lower to control flow writing a
-             * temporary alloca, then let mem2reg promote it into a φ-merged
-             * SSA value (no IR_PHI opcode needed).
-             *   a && b  →  t = a; if (!t) goto L_false; t = (b != 0);
-             *              goto L_done; L_false: t = 0; L_done: ... t
-             *   a || b  →  t = a; if (t) goto L_true; t = (b != 0);
-             *              goto L_done; L_true: t = 1; L_done: ... t */
+            /* Value context: branch on the short-circuit tree, then store
+             * a single 0/1.  Condition context (if/while/?:) uses
+             * lower_cond_br directly and never materializes. */
             IRValue slot = new_value(fn);
             emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, 4, 0, e->loc);
-
-            int L_true  = new_label(fn);
+            int L_true = new_label(fn);
             int L_false = new_label(fn);
-            int L_done  = new_label(fn);
-
-            IRValue lv = lower_expr(fn, st, e->u.bin.l);
-            emit_cbr(fn, cbr_from_scalar(fn, lv, e->loc), L_true, L_false, e->loc);
-
+            int L_done = new_label(fn);
+            lower_cond_br(fn, st, e, L_true, L_false);
             emit_label(fn, L_true, e->loc);
-            IRValue true_val;
-            if (bop == BOP_OR) {
-                /* a != 0 → result is 1, b not evaluated (short-circuit). */
-                true_val = new_value(fn);
-                emit_inst_w(fn, IR_CONST, true_val, -1, -1, 1, 4, 0, e->loc);
-            } else {
-                IRValue rv = lower_expr(fn, st, e->u.bin.r);
-                int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                int rf = get_value_is_float(fn, rv);
-                true_val = bool_normalize(fn, rv, rw, ru, rf, e->loc);
+            {
+                IRValue one = new_value(fn);
+                emit_inst_w(fn, IR_CONST, one, -1, -1, 1, 4, 0, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, slot, one, 0, 4, 0, e->loc);
             }
-            emit_inst_w(fn, IR_STORE, -1, slot, true_val, 0, 4, 0, e->loc);
             emit_br(fn, L_done, e->loc);
-
             emit_label(fn, L_false, e->loc);
-            IRValue false_val;
-            if (bop == BOP_AND) {
-                /* a == 0 → result is 0, b not evaluated (short-circuit). */
-                false_val = new_value(fn);
-                emit_inst_w(fn, IR_CONST, false_val, -1, -1, 0, 4, 0, e->loc);
-            } else {
-                IRValue rv = lower_expr(fn, st, e->u.bin.r);
-                int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                int rf = get_value_is_float(fn, rv);
-                false_val = bool_normalize(fn, rv, rw, ru, rf, e->loc);
+            {
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, slot, zero, 0, 4, 0, e->loc);
             }
-            emit_inst_w(fn, IR_STORE, -1, slot, false_val, 0, 4, 0, e->loc);
             emit_br(fn, L_done, e->loc);
-
             emit_label(fn, L_done, e->loc);
             IRValue result = new_value(fn);
             emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, 4, 0, e->loc);
@@ -6462,8 +6440,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_then = new_label(fn);
             int L_else = new_label(fn);
             int L_done = new_label(fn);
-            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+            lower_cond_br(fn, st, e->u.tern.cond, L_then, L_else);
             emit_label(fn, L_then, e->loc);
             if (e->u.tern.then)
                 lower_expr(fn, st, e->u.tern.then);
@@ -6480,12 +6457,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_then = new_label(fn);
             int L_else = new_label(fn);
             int L_done = new_label(fn);
-            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+            IRValue cond = -1;
+            if (e->u.tern.then)
+                lower_cond_br(fn, st, e->u.tern.cond, L_then, L_else);
+            else {
+                /* GNU `c ?: y`: keep the condition value for the then arm. */
+                cond = lower_expr(fn, st, e->u.tern.cond);
+                emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc),
+                         L_then, L_else, e->loc);
+            }
             emit_label(fn, L_then, e->loc);
             {
-                IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
-                Type then_ty = e->u.tern.then ? e->u.tern.then->type : e->u.tern.cond->type;
+                IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then)
+                                            : cond;
+                Type then_ty = e->u.tern.then ? e->u.tern.then->type
+                                             : e->u.tern.cond->type;
                 IRValue ta = i128_as_addr(fn, tv, then_ty,
                                           e->type.is_unsigned, e->loc);
                 emit_struct_copy(fn, addr, ta, 16, e->loc);
@@ -6512,8 +6498,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_then = new_label(fn);
             int L_else = new_label(fn);
             int L_done = new_label(fn);
-            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+            if (e->u.tern.then)
+                lower_cond_br(fn, st, e->u.tern.cond, L_then, L_else);
+            else {
+                IRValue cond = lower_expr(fn, st, e->u.tern.cond);
+                emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc),
+                         L_then, L_else, e->loc);
+            }
 
             emit_label(fn, L_then, e->loc);
             {
@@ -6608,8 +6599,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int L_then = new_label(fn);
         int L_else = new_label(fn);
         int L_done = new_label(fn);
-        IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-        emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+        IRValue cond = -1;
+        if (e->u.tern.then)
+            lower_cond_br(fn, st, e->u.tern.cond, L_then, L_else);
+        else {
+            cond = lower_expr(fn, st, e->u.tern.cond);
+            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc),
+                     L_then, L_else, e->loc);
+        }
         emit_label(fn, L_then, e->loc);
         IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
         int tw = get_value_width(fn, tv), tu = get_value_is_unsigned(fn, tv), tf = get_value_is_float(fn, tv);
@@ -9769,6 +9766,37 @@ static IRValue lower_condition(IRFunction *fn, IRSymTable *st, const Expr *e) {
     return lower_expr(fn, st, e);
 }
 
+/* Branch to L_true / L_false on a scalar condition without materializing
+ * 0/1 for && / || / !.  Matches gcc -O0 short-circuit shape. */
+static void lower_cond_br(IRFunction *fn, IRSymTable *st, const Expr *e,
+                          int L_true, int L_false) {
+    if (fakecc_had_error() || !e) {
+        SourceLoc loc = e ? e->loc : (SourceLoc){0};
+        emit_br(fn, L_false, loc);
+        return;
+    }
+    if (e->kind == EX_BINOP && e->u.bin.op == BOP_AND) {
+        int L_mid = new_label(fn);
+        lower_cond_br(fn, st, e->u.bin.l, L_mid, L_false);
+        emit_label(fn, L_mid, e->loc);
+        lower_cond_br(fn, st, e->u.bin.r, L_true, L_false);
+        return;
+    }
+    if (e->kind == EX_BINOP && e->u.bin.op == BOP_OR) {
+        int L_mid = new_label(fn);
+        lower_cond_br(fn, st, e->u.bin.l, L_true, L_mid);
+        emit_label(fn, L_mid, e->loc);
+        lower_cond_br(fn, st, e->u.bin.r, L_true, L_false);
+        return;
+    }
+    if (e->kind == EX_UNARY && e->u.un.op == UOP_NOT) {
+        lower_cond_br(fn, st, e->u.un.operand, L_false, L_true);
+        return;
+    }
+    IRValue cond = lower_condition(fn, st, e);
+    emit_cbr(fn, cond, L_true, L_false, e->loc);
+}
+
 /* Label map: label name → IR label id.  Populated by a pre-pass over the
  * function body so forward gotos resolve to ids assigned before lowering. */
 /* (LabelMap typedef and g_ir_label_map are forward-declared at the top of this file) */
@@ -10485,11 +10513,10 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_IF: {
-        IRValue cond = lower_condition(fn, st, s->u.if_s.cond);
         int L_then = new_label(fn);
         int L_end  = new_label(fn);
         int L_else = s->u.if_s.else_s ? new_label(fn) : L_end;
-        emit_cbr(fn, cond, L_then, L_else, s->loc);
+        lower_cond_br(fn, st, s->u.if_s.cond, L_then, L_else);
         emit_label(fn, L_then, s->loc);
         lower_stmt(fn, st, s->u.if_s.then_s, cur_fd);
         if (s->u.if_s.else_s) {
@@ -10506,8 +10533,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         int L_exit = new_label(fn);
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_head, s->loc);
-        IRValue cond = lower_condition(fn, st, s->u.while_s.cond);
-        emit_cbr(fn, cond, L_body, L_exit, s->loc);
+        lower_cond_br(fn, st, s->u.while_s.cond, L_body, L_exit);
         emit_label(fn, L_body, s->loc);
         push_loop(L_head, L_exit);
         lower_stmt(fn, st, s->u.while_s.body, cur_fd);
@@ -10535,8 +10561,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         pop_loop();
         emit_br(fn, L_cond, s->loc);
         emit_label(fn, L_cond, s->loc);
-        IRValue cond = lower_condition(fn, st, s->u.do_s.cond);
-        emit_cbr(fn, cond, L_body, L_exit, s->loc);
+        lower_cond_br(fn, st, s->u.do_s.cond, L_body, L_exit);
         emit_label(fn, L_exit, s->loc);
         break;
     }
@@ -10570,8 +10595,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_head, s->loc);
         if (s->u.for_s.cond) {
-            IRValue cond = lower_condition(fn, st, s->u.for_s.cond);
-            emit_cbr(fn, cond, L_body, L_exit, s->loc);
+            lower_cond_br(fn, st, s->u.for_s.cond, L_body, L_exit);
         } else {
             emit_br(fn, L_body, s->loc);
         }
