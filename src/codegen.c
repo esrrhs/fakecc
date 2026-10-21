@@ -474,6 +474,16 @@ static void emit_sse_arith(Buffer *b, int op, int dst, int src, int is_float) {
     emit_modrm(b, 3, dst & 7, src & 7);
 }
 
+/* addsd/subsd/mulsd/divsd xmm, off(%rbp) — gcc -O0 memory operand form. */
+static void emit_sse_arith_disp(Buffer *b, int op, int dst, int base, int off,
+                                int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_wrb(b, 0, dst, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, op);
+    emit_modrm_disp(b, dst, base, off);
+}
+
 /* Ordered comparison of two SSE scalars.  is_float → ucomiss (0F 2E /r);
  * else ucomisd (66 0F 2E /r).  Sets ZF/CF/PF. */
 static void emit_sse_ucomi(Buffer *b, int a, int b_xmm, int is_float) {
@@ -1467,6 +1477,25 @@ static void emit_store_sib(Buffer *b, int base, int index, int scale2,
     }
 }
 
+/* movsd/ss xmm, [base+index*2^scale+off] — gcc -O0 stack-array float load. */
+static void emit_sse_load_sib(Buffer *b, int dst, int base, int index, int scale2,
+                              int off, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_if(b, 0, dst, index, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm_sib_disp(b, dst, base, index, scale2, off);
+}
+
+static void emit_sse_store_sib(Buffer *b, int base, int index, int scale2,
+                               int off, int src, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_if(b, 0, src, index, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    emit_modrm_sib_disp(b, src, base, index, scale2, off);
+}
+
 /* Absolute + index addressing for local globals (gcc -O0 -fno-pic):
  *   movzx dst, symb(%index)           scale2 == 0
  *   movzx dst, symb(,%index,2^scale2) scale2 != 0
@@ -2072,6 +2101,15 @@ static void spill_if_needed_xmm(Buffer *b, int v, int src_xmm,
  *   movabs rax, <bits>; movq xmm, rax
  * Works for both float (bits in low 32) and double (all 64 bits). */
 static void emit_float_const(Buffer *b, int xmm_dst, int64_t bits) {
+    /* +0.0: pxor xmm, xmm (gcc -O0).  Avoids movabs+movq. */
+    if (bits == 0) {
+        emit_byte(b, 0x66);
+        emit_rex_wrb(b, 0, xmm_dst, xmm_dst);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0xEF);
+        emit_modrm(b, 3, xmm_dst & 7, xmm_dst & 7);
+        return;
+    }
     /* movabs rax, imm64  →  REX.W B8+0 */
     emit_rex_w(b);
     emit_byte(b, 0xB8);
@@ -3791,8 +3829,13 @@ static int deref_folds_addr(const IRModule *ir, const IRFunction *fn,
     int dummy = 0;
     if (fold_ptr_off(fn, def, alloca_off, v, &dummy, 0)) return 1;
     IRValue val = inst->op == IR_LOAD_PTR ? inst->dst : inst->b;
-    if (value_is_float_class(fn, val) || value_is_ld(fn, val)) return 0;
-    if (inst->width != 1 && inst->width != 2 && inst->width != 4
+    /* Scalar float/double use the same [rbp+idx*8] fold as GP (nbody). */
+    if (value_is_ld(fn, val)) return 0;
+    if (value_is_float_class(fn, val)
+        && inst->width != 4 && inst->width != 8)
+        return 0;
+    if (!value_is_float_class(fn, val)
+        && inst->width != 1 && inst->width != 2 && inst->width != 4
         && inst->width != 8)
         return 0;
     if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
@@ -3802,12 +3845,16 @@ static int deref_folds_addr(const IRModule *ir, const IRFunction *fn,
     }
     if (local_abs_af(ir, fn, def, alloca_off, v, NULL, NULL, NULL, NULL))
         return 1;
-    if ((size_t)def[v] + 1 != ii) return 0;
-    if (raw_uses && raw_uses[v] > 1) return 0;
     IRValue base = -1, idx = -1;
     int sc = 0, disp = 0;
-    return classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc, &disp)
-           != AF_NONE;
+    int kind = classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc,
+                                 &disp);
+    /* [rbp+idx*s+d] rematerializes from the GEP (gcc -O0 RMW on stack
+     * arrays).  Shared load+store of &a[i] may both fold. */
+    if (kind == AF_RBP_IDX) return 1;
+    if (raw_uses && raw_uses[v] > 1) return 0;
+    if (kind == AF_NONE) return 0;
+    return (size_t)def[v] + 1 == ii;
 }
 
 static void codegen_mark_inst_roots(char *needed, int *uses,
@@ -3844,16 +3891,23 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
             int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
             int af_ok = 0;
-            if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
-                && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                    || inst->width == 8)) {
+            int fp_scalar = value_is_float_class(fn, inst->dst)
+                            && (inst->width == 4 || inst->width == 8);
+            int gp_scalar = !value_is_float_class(fn, inst->dst)
+                            && !value_is_ld(fn, inst->dst)
+                            && (inst->width == 1 || inst->width == 2
+                                || inst->width == 4 || inst->width == 8);
+            if (gp_scalar || fp_scalar) {
                 if (local_abs_af(ir, fn, def, alloca_off, inst->a,
                                  &ab, &ai, &asc, &adisp))
                     af_ok = 1;
-                else if (adjacent && sole_use
-                         && classify_ptr_addr(fn, def, alloca_off, inst->a,
-                                              &ab, &ai, &asc, &adisp) != AF_NONE)
-                    af_ok = 1;
+                else {
+                    int k = classify_ptr_addr(fn, def, alloca_off, inst->a,
+                                              &ab, &ai, &asc, &adisp);
+                    if (k == AF_RBP_IDX
+                        || (k != AF_NONE && adjacent && sole_use))
+                        af_ok = 1;
+                }
             }
             if (af_ok) {
             /* Local GADDR folds into R_X86_64_32S; no lea of the base.
@@ -3899,16 +3953,23 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
             int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
             int af_ok = 0;
-            if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
-                && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                    || inst->width == 8)) {
+            int fp_scalar = value_is_float_class(fn, inst->b)
+                            && (inst->width == 4 || inst->width == 8);
+            int gp_scalar = !value_is_float_class(fn, inst->b)
+                            && !value_is_ld(fn, inst->b)
+                            && (inst->width == 1 || inst->width == 2
+                                || inst->width == 4 || inst->width == 8);
+            if (gp_scalar || fp_scalar) {
                 if (local_abs_af(ir, fn, def, alloca_off, inst->a,
                                  &ab, &ai, &asc, &adisp))
                     af_ok = 1;
-                else if (adjacent && sole_use
-                         && classify_ptr_addr(fn, def, alloca_off, inst->a,
-                                              &ab, &ai, &asc, &adisp) != AF_NONE)
-                    af_ok = 1;
+                else {
+                    int k = classify_ptr_addr(fn, def, alloca_off, inst->a,
+                                              &ab, &ai, &asc, &adisp);
+                    if (k == AF_RBP_IDX
+                        || (k != AF_NONE && adjacent && sole_use))
+                        af_ok = 1;
+                }
             }
             if (af_ok) {
             if (ab >= 0) {
@@ -5796,20 +5857,31 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
                 IRValue af_base = -1, af_idx = -1;
                 int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
+                int af_sole = inst->a < 0 || raw_uses[inst->a] <= 1;
                 int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
                              && ssa_def[inst->a] >= 0
                              && (size_t)ssa_def[inst->a] + 1 == j
-                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
-                if (!folded
-                    && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
-                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                        || inst->width == 8)) {
-                    if (local_abs_af(ir, fn, ssa_def, alloca_off, inst->a,
-                                     &af_base, &af_idx, &af_sc, &af_disp))
-                        af_kind = AF_SIB;
-                    else if (af_adj)
-                        af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
-                                                    &af_base, &af_idx, &af_sc, &af_disp);
+                             && af_sole;
+                {
+                    int fp_scalar = value_is_float_class(fn, inst->dst)
+                                    && (inst->width == 4 || inst->width == 8);
+                    int gp_scalar = !value_is_float_class(fn, inst->dst)
+                                    && !value_is_ld(fn, inst->dst)
+                                    && (inst->width == 1 || inst->width == 2
+                                        || inst->width == 4 || inst->width == 8);
+                    if (!folded && (gp_scalar || fp_scalar)) {
+                        if (local_abs_af(ir, fn, ssa_def, alloca_off, inst->a,
+                                         &af_base, &af_idx, &af_sc, &af_disp))
+                            af_kind = AF_SIB;
+                        else {
+                            int k = classify_ptr_addr(fn, ssa_def, alloca_off,
+                                                      inst->a, &af_base, &af_idx,
+                                                      &af_sc, &af_disp);
+                            if (k == AF_RBP_IDX
+                                || (k != AF_NONE && af_adj))
+                                af_kind = k;
+                        }
+                    }
                 }
                 if (af_kind != AF_NONE && af_idx >= 0) {
                     IRValue inner = af_idx;
@@ -5869,7 +5941,26 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         int is_float = (inst->width == 4);
                         if (folded)
                             emit_sse_load_disp(&out->text, dst_xmm, REG_RBP, ptr_off, is_float);
-                        else
+                        else if (af_kind == AF_RBP_IDX) {
+                            int idx_r = af_idx >= 0
+                                        ? ensure_index(&out->text, af_idx, ra) : -1;
+                            if (af_idx >= 0)
+                                emit_sse_load_sib(&out->text, dst_xmm, REG_RBP,
+                                                  idx_r, af_sc, af_disp, is_float);
+                            else
+                                emit_sse_load_disp(&out->text, dst_xmm, REG_RBP,
+                                                   af_disp, is_float);
+                        } else if (af_kind == AF_SIB) {
+                            int idx_r = af_idx >= 0
+                                        ? ensure_index(&out->text, af_idx, ra) : -1;
+                            ensure_reg(&out->text, af_base, REG_RAX, ra);
+                            if (af_idx >= 0)
+                                emit_sse_load_sib(&out->text, dst_xmm, REG_RAX,
+                                                  idx_r, af_sc, af_disp, is_float);
+                            else
+                                emit_sse_load_disp(&out->text, dst_xmm, REG_RAX,
+                                                   af_disp, is_float);
+                        } else
                             emit_sse_load_via_ptr(&out->text, dst_xmm, REG_RCX, is_float);
                     }
                     if (dr < 0)
@@ -5933,20 +6024,31 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
                 IRValue af_base = -1, af_idx = -1;
                 int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
+                int af_sole = inst->a < 0 || raw_uses[inst->a] <= 1;
                 int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
                              && ssa_def[inst->a] >= 0
                              && (size_t)ssa_def[inst->a] + 1 == j
-                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
-                if (!folded
-                    && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
-                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                        || inst->width == 8)) {
-                    if (local_abs_af(ir, fn, ssa_def, alloca_off, inst->a,
-                                     &af_base, &af_idx, &af_sc, &af_disp))
-                        af_kind = AF_SIB;
-                    else if (af_adj)
-                        af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
-                                                    &af_base, &af_idx, &af_sc, &af_disp);
+                             && af_sole;
+                {
+                    int fp_scalar = value_is_float_class(fn, inst->b)
+                                    && (inst->width == 4 || inst->width == 8);
+                    int gp_scalar = !value_is_float_class(fn, inst->b)
+                                    && !value_is_ld(fn, inst->b)
+                                    && (inst->width == 1 || inst->width == 2
+                                        || inst->width == 4 || inst->width == 8);
+                    if (!folded && (gp_scalar || fp_scalar)) {
+                        if (local_abs_af(ir, fn, ssa_def, alloca_off, inst->a,
+                                         &af_base, &af_idx, &af_sc, &af_disp))
+                            af_kind = AF_SIB;
+                        else {
+                            int k = classify_ptr_addr(fn, ssa_def, alloca_off,
+                                                      inst->a, &af_base, &af_idx,
+                                                      &af_sc, &af_disp);
+                            if (k == AF_RBP_IDX
+                                || (k != AF_NONE && af_adj))
+                                af_kind = k;
+                        }
+                    }
                 }
                 if (af_kind != AF_NONE && af_idx >= 0) {
                     IRValue inner = af_idx;
@@ -6008,7 +6110,28 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (folded)
                             emit_sse_store_disp(&out->text, REG_RBP, XMM_SCRATCH0,
                                                 ptr_off, is_float);
-                        else
+                        else if (af_kind == AF_RBP_IDX) {
+                            int idx_r = af_idx >= 0
+                                        ? ensure_index(&out->text, af_idx, ra) : -1;
+                            if (af_idx >= 0)
+                                emit_sse_store_sib(&out->text, REG_RBP, idx_r,
+                                                   af_sc, af_disp, XMM_SCRATCH0,
+                                                   is_float);
+                            else
+                                emit_sse_store_disp(&out->text, REG_RBP,
+                                                    XMM_SCRATCH0, af_disp, is_float);
+                        } else if (af_kind == AF_SIB) {
+                            int idx_r = af_idx >= 0
+                                        ? ensure_index(&out->text, af_idx, ra) : -1;
+                            ensure_reg(&out->text, af_base, REG_RAX, ra);
+                            if (af_idx >= 0)
+                                emit_sse_store_sib(&out->text, REG_RAX, idx_r,
+                                                   af_sc, af_disp, XMM_SCRATCH0,
+                                                   is_float);
+                            else
+                                emit_sse_store_disp(&out->text, REG_RAX,
+                                                    XMM_SCRATCH0, af_disp, is_float);
+                        } else
                             emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0,
                                                    is_float);
                     }
@@ -7437,14 +7560,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_ld_store(&out->text, inst->dst, ld_off);
                     break;
                 }
-                /* dst = a op b, all float.  Stage both operands into XMM
-                 * scratch regs (never-allocated scratch0/1), compute into
-                 * scratch0, then move to dst home or spill. */
+                /* dst = a op b.  Prefer dst's XMM home as the accumulator
+                 * (gcc -O0).  When b is spilled, use addsd/divsd mem form.
+                 * Materialize b before writing acc — b may share dst's home. */
                 int is_float = (inst->width == 4);
-                ensure_reg_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm,
-                               gp_spill_area);
-                ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH1, ra_xmm,
-                               gp_spill_area);
+                int acc = (dr >= 0) ? dr : XMM_SCRATCH0;
                 int op;
                 switch (inst->op) {
                 case IR_FADD: op = 0x58; break;
@@ -7452,12 +7572,35 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 case IR_FMUL: op = 0x59; break;
                 default:      op = 0x5E; break; /* FDIV */
                 }
-                emit_sse_arith(&out->text, op, XMM_SCRATCH0, XMM_SCRATCH1,
-                               is_float);
-                if (dr >= 0 && dr != XMM_SCRATCH0)
-                    emit_sse_mov_rr(&out->text, dr, XMM_SCRATCH0);
-                spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
-                                    ra_xmm, gp_spill_area);
+                int br = (ra_xmm && inst->b >= 0 && inst->b < ra_xmm->num_values)
+                         ? ra_xmm->reg[inst->b] : -1;
+                int mem_off = 0, use_mem = 0;
+                if (br < 0 && ra_xmm && inst->b >= 0
+                    && inst->b < ra_xmm->num_values
+                    && ra_xmm->spill_slot[inst->b] >= 0) {
+                    mem_off = spill_offset_xmm(ra_xmm->spill_slot[inst->b],
+                                               gp_spill_area);
+                    use_mem = 1;
+                }
+                if (use_mem) {
+                    ensure_reg_xmm(&out->text, inst->a, acc, ra_xmm,
+                                   gp_spill_area);
+                    emit_sse_arith_disp(&out->text, op, acc, REG_RBP, mem_off,
+                                        is_float);
+                } else {
+                    int bsrc = XMM_SCRATCH1;
+                    if (br >= 0 && br != acc) bsrc = br;
+                    ensure_reg_xmm(&out->text, inst->b, bsrc, ra_xmm,
+                                   gp_spill_area);
+                    ensure_reg_xmm(&out->text, inst->a, acc, ra_xmm,
+                                   gp_spill_area);
+                    emit_sse_arith(&out->text, op, acc, bsrc, is_float);
+                }
+                if (dr < 0)
+                    spill_if_needed_xmm(&out->text, inst->dst, acc, ra_xmm,
+                                        gp_spill_area);
+                else if (dr != acc)
+                    emit_sse_mov_rr(&out->text, dr, acc);
                 break;
             }
 
