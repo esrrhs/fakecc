@@ -3203,6 +3203,8 @@ static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_
     int di = def[v];
     if (di < 0) return 0;
     const IRInst *d = &fn->insts.data[di];
+    if (d->op == IR_COPY)
+        return fold_ptr_off(fn, def, alloca_off, d->a, out_off, depth + 1);
     if (d->op == IR_ADDR && d->a >= 0 && d->a < fn->next_value_id && alloca_off[d->a] != 0) {
         if (alloca_dyn_align(fn, def, d->a)) return 0;
         *out_off = alloca_off[d->a];
