@@ -11,7 +11,7 @@ _COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$_COMPAT_DIR/compat.sh" || { echo "cannot source compat.sh from $_COMPAT_DIR" >&2; exit 2; }
 # run_e2e fans cases out to `xargs bash -c` workers, which only see exported
 # functions, so re-export the shims this script's workers rely on.
-export -f timeout nproc 2>/dev/null || true
+export -f timeout nproc cmp 2>/dev/null || true
 
 
 FAKECC=${1:-./build/fakecc}
@@ -34,7 +34,7 @@ CASE_DIR="$SUITE_DIR/cases"
 # linux-x86_64).  Resolve it once: inside run_single_case it cost two `uname`
 # forks per case, ~5.4k of them across the corpus, to compute a value that
 # cannot change during the run.
-HOST_TAG="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m)"
+HOST_TAG="$(host_tag)"
 export HOST_TAG
 export FAKECC_PKG="${SUITE_DIR}/pkg_fixtures${FAKECC_PKG:+:$FAKECC_PKG}"
 WORK=$(mktemp -d)

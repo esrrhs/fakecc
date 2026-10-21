@@ -76,9 +76,55 @@ static const RaRegClasses *ra_classes_x86(void) {
     return ra_reserve_va_scratch ? &c_no_r11 : &c;
 }
 
+static const RaRegClasses *ra_classes_win64(void) {
+    static const int GP_NO_R11[] = {
+        REG_RSI, REG_RDI,
+        REG_R8,  REG_R9,  REG_R10,
+        REG_RBX, REG_R12, REG_R13
+    };
+    static RaRegClasses c = {
+        .gp = {
+            ALLOCATABLE_REGS,
+            REG_ALLOCATABLE,
+            0x3Cu, /* caller-saved: R8, R9, R10, R11; callee-saved: RSI, RDI, RBX, R12, R13 */
+            8,
+            0,
+        },
+        .simd = {
+            XMM_ALLOCATABLE_REGS,
+            REG_XMM_ALLOCATABLE,
+            XMM_CALLER_SAVED_MASK,
+            32,
+            0,
+        },
+    };
+    static RaRegClasses c_no_r11 = {
+        .gp = {
+            GP_NO_R11,
+            8,
+            0x1Cu, /* caller-saved: R8, R9, R10 */
+            8,
+            0,
+        },
+        .simd = {
+            XMM_ALLOCATABLE_REGS,
+            REG_XMM_ALLOCATABLE,
+            XMM_CALLER_SAVED_MASK,
+            32,
+            0,
+        },
+    };
+    int spill = host_has_avx512f() ? 64 : 32;
+    c.simd.spill_bytes = spill;
+    c_no_r11.simd.spill_bytes = spill;
+    return ra_reserve_va_scratch ? &c_no_r11 : &c;
+}
+
 const RaRegClasses *ra_classes_current(void) {
     if (target_current()->arch == TARGET_ARCH_ARM64)
         return ra_classes_arm64();
+    if (target_current()->os == TOS_WINDOWS)
+        return ra_classes_win64();
     return ra_classes_x86();
 }
 

@@ -32,7 +32,12 @@ cmake --install "$BUILD" --prefix "$PREFIX" >/dev/null 2>&1 ||
     fail "cmake --install $BUILD --prefix \$TMP failed"
 
 # 1. The compiler itself has to land on the standard bindir.
-[ -x "$PREFIX/bin/fakecc" ] || fail "no executable at \$PREFIX/bin/fakecc"
+# Windows installs fakecc.exe; the other hosts install fakecc.
+FCC="$PREFIX/bin/fakecc"
+if [ ! -x "$FCC" ] && [ -x "$FCC.exe" ]; then
+    FCC="$FCC.exe"
+fi
+[ -x "$FCC" ] || fail "no executable at \$PREFIX/bin/fakecc"
 
 # 2. The runtime package.  This is the rule that can quietly go missing:
 #    runtime/ has its own install(DIRECTORY ...), and a compiler without it
@@ -57,7 +62,7 @@ int main() {
 }
 EOF
 
-(cd "$WORK" && "$PREFIX/bin/fakecc" hello.c -o hello) >/dev/null 2>&1 ||
+(cd "$WORK" && "$FCC" hello.c -o hello) >/dev/null 2>&1 ||
     fail "installed fakecc could not compile hello.c"
 [ -x "$WORK/hello" ] || fail "installed fakecc produced no executable"
 

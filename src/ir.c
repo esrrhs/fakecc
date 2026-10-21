@@ -1,5 +1,6 @@
 #include "fakecc/ir.h"
 #include "fakecc/ast.h"
+#include "fakecc/target.h"
 #include "fakecc/common.h"
 #include "fakecc/dfp.h"
 
@@ -1961,9 +1962,6 @@ static int type_is_i128(Type t) {
 static int type_is_d128(Type t) {
     return t.kind == TY_FLOAT && t.is_decimal && t.width == 16 && !t.is_vector;
 }
-static int type_is_pair16(Type t) {
-    return type_is_i128(t) || type_is_d128(t);
-}
 static int get_value_is_decimal(const IRFunction *fn, IRValue v) {
     return get_value_is_float(fn, v) == 2;
 }
@@ -2008,6 +2006,14 @@ static IRValue emit_runtime_call(IRFunction *fn, const char *name,
     if (dst_float_kind == 2) set_value_decimal(fn, dst);
     else if (dst_float_kind) set_value_float(fn, dst, 1);
     return dst;
+}
+
+/* Drop a stack_save taken for large by-value aggregate copies.  The
+ * copies are dynallocas so they do not each reserve a permanent frame
+ * slot; the restore runs after the call that consumes them. */
+static void restore_big_copy(IRFunction *fn, IRValue sp, SourceLoc loc) {
+    if (sp < 0) return;
+    emit_inst_w(fn, IR_STACK_RESTORE, -1, sp, -1, 0, 8, 1, loc);
 }
 
 static void emit_runtime_call_void(IRFunction *fn, const char *name,
@@ -3713,7 +3719,7 @@ static IRValue lower_fortify_chk_call(IRFunction *fn, IRSymTable *st, const Expr
 static IRValue bos_lower_va_list_arg(IRFunction *fn, IRSymTable *st,
                                      const Expr *arg) {
     IRValue v = lower_expr(fn, st, arg);
-    if (!abi_sret_uses_gp() && arg->type.kind == TY_STRUCT && arg->type.tag
+    if ((!abi_sret_uses_gp() || target_current()->os == TOS_WINDOWS) && arg->type.kind == TY_STRUCT && arg->type.tag
         && strcmp(arg->type.tag, "__va_list_tag") == 0) {
         IRValue m = new_value(fn);
         emit_inst_w(fn, IR_LOAD_PTR, m, v, -1, 0, 8, 1, arg->loc);
@@ -4701,12 +4707,14 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
                 addr_r, addr_i, l_real, l_imag, r_real, r_imag
             };
             emit_runtime_call_void(fn, dn, cargs, 6, e->loc);
+            /* IR_LOAD of an alloca copies the slot id.  The helper wrote
+             * through the pointer, so reload with IR_LOAD_PTR. */
             out_r = new_value(fn);
-            emit_inst_w(fn, IR_LOAD, out_r, slot_r, -1, 0, elem_sz, 0, e->loc);
+            emit_inst_w(fn, IR_LOAD_PTR, out_r, addr_r, -1, 0, elem_sz, 0, e->loc);
             fn->insts.data[fn->insts.len - 1].is_float = 1;
             set_value_float(fn, out_r, 1);
             out_i = new_value(fn);
-            emit_inst_w(fn, IR_LOAD, out_i, slot_i, -1, 0, elem_sz, 0, e->loc);
+            emit_inst_w(fn, IR_LOAD_PTR, out_i, addr_i, -1, 0, elem_sz, 0, e->loc);
             fn->insts.data[fn->insts.len - 1].is_float = 1;
             set_value_float(fn, out_i, 1);
         } else if (is_float && elem_sz <= 8) {
@@ -7650,7 +7658,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 || strcmp(cname, "__builtin_va_copy") == 0) {
                 IRValue dst = lower_expr(fn, st, e->u.call.args.data[0]);
                 IRValue src = lower_expr(fn, st, e->u.call.args.data[1]);
-                emit_struct_copy(fn, dst, src, abi_sret_uses_gp() ? 24 : 8, e->loc);
+                int va_sz = (target_current()->os == TOS_WINDOWS || !abi_sret_uses_gp()) ? 8 : 24;
+                emit_struct_copy(fn, dst, src, va_sz, e->loc);
                 return -1;
             }
             if (strcmp(cname, "__builtin_shuffle") == 0) {
@@ -7947,6 +7956,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             exit(1);
         }
         int nargs = 0;
+        IRValue big_copy_sp = -1;
         memset(arg_on_stack, 0, IR_CALL_MAX_ARGS);
         /* Reserve a slot if the return needs a hidden sret pointer. */
         int is_void_pre = (e->type.kind == TY_VOID);
@@ -7955,9 +7965,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         SysVRegClass ret_cls_pre[4] = {0};
         int ret_nreg_pre = 0;
         if (is_ret_i128_pre) {
-            ret_cls_pre[0] = SYSV_CLS_INTEGER;
-            ret_cls_pre[1] = SYSV_CLS_INTEGER;
-            ret_nreg_pre = 2;
+            if (target_current()->os == TOS_WINDOWS) {
+                ret_nreg_pre = 0;
+            } else {
+                ret_cls_pre[0] = SYSV_CLS_INTEGER;
+                ret_cls_pre[1] = SYSV_CLS_INTEGER;
+                ret_nreg_pre = 2;
+            }
         } else if (is_ret_struct_pre) {
             ret_nreg_pre = sysv_classify_agg(e->type, ret_cls_pre);
             /* Capacity 4: a three- or four-element HFA result comes back in
@@ -7965,7 +7979,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             abi_adjust_cls(e->type, ret_cls_pre, &ret_nreg_pre, 4, e->loc);
         }
         int ret_in_mem_pre = is_ret_struct_pre && ret_nreg_pre == 0;
-        if (type_is_complex_ldouble(e->type)) {
+        if (type_is_complex_ldouble(e->type) && target_current()->os != TOS_WINDOWS && target_current()->arch != TARGET_ARCH_ARM64) {
             ret_nreg_pre = 2;
             ret_in_mem_pre = 0;
         }
@@ -8033,9 +8047,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     continue;
                 }
                 if (type_is_pair16(arg->type)) {
-                    cls[0] = SYSV_CLS_INTEGER;
-                    cls[1] = SYSV_CLS_INTEGER;
-                    nreg = 2;
+                    if (target_current()->os == TOS_WINDOWS) {
+                        nreg = 0;
+                    } else {
+                        cls[0] = SYSV_CLS_INTEGER;
+                        cls[1] = SYSV_CLS_INTEGER;
+                        nreg = 2;
+                    }
                     asz = 16;
                 } else {
                     nreg = sysv_classify_agg(arg->type, cls);
@@ -8049,6 +8067,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     is_memory = 1;
                     nreg = 0;
                 }
+                /* Win64 va_arg of a vector wider than 8 bytes loads a
+                 * pointer from the home slot and dereferences it.  A named
+                 * __m128 still travels in XMM; only the unnamed one is a
+                 * pointer in the matching GP register. */
+                int win_va_vec_ptr = (target_current()->os == TOS_WINDOWS
+                                      && call_real_variadic && i >= call_nparams
+                                      && arg->type.is_vector && asz > 8);
                 if (type_is_empty_struct(arg->type)) {
                     /* GNU empty structs occupy no argument slots. */
                     continue;
@@ -8090,15 +8115,36 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                     free(ebs);
                     continue;
                 }
-                if (is_memory && (sysv_memory_pass_as_pointer(arg->type)
-                                  || abi_indirect_agg(arg->type))) {
+                if (win_va_vec_ptr || (is_memory && (sysv_memory_pass_as_pointer(arg->type)
+                                  || abi_indirect_agg(arg->type)))) {
                     /* Pointer to a stack copy: SysV va_list, or a Darwin
                      * aggregate larger than 16 bytes. */
                     int copy_sz = asz;
                     if (copy_sz < 1) copy_sz = 1;
-                    IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
-                    IRValue tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1, 8, 1,
-                                                  e->loc);
+                    IRValue tmp_addr;
+                    /* A permanent slot per call site stacks up.  pr23135
+                     * passes a 128KB struct eleven times and that blew the
+                     * 1MB Windows stack.  Large copies are dynallocas,
+                     * reclaimed after this call. */
+                    if (copy_sz >= 4096) {
+                        if (big_copy_sp < 0) {
+                            big_copy_sp = new_value(fn);
+                            emit_inst_w(fn, IR_STACK_SAVE, big_copy_sp, -1, -1,
+                                        0, 8, 1, e->loc);
+                            set_value_type(fn, big_copy_sp, 8, 1);
+                            fn->has_dyn_alloca = 1;
+                        }
+                        IRValue szv = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, szv, -1, -1, copy_sz, 8, 1, e->loc);
+                        set_value_type(fn, szv, 8, 1);
+                        tmp_addr = new_value(fn);
+                        emit_inst_w(fn, IR_DYN_ALLOCA, tmp_addr, szv, -1, 0, 8, 1, e->loc);
+                        set_value_type(fn, tmp_addr, 8, 1);
+                    } else {
+                        IRValue tmp_alloca = emit_alloca(fn, copy_sz, 8, 1, e->loc);
+                        tmp_addr = emit_bin_w(fn, IR_ADDR, tmp_alloca, -1, 8, 1,
+                                              e->loc);
+                    }
                     emit_struct_copy(fn, tmp_addr, av, asz, e->loc);
                     if (nargs >= arg_limit) {
                         fprintf(stderr, "fakecc: too many call arguments (max %d)\n",
@@ -8266,6 +8312,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.loc = e->loc;
         inst.call_name = NULL;
         inst.call_callee = -1;
+        inst.call_is_variadic = call_variadic || call_fake_variadic;
         /* Direct named call: callee is `EX_VAR` whose name is a known function
          * in the TU (matches sema's direct-call path).  Otherwise it's an
          * indirect call through a function pointer. */
@@ -8372,6 +8419,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             inst.width = 8;
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
+            restore_big_copy(fn, big_copy_sp, e->loc);
             /* Keep the result-slot pointer live across the call so RA
              * spills it (or uses a callee-saved home) and codegen can
              * fstpt into it after the callee returns. */
@@ -8397,6 +8445,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (hfa_ret) inst.align16 = A64_MARK_HFA;
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
+            restore_big_copy(fn, big_copy_sp, e->loc);
             set_value_type(fn, ret_lo, vecw ? vecw : 8, vecw ? 0 : 1);
             if (!hfa_ret && ret_cls[0] == SYSV_CLS_SSE)
                 set_value_float(fn, ret_lo, vecw ? 4 : 1);
@@ -8427,6 +8476,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                       : (is_void ? 0 : (e->type.width ? e->type.width : 4));
         inst.is_unsigned = ret_in_mem ? 1 : e->type.is_unsigned;
         ir_inst_array_push(&fn->insts, inst);
+        restore_big_copy(fn, big_copy_sp, e->loc);
         if (!is_void && !is_ret_struct) {
             set_value_type(fn, v, inst.width, inst.is_unsigned);
             if (e->type.kind == TY_FLOAT)
@@ -11990,10 +12040,15 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.ret_reg_n = 0;
         for (int k = 0; k < 4; k++) irfn.ret_reg_cls[k] = 0;
         if (type_is_pair16(fd->ret_type)) {
-            irfn.ret_reg_n = 2;
-            irfn.ret_reg_cls[0] = (int)SYSV_CLS_INTEGER;
-            irfn.ret_reg_cls[1] = (int)SYSV_CLS_INTEGER;
-            irfn.ret_width = 16;
+            if (target_current()->os == TOS_WINDOWS) {
+                irfn.ret_reg_n = 0;
+                irfn.ret_width = 16;
+            } else {
+                irfn.ret_reg_n = 2;
+                irfn.ret_reg_cls[0] = (int)SYSV_CLS_INTEGER;
+                irfn.ret_reg_cls[1] = (int)SYSV_CLS_INTEGER;
+                irfn.ret_width = 16;
+            }
         } else if (irfn.ret_is_struct) {
             SysVRegClass rcls[4] = {0};
             /* Capacity 4: a three- or four-element HFA is returned in
@@ -12005,7 +12060,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
             /* Struct size for copy/load lives in ret_width. */
             irfn.ret_width = type_size(fd->ret_type);
         }
-        if (irfn.ret_is_complex_ld) {
+        if (irfn.ret_is_complex_ld && target_current()->os != TOS_WINDOWS && target_current()->arch != TARGET_ARCH_ARM64) {
             /* SysV: `_Complex long double` returns in st0/st1, not sret. */
             irfn.ret_reg_n = 2;
             irfn.ret_width = type_size(fd->ret_type);
@@ -12061,9 +12116,13 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
                 SysVRegClass cls[4];
                 int nreg;
                 if (type_is_pair16(pty)) {
-                    cls[0] = SYSV_CLS_INTEGER;
-                    cls[1] = SYSV_CLS_INTEGER;
-                    nreg = 2;
+                    if (target_current()->os == TOS_WINDOWS) {
+                        nreg = 0;
+                    } else {
+                        cls[0] = SYSV_CLS_INTEGER;
+                        cls[1] = SYSV_CLS_INTEGER;
+                        nreg = 2;
+                    }
                 } else {
                     nreg = sysv_classify_agg(pty, cls);
                     abi_adjust_cls(pty, cls, &nreg, 4, ploc);

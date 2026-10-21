@@ -1159,7 +1159,9 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     }
     size_t written = fwrite(out.data, 1, out.len, f);
     fclose(f);
+#if !defined(_WIN32)
     chmod(path, 0755);
+#endif
     buffer_free(&out);
     if (written != total_size) {
         fprintf(stderr, "fakecc: short write on '%s' (%zu != %zu)\n",
@@ -1730,7 +1732,9 @@ int macho_write_object(const EmitModule *em, const char *path) {
     size_t written = fwrite(out.data, 1, out.len, f);
     size_t total = out.len;
     fclose(f);
+#if !defined(_WIN32)
     chmod(path, 0644);
+#endif
     buffer_free(&out);
     if (written != total) {
         fprintf(stderr, "fakecc: short write on '%s'\n", path);
@@ -3780,7 +3784,9 @@ int macho_codesign(const char *path) {
     fclose(f);
     /* A file created afresh carries the umask, not the exec bit the linker
      * just put on the image it wrote. */
+#if !defined(_WIN32)
     chmod(path, 0755);
+#endif
     free(buf);
     if (wrote != (size_t)total) {
         fprintf(stderr, "fakecc: short write signing '%s'\n", path);

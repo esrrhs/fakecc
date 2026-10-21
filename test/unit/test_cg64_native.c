@@ -23,10 +23,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #if defined(__APPLE__) && defined(__aarch64__)
+#include <sys/wait.h>
+#include <unistd.h>
 
 /* Compile and run.  extra_argv are appended after the program name;
  * when out != NULL child stdout is piped into out[0..outcap-1]. */

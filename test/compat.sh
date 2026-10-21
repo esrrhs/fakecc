@@ -12,6 +12,75 @@
 #
 # Sourced, never executed.
 
+# CTest launches this file's callers as `bash script`, not a login shell.  On
+# Windows that leaves System32 ahead of MSYS, so `find` is find.exe and the
+# suite reports "no cases" after testing nothing.  GNU find/xargs/md5sum live
+# in /usr/bin; put them first before any lookup below.
+case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*)
+        # /usr/bin has GNU find, xargs, and md5sum.  /mingw64/bin has the
+        # host gcc difftest uses as the oracle.  /usr/bin stays first so a
+        # Windows find.exe later on PATH cannot win.
+        PATH="/usr/bin:/mingw64/bin:${PATH}"
+        export PATH
+        ;;
+esac
+
+# `<os>-<machine>` tag used by `unsupported_on:`.  MSYS and MinGW are the
+# Windows host; keep the tag stable so it does not include the NT build number
+# that `uname -s` prints there.
+host_tag() {
+    local s m
+    s=$(uname -s | tr 'A-Z' 'a-z')
+    m=$(uname -m | tr 'A-Z' 'a-z')
+    case "$s" in
+        msys*|mingw*|cygwin*) s="windows" ;;
+    esac
+    case "$m" in
+        amd64) m="x86_64" ;;
+    esac
+    printf '%s-%s\n' "$s" "$m"
+}
+
+# Byte-compare two files.  MSYS ships md5sum but not cmp (diffutils), and the
+# e2e/difftest workers treat a missing cmp as "stdout mismatch".
+cmp() {
+    local real
+    real=$(type -P gcmp 2>/dev/null) || real=""
+    if [ -z "$real" ]; then
+        real=$(type -P cmp 2>/dev/null) || real=""
+    fi
+    if [ -n "$real" ]; then
+        "$real" "$@"
+        return $?
+    fi
+    local silent=0
+    local files=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -s|--quiet|--silent) silent=1; shift ;;
+            --) shift; break ;;
+            -*) shift ;;
+            *) files+=("$1"); shift ;;
+        esac
+    done
+    if [ $# -gt 0 ]; then
+        files+=("$@")
+    fi
+    if [ "${#files[@]}" -ne 2 ]; then
+        [ "$silent" = 1 ] || echo "cmp: expected two files" >&2
+        return 2
+    fi
+    local h1 h2
+    h1=$(md5sum "${files[0]}" 2>/dev/null | cut -d' ' -f1)
+    h2=$(md5sum "${files[1]}" 2>/dev/null | cut -d' ' -f1)
+    if [ -z "$h1" ] || [ -z "$h2" ]; then
+        [ "$silent" = 1 ] || echo "cmp: cannot read files" >&2
+        return 2
+    fi
+    [ "$h1" = "$h2" ]
+}
+
 # Number of parallel jobs to use.  Falls back through the tools macOS does have
 # (sysctl) before resorting to a conservative constant.
 nproc() {

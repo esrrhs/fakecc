@@ -21,6 +21,9 @@
 extern void *__fakecc_dir_open(const char *path);
 extern const char *__fakecc_dir_next(void *dir);
 extern int __fakecc_dir_close(void *dir);
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #else
 #include <dirent.h>
 #endif
@@ -227,6 +230,48 @@ extern int __fakecc_dir_close(void *dir);
 static void *pkg_dir_open(const char *path) { return __fakecc_dir_open(path); }
 static const char *pkg_dir_next(void *dir) { return __fakecc_dir_next(dir); }
 static void pkg_dir_close(void *dir) { (void)__fakecc_dir_close(dir); }
+#elif defined(_WIN32)
+typedef struct {
+    HANDLE h;
+    WIN32_FIND_DATAA data;
+    char name[MAX_PATH];
+    int have;
+} WinDir;
+
+static void *pkg_dir_open(const char *path) {
+    char pattern[MAX_PATH];
+    size_t n = strlen(path);
+    if (n + 3 >= sizeof pattern) return NULL;
+    memcpy(pattern, path, n);
+    if (n && pattern[n - 1] != '/' && pattern[n - 1] != '\\')
+        pattern[n++] = '\\';
+    pattern[n++] = '*';
+    pattern[n] = '\0';
+    WinDir *w = calloc(1, sizeof *w);
+    if (!w) return NULL;
+    w->h = FindFirstFileA(pattern, &w->data);
+    if (w->h == INVALID_HANDLE_VALUE) { free(w); return NULL; }
+    w->have = 1;
+    return w;
+}
+
+static const char *pkg_dir_next(void *dir) {
+    WinDir *w = dir;
+    while (w->have) {
+        memcpy(w->name, w->data.cFileName, MAX_PATH);
+        int skip = strcmp(w->name, ".") == 0 || strcmp(w->name, "..") == 0;
+        w->have = FindNextFileA(w->h, &w->data) ? 1 : 0;
+        if (!skip) return w->name;
+    }
+    return NULL;
+}
+
+static void pkg_dir_close(void *dir) {
+    WinDir *w = dir;
+    if (!w) return;
+    if (w->h != INVALID_HANDLE_VALUE) FindClose(w->h);
+    free(w);
+}
 #else
 static void *pkg_dir_open(const char *path) { return (void *)opendir(path); }
 static const char *pkg_dir_next(void *dir) {
@@ -371,12 +416,13 @@ static int c_file_matches_target(const char *name) {
     /* Strip the .c and split the remaining underscores.  The last two
      * components may be an OS and/or an arch tag; anything else is part of
      * the unit's own name and never matches a tag. */
-    static const char *const os_tags[] = { "linux", "darwin" };
+    static const char *const os_tags[] = { "linux", "darwin", "windows" };
     static const char *const arch_tags[] = { "amd64", "arm64" };
 
     size_t end = n - 2;                /* exclusive end of the stem */
     int want_os = t->os == TOS_LINUX ? 0
-                : t->os == TOS_MACOS ? 1 : -1;
+                : t->os == TOS_MACOS ? 1
+                : t->os == TOS_WINDOWS ? 2 : -1;
     int want_arch = t->arch == TARGET_ARCH_X86_64 ? 0
                   : t->arch == TARGET_ARCH_ARM64 ? 1 : -1;
 

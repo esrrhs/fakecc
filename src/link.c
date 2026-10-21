@@ -3,6 +3,7 @@
 #include "fakecc/debug.h"
 #include "fakecc/target.h"
 #include "fakecc/macho.h"
+#include "fakecc/pe.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -1078,6 +1079,37 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                                   skip_libsystem, NULL);
         if (rc != 0) exit(1);
         if (macho_codesign(path) != 0) exit(1);
+        return;
+    }
+    if (target_current()->objfmt == TARGET_OBJFMT_PE) {
+        EmitModule **extra = NULL;
+        size_t nextra = 0;
+        PeImport *imps = NULL;
+        size_t nimps = 0;
+        if (pe_pull_libraries(mods, n, needed_in, num_needed_in,
+                              lib_paths, num_lib_paths,
+                              &extra, &nextra, &imps, &nimps) != 0)
+            exit(1);
+        EmitModule **all = mods;
+        if (nextra) {
+            all = xmalloc((n + nextra) * sizeof(EmitModule *));
+            memcpy(all, mods, n * sizeof(*all));
+            memcpy(all + n, extra, nextra * sizeof(*all));
+        }
+        PeLinkOpt opt;
+        memset(&opt, 0, sizeof opt);
+        opt.shared = is_shared;
+        opt.imports = imps;
+        opt.nimports = nimps;
+        int rc = pe_link_ex(all, n + nextra, path, &opt);
+        for (size_t i = 0; i < nextra; i++) {
+            emit_module_free(extra[i]);
+            free(extra[i]);
+        }
+        free(extra);
+        pe_imports_free(imps, nimps);
+        if (all != mods) free(all);
+        if (rc != 0) exit(1);
         return;
     }
     /* ---- Merge sections ---- */
@@ -2913,7 +2945,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         if (!f) { fprintf(stderr, "fakecc: cannot write '%s'\n", path); exit(1); }
         fwrite(elf.data, 1, elf.len, f);
         fclose(f);
+#if !defined(_WIN32)
         chmod(path, is_shared ? 0644 : 0755);
+#endif
 
         buffer_free(&rx); buffer_free(&got); buffer_free(&elf);
     } else {
@@ -3036,7 +3070,9 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
         if (!f) { fprintf(stderr, "fakecc: cannot write '%s'\n", path); exit(1); }
         fwrite(elf.data, 1, elf.len, f);
         fclose(f);
+#if !defined(_WIN32)
         chmod(path, 0755);
+#endif
 
         buffer_free(&rx); buffer_free(&got); buffer_free(&elf);
     }

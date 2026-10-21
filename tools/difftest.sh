@@ -44,7 +44,34 @@ TOOLS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export FAKECC RUN_TIMEOUT FCC_FLAGS WORK TOOLS_DIR ORACLE
 # The worker subshell only sees exported functions; re-export the timeout
 # shim from compat.sh so it is available inside difftest_one.
-export -f timeout nproc 2>/dev/null || true
+export -f timeout nproc cmp 2>/dev/null || true
+
+# MSYS reports ExitProcess(status) as 127 when the high bits are set, so a
+# MinGW `return -3` and fakecc's 8-bit status never compare equal.  The
+# helper reads the raw code.  Absent (or failing to build) on other hosts.
+WIN_EXIT8=""
+case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*)
+        if "$ORACLE" -O2 -o "$WORK/win_exit8.exe" "$TOOLS_DIR/win_exit8.c" 2>/dev/null; then
+            WIN_EXIT8="$WORK/win_exit8.exe"
+        fi
+        ;;
+esac
+export WIN_EXIT8
+
+# Run prog and return its status.  On Windows the status is the low 8 bits
+# of the process exit code; elsewhere it is whatever bash already reports.
+run_status() {
+    local prog="$1" out="$2" err="$3"
+    if [ -n "${WIN_EXIT8:-}" ]; then
+        if [ -f "${prog}.exe" ]; then prog="${prog}.exe"; fi
+        prog=$(cygpath -w "$prog")
+        "$WIN_EXIT8" "$RUN_TIMEOUT" "$prog" >"$out" 2>"$err"
+    else
+        timeout "$RUN_TIMEOUT" "$prog" >"$out" 2>"$err"
+    fi
+}
+export -f run_status
 
 difftest_one() {
     local src="$1"
@@ -203,7 +230,7 @@ PY
         fi
     fi
     local gcc_rc=0
-    timeout "$RUN_TIMEOUT" "$WORK/$name.gcc" >"$WORK/$name.gcc.out" 2>"$WORK/$name.gcc.stderr" || gcc_rc=$?
+    run_status "$WORK/$name.gcc" "$WORK/$name.gcc.out" "$WORK/$name.gcc.stderr" || gcc_rc=$?
 
     if ! "$FAKECC" $FCC_FLAGS $fcc_extra "$src" -o "$WORK/$name.fcc" 2>"$WORK/$name.fcc.err"; then
         local rc=$?
@@ -217,7 +244,7 @@ PY
         return 1
     fi
     local fcc_rc=0
-    timeout "$RUN_TIMEOUT" "$WORK/$name.fcc" >"$WORK/$name.fcc.out" 2>"$WORK/$name.fcc.stderr" || fcc_rc=$?
+    run_status "$WORK/$name.fcc" "$WORK/$name.fcc.out" "$WORK/$name.fcc.stderr" || fcc_rc=$?
 
     if [ "$fcc_rc" = "124" ] && [ "$gcc_rc" != "124" ]; then
         printf '%-28s DIFF (fakecc build did not terminate; gcc exits %s)\n' "$base" "$gcc_rc"

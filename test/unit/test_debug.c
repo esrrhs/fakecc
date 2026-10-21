@@ -25,7 +25,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define PATH_SEP "\\"
+#define TMP_DIR  "."
+#else
 #include <unistd.h>
+#define PATH_SEP "/"
+#define TMP_DIR  "/tmp"
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Harness                                                             */
@@ -198,10 +206,21 @@ static int check_debug_loc(const char *path, uint64_t *out_max_addr,
 }
 
 static int elf_sym_has(const char *path, const char *symname) {
-    /* Use nm if available; otherwise parse .symtab lightly via readelf-like scan. */
-    char cmd[512];
-    snprintf(cmd, sizeof cmd, "nm '%s' 2>/dev/null | grep -q ' %s$'", path, symname);
-    return system(cmd) == 0;
+    size_t strsz = 0;
+    unsigned char *str = elf_read_section(path, ".strtab", &strsz);
+    if (!str) return 0;
+    int found = 0;
+    size_t slen = strlen(symname);
+    for (size_t p = 0; p + slen <= strsz; ) {
+        if (strcmp((const char *)str + p, symname) == 0) {
+            found = 1;
+            break;
+        }
+        while (p < strsz && str[p]) p++;
+        p++;
+    }
+    free(str);
+    return found;
 }
 
 /* ------------------------------------------------------------------ */
@@ -209,18 +228,18 @@ static int elf_sym_has(const char *path, const char *symname) {
 /* ------------------------------------------------------------------ */
 
 static void test_symtab_without_g(void) {
-    const char *path = "/tmp/fakecc_test_debug_sym";
+    const char *path = TMP_DIR PATH_SEP "fakecc_test_debug_sym";
     compile_and_link("package main; int main(void) { return 7; }", path, 0);
     T_ASSERT(elf_has_section(path, ".symtab"));
     T_ASSERT(elf_has_section(path, ".strtab"));
     T_ASSERT(!elf_has_section(path, ".debug_info"));
     T_ASSERT(!elf_has_section(path, ".debug_loc"));
     T_ASSERT(elf_sym_has(path, "main"));
-    unlink(path);
+    remove(path);
 }
 
 static void test_dwarf_with_g(void) {
-    const char *path = "/tmp/fakecc_test_debug_dwarf";
+    const char *path = TMP_DIR PATH_SEP "fakecc_test_debug_dwarf";
     compile_and_link(
         "package main;\n"
         "int main(void) {\n"
@@ -235,12 +254,12 @@ static void test_dwarf_with_g(void) {
     T_ASSERT(elf_has_section(path, ".debug_abbrev"));
     T_ASSERT(elf_has_section(path, ".debug_frame"));
     T_ASSERT(elf_sym_has(path, "main"));
-    unlink(path);
+    remove(path);
 }
 
 static void test_obj_dbg_roundtrip(void) {
-    const char *opath = "/tmp/fakecc_test_debug_rt.o";
-    const char *epath = "/tmp/fakecc_test_debug_rt";
+    const char *opath = TMP_DIR PATH_SEP "fakecc_test_debug_rt.o";
+    const char *epath = TMP_DIR PATH_SEP "fakecc_test_debug_rt";
 
     EmitModule em;
     compile_module("package main;\n"
@@ -270,7 +289,7 @@ static void test_obj_dbg_roundtrip(void) {
     T_ASSERT(elf_has_section(epath, ".debug_line"));
     T_ASSERT(elf_has_section(epath, ".debug_loc"));
     emit_module_free(&got);
-    unlink(opath); unlink(epath);
+    remove(opath); remove(epath);
 }
 
 /* ------------------------------------------------------------------ */
@@ -673,7 +692,7 @@ static void test_link_rebases_loclists(void) {
 
     T_ASSERT(m_before->ranges[0].pc_start < a.text.len);
 
-    const char *path = "/tmp/fakecc_test_debug_rebase";
+    const char *path = TMP_DIR PATH_SEP "fakecc_test_debug_rebase";
     EmitModule *mods[2] = { &a, &b };
     emit_link(mods, 2, path, NULL, 0, 0, NULL, 0, 1, 0);
 
@@ -685,13 +704,13 @@ static void test_link_rebases_loclists(void) {
     T_ASSERT(check_debug_loc(path, &max_addr, &lists));
     T_ASSERT(lists >= 2);
     T_ASSERT(max_addr > a.text.len);
-    unlink(path);
+    remove(path);
     emit_module_free(&a);
     emit_module_free(&b);
 }
 
 static void test_loclist_section_present(void) {
-    const char *path = "/tmp/fakecc_test_debug_loclist";
+    const char *path = TMP_DIR PATH_SEP "fakecc_test_debug_loclist";
     compile_and_link_at(
         "package main;\n"
         "int add(int a, int b) { int s; s = a + b; s = s * 2; return s; }\n"
@@ -701,11 +720,11 @@ static void test_loclist_section_present(void) {
     int lists = 0;
     T_ASSERT(check_debug_loc(path, &max_addr, &lists));
     T_ASSERT(lists >= 3);   /* a, b and s all move between homes */
-    unlink(path);
+    remove(path);
 }
 
 static void test_bitfield_and_anon_struct_debug(void) {
-    const char *path = "/tmp/fakecc_test_debug_bitfield";
+    const char *path = TMP_DIR PATH_SEP "fakecc_test_debug_bitfield";
     compile_and_link_at(
         "package main;\n"
         "struct B { unsigned a : 3; unsigned : 0; unsigned b : 5; int c; };\n"
@@ -713,7 +732,7 @@ static void test_bitfield_and_anon_struct_debug(void) {
         "int main(void) { struct B f; f.a = 1; f.b = 2; f.c = 3; return (int)f.a + (int)f.b + f.c + (int)g.a; }\n",
         path, 1, 1);
     T_ASSERT(elf_has_section(path, ".debug_info"));
-    unlink(path);
+    remove(path);
 }
 
 int main(void) {

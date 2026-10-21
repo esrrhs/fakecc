@@ -3,7 +3,7 @@
 // skip_oracle: darwin
 // __paciasp/__pacia/__autda/__retab are HINT-space A64 instructions and only
 // the arm64 backend emits them, so there is nothing to check on x86-64.
-// unsupported_on: linux-x86_64
+// unsupported_on: linux-x86_64 windows-x86_64
 // Pointer-authentication instructions.
 //
 // Darwin signs a thread start routine before handing it to the kernel and

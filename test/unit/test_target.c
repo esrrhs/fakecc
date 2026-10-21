@@ -27,6 +27,16 @@ static void test_canonical_targets(void) {
     /* Freestanding arm64 Mach-O executables work since T5/T6; relocatable
      * object emission and dylib links land in T14/T19. */
     T_ASSERT(target_backend_ready(t));
+
+    t = target_x86_64_windows();
+    T_ASSERT_EQ_INT(t->arch, TARGET_ARCH_X86_64);
+    T_ASSERT_EQ_INT(t->os, TOS_WINDOWS);
+    T_ASSERT_EQ_INT(t->objfmt, TARGET_OBJFMT_PE);
+    T_ASSERT_EQ_INT(t->ptr_bits, 64);
+    T_ASSERT_EQ_INT(t->gp_arg_regs, 4);
+    T_ASSERT_EQ_INT(t->sret_uses_gp, 1);
+    T_ASSERT_STR_EQ(t->triple, "x86_64-windows");
+    T_ASSERT(target_backend_ready(t));
 }
 
 static void test_triple_aliases(void) {
@@ -43,6 +53,15 @@ static void test_triple_aliases(void) {
     T_ASSERT(target_parse("arm64-apple-macos26") == target_arm64_macos());
     T_ASSERT(target_parse("arm64-darwin") == target_arm64_macos());
     T_ASSERT(target_parse("aarch64-apple-darwin") == target_arm64_macos());
+
+    /* x86_64-windows spellings. */
+    T_ASSERT(target_parse("x86_64-windows") == target_x86_64_windows());
+    T_ASSERT(target_parse("x86_64-pc-windows") == target_x86_64_windows());
+    T_ASSERT(target_parse("x86_64-pc-windows-msvc") == target_x86_64_windows());
+    T_ASSERT(target_parse("x86_64-pc-windows-gnu") == target_x86_64_windows());
+    T_ASSERT(target_parse("x86_64-w64-mingw32") == target_x86_64_windows());
+    T_ASSERT(target_parse("amd64-windows") == target_x86_64_windows());
+    T_ASSERT(target_parse("amd64-pc-windows-msvc") == target_x86_64_windows());
 }
 
 static void test_bad_triples(void) {
@@ -54,6 +73,8 @@ static void test_bad_triples(void) {
     T_ASSERT(target_parse("x86_64-apple-darwin") == NULL);
     T_ASSERT(target_parse("arm64-linux") == NULL);     /* aarch64-linux: not delivered */
     T_ASSERT(target_parse("aarch64-unknown-linux-gnu") == NULL);
+    T_ASSERT(target_parse("arm64-windows") == NULL);
+    T_ASSERT(target_parse("aarch64-pc-windows-msvc") == NULL);
     T_ASSERT(target_parse("arm64") == NULL);
     T_ASSERT(target_parse("linux") == NULL);
     T_ASSERT(target_parse(NULL) == NULL);
@@ -78,6 +99,8 @@ static void test_host_default(void) {
     const TargetDesc *d = target_default();
 #if defined(__APPLE__) && defined(__aarch64__)
     T_ASSERT(d == target_arm64_macos());
+#elif defined(_WIN32)
+    T_ASSERT(d == target_x86_64_windows());
 #elif defined(__linux__) && defined(__x86_64__)
     T_ASSERT(d == target_x86_64_linux());
 #else

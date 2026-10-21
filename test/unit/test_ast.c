@@ -1,4 +1,5 @@
 #include "fakecc/ast.h"
+#include "fakecc/target.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/token.h"
@@ -75,6 +76,8 @@ static void test_typedef_and_func_equal(void) {
 }
 
 static void test_sysv_classify(void) {
+    const TargetDesc *saved = target_current();
+    target_set_current(target_x86_64_linux());
     SysVRegClass cls[2] = {0, 0};
     Type vf = type_make_vector(type_make_float(4), 16);
     T_ASSERT_EQ_INT(sysv_classify_agg(vf, cls), 1);
@@ -102,6 +105,7 @@ static void test_sysv_classify(void) {
     Type big = type_make_struct("Big", 32);
     T_ASSERT_EQ_INT(sysv_classify_agg(big, cls), 0);
     type_free(&big);
+    target_set_current(saved);
 }
 
 static void test_fold_int128(void) {

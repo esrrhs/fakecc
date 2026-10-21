@@ -16,6 +16,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <direct.h>
+#define rt_mkdir_one(p) _mkdir(p)
+#else
+#define rt_mkdir_one(p) mkdir((p), 0755)
+#endif
 
 #if defined(__SANITIZE_ADDRESS__) || defined(__has_feature)
 const char *__asan_default_options(void) {
@@ -100,7 +106,7 @@ static void usage(void) {
             "              [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
-            "  -shared         produce a shared object (.so) library\n"
+            "  -shared         produce a shared library (.so, or a DLL on Windows)\n"
             "  -g              emit DWARF debug info (line numbers, variables);\n"
             "                  independent of -O, never changes generated code\n"
             "  -O0             keep locals in memory (skip SSA promotion)\n"
@@ -110,14 +116,16 @@ static void usage(void) {
             "  -mavx512f       pass 64-byte vectors in one ZMM (gcc -mavx512f)\n"
             "  -mno-avx512f    default: 64-byte vectors in memory\n"
             "  -nostdlib       do not link builtin runtime/; use -l for system libs\n"
-            "  -lLIB           link against libLIB.so (DT_NEEDED; optional interop)\n"
-            "  -l:SONAME       link against exact soname SONAME\n"
+            "  -lLIB           link libLIB.so (ELF), libLIB.dylib (Mach-O), or on\n"
+            "                  Windows a static/import library (libLIB.dll.a, ...)\n"
+            "  -l:NAME         link against exact soname or archive filename NAME\n"
             "  -LDIR           add DIR to the shared-library search path\n"
             "                  (link-time check for -l; also DT_RUNPATH)\n"
             "  -nodefaultlibs  accepted for compatibility (default already skips libc)\n"
             "  --target=T      code generation target: x86_64-linux (default on\n"
-            "                  Linux hosts) or arm64-macos (default on Apple Silicon;\n"
-            "                  accepted spellings: x86_64-linux, arm64-apple-darwin, ...)\n"
+            "                  Linux hosts), arm64-macos (default on Apple Silicon),\n"
+            "                  or x86_64-windows (default on Windows; also\n"
+            "                  x86_64-pc-windows-msvc, x86_64-w64-mingw32, ...)\n"
             "  FAKECC_RT       override path to the runtime/ directory\n"
             "  FAKECC_PKG      colon-separated package search path\n");
     exit(1);
@@ -126,6 +134,30 @@ static void usage(void) {
 static int ends_with(const char *s, const char *suf) {
     size_t n = strlen(s), m = strlen(suf);
     return n >= m && strcmp(s + n - m, suf) == 0;
+}
+
+/* Relocatable object inputs: ELF/Mach-O use .o; Windows COFF uses .obj too. */
+static int is_obj_input(const char *s) {
+    return ends_with(s, ".o") || ends_with(s, ".obj");
+}
+
+/* Windows link inputs that are archives, import libraries, or DLLs.
+ * ELF/Mach-O keep treating a stray .a as a source path (they have no
+ * archive reader on this path). */
+static int is_pe_lib_input(const char *s) {
+    if (target_current()->objfmt != TARGET_OBJFMT_PE) return 0;
+    return ends_with(s, ".dll.a") || ends_with(s, ".a")
+        || ends_with(s, ".lib") || ends_with(s, ".dll");
+}
+
+/* -l on Windows keeps the stem, or ":filename" for an exact archive name.
+ * ELF/Mach-O still go through soname_from_l. */
+static char *pe_needed_from_l(const char *arg) {
+    if (!arg || !*arg) {
+        fprintf(stderr, "fakecc: -l requires a library name\n");
+        exit(1);
+    }
+    return xstrdup(arg);
 }
 
 static int is_system_soname(const char *soname) {
@@ -183,9 +215,16 @@ static char *soname_from_so_path(const char *path) {
 static char *dir_of(const char *path) {
     const char *slash = NULL;
     for (const char *p = path; *p; p++)
-        if (*p == '/') slash = p;
+        if (*p == '/' || *p == '\\') slash = p;
     if (!slash) return xstrdup(".");
     if (slash == path) return xstrdup("/");
+    /* "C:\file" — the parent is the drive root, not "C:". */
+    if ((size_t)(slash - path) == 2 && path[1] == ':') {
+        char *d = malloc(4);
+        if (!d) { fprintf(stderr, "fakecc: out of memory\n"); exit(1); }
+        d[0] = path[0]; d[1] = ':'; d[2] = '\\'; d[3] = '\0';
+        return d;
+    }
     {
         size_t n = (size_t)(slash - path);
         char *d = malloc(n + 1);
@@ -367,6 +406,9 @@ static char *rt_cache_base(void) {
     const char *xdg = getenv("XDG_CACHE_HOME");
     if (xdg && xdg[0]) return path_join(xdg, "fakecc");
     const char *home = getenv("HOME");
+#if defined(_WIN32)
+    if (!home || !home[0]) home = getenv("USERPROFILE");
+#endif
     if (home && home[0]) {
         char *a = path_join(home, ".cache");
         char *b = path_join(a, "fakecc");
@@ -384,10 +426,10 @@ static int rt_mkdir_p(const char *path) {
     char *copy = xstrdup(path);
     size_t n = strlen(copy);
     for (size_t i = 1; i <= n; i++) {
-        if (copy[i] != '/' && copy[i] != '\0') continue;
+        if (copy[i] != '/' && copy[i] != '\\' && copy[i] != '\0') continue;
         char save = copy[i];
         copy[i] = '\0';
-        mkdir(copy, 0755);
+        if (copy[0]) rt_mkdir_one(copy);
         copy[i] = save;
     }
     free(copy);
@@ -399,18 +441,53 @@ static int rt_mkdir_p(const char *path) {
  * compiler with, so the cache stays off. */
 static char *rt_self_path(const char *argv0) {
     if (!argv0 || !argv0[0]) return NULL;
-    if (strchr(argv0, '/')) return file_readable(argv0) ? xstrdup(argv0) : NULL;
+    int has_sep = 0;
+    for (const char *q = argv0; *q; q++)
+        if (*q == '/' || *q == '\\') has_sep = 1;
+    if (has_sep) {
+        if (file_readable(argv0)) return xstrdup(argv0);
+#if defined(_WIN32)
+        if (!ends_with(argv0, ".exe")) {
+            char *with_exe = malloc(strlen(argv0) + 5);
+            if (with_exe) {
+                sprintf(with_exe, "%s.exe", argv0);
+                if (file_readable(with_exe)) return with_exe;
+                free(with_exe);
+            }
+        }
+#endif
+        return NULL;
+    }
     const char *path = getenv("PATH");
     if (!path || !path[0]) return NULL;
     char *copy = xstrdup(path);
     char *p = copy;
     char *found = NULL;
+#if defined(_WIN32)
+    const char sep = ';';
+#else
+    const char sep = ':';
+#endif
     while (*p) {
-        char *colon = strchr(p, ':');
+        char *colon = strchr(p, sep);
         if (colon) *colon = '\0';
         if (*p) {
             char *cand = path_join(p, argv0);
             if (file_readable(cand)) { found = cand; break; }
+#if defined(_WIN32)
+            if (!ends_with(cand, ".exe")) {
+                char *with_exe = malloc(strlen(cand) + 5);
+                if (with_exe) {
+                    sprintf(with_exe, "%s.exe", cand);
+                    if (file_readable(with_exe)) {
+                        free(cand);
+                        found = with_exe;
+                        break;
+                    }
+                    free(with_exe);
+                }
+            }
+#endif
             free(cand);
         }
         if (!colon) break;
@@ -549,7 +626,7 @@ int main(int argc, char **argv) {
         if (!target) {
             fprintf(stderr,
                     "fakecc: unrecognized target triple '%s' "
-                    "(supported: x86_64-linux, arm64-macos)\n",
+                    "(supported: x86_64-linux, arm64-macos, x86_64-windows)\n",
                     target_arg);
             exit(1);
         }
@@ -622,10 +699,23 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-l") == 0) {
             if (i + 1 >= argc) usage();
             needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
-            needed[num_needed++] = soname_from_l(argv[++i], is_macho);
+            {
+                const char *arg = argv[++i];
+                needed[num_needed++] = (target->objfmt == TARGET_OBJFMT_PE)
+                    ? pe_needed_from_l(arg)
+                    : soname_from_l(arg, is_macho);
+            }
         } else if (argv[i][0] == '-' && argv[i][1] == 'l') {
             needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
-            needed[num_needed++] = soname_from_l(argv[i] + 2, is_macho);
+            {
+                const char *arg = argv[i] + 2;
+                needed[num_needed++] = (target->objfmt == TARGET_OBJFMT_PE)
+                    ? pe_needed_from_l(arg)
+                    : soname_from_l(arg, is_macho);
+            }
+        } else if (is_pe_lib_input(argv[i])) {
+            needed = realloc(needed, ((size_t)num_needed + 1) * sizeof(char *));
+            needed[num_needed++] = xstrdup(argv[i]);
         } else if (ends_with(argv[i], ".so") || ends_with(argv[i], ".dylib")) {
             /* Pass a .so/.dylib path: DT_NEEDED/LC_LOAD_DYLIB = basename;
              * its dir joins -L/RUNPATH/LC_RPATH. */
@@ -679,6 +769,17 @@ int main(int argc, char **argv) {
 
     if (ninputs == 0 || output_path == NULL) usage();
 
+    for (int i = 0; i < ninputs; i++) {
+        if (ends_with(inputs[i], ".cpp") || ends_with(inputs[i], ".cc")
+            || ends_with(inputs[i], ".cxx") || ends_with(inputs[i], ".cp")
+            || ends_with(inputs[i], ".C")) {
+            fprintf(stderr,
+                    "fakecc: unsupported source file '%s': C++ is not supported (fakecc is a C compiler)\n",
+                    inputs[i]);
+            exit(1);
+        }
+    }
+
     /* x86-only vector-width switches: arm64 always passes 16-byte NEON
      * vectors; -mavx/-mavx512f are meaningless there.  The -mno-* forms
      * are accepted as no-ops (gcc-like). */
@@ -711,7 +812,7 @@ int main(int argc, char **argv) {
     }
     /* Also search next to each input so user packages resolve. */
     for (int i = 0; i < ninputs; i++) {
-        if (ends_with(inputs[i], ".o")) continue;
+        if (is_obj_input(inputs[i])) continue;
         char *d = dir_of(inputs[i]);
         pkg_ctx_add_path(&pkg, d);
         free(d);
@@ -757,7 +858,8 @@ int main(int argc, char **argv) {
         nostdlib = 1;
     }
 
-    require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
+    if (target->objfmt != TARGET_OBJFMT_PE)
+        require_libs_found(needed, num_needed, lib_paths, num_lib_paths);
     register_aux_dylibs(needed, num_needed, lib_paths, num_lib_paths);
 
     int nrt = 0;
@@ -791,9 +893,8 @@ int main(int argc, char **argv) {
         exit(1);
     }
     for (int i = 0; i < ninputs; i++) {
-        size_t len = strlen(inputs[i]);
         tu_init(&user_tus[i]);
-        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
+        if (is_obj_input(inputs[i])) {
             token_array_init(&user_tokens[i]);
         } else {
             char *src = read_file(inputs[i]);
@@ -807,9 +908,8 @@ int main(int argc, char **argv) {
     }
 
     for (int i = 0; i < ninputs; i++) {
-        size_t len = strlen(inputs[i]);
-        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
-            /* .o inputs have no TU; mark package.name NULL as a sentinel. */
+        if (is_obj_input(inputs[i])) {
+            /* .o/.obj inputs have no TU; mark package.name NULL as a sentinel. */
             memset(&user_tus[i], 0, sizeof(user_tus[i]));
         } else {
             if (parse_in_pkg(&user_tokens[i], &user_tus[i], &pkg) != FAKECC_OK)
@@ -876,8 +976,7 @@ int main(int argc, char **argv) {
      * real source TUs: a prebuilt .o input never carries one. */
     int nsource_tus = 0;
     for (int i = 0; i < ninputs; i++) {
-        size_t len = strlen(inputs[i]);
-        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o')
+        if (is_obj_input(inputs[i]))
             continue;
         nsource_tus++;
     }
@@ -901,8 +1000,7 @@ int main(int argc, char **argv) {
 
     /* Phase 2: sema + codegen user modules. */
     for (int i = 0; i < ninputs; i++) {
-        size_t len = strlen(inputs[i]);
-        if (len >= 2 && inputs[i][len - 2] == '.' && inputs[i][len - 1] == 'o') {
+        if (is_obj_input(inputs[i])) {
             if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
         } else {
             if (lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg) != FAKECC_OK)
@@ -931,7 +1029,9 @@ int main(int argc, char **argv) {
      * object-mode runtime module linked next to a whole-program package
      * module is a combination nothing else produces. */
     char *rt_cache_dir = NULL;
-    if (nrt && !arm64_freestanding) {
+    /* The runtime cache stores ELF/Mach-O relocatable objects.  The Windows
+     * link reads modules from memory, so that cache cannot be reused. */
+    if (nrt && !arm64_freestanding && target->objfmt != TARGET_OBJFMT_PE) {
         int npkg_files = 0;
         for (size_t p = 0; p < pkg.npkgs; p++)
             if (pkg.pkgs[p]->owns_files) npkg_files++;
@@ -1011,13 +1111,20 @@ int main(int argc, char **argv) {
                  * cache directory so the rename below cannot cross a
                  * filesystem. */
                 const char *tn = tmpnam(NULL);
-                const char *slash = tn ? strrchr(tn, '/') : NULL;
+                const char *slash = NULL;
+                if (tn) {
+                    for (const char *q = tn; *q; q++)
+                        if (*q == '/' || *q == '\\') slash = q;
+                }
                 const char *tbase = slash ? slash + 1 : (tn ? tn : "tmp");
                 size_t tlen = strlen(rt_cache_dir) + strlen(tbase) + 2;
                 char *tmp = malloc(tlen);
                 if (tmp) {
                     snprintf(tmp, tlen, "%s/%s", rt_cache_dir, tbase);
                     emit_obj(&mods[mi], tmp);
+#if defined(_WIN32)
+                    remove(cached);
+#endif
                     if (rename(tmp, cached) != 0) remove(tmp);
                     free(tmp);
                 }

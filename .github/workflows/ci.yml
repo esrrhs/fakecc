@@ -277,6 +277,42 @@ jobs:
           flags: ${{ matrix.config.cov_flag }}
           fail_ci_if_error: true
 
+  # Same ctest roster as the Linux and macOS legs.  windows-latest has no
+  # bash or gcc, so the job builds inside MSYS2's MINGW64 environment and
+  # lets ctest drive the shared bash suites.  Host-only checks (ELF .so,
+  # Mach-O .dylib, lldb) skip themselves the way the other platforms skip
+  # each other's.
+  build-and-test-windows:
+    name: windows-latest · gcc
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSYS2 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            diffutils
+            python
+
+      - name: Configure
+        shell: msys2 {0}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build build --parallel
+
+      - name: Test
+        shell: msys2 {0}
+        run: ctest --test-dir build --output-on-failure
+
   # Differential fuzzing: random C programs, gcc is the oracle.  Programs in
   # test/fuzz/known_failures are known miscompiles (reported, not failing).
   # Both platforms, same seed count: a miscompile that only shows up under one

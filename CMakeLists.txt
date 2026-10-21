@@ -13,7 +13,11 @@ set(CMAKE_MACOSX_RPATH ON)
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-add_compile_options(-Wall -Wextra -Werror -Wno-unused-parameter)
+if(MSVC)
+    add_compile_options(/W3)
+else()
+    add_compile_options(-Wall -Wextra -Werror -Wno-unused-parameter)
+endif()
 if(APPLE)
     add_compile_definitions(_DARWIN_C_SOURCE)
     add_compile_options(-Wno-deprecated-declarations)
@@ -67,6 +71,9 @@ add_library(fakecc_core
     src/emit.c
     src/link.c
     src/macho.c
+    src/pe.c
+    src/coff.c
+    src/arcoff.c
     src/sha256.c
     src/pkg.c
     src/compiler.c
@@ -86,7 +93,9 @@ set_target_properties(fakecc_core PROPERTIES
     INSTALL_NAME_DIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}"
 )
 
-target_link_libraries(fakecc_core PUBLIC m)
+if(NOT WIN32)
+    target_link_libraries(fakecc_core PUBLIC m)
+endif()
 if(USE_COV)
     # Same split as the flags above: gcc's gcov-format instrumentation needs an
     # explicit -lgcov, while clang's -fprofile-instr-generate already pulls in

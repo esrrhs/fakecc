@@ -27,6 +27,7 @@ typedef enum {
     TOS_UNKNOWN = 0,
     TOS_LINUX   = 1,
     TOS_MACOS   = 2,
+    TOS_WINDOWS = 3,
 } TargetOS;
 
 /* Object/executable file format produced by the object writer/linker. */
@@ -34,6 +35,7 @@ typedef enum {
     TARGET_OBJFMT_UNKNOWN = 0,
     TARGET_OBJFMT_ELF     = 1,
     TARGET_OBJFMT_MACHO   = 2,
+    TARGET_OBJFMT_PE      = 3,   /* PE32+ executable (Windows x64) */
 } TargetObjFmt;
 
 typedef struct {
@@ -45,7 +47,8 @@ typedef struct {
                                           x86-64 default 32 (YMM; -mavx512f widens to 64),
                                           arm64 NEON 16 */
     const char  *triple;               /* canonical triple string */
-    int          gp_arg_regs;          /* integer argument registers: 6 SysV, 8 AAPCS64 */
+    int          gp_arg_regs;          /* integer argument registers: 6 SysV, 8 AAPCS64,
+                                          4 Microsoft x64 (RCX, RDX, R8, R9). */
     int          sret_uses_gp;         /* 1: hidden sret consumes a GP (SysV rdi);
                                           0: sret arrives in x8 and does not */
 } TargetDesc;
@@ -56,24 +59,28 @@ typedef struct {
 const TargetDesc *target_current(void);
 void              target_set_current(const TargetDesc *t);
 
-/* Host-default target: arm64-macos on Apple Silicon, x86_64-linux on
- * Linux x86_64 (and on any other host, preserving the historical behavior
- * of always producing x86-64 ELF). */
+/* Host-default target: arm64-macos on Apple Silicon, x86_64-windows on
+ * Windows, x86_64-linux on Linux x86_64 (and on any other host, preserving
+ * the historical behavior of always producing x86-64 ELF). */
 const TargetDesc *target_default(void);
 
 /* Parse a target triple.  Returns NULL if unrecognized or unsupported.
  *
  * Accepted spellings (case-sensitive):
- *   x86_64-linux | x86_64-unknown-linux[-gnu] | amd64[-...]-linux
- *   arm64-macos  | arm64-apple-macos[-...]    | aarch64-apple-darwin
- *                | arm64-darwin
+ *   x86_64-linux   | x86_64-unknown-linux[-gnu] | amd64[-...]-linux
+ *   arm64-macos    | arm64-apple-macos[-...]    | aarch64-apple-darwin
+ *                  | arm64-darwin
+ *   x86_64-windows | x86_64-pc-windows[-msvc|-gnu] | x86_64-w64-mingw32
+ *                  | amd64-windows
  *
- * The only supported combinations are x86_64+linux and arm64+macos. */
+ * The supported combinations are x86_64+linux, arm64+macos, and
+ * x86_64+windows. */
 const TargetDesc *target_parse(const char *triple);
 
 /* Singleton descriptors. */
 const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
+const TargetDesc *target_x86_64_windows(void);
 
 /* True when this build of fakecc can actually compile and link the target.
  * The driver uses this to fail early with a clear message while a backend
