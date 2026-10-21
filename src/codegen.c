@@ -3261,6 +3261,46 @@ static int fold_gep(const IRFunction *fn, const int *def,
 
 enum { AF_NONE = 0, AF_RBP_IDX = 1, AF_SIB = 2 };
 
+/* If idx is MUL(simple_index, 1|2|4|8), peel to the inner index and real
+ * SIB scale.  "Simple" means LOAD / LOAD_PTR / PARAM through COPY/SEXT/ZEXT
+ * only — not ADD/MUL (so i*N+k stays as a byte-offset MUL). */
+static int peel_sib_scale(const IRFunction *fn, const int *def, IRValue idx,
+                          IRValue *inner, int *scale2) {
+    if (idx < 0 || idx >= fn->next_value_id || def[idx] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[idx]];
+    if (d->op != IR_MUL) return 0;
+    int64_t ca, cb;
+    int sc;
+    IRValue cand = -1;
+    if (ssa_const_imm(fn, def, d->b, &cb) && (sc = sib_scale_log2(cb)) >= 0)
+        cand = d->a;
+    else if (ssa_const_imm(fn, def, d->a, &ca) && (sc = sib_scale_log2(ca)) >= 0)
+        cand = d->b;
+    else
+        return 0;
+    IRValue v = cand;
+    for (int depth = 0; depth < 8 && v >= 0 && v < fn->next_value_id
+         && def[v] >= 0; depth++) {
+        const IRInst *x = &fn->insts.data[def[v]];
+        if (x->op == IR_COPY || x->op == IR_SEXT || x->op == IR_ZEXT) {
+            v = x->a;
+            continue;
+        }
+        if (x->op == IR_LOAD || x->op == IR_LOAD_PTR || x->op == IR_PARAM) {
+            *inner = cand;
+            *scale2 = sc;
+            return 1;
+        }
+        return 0;
+    }
+    if (v >= 0 && v < fn->next_value_id && def[v] < 0) {
+        *inner = cand;
+        *scale2 = sc;
+        return 1;
+    }
+    return 0;
+}
+
 /* Classify a dereferenced address for -O0 addressing-mode folding.
  *   AF_RBP_IDX: [rbp + idx*2^scale2 + disp]  (idx may be -1)
  *   AF_SIB:     [base + idx*2^scale2 + disp] (idx may be -1)
@@ -3336,6 +3376,26 @@ static void mark_reg(char *needed, int *uses, int nv, IRValue v) {
     }
 }
 
+/* Keep an address-index expression rooted when the address ADD itself was
+ * dropped from uses_left (SIB fold).  Walks ADD/MUL/COPY/extend so i*N+k
+ * stays live even though the outer byte-offset MUL is the only mark root. */
+static void mark_live_index(char *needed, int *uses, int nv,
+                            const IRFunction *fn, const int *def, IRValue v,
+                            int depth) {
+    if (depth > 12 || v < 0 || v >= nv) return;
+    mark_reg(needed, uses, nv, v);
+    if (def[v] < 0) return;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op == IR_COPY || d->op == IR_SEXT || d->op == IR_ZEXT) {
+        mark_live_index(needed, uses, nv, fn, def, d->a, depth + 1);
+        return;
+    }
+    if (d->op == IR_ADD || d->op == IR_MUL || d->op == IR_SUB) {
+        mark_live_index(needed, uses, nv, fn, def, d->a, depth + 1);
+        mark_live_index(needed, uses, nv, fn, def, d->b, depth + 1);
+    }
+}
+
 static void mark_inst_uses_needed(const IRInst *inst, char *needed,
                                 int *uses, int nv) {
     if (inst->op == IR_LABEL || inst->op == IR_BR || inst->op == IR_DBG_VALUE) return;
@@ -3359,9 +3419,9 @@ static int pure_addr_op(int op) {
     return op == IR_ADD || op == IR_MUL || op == IR_SEXT || op == IR_ZEXT;
 }
 
-/* 1 when this dereference becomes [rbp+disp] and does not read the pointer.
- * Indexed/SIB folds still read base/index via mark roots; only pure frame
- * displacements drop the pointer SSA use for uses_left. */
+/* 1 when this dereference folds away the pointer SSA (uses base/index
+ * instead).  Requires adjacent sole-use so shared GEPs (a[i++] load+store)
+ * keep the address ADD live. */
 static int deref_folds_addr(const IRFunction *fn, const int *def,
                             const int *alloca_off, const int *raw_uses,
                             const IRInst *inst, size_t ii) {
@@ -3380,10 +3440,8 @@ static int deref_folds_addr(const IRFunction *fn, const int *def,
     if (raw_uses && raw_uses[v] > 1) return 0;
     IRValue base = -1, idx = -1;
     int sc = 0, disp = 0;
-    if (classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc, &disp)
-        != AF_RBP_IDX)
-        return 0;
-    return base < 0 && idx < 0;
+    return classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc, &disp)
+           != AF_NONE;
 }
 
 static void codegen_mark_inst_roots(char *needed, int *uses,
@@ -3421,7 +3479,14 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
                 if (!(gn && gaddr_is_local_abs(ir, gn)))
                     mark_reg(needed, uses, nv, ab);
             }
-            if (ai >= 0) mark_reg(needed, uses, nv, ai);
+            if (ai >= 0) {
+                IRValue inner = ai;
+                int psc = 0;
+                if (peel_sib_scale(fn, def, ai, &inner, &psc))
+                    mark_live_index(needed, uses, nv, fn, def, inner, 0);
+                else
+                    mark_live_index(needed, uses, nv, fn, def, ai, 0);
+            }
             return;
         }
         mark_reg(needed, uses, nv, inst->a);
@@ -3448,7 +3513,14 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
                 if (!(gn && gaddr_is_local_abs(ir, gn)))
                     mark_reg(needed, uses, nv, ab);
             }
-            if (ai >= 0) mark_reg(needed, uses, nv, ai);
+            if (ai >= 0) {
+                IRValue inner = ai;
+                int psc = 0;
+                if (peel_sib_scale(fn, def, ai, &inner, &psc))
+                    mark_live_index(needed, uses, nv, fn, def, inner, 0);
+                else
+                    mark_live_index(needed, uses, nv, fn, def, ai, 0);
+            }
             mark_reg(needed, uses, nv, inst->b);
             return;
         }
@@ -5214,6 +5286,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         || inst->width == 8))
                     af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
                                                 &af_base, &af_idx, &af_sc, &af_disp);
+                if (af_kind != AF_NONE && af_idx >= 0) {
+                    IRValue inner = af_idx;
+                    int psc = 0;
+                    if (peel_sib_scale(fn, ssa_def, af_idx, &inner, &psc)) {
+                        af_idx = inner;
+                        af_sc = psc;
+                    }
+                }
                 if (!folded && af_kind == AF_NONE)
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->dst)) {
@@ -5321,6 +5401,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         || inst->width == 8))
                     af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
                                                 &af_base, &af_idx, &af_sc, &af_disp);
+                if (af_kind != AF_NONE && af_idx >= 0) {
+                    IRValue inner = af_idx;
+                    int psc = 0;
+                    if (peel_sib_scale(fn, ssa_def, af_idx, &inner, &psc)) {
+                        af_idx = inner;
+                        af_sc = psc;
+                    }
+                }
                 if (!folded && af_kind == AF_NONE)
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->b)) {
