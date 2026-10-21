@@ -100,12 +100,19 @@ install_conda_gcc16() {
     export LD_LIBRARY_PATH="${libdir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 }
 mkdir -p "$HOME/.local/bin"
+ppa_ok=0
 if wait_for_gcc16; then
-    retry sudo apt-get install -y \
-        -o Acquire::Retries=8 \
+    # One attempt.  apt's own retries already sit on HTTP 503 for several
+    # minutes; repeating that five times blows the job before the fallback.
+    if sudo apt-get install -y \
+        -o Acquire::Retries=2 \
         -o Acquire::Languages=none \
-        -o Acquire::https::Timeout=60 \
-        gcc-16 g++-16
+        -o Acquire::https::Timeout=30 \
+        gcc-16 g++-16; then
+        ppa_ok=1
+    fi
+fi
+if [ "$ppa_ok" -eq 1 ]; then
     ln -sfn "$(command -v gcc-16)" "$HOME/.local/bin/gcc"
     ln -sfn "$(command -v g++-16)" "$HOME/.local/bin/g++"
     if command -v gcov-16 >/dev/null 2>&1; then
