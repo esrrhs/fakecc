@@ -5630,6 +5630,285 @@ static IRValue try_lower_rotate(IRFunction *fn, IRSymTable *st, const Expr *e) {
 
 /* Lower an expression to a value id, emitting instructions as needed.
  * Sema has annotated e->type; we lower operands and coerce them per UAC. */
+/* A 128-bit value kept as two 64-bit SSA halves.  hi_zero means the high
+ * half is the constant 0 and `hi` may be -1 until a consumer asks for it.
+ * Materializing every intermediate __int128 into a 16-byte temporary is
+ * what makes -O0 i128 arithmetic a long chain of stores and reloads. */
+typedef struct {
+    IRValue lo;
+    IRValue hi;
+    int hi_zero;
+} I128Pair;
+
+static IRValue i128_pair_hi(IRFunction *fn, I128Pair *p, SourceLoc loc) {
+    if (p->hi < 0)
+        p->hi = i64imm(fn, 0, loc);
+    return p->hi;
+}
+
+static void i128_pair_from_scalar(IRFunction *fn, IRValue v, SourceLoc loc,
+                                 I128Pair *out) {
+    int w = get_value_width(fn, v);
+    int u = get_value_is_unsigned(fn, v);
+    if (w <= 0) w = 4;
+    out->lo = coerce(fn, v, w, u, 8, u, loc);
+    if (u) {
+        out->hi = -1;
+        out->hi_zero = 1;
+    } else {
+        out->hi = emit_bin_w(fn, IR_SHR, out->lo, i64imm(fn, 63, loc), 8, 0, loc);
+        out->hi_zero = 0;
+    }
+}
+
+static void i128_pair_add(IRFunction *fn, I128Pair a, I128Pair b,
+                         SourceLoc loc, I128Pair *out) {
+    IRValue slo = emit_bin_w(fn, IR_ADD, a.lo, b.lo, 8, 1, loc);
+    IRValue carry = emit_bin_w(fn, IR_LT, slo, a.lo, 8, 1, loc);
+    carry = coerce(fn, carry, 4, 0, 8, 1, loc);
+    IRValue shi;
+    if (a.hi_zero && b.hi_zero)
+        shi = carry;
+    else if (b.hi_zero)
+        shi = emit_bin_w(fn, IR_ADD, a.hi, carry, 8, 1, loc);
+    else if (a.hi_zero)
+        shi = emit_bin_w(fn, IR_ADD, b.hi, carry, 8, 1, loc);
+    else {
+        IRValue mid = emit_bin_w(fn, IR_ADD, a.hi, b.hi, 8, 1, loc);
+        shi = emit_bin_w(fn, IR_ADD, mid, carry, 8, 1, loc);
+    }
+    out->lo = slo;
+    out->hi = shi;
+    out->hi_zero = 0;
+}
+
+static void i128_pair_sub(IRFunction *fn, I128Pair a, I128Pair b,
+                         SourceLoc loc, I128Pair *out) {
+    IRValue dlo = emit_bin_w(fn, IR_SUB, a.lo, b.lo, 8, 1, loc);
+    IRValue borrow = emit_bin_w(fn, IR_LT, a.lo, b.lo, 8, 1, loc);
+    borrow = coerce(fn, borrow, 4, 0, 8, 1, loc);
+    IRValue dhi;
+    if (a.hi_zero && b.hi_zero)
+        dhi = emit_bin_w(fn, IR_SUB, i64imm(fn, 0, loc), borrow, 8, 1, loc);
+    else if (b.hi_zero)
+        dhi = emit_bin_w(fn, IR_SUB, a.hi, borrow, 8, 1, loc);
+    else if (a.hi_zero) {
+        IRValue mid = emit_bin_w(fn, IR_SUB, i64imm(fn, 0, loc), b.hi, 8, 1, loc);
+        dhi = emit_bin_w(fn, IR_SUB, mid, borrow, 8, 1, loc);
+    } else {
+        IRValue mid = emit_bin_w(fn, IR_SUB, a.hi, b.hi, 8, 1, loc);
+        dhi = emit_bin_w(fn, IR_SUB, mid, borrow, 8, 1, loc);
+    }
+    out->lo = dlo;
+    out->hi = dhi;
+    out->hi_zero = 0;
+}
+
+static void i128_pair_mul(IRFunction *fn, I128Pair a, I128Pair b,
+                         SourceLoc loc, I128Pair *out) {
+    IRValue tlo, thi;
+    mul64_wide(fn, a.lo, b.lo, &tlo, &thi, loc);
+    IRValue hi = thi;
+    if (!a.hi_zero) {
+        IRValue p = emit_bin_w(fn, IR_MUL, a.hi, b.lo, 8, 1, loc);
+        hi = emit_bin_w(fn, IR_ADD, hi, p, 8, 1, loc);
+    }
+    if (!b.hi_zero) {
+        IRValue p = emit_bin_w(fn, IR_MUL, a.lo, b.hi, 8, 1, loc);
+        hi = emit_bin_w(fn, IR_ADD, hi, p, 8, 1, loc);
+    }
+    out->lo = tlo;
+    out->hi = hi;
+    out->hi_zero = 0;
+}
+
+static void i128_pair_bit(IRFunction *fn, IROpcode op, I128Pair a, I128Pair b,
+                         SourceLoc loc, I128Pair *out) {
+    out->lo = emit_bin_w(fn, op, a.lo, b.lo, 8, 1, loc);
+    if (op == IR_BAND && (a.hi_zero || b.hi_zero)) {
+        out->hi = -1;
+        out->hi_zero = 1;
+        return;
+    }
+    if ((op == IR_BOR || op == IR_BXOR) && a.hi_zero && b.hi_zero) {
+        out->hi = -1;
+        out->hi_zero = 1;
+        return;
+    }
+    if ((op == IR_BOR || op == IR_BXOR) && a.hi_zero) {
+        out->hi = b.hi;
+        out->hi_zero = 0;
+        return;
+    }
+    if ((op == IR_BOR || op == IR_BXOR) && b.hi_zero) {
+        out->hi = a.hi;
+        out->hi_zero = 0;
+        return;
+    }
+    out->hi = emit_bin_w(fn, op, i128_pair_hi(fn, &a, loc),
+                        i128_pair_hi(fn, &b, loc), 8, 1, loc);
+    out->hi_zero = 0;
+}
+
+static void i128_pair_bitnot(IRFunction *fn, I128Pair a, SourceLoc loc,
+                            I128Pair *out) {
+    IRValue nlo = new_value(fn);
+    emit_inst_w(fn, IR_BNOT, nlo, a.lo, -1, 0, 8, 1, loc);
+    out->lo = nlo;
+    if (a.hi_zero)
+        out->hi = i64imm(fn, -1, loc);
+    else {
+        IRValue nhi = new_value(fn);
+        emit_inst_w(fn, IR_BNOT, nhi, a.hi, -1, 0, 8, 1, loc);
+        out->hi = nhi;
+    }
+    out->hi_zero = 0;
+}
+
+static int i128_operand_shape(const Expr *e);
+
+/* True when the whole expression can be lowered as a (lo, hi) pair,
+ * with no 16-byte temporary between operations. */
+static int i128_pair_shape(const Expr *e) {
+    if (!e || !type_is_i128(e->type)) return 0;
+    switch (e->kind) {
+    case EX_INT_LIT:
+    case EX_VAR:
+    case EX_MEMBER:
+    case EX_INDEX:
+    case EX_DEREF:
+        return 1;
+    case EX_CAST:
+        if (e->u.cast.operand->type.kind == TY_FLOAT
+            || e->u.cast.operand->type.is_decimal
+            || e->u.cast.operand->type.is_vector)
+            return 0;
+        if (type_is_i128(e->u.cast.operand->type))
+            return i128_pair_shape(e->u.cast.operand);
+        return e->u.cast.operand->type.kind == TY_INT;
+    case EX_UNARY:
+        if (e->u.un.op != UOP_POS && e->u.un.op != UOP_NEG
+            && e->u.un.op != UOP_BITNOT)
+            return 0;
+        return i128_pair_shape(e->u.un.operand);
+    case EX_BINOP:
+        if (e->u.bin.op != BOP_ADD && e->u.bin.op != BOP_SUB
+            && e->u.bin.op != BOP_MUL && e->u.bin.op != BOP_BITAND
+            && e->u.bin.op != BOP_BITOR && e->u.bin.op != BOP_BITXOR)
+            return 0;
+        return i128_operand_shape(e->u.bin.l) && i128_operand_shape(e->u.bin.r);
+    default:
+        return 0;
+    }
+}
+
+static int i128_operand_shape(const Expr *e) {
+    if (!e) return 0;
+    if (type_is_i128(e->type)) return i128_pair_shape(e);
+    if (e->type.kind == TY_FLOAT || e->type.is_decimal || e->type.is_vector
+        || e->type.kind == TY_STRUCT || e->type.kind == TY_PTR
+        || e->type.kind == TY_ARRAY)
+        return 0;
+    return 1;
+}
+
+static void lower_i128_pair(IRFunction *fn, IRSymTable *st, const Expr *e,
+                           I128Pair *out);
+
+static void lower_i128_operand(IRFunction *fn, IRSymTable *st, const Expr *e,
+                              I128Pair *out) {
+    if (type_is_i128(e->type)) {
+        lower_i128_pair(fn, st, e, out);
+        return;
+    }
+    /* A non-negative integer widens with a zero high half.  Unsigned
+     * values do too, even when the low half's top bit is set. */
+    if (e->kind == EX_INT_LIT && e->int_hi == 0
+        && (e->type.is_unsigned || e->u.int_val >= 0)) {
+        IRValue v = lower_expr(fn, st, e);
+        int w = get_value_width(fn, v);
+        int u = get_value_is_unsigned(fn, v);
+        if (w <= 0) w = 4;
+        out->lo = coerce(fn, v, w, u, 8, u, e->loc);
+        out->hi = -1;
+        out->hi_zero = 1;
+        return;
+    }
+    i128_pair_from_scalar(fn, lower_expr(fn, st, e), e->loc, out);
+}
+
+static void lower_i128_pair(IRFunction *fn, IRSymTable *st, const Expr *e,
+                           I128Pair *out) {
+    switch (e->kind) {
+    case EX_INT_LIT:
+        out->lo = i64imm(fn, e->u.int_val, e->loc);
+        if (e->int_hi == 0) {
+            out->hi = -1;
+            out->hi_zero = 1;
+        } else {
+            out->hi = i64imm(fn, (int64_t)e->int_hi, e->loc);
+            out->hi_zero = 0;
+        }
+        return;
+    case EX_CAST:
+        if (type_is_i128(e->u.cast.operand->type))
+            lower_i128_pair(fn, st, e->u.cast.operand, out);
+        else
+            lower_i128_operand(fn, st, e->u.cast.operand, out);
+        return;
+    case EX_UNARY:
+        if (e->u.un.op == UOP_POS) {
+            lower_i128_pair(fn, st, e->u.un.operand, out);
+            return;
+        }
+        if (e->u.un.op == UOP_NEG) {
+            I128Pair z, a;
+            z.lo = i64imm(fn, 0, e->loc);
+            z.hi = -1;
+            z.hi_zero = 1;
+            lower_i128_pair(fn, st, e->u.un.operand, &a);
+            i128_pair_sub(fn, z, a, e->loc, out);
+            return;
+        }
+        {
+            I128Pair a;
+            lower_i128_pair(fn, st, e->u.un.operand, &a);
+            i128_pair_bitnot(fn, a, e->loc, out);
+            return;
+        }
+    case EX_BINOP: {
+        I128Pair l, r;
+        lower_i128_operand(fn, st, e->u.bin.l, &l);
+        lower_i128_operand(fn, st, e->u.bin.r, &r);
+        if (e->u.bin.op == BOP_ADD)
+            i128_pair_add(fn, l, r, e->loc, out);
+        else if (e->u.bin.op == BOP_SUB)
+            i128_pair_sub(fn, l, r, e->loc, out);
+        else if (e->u.bin.op == BOP_MUL)
+            i128_pair_mul(fn, l, r, e->loc, out);
+        else if (e->u.bin.op == BOP_BITAND)
+            i128_pair_bit(fn, IR_BAND, l, r, e->loc, out);
+        else if (e->u.bin.op == BOP_BITOR)
+            i128_pair_bit(fn, IR_BOR, l, r, e->loc, out);
+        else
+            i128_pair_bit(fn, IR_BXOR, l, r, e->loc, out);
+        return;
+    }
+    default: {
+        IRValue addr = lower_lvalue_addr(fn, st, e);
+        i128_load2(fn, addr, &out->lo, &out->hi, e->loc);
+        out->hi_zero = 0;
+        return;
+    }
+    }
+}
+
+static IRValue i128_pair_materialize(IRFunction *fn, I128Pair *p, SourceLoc loc) {
+    IRValue dst = i128_alloc(fn, loc);
+    i128_store2(fn, dst, p->lo, i128_pair_hi(fn, p, loc), loc);
+    return dst;
+}
+
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     if (fakecc_had_error()) return FAKECC_ERR;
     switch (e->kind) {
@@ -5922,6 +6201,11 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return lower_complex_binop(fn, st, e, lt, rt, bop, -1);
         }
         if (type_is_i128(lt) || type_is_i128(rt) || type_is_i128(e->type)) {
+            if (type_is_i128(e->type) && i128_pair_shape(e)) {
+                I128Pair p;
+                lower_i128_pair(fn, st, e, &p);
+                return i128_pair_materialize(fn, &p, e->loc);
+            }
             IRValue lv = lower_expr(fn, st, e->u.bin.l);
             IRValue rv = lower_expr(fn, st, e->u.bin.r);
             return lower_i128_binop(fn, lv, rv, lt, rt, bop, e->type, e->loc);
@@ -6421,6 +6705,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     }
     case EX_ASSIGN: {
         Expr *lv = e->u.assign.lvalue;
+        if (type_is_i128(lv->type) && i128_pair_shape(e->u.assign.rvalue)
+            && (lv->kind == EX_VAR || lv->kind == EX_DEREF
+                || lv->kind == EX_INDEX || lv->kind == EX_MEMBER)) {
+            I128Pair p;
+            lower_i128_pair(fn, st, e->u.assign.rvalue, &p);
+            IRValue dst = lower_lvalue_addr(fn, st, lv);
+            if (dst < 0) return dst;
+            i128_store2(fn, dst, p.lo, i128_pair_hi(fn, &p, e->loc), e->loc);
+            return dst;
+        }
         IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
         int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
         int rf = get_value_is_float(fn, rv);

@@ -3232,20 +3232,20 @@ static void codegen_mark_needed_and_uses(const IRFunction *fn, const int *def,
 }
 
 /* i128 add/sub is `lo ± lo; hi ± hi ± carry`, with the carry materialized
- * by an unsigned compare, a zero-extend, and a second add.  When that
- * chain is intact, x86 can keep the carry in CF and emit adc/sbb.
- * Returns the index of the final high add, or -1. */
+ * by an unsigned compare and an extend.  When that chain is intact, x86
+ * keeps the carry in CF and emits adc/sbb.  A zero high half drops the
+ * middle add, and the selector emits adc/sbb $0 instead.
+ * Returns the index of the final high add, or -1.  *zero_hi is 1 when
+ * the other high half is absent. */
 static int match_i128_carry(const IRFunction *fn, const int *uses, size_t i,
-                            int *is_sub) {
-    if (!fn || i + 4 >= fn->insts.len) return -1;
+                            int *is_sub, int *zero_hi) {
+    if (!fn || i + 3 >= fn->insts.len) return -1;
     const IRInst *lo = &fn->insts.data[i];
     int sub = lo->op == IR_SUB;
     if ((lo->op != IR_ADD && !sub) || lo->width != 8 || lo->is_float)
         return -1;
     const IRInst *lt = &fn->insts.data[i + 1];
     const IRInst *zx = &fn->insts.data[i + 2];
-    const IRInst *mid = &fn->insts.data[i + 3];
-    const IRInst *hi = &fn->insts.data[i + 4];
     if (lt->op != IR_LT || !lt->is_unsigned || lt->dst < 0) return -1;
     if (sub) {
         if (lt->a != lo->a || lt->b != lo->b) return -1;
@@ -3255,23 +3255,36 @@ static int match_i128_carry(const IRFunction *fn, const int *uses, size_t i,
     /* coerce() sign-extends the 0/1 carry.  0 and 1 survive either extend. */
     if ((zx->op != IR_ZEXT && zx->op != IR_SEXT) || zx->a != lt->dst || zx->dst < 0)
         return -1;
-    if (mid->op != lo->op || mid->width != 8 || mid->is_float || mid->dst < 0)
+    if (!uses || lt->dst >= fn->next_value_id || zx->dst >= fn->next_value_id)
         return -1;
+    if (uses[lt->dst] != 1 || uses[zx->dst] != 1)
+        return -1;
+    if (i + 4 < fn->insts.len) {
+        const IRInst *mid = &fn->insts.data[i + 3];
+        const IRInst *hi = &fn->insts.data[i + 4];
+        if (mid->op == lo->op && mid->width == 8 && !mid->is_float && mid->dst >= 0
+            && hi->op == lo->op && hi->width == 8 && !hi->is_float && hi->dst >= 0
+            && mid->dst < fn->next_value_id && uses[mid->dst] == 1) {
+            int hi_ok = sub ? (hi->a == mid->dst && hi->b == zx->dst)
+                            : ((hi->a == mid->dst && hi->b == zx->dst)
+                               || (hi->a == zx->dst && hi->b == mid->dst));
+            if (hi_ok) {
+                *is_sub = sub;
+                *zero_hi = 0;
+                return (int)(i + 4);
+            }
+        }
+    }
+    const IRInst *hi = &fn->insts.data[i + 3];
     if (hi->op != lo->op || hi->width != 8 || hi->is_float || hi->dst < 0)
         return -1;
-    if (sub) {
-        if (hi->a != mid->dst || hi->b != zx->dst) return -1;
-    } else if (!((hi->a == mid->dst && hi->b == zx->dst)
-                 || (hi->a == zx->dst && hi->b == mid->dst))) {
-        return -1;
-    }
-    if (!uses || lt->dst >= fn->next_value_id || zx->dst >= fn->next_value_id
-        || mid->dst >= fn->next_value_id)
-        return -1;
-    if (uses[lt->dst] != 1 || uses[zx->dst] != 1 || uses[mid->dst] != 1)
-        return -1;
+    int zx_a = hi->a == zx->dst;
+    int zx_b = hi->b == zx->dst;
+    if (zx_a == zx_b) return -1;
+    if (sub && !zx_b) return -1;
     *is_sub = sub;
-    return (int)(i + 4);
+    *zero_hi = 1;
+    return (int)(i + 3);
 }
 
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
@@ -3724,11 +3737,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         char *fused_inv_at = xmalloc(ninst_f);
         int *carry_hi_at = xmalloc(ninst_f * sizeof(int));
         char *carry_is_sub = xmalloc(ninst_f);
+        char *carry_zero_hi = xmalloc(ninst_f);
+        int *mul_hi_at = xmalloc(ninst_f * sizeof(int));
         memset(fused_skip, 0, ninst_f);
         memset(carry_is_sub, 0, ninst_f);
+        memset(carry_zero_hi, 0, ninst_f);
         for (size_t uj = 0; uj < ninst_f; uj++) {
             fused_cmp_at[uj] = -1;
             carry_hi_at[uj] = -1;
+            mul_hi_at[uj] = -1;
         }
         memset(fused_inv_at, 0, ninst_f);
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
@@ -3771,21 +3788,40 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (!(ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)))
                 mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
         }
-        for (size_t uj = 0; uj + 4 < fn->insts.len; uj++) {
+        for (size_t uj = 0; uj + 3 < fn->insts.len; uj++) {
             if (skip_body[uj] || fused_skip[uj]) continue;
-            int is_sub = 0;
-            int hi = match_i128_carry(fn, raw_uses, uj, &is_sub);
+            int is_sub = 0, zero_hi = 0;
+            int hi = match_i128_carry(fn, raw_uses, uj, &is_sub, &zero_hi);
             if (hi < 0) continue;
+            int span = hi - (int)uj;
             int blocked = 0;
-            for (int k = 1; k <= 4; k++) {
+            for (int k = 1; k <= span; k++) {
                 if (skip_body[uj + (size_t)k] || fused_skip[uj + (size_t)k])
                     blocked = 1;
             }
             if (blocked) continue;
             carry_hi_at[uj] = hi;
             carry_is_sub[uj] = (char)is_sub;
-            for (int k = 1; k <= 4; k++)
+            carry_zero_hi[uj] = (char)zero_hi;
+            for (int k = 1; k <= span; k++)
                 fused_skip[uj + (size_t)k] = 1;
+        }
+        /* mul64_wide emits MUL then UMULH of the same 64-bit inputs.
+         * One `mul r/m64` writes both halves to RDX:RAX. */
+        for (size_t uj = 0; uj + 1 < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            const IRInst *lo = &fn->insts.data[uj];
+            const IRInst *hi = &fn->insts.data[uj + 1];
+            if (lo->op != IR_MUL || hi->op != IR_UMULH) continue;
+            if (lo->width != 8 || hi->width != 8 || lo->is_float || hi->is_float)
+                continue;
+            if (lo->dst < 0 || hi->dst < 0) continue;
+            if (skip_body[uj + 1] || fused_skip[uj + 1]) continue;
+            int same = (lo->a == hi->a && lo->b == hi->b)
+                    || (lo->a == hi->b && lo->b == hi->a);
+            if (!same) continue;
+            mul_hi_at[uj] = (int)(uj + 1);
+            fused_skip[uj + 1] = 1;
         }
 
         /* Variadic: compute the initial va_list field values.  The named args
@@ -4111,22 +4147,51 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     && carry_hi_at[j] >= 0) {
                     /* CF still belongs to the low add/sub: finish_gp_dst
                      * only moves the sum, and ensure_reg only moves. */
-                    const IRInst *mid = &fn->insts.data[(size_t)carry_hi_at[j] - 1];
                     const IRInst *hi = &fn->insts.data[carry_hi_at[j]];
                     int hdr = gp_home(ra, hi->dst);
-                    int bhome = gp_home(ra, mid->b);
-                    int acc = pick_alu_acc(hdr, bhome);
-                    ensure_reg(&out->text, mid->a, acc, ra);
-                    int br = bhome >= 0 ? bhome : REG_RCX;
-                    if (bhome < 0) ensure_reg(&out->text, mid->b, br, ra);
-                    emit_arith_rr_w(&out->text, carry_is_sub[j] ? 0x19 : 0x11,
-                                    acc, br, 8);
-                    finish_gp_dst(&out->text, acc, hdr, hi->dst, ra, 8, 1);
+                    if (carry_zero_hi[j]) {
+                        const IRInst *zx = &fn->insts.data[(size_t)carry_hi_at[j] - 1];
+                        IRValue hsrc = (hi->a == zx->dst) ? hi->b : hi->a;
+                        int acc = pick_alu_acc(hdr, -1);
+                        ensure_reg(&out->text, hsrc, acc, ra);
+                        emit_arith_imm_w(&out->text, carry_is_sub[j] ? 3 : 2,
+                                         acc, 0, 8);
+                        finish_gp_dst(&out->text, acc, hdr, hi->dst, ra, 8, 1);
+                    } else {
+                        const IRInst *mid = &fn->insts.data[(size_t)carry_hi_at[j] - 1];
+                        int bhome = gp_home(ra, mid->b);
+                        int acc = pick_alu_acc(hdr, bhome);
+                        ensure_reg(&out->text, mid->a, acc, ra);
+                        int br = bhome >= 0 ? bhome : REG_RCX;
+                        if (bhome < 0) ensure_reg(&out->text, mid->b, br, ra);
+                        emit_arith_rr_w(&out->text, carry_is_sub[j] ? 0x19 : 0x11,
+                                        acc, br, 8);
+                        finish_gp_dst(&out->text, acc, hdr, hi->dst, ra, 8, 1);
+                    }
                 }
                 break;
 
             case IR_MUL:
-                isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 1);
+                if (mul_hi_at[j] >= 0) {
+                    const IRInst *hi = &fn->insts.data[mul_hi_at[j]];
+                    int lo_dr = gp_home(ra, inst->dst);
+                    int hi_dr = gp_home(ra, hi->dst);
+                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                    ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                    emit_rex_if(&out->text, 1, 0, 0, REG_RCX);
+                    emit_byte(&out->text, 0xF7);
+                    emit_modrm(&out->text, 3, 4, REG_RCX);
+                    if (lo_dr >= 0 && lo_dr != REG_RAX)
+                        emit_mov_rr(&out->text, lo_dr, REG_RAX);
+                    spill_if_needed(&out->text, inst->dst,
+                                    lo_dr >= 0 ? lo_dr : REG_RAX, ra);
+                    if (hi_dr >= 0 && hi_dr != REG_RDX)
+                        emit_mov_rr(&out->text, hi_dr, REG_RDX);
+                    spill_if_needed(&out->text, hi->dst,
+                                    hi_dr >= 0 ? hi_dr : REG_RDX, ra);
+                } else {
+                    isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 1);
+                }
                 break;
 
             case IR_UMULH:
@@ -6562,6 +6627,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(skip_body);
         free(param_home_off);
         free(needed);
+        free(carry_zero_hi);
+        free(mul_hi_at);
 
         size_t fn_size = out->text.len - start_offset;
         uint8_t binding = fn->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
