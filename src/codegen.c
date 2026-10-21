@@ -6931,10 +6931,24 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     free(node_val);
                     free(node_home);
                 }
-                /* AL = number of vector registers used (ABI requirement for
-                 * variadic callees; harmless otherwise). */
-                emit_byte(&out->text, 0xB0 | REG_RAX); /* mov al, imm8 */
-                emit_byte(&out->text, (uint8_t)n_xmm);
+                /* AL = vector-register count: required for variadic callees.
+                 * Skip when the callee is a known non-variadic TU function. */
+                {
+                    int need_al = 1;
+                    if (inst->call_name) {
+                        for (size_t fi = 0; fi < ir->functions.len; fi++) {
+                            const IRFunction *cf = &ir->functions.data[fi];
+                            if (cf->name && strcmp(cf->name, inst->call_name) == 0) {
+                                need_al = cf->is_variadic;
+                                break;
+                            }
+                        }
+                    }
+                    if (need_al) {
+                        emit_byte(&out->text, 0xB0 | REG_RAX); /* mov al, imm8 */
+                        emit_byte(&out->text, (uint8_t)n_xmm);
+                    }
+                }
 
                 if (inst->call_name) {
                     /* Direct named call: emit call rel32 with a cross-function patch. */
