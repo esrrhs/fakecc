@@ -701,6 +701,26 @@ static size_t emit_jcc_rel32(Buffer *b, uint8_t cc_opcode) {
     return patch;
 }
 
+/* Backward short jumps when the target is already placed (gcc -O0).
+ * cc_opcode is the near form (0x80|cc).  Returns 1 if a short insn was emitted. */
+static int emit_jmp_short_to(Buffer *b, size_t target) {
+    size_t after = b->len + 2;
+    int64_t rel = (int64_t)target - (int64_t)after;
+    if (rel < -128 || rel > 127) return 0;
+    emit_byte(b, 0xEB);
+    emit_byte(b, (uint8_t)rel);
+    return 1;
+}
+
+static int emit_jcc_short_to(Buffer *b, uint8_t cc_opcode, size_t target) {
+    size_t after = b->len + 2;
+    int64_t rel = (int64_t)target - (int64_t)after;
+    if (rel < -128 || rel > 127) return 0;
+    emit_byte(b, (uint8_t)(0x70 | (cc_opcode & 0x0F)));
+    emit_byte(b, (uint8_t)rel);
+    return 1;
+}
+
 /* push %r  →  50+r  (with REX.B for r8-r15) */
 static void emit_push_r(Buffer *b, int r) {
     if (r >= 8) emit_byte(b, 0x41);  /* REX.B */
@@ -1268,6 +1288,26 @@ static void emit_arith_r32_disp(Buffer *b, int op, int base, int src, int off) {
     if (src >= 8 || base >= 8) emit_rex_wrb(b, 0, src, base);
     emit_byte(b, (uint8_t)op);
     emit_modrm_disp(b, src, base, off);
+}
+
+/* movl/movb $imm, symb(%rip) — returns patch offset of the disp32. */
+static size_t emit_store_imm_rip(Buffer *b, int32_t imm, int width) {
+    size_t patch;
+    if (width == 1) {
+        emit_byte(b, 0xC6);
+        emit_modrm(b, 0, 0, 5);
+        patch = b->len;
+        emit_int32(b, 0);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        /* width 4 (and small width-8 via sign-ext imm32) */
+        emit_byte(b, 0xC7);
+        emit_modrm(b, 0, 0, 5);
+        patch = b->len;
+        emit_int32(b, 0);
+        emit_int32(b, imm);
+    }
+    return patch;
 }
 
 /* addl/xorl $imm, symb(%rip) — returns patch offset of the disp32. */
@@ -4772,6 +4812,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                        && (st->width == 1 || st->width == 4)) {
                 /* abs32 imm store only for byte/int (emit_store_imm_abs32).
                  * Width 8 must keep the CONST live for a GP store. */
+            } else if (st->width == 1 || st->width == 4) {
+                const char *rg = peel_gaddr_name_unique(fn, ssa_def, st->a);
+                if (!rg || !gaddr_is_local_abs(ir, rg))
+                    continue;
+                /* movl $imm, local(%rip) (bumps = 0). */
             } else {
                 continue;
             }
@@ -4804,6 +4849,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             store_imm[uj] = 1;
             for (int k = 0; k < nskip; k++)
                 fused_skip[skip_chain[k]] = 1;
+            if (st->a >= 0 && st->a < nvals_f && ssa_def[st->a] >= 0
+                && raw_uses[st->a] <= 1)
+                fused_skip[ssa_def[st->a]] = 1;
             (void)poff;
         }
         /* Narrow store sole-use: TRUNC/ZEXT/SEXT can omit re-extend (still
@@ -6462,6 +6510,26 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     emit_store_imm_disp(&out->text, REG_RBP, (int32_t)immv,
                                         ptr_off, inst->width);
+                } else if (rip_sym >= 0 && store_imm[j]
+                           && (inst->width == 1 || inst->width == 4)) {
+                    int64_t immv = 0;
+                    IRValue cur = inst->b;
+                    for (int depth = 0; depth < 4; depth++) {
+                        if (ssa_const_imm(fn, ssa_def, cur, &immv)) break;
+                        if (cur < 0 || cur >= fn->next_value_id
+                            || ssa_def[cur] < 0) break;
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op != IR_ZEXT && d->op != IR_SEXT
+                            && d->op != IR_TRUNC && d->op != IR_COPY)
+                            break;
+                        cur = d->a;
+                    }
+                    size_t patch = emit_store_imm_rip(&out->text, (int32_t)immv,
+                                                      inst->width);
+                    /* disp32 then imm8 (-5) or imm32 (-8). */
+                    int addend = (inst->width == 1) ? -5 : -8;
+                    emit_module_add_reloc(out, patch, R_X86_64_PC32,
+                                          rip_sym, addend);
                 } else if (rip_sym >= 0) {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     size_t patch = emit_store_rip_w(&out->text, REG_RAX,
@@ -6598,6 +6666,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     && fn->insts.data[j + 1].op == IR_LABEL
                     && fn->insts.data[j + 1].imm == inst->imm)
                     break;
+                if (inst->imm >= 0 && inst->imm < nlabels
+                    && label_off[inst->imm] != (size_t)-1
+                    && emit_jmp_short_to(&out->text, label_off[inst->imm]))
+                    break;
                 size_t patch = emit_jmp_rel32(&out->text);
                 size_t after = out->text.len;
                 ADD_PATCH(patch, inst->imm, after);
@@ -6693,18 +6765,40 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                   && (int)fn->insts.data[j + 1].imm == inst->b);
                 if (true_fall) {
                     /* j<inv> false; fall into true. */
+                    int tlab = (int)inst->b;
+                    if (tlab >= 0 && tlab < nlabels
+                        && label_off[tlab] != (size_t)-1
+                        && emit_jcc_short_to(&out->text, (uint8_t)(cc ^ 1),
+                                             label_off[tlab]))
+                        break;
                     size_t p1 = emit_jcc_rel32(&out->text, (uint8_t)(cc ^ 1));
                     size_t a1 = out->text.len;
                     ADD_PATCH(p1, inst->b, a1);
                 } else if (false_fall) {
                     /* j<cc> true; fall into false. */
+                    int tlab = (int)inst->imm;
+                    if (tlab >= 0 && tlab < nlabels
+                        && label_off[tlab] != (size_t)-1
+                        && emit_jcc_short_to(&out->text, cc, label_off[tlab]))
+                        break;
                     size_t p1 = emit_jcc_rel32(&out->text, cc);
                     size_t a1 = out->text.len;
                     ADD_PATCH(p1, inst->imm, a1);
                 } else {
-                    size_t p1 = emit_jcc_rel32(&out->text, cc);
-                    size_t a1 = out->text.len;
-                    ADD_PATCH(p1, inst->imm, a1);
+                    int tlab = (int)inst->imm;
+                    if (!(tlab >= 0 && tlab < nlabels
+                          && label_off[tlab] != (size_t)-1
+                          && emit_jcc_short_to(&out->text, cc,
+                                               label_off[tlab]))) {
+                        size_t p1 = emit_jcc_rel32(&out->text, cc);
+                        size_t a1 = out->text.len;
+                        ADD_PATCH(p1, inst->imm, a1);
+                    }
+                    int flab = (int)inst->b;
+                    if (flab >= 0 && flab < nlabels
+                        && label_off[flab] != (size_t)-1
+                        && emit_jmp_short_to(&out->text, label_off[flab]))
+                        break;
                     size_t p2 = emit_jmp_rel32(&out->text);
                     size_t a2 = out->text.len;
                     ADD_PATCH(p2, inst->b, a2);
