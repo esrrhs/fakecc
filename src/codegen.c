@@ -1523,14 +1523,18 @@ static size_t emit_lea_abs32(Buffer *b, int dst, int index, int scale2) {
 
 static size_t emit_load_abs32(Buffer *b, int dst, int index, int scale2,
                               int width, int is_unsigned) {
-    int op_w = (width == 1 || width == 2) ? 1 : (width >= 8 ? 1 : 0);
+    /* Unsigned byte/word: movzbl/movzwl (no REX.W) like gcc -O0; writing
+     * a 32-bit dest zero-extends into the 64-bit home.  Signed keeps
+     * movsbq/movswq so negative values fill the upper half. */
+    int op_w = (width == 1 || width == 2) ? (is_unsigned ? 0 : 1)
+                                          : (width >= 8 ? 1 : 0);
     uint8_t op = 0x8B;
     if (width == 1) op = is_unsigned ? 0xB6 : 0xBE;
     else if (width == 2) op = is_unsigned ? 0xB7 : 0xBF;
     if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
         /* [index + disp32] */
         if (width == 1 || width == 2) {
-            emit_rex_if(b, 1, dst, 0, index);
+            emit_rex_if(b, op_w, dst, 0, index);
             emit_byte(b, 0x0F);
             emit_byte(b, op);
         } else {
@@ -1543,7 +1547,7 @@ static size_t emit_load_abs32(Buffer *b, int dst, int index, int scale2,
         int idx = index < 0 ? 4 : index;
         int sc = index < 0 ? 0 : (scale2 & 3);
         if (width == 1 || width == 2) {
-            emit_rex_if(b, 1, dst, idx, 0);
+            emit_rex_if(b, op_w, dst, idx, 0);
             emit_byte(b, 0x0F);
             emit_byte(b, op);
         } else {
@@ -4695,10 +4699,39 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             fused_inv_at[uj] = (char)invert;
             fused_skip[ci] = 1;
             if (wi != ci) fused_skip[wi] = 1;
+            /* cmp/test against 0 on a sole-use frame load → cmpl $0, mem.
+             * Check raw_uses before mark_reg bumps the count. */
+            int64_t cimm0 = 0;
+            if (ssa_const_imm(fn, ssa_def, cmp->b, &cimm0) && cimm0 == 0
+                && cmp->a >= 0 && cmp->a < nvals_f && raw_uses[cmp->a] == 1
+                && ssa_def[cmp->a] >= 0) {
+                int li = ssa_def[cmp->a];
+                const IRInst *ld = &fn->insts.data[li];
+                int loff = 0;
+                if ((ld->op == IR_LOAD || ld->op == IR_LOAD_PTR) && ld->width == 4
+                    && !skip_body[li] && !fused_skip[li]
+                    && fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &loff, 0))
+                    fused_skip[li] = 1;
+            }
             mark_reg(needed, ssa_uses_f, nvals_f, cmp->a);
             int64_t cimm;
             if (!(ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)))
                 mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
+        }
+        /* Bare CBR of a sole-use frame int: cmpl $0, off(%rbp) (logic). */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *cb = &fn->insts.data[uj];
+            if (cb->op != IR_CBR || skip_body[uj] || fused_cmp_at[uj] >= 0)
+                continue;
+            if (cb->a < 0 || cb->a >= nvals_f || raw_uses[cb->a] != 1)
+                continue;
+            int li = ssa_def[cb->a];
+            if (li < 0 || skip_body[li] || fused_skip[li]) continue;
+            const IRInst *ld = &fn->insts.data[li];
+            int loff = 0;
+            if ((ld->op == IR_LOAD || ld->op == IR_LOAD_PTR) && ld->width == 4
+                && fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &loff, 0))
+                fused_skip[li] = 1;
         }
         /* STORE_PTR of a single-use CONST (possibly via ZEXT/SEXT/COPY)
          * into [rbp+off] or local abs32: emit mov $imm and skip materialization. */
@@ -6435,24 +6468,63 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     int64_t cimmv = 0;
                     int cfb = ssa_const_imm(fn, ssa_def, cmp->b, &cimmv)
                               && imm_fits_i32(cimmv);
-                    ensure_reg(&out->text, cmp->a, REG_RAX, ra);
-                    if (!cfb)
-                        ensure_reg(&out->text, cmp->b, REG_RCX, ra);
+                    /* cmpl $0, off(%rbp) when a is a sole-use frame load. */
+                    int a_off = 0, a_mem = 0;
+                    if (cfb && cimmv == 0 && cmp->a >= 0
+                        && cmp->a < fn->next_value_id
+                        && raw_uses[cmp->a] == 1 && ssa_def[cmp->a] >= 0
+                        && fused_skip[ssa_def[cmp->a]]) {
+                        const IRInst *ld = &fn->insts.data[ssa_def[cmp->a]];
+                        if ((ld->op == IR_LOAD || ld->op == IR_LOAD_PTR)
+                            && ld->width == 4
+                            && fold_ptr_off(fn, ssa_def, alloca_off, ld->a,
+                                            &a_off, 0))
+                            a_mem = 1;
+                    }
+                    int ah = gp_home(ra, cmp->a);
+                    int ar = (ah >= 0) ? ah : REG_RAX;
+                    if (!a_mem) {
+                        ensure_reg(&out->text, cmp->a, ar, ra);
+                        if (!cfb)
+                            ensure_reg(&out->text, cmp->b, REG_RCX, ra);
+                    }
                     /* ir_cmp_to_setcc yields the SETcc opcode (0x90+cc);
                      * jcc rel32 wants the near-branch opcode (0x80+cc). */
                     cc = (uint8_t)(0x80 | (ir_cmp_to_setcc(cmp->op, cmp->is_unsigned)
                                             & 0x0F));
                     if (fused_inv_at[j])
                         cc ^= 1;
-                    if (cfb && cimmv == 0)
-                        emit_test_r_w(&out->text, REG_RAX, cwidth);
+                    if (a_mem)
+                        emit_arith_imm32_disp(&out->text, 7, REG_RBP, 0, a_off);
+                    else if (cfb && cimmv == 0)
+                        emit_test_r_w(&out->text, ar, cwidth);
                     else if (cfb)
-                        emit_cmp_imm_w(&out->text, REG_RAX, (int32_t)cimmv, cwidth);
+                        emit_cmp_imm_w(&out->text, ar, (int32_t)cimmv, cwidth);
                     else
-                        emit_cmp_rr_w(&out->text, REG_RAX, REG_RCX, cwidth);
+                        emit_cmp_rr_w(&out->text, ar, REG_RCX, cwidth);
                 } else {
-                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                    emit_test_rr(&out->text, REG_RAX);
+                    /* Prefer testing the cond's home (avoid rax bounce) and
+                     * cmpl $0, mem for a sole-use frame load (gcc -O0). */
+                    int cwidth = 8, c_off = 0, c_mem = 0;
+                    if (inst->a >= 0 && inst->a < fn->next_value_id
+                        && ssa_def[inst->a] >= 0) {
+                        const IRInst *cd = &fn->insts.data[ssa_def[inst->a]];
+                        if (cd->width > 0) cwidth = cd->width;
+                        if (raw_uses[inst->a] == 1 && fused_skip[ssa_def[inst->a]]
+                            && (cd->op == IR_LOAD || cd->op == IR_LOAD_PTR)
+                            && cd->width == 4
+                            && fold_ptr_off(fn, ssa_def, alloca_off, cd->a,
+                                            &c_off, 0))
+                            c_mem = 1;
+                    }
+                    if (c_mem) {
+                        emit_arith_imm32_disp(&out->text, 7, REG_RBP, 0, c_off);
+                    } else {
+                        int ch = gp_home(ra, inst->a);
+                        int tr = (ch >= 0) ? ch : REG_RAX;
+                        ensure_reg(&out->text, inst->a, tr, ra);
+                        emit_test_r_w(&out->text, tr, cwidth);
+                    }
                 }
                 int true_fall = (j + 1 < fn->insts.len
                                  && fn->insts.data[j + 1].op == IR_LABEL
