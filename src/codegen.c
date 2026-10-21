@@ -1935,6 +1935,15 @@ static int ensure_index(Buffer *b, IRValue v, const RAResult *ra) {
     return REG_RCX;
 }
 
+/* Indirect *p / *p=: use p's GP home when live (chacha quarter).  Spilled
+ * pointers still stage through %rcx. */
+static int ensure_ptr(Buffer *b, IRValue v, const RAResult *ra) {
+    int home = gp_home(ra, v);
+    if (home >= 0) return home;
+    ensure_reg(b, v, REG_RCX, ra);
+    return REG_RCX;
+}
+
 /* Prefer dest home so we don't copy rax→dr.  Avoid rcx (holds b) and b's home. */
 static int pick_alu_acc(int dr, int avoid) {
     if (dr >= 0 && dr != REG_RCX && dr != avoid)
@@ -5938,14 +5947,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         rip_gn = NULL;
                     }
                 }
+                int ptr_r = REG_RCX;
                 if (!folded && af_kind == AF_NONE && rip_sym < 0)
-                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                    ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->dst)) {
                     if (folded)
                         emit_x87_fldt_disp(&out->text, REG_RBP, ptr_off);
                     else {
                         emit_byte(&out->text, 0xDB);
-                        emit_modrm(&out->text, 0, 5, REG_RCX & 7);
+                        emit_modrm(&out->text, 0, 5, ptr_r & 7);
                     }
                     emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (value_is_float_class(fn, inst->dst)) {
@@ -5955,12 +5965,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (folded)
                             emit_evex_vmovups_mem(&out->text, dst_xmm, REG_RBP, ptr_off, 0);
                         else
-                            emit_evex_vmovups_via_ptr(&out->text, dst_xmm, REG_RCX, 0);
+                            emit_evex_vmovups_via_ptr(&out->text, dst_xmm, ptr_r, 0);
                     } else if (vw >= 32) {
                         if (folded)
                             emit_vmovups_mem(&out->text, dst_xmm, REG_RBP, ptr_off, 0);
                         else
-                            emit_vmovups_via_ptr(&out->text, dst_xmm, REG_RCX, 0);
+                            emit_vmovups_via_ptr(&out->text, dst_xmm, ptr_r, 0);
                     } else if (vw == 16) {
                         if (folded) {
                             emit_rex_wrb(&out->text, 0, dst_xmm, REG_RBP);
@@ -5968,7 +5978,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_byte(&out->text, 0x10);
                             emit_modrm_disp(&out->text, dst_xmm, REG_RBP, ptr_off);
                         } else
-                            emit_movups_load_via_ptr(&out->text, dst_xmm, REG_RCX);
+                            emit_movups_load_via_ptr(&out->text, dst_xmm, ptr_r);
                     } else {
                         int is_float = (inst->width == 4);
                         if (folded)
@@ -5993,7 +6003,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 emit_sse_load_disp(&out->text, dst_xmm, REG_RAX,
                                                    af_disp, is_float);
                         } else
-                            emit_sse_load_via_ptr(&out->text, dst_xmm, REG_RCX, is_float);
+                            emit_sse_load_via_ptr(&out->text, dst_xmm, ptr_r, is_float);
                     }
                     if (dr < 0)
                         spill_if_needed_xmm(&out->text, inst->dst, XMM_SCRATCH0,
@@ -6043,7 +6053,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_module_add_reloc(out, patch, R_X86_64_PC32,
                                               rip_sym, -4);
                     } else
-                        emit_load_via_ptr(&out->text, dst_gp, REG_RCX,
+                        emit_load_via_ptr(&out->text, dst_gp, ptr_r,
                                           inst->width, inst->is_unsigned);
                     if (dr < 0)
                         spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
@@ -6105,16 +6115,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         rip_gn = NULL;
                     }
                 }
+                int ptr_r = REG_RCX;
                 if (!folded && af_kind == AF_NONE && rip_sym < 0)
-                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                    ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->b)) {
                     emit_ld_load(&out->text, inst->b, ld_off);
                     if (folded)
                         emit_x87_fstpt_disp(&out->text, REG_RBP, ptr_off);
                     else {
-                        ensure_reg(&out->text, inst->a, REG_RCX, ra);
                         emit_byte(&out->text, 0xDB);
-                        emit_modrm(&out->text, 0, 7, REG_RCX & 7);
+                        emit_modrm(&out->text, 0, 7, ptr_r & 7);
                     }
                 } else if (value_is_float_class(fn, inst->b)) {
                     ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm,
@@ -6123,12 +6133,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (folded)
                             emit_evex_vmovups_mem(&out->text, XMM_SCRATCH0, REG_RBP, ptr_off, 1);
                         else
-                            emit_evex_vmovups_via_ptr(&out->text, XMM_SCRATCH0, REG_RCX, 1);
+                            emit_evex_vmovups_via_ptr(&out->text, XMM_SCRATCH0, ptr_r, 1);
                     } else if (inst->width >= 32) {
                         if (folded)
                             emit_vmovups_mem(&out->text, XMM_SCRATCH0, REG_RBP, ptr_off, 1);
                         else
-                            emit_vmovups_via_ptr(&out->text, XMM_SCRATCH0, REG_RCX, 1);
+                            emit_vmovups_via_ptr(&out->text, XMM_SCRATCH0, ptr_r, 1);
                     } else if (inst->width == 16) {
                         if (folded) {
                             emit_rex_wrb(&out->text, 0, XMM_SCRATCH0, REG_RBP);
@@ -6136,7 +6146,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_byte(&out->text, 0x11);
                             emit_modrm_disp(&out->text, XMM_SCRATCH0, REG_RBP, ptr_off);
                         } else
-                            emit_movups_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0);
+                            emit_movups_store_via_ptr(&out->text, ptr_r, XMM_SCRATCH0);
                     } else {
                         int is_float = (inst->width == 4);
                         if (folded)
@@ -6164,7 +6174,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 emit_sse_store_disp(&out->text, REG_RAX,
                                                     XMM_SCRATCH0, af_disp, is_float);
                         } else
-                            emit_sse_store_via_ptr(&out->text, REG_RCX, XMM_SCRATCH0,
+                            emit_sse_store_via_ptr(&out->text, ptr_r, XMM_SCRATCH0,
                                                    is_float);
                     }
                 } else if (af_kind == AF_RBP_IDX) {
@@ -6277,12 +6287,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_module_add_reloc(out, patch, R_X86_64_PC32,
                                           rip_sym, -4);
                 } else {
-                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    int val_r = (ptr_r == REG_RAX) ? REG_RDX : REG_RAX;
+                    ensure_reg(&out->text, inst->b, val_r, ra);
                     if (folded)
-                        emit_store_disp(&out->text, REG_RBP, REG_RAX, ptr_off,
+                        emit_store_disp(&out->text, REG_RBP, val_r, ptr_off,
                                         inst->width);
                     else
-                        emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, inst->width);
+                        emit_store_via_ptr(&out->text, ptr_r, val_r, inst->width);
                 }
                 break;
             }
