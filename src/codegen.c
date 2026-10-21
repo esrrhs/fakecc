@@ -1529,6 +1529,50 @@ static size_t emit_load_abs32(Buffer *b, int dst, int index, int scale2,
     return patch;
 }
 
+/* mov{b,l} $imm, symb(index*scale) — R_X86_64_32S patch at disp. */
+static size_t emit_store_imm_abs32(Buffer *b, int32_t imm, int index,
+                                   int scale2, int width) {
+    if (width != 1 && width != 4) width = 4;
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        if (width == 1) {
+            if (index >= 8) emit_byte(b, 0x41);
+            emit_byte(b, 0xC6);
+            emit_modrm(b, 2, 0, index & 7);
+            size_t patch = b->len;
+            emit_int32(b, 0);
+            emit_byte(b, (uint8_t)imm);
+            return patch;
+        }
+        if (index >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0xC7);
+        emit_modrm(b, 2, 0, index & 7);
+        size_t patch = b->len;
+        emit_int32(b, 0);
+        emit_int32(b, imm);
+        return patch;
+    }
+    int idx = index < 0 ? 4 : index;
+    int sc = index < 0 ? 0 : (scale2 & 3);
+    if (width == 1) {
+        if (idx >= 8) emit_byte(b, 0x42); /* REX.X */
+        emit_byte(b, 0xC6);
+        emit_modrm(b, 0, 0, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+        size_t patch = b->len;
+        emit_int32(b, 0);
+        emit_byte(b, (uint8_t)imm);
+        return patch;
+    }
+    if (idx >= 8) emit_byte(b, 0x42);
+    emit_byte(b, 0xC7);
+    emit_modrm(b, 0, 0, 4);
+    emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    emit_int32(b, imm);
+    return patch;
+}
+
 static size_t emit_store_abs32(Buffer *b, int src, int index, int scale2,
                                int width) {
     if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
@@ -4555,7 +4599,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
         }
         /* STORE_PTR of a single-use CONST (possibly via ZEXT/SEXT/COPY)
-         * into [rbp+off]: emit movl $imm and skip the materialization. */
+         * into [rbp+off] or local abs32: emit mov $imm and skip materialization. */
         char *store_imm = xmalloc(ninst_f ? ninst_f : 1);
         memset(store_imm, 0, ninst_f ? ninst_f : 1);
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
@@ -4567,8 +4611,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (value_is_float_class(fn, st->b) || value_is_ld(fn, st->b))
                 continue;
             int poff = 0;
-            if (!fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0))
+            int abs_ok = 0;
+            if (fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0)) {
+                /* frame */
+            } else if (local_abs_af(ir, fn, ssa_def, alloca_off, st->a,
+                                    NULL, NULL, NULL, NULL)) {
+                abs_ok = 1;
+            } else {
                 continue;
+            }
+            (void)abs_ok;
             IRValue cur = st->b;
             int skip_chain[4];
             int nskip = 0;
@@ -5980,22 +6032,43 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                  && out->syms[gsym].shndx != SECT_UNDEF;
                     int idx_r = af_idx >= 0
                                 ? ensure_index(&out->text, af_idx, ra) : -1;
-                    int val_r = REG_RDX;
-                    if (idx_r == val_r) val_r = REG_RAX;
-                    ensure_reg(&out->text, inst->b, val_r, ra);
-                    if (abs_ok) {
-                        size_t patch = emit_store_abs32(
-                            &out->text, val_r, idx_r, af_sc, inst->width);
+                    if (abs_ok && store_imm[j]
+                        && (inst->width == 1 || inst->width == 4)) {
+                        int64_t immv = 0;
+                        IRValue cur = inst->b;
+                        for (int depth = 0; depth < 4; depth++) {
+                            if (ssa_const_imm(fn, ssa_def, cur, &immv)) break;
+                            if (cur < 0 || cur >= fn->next_value_id
+                                || ssa_def[cur] < 0) break;
+                            const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                            if (d->op != IR_ZEXT && d->op != IR_SEXT
+                                && d->op != IR_TRUNC && d->op != IR_COPY)
+                                break;
+                            cur = d->a;
+                        }
+                        size_t patch = emit_store_imm_abs32(
+                            &out->text, (int32_t)immv, idx_r, af_sc,
+                            inst->width);
                         emit_module_add_reloc(out, patch, R_X86_64_32S,
                                               gsym, af_disp);
                     } else {
-                        ensure_reg(&out->text, af_base, REG_RAX, ra);
-                        if (af_idx >= 0)
-                            emit_store_sib(&out->text, REG_RAX, idx_r, af_sc,
-                                           af_disp, val_r, inst->width);
-                        else
-                            emit_store_disp(&out->text, REG_RAX, val_r,
-                                            af_disp, inst->width);
+                        int val_r = REG_RDX;
+                        if (idx_r == val_r) val_r = REG_RAX;
+                        ensure_reg(&out->text, inst->b, val_r, ra);
+                        if (abs_ok) {
+                            size_t patch = emit_store_abs32(
+                                &out->text, val_r, idx_r, af_sc, inst->width);
+                            emit_module_add_reloc(out, patch, R_X86_64_32S,
+                                                  gsym, af_disp);
+                        } else {
+                            ensure_reg(&out->text, af_base, REG_RAX, ra);
+                            if (af_idx >= 0)
+                                emit_store_sib(&out->text, REG_RAX, idx_r, af_sc,
+                                               af_disp, val_r, inst->width);
+                            else
+                                emit_store_disp(&out->text, REG_RAX, val_r,
+                                                af_disp, inst->width);
+                        }
                     }
                 } else if (folded && mem_rmw[j] >= 1 && mem_rmw[j] <= 7) {
                     emit_arith_imm32_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
