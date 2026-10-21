@@ -1771,6 +1771,16 @@ static int gp_home(const RAResult *ra, IRValue v) {
     return (r >= 0 && r < 16) ? r : -1;
 }
 
+/* SIB/abs32 index: prefer the value's GP home (gcc -O0 style) so we do not
+ * copy into %rcx on every memop.  RSP cannot be an index register. */
+static int ensure_index(Buffer *b, IRValue v, const RAResult *ra) {
+    int home = gp_home(ra, v);
+    if (home >= 0 && home != REG_RSP)
+        return home;
+    ensure_reg(b, v, REG_RCX, ra);
+    return REG_RCX;
+}
+
 /* Prefer dest home so we don't copy rax→dr.  Avoid rcx (holds b) and b's home. */
 static int pick_alu_acc(int dr, int avoid) {
     if (dr >= 0 && dr != REG_RCX && dr != avoid)
@@ -4876,13 +4886,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 const char *ln = NULL;
                 if (match_lea_local_gep(ir, fn, ssa_def, inst, &li, &lsc, &ln)) {
                     int dst_gp = dr >= 0 ? dr : REG_RAX;
-                    if (li >= 0)
-                        ensure_reg(&out->text, li, REG_RCX, ra);
+                    int idx_r = li >= 0 ? ensure_index(&out->text, li, ra) : -1;
                     int gsym = emit_module_find_symbol(out, ln);
                     if (gsym >= 0 && out->syms[gsym].shndx != SECT_UNDEF) {
                         size_t patch = emit_lea_abs32(
-                            &out->text, dst_gp,
-                            li >= 0 ? REG_RCX : -1, lsc);
+                            &out->text, dst_gp, idx_r, lsc);
                         emit_module_add_reloc(out, patch, R_X86_64_32S,
                                               gsym, 0);
                         if (dr < 0)
@@ -5527,10 +5535,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_load_disp(&out->text, dst_gp, REG_RBP, ptr_off,
                                        inst->width, inst->is_unsigned);
                     else if (af_kind == AF_RBP_IDX) {
+                        int idx_r = af_idx >= 0
+                                    ? ensure_index(&out->text, af_idx, ra) : -1;
                         if (af_idx >= 0)
-                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                        if (af_idx >= 0)
-                            emit_load_sib(&out->text, dst_gp, REG_RBP, REG_RCX,
+                            emit_load_sib(&out->text, dst_gp, REG_RBP, idx_r,
                                           af_sc, af_disp, inst->width, inst->is_unsigned);
                         else
                             emit_load_disp(&out->text, dst_gp, REG_RBP, af_disp,
@@ -5541,22 +5549,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                    ? emit_module_find_symbol(out, gn) : -1;
                         int abs_ok = gsym >= 0
                                      && out->syms[gsym].shndx != SECT_UNDEF;
+                        int idx_r = af_idx >= 0
+                                    ? ensure_index(&out->text, af_idx, ra) : -1;
                         if (abs_ok) {
-                            if (af_idx >= 0)
-                                ensure_reg(&out->text, af_idx, REG_RCX, ra);
                             size_t patch = emit_load_abs32(
-                                &out->text, dst_gp,
-                                af_idx >= 0 ? REG_RCX : -1, af_sc,
+                                &out->text, dst_gp, idx_r, af_sc,
                                 inst->width, inst->is_unsigned);
                             emit_module_add_reloc(out, patch, R_X86_64_32S,
                                                   gsym, af_disp);
                         } else {
-                            if (af_idx >= 0)
-                                ensure_reg(&out->text, af_idx, REG_RCX, ra);
                             ensure_reg(&out->text, af_base, REG_RAX, ra);
                             if (af_idx >= 0)
                                 emit_load_sib(&out->text, dst_gp, REG_RAX,
-                                              REG_RCX, af_sc, af_disp,
+                                              idx_r, af_sc, af_disp,
                                               inst->width, inst->is_unsigned);
                             else
                                 emit_load_disp(&out->text, dst_gp, REG_RAX,
@@ -5642,14 +5647,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                                    is_float);
                     }
                 } else if (af_kind == AF_RBP_IDX) {
+                    int idx_r = af_idx >= 0
+                                ? ensure_index(&out->text, af_idx, ra) : -1;
+                    int val_r = REG_RAX;
+                    if (idx_r == val_r) val_r = REG_RDX;
+                    ensure_reg(&out->text, inst->b, val_r, ra);
                     if (af_idx >= 0)
-                        ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
-                    if (af_idx >= 0)
-                        emit_store_sib(&out->text, REG_RBP, REG_RCX, af_sc, af_disp,
-                                       REG_RAX, inst->width);
+                        emit_store_sib(&out->text, REG_RBP, idx_r, af_sc, af_disp,
+                                       val_r, inst->width);
                     else
-                        emit_store_disp(&out->text, REG_RBP, REG_RAX, af_disp,
+                        emit_store_disp(&out->text, REG_RBP, val_r, af_disp,
                                         inst->width);
                 } else if (af_kind == AF_SIB) {
                     const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
@@ -5657,25 +5664,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                ? emit_module_find_symbol(out, gn) : -1;
                     int abs_ok = gsym >= 0
                                  && out->syms[gsym].shndx != SECT_UNDEF;
+                    int idx_r = af_idx >= 0
+                                ? ensure_index(&out->text, af_idx, ra) : -1;
+                    int val_r = REG_RDX;
+                    if (idx_r == val_r) val_r = REG_RAX;
+                    ensure_reg(&out->text, inst->b, val_r, ra);
                     if (abs_ok) {
-                        if (af_idx >= 0)
-                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                        ensure_reg(&out->text, inst->b, REG_RDX, ra);
                         size_t patch = emit_store_abs32(
-                            &out->text, REG_RDX,
-                            af_idx >= 0 ? REG_RCX : -1, af_sc, inst->width);
+                            &out->text, val_r, idx_r, af_sc, inst->width);
                         emit_module_add_reloc(out, patch, R_X86_64_32S,
                                               gsym, af_disp);
                     } else {
-                        if (af_idx >= 0)
-                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                        ensure_reg(&out->text, inst->b, REG_RDX, ra);
                         ensure_reg(&out->text, af_base, REG_RAX, ra);
                         if (af_idx >= 0)
-                            emit_store_sib(&out->text, REG_RAX, REG_RCX, af_sc,
-                                           af_disp, REG_RDX, inst->width);
+                            emit_store_sib(&out->text, REG_RAX, idx_r, af_sc,
+                                           af_disp, val_r, inst->width);
                         else
-                            emit_store_disp(&out->text, REG_RAX, REG_RDX,
+                            emit_store_disp(&out->text, REG_RAX, val_r,
                                             af_disp, inst->width);
                     }
                 } else if (folded && mem_rmw[j] >= 1 && mem_rmw[j] <= 7) {
