@@ -1393,6 +1393,116 @@ static void emit_store_sib(Buffer *b, int base, int index, int scale2,
     }
 }
 
+/* Absolute + index addressing for local globals (gcc -O0 -fno-pic):
+ *   movzx dst, symb(%index)           scale2 == 0
+ *   movzx dst, symb(,%index,2^scale2) scale2 != 0
+ *   movzx dst, symb                   index < 0
+ * Returns the disp32 patch offset; caller records R_X86_64_32S. */
+static size_t emit_load_abs32(Buffer *b, int dst, int index, int scale2,
+                              int width, int is_unsigned) {
+    int op_w = (width == 1 || width == 2) ? 1 : (width >= 8 ? 1 : 0);
+    uint8_t op = 0x8B;
+    if (width == 1) op = is_unsigned ? 0xB6 : 0xBE;
+    else if (width == 2) op = is_unsigned ? 0xB7 : 0xBF;
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        /* [index + disp32] */
+        if (width == 1 || width == 2) {
+            emit_rex_if(b, 1, dst, 0, index);
+            emit_byte(b, 0x0F);
+            emit_byte(b, op);
+        } else {
+            emit_rex_if(b, op_w, dst, 0, index);
+            emit_byte(b, op);
+        }
+        emit_modrm(b, 2, dst & 7, index & 7);
+    } else {
+        /* SIB with base=none: [index*scale + disp32] or [disp32] */
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        if (width == 1 || width == 2) {
+            emit_rex_if(b, 1, dst, idx, 0);
+            emit_byte(b, 0x0F);
+            emit_byte(b, op);
+        } else {
+            emit_rex_if(b, op_w, dst, idx, 0);
+            emit_byte(b, op);
+        }
+        emit_modrm(b, 0, dst & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
+static size_t emit_store_abs32(Buffer *b, int src, int index, int scale2,
+                               int width) {
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        switch (width) {
+        case 1: {
+            uint8_t rex = 0x40 | ((src & 8) >> 1) | ((index & 8) >> 3);
+            emit_byte(b, rex);
+            emit_byte(b, 0x88);
+            emit_modrm(b, 2, src & 7, index & 7);
+            break;
+        }
+        case 2:
+            emit_byte(b, 0x66);
+            emit_rex_if(b, 0, src, 0, index);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 2, src & 7, index & 7);
+            break;
+        case 4:
+            emit_rex_if(b, 0, src, 0, index);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 2, src & 7, index & 7);
+            break;
+        case 8:
+        default:
+            emit_rex_if(b, 1, src, 0, index);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 2, src & 7, index & 7);
+            break;
+        }
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        switch (width) {
+        case 1: {
+            uint8_t rex = 0x40 | ((src & 8) >> 1) | ((idx & 8) >> 2);
+            emit_byte(b, rex);
+            emit_byte(b, 0x88);
+            emit_modrm(b, 0, src & 7, 4);
+            emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+            break;
+        }
+        case 2:
+            emit_byte(b, 0x66);
+            emit_rex_if(b, 0, src, idx, 0);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 0, src & 7, 4);
+            emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+            break;
+        case 4:
+            emit_rex_if(b, 0, src, idx, 0);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 0, src & 7, 4);
+            emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+            break;
+        case 8:
+        default:
+            emit_rex_if(b, 1, src, idx, 0);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 0, src & 7, 4);
+            emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+            break;
+        }
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
 /* movsx reg64, reg_small — sign-extend a register's low `src_w` bytes. */
 static void emit_movsx_rr(Buffer *b, int dst, int src, int src_w) {
     if (src_w == 4) {
@@ -2913,6 +3023,58 @@ static int gep_scaled_index(const IRFunction *fn, const int *def, IRValue v,
     return 0;
 }
 
+/* Peel COPY to IR_GADDR; return the global name or NULL. */
+static const char *peel_gaddr_name(const IRFunction *fn, const int *def,
+                                   IRValue v) {
+    for (int depth = 0; depth < 4; depth++) {
+        if (v < 0 || v >= fn->next_value_id || def[v] < 0) return NULL;
+        const IRInst *d = &fn->insts.data[def[v]];
+        if (d->op == IR_COPY) {
+            v = d->a;
+            continue;
+        }
+        if (d->op == IR_GADDR) return d->call_name;
+        return NULL;
+    }
+    return NULL;
+}
+
+/* Local non-TLS global defined in this TU — safe for R_X86_64_32S. */
+static int gaddr_is_local_abs(const IRModule *ir, const char *name) {
+    if (!ir || !name) return 0;
+    for (size_t i = 0; i < ir->globals.len; i++) {
+        const IRGlobal *g = &ir->globals.data[i];
+        if (g->name && strcmp(g->name, name) == 0)
+            return !g->is_tls;
+    }
+    return 0;
+}
+
+/* Pointer-like base for an unscaled GEP ADD(base, index). */
+static int looks_like_addr_base(const IRFunction *fn, const int *def,
+                                const int *alloca_off, IRValue v) {
+    int depth = 0;
+    while (v >= 0 && v < fn->next_value_id && depth++ < 8) {
+        if (def[v] < 0) return 1; /* param / unpinned */
+        const IRInst *d = &fn->insts.data[def[v]];
+        int op = d->op;
+        if (op == IR_COPY) {
+            v = d->a;
+            continue;
+        }
+        if (op == IR_GADDR || op == IR_ADDR || op == IR_GADDR_TLS
+            || op == IR_FADDR || op == IR_ADD)
+            return 1;
+        int off = 0;
+        if (fold_ptr_off(fn, def, alloca_off, v, &off, 0)) return 1;
+        if (op == IR_LOAD_PTR || op == IR_LOAD || op == IR_CALL
+            || op == IR_PARAM)
+            return 1;
+        return 0;
+    }
+    return 0;
+}
+
 /* Decompose the address feeding a LOAD_PTR/STORE_PTR into
  *     base + index * 2^scale2 + disp
  * where the index*scale term comes from a MUL(idx, 1|2|4|8) GEP stride.
@@ -2999,10 +3161,6 @@ static int fold_gep(const IRFunction *fn, const int *def,
                 total += ci << sc;
                 idx = -1;
             } else if (def[raw_idx] >= 0) {
-                /* MUL(index, 1|2|4|8) where the index is a constant hidden
-                 * behind SEXT/ZEXT.  The byte offset is itself a constant, so
-                 * no index register is referenced and the scale-1 SIB form is
-                 * unnecessary. */
                 const IRInst *md = &fn->insts.data[def[raw_idx]];
                 int64_t iv = 0, factor = 0;
                 int ok = 0;
@@ -3040,8 +3198,44 @@ static int fold_gep(const IRFunction *fn, const int *def,
             inner = d->a;
         else if (ssa_const_imm(fn, def, d->a, &c))
             inner = d->b;
-        else
-            return 0;
+        else {
+            /* Unscaled GEP: ADD(base, index) with no element stride MUL. */
+            IRValue idx_v = -1, base_v = -1;
+            if (isel_ok_index(fn, def, d->a)
+                && looks_like_addr_base(fn, def, alloca_off, d->b)) {
+                idx_v = d->a;
+                base_v = d->b;
+            } else if (isel_ok_index(fn, def, d->b)
+                       && looks_like_addr_base(fn, def, alloca_off, d->a)) {
+                idx_v = d->b;
+                base_v = d->a;
+            } else {
+                return 0;
+            }
+            int is_frame = 0, boff = 0;
+            if (fold_ptr_off(fn, def, alloca_off, base_v, &boff, 0))
+                is_frame = 1;
+            int64_t total = (int64_t)disp + boff;
+            IRValue idx = idx_v;
+            int64_t ci;
+            if (ssa_extended_const(fn, def, idx_v, &ci)) {
+                total += ci;
+                idx = -1;
+            }
+            if (!imm_fits_i32(total)) return 0;
+            if (!is_frame) {
+                if (base_v < 0 || base_v >= fn->next_value_id
+                    || def[base_v] < 0)
+                    return 0;
+                int bop = fn->insts.data[def[base_v]].op;
+                if (bop == IR_CONST || bop == IR_MUL) return 0;
+            }
+            *base_out = is_frame ? -1 : base_v;
+            *idx_out = idx;
+            *scale2_out = 0;
+            *disp_out = (int)total;
+            return 1;
+        }
         int off = 0;
         if (inner >= 0 && inner < fn->next_value_id
             && fold_ptr_off(fn, def, alloca_off, inner, &off, 0)) {
@@ -3165,10 +3359,12 @@ static int pure_addr_op(int op) {
     return op == IR_ADD || op == IR_MUL || op == IR_SEXT || op == IR_ZEXT;
 }
 
-/* 1 when this dereference becomes [rbp+disp] and does not read the pointer. */
-static int deref_folds_frame_disp(const IRFunction *fn, const int *def,
-                                  const int *alloca_off, const int *raw_uses,
-                                  const IRInst *inst, size_t ii) {
+/* 1 when this dereference becomes [rbp+disp] and does not read the pointer.
+ * Indexed/SIB folds still read base/index via mark roots; only pure frame
+ * displacements drop the pointer SSA use for uses_left. */
+static int deref_folds_addr(const IRFunction *fn, const int *def,
+                            const int *alloca_off, const int *raw_uses,
+                            const IRInst *inst, size_t ii) {
     if (!inst || (inst->op != IR_LOAD_PTR && inst->op != IR_STORE_PTR))
         return 0;
     IRValue v = inst->a;
@@ -3192,7 +3388,8 @@ static int deref_folds_frame_disp(const IRFunction *fn, const int *def,
 
 static void codegen_mark_inst_roots(char *needed, int *uses,
                                     const int *raw_uses, const int *uses_left,
-                                    int nv, const IRFunction *fn,
+                                    int nv, const IRModule *ir,
+                                    const IRFunction *fn,
                                     const int *def, const int *alloca_off,
                                     const IRInst *inst, size_t ii) {
     int dummy;
@@ -3218,7 +3415,12 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
                 && adjacent && sole_use
                 && classify_ptr_addr(fn, def, alloca_off, inst->a,
                                      &ab, &ai, &asc, &adisp) != AF_NONE) {
-            if (ab >= 0) mark_reg(needed, uses, nv, ab);
+            /* Local GADDR folds into R_X86_64_32S; no lea of the base. */
+            if (ab >= 0) {
+                const char *gn = peel_gaddr_name(fn, def, ab);
+                if (!(gn && gaddr_is_local_abs(ir, gn)))
+                    mark_reg(needed, uses, nv, ab);
+            }
             if (ai >= 0) mark_reg(needed, uses, nv, ai);
             return;
         }
@@ -3241,7 +3443,11 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
                 && adjacent && sole_use
                 && classify_ptr_addr(fn, def, alloca_off, inst->a,
                                      &ab, &ai, &asc, &adisp) != AF_NONE) {
-            if (ab >= 0) mark_reg(needed, uses, nv, ab);
+            if (ab >= 0) {
+                const char *gn = peel_gaddr_name(fn, def, ab);
+                if (!(gn && gaddr_is_local_abs(ir, gn)))
+                    mark_reg(needed, uses, nv, ab);
+            }
             if (ai >= 0) mark_reg(needed, uses, nv, ai);
             mark_reg(needed, uses, nv, inst->b);
             return;
@@ -3285,15 +3491,16 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
  * use-def closure: post-mem2reg IR is not strictly SSA — a value id can be
  * defined more than once (loop variables), so def[id] only names the last
  * definition and a closure would drop the operands of the earlier ones. */
-static void codegen_mark_needed_and_uses(const IRFunction *fn, const int *def,
+static void codegen_mark_needed_and_uses(const IRModule *ir,
+                                 const IRFunction *fn, const int *def,
                                  const int *alloca_off, const char *skip_body,
                                  char *needed, int *ssa_uses,
                                  const int *raw_uses, const int *uses_left) {
     int nv = fn->next_value_id > 0 ? fn->next_value_id : 1;
     for (size_t i = 0; i < fn->insts.len; i++) {
         if (skip_body && skip_body[i]) continue;
-        codegen_mark_inst_roots(needed, ssa_uses, raw_uses, uses_left, nv, fn,
-                                def, alloca_off, &fn->insts.data[i], i);
+        codegen_mark_inst_roots(needed, ssa_uses, raw_uses, uses_left, nv, ir,
+                                fn, def, alloca_off, &fn->insts.data[i], i);
     }
 }
 
@@ -3805,7 +4012,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         for (size_t uj = fn->insts.len; uj-- > 0; ) {
             if (skip_body[uj]) continue;
             const IRInst *u = &fn->insts.data[uj];
-            if (deref_folds_frame_disp(fn, ssa_def, alloca_off, raw_uses, u, uj)
+            if (deref_folds_addr(fn, ssa_def, alloca_off, raw_uses, u, uj)
                 && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
                 uses_left[u->a]--;
             if (!pure_addr_op(u->op) || u->dst < 0 || u->dst >= nvals_f
@@ -3821,7 +4028,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
          * set and last-use counts, taking addressing-mode folds into account
          * (a folded dereference reuses base/index SSA roots, not the
          * intermediate address value). */
-        codegen_mark_needed_and_uses(fn, ssa_def, alloca_off, skip_body,
+        codegen_mark_needed_and_uses(ir, fn, ssa_def, alloca_off, skip_body,
                                     needed, ssa_uses_f, raw_uses, uses_left);
 
         /* ---- Fused integer-compare → conditional branch ----
@@ -3940,15 +4147,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         memset(mem_rmw_imm, 0, (ninst_f ? ninst_f : 1) * sizeof(int32_t));
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             const IRInst *st = &fn->insts.data[uj];
-            if (st->op != IR_STORE_PTR || skip_body[uj] || fused_skip[uj]
-                || store_imm[uj])
-                continue;
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (st->op == IR_STORE_PTR && store_imm[uj]) continue;
+            if (st->op != IR_STORE_PTR && st->op != IR_STORE) continue;
             if (st->width != 4) continue;
             int poff = 0;
-            if (!fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0))
+            if (st->op == IR_STORE) {
+                if (st->a < 0 || st->a >= nvals_f || alloca_off[st->a] == 0)
+                    continue;
+                poff = alloca_off[st->a];
+            } else if (!fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0)) {
                 continue;
+            }
             if (st->b < 0 || st->b >= nvals_f || ssa_def[st->b] < 0
-                || ssa_uses_f[st->b] != 1)
+                || raw_uses[st->b] != 1)
                 continue;
             int ai = ssa_def[st->b];
             if (skip_body[ai] || fused_skip[ai]) continue;
@@ -3978,7 +4190,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int loff = 0;
                 for (int depth = 0; depth < 4 && cand >= 0 && cand < nvals_f;
                      depth++) {
-                    if (ssa_uses_f[cand] != 1 || ssa_def[cand] < 0) break;
+                    if (raw_uses[cand] != 1 || ssa_def[cand] < 0) break;
                     int di = ssa_def[cand];
                     if (skip_body[di] || fused_skip[di]) break;
                     const IRInst *d = &fn->insts.data[di];
@@ -4019,46 +4231,52 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     { imm_src = -1; break; }
                 imm_src = d->a;
             }
-            if (imm_src >= 0 && imm_fits_i32(immv)
-                && ssa_uses_f[other] == 1) {
+            /* Imm form: embed the constant even if the CONST SSA is shared. */
+            if (imm_src >= 0 && imm_fits_i32(immv)) {
                 mem_rmw[uj] = (char)(1 + ext); /* 1..7 = imm form */
                 mem_rmw_imm[uj] = (int32_t)immv;
                 fused_skip[ai] = 1;
                 fused_skip[li] = 1;
                 for (int k = 0; k < npeel; k++)
                     fused_skip[peel_skip[k]] = 1;
-                /* Skip the const / zext chain. */
-                for (IRValue c = other; c >= 0 && c < nvals_f; ) {
-                    int ci = ssa_def[c];
-                    if (ci < 0 || fused_skip[ci]) break;
-                    fused_skip[ci] = 1;
-                    const IRInst *d = &fn->insts.data[ci];
-                    if (d->op == IR_CONST) break;
-                    if (d->op != IR_ZEXT && d->op != IR_SEXT && d->op != IR_COPY)
-                        break;
-                    c = d->a;
+                /* Skip a private const / zext chain only. */
+                if (raw_uses[other] == 1) {
+                    for (IRValue c = other; c >= 0 && c < nvals_f; ) {
+                        int ci = ssa_def[c];
+                        if (ci < 0 || fused_skip[ci]) break;
+                        fused_skip[ci] = 1;
+                        const IRInst *d = &fn->insts.data[ci];
+                        if (d->op == IR_CONST) break;
+                        if (d->op != IR_ZEXT && d->op != IR_SEXT
+                            && d->op != IR_COPY)
+                            break;
+                        c = d->a;
+                    }
                 }
-                if (st->a >= 0 && st->a < nvals_f && ssa_uses_f[st->a] == 1
-                    && ssa_def[st->a] >= 0)
+                /* Only skip a STORE_PTR address ADDR; IR_STORE's a is the
+                 * alloca itself and must stay. */
+                if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
+                    && raw_uses[st->a] == 1 && ssa_def[st->a] >= 0)
                     fused_skip[ssa_def[st->a]] = 1;
                 if (fn->insts.data[li].op == IR_LOAD_PTR
                     && fn->insts.data[li].a >= 0
                     && fn->insts.data[li].a < nvals_f
-                    && ssa_uses_f[fn->insts.data[li].a] == 1
+                    && raw_uses[fn->insts.data[li].a] == 1
                     && ssa_def[fn->insts.data[li].a] >= 0)
                     fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
-            } else if (ssa_uses_f[other] >= 1 && commutative) {
+            } else if (raw_uses[other] >= 1 && commutative) {
                 /* reg form: addl/xorl %reg, mem.  Keep SUB as load/op/store. */
                 mem_rmw[uj] = (char)(10 + (rop & 0x3f)); /* mark reg form */
                 mem_rmw_imm[uj] = other; /* reuse as IRValue */
                 fused_skip[ai] = 1;
                 fused_skip[li] = 1;
-                if (st->a >= 0 && st->a < nvals_f && ssa_uses_f[st->a] == 1
-                    && ssa_def[st->a] >= 0)
+                if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
+                    && raw_uses[st->a] == 1 && ssa_def[st->a] >= 0)
                     fused_skip[ssa_def[st->a]] = 1;
-                if (fn->insts.data[li].a >= 0
+                if (fn->insts.data[li].op == IR_LOAD_PTR
+                    && fn->insts.data[li].a >= 0
                     && fn->insts.data[li].a < nvals_f
-                    && ssa_uses_f[fn->insts.data[li].a] == 1
+                    && raw_uses[fn->insts.data[li].a] == 1
                     && ssa_def[fn->insts.data[li].a] >= 0)
                     fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
                 mark_reg(needed, ssa_uses_f, nvals_f, other);
@@ -4339,6 +4557,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         continue;
                     if (inst->op == IR_CONST && !inst->is_float && !value_is_ld(fn, inst->dst))
                         continue;
+                    /* Local GADDR folded into R_X86_64_32S at the dereference. */
+                    if (inst->op == IR_GADDR) {
+                        const char *gn = inst->call_name;
+                        if (gn && gaddr_is_local_abs(ir, gn))
+                            continue;
+                    }
                     /* A GEP stride multiply or the extend feeding it, consumed
                      * by a folded [rbp+disp].  COPY is not skipped: mem2reg
                      * pointer selects are copies. */
@@ -4627,14 +4851,28 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
             case IR_SEXT:
             case IR_ZEXT: {
-                /* imm = source width */
-                int src_w = inst->imm;
+                /* imm = source width.  Narrow (1/2-byte) LOAD_PTR/LOAD already
+                 * emit movsx/movzx into the 64-bit register.  4-byte loads use
+                 * movl (zero-extends), so a following SEXT still needs movsxd. */
+                int src_w = (int)inst->imm;
+                int already = 0;
+                if ((src_w == 1 || src_w == 2) && inst->a >= 0
+                    && inst->a < fn->next_value_id && ssa_def[inst->a] >= 0) {
+                    const IRInst *ld = &fn->insts.data[ssa_def[inst->a]];
+                    if ((ld->op == IR_LOAD_PTR || ld->op == IR_LOAD)
+                        && ld->width == src_w
+                        && ((inst->op == IR_ZEXT && ld->is_unsigned)
+                            || (inst->op == IR_SEXT && !ld->is_unsigned)))
+                        already = 1;
+                }
                 int target = dr >= 0 ? dr : REG_RAX;
                 ensure_reg(&out->text, inst->a, target, ra);
-                if (inst->op == IR_SEXT)
-                    emit_movsx_rr(&out->text, target, target, src_w);
-                else
-                    emit_movzx_rr(&out->text, target, target, src_w);
+                if (!already) {
+                    if (inst->op == IR_SEXT)
+                        emit_movsx_rr(&out->text, target, target, src_w);
+                    else
+                        emit_movzx_rr(&out->text, target, target, src_w);
+                }
                 spill_if_needed(&out->text, inst->dst, target, ra);
                 break;
             }
@@ -4722,6 +4960,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm, gp_spill_area);
                         spill_if_needed_xmm(&out->text, inst->a, XMM_SCRATCH0, ra_xmm, gp_spill_area);
                     }
+                    break;
+                }
+                if (inst->a >= 0 && inst->a < fn->next_value_id
+                    && alloca_off[inst->a] != 0 && mem_rmw[j] >= 1
+                    && mem_rmw[j] <= 7) {
+                    emit_arith_imm32_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
+                                          mem_rmw_imm[j], alloca_off[inst->a]);
+                    break;
+                }
+                if (inst->a >= 0 && inst->a < fn->next_value_id
+                    && alloca_off[inst->a] != 0 && mem_rmw[j] >= 10) {
+                    IRValue ov = (IRValue)mem_rmw_imm[j];
+                    ensure_reg(&out->text, ov, REG_RAX, ra);
+                    emit_arith_r32_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
+                                        REG_RAX, alloca_off[inst->a]);
                     break;
                 }
                 /* [a] = b.  Rarely reached — mem2reg normally removes it.
@@ -5017,15 +5270,33 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_load_disp(&out->text, dst_gp, REG_RBP, af_disp,
                                            inst->width, inst->is_unsigned);
                     } else if (af_kind == AF_SIB) {
-                        if (af_idx >= 0)
-                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                        ensure_reg(&out->text, af_base, REG_RAX, ra);
-                        if (af_idx >= 0)
-                            emit_load_sib(&out->text, dst_gp, REG_RAX, REG_RCX,
-                                          af_sc, af_disp, inst->width, inst->is_unsigned);
-                        else
-                            emit_load_disp(&out->text, dst_gp, REG_RAX, af_disp,
-                                           inst->width, inst->is_unsigned);
+                        const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
+                        int gsym = (gn && gaddr_is_local_abs(ir, gn))
+                                   ? emit_module_find_symbol(out, gn) : -1;
+                        int abs_ok = gsym >= 0
+                                     && out->syms[gsym].shndx != SECT_UNDEF;
+                        if (abs_ok) {
+                            if (af_idx >= 0)
+                                ensure_reg(&out->text, af_idx, REG_RCX, ra);
+                            size_t patch = emit_load_abs32(
+                                &out->text, dst_gp,
+                                af_idx >= 0 ? REG_RCX : -1, af_sc,
+                                inst->width, inst->is_unsigned);
+                            emit_module_add_reloc(out, patch, R_X86_64_32S,
+                                                  gsym, af_disp);
+                        } else {
+                            if (af_idx >= 0)
+                                ensure_reg(&out->text, af_idx, REG_RCX, ra);
+                            ensure_reg(&out->text, af_base, REG_RAX, ra);
+                            if (af_idx >= 0)
+                                emit_load_sib(&out->text, dst_gp, REG_RAX,
+                                              REG_RCX, af_sc, af_disp,
+                                              inst->width, inst->is_unsigned);
+                            else
+                                emit_load_disp(&out->text, dst_gp, REG_RAX,
+                                               af_disp, inst->width,
+                                               inst->is_unsigned);
+                        }
                     } else
                         emit_load_via_ptr(&out->text, dst_gp, REG_RCX,
                                           inst->width, inst->is_unsigned);
@@ -5102,16 +5373,32 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_store_disp(&out->text, REG_RBP, REG_RAX, af_disp,
                                         inst->width);
                 } else if (af_kind == AF_SIB) {
-                    if (af_idx >= 0)
-                        ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                    ensure_reg(&out->text, inst->b, REG_RDX, ra);
-                    ensure_reg(&out->text, af_base, REG_RAX, ra);
-                    if (af_idx >= 0)
-                        emit_store_sib(&out->text, REG_RAX, REG_RCX, af_sc, af_disp,
-                                       REG_RDX, inst->width);
-                    else
-                        emit_store_disp(&out->text, REG_RAX, REG_RDX, af_disp,
-                                        inst->width);
+                    const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
+                    int gsym = (gn && gaddr_is_local_abs(ir, gn))
+                               ? emit_module_find_symbol(out, gn) : -1;
+                    int abs_ok = gsym >= 0
+                                 && out->syms[gsym].shndx != SECT_UNDEF;
+                    if (abs_ok) {
+                        if (af_idx >= 0)
+                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
+                        ensure_reg(&out->text, inst->b, REG_RDX, ra);
+                        size_t patch = emit_store_abs32(
+                            &out->text, REG_RDX,
+                            af_idx >= 0 ? REG_RCX : -1, af_sc, inst->width);
+                        emit_module_add_reloc(out, patch, R_X86_64_32S,
+                                              gsym, af_disp);
+                    } else {
+                        if (af_idx >= 0)
+                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
+                        ensure_reg(&out->text, inst->b, REG_RDX, ra);
+                        ensure_reg(&out->text, af_base, REG_RAX, ra);
+                        if (af_idx >= 0)
+                            emit_store_sib(&out->text, REG_RAX, REG_RCX, af_sc,
+                                           af_disp, REG_RDX, inst->width);
+                        else
+                            emit_store_disp(&out->text, REG_RAX, REG_RDX,
+                                            af_disp, inst->width);
+                    }
                 } else if (folded && mem_rmw[j] >= 1 && mem_rmw[j] <= 7) {
                     emit_arith_imm32_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
                                           mem_rmw_imm[j], ptr_off);
