@@ -2266,15 +2266,32 @@ typedef struct {
 
 /* Compute which callee-saved registers this function actually uses.
  * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 (0 or 1). */
-static void collect_callee_saved(const RAResult *ra, int used[3]) {
+/* Callee-saved homes that codegen actually reads/writes.  IR_ALLOCA is a
+ * frame-slot id addressed via alloca_off; RA may still colour it, but the
+ * body never uses that GP home — counting it only forced dead push/pop
+ * (chacha quarter saved rbx/r12/r13 unused). */
+static void collect_callee_saved(const RAResult *ra, const IRFunction *fn,
+                                 int used[3]) {
     used[0] = used[1] = used[2] = 0;
     if (!ra) return;
+    char *is_alloca = NULL;
+    if (fn && ra->num_values > 0) {
+        is_alloca = xmalloc((size_t)ra->num_values);
+        memset(is_alloca, 0, (size_t)ra->num_values);
+        for (size_t j = 0; j < fn->insts.len; j++) {
+            const IRInst *in = &fn->insts.data[j];
+            if (in->op == IR_ALLOCA && in->dst >= 0 && in->dst < ra->num_values)
+                is_alloca[in->dst] = 1;
+        }
+    }
     for (int v = 0; v < ra->num_values; v++) {
+        if (is_alloca && is_alloca[v]) continue;
         int r = ra->reg[v];
         if (r == REG_RBX) used[0] = 1;
         else if (r == REG_R12) used[1] = 1;
         else if (r == REG_R13) used[2] = 1;
     }
+    free(is_alloca);
 }
 
 /* mov [base+off], %reg  →  REX.W 89 [mod=01/10 reg=src rm=base] disp. */
@@ -4321,7 +4338,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
         /* ---- Prologue ---- */
         int cs_used[3];
-        collect_callee_saved(ra, cs_used);
+        collect_callee_saved(ra, fn, cs_used);
         int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
         curr_cs_count = cs_count;
         int cs_save_area = 8 * cs_count;  /* bytes occupied by callee-saved reg pushes */
