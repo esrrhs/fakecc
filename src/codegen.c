@@ -3473,11 +3473,13 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
                 && adjacent && sole_use
                 && classify_ptr_addr(fn, def, alloca_off, inst->a,
                                      &ab, &ai, &asc, &adisp) != AF_NONE) {
-            /* Local GADDR folds into R_X86_64_32S; no lea of the base. */
+            /* Local GADDR folds into R_X86_64_32S; no lea of the base.
+             * A computed base (e.g. &buf[i] for buf[i][k]) must keep its
+             * whole address expression live once the cell ADD is folded. */
             if (ab >= 0) {
                 const char *gn = peel_gaddr_name(fn, def, ab);
                 if (!(gn && gaddr_is_local_abs(ir, gn)))
-                    mark_reg(needed, uses, nv, ab);
+                    mark_live_index(needed, uses, nv, fn, def, ab, 0);
             }
             if (ai >= 0) {
                 IRValue inner = ai;
@@ -3511,7 +3513,7 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             if (ab >= 0) {
                 const char *gn = peel_gaddr_name(fn, def, ab);
                 if (!(gn && gaddr_is_local_abs(ir, gn)))
-                    mark_reg(needed, uses, nv, ab);
+                    mark_live_index(needed, uses, nv, fn, def, ab, 0);
             }
             if (ai >= 0) {
                 IRValue inner = ai;
