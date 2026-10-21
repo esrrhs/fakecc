@@ -2326,29 +2326,45 @@ static void emit_builtin_return(Buffer *b, const IRInst *inst, const RAResult *r
 #define VA_OV_OFF   8
 #define VA_REG_OFF  16
 
+/* ap_frame_off != 0 → va_list at [rbp+ap_frame_off] (gcc -O0 style);
+ * otherwise ap_reg holds &va_list. */
+static int va_field_base(int ap_reg, int ap_frame_off) {
+    return ap_frame_off ? REG_RBP : ap_reg;
+}
+static int va_field_off(int ap_frame_off, int field) {
+    return ap_frame_off ? ap_frame_off + field : field;
+}
+
 /* Implement `va_start(ap, last)`: fill the four va_list fields.  The initial
  * offsets (gp_offset, fp_offset, overflow_arg_off) are passed in; they are
  * computed once per function from its named-arg layout.  reg_save_area is
  * the 176-byte save area at the bottom of the frame, addressed as
- * [rbp + reg_save_rbp_off] so it stays valid after IR_DYN_ALLOCA moves rsp. */
+ * [rbp + reg_save_rbp_off] so it stays valid after IR_DYN_ALLOCA moves rsp.
+ * When ap_frame_off != 0 the list is a local slot — write fields directly. */
 static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
                           int gp_offset, int fp_offset, int overflow_off,
-                          int reg_save_rbp_off) {
-    int ap = inst->call_args[0];
-    ensure_reg(b, ap, REG_RAX, ra);
+                          int reg_save_rbp_off, int ap_frame_off) {
     int ap_reg = REG_RAX;
-    /* gp_offset @0 (4-byte unsigned int) */
-    emit_mov_imm(b, REG_RCX, gp_offset);
-    emit_store_base_off32(b, ap_reg, REG_RCX, VA_GP_OFF);
-    /* fp_offset @4 (4-byte unsigned int) */
-    emit_mov_imm(b, REG_RCX, fp_offset);
-    emit_store_base_off32(b, ap_reg, REG_RCX, VA_FP_OFF);
-    /* overflow_arg_area @8 = rbp + first stack-passed arg offset (8-byte ptr) */
+    if (!ap_frame_off) {
+        int ap = inst->call_args[0];
+        ensure_reg(b, ap, REG_RAX, ra);
+    }
+    int base = va_field_base(ap_reg, ap_frame_off);
+    if (ap_frame_off) {
+        emit_store_imm_disp(b, REG_RBP, gp_offset,
+                            va_field_off(ap_frame_off, VA_GP_OFF), 4);
+        emit_store_imm_disp(b, REG_RBP, fp_offset,
+                            va_field_off(ap_frame_off, VA_FP_OFF), 4);
+    } else {
+        emit_mov_imm(b, REG_RCX, gp_offset);
+        emit_store_base_off32(b, base, REG_RCX, VA_GP_OFF);
+        emit_mov_imm(b, REG_RCX, fp_offset);
+        emit_store_base_off32(b, base, REG_RCX, VA_FP_OFF);
+    }
     emit_lea_rbp(b, REG_RCX, overflow_off);
-    emit_store_base_off(b, ap_reg, REG_RCX, VA_OV_OFF);
-    /* reg_save_area @16 = bottom of frame (8-byte ptr) */
+    emit_store_base_off(b, base, REG_RCX, va_field_off(ap_frame_off, VA_OV_OFF));
     emit_lea_rbp(b, REG_RCX, reg_save_rbp_off);
-    emit_store_base_off(b, ap_reg, REG_RCX, VA_REG_OFF);
+    emit_store_base_off(b, base, REG_RCX, va_field_off(ap_frame_off, VA_REG_OFF));
 }
 
 /* Load a GP value from [base+index] into dst without SIB addressing: computes
@@ -2369,16 +2385,18 @@ static void emit_load_gp_viabase(Buffer *b, int dst, int base, int index) {
  * reg_save_area = rsp is filled by va_start. */
 static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                         const RAResult *ra, const RAResult *ra_xmm,
-                        int gp_spill_area, const int *ld_off) {
-    int ap = inst->call_args[0];
-    ensure_reg(b, ap, REG_RAX, ra);
+                        int gp_spill_area, const int *ld_off, int ap_frame_off) {
     int ap_reg = REG_RAX;
+    if (!ap_frame_off)
+        ensure_reg(b, inst->call_args[0], REG_RAX, ra);
+    int base = va_field_base(ap_reg, ap_frame_off);
     int dst = inst->dst;
     int is_float = inst->is_float;
 
     if (dst >= 0 && value_is_ld(fn, dst)) {
         /* long double (X87 class): always passed on the stack. */
-        emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF); /* r11 = overflow_arg_area */
+        emit_load_base_off(b, REG_R11, base,
+                           va_field_off(ap_frame_off, VA_OV_OFF));
         emit_add_imm32(b, REG_R11, 15);
         emit_rex_wrb(b, 1, 0, REG_R11);
         emit_byte(b, 0x83);
@@ -2393,7 +2411,8 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
 
         /* Advance overflow_arg_area by 16 and save */
         emit_add_imm32(b, REG_R11, 16);
-        emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+        emit_store_base_off(b, base, REG_R11,
+                            va_field_off(ap_frame_off, VA_OV_OFF));
         return;
     }
 
@@ -2421,7 +2440,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
          * MEMORY structs must not take this path (va_arg_22 A32). */
         if (!inst->force_stack && (inst->float_imm & 0x10)
             && (nbytes == 32 || nbytes == 64)) {
-            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_OV_OFF));
             emit_add_imm32(b, REG_R11, ov_align - 1);
             emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
             if (nbytes == 64 && host_has_avx512f()) {
@@ -2436,7 +2455,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                 }
             }
             emit_add_imm32(b, REG_R11, nbytes);
-            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, VA_OV_OFF));
             if (dst >= 0) {
                 if (ra && dst < ra->num_values && ra->reg[dst] >= 0
                     && ra->reg[dst] < 16) {
@@ -2452,25 +2471,25 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         /* SSE+SSEUP aggregate (`struct { __m128 x; }`): one XMM, 16 bytes.
          * `{double; long}` is SSE+INTEGER (float_imm==1, no 0x10). */
         if (!inst->force_stack && (inst->float_imm & 0x10) && nbytes == 16) {
-            emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF);
+            emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, VA_FP_OFF));
             emit_cmp_imm32(b, REG_RCX, 176 - 16);
             size_t jae_ov = emit_jcc_rel32(b, 0x87); /* JA overflow */
-            emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_REG_OFF));
             emit_add_rr(b, REG_R11, REG_RCX);
             emit_movups_load_disp(b, 0, REG_R11, 0);
             emit_movups_store_disp(b, REG_RSI, 0, 0);
             emit_add_imm32(b, REG_RCX, 16);
-            emit_store_base_off32(b, ap_reg, REG_RCX, VA_FP_OFF);
+            emit_store_base_off32(b, base, REG_RCX, va_field_off(ap_frame_off, VA_FP_OFF));
             size_t jmp_end = emit_jmp_rel32(b);
             size_t ov_off = b->len;
             patch_rel32(b, jae_ov, ov_off);
-            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_OV_OFF));
             emit_add_imm32(b, REG_R11, 15);
             emit_and_imm32(b, REG_R11, (int32_t)-16);
             emit_movups_load_disp(b, 0, REG_R11, 0);
             emit_movups_store_disp(b, REG_RSI, 0, 0);
             emit_add_imm32(b, REG_R11, 16);
-            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, VA_OV_OFF));
             patch_rel32(b, jmp_end, b->len);
             if (dst >= 0) {
                 if (ra && dst < ra->num_values && ra->reg[dst] >= 0
@@ -2493,31 +2512,31 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         if (!inst->force_stack && n8 <= 2) {
             size_t jae_gp = 0, jae_fp = 0;
             if (num_gp > 0) {
-                emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
+                emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, VA_GP_OFF));
                 emit_cmp_imm32(b, REG_RCX, 48 - 8 * num_gp);
                 jae_gp = emit_jcc_rel32(b, 0x87); /* JA overflow */
             }
             if (num_fp > 0) {
-                emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF);
+                emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, VA_FP_OFF));
                 emit_cmp_imm32(b, REG_RCX, 176 - 16 * num_fp);
                 jae_fp = emit_jcc_rel32(b, 0x87); /* JA overflow */
             }
             for (int i = 0; i < n8; i++) {
                 int is_sse = (inst->float_imm >> i) & 1;
                 int off_field = is_sse ? VA_FP_OFF : VA_GP_OFF;
-                emit_load_base_off32(b, REG_RCX, ap_reg, off_field);
-                emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF);
+                emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, off_field));
+                emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_REG_OFF));
                 emit_add_rr(b, REG_R11, REG_RCX);
                 emit_load_base_off(b, REG_RDX, REG_R11, 0);
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
                 emit_add_imm32(b, REG_RCX, is_sse ? 16 : 8);
-                emit_store_base_off32(b, ap_reg, REG_RCX, off_field);
+                emit_store_base_off32(b, base, REG_RCX, va_field_off(ap_frame_off, off_field));
             }
             size_t jmp_end = emit_jmp_rel32(b);
             size_t ov_off = b->len;
             if (num_gp > 0) patch_rel32(b, jae_gp, ov_off);
             if (num_fp > 0) patch_rel32(b, jae_fp, ov_off);
-            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_OV_OFF));
             if (ov_align >= 16) {
                 emit_add_imm32(b, REG_R11, ov_align - 1);
                 emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
@@ -2527,12 +2546,12 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
             }
             emit_add_imm32(b, REG_R11, ov_step);
-            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, VA_OV_OFF));
             patch_rel32(b, jmp_end, b->len);
         } else {
             /* MEMORY-class struct: SysV copies eightbytes from the overflow
              * stack (including aggregates larger than 16 bytes). */
-            emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_OV_OFF));
             if (ov_align >= 16) {
                 emit_add_imm32(b, REG_R11, ov_align - 1);
                 emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
@@ -2542,7 +2561,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
             }
             emit_add_imm32(b, REG_R11, ov_step);
-            emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+            emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, VA_OV_OFF));
         }
         if (dst >= 0) {
             if (ra && dst < ra->num_values && ra->reg[dst] >= 0
@@ -2558,23 +2577,22 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
 
     if (!is_float) {
         /* ---------------- GP class ---------------- */
-        emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF); /* ecx = gp_offset */
+        emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, VA_GP_OFF)); /* ecx = gp_offset */
         emit_cmp_imm32(b, REG_RCX, 48);
         size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
         /* register path: load from [reg_save_area + gp_offset] */
-        emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF); /* r11 = save_area */
+        emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_REG_OFF)); /* r11 = save_area */
         emit_load_gp_viabase(b, REG_RDX, REG_R11, REG_RCX);  /* rdx = *[save+gp] */
-        emit_load_base_off32(b, REG_RCX, ap_reg, VA_GP_OFF);
         emit_add_imm32(b, REG_RCX, 8);
-        emit_store_base_off32(b, ap_reg, REG_RCX, VA_GP_OFF);
+        emit_store_base_off32(b, base, REG_RCX, va_field_off(ap_frame_off, VA_GP_OFF));
         size_t jmp_end = emit_jmp_rel32(b);
         /* overflow_path: load from [overflow_arg_area], advance by 8 */
         size_t ov_off = b->len;
         patch_rel32(b, jae_ov, ov_off);
-        emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF); /* r11 = overflow */
+        emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_OV_OFF)); /* r11 = overflow */
         emit_load_base_off(b, REG_RDX, REG_R11, 0);         /* rdx = *[overflow] */
         emit_add_imm32(b, REG_R11, 8);
-        emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+        emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, VA_OV_OFF));
         /* end: */
         patch_rel32(b, jmp_end, b->len);
         /* move loaded value (RDX) into dst home / spill */
@@ -2590,23 +2608,22 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
     } else {
         /* ---------------- FP class ---------------- */
         int w16 = dst >= 0 && value_is_xmm16(fn, dst);
-        emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF); /* ecx = fp_offset */
+        emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, VA_FP_OFF)); /* ecx = fp_offset */
         emit_cmp_imm32(b, REG_RCX, 176);
         size_t jae_ov = emit_jcc_rel32(b, 0x83); /* JAE overflow_path */
         /* register path: load FP from [reg_save_area + fp_offset] */
-        emit_load_base_off(b, REG_R11, ap_reg, VA_REG_OFF); /* r11 = save_area */
+        emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_REG_OFF)); /* r11 = save_area */
         emit_add_rr(b, REG_R11, REG_RCX); /* r11 = save_area + fp_offset */
         if (w16) emit_movups_load_disp(b, 0, REG_R11, 0);
         else emit_sse_load_base_off(b, 0, REG_R11, 0); /* xmm0 = *[r11] (movsd) */
-        emit_load_base_off32(b, REG_RCX, ap_reg, VA_FP_OFF);
         emit_add_imm32(b, REG_RCX, 16);
-        emit_store_base_off32(b, ap_reg, REG_RCX, VA_FP_OFF);
+        emit_store_base_off32(b, base, REG_RCX, va_field_off(ap_frame_off, VA_FP_OFF));
         size_t jmp_end = emit_jmp_rel32(b);
         /* overflow_path: 16-byte SSE is 16-aligned and consumes 16 bytes;
          * scalar float/double consume 8. */
         size_t ov_off = b->len;
         patch_rel32(b, jae_ov, ov_off);
-        emit_load_base_off(b, REG_R11, ap_reg, VA_OV_OFF); /* r11 = overflow */
+        emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, VA_OV_OFF)); /* r11 = overflow */
         if (w16) {
             emit_add_imm32(b, REG_R11, 15);
             emit_and_imm32(b, REG_R11, (int32_t)-16);
@@ -2616,7 +2633,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             emit_sse_load_base_off(b, 0, REG_R11, 0); /* xmm0 = *[overflow] */
             emit_add_imm32(b, REG_R11, 8);
         }
-        emit_store_base_off(b, ap_reg, REG_R11, VA_OV_OFF);
+        emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, VA_OV_OFF));
         /* end: */
         patch_rel32(b, jmp_end, b->len);
         if (dst >= 0) {
@@ -3613,6 +3630,29 @@ static void mark_inst_uses_needed(const IRInst *inst, char *needed,
     }
 }
 
+/* va_start/va_arg/va_end on a local va_list: fields are addressed as
+ * [rbp+disp], so &ap need not stay live (matches gcc -O0). */
+static int mark_va_builtin(const IRFunction *fn, const int *def,
+                           const int *alloca_off, const IRInst *inst,
+                           char *needed, int *uses, int nv) {
+    if (!inst->call_name) return 0;
+    int is_start = strcmp(inst->call_name, "va_start") == 0;
+    int is_arg = strcmp(inst->call_name, "va_arg") == 0;
+    int is_end = strcmp(inst->call_name, "va_end") == 0;
+    if (!is_start && !is_arg && !is_end) return 0;
+    int ap_off = 0;
+    if (inst->call_nargs >= 1
+        && fold_ptr_off(fn, def, alloca_off, inst->call_args[0], &ap_off, 0)
+        && ap_off != 0) {
+        if (is_arg) {
+            for (int k = 1; k < inst->call_nargs; k++)
+                mark_reg(needed, uses, nv, inst->call_args[k]);
+        }
+        return 1;
+    }
+    return 0;
+}
+
 /* Mark the SSA operands one instruction actually requires at -O0, taking
  * addressing-mode folds into account (a folded dereference needs base/index,
  * not the intermediate address/Gep value). */
@@ -3853,6 +3893,9 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
     }
     if (sext_folds_frame_load(fn, def, alloca_off, raw_uses, inst, NULL, NULL))
         return; /* frame load is folded into the SEXT; leave LOAD dead */
+    if (inst->op == IR_CALL
+        && mark_va_builtin(fn, def, alloca_off, inst, needed, uses, nv))
+        return;
     mark_inst_uses_needed(inst, needed, uses, nv);
 }
 
@@ -4735,7 +4778,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_store_rsp_off(&out->text, REG_RCX, 24);
             emit_store_rsp_off(&out->text, REG_R8, 32);
             emit_store_rsp_off(&out->text, REG_R9, 40);
-            /* FP regs xmm0-xmm7 → [rsp+48..+176] via movaps (16-byte slots). */
+            /* FP regs: only when the caller set %al (SysV vector count). */
+            emit_byte(&out->text, 0x84); /* test %al, %al */
+            emit_byte(&out->text, 0xC0);
+            size_t skip_xmm = emit_jcc_rel32(&out->text, 0x84); /* je */
             emit_sse_store_rsp_off(&out->text, 0, 48);
             emit_sse_store_rsp_off(&out->text, 1, 64);
             emit_sse_store_rsp_off(&out->text, 2, 80);
@@ -4744,6 +4790,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             emit_sse_store_rsp_off(&out->text, 5, 128);
             emit_sse_store_rsp_off(&out->text, 6, 144);
             emit_sse_store_rsp_off(&out->text, 7, 160);
+            patch_rel32(&out->text, skip_xmm, out->text.len);
         }
         if (fn->needs_apply_args)
             emit_fill_apply_args(&out->text, apply_args_rsp_off);
@@ -6560,8 +6607,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * calls (call_name set) and operate on the va_list pointer that
                  * was passed as call_args[0].  Dispatch by name. */
                 if (inst->call_name && strcmp(inst->call_name, "va_start") == 0) {
+                    int ap_frame = 0;
+                    if (inst->call_nargs >= 1)
+                        fold_ptr_off(fn, ssa_def, alloca_off, inst->call_args[0],
+                                     &ap_frame, 0);
                     emit_va_start(&out->text, inst, ra, va_gp_offset,
-                                  va_fp_offset, va_overflow_off, -frame_down);
+                                  va_fp_offset, va_overflow_off, -frame_down,
+                                  ap_frame);
                     break;
                 }
                 if (inst->call_name && strcmp(inst->call_name, "va_end") == 0) {
@@ -6569,7 +6621,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 if (inst->call_name && strcmp(inst->call_name, "va_arg") == 0) {
-                    emit_va_arg(&out->text, fn, inst, ra, ra_xmm, gp_spill_area, ld_off);
+                    int ap_frame = 0;
+                    if (inst->call_nargs >= 1)
+                        fold_ptr_off(fn, ssa_def, alloca_off, inst->call_args[0],
+                                     &ap_frame, 0);
+                    emit_va_arg(&out->text, fn, inst, ra, ra_xmm, gp_spill_area,
+                                ld_off, ap_frame);
                     break;
                 }
                 int nargs = inst->call_nargs;
