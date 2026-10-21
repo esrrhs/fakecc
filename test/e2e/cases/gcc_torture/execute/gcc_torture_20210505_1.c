@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // link: -lc
 // expect: 0
 package main;

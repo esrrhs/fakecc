@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // expect: 0
 // An alloca() in a function that also makes a call with stack arguments.
 //

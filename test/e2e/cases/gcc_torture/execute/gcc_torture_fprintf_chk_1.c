@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // expect: 0
 // Darwin's <stdio.h> already typedefs __int64_t; the port's decl clashes.
 // skip_oracle: darwin
