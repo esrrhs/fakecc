@@ -988,6 +988,51 @@ static size_t emit_load_rip(Buffer *b, int dst) {
     return patch;
 }
 
+/* movzx/movsx/mov dst, symb(%rip) — gcc -O0 style for TU-local globals. */
+static size_t emit_load_rip_w(Buffer *b, int dst, int width, int is_unsigned) {
+    if (width == 1) {
+        emit_rex_wrb(b, 1, dst, 0);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
+    } else if (width == 2) {
+        emit_rex_wrb(b, 1, dst, 0);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
+    } else if (width == 4) {
+        emit_rex_if(b, 0, dst, 0, 0);
+        emit_byte(b, 0x8B);
+    } else {
+        emit_rex_wrb(b, 1, dst, 0);
+        emit_byte(b, 0x8B);
+    }
+    emit_modrm(b, 0, dst & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
+static size_t emit_store_rip_w(Buffer *b, int src, int width) {
+    if (width == 1) {
+        uint8_t rex = 0x40 | ((src & 8) >> 1);
+        emit_byte(b, rex);
+        emit_byte(b, 0x88);
+    } else if (width == 2) {
+        emit_byte(b, 0x66);
+        emit_rex_if(b, 0, src, 0, 0);
+        emit_byte(b, 0x89);
+    } else if (width == 4) {
+        emit_rex_if(b, 0, src, 0, 0);
+        emit_byte(b, 0x89);
+    } else {
+        emit_rex_wrb(b, 1, src, 0);
+        emit_byte(b, 0x89);
+    }
+    emit_modrm(b, 0, src & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
 /* Emit ModRM for `[reg]` addressing where `reg` is a full 4-bit register id
  * (0..15).  Handles the two x86 special cases:
  *   - rbp (reg&7 == 5): mod=00 rm=5 means [disp32], not [rbp]. Use mod=01 disp8=0.
@@ -3093,6 +3138,37 @@ static const char *peel_gaddr_name(const IRFunction *fn, const int *def,
     return NULL;
 }
 
+/* Phi elimination emits several IR_COPY with the same dst.  ssa_def keeps
+ * only the last, so peel_gaddr_name would pick one branch's GADDR for a
+ * merge.  Rip-fold only when `v` has a single defining instruction. */
+static int value_unique_def(const IRFunction *fn, IRValue v) {
+    if (!fn || v < 0 || v >= fn->next_value_id) return 0;
+    int n = 0;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        if (fn->insts.data[i].dst == v && ++n > 1) return 0;
+    }
+    return n == 1;
+}
+
+/* GADDR (or COPY of one) with a unique def — safe for symb(%rip) memops. */
+static const char *peel_gaddr_name_unique(const IRFunction *fn, const int *def,
+                                          IRValue v) {
+    if (!value_unique_def(fn, v)) return NULL;
+    IRValue cur = v;
+    for (int depth = 0; depth < 4; depth++) {
+        if (cur < 0 || cur >= fn->next_value_id || def[cur] < 0) return NULL;
+        if (!value_unique_def(fn, cur)) return NULL;
+        const IRInst *d = &fn->insts.data[def[cur]];
+        if (d->op == IR_COPY) {
+            cur = d->a;
+            continue;
+        }
+        if (d->op == IR_GADDR) return d->call_name;
+        return NULL;
+    }
+    return NULL;
+}
+
 /* Local non-TLS global defined in this TU — safe for R_X86_64_32S. */
 static int gaddr_is_local_abs(const IRModule *ir, const char *name) {
     if (!ir || !name) return 0;
@@ -3607,6 +3683,10 @@ static int deref_folds_addr(const IRModule *ir, const IRFunction *fn,
         && inst->width != 8)
         return 0;
     if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    {
+        const char *gn = peel_gaddr_name_unique(fn, def, v);
+        if (gn && gaddr_is_local_abs(ir, gn)) return 1;
+    }
     if (local_abs_af(ir, fn, def, alloca_off, v, NULL, NULL, NULL, NULL))
         return 1;
     if ((size_t)def[v] + 1 != ii) return 0;
@@ -3629,6 +3709,16 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             int asc = 0, adisp = 0;
             if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
                 return;
+            /* symb(%rip) load — do not keep the GADDR lea live. */
+            {
+                const char *gn = peel_gaddr_name_unique(fn, def, inst->a);
+                if (gn && gaddr_is_local_abs(ir, gn)
+                    && !value_is_float_class(fn, inst->dst)
+                    && !value_is_ld(fn, inst->dst)
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8))
+                    return;
+            }
             /* Fold a fresh GEP only when the address ADD is immediately
              * before the dereference AND the address value is not used
              * anywhere else: a dereference folded into [base+index*s]
@@ -3680,6 +3770,17 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0)) {
                 mark_reg(needed, uses, nv, inst->b);
                 return;
+            }
+            {
+                const char *gn = peel_gaddr_name_unique(fn, def, inst->a);
+                if (gn && gaddr_is_local_abs(ir, gn)
+                    && !value_is_float_class(fn, inst->b)
+                    && !value_is_ld(fn, inst->b)
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    mark_reg(needed, uses, nv, inst->b);
+                    return;
+                }
             }
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
@@ -5559,7 +5660,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         af_sc = psc;
                     }
                 }
-                if (!folded && af_kind == AF_NONE)
+                const char *rip_gn = NULL;
+                int rip_sym = -1;
+                if (!folded && af_kind == AF_NONE
+                    && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    rip_gn = peel_gaddr_name_unique(fn, ssa_def, inst->a);
+                    if (rip_gn && gaddr_is_local_abs(ir, rip_gn)) {
+                        rip_sym = emit_module_find_symbol(out, rip_gn);
+                        if (rip_sym < 0 || out->syms[rip_sym].shndx == SECT_UNDEF)
+                            rip_sym = -1;
+                    } else {
+                        rip_gn = NULL;
+                    }
+                }
+                if (!folded && af_kind == AF_NONE && rip_sym < 0)
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->dst)) {
                     if (folded)
@@ -5639,6 +5755,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                                af_disp, inst->width,
                                                inst->is_unsigned);
                         }
+                    } else if (rip_sym >= 0) {
+                        size_t patch = emit_load_rip_w(&out->text, dst_gp,
+                                                       inst->width, inst->is_unsigned);
+                        emit_module_add_reloc(out, patch, R_X86_64_PC32,
+                                              rip_sym, -4);
                     } else
                         emit_load_via_ptr(&out->text, dst_gp, REG_RCX,
                                           inst->width, inst->is_unsigned);
@@ -5676,7 +5797,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         af_sc = psc;
                     }
                 }
-                if (!folded && af_kind == AF_NONE)
+                const char *rip_gn = NULL;
+                int rip_sym = -1;
+                if (!folded && af_kind == AF_NONE
+                    && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    rip_gn = peel_gaddr_name_unique(fn, ssa_def, inst->a);
+                    if (rip_gn && gaddr_is_local_abs(ir, rip_gn)) {
+                        rip_sym = emit_module_find_symbol(out, rip_gn);
+                        if (rip_sym < 0 || out->syms[rip_sym].shndx == SECT_UNDEF)
+                            rip_sym = -1;
+                    } else {
+                        rip_gn = NULL;
+                    }
+                }
+                if (!folded && af_kind == AF_NONE && rip_sym < 0)
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                 if (value_is_ld(fn, inst->b)) {
                     emit_ld_load(&out->text, inst->b, ld_off);
@@ -5777,6 +5913,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     emit_store_imm_disp(&out->text, REG_RBP, (int32_t)immv,
                                         ptr_off, inst->width);
+                } else if (rip_sym >= 0) {
+                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    size_t patch = emit_store_rip_w(&out->text, REG_RAX,
+                                                    inst->width);
+                    emit_module_add_reloc(out, patch, R_X86_64_PC32,
+                                          rip_sym, -4);
                 } else {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     if (folded)
