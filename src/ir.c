@@ -4699,6 +4699,34 @@ static IRValue lower_compound_literal_addr(IRFunction *fn, IRSymTable *st,
     return addr;
 }
 
+/* &a[i] / decay of a[i] when a[i] is an array.  Fold a[0] to just a (no
+ * mul-by-stride of zero) and a[k] for constant k to a + k*esz so stencil-style
+ * row[0][x] becomes ADD(row, MUL(x,4)) and folds to (%reg,%idx,4). */
+static IRValue lower_index_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    IRValue base = lower_expr(fn, st, e->u.idx.array);
+    long long esz = type_size(e->type);
+    long long ic = 0;
+    /* Only fold constant indices when the element size is a known positive
+     * constant.  VLA rows (esz <= 0) must go through lower_sizeof_type. */
+    if (esz > 0 && fold_const_int(e->u.idx.index, &ic)) {
+        long long byte = ic * esz;
+        if (byte == 0) return base;
+        if (byte == (long long)(int)byte)
+            return emit_add_const(fn, base, (int)byte, e->loc);
+    }
+    {
+        IRValue idx = lower_expr(fn, st, e->u.idx.index);
+        int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
+        IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
+        IRValue off, esize_v;
+        if (esz == 1)
+            return emit_bin_w(fn, IR_ADD, base, idx8, 8, 1, e->loc);
+        esize_v = lower_sizeof_type(fn, st, e->type, e->loc);
+        off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
+        return emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+    }
+}
+
 /* Compute the address of an lvalue expression (EX_VAR/EX_DEREF/EX_INDEX/EX_MEMBER).
  * Returns a pointer-typed SSA value. */
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
@@ -4731,15 +4759,8 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
          * it (emitting the sret setup), then use the result as the lvalue. */
         return lower_expr(fn, st, e);
     }
-    case EX_INDEX: {
-        IRValue base = lower_expr(fn, st, e->u.idx.array);
-        IRValue idx  = lower_expr(fn, st, e->u.idx.index);
-        IRValue esize_v = lower_sizeof_type(fn, st, e->type, e->loc);
-        int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
-        IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
-        IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
-        return emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
-    }
+    case EX_INDEX:
+        return lower_index_addr(fn, st, e);
     case EX_MEMBER: {
         IRValue base = lower_lvalue_addr(fn, st, e->u.member.obj);
         /* Resolve the struct tag from the member object's type.  For `p->x`
@@ -9093,13 +9114,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     }
     case EX_INDEX: {
         /* Same as *(a + i*sizeof(elem)) for rvalue use. */
-        IRValue base = lower_expr(fn, st, e->u.idx.array);
-        IRValue idx  = lower_expr(fn, st, e->u.idx.index);
-        IRValue esize_v = lower_sizeof_type(fn, st, e->type, e->loc);
-        int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
-        IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
-        IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
-        IRValue addr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+        IRValue addr = lower_index_addr(fn, st, e);
         int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int u = e->type.is_unsigned;
         if (e->type.kind == TY_ARRAY) return addr;

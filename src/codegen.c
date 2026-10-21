@@ -3321,8 +3321,19 @@ static int peel_sib_scale(const IRFunction *fn, const int *def, IRValue idx,
     for (int depth = 0; depth < 8 && v >= 0 && v < fn->next_value_id
          && def[v] >= 0; depth++) {
         const IRInst *x = &fn->insts.data[def[v]];
+        int64_t imm;
         if (x->op == IR_COPY || x->op == IR_SEXT || x->op == IR_ZEXT) {
             v = x->a;
+            continue;
+        }
+        /* x±k stays a usable index (row[i-1] → (%base,%idx,scale)). */
+        if ((x->op == IR_ADD || x->op == IR_SUB)
+            && (ssa_const_imm(fn, def, x->b, &imm)
+                || (x->op == IR_ADD && ssa_const_imm(fn, def, x->a, &imm)))) {
+            if (ssa_const_imm(fn, def, x->b, &imm))
+                v = x->a;
+            else
+                v = x->b;
             continue;
         }
         if (x->op == IR_LOAD || x->op == IR_LOAD_PTR || x->op == IR_PARAM) {
