@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // runtime.fflush / runtime.perror: the remaining untested stdio entry points.  runtime.fflush on a
 // stream forces a buffered write; runtime.perror writes a diagnostic to runtime.stderr.
 // skip_oracle: clang

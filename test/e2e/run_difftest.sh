@@ -81,6 +81,15 @@ for f in $(find "$SUITE_DIR" -name '*.c' -not -path '*/debug/*' | sort); do
             continue
         fi
     fi
+    # MinGW is LLP64, abort() is exit 3, and its stdio does not match the
+    # runtime's glibc-shaped behavior.  e2e still runs these against expect:.
+    case "$HOST_TAG" in
+        windows-*)
+            if grep -qE '^//[[:space:]]*skip_oracle:.*windows' "$f"; then
+                continue
+            fi
+            ;;
+    esac
     # Platform-intrinsic skips: run_e2e.sh honours `unsupported_on: <os>-<arch>`
     # (e.g. darwin-arm64) for ABI limits no compiler can satisfy here.  difftest
     # must agree — if e2e will not run the case on this host, comparing it

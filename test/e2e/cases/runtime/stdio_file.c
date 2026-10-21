@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // stdio file I/O: runtime.fopen/runtime.fclose/runtime.fwrite/runtime.fread/runtime.fseek/runtime.ftell over a real
 // file in a temporary location.  Pin that bytes written can be read
 // skip_oracle: clang

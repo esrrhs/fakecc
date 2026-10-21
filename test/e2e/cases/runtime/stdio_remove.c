@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // expect: 0
 // remove() returns 0 on success and -1 on failure (not a raw -errno).
 // skip_oracle: clang

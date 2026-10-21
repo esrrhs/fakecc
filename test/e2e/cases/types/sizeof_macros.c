@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // GCC predefined __SIZEOF_* macros + __SIZE_TYPE__ / __WCHAR_TYPE__ /
 // __WINT_TYPE__ / __PTRDIFF_TYPE__ typedefs.  Each macro should equal the
 // real sizeof of the corresponding C type; the typedefs must be usable as

@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // expect: 0
 package main;
 typedef unsigned long uint64_t;

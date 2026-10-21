@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // runtime.strtol: converts a string to a long in a given base, reporting where
 // parsing stopped through an endptr.  Pin base-10, sign, endptr, hex,
 // skip_oracle: clang

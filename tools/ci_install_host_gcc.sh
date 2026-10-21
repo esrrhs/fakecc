@@ -55,8 +55,11 @@ fi
 sudo apt-get update
 sudo apt-get install -y software-properties-common
 retry sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-sudo apt-get update
-sudo apt-get install -y gcc-16 g++-16
+# add-apt-repository exits 0 even when the PPA index fetch returns 503, and
+# the following install then cannot see gcc-16.  Repeat the update until the
+# package is actually listed.
+retry bash -c 'sudo apt-get update && apt-cache show gcc-16 >/dev/null'
+retry sudo apt-get install -y gcc-16 g++-16
 
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$(command -v gcc-16)" "$HOME/.local/bin/gcc"

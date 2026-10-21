@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // sizeof(long) and sizeof(long long): both are 8 bytes on x86-64 SysV.
 // The compiler folds sizeof into a constant, so the result is just the
 // integer value.  Pin both, plus a long-long arithmetic that only works

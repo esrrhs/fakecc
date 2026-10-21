@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // expect: 0
 // scanf %[] scansets, including GNU a-z ranges and a leading ].
 // skip_oracle: clang

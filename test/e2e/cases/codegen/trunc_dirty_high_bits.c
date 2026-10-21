@@ -1,3 +1,4 @@
+// skip_oracle: windows
 // expect: 0
 // A narrowing cast must clear (or sign-extend over) the discarded high bits.
 // IR_TRUNC used to be a pure register-level no-op on the theory that narrower

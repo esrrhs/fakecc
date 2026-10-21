@@ -1,3 +1,4 @@
+// skip_oracle: windows
 /* PR optimization/15296.  The delayed-branch scheduler caused code that
    SEGV:d for CRIS; a register was set to -1 in a delay-slot for the
    fall-through code, while that register held a pointer used in code at
