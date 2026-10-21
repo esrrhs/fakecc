@@ -3512,12 +3512,37 @@ static int pure_addr_op(int op) {
     return op == IR_ADD || op == IR_MUL || op == IR_SEXT || op == IR_ZEXT;
 }
 
+/* Local-abs GEPs rematerialize into R_X86_64_32S, so load+store of the same
+ * address (bitfield RMW) can both fold even when the ADD has multiple uses
+ * and is not adjacent to every memop.  Other GEPs still need adjacent
+ * sole-use so a[i++] keeps a live pointer across i++. */
+static int local_abs_af(const IRModule *ir, const IRFunction *fn,
+                        const int *def, const int *alloca_off, IRValue v,
+                        IRValue *base_out, IRValue *idx_out, int *sc_out,
+                        int *disp_out) {
+    IRValue base = -1, idx = -1;
+    int sc = 0, disp = 0;
+    if (classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc, &disp)
+        != AF_SIB)
+        return 0;
+    {
+        const char *gn = peel_gaddr_name(fn, def, base);
+        if (!(gn && gaddr_is_local_abs(ir, gn))) return 0;
+    }
+    if (base_out) *base_out = base;
+    if (idx_out) *idx_out = idx;
+    if (sc_out) *sc_out = sc;
+    if (disp_out) *disp_out = disp;
+    return 1;
+}
+
 /* 1 when this dereference folds away the pointer SSA (uses base/index
  * instead).  Requires adjacent sole-use so shared GEPs (a[i++] load+store)
- * keep the address ADD live. */
-static int deref_folds_addr(const IRFunction *fn, const int *def,
-                            const int *alloca_off, const int *raw_uses,
-                            const IRInst *inst, size_t ii) {
+ * keep the address ADD live — except local-abs GEPs (see local_abs_af). */
+static int deref_folds_addr(const IRModule *ir, const IRFunction *fn,
+                            const int *def, const int *alloca_off,
+                            const int *raw_uses, const IRInst *inst,
+                            size_t ii) {
     if (!inst || (inst->op != IR_LOAD_PTR && inst->op != IR_STORE_PTR))
         return 0;
     IRValue v = inst->a;
@@ -3529,6 +3554,8 @@ static int deref_folds_addr(const IRFunction *fn, const int *def,
         && inst->width != 8)
         return 0;
     if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    if (local_abs_af(ir, fn, def, alloca_off, v, NULL, NULL, NULL, NULL))
+        return 1;
     if ((size_t)def[v] + 1 != ii) return 0;
     if (raw_uses && raw_uses[v] > 1) return 0;
     IRValue base = -1, idx = -1;
@@ -3560,12 +3587,19 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
             int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
+            int af_ok = 0;
             if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                 && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                    || inst->width == 8)
-                && adjacent && sole_use
-                && classify_ptr_addr(fn, def, alloca_off, inst->a,
-                                     &ab, &ai, &asc, &adisp) != AF_NONE) {
+                    || inst->width == 8)) {
+                if (local_abs_af(ir, fn, def, alloca_off, inst->a,
+                                 &ab, &ai, &asc, &adisp))
+                    af_ok = 1;
+                else if (adjacent && sole_use
+                         && classify_ptr_addr(fn, def, alloca_off, inst->a,
+                                              &ab, &ai, &asc, &adisp) != AF_NONE)
+                    af_ok = 1;
+            }
+            if (af_ok) {
             /* Local GADDR folds into R_X86_64_32S; no lea of the base.
              * A computed base (e.g. &buf[i] for buf[i][k]) must keep its
              * whole address expression live once the cell ADD is folded. */
@@ -3597,12 +3631,19 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
             int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
+            int af_ok = 0;
             if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                 && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                    || inst->width == 8)
-                && adjacent && sole_use
-                && classify_ptr_addr(fn, def, alloca_off, inst->a,
-                                     &ab, &ai, &asc, &adisp) != AF_NONE) {
+                    || inst->width == 8)) {
+                if (local_abs_af(ir, fn, def, alloca_off, inst->a,
+                                 &ab, &ai, &asc, &adisp))
+                    af_ok = 1;
+                else if (adjacent && sole_use
+                         && classify_ptr_addr(fn, def, alloca_off, inst->a,
+                                              &ab, &ai, &asc, &adisp) != AF_NONE)
+                    af_ok = 1;
+            }
+            if (af_ok) {
             if (ab >= 0) {
                 const char *gn = peel_gaddr_name(fn, def, ab);
                 if (!(gn && gaddr_is_local_abs(ir, gn)))
@@ -4189,7 +4230,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         for (size_t uj = fn->insts.len; uj-- > 0; ) {
             if (skip_body[uj]) continue;
             const IRInst *u = &fn->insts.data[uj];
-            if (deref_folds_addr(fn, ssa_def, alloca_off, raw_uses, u, uj)
+            if (deref_folds_addr(ir, fn, ssa_def, alloca_off, raw_uses, u, uj)
                 && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
                 uses_left[u->a]--;
             /* Live lea-folded GEPs read the index, not GADDR/MUL SSA. */
@@ -5420,12 +5461,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                              && ssa_def[inst->a] >= 0
                              && (size_t)ssa_def[inst->a] + 1 == j
                              && (inst->a < 0 || raw_uses[inst->a] <= 1);
-                if (!folded && af_adj
+                if (!folded
                     && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                        || inst->width == 8))
-                    af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
-                                                &af_base, &af_idx, &af_sc, &af_disp);
+                        || inst->width == 8)) {
+                    if (local_abs_af(ir, fn, ssa_def, alloca_off, inst->a,
+                                     &af_base, &af_idx, &af_sc, &af_disp))
+                        af_kind = AF_SIB;
+                    else if (af_adj)
+                        af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
+                                                    &af_base, &af_idx, &af_sc, &af_disp);
+                }
                 if (af_kind != AF_NONE && af_idx >= 0) {
                     IRValue inner = af_idx;
                     int psc = 0;
@@ -5535,12 +5581,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                              && ssa_def[inst->a] >= 0
                              && (size_t)ssa_def[inst->a] + 1 == j
                              && (inst->a < 0 || raw_uses[inst->a] <= 1);
-                if (!folded && af_adj
+                if (!folded
                     && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                        || inst->width == 8))
-                    af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
-                                                &af_base, &af_idx, &af_sc, &af_disp);
+                        || inst->width == 8)) {
+                    if (local_abs_af(ir, fn, ssa_def, alloca_off, inst->a,
+                                     &af_base, &af_idx, &af_sc, &af_disp))
+                        af_kind = AF_SIB;
+                    else if (af_adj)
+                        af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
+                                                    &af_base, &af_idx, &af_sc, &af_disp);
+                }
                 if (af_kind != AF_NONE && af_idx >= 0) {
                     IRValue inner = af_idx;
                     int psc = 0;
