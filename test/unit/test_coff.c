@@ -177,12 +177,28 @@ static void test_coff_mingw_read(void) {
           "int *mingw_p = &mingw_g;\n", f);
     fclose(f);
     char cmd[512];
+#ifdef _WIN32
     snprintf(cmd, sizeof cmd, "gcc -c -O0 -o \"%s\" \"%s\" 2>nul", obj, src);
+#else
+    snprintf(cmd, sizeof cmd, "gcc -c -O0 -o \"%s\" \"%s\" 2>/dev/null", obj, src);
+#endif
     int rc = system(cmd);
     if (rc != 0) {
         /* MinGW/gcc unavailable — skip without failing the suite. */
         remove(src);
         return;
+    }
+    /* Linux and macOS gcc write ELF or Mach-O, not AMD64 COFF. */
+    {
+        FILE *of = fopen(obj, "rb");
+        unsigned char mag[2] = {0, 0};
+        size_t nread = of ? fread(mag, 1, 2, of) : 0;
+        if (of) fclose(of);
+        if (nread != 2 || mag[0] != 0x64 || mag[1] != 0x86) {
+            remove(src);
+            remove(obj);
+            return;
+        }
     }
     target_set_current(target_x86_64_windows());
     EmitModule m;
