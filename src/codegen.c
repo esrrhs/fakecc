@@ -1799,6 +1799,19 @@ static void finish_gp_dst(Buffer *b, int acc, int dr, int dst, const RAResult *r
 static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_t *imm);
 static int imm_fits_i32(int64_t imm);
 
+/* gcc -O0: *2/4/8 → shl.  lea+shl for *3/5/9<<k is left to imul — on
+ * this microarch a single imul beats a longer lea/shl chain for array
+ * byte strides like *160. */
+static int emit_mul_imm_strength(Buffer *b, int acc, int64_t imm, int width) {
+    int sh;
+    if (imm == 2) sh = 1;
+    else if (imm == 4) sh = 2;
+    else if (imm == 8) sh = 3;
+    else return 0;
+    emit_shift_imm_w(b, 4, acc, sh, width);
+    return 1;
+}
+
 /* Binary integer ALU at native width, with gcc-O0-style immediates. */
 static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
                        const int *def, const RAResult *ra, int dr, int is_mul) {
@@ -1821,13 +1834,17 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
     if (fb) {
         acc = pick_alu_acc(dr, -1);
         ensure_reg(b, inst->a, acc, ra);
-        if (is_mul) emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
-        else emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_b, width);
+        if (is_mul && !emit_mul_imm_strength(b, acc, imm_b, width))
+            emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
+        else if (!is_mul)
+            emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_b, width);
     } else if (fa) {
         acc = pick_alu_acc(dr, -1);
         ensure_reg(b, inst->b, acc, ra);
-        if (is_mul) emit_imul_imm_w(b, acc, (int32_t)imm_a, width);
-        else emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_a, width);
+        if (is_mul && !emit_mul_imm_strength(b, acc, imm_a, width))
+            emit_imul_imm_w(b, acc, (int32_t)imm_a, width);
+        else if (!is_mul)
+            emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_a, width);
     } else {
         int bhome = gp_home(ra, inst->b);
         acc = pick_alu_acc(dr, bhome);

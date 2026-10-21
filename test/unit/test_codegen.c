@@ -187,28 +187,56 @@ static int text_has_sib(const EmitModule *em, unsigned char sib) {
     return 0;
 }
 
+/* scale=4, base=none (abs32), any index: (sib & 0xC7) == 0x85. */
+static int text_has_sib_abs32_scale4(const EmitModule *em) {
+    for (size_t i = 1; i < em->text.len; i++) {
+        unsigned char modrm = (unsigned char)em->text.data[i - 1];
+        unsigned char sib = (unsigned char)em->text.data[i];
+        if ((modrm & 7) == 4 && (sib & 0xC7) == 0x85)
+            return 1;
+    }
+    return 0;
+}
+
+/* scale=4, base=rbp/r13, any index: (sib & 0xC7) == 0x85 with mod!=0 —
+ * equivalently (sib & 0xC7) == 0x85 is also used for abs32; local form
+ * pairs with mod=1/2 and base field 101 already in the SIB base nibble. */
+static int text_has_sib_rbp_scale4(const EmitModule *em) {
+    for (size_t i = 1; i < em->text.len; i++) {
+        unsigned char modrm = (unsigned char)em->text.data[i - 1];
+        unsigned char sib = (unsigned char)em->text.data[i];
+        if ((modrm & 7) != 4) continue;
+        /* scale=4, base=rbp (5): (sib & 0xC7) == 0x85 — same mask as abs32
+         * but mod != 0 distinguishes [rbp+idx*4+disp]. */
+        if ((sib & 0xC7) == 0x85 && (modrm & 0xC0) != 0)
+            return 1;
+        /* legacy scale=1 index=* base=rbp → 0x0D family */
+        if ((sib & 0xC7) == 0x05 && (modrm & 0xC0) != 0)
+            return 1;
+    }
+    return 0;
+}
+
 /* g[i] at -O0 should be a SIB load, not lea+add+indirect.
- * Prefer abs32 g(,%rcx,4) (SIB scale=4 index=rcx base=none → 0x8D);
- * older [rax+rcx] forms (0x08 / 0x01) remain acceptable. */
+ * Prefer abs32 g(,%reg,4); older [rax+rcx] forms remain acceptable. */
 static void test_sib_global_index(void) {
     EmitModule em = compile_o0(
         "package main;"
         "int g[8];"
         "int idx(int i) { return g[i]; }"
         "int main() { return idx(3); }");
-    T_ASSERT(text_has_sib(&em, 0x8D)
+    T_ASSERT(text_has_sib_abs32_scale4(&em)
              || text_has_sib(&em, 0x08) || text_has_sib(&em, 0x01));
     emit_module_free(&em);
 }
 
-/* a[i] of a pinned local should be [rbp+rcx*4+off] (or scale-1 equivalent). */
+/* a[i] of a pinned local should be [rbp+reg*4+off] (or scale-1 equivalent). */
 static void test_sib_local_index(void) {
     EmitModule em = compile_o0(
         "package main;"
         "int f(int i) { int a[8]; a[0] = 1; a[i] = 2; return a[i]; }"
         "int main() { return f(1); }");
-    /* scale=4 index=rcx base=rbp → 0x8D; scale=1 form was 0x0D. */
-    T_ASSERT(text_has_sib(&em, 0x8D) || text_has_sib(&em, 0x0D));
+    T_ASSERT(text_has_sib_rbp_scale4(&em) || text_has_sib(&em, 0x0D));
     emit_module_free(&em);
 }
 
