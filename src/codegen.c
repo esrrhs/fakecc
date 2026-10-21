@@ -4701,11 +4701,32 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             fused_inv_at[uj] = (char)invert;
             fused_skip[ci] = 1;
             if (wi != ci) fused_skip[wi] = 1;
-            /* cmp/test against 0 on a sole-use frame load → cmpl $0, mem.
-             * Check raw_uses before mark_reg bumps the count. */
-            int64_t cimm0 = 0;
-            if (ssa_const_imm(fn, ssa_def, cmp->b, &cimm0) && cimm0 == 0
-                && cmp->a >= 0 && cmp->a < nvals_f && raw_uses[cmp->a] == 1
+            /* Fold cmp imm (incl. sole-use ZEXT of CONST) and cmpl $imm, mem. */
+            mark_reg(needed, ssa_uses_f, nvals_f, cmp->a);
+            int64_t cimm = 0;
+            int cb_imm = 0;
+            if (ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)) {
+                cb_imm = 1;
+                /* Imm is embedded in cmpl; drop a private CONST (roots already
+                 * marked it via the fused-away LT). */
+                if (cmp->b >= 0 && cmp->b < nvals_f && raw_uses[cmp->b] == 1)
+                    needed[cmp->b] = 0;
+            } else if (cmp->b >= 0 && cmp->b < nvals_f && raw_uses[cmp->b] == 1
+                       && value_unique_def(fn, cmp->b) && ssa_def[cmp->b] >= 0) {
+                const IRInst *x = &fn->insts.data[ssa_def[cmp->b]];
+                if ((x->op == IR_ZEXT || x->op == IR_TRUNC || x->op == IR_COPY)
+                    && ssa_const_imm(fn, ssa_def, x->a, &cimm) && cimm >= 0
+                    && imm_fits_i32(cimm)) {
+                    cb_imm = 1;
+                    fused_skip[ssa_def[cmp->b]] = 1;
+                    needed[cmp->b] = 0;
+                    if (x->a >= 0 && x->a < nvals_f && raw_uses[x->a] == 1)
+                        needed[x->a] = 0;
+                }
+            }
+            if (!cb_imm)
+                mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
+            if (cb_imm && cmp->a >= 0 && cmp->a < nvals_f && raw_uses[cmp->a] == 1
                 && ssa_def[cmp->a] >= 0) {
                 int li = ssa_def[cmp->a];
                 const IRInst *ld = &fn->insts.data[li];
@@ -4715,10 +4736,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     && fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &loff, 0))
                     fused_skip[li] = 1;
             }
-            mark_reg(needed, ssa_uses_f, nvals_f, cmp->a);
-            int64_t cimm;
-            if (!(ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)))
-                mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
         }
         /* Bare CBR of a sole-use frame int: cmpl $0, off(%rbp) (logic). */
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
@@ -5731,11 +5748,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         int ok = 0;
                         if (ssa_const_imm(fn, ssa_def, d->b, &imm)) ok = 1;
                         else if (ssa_const_imm(fn, ssa_def, d->a, &imm)) ok = 1;
+                        /* Non-negative mask: 32-bit and already zero-extends;
+                         * skip the retag movl (logic bump args / gcc -O0). */
                         if (ok && ((imm_fits_i32(imm) && imm >= 0
                                     && imm <= 0x7fffffff)
                                    || (imm_fits_bitwise_u32(imm)
-                                       && (imm & 0x80000000u) == 0)))
+                                       && (imm & 0x80000000u) == 0))) {
                             trunc_u = 1;
+                            trunc_nop = 1;
+                        }
                         break;
                     }
                 }
@@ -6596,9 +6617,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     int64_t cimmv = 0;
                     int cfb = ssa_const_imm(fn, ssa_def, cmp->b, &cimmv)
                               && imm_fits_i32(cimmv);
-                    /* cmpl $0, off(%rbp) when a is a sole-use frame load. */
+                    if (!cfb && cmp->b >= 0 && cmp->b < fn->next_value_id
+                        && ssa_def[cmp->b] >= 0 && fused_skip[ssa_def[cmp->b]]) {
+                        const IRInst *x = &fn->insts.data[ssa_def[cmp->b]];
+                        if ((x->op == IR_ZEXT || x->op == IR_TRUNC
+                             || x->op == IR_COPY)
+                            && ssa_const_imm(fn, ssa_def, x->a, &cimmv)
+                            && cimmv >= 0 && imm_fits_i32(cimmv))
+                            cfb = 1;
+                    }
+                    /* cmpl $imm, off(%rbp) when a is a sole-use frame load. */
                     int a_off = 0, a_mem = 0;
-                    if (cfb && cimmv == 0 && cmp->a >= 0
+                    if (cfb && cmp->a >= 0
                         && cmp->a < fn->next_value_id
                         && raw_uses[cmp->a] == 1 && ssa_def[cmp->a] >= 0
                         && fused_skip[ssa_def[cmp->a]]) {
@@ -6623,7 +6653,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (fused_inv_at[j])
                         cc ^= 1;
                     if (a_mem)
-                        emit_arith_imm32_disp(&out->text, 7, REG_RBP, 0, a_off);
+                        emit_arith_imm32_disp(&out->text, 7, REG_RBP,
+                                              (int32_t)cimmv, a_off);
                     else if (cfb && cimmv == 0)
                         emit_test_r_w(&out->text, ar, cwidth);
                     else if (cfb)
