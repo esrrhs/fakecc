@@ -2007,15 +2007,24 @@ static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_
 static int imm_fits_i32(int64_t imm);
 static int imm_fits_bitwise_u32(int64_t imm);
 
-/* gcc -O0: *2/4/8 → shl.  lea+shl for *3/5/9<<k is left to imul — on
- * this microarch a single imul beats a longer lea/shl chain for array
- * byte strides like *160. */
+/* gcc -O0: *2/4/8 → shl; *3/5/9 → lea [acc+acc*2/4/8].  Larger
+ * constants (e.g. array stride *160) stay as imul — one imul beats a
+ * longer lea/shl chain there. */
 static int emit_mul_imm_strength(Buffer *b, int acc, int64_t imm, int width) {
     int sh;
     if (imm == 2) sh = 1;
     else if (imm == 4) sh = 2;
     else if (imm == 8) sh = 3;
-    else return 0;
+    else if (imm == 3 || imm == 5 || imm == 9) {
+        /* lea acc, [acc+acc*2|4|8].  RSP cannot be an index. */
+        int sc = (imm == 3) ? 1 : (imm == 5) ? 2 : 3;
+        if ((acc & 7) == 4) return 0;
+        emit_rex_if(b, alu_w64(width), acc, acc, acc);
+        emit_byte(b, 0x8D);
+        emit_modrm_sib_disp(b, acc, acc, acc, sc, 0);
+        return 1;
+    } else
+        return 0;
     emit_shift_imm_w(b, 4, acc, sh, width);
     return 1;
 }
