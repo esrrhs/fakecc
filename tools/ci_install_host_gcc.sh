@@ -55,19 +55,17 @@ fi
 sudo apt-get update
 sudo apt-get install -y software-properties-common
 retry sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-# add-apt-repository exits 0 even when Launchpad answers 503.  A later
-# apt-get update also returns failure when only Translation-en 503s, and
-# then discards a Packages file that already listed gcc-16.  Skip
-# translations, ignore that exit, and keep going until the package is
-# actually visible.  The pool stays flaky for several minutes at a time.
+# Launchpad often answers 503, and a Translation-en failure makes apt discard
+# a Packages file that already listed gcc-16.  Try briefly, then fall back
+# to the conda-forge GCC 16.2.0 build so a dead PPA cannot burn the job.
 wait_for_gcc16() {
-    local attempts=12 delay=20 n=1
+    local attempts=4 delay=10 n=1
     while true; do
         sudo apt-get update \
-            -o Acquire::Retries=6 \
+            -o Acquire::Retries=2 \
             -o Acquire::Languages=none \
-            -o Acquire::https::Timeout=30 \
-            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::http::Timeout=20 \
             || true
         if apt-cache show gcc-16 >/dev/null 2>&1; then
             return 0
@@ -81,18 +79,40 @@ wait_for_gcc16() {
         n=$((n + 1))
     done
 }
-wait_for_gcc16
-retry sudo apt-get install -y \
-    -o Acquire::Retries=8 \
-    -o Acquire::Languages=none \
-    -o Acquire::https::Timeout=60 \
-    gcc-16 g++-16
-
+install_conda_gcc16() {
+    echo "Installing GCC 16.2.0 from conda-forge" >&2
+    mkdir -p "$HOME/.local/bin"
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        -o "$HOME/.local/bin/micromamba" \
+        https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64
+    chmod +x "$HOME/.local/bin/micromamba"
+    "$HOME/.local/bin/micromamba" create -y -p "$HOME/.local/gcc16" \
+        -c conda-forge gcc=16.2.0 gxx=16.2.0
+    ln -sfn "$HOME/.local/gcc16/bin/gcc" "$HOME/.local/bin/gcc"
+    ln -sfn "$HOME/.local/gcc16/bin/g++" "$HOME/.local/bin/g++"
+    if [ -x "$HOME/.local/gcc16/bin/gcov" ]; then
+        ln -sfn "$HOME/.local/gcc16/bin/gcov" "$HOME/.local/bin/gcov"
+    fi
+    local libdir="$HOME/.local/gcc16/lib"
+    if [ -n "${GITHUB_ENV:-}" ]; then
+        echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+    fi
+    export LD_LIBRARY_PATH="${libdir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+}
 mkdir -p "$HOME/.local/bin"
-ln -sfn "$(command -v gcc-16)" "$HOME/.local/bin/gcc"
-ln -sfn "$(command -v g++-16)" "$HOME/.local/bin/g++"
-if command -v gcov-16 >/dev/null 2>&1; then
-    ln -sfn "$(command -v gcov-16)" "$HOME/.local/bin/gcov"
+if wait_for_gcc16; then
+    retry sudo apt-get install -y \
+        -o Acquire::Retries=8 \
+        -o Acquire::Languages=none \
+        -o Acquire::https::Timeout=60 \
+        gcc-16 g++-16
+    ln -sfn "$(command -v gcc-16)" "$HOME/.local/bin/gcc"
+    ln -sfn "$(command -v g++-16)" "$HOME/.local/bin/g++"
+    if command -v gcov-16 >/dev/null 2>&1; then
+        ln -sfn "$(command -v gcov-16)" "$HOME/.local/bin/gcov"
+    fi
+else
+    install_conda_gcc16
 fi
 
 if [ -n "${GITHUB_PATH:-}" ]; then

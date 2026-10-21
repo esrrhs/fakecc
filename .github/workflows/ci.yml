@@ -321,7 +321,10 @@ jobs:
   fuzz:
     name: random program difftest${{ matrix.suffix }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Host GCC install falls back to a conda-forge download when Launchpad
+    # is down.  The 300-program difftest itself has finished inside half an
+    # hour; the extra room is for that download, not a longer fuzz.
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
