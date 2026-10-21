@@ -245,6 +245,14 @@ static void liv_add_use(LiveInfo *l, int pt) {
 
 /* Compute liveness for all SSA values in fn.
  * Returns a malloc'd LiveInfo array of length fn->next_value_id. */
+/* Vector SIMD ops store through `dst`: it is a pointer USE, not a
+ * defined SSA value.  Treating it as a def kills the address early and
+ * lets another value reuse its home before the store. */
+static int ir_op_vec_store(int op) {
+    return op == IR_VADD || op == IR_VSUB || op == IR_VMUL || op == IR_VDIV
+        || op == IR_VBAND || op == IR_VBOR || op == IR_VBXOR;
+}
+
 static LiveInfo *compute_liveness(const IRFunction *fn) {
     int nv = fn->next_value_id;
     if (nv <= 0) return NULL;
@@ -261,9 +269,11 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
             inst->op == IR_DBG_VALUE) continue;
 
         /* Definition */
-        if (inst->dst >= 0 && inst->dst < nv) {
+        if (inst->dst >= 0 && inst->dst < nv && !ir_op_vec_store(inst->op)) {
             liv[inst->dst].def_point = (int)i;
         }
+        if (ir_op_vec_store(inst->op) && inst->dst >= 0 && inst->dst < nv)
+            liv_add_use(&liv[inst->dst], (int)i);
         /* IR_CALL.b/c/d are return eightbytes (defs), not uses.  c and d
          * carry the third and fourth eightbyte of a wide HFA result, which
          * AAPCS64 returns in v2/v3; other calls leave them at -1. */
@@ -502,7 +512,12 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 }
             }
             if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
-                bs_set(&def_b[bi], inst->dst);
+                if (ir_op_vec_store(inst->op)) {
+                    if (!bs_test(&def_b[bi], inst->dst))
+                        bs_set(&use_b[bi], inst->dst);
+                } else {
+                    bs_set(&def_b[bi], inst->dst);
+                }
             }
             /* IR_CALL.b/c/d: second, third and fourth return eightbyte. */
             if (inst->op == IR_CALL) {
@@ -624,7 +639,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             }
 
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)) {
+                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)
+                && !ir_op_vec_store(inst->op)) {
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
@@ -646,6 +662,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->b);
+            if (ir_op_vec_store(inst->op) && inst->dst >= 0 && inst->dst < nv
+                && value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld))
+                bs_set(&live, inst->dst);
             if (inst->op == IR_RETURN) {
                 if (inst->c >= 0 && inst->c < nv &&
                     value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld))
@@ -710,7 +729,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             inst->op == IR_DBG_VALUE) continue;
 
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)) {
+                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)
+                && !ir_op_vec_store(inst->op)) {
                 BS_FOREACH(&live, other) {
                     if (!value_in_class(fn, (int)other, float_class, cls->exclude_16byte_ld))
                         continue;
@@ -766,6 +786,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->b);
+            if (ir_op_vec_store(inst->op) && inst->dst >= 0 && inst->dst < nv
+                && value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld))
+                bs_set(&live, inst->dst);
             if (inst->op == IR_RETURN) {
                 if (inst->c >= 0 && inst->c < nv &&
                     value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld))

@@ -3199,6 +3199,14 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
     if (pure_addr_op(inst->op) && inst->dst >= 0 && inst->dst < nv
         && uses_left && uses_left[inst->dst] == 0)
         return;
+    if (inst->op == IR_VADD || inst->op == IR_VSUB || inst->op == IR_VMUL
+        || inst->op == IR_VDIV || inst->op == IR_VBAND || inst->op == IR_VBOR
+        || inst->op == IR_VBXOR) {
+        mark_reg(needed, uses, nv, inst->dst);
+        mark_reg(needed, uses, nv, inst->a);
+        mark_reg(needed, uses, nv, inst->b);
+        return;
+    }
     if (alu_folds_imm(inst, 1, fn, def)) {
         mark_reg(needed, uses, nv, inst->a);
         return;
@@ -3690,6 +3698,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 raw_uses[u->a]++;
             if (u->op != IR_CBR && u->op != IR_CALL && u->b >= 0)
                 raw_uses[u->b]++;
+            if ((u->op == IR_VADD || u->op == IR_VSUB || u->op == IR_VMUL
+                 || u->op == IR_VDIV || u->op == IR_VBAND || u->op == IR_VBOR
+                 || u->op == IR_VBXOR)
+                && u->dst >= 0)
+                raw_uses[u->dst]++;
             if (u->op == IR_CALL) {
                 if (u->call_callee >= 0) raw_uses[u->call_callee]++;
                 for (int uk = 0; uk < u->call_nargs; uk++)

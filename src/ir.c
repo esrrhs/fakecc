@@ -1631,6 +1631,18 @@ static void pack_bitfield_host(char *bytes, int nbytes, int byte_off,
 
 static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
                               int size, SourceLoc loc) {
+    /* A plain 16-byte blob is one XMM move.  Two 8-byte GP copies are
+     * what made vector assignment at -O0 twice as slow as gcc. */
+    if (size == 16) {
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, src, -1, 0, 16, 1, loc);
+        fn->insts.data[fn->insts.len - 1].is_float = 1;
+        set_value_type(fn, v, 16, 0);
+        set_value_float(fn, v, 4);
+        emit_inst_w(fn, IR_STORE_PTR, -1, dst, v, 0, 16, 1, loc);
+        fn->insts.data[fn->insts.len - 1].is_float = 1;
+        return;
+    }
     if (size > STRUCT_COPY_MEMCPY_THRESHOLD) {
         /* Large copy: call memcpy(dst, src, size).  The caller is responsible
          * for declaring memcpy (it is not a builtin).  Emit a direct named
@@ -4973,7 +4985,7 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
 }
 
 static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
-                                  Type lt, Type rt, BinOp bop) {
+                                  Type lt, Type rt, BinOp bop, IRValue into) {
     if (fakecc_had_error()) return FAKECC_ERR;
     Type vt = lt.is_vector ? lt : rt;
     int total_sz = type_size(vt);
@@ -5044,8 +5056,13 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
 
     int is_int_div = ((bop == BOP_DIV || bop == BOP_MOD) && !is_float);
     if (is_cmp || is_shift || total_sz > 16 || is_int_div) {
-        IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
-        IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        IRValue dst_addr;
+        if (into >= 0) {
+            dst_addr = into;
+        } else {
+            IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+            dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        }
         for (int i = 0; i < count; i++) {
             IRValue l_off = emit_add_const(fn, l_addr, i * esz, e->loc);
             IRValue r_off = emit_add_const(fn, r_addr, i * esz, e->loc);
@@ -5145,8 +5162,13 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
     default: vop = IR_VADD; break;
     }
 
-    IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
-    IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    IRValue dst_addr;
+    if (into >= 0) {
+        dst_addr = into;
+    } else {
+        IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+        dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    }
     emit_inst_w(fn, vop, dst_addr, l_addr, r_addr, esz, total_sz, is_unsigned, e->loc);
     if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
     return dst_addr;
@@ -6194,7 +6216,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int r_is_ptr = (rt.kind == TY_PTR || rt.kind == TY_ARRAY);
         BinOp bop = e->u.bin.op;
         if (lt.is_vector || rt.is_vector) {
-            return lower_vector_binop(fn, st, e, lt, rt, bop);
+            return lower_vector_binop(fn, st, e, lt, rt, bop, -1);
         }
         if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
@@ -6714,6 +6736,23 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (dst < 0) return dst;
             i128_store2(fn, dst, p.lo, i128_pair_hi(fn, &p, e->loc), e->loc);
             return dst;
+        }
+        /* `v = a + b` on a local vector the rhs does not read: store the
+         * packed op into v.  A temporary plus a 16-byte copy is the whole
+         * -O0 gap against gcc for this shape. */
+        if (lv->type.is_vector && lv->kind == EX_VAR
+            && e->u.assign.rvalue && e->u.assign.rvalue->kind == EX_BINOP
+            && e->u.assign.rvalue->type.is_vector
+            && lv->u.var.name
+            && !expr_mentions_name(e->u.assign.rvalue, lv->u.var.name)) {
+            const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
+            if (entry && !entry->is_global) {
+                IRValue dst = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+                return lower_vector_binop(fn, st, e->u.assign.rvalue,
+                                         e->u.assign.rvalue->u.bin.l->type,
+                                         e->u.assign.rvalue->u.bin.r->type,
+                                         e->u.assign.rvalue->u.bin.op, dst);
+            }
         }
         IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
         int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
