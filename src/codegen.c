@@ -1952,6 +1952,7 @@ static void finish_gp_dst(Buffer *b, int acc, int dr, int dst, const RAResult *r
 
 static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_t *imm);
 static int imm_fits_i32(int64_t imm);
+static int imm_fits_bitwise_u32(int64_t imm);
 
 /* gcc -O0: *2/4/8 → shl.  lea+shl for *3/5/9<<k is left to imul — on
  * this microarch a single imul beats a longer lea/shl chain for array
@@ -1971,9 +1972,15 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
                        const int *def, const RAResult *ra, int dr, int is_mul) {
     int width = inst->width > 0 ? inst->width : 8;
     int64_t imm_a = 0, imm_b = 0;
-    int fb = ssa_const_imm(fn, def, inst->b, &imm_b) && imm_fits_i32(imm_b);
+    int bitwise = !is_mul && (inst->op == IR_BAND || inst->op == IR_BOR
+                              || inst->op == IR_BXOR);
+    int fb = ssa_const_imm(fn, def, inst->b, &imm_b)
+             && (imm_fits_i32(imm_b)
+                 || (bitwise && imm_fits_bitwise_u32(imm_b)));
     int fa = !is_mul && inst->op != IR_SUB &&
-             ssa_const_imm(fn, def, inst->a, &imm_a) && imm_fits_i32(imm_a);
+             ssa_const_imm(fn, def, inst->a, &imm_a)
+             && (imm_fits_i32(imm_a)
+                 || (bitwise && imm_fits_bitwise_u32(imm_a)));
     if (is_mul)
         fa = ssa_const_imm(fn, def, inst->a, &imm_a) && imm_fits_i32(imm_a);
     int acc;
@@ -1990,15 +1997,32 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
         ensure_reg(b, inst->a, acc, ra);
         if (is_mul && !emit_mul_imm_strength(b, acc, imm_b, width))
             emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
-        else if (!is_mul)
-            emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_b, width);
+        else if (!is_mul) {
+            /* u32 masks with the high bit set: 32-bit and/or/xor so the
+             * imm32 encoding matches the constant (REX.W would sign-extend
+             * 0xffffffe0 into 0xffffffffffffffe0). */
+            int ew = width;
+            int32_t enc = (int32_t)imm_b;
+            if (bitwise && !imm_fits_i32(imm_b) && imm_fits_bitwise_u32(imm_b)) {
+                ew = 4;
+                enc = (int32_t)(uint32_t)imm_b;
+            }
+            emit_arith_imm_w(b, imm_ext, acc, enc, ew);
+        }
     } else if (fa) {
         acc = pick_alu_acc(dr, -1);
         ensure_reg(b, inst->b, acc, ra);
         if (is_mul && !emit_mul_imm_strength(b, acc, imm_a, width))
             emit_imul_imm_w(b, acc, (int32_t)imm_a, width);
-        else if (!is_mul)
-            emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_a, width);
+        else if (!is_mul) {
+            int ew = width;
+            int32_t enc = (int32_t)imm_a;
+            if (bitwise && !imm_fits_i32(imm_a) && imm_fits_bitwise_u32(imm_a)) {
+                ew = 4;
+                enc = (int32_t)(uint32_t)imm_a;
+            }
+            emit_arith_imm_w(b, imm_ext, acc, enc, ew);
+        }
     } else {
         int bhome = gp_home(ra, inst->b);
         acc = pick_alu_acc(dr, bhome);
@@ -3176,6 +3200,13 @@ static int ssa_extended_const(const IRFunction *fn, const int *def,
     return 0;
 }
 
+/* Bitwise and/or/xor masks often live as unsigned 32-bit constants
+ * (0xffffffe0 for a 5-bit field clear).  Those fail imm_fits_i32 but encode
+ * as imm32; a 32-bit ALU op zero-extends into the 64-bit home (gcc -O0). */
+static int imm_fits_bitwise_u32(int64_t imm) {
+    return (uint64_t)imm <= 0xffffffffu;
+}
+
 static int imm_fits_i32(int64_t imm) {
     return imm == (int64_t)(int32_t)imm;
 }
@@ -3631,16 +3662,17 @@ static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
                          const int *def) {
     IRValue v = which ? inst->b : inst->a;
     int64_t imm;
-    if (!ssa_const_imm(fn, def, v, &imm) || !imm_fits_i32(imm)) return 0;
+    if (!ssa_const_imm(fn, def, v, &imm)) return 0;
     switch (inst->op) {
-    case IR_ADD:
     case IR_BAND:
     case IR_BOR:
     case IR_BXOR:
+        return imm_fits_i32(imm) || imm_fits_bitwise_u32(imm);
+    case IR_ADD:
     case IR_MUL:
-        return 1;
+        return imm_fits_i32(imm);
     case IR_SUB:
-        return which == 1;
+        return which == 1 && imm_fits_i32(imm);
     case IR_SHL:
     case IR_SHR:
     case IR_ROL:
@@ -3651,7 +3683,7 @@ static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
     case IR_LE:
     case IR_GT:
     case IR_GE:
-        return which == 1;
+        return which == 1 && imm_fits_i32(imm);
     default:
         return 0;
     }
