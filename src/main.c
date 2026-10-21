@@ -581,11 +581,22 @@ static void add_pkg_env_paths(PkgContext *ctx) {
     char *copy = xstrdup(env);
     char *p = copy;
     while (*p) {
-        char *colon = strchr(p, ':');
-        if (colon) *colon = '\0';
+        char *sep = NULL;
+        char *q;
+        for (q = p; *q; q++) {
+            /* A Windows drive prefix is "C:".  That colon is not a separator.
+             * ';' is the native PATH separator and is accepted as well. */
+            if (*q == ';') { sep = q; break; }
+#if defined(_WIN32)
+            if (*q == ':' && q != p + 1) { sep = q; break; }
+#else
+            if (*q == ':') { sep = q; break; }
+#endif
+        }
+        if (sep) *sep = '\0';
         if (*p) pkg_ctx_add_path(ctx, p);
-        if (!colon) break;
-        p = colon + 1;
+        if (!sep) break;
+        p = sep + 1;
     }
     free(copy);
 }

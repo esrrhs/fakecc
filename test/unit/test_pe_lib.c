@@ -16,10 +16,16 @@
 #define MKDIR(p) mkdir(p, 0755)
 #endif
 
-#define GCC "C:\\msys64\\mingw64\\bin\\gcc.exe"
-#define AR  "C:\\msys64\\mingw64\\bin\\ar.exe"
-#define MINGW_LIB "C:\\msys64\\mingw64\\lib"
 #define WORK "pe-lib-work"
+
+/* Filled in main from the well-known MSYS prefix or from PATH.  GitHub's
+ * setup-msys2 action does not install under C:\msys64. */
+static char g_gcc[512];
+static char g_ar[512];
+static char g_mingw_lib[512];
+#define GCC g_gcc
+#define AR g_ar
+#define MINGW_LIB g_mingw_lib
 
 static char g_cc[512];
 
@@ -739,6 +745,47 @@ static void test_native_windows_threads(void) {
     T_ASSERT(exit_is(run(cmd), 0));
 }
 
+static int file_ok(const char *p) {
+    FILE *fp = fopen(p, "rb");
+    if (!fp) return 0;
+    fclose(fp);
+    return 1;
+}
+
+static int search_path(char *out, size_t n, const char *exe) {
+    const char *path = getenv("PATH");
+    const char *p;
+    if (!path) return 0;
+    p = path;
+    while (*p) {
+        const char *semi = strchr(p, ';');
+        size_t len = semi ? (size_t)(semi - p) : strlen(p);
+        if (len > 0 && len + 1 + strlen(exe) < n) {
+            memcpy(out, p, len);
+            if (out[len - 1] != '\\' && out[len - 1] != '/') out[len++] = '\\';
+            memcpy(out + len, exe, strlen(exe) + 1);
+            if (file_ok(out)) return 1;
+        }
+        if (!semi) break;
+        p = semi + 1;
+    }
+    out[0] = 0;
+    return 0;
+}
+
+static void parent_lib(char *out, size_t n, const char *exe) {
+    char buf[512];
+    char *s;
+    snprintf(buf, sizeof buf, "%s", exe);
+    s = strrchr(buf, '\\');
+    if (!s) s = strrchr(buf, '/');
+    if (s) *s = 0;
+    s = strrchr(buf, '\\');
+    if (!s) s = strrchr(buf, '/');
+    if (s) *s = 0;
+    snprintf(out, n, "%s\\lib", buf);
+}
+
 int main(void) {
     const char *cands[] = {
         "..\\fakecc.exe", "..\\fakecc", ".\\fakecc.exe",
@@ -751,10 +798,19 @@ int main(void) {
     }
     T_ASSERT(g_cc[0] != 0);
     if (!g_cc[0]) return t_finalize();
-    FILE *gcc = fopen(GCC, "rb");
-    T_ASSERT(gcc != NULL);
-    if (gcc) fclose(gcc);
-    else return t_finalize();
+    if (file_ok("C:\\msys64\\mingw64\\bin\\gcc.exe"))
+        snprintf(g_gcc, sizeof g_gcc, "C:\\msys64\\mingw64\\bin\\gcc.exe");
+    else if (!search_path(g_gcc, sizeof g_gcc, "gcc.exe"))
+        g_gcc[0] = 0;
+    T_ASSERT(g_gcc[0] != 0);
+    if (!g_gcc[0]) return t_finalize();
+    if (file_ok("C:\\msys64\\mingw64\\bin\\ar.exe"))
+        snprintf(g_ar, sizeof g_ar, "C:\\msys64\\mingw64\\bin\\ar.exe");
+    else if (!search_path(g_ar, sizeof g_ar, "ar.exe"))
+        g_ar[0] = 0;
+    T_ASSERT(g_ar[0] != 0);
+    if (!g_ar[0]) return t_finalize();
+    parent_lib(g_mingw_lib, sizeof g_mingw_lib, g_gcc);
     MKDIR(WORK);
     test_static_archive();
     test_consume_mingw_dll();

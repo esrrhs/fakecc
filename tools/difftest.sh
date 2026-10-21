@@ -22,6 +22,7 @@ RUN_TIMEOUT=${RUN_TIMEOUT:-10}
 FCC_FLAGS=${FCC_FLAGS:-}
 # Oracle compiler: gcc on Linux, clang on macOS (both understand gnu99).
 ORACLE=${ORACLE:-gcc}
+ORACLE_HOST_FLAGS=${ORACLE_HOST_FLAGS:-}
 
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 
@@ -55,9 +56,13 @@ case "$(uname -s 2>/dev/null)" in
         if "$ORACLE" -O2 -o "$WORK/win_exit8.exe" "$TOOLS_DIR/win_exit8.c" 2>/dev/null; then
             WIN_EXIT8="$WORK/win_exit8.exe"
         fi
+        # MinGW defaults to 80-bit long double and MSVC bitfield layout.
+        # fakecc follows the 64-bit long double and the SysV field layout the
+        # Linux oracle uses, so the MinGW driver has to be told the same.
+        ORACLE_HOST_FLAGS="-mlong-double-64 -mno-ms-bitfields"
         ;;
 esac
-export WIN_EXIT8
+export WIN_EXIT8 ORACLE_HOST_FLAGS
 
 # Run prog and return its status.  On Windows the status is the low 8 bits
 # of the process exit code; elsewhere it is whatever bash already reports.
@@ -167,6 +172,7 @@ difftest_one() {
     if ! $ORACLE -std=gnu99 -D_GNU_SOURCE \
             -Wno-error=int-conversion -Wno-error=implicit-int \
             -Wno-error=incompatible-pointer-types \
+            $ORACLE_HOST_FLAGS \
             $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err" \
        || grep -qE 'implicit declaration|隐式声明' "$WORK/$name.gcc.err"; then
         {
@@ -224,6 +230,7 @@ PY
         if ! $ORACLE -std=gnu99 -D_GNU_SOURCE -w \
                 -Wno-error=int-conversion -Wno-error=implicit-int \
                 -Wno-error=incompatible-pointer-types \
+                $ORACLE_HOST_FLAGS \
                 $extra_flags -o "$WORK/$name.gcc" "$WORK/$name.gcc.c" -lm 2>"$WORK/$name.gcc.err"; then
             printf '%-28s FAIL (%s rejected: %s)\n' "$base" "$ORACLE" "$(head -1 "$WORK/$name.gcc.err")"
             return 1
@@ -245,6 +252,8 @@ PY
     fi
     local fcc_rc=0
     run_status "$WORK/$name.fcc" "$WORK/$name.fcc.out" "$WORK/$name.fcc.stderr" || fcc_rc=$?
+    tr -d '\r' < "$WORK/$name.gcc.out" > "$WORK/$name.gcc.out.n"
+    tr -d '\r' < "$WORK/$name.fcc.out" > "$WORK/$name.fcc.out.n"
 
     if [ "$fcc_rc" = "124" ] && [ "$gcc_rc" != "124" ]; then
         printf '%-28s DIFF (fakecc build did not terminate; gcc exits %s)\n' "$base" "$gcc_rc"
@@ -252,7 +261,7 @@ PY
     elif [ "$gcc_rc" != "$fcc_rc" ]; then
         printf '%-28s DIFF (gcc exits %s, fakecc exits %s)\n' "$base" "$gcc_rc" "$fcc_rc"
         return 1
-    elif ! cmp -s "$WORK/$name.gcc.out" "$WORK/$name.fcc.out"; then
+    elif ! cmp -s "$WORK/$name.gcc.out.n" "$WORK/$name.fcc.out.n"; then
         printf '%-28s DIFF (same exit %s, different stdout)\n' "$base" "$gcc_rc"
         return 1
     else

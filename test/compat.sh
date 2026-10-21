@@ -250,6 +250,10 @@ has_runpath() {
 # ---------------------------------------------------------------------------
 
 is_elf_host() {
+    # MSYS ships readelf, but the objects it inspects there are COFF.
+    case "$(uname -s 2>/dev/null)" in
+        MSYS*|MINGW*|CYGWIN*) return 1 ;;
+    esac
     command -v readelf >/dev/null 2>&1
 }
 
