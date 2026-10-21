@@ -1398,6 +1398,26 @@ static void emit_store_sib(Buffer *b, int base, int index, int scale2,
  *   movzx dst, symb(,%index,2^scale2) scale2 != 0
  *   movzx dst, symb                   index < 0
  * Returns the disp32 patch offset; caller records R_X86_64_32S. */
+/* lea dst, symb(%index) / symb(,%index,2^scale2) / symb — same forms as
+ * emit_load_abs32 but with opcode 8D.  Returns disp32 patch offset. */
+static size_t emit_lea_abs32(Buffer *b, int dst, int index, int scale2) {
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        emit_rex_if(b, 1, dst, 0, index);
+        emit_byte(b, 0x8D);
+        emit_modrm(b, 2, dst & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        emit_rex_if(b, 1, dst, idx, 0);
+        emit_byte(b, 0x8D);
+        emit_modrm(b, 0, dst & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
 static size_t emit_load_abs32(Buffer *b, int dst, int index, int scale2,
                               int width, int is_unsigned) {
     int op_w = (width == 1 || width == 2) ? 1 : (width >= 8 ? 1 : 0);
@@ -3396,6 +3416,49 @@ static void mark_live_index(char *needed, int *uses, int nv,
     }
 }
 
+/* ADD(local_gaddr, index_or_scaled) → lea dst, symb(,%idx,scale).
+ * Shared GEPs (bitfield RMW) keep a live pointer; folding the ADD into lea
+ * removes the lea/imul/add materialization while both load and store still
+ * share the resulting register. */
+static int match_lea_local_gep(const IRModule *ir, const IRFunction *fn,
+                               const int *def, const IRInst *add,
+                               IRValue *idx_out, int *scale2_out,
+                               const char **name_out) {
+    if (!ir || !add || add->op != IR_ADD) return 0;
+    IRValue base = -1, idx = -1;
+    int sc = 0;
+    if (gep_scaled_index(fn, def, add->a, &idx, &sc))
+        base = add->b;
+    else if (gep_scaled_index(fn, def, add->b, &idx, &sc))
+        base = add->a;
+    else if (isel_ok_index(fn, def, add->a)
+             && peel_gaddr_name(fn, def, add->b)) {
+        base = add->b;
+        idx = add->a;
+        sc = 0;
+    } else if (isel_ok_index(fn, def, add->b)
+               && peel_gaddr_name(fn, def, add->a)) {
+        base = add->a;
+        idx = add->b;
+        sc = 0;
+    } else {
+        return 0;
+    }
+    const char *gn = peel_gaddr_name(fn, def, base);
+    if (!gn || !gaddr_is_local_abs(ir, gn)) return 0;
+    IRValue inner = idx;
+    int psc = 0;
+    if (peel_sib_scale(fn, def, idx, &inner, &psc)) {
+        *idx_out = inner;
+        *scale2_out = psc;
+    } else {
+        *idx_out = idx;
+        *scale2_out = sc;
+    }
+    *name_out = gn;
+    return 1;
+}
+
 static void mark_inst_uses_needed(const IRInst *inst, char *needed,
                                 int *uses, int nv) {
     if (inst->op == IR_LABEL || inst->op == IR_BR || inst->op == IR_DBG_VALUE) return;
@@ -3537,6 +3600,16 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
     if (pure_addr_op(inst->op) && inst->dst >= 0 && inst->dst < nv
         && uses_left && uses_left[inst->dst] == 0)
         return;
+    if (inst->op == IR_ADD) {
+        IRValue li = -1;
+        int lsc = 0;
+        const char *ln = NULL;
+        if (match_lea_local_gep(ir, fn, def, inst, &li, &lsc, &ln)) {
+            if (li >= 0)
+                mark_live_index(needed, uses, nv, fn, def, li, 0);
+            return;
+        }
+    }
     if (inst->op == IR_VADD || inst->op == IR_VSUB || inst->op == IR_VMUL
         || inst->op == IR_VDIV || inst->op == IR_VBAND || inst->op == IR_VBOR
         || inst->op == IR_VBXOR) {
@@ -4089,6 +4162,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (deref_folds_addr(fn, ssa_def, alloca_off, raw_uses, u, uj)
                 && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
                 uses_left[u->a]--;
+            /* Live lea-folded GEPs read the index, not GADDR/MUL SSA. */
+            if (u->op == IR_ADD && u->dst >= 0 && u->dst < nvals_f
+                && uses_left[u->dst] > 0) {
+                IRValue li = -1;
+                int lsc = 0;
+                const char *ln = NULL;
+                if (match_lea_local_gep(ir, fn, ssa_def, u, &li, &lsc, &ln)) {
+                    if (u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+                        uses_left[u->a]--;
+                    if (u->b >= 0 && u->b < nvals_f && uses_left[u->b] > 0)
+                        uses_left[u->b]--;
+                    continue;
+                }
+            }
             if (!pure_addr_op(u->op) || u->dst < 0 || u->dst >= nvals_f
                 || uses_left[u->dst] != 0)
                 continue;
@@ -4712,7 +4799,28 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
 
-            case IR_ADD:
+            case IR_ADD: {
+                IRValue li = -1;
+                int lsc = 0;
+                const char *ln = NULL;
+                if (match_lea_local_gep(ir, fn, ssa_def, inst, &li, &lsc, &ln)) {
+                    int dst_gp = dr >= 0 ? dr : REG_RAX;
+                    if (li >= 0)
+                        ensure_reg(&out->text, li, REG_RCX, ra);
+                    int gsym = emit_module_find_symbol(out, ln);
+                    if (gsym >= 0 && out->syms[gsym].shndx != SECT_UNDEF) {
+                        size_t patch = emit_lea_abs32(
+                            &out->text, dst_gp,
+                            li >= 0 ? REG_RCX : -1, lsc);
+                        emit_module_add_reloc(out, patch, R_X86_64_32S,
+                                              gsym, 0);
+                        if (dr < 0)
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        break;
+                    }
+                }
+            }
+                /* fall through */
             case IR_SUB:
             case IR_BAND:
             case IR_BOR:
