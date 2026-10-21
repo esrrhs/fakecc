@@ -24,6 +24,9 @@ static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
 /* When set, a register-returned struct call stores into this address
  * instead of allocating a temporary and copying. */
 static IRValue g_call_ret_into = -1;
+/* When ≥0, EX_TERNARY stores each arm into this alloca instead of a temp
+ * (gcc -O0: `a = c ? a+b : …` writes `a` on both sides). */
+static IRValue g_tern_store_into = -1;
 
 static int align_up(int x, int align) {
     if (align <= 0) return x;
@@ -6681,7 +6684,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int rf = (e->type.kind == TY_FLOAT);
         int use_ptr = (rw > 8);
         IRValue slot, addr = -1;
-        if (use_ptr) {
+        if (!use_ptr && g_tern_store_into >= 0) {
+            /* Pinned locals must be written via STORE_PTR+ADDR (same as
+             * EX_ASSIGN); plain IR_STORE of a pinned alloca can land in a
+             * GP home instead of the frame slot. */
+            slot = g_tern_store_into;
+            g_tern_store_into = -1;
+            addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            use_ptr = 1;
+        } else if (use_ptr) {
             slot = emit_alloca(fn, rw, 8, 1, e->loc);
             addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         } else {
@@ -6866,6 +6877,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             if (src != dst)
                 emit_struct_copy_ex(fn, dst, src, type_size(lv->type), 0, e->loc);
             return dst;
+        }
+        /* `v = c ? x : y` into a pinned local: each arm stores into v
+         * (gcc -O0).  Only when pinned — -O1 promotes the slot. */
+        if (lv->kind == EX_VAR && e->u.assign.rvalue
+            && e->u.assign.rvalue->kind == EX_TERNARY
+            && lv->u.var.name && !lv->type.is_vector
+            && lv->type.kind != TY_STRUCT && !type_is_i128(lv->type)
+            && !lv->type.is_decimal
+            && (lv->type.width ? lv->type.width : 4) <= 8) {
+            const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
+            if (entry && !entry->is_global && entry->pinned) {
+                g_tern_store_into = entry->slot;
+                IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
+                if (g_tern_store_into >= 0) g_tern_store_into = -1;
+                return rv;
+            }
         }
         IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
         int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
