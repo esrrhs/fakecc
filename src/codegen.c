@@ -5593,6 +5593,34 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             || (inst->op == IR_SEXT && !ld->is_unsigned)))
                         already = 1;
                 }
+                /* SEXT of (x & mask) with mask clearing bit 31: result is
+                 * already non-negative in the low 32 bits (bitfield / (int)(u&k)).
+                 * Skip movsxd — gcc just keeps the and result. */
+                if (!already && inst->op == IR_SEXT && src_w == 4
+                    && inst->a >= 0 && inst->a < fn->next_value_id) {
+                    IRValue cur = inst->a;
+                    for (int depth = 0; depth < 6 && cur >= 0
+                         && cur < fn->next_value_id && ssa_def[cur] >= 0;
+                         depth++) {
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op == IR_COPY || d->op == IR_ZEXT
+                            || d->op == IR_TRUNC) {
+                            cur = d->a;
+                            continue;
+                        }
+                        if (d->op != IR_BAND) break;
+                        int64_t imm = 0;
+                        int ok = 0;
+                        if (ssa_const_imm(fn, ssa_def, d->b, &imm)) ok = 1;
+                        else if (ssa_const_imm(fn, ssa_def, d->a, &imm)) ok = 1;
+                        if (ok && ((imm_fits_i32(imm) && imm >= 0
+                                    && imm <= 0x7fffffff)
+                                   || (imm_fits_bitwise_u32(imm)
+                                       && (imm & 0x80000000u) == 0)))
+                            already = 1;
+                        break;
+                    }
+                }
                 ensure_reg(&out->text, inst->a, target, ra);
                 if (!already) {
                     if (inst->op == IR_SEXT)
