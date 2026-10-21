@@ -187,26 +187,28 @@ static int text_has_sib(const EmitModule *em, unsigned char sib) {
     return 0;
 }
 
-/* g[i] at -O0 should be movl (%rax,%rcx), not lea+add+indirect. */
+/* g[i] at -O0 should be a SIB load, not lea+add+indirect.
+ * Prefer abs32 g(,%rcx,4) (SIB scale=4 index=rcx base=none → 0x8D);
+ * older [rax+rcx] forms (0x08 / 0x01) remain acceptable. */
 static void test_sib_global_index(void) {
     EmitModule em = compile_o0(
         "package main;"
         "int g[8];"
         "int idx(int i) { return g[i]; }"
         "int main() { return idx(3); }");
-    /* [rax+rcx] SIB is 0x08; swapped [rcx+rax] is 0x01. */
-    T_ASSERT(text_has_sib(&em, 0x08) || text_has_sib(&em, 0x01));
+    T_ASSERT(text_has_sib(&em, 0x8D)
+             || text_has_sib(&em, 0x08) || text_has_sib(&em, 0x01));
     emit_module_free(&em);
 }
 
-/* a[i] of a pinned local should be [rbp+rcx+off] (SIB base=rbp index=rcx). */
+/* a[i] of a pinned local should be [rbp+rcx*4+off] (or scale-1 equivalent). */
 static void test_sib_local_index(void) {
     EmitModule em = compile_o0(
         "package main;"
         "int f(int i) { int a[8]; a[0] = 1; a[i] = 2; return a[i]; }"
         "int main() { return f(1); }");
-    /* SIB index=rcx (1), base=rbp (5) → 0x0D. */
-    T_ASSERT(text_has_sib(&em, 0x0D));
+    /* scale=4 index=rcx base=rbp → 0x8D; scale=1 form was 0x0D. */
+    T_ASSERT(text_has_sib(&em, 0x8D) || text_has_sib(&em, 0x0D));
     emit_module_free(&em);
 }
 

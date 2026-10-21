@@ -987,7 +987,36 @@ static int find_block_for_inst(const CFG *cfg, int inst_idx) {
 /* Spill-cost estimation                                               */
 /* ================================================================== */
 
-static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg) {
+/* LOAD / SEXT(LOAD i) style values are cheap to rematerialize from a
+ * pinned frame slot; prefer spilling other temporaries instead. */
+static int ssa_is_frame_ext(const IRFunction *fn, int v) {
+    int depth;
+    if (!fn || v < 0 || v >= fn->next_value_id) return 0;
+    for (depth = 0; depth < 6; depth++) {
+        size_t i;
+        const IRInst *d = NULL;
+        for (i = fn->insts.len; i > 0; ) {
+            i--;
+            if (fn->insts.data[i].dst == v) {
+                d = &fn->insts.data[i];
+                break;
+            }
+        }
+        if (!d) return 0;
+        if (d->op == IR_LOAD || d->op == IR_LOAD_PTR)
+            return 1;
+        if (d->op == IR_COPY || d->op == IR_SEXT || d->op == IR_ZEXT
+            || d->op == IR_TRUNC) {
+            v = d->a;
+            continue;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg,
+                              const IRFunction *fn) {
     const LiveInfo *l = &liv[v];
     int cost = 0;
     for (size_t i = 0; i < l->num_uses; i++) {
@@ -1000,7 +1029,10 @@ static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg) {
         cost += 1 + estimate_loop_depth(blk, cfg) * 10;
     }
     /* Prevent zero cost (even unused values need some cost). */
-    return cost > 0 ? cost : 1;
+    if (cost <= 0) cost = 1;
+    if (ssa_is_frame_ext(fn, v))
+        cost *= 64;
+    return cost;
 }
 
 /* ================================================================== */
@@ -1011,7 +1043,7 @@ static void greedy_color(const InterfGraph *g, const int *order,
                          const LiveInfo *liv, const CFG *cfg,
                          const uint32_t *forbid_mask,
                          int *colors, int *spill_slots, int *num_spills,
-                         const RegClass *cls) {
+                         const RegClass *cls, const IRFunction *fn) {
     int n = g->n;
     int k = cls->nregs;
     if (k > 32) {
@@ -1023,7 +1055,7 @@ static void greedy_color(const InterfGraph *g, const int *order,
     /* Track spill costs for eviction decisions. */
     int *spill_cost = xmalloc(n * sizeof(int));
     for (int v = 0; v < n; v++)
-        spill_cost[v] = compute_spill_cost(v, liv, cfg);
+        spill_cost[v] = compute_spill_cost(v, liv, cfg, fn);
 
     /* color = -1 means "not yet assigned / spilled pending decision"
      * We use -2 to mean "spilled" */
@@ -1163,7 +1195,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     memset(spill_slots, 0, nv * sizeof(int));
     int num_spills = 0;
     greedy_color(&g, order, liv, &cfg, forbid_mask,
-                 colors, spill_slots, &num_spills, cls);
+                 colors, spill_slots, &num_spills, cls, fn);
     free(forbid_mask);
 
     /* Map color indices (0..cls->nregs-1) to the backend's native register
