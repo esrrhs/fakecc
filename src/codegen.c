@@ -4856,11 +4856,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (inst->op == IR_MUL || inst->op == IR_SEXT
                         || inst->op == IR_ZEXT)
                         continue;
+                    /* Frame LOAD_PTR fused into a later SEXT (movsxd [rbp]). */
+                    if (inst->op == IR_LOAD_PTR || inst->op == IR_LOAD)
+                        continue;
                     if (inst->op == IR_ADD
                         && (fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0)
                             || classify_ptr_addr(fn, ssa_def, alloca_off, inst->dst,
                                                  &dummy_b, &dummy_idx,
                                                  &fold_off, &fold_off) != AF_NONE))
+                        continue;
+                }
+                /* Skip a frame load consumed only by the next fused SEXT. */
+                if ((inst->op == IR_LOAD_PTR || inst->op == IR_LOAD)
+                    && j + 1 < fn->insts.len) {
+                    const IRInst *nx = &fn->insts.data[j + 1];
+                    if (nx->op == IR_SEXT && nx->a == inst->dst
+                        && sext_folds_frame_load(fn, ssa_def, alloca_off,
+                                                 raw_uses, nx, NULL, NULL))
                         continue;
                 }
             }
