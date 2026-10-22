@@ -39,12 +39,13 @@ static int win_mkdir(const char *path, int mode) {
 }
 #define mkdir(path, mode) win_mkdir((path), (mode))
 
-static char *mkdtemp(char *tmpl) __attribute__((unused));
-static char *mkdtemp(char *tmpl) {
+static char *win_mkdtemp(char *tmpl) __attribute__((unused));
+static char *win_mkdtemp(char *tmpl) {
     if (_mktemp(tmpl) == NULL) return NULL;
     if (_mkdir(tmpl) != 0) return NULL;
     return tmpl;
 }
+#define mkdtemp(tmpl) win_mkdtemp(tmpl)
 
 /* Host path a MinGW process can create.  /tmp is an MSYS mount, not a path
  * the native runtime can open. */

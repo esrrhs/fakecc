@@ -278,8 +278,9 @@ jobs:
           fail_ci_if_error: true
 
   # Same jobs Linux runs, on the Windows x64 target: plain gcc, gcc -O2,
-  # ASan/UBSan, clang, clang -O2, and gcov.  ctest is the shared roster,
-  # including the fork-isolated unit tests, difftest, and the DWARF gdb suite.
+  # clang ASan/UBSan (MinGW gcc does not ship libasan), clang, clang -O2,
+  # and gcov.  ctest is the shared roster, including the fork-isolated unit
+  # tests, difftest, and the DWARF gdb suite.
   build-and-test-windows:
     name: ${{ matrix.config.label }}
     runs-on: windows-latest
@@ -301,12 +302,12 @@ jobs:
             cxx: g++
             cflags: "-O2"
             pkgs: ""
-          - label: windows-latest · gcc ASan
-            cc: gcc
-            cxx: g++
+          - label: windows-latest · clang ASan
+            cc: clang
+            cxx: clang++
             cflags: "-fsanitize=address,undefined -g -fno-omit-frame-pointer"
             ctest_args: "-E difftest_O1"
-            pkgs: mingw-w64-x86_64-libasan mingw-w64-x86_64-libubsan
+            pkgs: mingw-w64-x86_64-clang mingw-w64-x86_64-compiler-rt
           - label: windows-latest · clang
             cc: clang
             cxx: clang++
@@ -323,7 +324,7 @@ jobs:
             cflags: ""
             cov: true
             ctest_args: "-E difftest"
-            pkgs: lcov
+            pkgs: mingw-w64-x86_64-lcov
     steps:
       - uses: actions/checkout@v4
 
