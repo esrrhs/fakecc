@@ -114,6 +114,7 @@ void a64_lsl_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_lsr_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_asr_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_mul(A64Asm *a, int rd, int rn, int rm, int is64);
+void a64_umulh(A64Asm *a, int rd, int rn, int rm);
 void a64_msub(A64Asm *a, int rd, int rn, int rm, int ra, int is64);
 void a64_udiv(A64Asm *a, int rd, int rn, int rm, int is64);
 void a64_sdiv(A64Asm *a, int rd, int rn, int rm, int is64);

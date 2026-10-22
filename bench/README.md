@@ -6,12 +6,33 @@
 
 ```
 bench/
-├── run_bench.sh
+├── run_bench.sh    # 入口，转给 measure.py
+├── measure.py      # 计时与汇总
 └── cases/
     ├── sieve.c     # 埃氏筛
     ├── matmul.c    # 整型矩阵乘
     ├── nbody.c     # 小 n-body（牛顿开方，不链 libm）
-    └── chacha.c    # ChaCha 风格 ARX
+    ├── chacha.c    # ChaCha 风格 ARX
+    ├── struct.c    # 嵌套结构体、按值传递、按值返回
+    ├── switch.c    # 稠密 switch、稀疏 switch、case 范围
+    ├── recur.c     # 递归快排
+    ├── fptr.c      # 函数指针表
+    ├── vararg.c    # va_list / va_arg
+    ├── bitfield.c  # 位域
+    ├── vla.c       # 变长数组
+    ├── narrow.c    # char / short 提升
+    ├── float.c     # float 循环依赖
+    ├── pun.c       # union 重叠
+    ├── string.c    # 手写拷贝、比较、哈希
+    ├── cgoto.c     # 计算跳转
+    ├── stencil.c   # 三维数组
+    ├── logic.c     # 短路、三元、逗号
+    ├── sret.c      # 多参数与结构体返回
+    ├── i64.c       # 64 位乘除
+    ├── init.c      # 指定初始化、复合字面量
+    ├── stmt.c      # 语句表达式、typeof
+    ├── vec.c       # 整型向量
+    └── i128.c      # __int128
 ```
 
 ```bash
@@ -23,9 +44,20 @@ bash v0/stage2_check.sh
 bash bench/run_bench.sh v0/fakecc-1
 ```
 
-每个 case 用 fakecc `-O0`/`-O1` 和 gcc `-O0`/`-O1`/`-O2` 各编一份，warmup 一次后取 3 次 median。stdout 校验和必须一致；快慢只打印，不当失败条件。
+每个 case 用 fakecc `-O0`/`-O1` 和 gcc `-O0`/`-O1`/`-O2` 各编一份。stdout 必须一致，否则整套失败；快慢只打印，不当失败条件。
+
+计时对齐 [Google Benchmark](https://github.com/google/benchmark) 的重复试验，而不是固定 3 次墙钟：
+
+- 用 `perf stat -e task-clock` 做比较。这是进程真正占着 CPU 的时间，和 Google Benchmark 用的 `CLOCK_PROCESS_CPUTIME_ID` 是同一类钟。这台内核的 `getrusage` 一跳 4 ms，比噪声还粗，所以不用它。墙钟取同一次 perf 的 elapsed（子进程自己的墙钟，不含 perf 启动）。两边被抢占的比例差出 15 个百分点才标 `sched`；两边一起被抢占时，比值用的是 task-clock，不受影响。
+- 丢掉一次 warmup。它的 CPU 时间用来决定重复次数：凑满 `--min-time`（默认 0.5 s），至少 `--min-reps`（默认 5），不超过 `--max-reps`（默认 20）。`BENCH_RUNS=N` 则固定测 N 次。
+- 同优化级别下 fakecc 和 gcc 交替跑。公布的比值是两边 CPU 中位数之比；旁边再给逐对比值的中位数。两个数差一截，说明机器在这一轮里漂了。
+- 汇总是 mean、median、样本标准差（除以 n−1）和变异系数。变异系数超过 5% 标 `noisy`；中位数之比和逐对比值的中位数差超过 5% 标 `drift`；两边被抢占的比例差出 15 个百分点标 `sched`。
+
+每个 case 会改自己的全局数据，所以不能在进程里把函数体再循环一遍（第二遍测到的是已经被填满的表）。重复的是整个进程，对应 `--benchmark_repetitions`。
 
 ## 运行结果
+
+下面这张表是旧计时：丢掉一次 warmup，再取 3 次墙钟的中位数。新的 `measure.py` 换了钟和重复次数，不要和这张表直接比。
 
 机器：本机 x86-64。编译器：`./build/fakecc`（host 构建）、`gcc (GCC) 16.2.0`。  
 四份程序的 stdout 校验和与 gcc 完全一致。

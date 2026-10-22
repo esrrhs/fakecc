@@ -21,6 +21,12 @@ int g_flt_counter = 0;
 const StructRegistry *g_ir_structs = NULL;   /* set by ir_generate */
 const TranslationUnit *g_ir_tu = NULL;       /* set by ir_generate */
 static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
+/* When set, a register-returned struct call stores into this address
+ * instead of allocating a temporary and copying. */
+static IRValue g_call_ret_into = -1;
+/* When ≥0, EX_TERNARY stores each arm into this alloca instead of a temp
+ * (gcc -O0: `a = c ? a+b : …` writes `a` on both sides). */
+static IRValue g_tern_store_into = -1;
 
 static int align_up(int x, int align) {
     if (align <= 0) return x;
@@ -1423,8 +1429,11 @@ static IRValue emit_add_const(IRFunction *fn, IRValue ptr, int delta,
 typedef struct {
     IRValue lo;
     IRValue hi;  /* -1 if the field fits in 8 bytes */
+    IRValue addr; /* address of the (possibly narrowed) cell */
     int uw;      /* bytes in lo */
     int hi_w;    /* bytes in hi; 0 if none */
+    int bit_off; /* bit offset within lo after narrowing */
+    int byte_off;/* constant addend applied to the original addr */
 } BFUnit;
 
 static int bitfield_span_bytes(int bit_offset, int bit_width) {
@@ -1433,6 +1442,40 @@ static int bitfield_span_bytes(int bit_offset, int bit_width) {
     if (n < 1) n = 1;
     if (n > 16) n = 16;
     return n;
+}
+
+/* Pick the smallest power-of-two cell (1/2/4/8) that covers the field, like
+ * gcc -O0: flags.a uses a byte RMW, flags.b a halfword, etc.  LE only. */
+static void bf_narrow_params(int bit_offset, int bit_width, int decl_unit, int is_be,
+                             int *byte_off, int *uw, int *bit_off) {
+    int decl = decl_unit > 0 ? decl_unit : 4;
+    if (decl > 8) decl = 8;
+    if (decl < 1) decl = 1;
+    *byte_off = 0;
+    *uw = decl;
+    *bit_off = bit_offset;
+    if (is_be || bit_width <= 0 || bit_offset < 0) return;
+    if (bit_offset + bit_width > decl * 8) return; /* span path, or widened */
+    {
+        int first = bit_offset / 8;
+        int last = (bit_offset + bit_width - 1) / 8;
+        static const int sizes[] = {1, 2, 4, 8};
+        int i;
+        for (i = 0; i < 4; i++) {
+            int U = sizes[i];
+            int S;
+            if (U > decl) break;
+            if (U < last - first + 1) continue;
+            S = first - (first % U);
+            if (S < 0) continue;
+            if (S + U - 1 < last) continue;
+            if (S + U > decl) continue;
+            *byte_off = S;
+            *uw = U;
+            *bit_off = bit_offset - S * 8;
+            return;
+        }
+    }
 }
 
 static IRValue emit_iconst_w(IRFunction *fn, int64_t val, int w, int u, SourceLoc loc) {
@@ -1447,13 +1490,23 @@ static BFUnit emit_bf_load(IRFunction *fn, IRValue addr, int bit_offset, int bit
     int span = bitfield_span_bytes(bit_offset, bit_width);
     u.hi = -1;
     u.hi_w = 0;
+    u.byte_off = 0;
+    u.bit_off = bit_offset;
+    u.addr = addr;
     if (span <= 8) {
-        u.uw = unit_width ? unit_width : 4;
-        if (u.uw < 1) u.uw = 1;
-        if (u.uw > 8) u.uw = 8;
+        int boff = 0, uw = 0, bo = 0;
+        bf_narrow_params(bit_offset, bit_width, unit_width, is_be, &boff, &uw, &bo);
+        u.uw = uw;
+        u.bit_off = bo;
+        u.byte_off = boff;
+        if (boff)
+            u.addr = emit_add_const(fn, addr, boff, loc);
         u.lo = new_value(fn);
-        emit_inst_w(fn, IR_LOAD_PTR, u.lo, addr, -1, 0, u.uw, 1, loc);
+        emit_inst_w(fn, IR_LOAD_PTR, u.lo, u.addr, -1, 0, u.uw, 1, loc);
         if (is_be) u.lo = emit_bswap_val(fn, u.lo, u.uw, loc);
+        /* Promote narrow loads to 32-bit before mask/shift. */
+        if (u.uw < 4 && u.hi_w == 0)
+            u.lo = coerce(fn, u.lo, u.uw, 1, 4, 1, loc);
         return u;
     }
     u.uw = 8;
@@ -1468,23 +1521,40 @@ static BFUnit emit_bf_load(IRFunction *fn, IRValue addr, int bit_offset, int bit
     return u;
 }
 
-static void emit_bf_store(IRFunction *fn, IRValue addr, BFUnit u, int is_be, SourceLoc loc) {
-    IRValue lo = u.lo;
-    if (u.hi_w == 0 && is_be)
-        lo = emit_bswap_val(fn, lo, u.uw, loc);
-    emit_inst_w(fn, IR_STORE_PTR, -1, addr, lo, 0, u.uw, 1, loc);
+/* Bswap (BE only) before rematerializing the store address so STORE stays
+ * adjacent to its address ADD.  LE narrow stores keep a 32-bit payload —
+ * codegen emits movb/movw from the low part of the GP register. */
+static BFUnit bf_prepare_store_val(IRFunction *fn, BFUnit u, int is_be,
+                                   SourceLoc loc) {
+    int mem_w = u.uw;
+    if (u.hi_w == 0 && is_be) {
+        int work_w = mem_w < 4 ? 4 : mem_w;
+        if (mem_w < 4)
+            u.lo = coerce(fn, u.lo, work_w, 1, mem_w, 1, loc);
+        u.lo = emit_bswap_val(fn, u.lo, mem_w, loc);
+    }
+    return u;
+}
+
+static void emit_bf_store(IRFunction *fn, BFUnit u, int is_be, SourceLoc loc) {
+    (void)is_be;
+    emit_inst_w(fn, IR_STORE_PTR, -1, u.addr, u.lo, 0, u.uw, 1, loc);
     if (u.hi_w > 0) {
-        IRValue hi_addr = emit_add_const(fn, addr, 8, loc);
+        IRValue hi_addr = emit_add_const(fn, u.addr, 8, loc);
         emit_inst_w(fn, IR_STORE_PTR, -1, hi_addr, u.hi, 0, u.hi_w, 1, loc);
     }
 }
 
 static int bf_work_width(const BFUnit *u) {
-    return u->hi_w ? 8 : u->uw;
+    /* Narrow (byte/half) memops still do the mask/shift math in a GP
+     * register at ≥4 bytes — matching gcc -O0 (movzbl → and/or → movb). */
+    if (u->hi_w) return 8;
+    return u->uw < 4 ? 4 : u->uw;
 }
 
-static IRValue emit_bf_extract(IRFunction *fn, BFUnit u, int bit_offset, int bit_width,
+static IRValue emit_bf_extract(IRFunction *fn, BFUnit u, int bit_width,
                               SourceLoc loc) {
+    int bit_offset = u.bit_off;
     int ww = bf_work_width(&u);
     int64_t mask = bitfield_mask64(bit_width);
     IRValue v;
@@ -1516,8 +1586,9 @@ static IRValue emit_bf_extract(IRFunction *fn, BFUnit u, int bit_offset, int bit
     return masked;
 }
 
-static BFUnit emit_bf_insert(IRFunction *fn, BFUnit u, IRValue val, int bit_offset,
+static BFUnit emit_bf_insert(IRFunction *fn, BFUnit u, IRValue val,
                             int bit_width, SourceLoc loc) {
+    int bit_offset = u.bit_off;
     int ww = bf_work_width(&u);
     int64_t mask = bitfield_mask64(bit_width);
     IRValue vm = coerce(fn, val, get_value_width(fn, val), 1, ww, 1, loc);
@@ -1525,15 +1596,21 @@ static BFUnit emit_bf_insert(IRFunction *fn, BFUnit u, IRValue val, int bit_offs
     IRValue masked = new_value(fn);
     emit_inst_w(fn, IR_BAND, masked, vm, m, 0, ww, 1, loc);
     if (u.hi_w == 0) {
-        IRValue so = emit_iconst_w(fn, bit_offset, 8, 1, loc);
-        IRValue ms = new_value(fn);
-        emit_inst_w(fn, IR_SHL, ms, m, so, 0, ww, 1, loc);
-        IRValue nm = new_value(fn);
+        IRValue ms, nm, cleared, vs;
+        if (bit_offset > 0) {
+            IRValue so = emit_iconst_w(fn, bit_offset, 8, 1, loc);
+            ms = new_value(fn);
+            emit_inst_w(fn, IR_SHL, ms, m, so, 0, ww, 1, loc);
+            vs = new_value(fn);
+            emit_inst_w(fn, IR_SHL, vs, masked, so, 0, ww, 1, loc);
+        } else {
+            ms = m;
+            vs = masked;
+        }
+        nm = new_value(fn);
         emit_inst_w(fn, IR_BNOT, nm, ms, -1, 0, ww, 1, loc);
-        IRValue cleared = new_value(fn);
+        cleared = new_value(fn);
         emit_inst_w(fn, IR_BAND, cleared, u.lo, nm, 0, ww, 1, loc);
-        IRValue vs = new_value(fn);
-        emit_inst_w(fn, IR_SHL, vs, masked, so, 0, ww, 1, loc);
         u.lo = new_value(fn);
         emit_inst_w(fn, IR_BOR, u.lo, cleared, vs, 0, ww, 1, loc);
         return u;
@@ -1629,8 +1706,21 @@ static void pack_bitfield_host(char *bytes, int nbytes, int byte_off,
  * O(1) IR.  The cutoff balances code size against memcpy call overhead. */
 #define STRUCT_COPY_MEMCPY_THRESHOLD 64
 
-static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
-                              int size, SourceLoc loc) {
+/* Copy `size` bytes.  When `xmm16` is set and size is 16, use one movups
+ * (SIMD vectors).  Plain structs stay on GP 8-byte chunks so a call return
+ * that just wrote RAX/RDX can forward into the copy without an XMM stall. */
+static void emit_struct_copy_ex(IRFunction *fn, IRValue dst, IRValue src,
+                                int size, int xmm16, SourceLoc loc) {
+    if (xmm16 && size == 16) {
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, src, -1, 0, 16, 1, loc);
+        fn->insts.data[fn->insts.len - 1].is_float = 1;
+        set_value_type(fn, v, 16, 0);
+        set_value_float(fn, v, 4);
+        emit_inst_w(fn, IR_STORE_PTR, -1, dst, v, 0, 16, 1, loc);
+        fn->insts.data[fn->insts.len - 1].is_float = 1;
+        return;
+    }
     if (size > STRUCT_COPY_MEMCPY_THRESHOLD) {
         /* Large copy: call memcpy(dst, src, size).  The caller is responsible
          * for declaring memcpy (it is not a builtin).  Emit a direct named
@@ -1667,6 +1757,11 @@ static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
         off += w;
         size -= w;
     }
+}
+
+static void emit_struct_copy(IRFunction *fn, IRValue dst, IRValue src,
+                              int size, SourceLoc loc) {
+    emit_struct_copy_ex(fn, dst, src, size, 0, loc);
 }
 
 /* Load the SysV register eightbytes of an aggregate at `addr` into SSA
@@ -2528,32 +2623,8 @@ static void i128_neg(IRFunction *fn, IRValue dst, IRValue a, SourceLoc loc) {
 
 static void mul64_wide(IRFunction *fn, IRValue a, IRValue b,
                       IRValue *lo_out, IRValue *hi_out, SourceLoc loc) {
-    IRValue mask = i64imm(fn, 0xffffffffLL, loc);
-    IRValue sh32 = i64imm(fn, 32, loc);
-    IRValue a0 = emit_bin_w(fn, IR_BAND, a, mask, 8, 1, loc);
-    IRValue a1 = emit_bin_w(fn, IR_SHR, a, sh32, 8, 1, loc);
-    IRValue b0 = emit_bin_w(fn, IR_BAND, b, mask, 8, 1, loc);
-    IRValue b1 = emit_bin_w(fn, IR_SHR, b, sh32, 8, 1, loc);
-    IRValue p0 = emit_bin_w(fn, IR_MUL, a0, b0, 8, 1, loc);
-    IRValue p1 = emit_bin_w(fn, IR_MUL, a0, b1, 8, 1, loc);
-    IRValue p2 = emit_bin_w(fn, IR_MUL, a1, b0, 8, 1, loc);
-    IRValue p3 = emit_bin_w(fn, IR_MUL, a1, b1, 8, 1, loc);
-    IRValue p0h = emit_bin_w(fn, IR_SHR, p0, sh32, 8, 1, loc);
-    IRValue p1l = emit_bin_w(fn, IR_BAND, p1, mask, 8, 1, loc);
-    IRValue p2l = emit_bin_w(fn, IR_BAND, p2, mask, 8, 1, loc);
-    IRValue m = emit_bin_w(fn, IR_ADD, p0h, p1l, 8, 1, loc);
-    m = emit_bin_w(fn, IR_ADD, m, p2l, 8, 1, loc);
-    IRValue mh = emit_bin_w(fn, IR_SHR, m, sh32, 8, 1, loc);
-    IRValue p1h = emit_bin_w(fn, IR_SHR, p1, sh32, 8, 1, loc);
-    IRValue p2h = emit_bin_w(fn, IR_SHR, p2, sh32, 8, 1, loc);
-    IRValue hi = emit_bin_w(fn, IR_ADD, p3, p1h, 8, 1, loc);
-    hi = emit_bin_w(fn, IR_ADD, hi, p2h, 8, 1, loc);
-    hi = emit_bin_w(fn, IR_ADD, hi, mh, 8, 1, loc);
-    IRValue ml = emit_bin_w(fn, IR_BAND, m, mask, 8, 1, loc);
-    IRValue mls = emit_bin_w(fn, IR_SHL, ml, sh32, 8, 1, loc);
-    IRValue p0l = emit_bin_w(fn, IR_BAND, p0, mask, 8, 1, loc);
-    *lo_out = emit_bin_w(fn, IR_BOR, mls, p0l, 8, 1, loc);
-    *hi_out = hi;
+    *lo_out = emit_bin_w(fn, IR_MUL, a, b, 8, 1, loc);
+    *hi_out = emit_bin_w(fn, IR_UMULH, a, b, 8, 1, loc);
 }
 
 static void i128_mul(IRFunction *fn, IRValue dst, IRValue a, IRValue b,
@@ -3038,9 +3109,12 @@ static const IRSlot *irsymtable_find(const IRSymTable *st, const char *name) {
 
 /* Forward decl. */
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
+static void lower_cond_br(IRFunction *fn, IRSymTable *st, const Expr *e,
+                          int L_true, int L_false);
 static int fold_const_float(const Expr *e, long double *out, const IRModule *ir);
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceLoc loc);
+
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                        const FunctionDecl *cur_fd);
 
@@ -4441,6 +4515,123 @@ static IRValue scale_rhs(IRFunction *fn, IRSymTable *st, IRValue rhs, int is_ptr
     return coerce(fn, rhs, rw, ru, lw, lu, loc);
 }
 
+static int init_expr_is_implicit_zero(const Expr *e) {
+    /* lower_init_list treats this as a no-op and relies on emit_zero_bytes. */
+    return e && e->kind == EX_INT_LIT && e->u.int_val == 0 && e->int_hi == 0
+        && e->type.kind != TY_FLOAT && !e->type.is_decimal;
+}
+
+/* True when the initializer writes every byte, so the background zero is
+ * redundant.  Holes, padding, bitfields, unions, and implicit zeros still
+ * need it: a later store does not cover those bytes, and a bitfield update
+ * is a read-modify of the surrounding storage.  After sema, a non-union
+ * brace list is a dense positional array; a NULL element is an implicit zero. */
+static int init_covers_object(const Type *ty, const Expr *e) {
+    if (!ty || !e || init_expr_is_implicit_zero(e)) return 0;
+    if (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT && !ty->is_vector) {
+        return e->kind != EX_INIT_LIST || e->u.init_list.num_elements > 0;
+    }
+    if (e->kind != EX_INIT_LIST) {
+        if (e->kind == EX_STR && ty->kind == TY_ARRAY && ty->elem_type
+            && ty->elem_type->width == 1)
+            return ty->length > 0 && e->u.str.len >= ty->length;
+        return 0;
+    }
+    if (e->u.init_list.desig_kind) return 0;
+    if (ty->kind == TY_ARRAY || ty->is_vector) {
+        if (!ty->elem_type || ty->length < 0) return 0;
+        long long esz = type_size(*ty->elem_type);
+        if (esz <= 0 || type_size(*ty) != esz * ty->length) return 0;
+        if (e->u.init_list.num_elements != ty->length) return 0;
+        for (int i = 0; i < ty->length; i++)
+            if (!init_covers_object(ty->elem_type, e->u.init_list.elements[i]))
+                return 0;
+        return 1;
+    }
+    const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
+    if (!sd || sd->is_union || e->u.init_list.num_elements != sd->num_members)
+        return 0;
+    long long expect = 0;
+    for (int i = 0; i < sd->num_members; i++) {
+        const StructMember *sm = &sd->members[i];
+        if (sm->bit_width >= 0 || sm->offset != expect) return 0;
+        int sz = type_size(sm->type);
+        if (sz < 0) return 0;
+        if (!init_covers_object(&sm->type, e->u.init_list.elements[i])) return 0;
+        expect += sz;
+    }
+    return expect == type_size(*ty);
+}
+
+/* Conservative: an unhandled expression form is treated as a mention, so a
+ * destination is initialized in place only when none of its reads can see it. */
+static int expr_mentions_name(const Expr *e, const char *name) {
+    if (!e || !name) return 0;
+    switch (e->kind) {
+    case EX_INT_LIT: case EX_FLOAT_LIT: case EX_STR:
+    case EX_SIZEOF_TYPE: case EX_ALIGNOF_TYPE: case EX_LABEL_ADDR:
+        return 0;
+    case EX_VAR:
+        return e->u.var.name && strcmp(e->u.var.name, name) == 0;
+    case EX_BINOP:
+        return expr_mentions_name(e->u.bin.l, name)
+            || expr_mentions_name(e->u.bin.r, name);
+    case EX_UNARY: case EX_ADDR: case EX_DEREF: case EX_SIZEOF_EXPR:
+    case EX_ALIGNOF_EXPR:
+        return expr_mentions_name(e->kind == EX_UNARY ? e->u.un.operand
+                                  : e->kind == EX_ADDR ? e->u.addr.operand
+                                  : e->kind == EX_DEREF ? e->u.deref.operand
+                                  : e->kind == EX_SIZEOF_EXPR ? e->u.sizeof_e.operand
+                                  : e->u.alignof_e.operand, name);
+    case EX_ASSIGN:
+        return expr_mentions_name(e->u.assign.lvalue, name)
+            || expr_mentions_name(e->u.assign.rvalue, name);
+    case EX_CALL:
+        if (expr_mentions_name(e->u.call.callee, name)) return 1;
+        for (size_t i = 0; i < e->u.call.args.len; i++)
+            if (expr_mentions_name(e->u.call.args.data[i], name)) return 1;
+        return 0;
+    case EX_INDEX:
+        return expr_mentions_name(e->u.idx.array, name)
+            || expr_mentions_name(e->u.idx.index, name);
+    case EX_MEMBER:
+        return expr_mentions_name(e->u.member.obj, name);
+    case EX_CAST:
+        return expr_mentions_name(e->u.cast.operand, name);
+    case EX_TERNARY:
+        return expr_mentions_name(e->u.tern.cond, name)
+            || expr_mentions_name(e->u.tern.then, name)
+            || expr_mentions_name(e->u.tern.else_, name);
+    case EX_INC_DEC:
+        return expr_mentions_name(e->u.incdec.operand, name);
+    case EX_COMPOUND_ASSIGN:
+        return expr_mentions_name(e->u.comp.lvalue, name)
+            || expr_mentions_name(e->u.comp.rvalue, name);
+    case EX_COMMA:
+        return expr_mentions_name(e->u.comma.lhs, name)
+            || expr_mentions_name(e->u.comma.rhs, name);
+    case EX_INIT_LIST:
+        for (int i = 0; i < e->u.init_list.num_elements; i++)
+            if (expr_mentions_name(e->u.init_list.elements[i], name)) return 1;
+        return 0;
+    case EX_COMPOUND_LITERAL:
+        return expr_mentions_name(e->u.compound.init, name);
+    default:
+        return 1;
+    }
+}
+
+static int same_aggregate_type(const Type *a, const Type *b) {
+    if (!a || !b || a->kind != b->kind || a->is_vector != b->is_vector)
+        return 0;
+    if (a->kind == TY_ARRAY || a->is_vector)
+        return a->length == b->length && a->elem_type && b->elem_type
+            && type_size(*a->elem_type) == type_size(*b->elem_type);
+    if (a->kind == TY_STRUCT)
+        return a->tag && b->tag && strcmp(a->tag, b->tag) == 0;
+    return 0;
+}
+
 /* Materialize a compound literal's storage and return its address.
  * Used both as an lvalue (`&(int){42}`, `(struct S){}.x`) and as the
  * backing object whose scalar rvalue is then loaded. */
@@ -4452,9 +4643,38 @@ static IRValue lower_compound_literal_addr(IRFunction *fn, IRSymTable *st,
     if (total <= 0) total = 8;
     IRValue slot = emit_alloca(fn, total, 8, 1, e->loc);
     IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-    emit_zero_bytes(fn, addr, total, e->loc);
+    if (!init_covers_object(&target, e->u.compound.init))
+        emit_zero_bytes(fn, addr, total, e->loc);
     lower_init_list(fn, st, addr, &target, e->u.compound.init, e->loc);
     return addr;
+}
+
+/* &a[i] / decay of a[i] when a[i] is an array.  Fold a[0] to just a (no
+ * mul-by-stride of zero) and a[k] for constant k to a + k*esz so stencil-style
+ * row[0][x] becomes ADD(row, MUL(x,4)) and folds to (%reg,%idx,4). */
+static IRValue lower_index_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    IRValue base = lower_expr(fn, st, e->u.idx.array);
+    long long esz = type_size(e->type);
+    long long ic = 0;
+    /* Only fold constant indices when the element size is a known positive
+     * constant.  VLA rows (esz <= 0) must go through lower_sizeof_type. */
+    if (esz > 0 && fold_const_int(e->u.idx.index, &ic)) {
+        long long byte = ic * esz;
+        if (byte == 0) return base;
+        if (byte == (long long)(int)byte)
+            return emit_add_const(fn, base, (int)byte, e->loc);
+    }
+    {
+        IRValue idx = lower_expr(fn, st, e->u.idx.index);
+        int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
+        IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
+        IRValue off, esize_v;
+        if (esz == 1)
+            return emit_bin_w(fn, IR_ADD, base, idx8, 8, 1, e->loc);
+        esize_v = lower_sizeof_type(fn, st, e->type, e->loc);
+        off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
+        return emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+    }
 }
 
 /* Compute the address of an lvalue expression (EX_VAR/EX_DEREF/EX_INDEX/EX_MEMBER).
@@ -4489,15 +4709,8 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
          * it (emitting the sret setup), then use the result as the lvalue. */
         return lower_expr(fn, st, e);
     }
-    case EX_INDEX: {
-        IRValue base = lower_expr(fn, st, e->u.idx.array);
-        IRValue idx  = lower_expr(fn, st, e->u.idx.index);
-        IRValue esize_v = lower_sizeof_type(fn, st, e->type, e->loc);
-        int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
-        IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
-        IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
-        return emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
-    }
+    case EX_INDEX:
+        return lower_index_addr(fn, st, e);
     case EX_MEMBER: {
         IRValue base = lower_lvalue_addr(fn, st, e->u.member.obj);
         /* Resolve the struct tag from the member object's type.  For `p->x`
@@ -4514,15 +4727,21 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
         long long off = 0;
         if (sd)
             struct_lookup_member(g_ir_structs, sd, e->u.member.name, &off);
-        IRValue off_v = new_value(fn);
-        emit_inst_w(fn, IR_CONST, off_v, -1, -1, off, 8, 1, e->loc);
-        return emit_bin_w(fn, IR_ADD, base, off_v, 8, 1, e->loc);
+        return emit_add_const(fn, base, (int)off, e->loc);
     }
     case EX_COMPOUND_LITERAL:
         /* A compound literal yields an lvalue: its address is the base for `&`
          * or member access (e.g. `(struct S){1,2}.x`). */
         return lower_compound_literal_addr(fn, st, e);
-    default: break;
+    default:
+        /* Rvalue aggregates (complex arith like `__real (dc * dc)`, casts,
+         * ternaries, …) materialize to a stack slot and return that address
+         * from lower_expr — same contract as EX_CALL above.  Without this,
+         * member lowering of those temps fed LOAD_PTR a=-1 and crashed isel. */
+        if (e->type.kind == TY_STRUCT || e->type.is_vector
+            || type_is_pair16(e->type))
+            return lower_expr(fn, st, e);
+        break;
     }
     return -1;
 }
@@ -4879,7 +5098,7 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
 }
 
 static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
-                                  Type lt, Type rt, BinOp bop) {
+                                  Type lt, Type rt, BinOp bop, IRValue into) {
     if (fakecc_had_error()) return FAKECC_ERR;
     Type vt = lt.is_vector ? lt : rt;
     int total_sz = type_size(vt);
@@ -4950,8 +5169,13 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
 
     int is_int_div = ((bop == BOP_DIV || bop == BOP_MOD) && !is_float);
     if (is_cmp || is_shift || total_sz > 16 || is_int_div) {
-        IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
-        IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        IRValue dst_addr;
+        if (into >= 0) {
+            dst_addr = into;
+        } else {
+            IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+            dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+        }
         for (int i = 0; i < count; i++) {
             IRValue l_off = emit_add_const(fn, l_addr, i * esz, e->loc);
             IRValue r_off = emit_add_const(fn, r_addr, i * esz, e->loc);
@@ -5051,8 +5275,13 @@ static IRValue lower_vector_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
     default: vop = IR_VADD; break;
     }
 
-    IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
-    IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    IRValue dst_addr;
+    if (into >= 0) {
+        dst_addr = into;
+    } else {
+        IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+        dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    }
     emit_inst_w(fn, vop, dst_addr, l_addr, r_addr, esz, total_sz, is_unsigned, e->loc);
     if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
     return dst_addr;
@@ -5536,6 +5765,285 @@ static IRValue try_lower_rotate(IRFunction *fn, IRSymTable *st, const Expr *e) {
 
 /* Lower an expression to a value id, emitting instructions as needed.
  * Sema has annotated e->type; we lower operands and coerce them per UAC. */
+/* A 128-bit value kept as two 64-bit SSA halves.  hi_zero means the high
+ * half is the constant 0 and `hi` may be -1 until a consumer asks for it.
+ * Materializing every intermediate __int128 into a 16-byte temporary is
+ * what makes -O0 i128 arithmetic a long chain of stores and reloads. */
+typedef struct {
+    IRValue lo;
+    IRValue hi;
+    int hi_zero;
+} I128Pair;
+
+static IRValue i128_pair_hi(IRFunction *fn, I128Pair *p, SourceLoc loc) {
+    if (p->hi < 0)
+        p->hi = i64imm(fn, 0, loc);
+    return p->hi;
+}
+
+static void i128_pair_from_scalar(IRFunction *fn, IRValue v, SourceLoc loc,
+                                 I128Pair *out) {
+    int w = get_value_width(fn, v);
+    int u = get_value_is_unsigned(fn, v);
+    if (w <= 0) w = 4;
+    out->lo = coerce(fn, v, w, u, 8, u, loc);
+    if (u) {
+        out->hi = -1;
+        out->hi_zero = 1;
+    } else {
+        out->hi = emit_bin_w(fn, IR_SHR, out->lo, i64imm(fn, 63, loc), 8, 0, loc);
+        out->hi_zero = 0;
+    }
+}
+
+static void i128_pair_add(IRFunction *fn, I128Pair a, I128Pair b,
+                         SourceLoc loc, I128Pair *out) {
+    IRValue slo = emit_bin_w(fn, IR_ADD, a.lo, b.lo, 8, 1, loc);
+    IRValue carry = emit_bin_w(fn, IR_LT, slo, a.lo, 8, 1, loc);
+    carry = coerce(fn, carry, 4, 0, 8, 1, loc);
+    IRValue shi;
+    if (a.hi_zero && b.hi_zero)
+        shi = carry;
+    else if (b.hi_zero)
+        shi = emit_bin_w(fn, IR_ADD, a.hi, carry, 8, 1, loc);
+    else if (a.hi_zero)
+        shi = emit_bin_w(fn, IR_ADD, b.hi, carry, 8, 1, loc);
+    else {
+        IRValue mid = emit_bin_w(fn, IR_ADD, a.hi, b.hi, 8, 1, loc);
+        shi = emit_bin_w(fn, IR_ADD, mid, carry, 8, 1, loc);
+    }
+    out->lo = slo;
+    out->hi = shi;
+    out->hi_zero = 0;
+}
+
+static void i128_pair_sub(IRFunction *fn, I128Pair a, I128Pair b,
+                         SourceLoc loc, I128Pair *out) {
+    IRValue dlo = emit_bin_w(fn, IR_SUB, a.lo, b.lo, 8, 1, loc);
+    IRValue borrow = emit_bin_w(fn, IR_LT, a.lo, b.lo, 8, 1, loc);
+    borrow = coerce(fn, borrow, 4, 0, 8, 1, loc);
+    IRValue dhi;
+    if (a.hi_zero && b.hi_zero)
+        dhi = emit_bin_w(fn, IR_SUB, i64imm(fn, 0, loc), borrow, 8, 1, loc);
+    else if (b.hi_zero)
+        dhi = emit_bin_w(fn, IR_SUB, a.hi, borrow, 8, 1, loc);
+    else if (a.hi_zero) {
+        IRValue mid = emit_bin_w(fn, IR_SUB, i64imm(fn, 0, loc), b.hi, 8, 1, loc);
+        dhi = emit_bin_w(fn, IR_SUB, mid, borrow, 8, 1, loc);
+    } else {
+        IRValue mid = emit_bin_w(fn, IR_SUB, a.hi, b.hi, 8, 1, loc);
+        dhi = emit_bin_w(fn, IR_SUB, mid, borrow, 8, 1, loc);
+    }
+    out->lo = dlo;
+    out->hi = dhi;
+    out->hi_zero = 0;
+}
+
+static void i128_pair_mul(IRFunction *fn, I128Pair a, I128Pair b,
+                         SourceLoc loc, I128Pair *out) {
+    IRValue tlo, thi;
+    mul64_wide(fn, a.lo, b.lo, &tlo, &thi, loc);
+    IRValue hi = thi;
+    if (!a.hi_zero) {
+        IRValue p = emit_bin_w(fn, IR_MUL, a.hi, b.lo, 8, 1, loc);
+        hi = emit_bin_w(fn, IR_ADD, hi, p, 8, 1, loc);
+    }
+    if (!b.hi_zero) {
+        IRValue p = emit_bin_w(fn, IR_MUL, a.lo, b.hi, 8, 1, loc);
+        hi = emit_bin_w(fn, IR_ADD, hi, p, 8, 1, loc);
+    }
+    out->lo = tlo;
+    out->hi = hi;
+    out->hi_zero = 0;
+}
+
+static void i128_pair_bit(IRFunction *fn, IROpcode op, I128Pair a, I128Pair b,
+                         SourceLoc loc, I128Pair *out) {
+    out->lo = emit_bin_w(fn, op, a.lo, b.lo, 8, 1, loc);
+    if (op == IR_BAND && (a.hi_zero || b.hi_zero)) {
+        out->hi = -1;
+        out->hi_zero = 1;
+        return;
+    }
+    if ((op == IR_BOR || op == IR_BXOR) && a.hi_zero && b.hi_zero) {
+        out->hi = -1;
+        out->hi_zero = 1;
+        return;
+    }
+    if ((op == IR_BOR || op == IR_BXOR) && a.hi_zero) {
+        out->hi = b.hi;
+        out->hi_zero = 0;
+        return;
+    }
+    if ((op == IR_BOR || op == IR_BXOR) && b.hi_zero) {
+        out->hi = a.hi;
+        out->hi_zero = 0;
+        return;
+    }
+    out->hi = emit_bin_w(fn, op, i128_pair_hi(fn, &a, loc),
+                        i128_pair_hi(fn, &b, loc), 8, 1, loc);
+    out->hi_zero = 0;
+}
+
+static void i128_pair_bitnot(IRFunction *fn, I128Pair a, SourceLoc loc,
+                            I128Pair *out) {
+    IRValue nlo = new_value(fn);
+    emit_inst_w(fn, IR_BNOT, nlo, a.lo, -1, 0, 8, 1, loc);
+    out->lo = nlo;
+    if (a.hi_zero)
+        out->hi = i64imm(fn, -1, loc);
+    else {
+        IRValue nhi = new_value(fn);
+        emit_inst_w(fn, IR_BNOT, nhi, a.hi, -1, 0, 8, 1, loc);
+        out->hi = nhi;
+    }
+    out->hi_zero = 0;
+}
+
+static int i128_operand_shape(const Expr *e);
+
+/* True when the whole expression can be lowered as a (lo, hi) pair,
+ * with no 16-byte temporary between operations. */
+static int i128_pair_shape(const Expr *e) {
+    if (!e || !type_is_i128(e->type)) return 0;
+    switch (e->kind) {
+    case EX_INT_LIT:
+    case EX_VAR:
+    case EX_MEMBER:
+    case EX_INDEX:
+    case EX_DEREF:
+        return 1;
+    case EX_CAST:
+        if (e->u.cast.operand->type.kind == TY_FLOAT
+            || e->u.cast.operand->type.is_decimal
+            || e->u.cast.operand->type.is_vector)
+            return 0;
+        if (type_is_i128(e->u.cast.operand->type))
+            return i128_pair_shape(e->u.cast.operand);
+        return e->u.cast.operand->type.kind == TY_INT;
+    case EX_UNARY:
+        if (e->u.un.op != UOP_POS && e->u.un.op != UOP_NEG
+            && e->u.un.op != UOP_BITNOT)
+            return 0;
+        return i128_pair_shape(e->u.un.operand);
+    case EX_BINOP:
+        if (e->u.bin.op != BOP_ADD && e->u.bin.op != BOP_SUB
+            && e->u.bin.op != BOP_MUL && e->u.bin.op != BOP_BITAND
+            && e->u.bin.op != BOP_BITOR && e->u.bin.op != BOP_BITXOR)
+            return 0;
+        return i128_operand_shape(e->u.bin.l) && i128_operand_shape(e->u.bin.r);
+    default:
+        return 0;
+    }
+}
+
+static int i128_operand_shape(const Expr *e) {
+    if (!e) return 0;
+    if (type_is_i128(e->type)) return i128_pair_shape(e);
+    if (e->type.kind == TY_FLOAT || e->type.is_decimal || e->type.is_vector
+        || e->type.kind == TY_STRUCT || e->type.kind == TY_PTR
+        || e->type.kind == TY_ARRAY)
+        return 0;
+    return 1;
+}
+
+static void lower_i128_pair(IRFunction *fn, IRSymTable *st, const Expr *e,
+                           I128Pair *out);
+
+static void lower_i128_operand(IRFunction *fn, IRSymTable *st, const Expr *e,
+                              I128Pair *out) {
+    if (type_is_i128(e->type)) {
+        lower_i128_pair(fn, st, e, out);
+        return;
+    }
+    /* A non-negative integer widens with a zero high half.  Unsigned
+     * values do too, even when the low half's top bit is set. */
+    if (e->kind == EX_INT_LIT && e->int_hi == 0
+        && (e->type.is_unsigned || e->u.int_val >= 0)) {
+        IRValue v = lower_expr(fn, st, e);
+        int w = get_value_width(fn, v);
+        int u = get_value_is_unsigned(fn, v);
+        if (w <= 0) w = 4;
+        out->lo = coerce(fn, v, w, u, 8, u, e->loc);
+        out->hi = -1;
+        out->hi_zero = 1;
+        return;
+    }
+    i128_pair_from_scalar(fn, lower_expr(fn, st, e), e->loc, out);
+}
+
+static void lower_i128_pair(IRFunction *fn, IRSymTable *st, const Expr *e,
+                           I128Pair *out) {
+    switch (e->kind) {
+    case EX_INT_LIT:
+        out->lo = i64imm(fn, e->u.int_val, e->loc);
+        if (e->int_hi == 0) {
+            out->hi = -1;
+            out->hi_zero = 1;
+        } else {
+            out->hi = i64imm(fn, (int64_t)e->int_hi, e->loc);
+            out->hi_zero = 0;
+        }
+        return;
+    case EX_CAST:
+        if (type_is_i128(e->u.cast.operand->type))
+            lower_i128_pair(fn, st, e->u.cast.operand, out);
+        else
+            lower_i128_operand(fn, st, e->u.cast.operand, out);
+        return;
+    case EX_UNARY:
+        if (e->u.un.op == UOP_POS) {
+            lower_i128_pair(fn, st, e->u.un.operand, out);
+            return;
+        }
+        if (e->u.un.op == UOP_NEG) {
+            I128Pair z, a;
+            z.lo = i64imm(fn, 0, e->loc);
+            z.hi = -1;
+            z.hi_zero = 1;
+            lower_i128_pair(fn, st, e->u.un.operand, &a);
+            i128_pair_sub(fn, z, a, e->loc, out);
+            return;
+        }
+        {
+            I128Pair a;
+            lower_i128_pair(fn, st, e->u.un.operand, &a);
+            i128_pair_bitnot(fn, a, e->loc, out);
+            return;
+        }
+    case EX_BINOP: {
+        I128Pair l, r;
+        lower_i128_operand(fn, st, e->u.bin.l, &l);
+        lower_i128_operand(fn, st, e->u.bin.r, &r);
+        if (e->u.bin.op == BOP_ADD)
+            i128_pair_add(fn, l, r, e->loc, out);
+        else if (e->u.bin.op == BOP_SUB)
+            i128_pair_sub(fn, l, r, e->loc, out);
+        else if (e->u.bin.op == BOP_MUL)
+            i128_pair_mul(fn, l, r, e->loc, out);
+        else if (e->u.bin.op == BOP_BITAND)
+            i128_pair_bit(fn, IR_BAND, l, r, e->loc, out);
+        else if (e->u.bin.op == BOP_BITOR)
+            i128_pair_bit(fn, IR_BOR, l, r, e->loc, out);
+        else
+            i128_pair_bit(fn, IR_BXOR, l, r, e->loc, out);
+        return;
+    }
+    default: {
+        IRValue addr = lower_lvalue_addr(fn, st, e);
+        i128_load2(fn, addr, &out->lo, &out->hi, e->loc);
+        out->hi_zero = 0;
+        return;
+    }
+    }
+}
+
+static IRValue i128_pair_materialize(IRFunction *fn, I128Pair *p, SourceLoc loc) {
+    IRValue dst = i128_alloc(fn, loc);
+    i128_store2(fn, dst, p->lo, i128_pair_hi(fn, p, loc), loc);
+    return dst;
+}
+
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     if (fakecc_had_error()) return FAKECC_ERR;
     switch (e->kind) {
@@ -5821,13 +6329,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int r_is_ptr = (rt.kind == TY_PTR || rt.kind == TY_ARRAY);
         BinOp bop = e->u.bin.op;
         if (lt.is_vector || rt.is_vector) {
-            return lower_vector_binop(fn, st, e, lt, rt, bop);
+            return lower_vector_binop(fn, st, e, lt, rt, bop, -1);
         }
         if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
             return lower_complex_binop(fn, st, e, lt, rt, bop, -1);
         }
         if (type_is_i128(lt) || type_is_i128(rt) || type_is_i128(e->type)) {
+            if (type_is_i128(e->type) && i128_pair_shape(e)) {
+                I128Pair p;
+                lower_i128_pair(fn, st, e, &p);
+                return i128_pair_materialize(fn, &p, e->loc);
+            }
             IRValue lv = lower_expr(fn, st, e->u.bin.l);
             IRValue rv = lower_expr(fn, st, e->u.bin.r);
             return lower_i128_binop(fn, lv, rv, lt, rt, bop, e->type, e->loc);
@@ -5857,53 +6370,29 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return emit_dfp_arith(fn, w, aop, lv, rv, e->loc);
         }
         if (bop == BOP_AND || bop == BOP_OR) {
-            /* Short-circuit logical operators: lower to control flow writing a
-             * temporary alloca, then let mem2reg promote it into a φ-merged
-             * SSA value (no IR_PHI opcode needed).
-             *   a && b  →  t = a; if (!t) goto L_false; t = (b != 0);
-             *              goto L_done; L_false: t = 0; L_done: ... t
-             *   a || b  →  t = a; if (t) goto L_true; t = (b != 0);
-             *              goto L_done; L_true: t = 1; L_done: ... t */
+            /* Value context: branch on the short-circuit tree, then store
+             * a single 0/1.  Condition context (if/while/?:) uses
+             * lower_cond_br directly and never materializes. */
             IRValue slot = new_value(fn);
             emit_inst_w(fn, IR_ALLOCA, slot, -1, -1, 0, 4, 0, e->loc);
-
-            int L_true  = new_label(fn);
+            int L_true = new_label(fn);
             int L_false = new_label(fn);
-            int L_done  = new_label(fn);
-
-            IRValue lv = lower_expr(fn, st, e->u.bin.l);
-            emit_cbr(fn, cbr_from_scalar(fn, lv, e->loc), L_true, L_false, e->loc);
-
+            int L_done = new_label(fn);
+            lower_cond_br(fn, st, e, L_true, L_false);
             emit_label(fn, L_true, e->loc);
-            IRValue true_val;
-            if (bop == BOP_OR) {
-                /* a != 0 → result is 1, b not evaluated (short-circuit). */
-                true_val = new_value(fn);
-                emit_inst_w(fn, IR_CONST, true_val, -1, -1, 1, 4, 0, e->loc);
-            } else {
-                IRValue rv = lower_expr(fn, st, e->u.bin.r);
-                int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                int rf = get_value_is_float(fn, rv);
-                true_val = bool_normalize(fn, rv, rw, ru, rf, e->loc);
+            {
+                IRValue one = new_value(fn);
+                emit_inst_w(fn, IR_CONST, one, -1, -1, 1, 4, 0, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, slot, one, 0, 4, 0, e->loc);
             }
-            emit_inst_w(fn, IR_STORE, -1, slot, true_val, 0, 4, 0, e->loc);
             emit_br(fn, L_done, e->loc);
-
             emit_label(fn, L_false, e->loc);
-            IRValue false_val;
-            if (bop == BOP_AND) {
-                /* a == 0 → result is 0, b not evaluated (short-circuit). */
-                false_val = new_value(fn);
-                emit_inst_w(fn, IR_CONST, false_val, -1, -1, 0, 4, 0, e->loc);
-            } else {
-                IRValue rv = lower_expr(fn, st, e->u.bin.r);
-                int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
-                int rf = get_value_is_float(fn, rv);
-                false_val = bool_normalize(fn, rv, rw, ru, rf, e->loc);
+            {
+                IRValue zero = new_value(fn);
+                emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, 4, 0, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, slot, zero, 0, 4, 0, e->loc);
             }
-            emit_inst_w(fn, IR_STORE, -1, slot, false_val, 0, 4, 0, e->loc);
             emit_br(fn, L_done, e->loc);
-
             emit_label(fn, L_done, e->loc);
             IRValue result = new_value(fn);
             emit_inst_w(fn, IR_LOAD, result, slot, -1, 0, 4, 0, e->loc);
@@ -6055,8 +6544,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_then = new_label(fn);
             int L_else = new_label(fn);
             int L_done = new_label(fn);
-            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+            lower_cond_br(fn, st, e->u.tern.cond, L_then, L_else);
             emit_label(fn, L_then, e->loc);
             if (e->u.tern.then)
                 lower_expr(fn, st, e->u.tern.then);
@@ -6073,12 +6561,21 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_then = new_label(fn);
             int L_else = new_label(fn);
             int L_done = new_label(fn);
-            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+            IRValue cond = -1;
+            if (e->u.tern.then)
+                lower_cond_br(fn, st, e->u.tern.cond, L_then, L_else);
+            else {
+                /* GNU `c ?: y`: keep the condition value for the then arm. */
+                cond = lower_expr(fn, st, e->u.tern.cond);
+                emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc),
+                         L_then, L_else, e->loc);
+            }
             emit_label(fn, L_then, e->loc);
             {
-                IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
-                Type then_ty = e->u.tern.then ? e->u.tern.then->type : e->u.tern.cond->type;
+                IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then)
+                                            : cond;
+                Type then_ty = e->u.tern.then ? e->u.tern.then->type
+                                             : e->u.tern.cond->type;
                 IRValue ta = i128_as_addr(fn, tv, then_ty,
                                           e->type.is_unsigned, e->loc);
                 emit_struct_copy(fn, addr, ta, 16, e->loc);
@@ -6105,8 +6602,13 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int L_then = new_label(fn);
             int L_else = new_label(fn);
             int L_done = new_label(fn);
-            IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+            if (e->u.tern.then)
+                lower_cond_br(fn, st, e->u.tern.cond, L_then, L_else);
+            else {
+                IRValue cond = lower_expr(fn, st, e->u.tern.cond);
+                emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc),
+                         L_then, L_else, e->loc);
+            }
 
             emit_label(fn, L_then, e->loc);
             {
@@ -6190,7 +6692,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int rf = (e->type.kind == TY_FLOAT);
         int use_ptr = (rw > 8);
         IRValue slot, addr = -1;
-        if (use_ptr) {
+        if (!use_ptr && g_tern_store_into >= 0) {
+            /* Pinned locals must be written via STORE_PTR+ADDR (same as
+             * EX_ASSIGN); plain IR_STORE of a pinned alloca can land in a
+             * GP home instead of the frame slot. */
+            slot = g_tern_store_into;
+            g_tern_store_into = -1;
+            addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            use_ptr = 1;
+        } else if (use_ptr) {
             slot = emit_alloca(fn, rw, 8, 1, e->loc);
             addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         } else {
@@ -6201,8 +6711,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         int L_then = new_label(fn);
         int L_else = new_label(fn);
         int L_done = new_label(fn);
-        IRValue cond = lower_expr(fn, st, e->u.tern.cond);
-        emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc), L_then, L_else, e->loc);
+        IRValue cond = -1;
+        if (e->u.tern.then)
+            lower_cond_br(fn, st, e->u.tern.cond, L_then, L_else);
+        else {
+            cond = lower_expr(fn, st, e->u.tern.cond);
+            emit_cbr(fn, cbr_from_scalar(fn, cond, e->loc),
+                     L_then, L_else, e->loc);
+        }
         emit_label(fn, L_then, e->loc);
         IRValue tv = e->u.tern.then ? lower_expr(fn, st, e->u.tern.then) : cond;
         int tw = get_value_width(fn, tv), tu = get_value_is_unsigned(fn, tv), tf = get_value_is_float(fn, tv);
@@ -6327,6 +6843,65 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     }
     case EX_ASSIGN: {
         Expr *lv = e->u.assign.lvalue;
+        if (type_is_i128(lv->type) && i128_pair_shape(e->u.assign.rvalue)
+            && (lv->kind == EX_VAR || lv->kind == EX_DEREF
+                || lv->kind == EX_INDEX || lv->kind == EX_MEMBER)) {
+            I128Pair p;
+            lower_i128_pair(fn, st, e->u.assign.rvalue, &p);
+            IRValue dst = lower_lvalue_addr(fn, st, lv);
+            if (dst < 0) return dst;
+            i128_store2(fn, dst, p.lo, i128_pair_hi(fn, &p, e->loc), e->loc);
+            return dst;
+        }
+        /* `v = a + b` on a local vector the rhs does not read: store the
+         * packed op into v.  A temporary plus a 16-byte copy is the whole
+         * -O0 gap against gcc for this shape. */
+        if (lv->type.is_vector && lv->kind == EX_VAR
+            && e->u.assign.rvalue && e->u.assign.rvalue->kind == EX_BINOP
+            && e->u.assign.rvalue->type.is_vector
+            && lv->u.var.name
+            && !expr_mentions_name(e->u.assign.rvalue, lv->u.var.name)) {
+            const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
+            if (entry && !entry->is_global) {
+                IRValue dst = emit_bin_w(fn, IR_ADDR, entry->slot, -1, 8, 1, e->loc);
+                return lower_vector_binop(fn, st, e->u.assign.rvalue,
+                                         e->u.assign.rvalue->u.bin.l->type,
+                                         e->u.assign.rvalue->u.bin.r->type,
+                                         e->u.assign.rvalue->u.bin.op, dst);
+            }
+        }
+        /* `p = f();` with a register-returned struct: store into p. */
+        if (e->u.assign.rvalue && e->u.assign.rvalue->kind == EX_CALL
+            && lv->type.kind == TY_STRUCT && !lv->type.is_vector
+            && !type_is_i128(lv->type)
+            && same_aggregate_type(&lv->type, &e->u.assign.rvalue->type)
+            && (lv->kind == EX_VAR || lv->kind == EX_DEREF
+                || lv->kind == EX_INDEX || lv->kind == EX_MEMBER)) {
+            IRValue dst = lower_lvalue_addr(fn, st, lv);
+            if (dst < 0) return dst;
+            g_call_ret_into = dst;
+            IRValue src = lower_expr(fn, st, e->u.assign.rvalue);
+            if (g_call_ret_into >= 0) g_call_ret_into = -1;
+            if (src != dst)
+                emit_struct_copy_ex(fn, dst, src, type_size(lv->type), 0, e->loc);
+            return dst;
+        }
+        /* `v = c ? x : y` into a pinned local: each arm stores into v
+         * (gcc -O0).  Only when pinned — -O1 promotes the slot. */
+        if (lv->kind == EX_VAR && e->u.assign.rvalue
+            && e->u.assign.rvalue->kind == EX_TERNARY
+            && lv->u.var.name && !lv->type.is_vector
+            && lv->type.kind != TY_STRUCT && !type_is_i128(lv->type)
+            && !lv->type.is_decimal
+            && (lv->type.width ? lv->type.width : 4) <= 8) {
+            const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
+            if (entry && !entry->is_global && entry->pinned) {
+                g_tern_store_into = entry->slot;
+                IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
+                if (g_tern_store_into >= 0) g_tern_store_into = -1;
+                return rv;
+            }
+        }
         IRValue rv = lower_expr(fn, st, e->u.assign.rvalue);
         int rw = get_value_width(fn, rv), ru = get_value_is_unsigned(fn, rv);
         int rf = get_value_is_float(fn, rv);
@@ -6370,10 +6945,6 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         /* Slice 13 — struct lvalue: both sides are pointers (a struct value is
          * its byte address), so copy the bytes instead of storing the pointer. */
         if (lv->type.kind == TY_STRUCT || lv->type.is_vector || type_is_i128(lv->type)) {
-            IRValue src = rv;
-            if (type_is_i128(lv->type))
-                src = i128_as_addr(fn, rv, e->u.assign.rvalue->type,
-                                   lv->type.is_unsigned, e->loc);
             IRValue dst;
             if (lv->kind == EX_VAR) {
                 const IRSlot *entry = irsymtable_find(st, lv->u.var.name);
@@ -6405,7 +6976,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 emit_struct_copy(fn, dst, cplx_rv, type_size(lv->type), e->loc);
                 return dst;
             }
-            emit_struct_copy(fn, dst, src, type_size(lv->type), e->loc);
+            IRValue src = rv;
+            if (type_is_i128(lv->type))
+                src = i128_as_addr(fn, rv, e->u.assign.rvalue->type,
+                                   lv->type.is_unsigned, e->loc);
+            emit_struct_copy_ex(fn, dst, src, type_size(lv->type),
+                                lv->type.is_vector, e->loc);
             return dst;
         }
         if (lv->kind == EX_VAR) {
@@ -6434,8 +7010,12 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 BFUnit unit = emit_bf_load(fn, addr, bit_offset, bit_width,
                                            unit_width, is_be, e->loc);
                 int uw = bf_work_width(&unit);
-                unit = emit_bf_insert(fn, unit, coerced, bit_offset, bit_width, e->loc);
-                emit_bf_store(fn, addr, unit, is_be, e->loc);
+                unit = emit_bf_insert(fn, unit, coerced, bit_width, e->loc);
+                unit = bf_prepare_store_val(fn, unit, is_be, e->loc);
+                /* Store shares the load's GEP; codegen folds local-abs
+                 * multi-use GEPs, so rematerializing the address only
+                 * adds another index reload. */
+                emit_bf_store(fn, unit, is_be, e->loc);
                 int64_t mask = bitfield_mask64(bit_width);
                 IRValue m = emit_iconst_w(fn, mask, uw, 1, e->loc);
                 IRValue vm = new_value(fn);
@@ -8216,10 +8796,15 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         IRValue slot_addr = -1;
         if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
-            int total = type_size(e->type);
-            if (total < 1) total = 1;
-            IRValue slot = emit_alloca_ty(fn, e->type, e->loc);
-            slot_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            if (g_call_ret_into >= 0) {
+                slot_addr = g_call_ret_into;
+                g_call_ret_into = -1;
+            } else {
+                int total = type_size(e->type);
+                if (total < 1) total = 1;
+                IRValue slot = emit_alloca_ty(fn, e->type, e->loc);
+                slot_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+            }
         }
         IRValue v;
         if (ret_in_mem) {
@@ -8238,7 +8823,18 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         IRValue ret_lo = -1, ret_hi = -1, ret_c = -1, ret_d = -1;
         int is_cld_ret = type_is_complex_ldouble(e->type);
         int is_x87_ret = is_cld_ret || is_x87_st0;
-        if (is_ret_struct && ret_nreg > 0 && !is_cld_ret) {
+        /* INTEGER 1–2 eightbyte return: write RAX/RDX (or x0/x1) straight
+         * into the result slot instead of capturing SSA eightbytes. */
+        int direct_ret_slot = 0;
+        if (is_ret_struct && ret_nreg > 0 && ret_nreg <= 2 && !is_cld_ret
+            && slot_addr >= 0 && !abi_is_hfa(e->type)
+            && type_size(e->type) <= 16) {
+            int all_int = 1;
+            for (int k = 0; k < ret_nreg; k++)
+                if (ret_cls[k] != SYSV_CLS_INTEGER) all_int = 0;
+            direct_ret_slot = all_int;
+        }
+        if (is_ret_struct && ret_nreg > 0 && !is_cld_ret && !direct_ret_slot) {
             ret_lo = new_value(fn);
             if (ret_nreg > 1) ret_hi = new_value(fn);
             /* A three- or four-element HFA comes back in v0-v3. */
@@ -8253,14 +8849,20 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         inst.op = IR_CALL;
         inst.dst = ret_in_mem ? -1
                  : is_x87_ret ? -1
+                 : direct_ret_slot ? -1
                  : (is_ret_struct && ret_nreg > 0) ? ret_lo
                  : (type_is_empty_struct(e->type) ? -1 : v);
-        inst.a = is_x87_ret ? slot_addr : -1;
+        inst.a = is_x87_ret ? slot_addr
+               : direct_ret_slot ? slot_addr
+               : -1;
         inst.b = ret_hi;   /* second return eightbyte, or -1 */
         inst.c = ret_c;    /* third, for a wide HFA result */
         inst.d = ret_d;    /* fourth */
         inst.x87_pair = is_x87_ret;
-        inst.imm = is_x87_st0 ? 16 : (is_cld_ret ? 32 : 0);
+        inst.imm = is_x87_st0 ? 16
+                 : is_cld_ret ? 32
+                 : direct_ret_slot ? ret_nreg
+                 : 0;
         if (ret_in_mem && !abi_sret_uses_gp())
             inst.align16 = A64_MARK_SRET;
         inst.loc = e->loc;
@@ -8383,6 +8985,20 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             return v;
         }
         if (is_ret_struct && ret_nreg > 0) {
+            if (direct_ret_slot) {
+                inst.width = 8;
+                inst.is_unsigned = 1;
+                ir_inst_array_push(&fn->insts, inst);
+                /* Keep the result-slot pointer live across the call (same
+                 * trick as the X87 path) so RA spills or uses a callee-saved
+                 * home; codegen stores RAX/RDX through it after return. */
+                IRValue keep = emit_alloca(fn, 8, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE, -1, keep, slot_addr, 0, 8, 1, e->loc);
+                free(arg_vals);
+                free(arg_on_stack);
+                free(arg_nbytes);
+                return slot_addr;
+            }
             /* Result eightbytes are INTEGER (RAX/RDX or x0/x1) or SSE
              * (XMM0/XMM1).  A Darwin HFA result is bits in v0/v1; the SSA
              * values stay integer so the GP allocator owns them and the
@@ -8481,13 +9097,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     }
     case EX_INDEX: {
         /* Same as *(a + i*sizeof(elem)) for rvalue use. */
-        IRValue base = lower_expr(fn, st, e->u.idx.array);
-        IRValue idx  = lower_expr(fn, st, e->u.idx.index);
-        IRValue esize_v = lower_sizeof_type(fn, st, e->type, e->loc);
-        int iw = get_value_width(fn, idx), iu = get_value_is_unsigned(fn, idx);
-        IRValue idx8 = coerce(fn, idx, iw, iu, 8, 0, e->loc);
-        IRValue off = emit_bin_w(fn, IR_MUL, idx8, esize_v, 8, 1, e->loc);
-        IRValue addr = emit_bin_w(fn, IR_ADD, base, off, 8, 1, e->loc);
+        IRValue addr = lower_index_addr(fn, st, e);
         int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
         int u = e->type.is_unsigned;
         if (e->type.kind == TY_ARRAY) return addr;
@@ -8514,7 +9124,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             BFUnit unit = emit_bf_load(fn, addr, bit_offset, bit_width,
                                        unit_width, is_be_bf, e->loc);
             int w = bf_work_width(&unit);
-            IRValue v = emit_bf_extract(fn, unit, bit_offset, bit_width, e->loc);
+            IRValue v = emit_bf_extract(fn, unit, bit_width, e->loc);
             mark_last_volatile(fn, e->type.is_volatile);
             int u = 1;
             int is_signed_bf = (!m_is_unsigned && !e->type.is_bool);
@@ -8868,7 +9478,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             BFUnit unit = emit_bf_load(fn, addr, bf_offset, bf_width, bf_unit, is_be, e->loc);
             int uw = bf_work_width(&unit);
             int64_t mask = bitfield_mask64(bf_width);
-            IRValue old_bits = emit_bf_extract(fn, unit, bf_offset, bf_width, e->loc);
+            IRValue old_bits = emit_bf_extract(fn, unit, bf_width, e->loc);
             IRValue old_val = bitfield_to_promoted(fn, old_bits, uw, bf_width,
                                                    m_is_unsigned, lv->type.is_bool,
                                                    e->loc);
@@ -8881,8 +9491,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue m_mask = emit_iconst_w(fn, mask, uw, 1, e->loc);
             IRValue new_masked = new_value(fn);
             emit_inst_w(fn, IR_BAND, new_masked, new_u, m_mask, 0, uw, 1, e->loc);
-            unit = emit_bf_insert(fn, unit, new_masked, bf_offset, bf_width, e->loc);
-            emit_bf_store(fn, addr, unit, is_be, e->loc);
+            unit = emit_bf_insert(fn, unit, new_masked, bf_width, e->loc);
+            unit = bf_prepare_store_val(fn, unit, is_be, e->loc);
+            emit_bf_store(fn, unit, is_be, e->loc);
             if (is_prefix) {
                 IRValue neu = bitfield_to_promoted(fn, new_masked, uw, bf_width,
                                                    m_is_unsigned, lv->type.is_bool,
@@ -9039,7 +9650,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             BFUnit unit = emit_bf_load(fn, addr, bf_offset, bf_width, bf_unit, is_be, e->loc);
             int uw = bf_work_width(&unit);
             int64_t mask = bitfield_mask64(bf_width);
-            IRValue extracted = emit_bf_extract(fn, unit, bf_offset, bf_width, e->loc);
+            IRValue extracted = emit_bf_extract(fn, unit, bf_width, e->loc);
             /* Use the member's *declared* signedness, not the promoted
              * EX_MEMBER type.  An `unsigned int : 6` promotes to signed int
              * as an rvalue, but compound-assign must still extract it as
@@ -9068,8 +9679,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue m_mask2 = emit_iconst_w(fn, mask, uw, 1, e->loc);
             IRValue new_masked = new_value(fn);
             emit_inst_w(fn, IR_BAND, new_masked, neu_u, m_mask2, 0, uw, 1, e->loc);
-            unit = emit_bf_insert(fn, unit, new_masked, bf_offset, bf_width, e->loc);
-            emit_bf_store(fn, addr, unit, is_be, e->loc);
+            unit = emit_bf_insert(fn, unit, new_masked, bf_width, e->loc);
+            unit = bf_prepare_store_val(fn, unit, is_be, e->loc);
+            emit_bf_store(fn, unit, is_be, e->loc);
             IRValue ret = bitfield_to_promoted(fn, new_masked, uw, bf_width,
                                                m_is_unsigned, lv->type.is_bool,
                                                e->loc);
@@ -9280,6 +9892,37 @@ static IRValue lower_condition(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return cbr_from_scalar(fn, v, e->loc);
     }
     return lower_expr(fn, st, e);
+}
+
+/* Branch to L_true / L_false on a scalar condition without materializing
+ * 0/1 for && / || / !.  Matches gcc -O0 short-circuit shape. */
+static void lower_cond_br(IRFunction *fn, IRSymTable *st, const Expr *e,
+                          int L_true, int L_false) {
+    if (fakecc_had_error() || !e) {
+        SourceLoc loc = e ? e->loc : (SourceLoc){0};
+        emit_br(fn, L_false, loc);
+        return;
+    }
+    if (e->kind == EX_BINOP && e->u.bin.op == BOP_AND) {
+        int L_mid = new_label(fn);
+        lower_cond_br(fn, st, e->u.bin.l, L_mid, L_false);
+        emit_label(fn, L_mid, e->loc);
+        lower_cond_br(fn, st, e->u.bin.r, L_true, L_false);
+        return;
+    }
+    if (e->kind == EX_BINOP && e->u.bin.op == BOP_OR) {
+        int L_mid = new_label(fn);
+        lower_cond_br(fn, st, e->u.bin.l, L_true, L_mid);
+        emit_label(fn, L_mid, e->loc);
+        lower_cond_br(fn, st, e->u.bin.r, L_true, L_false);
+        return;
+    }
+    if (e->kind == EX_UNARY && e->u.un.op == UOP_NOT) {
+        lower_cond_br(fn, st, e->u.un.operand, L_false, L_true);
+        return;
+    }
+    IRValue cond = lower_condition(fn, st, e);
+    emit_cbr(fn, cond, L_true, L_false, e->loc);
 }
 
 /* Label map: label name → IR label id.  Populated by a pre-pass over the
@@ -9746,7 +10389,8 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 if (dty.kind == TY_ARRAY || dty.kind == TY_STRUCT || dty.is_vector) {
                     IRValue addr = emit_bin_w(fn, IR_ADDR, v, -1, 8, 1, s->loc);
                     int total = type_size(dty);
-                    if (total > 0) emit_zero_bytes(fn, addr, total, s->loc);
+                    if (total > 0 && !init_covers_object(&dty, s->u.decl.init))
+                        emit_zero_bytes(fn, addr, total, s->loc);
                     lower_init_list(fn, st, addr, &dty, s->u.decl.init, s->loc);
                 } else {
                     /* Scalar target with a single-element brace list
@@ -9793,8 +10437,37 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                     emit_struct_copy(fn, addr, cplx_rv, type_size(dty), s->loc);
                     break;
                 }
+                /* `T x = (T){ ... }` that does not read x is the same stores
+                 * written straight into x.  The compound-literal temporary
+                 * and the following copy are pure overhead at -O0. */
+                if (s->u.decl.init->kind == EX_COMPOUND_LITERAL
+                    && same_aggregate_type(&dty,
+                                           &s->u.decl.init->u.compound.target_type)
+                    && !expr_mentions_name(s->u.decl.init, s->u.decl.name)) {
+                    Expr *ilist = s->u.decl.init->u.compound.init;
+                    int total = type_size(dty);
+                    if (total > 0 && !init_covers_object(&dty, ilist))
+                        emit_zero_bytes(fn, addr, total, s->loc);
+                    lower_init_list(fn, st, addr, &dty, ilist, s->loc);
+                    break;
+                }
+                /* `T x = f();` with a register-returned struct: write the
+                 * return registers straight into x. */
+                if (s->u.decl.init->kind == EX_CALL
+                    && dty.kind == TY_STRUCT && !dty.is_vector
+                    && !type_is_pair16(dty)
+                    && same_aggregate_type(&dty, &s->u.decl.init->type)) {
+                    g_call_ret_into = addr;
+                    IRValue rv = lower_expr(fn, st, s->u.decl.init);
+                    if (g_call_ret_into >= 0) g_call_ret_into = -1;
+                    if (rv != addr)
+                        emit_struct_copy_ex(fn, addr, rv, type_size(dty),
+                                            dty.is_vector, s->loc);
+                    break;
+                }
                 IRValue rv = lower_expr(fn, st, s->u.decl.init);
-                emit_struct_copy(fn, addr, rv, type_size(dty), s->loc);
+                emit_struct_copy_ex(fn, addr, rv, type_size(dty),
+                                    dty.is_vector, s->loc);
                 break;
             } else {
                 IRValue rv = lower_expr(fn, st, s->u.decl.init);
@@ -9968,11 +10641,10 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_IF: {
-        IRValue cond = lower_condition(fn, st, s->u.if_s.cond);
         int L_then = new_label(fn);
         int L_end  = new_label(fn);
         int L_else = s->u.if_s.else_s ? new_label(fn) : L_end;
-        emit_cbr(fn, cond, L_then, L_else, s->loc);
+        lower_cond_br(fn, st, s->u.if_s.cond, L_then, L_else);
         emit_label(fn, L_then, s->loc);
         lower_stmt(fn, st, s->u.if_s.then_s, cur_fd);
         if (s->u.if_s.else_s) {
@@ -9989,8 +10661,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         int L_exit = new_label(fn);
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_head, s->loc);
-        IRValue cond = lower_condition(fn, st, s->u.while_s.cond);
-        emit_cbr(fn, cond, L_body, L_exit, s->loc);
+        lower_cond_br(fn, st, s->u.while_s.cond, L_body, L_exit);
         emit_label(fn, L_body, s->loc);
         push_loop(L_head, L_exit);
         lower_stmt(fn, st, s->u.while_s.body, cur_fd);
@@ -10018,8 +10689,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         pop_loop();
         emit_br(fn, L_cond, s->loc);
         emit_label(fn, L_cond, s->loc);
-        IRValue cond = lower_condition(fn, st, s->u.do_s.cond);
-        emit_cbr(fn, cond, L_body, L_exit, s->loc);
+        lower_cond_br(fn, st, s->u.do_s.cond, L_body, L_exit);
         emit_label(fn, L_exit, s->loc);
         break;
     }
@@ -10053,8 +10723,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         emit_br(fn, L_head, s->loc);
         emit_label(fn, L_head, s->loc);
         if (s->u.for_s.cond) {
-            IRValue cond = lower_condition(fn, st, s->u.for_s.cond);
-            emit_cbr(fn, cond, L_body, L_exit, s->loc);
+            lower_cond_br(fn, st, s->u.for_s.cond, L_body, L_exit);
         } else {
             emit_br(fn, L_body, s->loc);
         }
@@ -11767,8 +12436,9 @@ static void lower_init_list(IRFunction *fn, IRSymTable *st, IRValue base,
                     IRValue rv = lower_expr(fn, st, e->u.init_list.elements[i]);
                     BFUnit unit = emit_bf_load(fn, ptr, sm->bit_offset, sm->bit_width,
                                                uw, sd->is_big_endian, loc);
-                    unit = emit_bf_insert(fn, unit, rv, sm->bit_offset, sm->bit_width, loc);
-                    emit_bf_store(fn, ptr, unit, sd->is_big_endian, loc);
+                    unit = emit_bf_insert(fn, unit, rv, sm->bit_width, loc);
+                    unit = bf_prepare_store_val(fn, unit, sd->is_big_endian, loc);
+                    emit_bf_store(fn, unit, sd->is_big_endian, loc);
                 } else {
                     lower_init_list(fn, st, ptr, &sm->type,
                                     e->u.init_list.elements[i], loc);

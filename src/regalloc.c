@@ -167,16 +167,57 @@ static int ra_ok_index(const IRFunction *fn, const int *def, IRValue v) {
     return 0;
 }
 
+/* If idx is MUL by 2/4/8 (isel peel_sib_scale), also keep the multiplicand
+ * live — emit uses that SSA as the SIB index, not the MUL result. */
+static int ra_push_idx(const IRFunction *fn, const int *def, IRValue idx,
+                       IRValue *extra, int n, int cap) {
+    if (n >= cap || idx < 0) return n;
+    extra[n++] = idx;
+    if (idx >= fn->next_value_id || def[idx] < 0 || n >= cap) return n;
+    const IRInst *md = &fn->insts.data[def[idx]];
+    if (md->op != IR_MUL) return n;
+    int64_t factor = 0;
+    IRValue inner = -1;
+    if (def_op_is(fn, def, md->b, IR_CONST)) {
+        factor = fn->insts.data[def[md->b]].imm;
+        inner = md->a;
+    } else if (def_op_is(fn, def, md->a, IR_CONST)) {
+        factor = fn->insts.data[def[md->a]].imm;
+        inner = md->b;
+    } else {
+        return n;
+    }
+    if ((factor == 2 || factor == 4 || factor == 8) && inner >= 0 && n < cap)
+        extra[n++] = inner;
+    return n;
+}
+
 /* Extra SSA operands that must stay live at LOAD_PTR/STORE_PTR so isel
  * can emit [base+index] / [rbp+off+index] without the ADD result.  Does
  * not follow COPY (pointer selects are copies of distinct locals).
  * Only GP scalar widths — vector 16-byte loads/stores are not SIB-folded.
- * Only ADDR/GADDR bases with an integer index, matching isel. */
+ * Only ADDR/GADDR bases with an integer index, matching isel.
+ * Peels field-offset ADD(+const) layers so multi-use local-abs folds
+ * (bitfield / struct RMW) keep the index live across the load. */
 static int addr_fold_extras(const IRFunction *fn, const int *def, IRValue ptr,
-                            int width, IRValue extra[2]) {
+                            int width, IRValue *extra, int cap) {
     int n = 0;
     if (width != 1 && width != 2 && width != 4 && width != 8) return 0;
     if (!def || ptr < 0 || ptr >= fn->next_value_id || def[ptr] < 0) return 0;
+    for (int depth = 0; depth < 8; depth++) {
+        if (ptr < 0 || ptr >= fn->next_value_id || def[ptr] < 0) return 0;
+        const IRInst *pd = &fn->insts.data[def[ptr]];
+        if (pd->op != IR_ADD) break;
+        if (def_op_is(fn, def, pd->b, IR_CONST)
+            && !def_op_is(fn, def, pd->a, IR_CONST))
+            ptr = pd->a;
+        else if (def_op_is(fn, def, pd->a, IR_CONST)
+                 && !def_op_is(fn, def, pd->b, IR_CONST))
+            ptr = pd->b;
+        else
+            break;
+    }
+    if (ptr < 0 || ptr >= fn->next_value_id || def[ptr] < 0) return 0;
     const IRInst *d = &fn->insts.data[def[ptr]];
     if (d->op != IR_ADD) return 0;
     int a_const = def_op_is(fn, def, d->a, IR_CONST);
@@ -185,23 +226,17 @@ static int addr_fold_extras(const IRFunction *fn, const int *def, IRValue ptr,
     int b_stack = ra_is_stack_base(fn, def, d->b, 0);
     /* ADDR+const already folds to [rbp+off]; no extra live regs. */
     if ((a_stack && b_const) || (b_stack && a_const)) return 0;
-    if (a_stack && !b_const && ra_ok_index(fn, def, d->b)) {
-        extra[n++] = d->b;
-        return n;
-    }
-    if (b_stack && !a_const && ra_ok_index(fn, def, d->a)) {
-        extra[n++] = d->a;
-        return n;
-    }
+    if (a_stack && !b_const && ra_ok_index(fn, def, d->b))
+        return ra_push_idx(fn, def, d->b, extra, n, cap);
+    if (b_stack && !a_const && ra_ok_index(fn, def, d->a))
+        return ra_push_idx(fn, def, d->a, extra, n, cap);
     if (ra_is_gaddr(fn, def, d->a) && !b_const && ra_ok_index(fn, def, d->b)) {
-        extra[n++] = d->a;
-        extra[n++] = d->b;
-        return n;
+        if (n < cap) extra[n++] = d->a;
+        return ra_push_idx(fn, def, d->b, extra, n, cap);
     }
     if (ra_is_gaddr(fn, def, d->b) && !a_const && ra_ok_index(fn, def, d->a)) {
-        extra[n++] = d->b;
-        extra[n++] = d->a;
-        return n;
+        if (n < cap) extra[n++] = d->b;
+        return ra_push_idx(fn, def, d->a, extra, n, cap);
     }
     return 0;
 }
@@ -245,6 +280,14 @@ static void liv_add_use(LiveInfo *l, int pt) {
 
 /* Compute liveness for all SSA values in fn.
  * Returns a malloc'd LiveInfo array of length fn->next_value_id. */
+/* Vector SIMD ops store through `dst`: it is a pointer USE, not a
+ * defined SSA value.  Treating it as a def kills the address early and
+ * lets another value reuse its home before the store. */
+static int ir_op_vec_store(int op) {
+    return op == IR_VADD || op == IR_VSUB || op == IR_VMUL || op == IR_VDIV
+        || op == IR_VBAND || op == IR_VBOR || op == IR_VBXOR;
+}
+
 static LiveInfo *compute_liveness(const IRFunction *fn) {
     int nv = fn->next_value_id;
     if (nv <= 0) return NULL;
@@ -261,9 +304,11 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
             inst->op == IR_DBG_VALUE) continue;
 
         /* Definition */
-        if (inst->dst >= 0 && inst->dst < nv) {
+        if (inst->dst >= 0 && inst->dst < nv && !ir_op_vec_store(inst->op)) {
             liv[inst->dst].def_point = (int)i;
         }
+        if (ir_op_vec_store(inst->op) && inst->dst >= 0 && inst->dst < nv)
+            liv_add_use(&liv[inst->dst], (int)i);
         /* IR_CALL.b/c/d are return eightbytes (defs), not uses.  c and d
          * carry the third and fourth eightbyte of a wide HFA result, which
          * AAPCS64 returns in v2/v3; other calls leave them at -1. */
@@ -300,8 +345,8 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
         for (size_t i = 0; i < fn->insts.len; i++) {
             const IRInst *inst = &fn->insts.data[i];
             if (inst->op != IR_LOAD_PTR && inst->op != IR_STORE_PTR) continue;
-            IRValue extra[2];
-            int n = addr_fold_extras(fn, def, inst->a, inst->width, extra);
+            IRValue extra[4];
+            int n = addr_fold_extras(fn, def, inst->a, inst->width, extra, 4);
             for (int k = 0; k < n; k++) {
                 if (extra[k] >= 0 && extra[k] < nv)
                     liv_add_use(&liv[extra[k]], (int)i);
@@ -490,10 +535,10 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 }
             }
             if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
-                IRValue extra[2];
+                IRValue extra[4];
                 int w = inst->width;
                 if (w == 1 || w == 2 || w == 4 || w == 8) {
-                    int n = addr_fold_extras(fn, def, inst->a, inst->width, extra);
+                    int n = addr_fold_extras(fn, def, inst->a, inst->width, extra, 4);
                     for (int k = 0; k < n; k++) {
                         IRValue v = extra[k];
                         if (v >= 0 && v < use_b[bi].nv && !bs_test(&def_b[bi], v))
@@ -502,7 +547,12 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                 }
             }
             if (inst->dst >= 0 && inst->dst < def_b[bi].nv) {
-                bs_set(&def_b[bi], inst->dst);
+                if (ir_op_vec_store(inst->op)) {
+                    if (!bs_test(&def_b[bi], inst->dst))
+                        bs_set(&use_b[bi], inst->dst);
+                } else {
+                    bs_set(&def_b[bi], inst->dst);
+                }
             }
             /* IR_CALL.b/c/d: second, third and fourth return eightbyte. */
             if (inst->op == IR_CALL) {
@@ -624,7 +674,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             }
 
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)) {
+                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)
+                && !ir_op_vec_store(inst->op)) {
                 if (inst->op != IR_COPY)
                     bs_clr(&live, inst->dst);
             }
@@ -646,6 +697,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->b);
+            if (ir_op_vec_store(inst->op) && inst->dst >= 0 && inst->dst < nv
+                && value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld))
+                bs_set(&live, inst->dst);
             if (inst->op == IR_RETURN) {
                 if (inst->c >= 0 && inst->c < nv &&
                     value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld))
@@ -663,8 +717,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 }
             }
             if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
-                IRValue extra[2];
-                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
+                IRValue extra[4];
+                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra, 4);
                 for (int k = 0; k < n; k++) {
                     IRValue v = extra[k];
                     if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
@@ -710,7 +764,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             inst->op == IR_DBG_VALUE) continue;
 
             if (inst->dst >= 0 && inst->dst < nv &&
-                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)) {
+                value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)
+                && !ir_op_vec_store(inst->op)) {
                 BS_FOREACH(&live, other) {
                     if (!value_in_class(fn, (int)other, float_class, cls->exclude_16byte_ld))
                         continue;
@@ -766,6 +821,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 inst->b >= 0 && inst->b < nv &&
                 value_in_class(fn, inst->b, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->b);
+            if (ir_op_vec_store(inst->op) && inst->dst >= 0 && inst->dst < nv
+                && value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld))
+                bs_set(&live, inst->dst);
             if (inst->op == IR_RETURN) {
                 if (inst->c >= 0 && inst->c < nv &&
                     value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld))
@@ -783,8 +841,8 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                 }
             }
             if (inst->op == IR_LOAD_PTR || inst->op == IR_STORE_PTR) {
-                IRValue extra[2];
-                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra);
+                IRValue extra[4];
+                int n = addr_fold_extras(fn, ssa_def, inst->a, inst->width, extra, 4);
                 for (int k = 0; k < n; k++) {
                     IRValue v = extra[k];
                     if (v >= 0 && v < nv && value_in_class(fn, v, float_class, cls->exclude_16byte_ld))
@@ -964,7 +1022,36 @@ static int find_block_for_inst(const CFG *cfg, int inst_idx) {
 /* Spill-cost estimation                                               */
 /* ================================================================== */
 
-static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg) {
+/* LOAD / SEXT(LOAD i) style values are cheap to rematerialize from a
+ * pinned frame slot; prefer spilling other temporaries instead. */
+static int ssa_is_frame_ext(const IRFunction *fn, int v) {
+    int depth;
+    if (!fn || v < 0 || v >= fn->next_value_id) return 0;
+    for (depth = 0; depth < 6; depth++) {
+        size_t i;
+        const IRInst *d = NULL;
+        for (i = fn->insts.len; i > 0; ) {
+            i--;
+            if (fn->insts.data[i].dst == v) {
+                d = &fn->insts.data[i];
+                break;
+            }
+        }
+        if (!d) return 0;
+        if (d->op == IR_LOAD || d->op == IR_LOAD_PTR)
+            return 1;
+        if (d->op == IR_COPY || d->op == IR_SEXT || d->op == IR_ZEXT
+            || d->op == IR_TRUNC) {
+            v = d->a;
+            continue;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg,
+                              const IRFunction *fn) {
     const LiveInfo *l = &liv[v];
     int cost = 0;
     for (size_t i = 0; i < l->num_uses; i++) {
@@ -977,7 +1064,10 @@ static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg) {
         cost += 1 + estimate_loop_depth(blk, cfg) * 10;
     }
     /* Prevent zero cost (even unused values need some cost). */
-    return cost > 0 ? cost : 1;
+    if (cost <= 0) cost = 1;
+    if (ssa_is_frame_ext(fn, v))
+        cost *= 64;
+    return cost;
 }
 
 /* ================================================================== */
@@ -988,7 +1078,7 @@ static void greedy_color(const InterfGraph *g, const int *order,
                          const LiveInfo *liv, const CFG *cfg,
                          const uint32_t *forbid_mask,
                          int *colors, int *spill_slots, int *num_spills,
-                         const RegClass *cls) {
+                         const RegClass *cls, const IRFunction *fn) {
     int n = g->n;
     int k = cls->nregs;
     if (k > 32) {
@@ -1000,7 +1090,7 @@ static void greedy_color(const InterfGraph *g, const int *order,
     /* Track spill costs for eviction decisions. */
     int *spill_cost = xmalloc(n * sizeof(int));
     for (int v = 0; v < n; v++)
-        spill_cost[v] = compute_spill_cost(v, liv, cfg);
+        spill_cost[v] = compute_spill_cost(v, liv, cfg, fn);
 
     /* color = -1 means "not yet assigned / spilled pending decision"
      * We use -2 to mean "spilled" */
@@ -1083,14 +1173,52 @@ static void greedy_color(const InterfGraph *g, const int *order,
 }
 
 /* ================================================================== */
-/* Coalescing — identifies but does NOT modify redundant COPYs.
- * Codegen uses the RAResult to skip COPYs where src and dst share
- * the same register. */
-static void coalesce_copies(IRFunction *fn, int *colors) {
-    (void)fn;
+/* Sole-use coalescing: COPY/SEXT/ZEXT/TRUNC and ADD/SUB $imm into the
+ * dying source's register when the interference graph allows it.
+ * Removes mov/mov/add/mov/movslq chains gcc -O0 avoids (chacha &st[i+k]). */
+static int coalesce_ok(const InterfGraph *g, const int *colors, int dst, int src) {
+    if (dst < 0 || src < 0 || dst >= g->n || src >= g->n) return 0;
+    if (colors[src] < 0) return 0;
+    if (colors[dst] == colors[src]) return 1;
+    if (colors[dst] < 0) return 0;
+    for (size_t j = 0; j < g->nodes[dst].degree; j++) {
+        int w = g->nodes[dst].neighbors[j];
+        if (w == src) continue;
+        if (colors[w] == colors[src]) return 0;
+    }
+    return 1;
+}
+
+static void coalesce_copies(IRFunction *fn, int *colors, const InterfGraph *g,
+                            const LiveInfo *liv) {
+    int nv = fn->next_value_id;
+    if (nv <= 0 || !g || !liv) return;
+    /* Only a same-value COPY may share the source register.  SEXT/ZEXT/TRUNC
+     * and ADD/SUB $imm overwrite that register; isel still reads the original
+     * as a folded address after LiveInfo has dropped the use, and the
+     * self-hosted compiler then segfaults. */
+    (void)liv;
     (void)colors;
-    /* No IR modification.  Codegen checks ra->reg[dst] == ra->reg[a]
-     * for IR_COPY instructions and skips them when coalesced. */
+    (void)fn;
+    (void)g;
+    return; /* disable until arm64 bootstrap is green; COPY-only still
+             * miscompiled self-hosted A64 (CI macOS stage2 SIGSEGV). */
+    for (int pass = 0; pass < 8; pass++) {
+        int changed = 0;
+        for (size_t i = 0; i < fn->insts.len; i++) {
+            const IRInst *in = &fn->insts.data[i];
+            int d = in->dst;
+            if (d < 0 || d >= nv || in->op != IR_COPY) continue;
+            int src = in->a;
+            if (src < 0 || src >= nv || src == d) continue;
+            if (!coalesce_ok(g, colors, d, src)) continue;
+            if (colors[d] != colors[src]) {
+                colors[d] = colors[src];
+                changed = 1;
+            }
+        }
+        if (!changed) break;
+    }
 }
 
 /* ================================================================== */
@@ -1140,7 +1268,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     memset(spill_slots, 0, nv * sizeof(int));
     int num_spills = 0;
     greedy_color(&g, order, liv, &cfg, forbid_mask,
-                 colors, spill_slots, &num_spills, cls);
+                 colors, spill_slots, &num_spills, cls, fn);
     free(forbid_mask);
 
     /* Map color indices (0..cls->nregs-1) to the backend's native register
@@ -1157,8 +1285,9 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
         }
     }
 
-    /* Coalesce COPYs with same-register src/dst. */
-    coalesce_copies((IRFunction *)fn, colors);
+    /* Coalesce before freeing the interference graph (GP only). */
+    if (!float_class)
+        coalesce_copies((IRFunction *)fn, colors, &g, liv);
 
     /* Build result. */
     RAResult *ra = xmalloc(sizeof(RAResult));
