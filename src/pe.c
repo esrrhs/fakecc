@@ -82,6 +82,9 @@ enum {
     IMP_WaitForSingleObject,
     IMP_ExitThread,
     IMP_GetCurrentThreadId,
+    IMP_FindFirstFileA,
+    IMP_FindNextFileA,
+    IMP_FindClose,
     IMP_COUNT
 };
 
@@ -105,6 +108,9 @@ static const char *const IMP_NAMES[IMP_COUNT] = {
     "WaitForSingleObject",
     "ExitThread",
     "GetCurrentThreadId",
+    "FindFirstFileA",
+    "FindNextFileA",
+    "FindClose",
 };
 
 /* Linker-synthesized bytes at the end of .data.  The stub addresses them
@@ -261,7 +267,7 @@ static void emit_trampoline(Asm *a, size_t *fail_slots, int *nfail) {
     struct { uint8_t num; size_t slot; } br[32];
     int nb = 0;
     static const uint8_t nums[] = {
-        0, 1, 2, 3, 8, 9, 11, 39, 60, 82, 83, 87, 90, 186, 231
+        0, 1, 2, 3, 8, 9, 11, 39, 60, 82, 83, 87, 90, 186, 200, 201, 202, 231
     };
     for (size_t i = 0; i < sizeof nums; i++) {
         /* imm32, not imm8: 186 and 231 do not fit in a sign-extended byte. */
@@ -499,6 +505,28 @@ static void emit_trampoline(Asm *a, size_t *fail_slots, int *nfail) {
     ab(a, 0x31); ab(a, 0xC0);
     size_t ch_done = j32(a);
 
+    /* FindFirstFileA(path, find_data) -> handle, or -1. */
+    handler[200] = a->buf.len;
+    ab(a, 0x48); ab(a, 0x89); ab(a, 0xF9);             /* mov rcx, rdi */
+    ab(a, 0x48); ab(a, 0x89); ab(a, 0xF2);             /* mov rdx, rsi */
+    call_iat(a, IMP_FindFirstFileA);
+    size_t find_done = j32(a);
+
+    /* FindNextFileA(handle, find_data) -> BOOL, zero-extended. */
+    handler[201] = a->buf.len;
+    ab(a, 0x48); ab(a, 0x89); ab(a, 0xF9);
+    ab(a, 0x48); ab(a, 0x89); ab(a, 0xF2);
+    call_iat(a, IMP_FindNextFileA);
+    ab(a, 0x89); ab(a, 0xC0);                          /* mov eax, eax */
+    size_t next_done = j32(a);
+
+    /* FindClose(handle). */
+    handler[202] = a->buf.len;
+    ab(a, 0x48); ab(a, 0x89); ab(a, 0xF9);
+    call_iat(a, IMP_FindClose);
+    ab(a, 0x89); ab(a, 0xC0);
+    size_t fclose_done = j32(a);
+
     size_t done = a->buf.len;
     ab(a, 0x48); ab(a, 0x83); ab(a, 0xC4); ab(a, 0x40); /* add rsp, 0x40 */
     ab(a, 0x41); ab(a, 0x5D);                          /* pop r13 */
@@ -526,6 +554,9 @@ static void emit_trampoline(Asm *a, size_t *fail_slots, int *nfail) {
     apatch(a, mk_done, done);
     apatch(a, ul_done, done);
     apatch(a, ch_done, done);
+    apatch(a, find_done, done);
+    apatch(a, next_done, done);
+    apatch(a, fclose_done, done);
     for (int i = 0; i < *nfail; i++) apatch(a, fail_slots[i], fail);
     for (int i = 0; i < nb; i++) apatch(a, br[i].slot, handler[br[i].num]);
 

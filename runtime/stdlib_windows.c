@@ -69,20 +69,64 @@ char *getenv(const char *name) {
     return 0;
 }
 
-/* Directory listing is a self-host concern.  The stage0 compiler uses the
- * host Win32 APIs instead of these, so a stub is enough to keep the package
- * linkable. */
+/* Directory listing for the self-hosted compiler.  Stage 0's pkg.c calls
+ * Win32 directly; the translated compiler calls these, and the PE syscall
+ * trampoline turns 200/201/202 into FindFirstFileA/FindNextFileA/FindClose.
+ * WIN32_FIND_DATAA.cFileName is at byte 44. */
+struct win_dir {
+    long handle;
+    char data[320];
+    char pattern[520];
+    int have;
+};
+
 void *__fakecc_dir_open(const char *path) {
-    if (path == 0) return 0;
-    return 0;
+    struct win_dir *d;
+    int n;
+    long h;
+    if (path == 0 || path[0] == 0) return 0;
+    d = (struct win_dir *)malloc(sizeof(struct win_dir));
+    if (d == 0) return 0;
+    n = 0;
+    while (path[n] && n < 500) {
+        d->pattern[n] = path[n];
+        n = n + 1;
+    }
+    if (n > 0 && d->pattern[n - 1] != '/' && d->pattern[n - 1] != '\\') {
+        d->pattern[n] = '\\';
+        n = n + 1;
+    }
+    d->pattern[n] = '*';
+    d->pattern[n + 1] = 0;
+    h = __syscall(200, (long)d->pattern, (long)d->data);
+    if (h == -1) {
+        free(d);
+        return 0;
+    }
+    d->handle = h;
+    d->have = 1;
+    return (void *)d;
 }
 
 const char *__fakecc_dir_next(void *h) {
-    if (h == 0) return 0;
-    return 0;
+    struct win_dir *d;
+    long ok;
+    d = (struct win_dir *)h;
+    if (d == 0) return 0;
+    if (d->have) {
+        d->have = 0;
+        return (const char *)(d->data + 44);
+    }
+    ok = __syscall(201, d->handle, (long)d->data);
+    if (ok == 0) return 0;
+    return (const char *)(d->data + 44);
 }
 
 int __fakecc_dir_close(void *h) {
-    if (h == 0) return -1;
-    return -1;
+    struct win_dir *d;
+    d = (struct win_dir *)h;
+    if (d == 0) return -1;
+    __syscall(202, d->handle);
+    free(h);
+    return 0;
 }
