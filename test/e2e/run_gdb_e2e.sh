@@ -6,9 +6,11 @@
 # Cases live in cases/debug/*.c and are annotated:
 #
 #     // expect: 42                 program's own exit code
-#     // gdb: break {brk}           a gdb command; {brk} is the source path
-#                                   plus the line tagged `// BRK`, and {src}
-#                                   is the source path alone
+#     // gdb: break {brk}           a gdb command; {brk} is basename(src)
+#                                   plus the line tagged `// BRK` (basename so
+#                                   MSYS path conversion cannot desync DWARF
+#                                   from the gdb -ex string), and {src} is the
+#                                   source path alone
 #     // gdb_expect: a = 40         extended regex the output must contain
 #     // gdb_reject: optimized out  extended regex the output must NOT contain
 #
@@ -111,12 +113,15 @@ run_case() {
     n_fail=$((n_fail + 1)); FAIL=1; return
   fi
 
-  # Resolve the `// BRK` tag to "<path>:<line>".  Cases that break by function
+  # Resolve the `// BRK` tag to "<basename>:<line>".  Cases that break by function
   # name instead do not need the tag.
   local brk_line brk=""
   brk_line=$(grep -n '// BRK' "$src" | head -1 | cut -d: -f1)
   if [ -n "$brk_line" ]; then
-    brk="$src:$brk_line"
+    # Basename (not $src): on MSYS, MinGW fakecc argv is converted to D:/...
+    # in DWARF while gdb -ex 'break /d/...:N' keeps the Unix form, so a full
+    # path never matches.  Basename matches on Linux and Windows alike.
+    brk="$(basename "$src"):$brk_line"
   elif grep -q '{brk}' "$src"; then
     echo "FAIL $name [$label] (uses {brk} but has no '// BRK' tag)"
     n_fail=$((n_fail + 1)); FAIL=1; return
