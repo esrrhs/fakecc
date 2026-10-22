@@ -2633,12 +2633,18 @@ static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
                           int reg_save_rbp_off, int ap_frame_off) {
     int ap_reg = REG_RAX;
     if (target_current()->os == TOS_WINDOWS) {
+        /* Win64 va_list is one pointer.  When ap is a folded frame local,
+         * write the cursor to [rbp+ap_frame_off]; otherwise ap_reg holds &ap.
+         * The old path always stored through RAX, which the param dance often
+         * left holding a named-arg value (e.g. 1) -> ACCESS_VIOLATION. */
         if (!ap_frame_off) {
             int ap = inst->call_args[0];
             ensure_reg(b, ap, REG_RAX, ra);
         }
+        int base = va_field_base(ap_reg, ap_frame_off);
+        int off = va_field_off(ap_frame_off, 0);
         emit_lea_rbp(b, REG_RCX, overflow_off);
-        emit_store_base_off(b, ap_reg, REG_RCX, 0);
+        emit_store_base_off(b, base, REG_RCX, off);
         return;
     }
     if (!ap_frame_off) {
@@ -2714,13 +2720,16 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
     int is_float = inst->is_float;
 
     if (target_current()->os == TOS_WINDOWS) {
+        /* Same frame-local vs pointer split as emit_va_start. */
+        int ap_base = va_field_base(ap_reg, ap_frame_off);
+        int ap_off = va_field_off(ap_frame_off, 0);
         /* 1. Load current cursor into RDX */
-        emit_load_base_off(b, REG_RDX, ap_reg, 0);
+        emit_load_base_off(b, REG_RDX, ap_base, ap_off);
 
         /* 2. Advance cursor by 8 and store back to *ap */
         emit_mov_rr(b, REG_R11, REG_RDX);
         emit_add_imm32(b, REG_R11, 8);
-        emit_store_base_off(b, ap_reg, REG_R11, 0);
+        emit_store_base_off(b, ap_base, REG_R11, ap_off);
 
         /* 3. Fetch argument */
         if (inst->imm > 0 && inst->call_nargs >= 2 && inst->call_args[1] >= 0) {
