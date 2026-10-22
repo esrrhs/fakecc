@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 package main;
 // skip_oracle: clang

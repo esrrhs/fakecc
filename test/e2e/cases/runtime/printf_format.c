@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // runtime.printf conversions and length modifiers that the float-focused
 // printf_float.c leaves uncovered: %o (octal), %u (unsigned), %i, %p
 // skip_oracle: clang

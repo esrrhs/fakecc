@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 // Packed bitfields that spill into a later eightbyte are INTEGER+INTEGER.
 // `{ unsigned long :60; unsigned :8 }` is 9 bytes; gcc passes rdi+esi, then

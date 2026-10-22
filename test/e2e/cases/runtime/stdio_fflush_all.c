@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 // fflush(NULL) and exit() must flush fopen'd streams, not only stdout/stderr.
 // skip_oracle: clang

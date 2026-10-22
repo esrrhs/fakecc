@@ -20,6 +20,16 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 STAGE0=${FAKECC:-$ROOT/build/fakecc}
+if [ ! -x "$STAGE0" ] && [ -x "${STAGE0}.exe" ]; then
+    STAGE0="${STAGE0}.exe"
+fi
+# Windows executes a PE named fakecc.exe.  The fixed-point copies stay
+# extensionless (v0/fakecc-1) so the suite scripts are the same on every host;
+# MSYS runs that image, and a sibling .exe is kept for CreateProcess.
+OUT_NAME=fakecc
+case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*) OUT_NAME=fakecc.exe ;;
+esac
 # Derived from src/, not listed here — see build_bootstrap.sh for why.
 MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | tr '\n' ' ')
 [ -n "$MODULES" ] || { echo "no sources found in $ROOT/src" >&2; exit 1; }
@@ -44,7 +54,7 @@ build_with() {
     # semantics expose sibling files' symbols unqualified (no per-file extern).
     local srcs=""
     for m in $MODULES; do srcs="$srcs $ROOT/v0/$m.c"; done
-    "$cc" $srcs -o "$outdir/fakecc" 2>"$outdir/build.err" || {
+    "$cc" $srcs -o "$outdir/$OUT_NAME" 2>"$outdir/build.err" || {
         echo "  BUILD FAIL: $(head -1 "$outdir/build.err")" >&2
         return 1
     }
@@ -52,37 +62,48 @@ build_with() {
 
 echo "=== stage 1: Stage 0 compiles fakecc ==="
 build_with "$STAGE0" "$WORK/s1" || exit 1
-echo "    -> $WORK/s1/fakecc"
+echo "    -> $WORK/s1/$OUT_NAME"
 # Persist stage1 immediately so the workflow uploads the exact
 # stage1 binary even if stage2 crashes the compiler before any
 # v0/fakecc-1 is written.
-cp "$WORK/s1/fakecc" "$ROOT/v0/fakecc-1"
+cp "$WORK/s1/$OUT_NAME" "$ROOT/v0/fakecc-1"
+if [ "$OUT_NAME" != "fakecc" ]; then
+    cp "$WORK/s1/$OUT_NAME" "$ROOT/v0/fakecc-1.exe"
+fi
 
 echo "=== stage 2: fakecc-1 compiles fakecc ==="
-if ! build_with "$WORK/s1/fakecc" "$WORK/s2"; then
+if ! build_with "$WORK/s1/$OUT_NAME" "$WORK/s2"; then
     echo "stage2 compiler failed; v0/fakecc-1 retained for inspection" >&2
     exit 1
 fi
-echo "    -> $WORK/s2/fakecc"
+echo "    -> $WORK/s2/$OUT_NAME"
 
 echo
 echo "=== comparing stage 1 and stage 2 binaries ==="
-if cmp -s "$WORK/s1/fakecc" "$WORK/s2/fakecc"; then
+if cmp -s "$WORK/s1/$OUT_NAME" "$WORK/s2/$OUT_NAME"; then
     echo "binaries byte-identical"
 else
     echo "NOT a fixed point — stage 1 and stage 2 binaries differ"
-    echo "  stage 1: $(file_size "$WORK/s1/fakecc") bytes"
-    echo "  stage 2: $(file_size "$WORK/s2/fakecc") bytes"
+    echo "  stage 1: $(file_size "$WORK/s1/$OUT_NAME") bytes"
+    echo "  stage 2: $(file_size "$WORK/s2/$OUT_NAME") bytes"
     echo "  first differing bytes (cmp -l):"
-    cmp -l "$WORK/s1/fakecc" "$WORK/s2/fakecc" | head -20
-    cp "$WORK/s1/fakecc" "$ROOT/v0/fakecc-1"
-    cp "$WORK/s2/fakecc" "$ROOT/v0/fakecc-2"
+    cmp -l "$WORK/s1/$OUT_NAME" "$WORK/s2/$OUT_NAME" | head -20
+    cp "$WORK/s1/$OUT_NAME" "$ROOT/v0/fakecc-1"
+    cp "$WORK/s2/$OUT_NAME" "$ROOT/v0/fakecc-2"
+    if [ "$OUT_NAME" != "fakecc" ]; then
+        cp "$WORK/s1/$OUT_NAME" "$ROOT/v0/fakecc-1.exe"
+        cp "$WORK/s2/$OUT_NAME" "$ROOT/v0/fakecc-2.exe"
+    fi
     echo "wrote v0/fakecc-1 and v0/fakecc-2 (mismatch)"
     exit 1
 fi
 
 echo
 echo "FIXED POINT REACHED: linked binaries are byte-identical"
-cp "$WORK/s1/fakecc" "$ROOT/v0/fakecc-1"
-cp "$WORK/s2/fakecc" "$ROOT/v0/fakecc-2"
+cp "$WORK/s1/$OUT_NAME" "$ROOT/v0/fakecc-1"
+cp "$WORK/s2/$OUT_NAME" "$ROOT/v0/fakecc-2"
+if [ "$OUT_NAME" != "fakecc" ]; then
+    cp "$WORK/s1/$OUT_NAME" "$ROOT/v0/fakecc-1.exe"
+    cp "$WORK/s2/$OUT_NAME" "$ROOT/v0/fakecc-2.exe"
+fi
 echo "wrote v0/fakecc-1 and v0/fakecc-2"

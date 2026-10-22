@@ -277,15 +277,149 @@ jobs:
           flags: ${{ matrix.config.cov_flag }}
           fail_ci_if_error: true
 
-  # Same ctest roster as the Linux and macOS legs.  windows-latest has no
-  # bash or gcc, so the job builds inside MSYS2's MINGW64 environment and
-  # lets ctest drive the shared bash suites.  Host-only checks (ELF .so,
-  # Mach-O .dylib, lldb) skip themselves the way the other platforms skip
-  # each other's.
+  # Same jobs Linux runs, on the Windows x64 target: plain gcc, gcc -O2,
+  # ASan/UBSan, clang, clang -O2, and gcov.  ctest is the shared roster,
+  # including the fork-isolated unit tests, difftest, and the DWARF gdb suite.
   build-and-test-windows:
-    name: windows-latest · gcc
+    name: ${{ matrix.config.label }}
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: msys2 {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - label: windows-latest · gcc
+            cc: gcc
+            cxx: g++
+            cflags: ""
+            pkgs: ""
+          - label: windows-latest · gcc -O2
+            cc: gcc
+            cxx: g++
+            cflags: "-O2"
+            pkgs: ""
+          - label: windows-latest · gcc ASan
+            cc: gcc
+            cxx: g++
+            cflags: "-fsanitize=address,undefined -g -fno-omit-frame-pointer"
+            ctest_args: "-E difftest_O1"
+            pkgs: mingw-w64-x86_64-libasan mingw-w64-x86_64-libubsan
+          - label: windows-latest · clang
+            cc: clang
+            cxx: clang++
+            cflags: ""
+            pkgs: mingw-w64-x86_64-clang
+          - label: windows-latest · clang -O2
+            cc: clang
+            cxx: clang++
+            cflags: "-O2"
+            pkgs: mingw-w64-x86_64-clang
+          - label: windows-latest · gcc coverage
+            cc: gcc
+            cxx: g++
+            cflags: ""
+            cov: true
+            ctest_args: "-E difftest"
+            pkgs: lcov
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSYS2 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-gdb
+            diffutils
+            python
+            ${{ matrix.config.pkgs }}
+
+      - name: Require gdb
+        run: |
+          if ! command -v gdb >/dev/null 2>&1; then
+            echo "::error::gdb install failed; the DWARF suite would silently pass"
+            exit 1
+          fi
+          gdb --version | head -1
+
+      - name: Configure
+        run: |
+          EXTRA_FLAGS=""
+          if [ "${{ matrix.config.cov }}" = "true" ]; then
+            EXTRA_FLAGS="-DUSE_COV=ON"
+          fi
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_C_COMPILER=${{ matrix.config.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.config.cxx }} \
+            -DCMAKE_C_FLAGS="${{ matrix.config.cflags }}" \
+            $EXTRA_FLAGS
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: |
+          CTEST_ARGS="${{ matrix.config.ctest_args }}"
+          ctest --test-dir build --output-on-failure $CTEST_ARGS
+
+      - name: Coverage report
+        if: matrix.config.cov
+        run: |
+          set -x
+          cd build
+          lcov --directory ./ --capture --output-file coverage.info --ignore-errors source --ignore-errors mismatch
+          ls -l coverage.info
+          lcov --list coverage.info
+
+  # Random programs, same seed count as Linux.  MinGW gcc is the oracle;
+  # clang is installed so an order-sensitive seed is AMBIG rather than FAIL.
+  fuzz-windows:
+    name: random program difftest (windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSYS2 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-clang
+            diffutils
+            python
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja
+          cmake --build build --parallel --target fakecc
+
+      - name: Random program difftest
+        run: bash test/fuzz/run_fuzz.sh build/fakecc.exe 300 1
+
+  # Stage 0 is MinGW gcc -O0 (the PPA snapshot that miscompiles Stage 0 is a
+  # Linux-only package).  The fixed point is the PE image.
+  bootstrap-windows:
+    name: bootstrap (fixed point, windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
 
@@ -301,17 +435,126 @@ jobs:
             diffutils
             python
 
-      - name: Configure
-        shell: msys2 {0}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - name: Build stage 0
+        run: |
+          gcc --version | head -1
+          cmake -S . -B build -G Ninja -DCMAKE_C_FLAGS="-O0"
+          cmake --build build --parallel
 
-      - name: Build
-        shell: msys2 {0}
-        run: cmake --build build --parallel
+      - name: Stage 2 fixed point
+        run: FAKECC="$PWD/build/fakecc.exe" bash v0/stage2_check.sh
 
-      - name: Test
+      - name: Upload self-hosted compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: fakecc-1-windows
+          path: |
+            v0/fakecc-1
+            v0/fakecc-1.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload mismatch binaries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-windows-mismatch
+          path: |
+            v0/fakecc-1
+            v0/fakecc-1.exe
+            v0/fakecc-2
+            v0/fakecc-2.exe
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # Same suite matrix as the Linux bootstrap-suite job: e2e, difftest, and
+  # multi/shlib/gdb/cli/compile/ports, driven by the self-hosted PE compiler.
+  bootstrap-suite-windows:
+    name: bootstrap (windows) · ${{ matrix.label }}
+    needs: bootstrap-windows
+    runs-on: windows-latest
+    timeout-minutes: 180
+    defaults:
+      run:
         shell: msys2 {0}
-        run: ctest --test-dir build --output-on-failure
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: e2e -O0
+            suite: e2e
+            opt: -O0
+          - label: e2e -O1
+            suite: e2e
+            opt: -O1
+          - label: difftest -O0
+            suite: difftest
+            opt: -O0
+          - label: difftest -O1
+            suite: difftest
+            opt: -O1
+          - label: multi/shlib/gdb/cli/compile/ports
+            suite: misc
+            opt: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSYS2 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-gdb
+            diffutils
+            python
+
+      - name: Require gdb
+        run: |
+          if ! command -v gdb >/dev/null 2>&1; then
+            echo "::error::gdb install failed; the DWARF suite would silently pass"
+            exit 1
+          fi
+          gdb --version | head -1
+
+      - name: Download self-hosted compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: fakecc-1-windows
+          path: v0
+
+      - name: Run suite
+        env:
+          SUITE: ${{ matrix.suite }}
+          OPT: ${{ matrix.opt }}
+        run: |
+          chmod +x v0/fakecc-1 v0/fakecc-1.exe
+          CC=v0/fakecc-1.exe
+          case "$SUITE" in
+            e2e)
+              CC_TIMEOUT=300 bash test/e2e/run_e2e.sh "$CC" "$OPT"
+              ;;
+            difftest)
+              CC_TIMEOUT=300 bash test/e2e/run_difftest.sh "$CC" "$OPT"
+              ;;
+            misc)
+              bash test/e2e/run_multi_e2e.sh "$CC" -O0
+              bash test/e2e/run_multi_e2e.sh "$CC" -O1
+              bash test/e2e/run_shlib_e2e.sh "$CC" -O0
+              bash test/e2e/run_shlib_e2e.sh "$CC" -O1
+              bash test/e2e/run_gdb_e2e.sh "$CC"
+              bash test/e2e/run_cli_e2e.sh "$CC"
+              CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh "$CC" -O0
+              CC_TIMEOUT=300 bash test/compile/gcc_compile/run_compile.sh "$CC" -O1
+              bash test/app_ports/run_all.sh "$CC" -O0
+              bash test/app_ports/run_all.sh "$CC" -O1
+              ;;
+            *)
+              echo "unknown suite: $SUITE" >&2
+              exit 2
+              ;;
+          esac
 
   # Differential fuzzing: random C programs, gcc is the oracle.  Programs in
   # test/fuzz/known_failures are known miscompiles (reported, not failing).

@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // runtime.chmod: sets a file's mode bits via sys_chmod.  Pin that it returns
 // 0 on a real file and -1 on a path that does not exist.  (The exact mode is
 // skip_oracle: clang

@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 // Darwin's <stdio.h> declares vfprintf; the port's prototype clashes.
 // skip_oracle: darwin

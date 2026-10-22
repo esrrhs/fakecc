@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 8
 package main;
 union Mix {

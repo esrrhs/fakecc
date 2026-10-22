@@ -100,33 +100,39 @@ add_executable(test_cg64_native unit/test_cg64_native.c)
 target_link_libraries(test_cg64_native PRIVATE fakecc_core test_framework)
 add_test(NAME test_cg64_native COMMAND test_cg64_native)
 
-# --- POSIX / Linux-only unit tests (fork / pipe / exec / ELF host dependent) ---
+# Same unit tests as Linux.  On Windows the fork in these files is the
+# in-process longjmp in test/win_isolate.h; the assertions are unchanged.
+add_executable(test_parser unit/test_parser.c)
+target_link_libraries(test_parser PRIVATE fakecc_core test_framework)
+add_test(NAME test_parser COMMAND test_parser)
 
-if(NOT WIN32)
-    add_executable(test_parser unit/test_parser.c)
-    target_link_libraries(test_parser PRIVATE fakecc_core test_framework)
-    add_test(NAME test_parser COMMAND test_parser)
+add_executable(test_sema unit/test_sema.c)
+target_link_libraries(test_sema PRIVATE fakecc_core test_framework)
+add_test(NAME test_sema COMMAND test_sema)
 
-    add_executable(test_sema unit/test_sema.c)
-    target_link_libraries(test_sema PRIVATE fakecc_core test_framework)
-    add_test(NAME test_sema COMMAND test_sema)
+add_executable(test_emit unit/test_emit.c)
+target_link_libraries(test_emit PRIVATE fakecc_core test_framework)
+add_test(NAME test_emit COMMAND test_emit)
 
-    add_executable(test_emit unit/test_emit.c)
-    target_link_libraries(test_emit PRIVATE fakecc_core test_framework)
-    add_test(NAME test_emit COMMAND test_emit)
+add_executable(test_link unit/test_link.c)
+target_link_libraries(test_link PRIVATE fakecc_core test_framework)
+add_test(NAME test_link COMMAND test_link)
 
-    add_executable(test_link unit/test_link.c)
-    target_link_libraries(test_link PRIVATE fakecc_core test_framework)
-    add_test(NAME test_link COMMAND test_link)
+add_executable(test_pkg unit/test_pkg.c)
+target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
+add_test(NAME test_pkg COMMAND test_pkg)
 
-    add_executable(test_pkg unit/test_pkg.c)
-    target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
-    add_test(NAME test_pkg COMMAND test_pkg)
+add_executable(test_die_at unit/test_die_at.c)
+target_link_libraries(test_die_at PRIVATE fakecc_core test_framework)
+add_test(NAME test_die_at COMMAND test_die_at)
 
-    add_executable(test_die_at unit/test_die_at.c)
-    target_link_libraries(test_die_at PRIVATE fakecc_core test_framework)
-    add_test(NAME test_die_at COMMAND test_die_at)
-else()
+if(WIN32)
+    foreach(t test_parser test_sema test_emit test_link test_pkg test_die_at)
+        target_link_options(${t} PRIVATE -Wl,--wrap=exit -Wl,--wrap=abort)
+    endforeach()
+endif()
+
+if(WIN32)
     add_test(NAME test_win64_abi_exec_build
              COMMAND $<TARGET_FILE:fakecc> ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_win64_abi_exec.c -o ${CMAKE_CURRENT_BINARY_DIR}/test_win64_abi_exec.exe)
     add_test(NAME test_win64_abi_exec_run

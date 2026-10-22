@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 // Darwin libc formats %p/%# differently from glibc (and from fakecc's
 // runtime).

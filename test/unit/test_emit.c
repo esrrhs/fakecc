@@ -14,8 +14,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include "win_isolate.h"
+#endif
 
 /* ---- helper: compile source to temp executable ---- */
 static void compile_to_file(const char *src, const char *out_path) {
@@ -46,7 +50,11 @@ static void compile_to_file(const char *src, const char *out_path) {
 /* ---- tests ---- */
 
 static void test_elf_magic(void) {
+#ifdef _WIN32
+    const char *out = win_tmp("fakecc_test_elf_magic");
+#else
     const char *out = "/tmp/fakecc_test_elf_magic";
+#endif
     compile_to_file("package main; int main() { return 0; }", out);
 
     FILE *f = fopen(out, "rb");
@@ -62,7 +70,11 @@ static void test_elf_magic(void) {
 }
 
 static void test_elf_machine(void) {
+#ifdef _WIN32
+    const char *out = win_tmp("fakecc_test_elf_machine");
+#else
     const char *out = "/tmp/fakecc_test_elf_machine";
+#endif
     compile_to_file("package main; int main() { return 0; }", out);
 
     FILE *f = fopen(out, "rb");
@@ -115,7 +127,11 @@ static int run_elf_exit_code(const char *out) {
 #endif
 
 static void test_run_return_0(void) {
+#ifdef _WIN32
+    const char *out = win_tmp("fakecc_test_run_0");
+#else
     const char *out = "/tmp/fakecc_test_run_0";
+#endif
     compile_to_file("package main; int main() { return 0; }", out);
 
     RUN_ELF_CASE(out, 0);
@@ -123,7 +139,11 @@ static void test_run_return_0(void) {
 }
 
 static void test_run_return_42(void) {
+#ifdef _WIN32
+    const char *out = win_tmp("fakecc_test_run_42");
+#else
     const char *out = "/tmp/fakecc_test_run_42";
+#endif
     compile_to_file("package main; int main() { return 42; }", out);
 
     RUN_ELF_CASE(out, 42);
@@ -131,7 +151,11 @@ static void test_run_return_42(void) {
 }
 
 static void test_run_return_255(void) {
+#ifdef _WIN32
+    const char *out = win_tmp("fakecc_test_run_255");
+#else
     const char *out = "/tmp/fakecc_test_run_255";
+#endif
     compile_to_file("package main; int main() { return 255; }", out);
 
     RUN_ELF_CASE(out, 255);

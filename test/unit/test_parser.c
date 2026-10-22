@@ -11,8 +11,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include <stdio.h>
+#include "win_isolate.h"
+#endif
 
 /* ---- helper: lex + parse ---- */
 static TranslationUnit lex_parse(const char *src) {
@@ -286,6 +291,30 @@ static void test_decl_with_init(void) {
 static void test_nested_function(void) {
     /* Nested function definitions are not supported by FakeCC; the parser
      * rejects them with die_at() (records error + returns). */
+    const char *src =
+        "package main; int main() { int nested(int x) { return x * 2; } return nested(21); }";
+#ifdef _WIN32
+    char path[260];
+    snprintf(path, sizeof path, "%s", win_tmp("fakecc_nested_err.txt"));
+    int fd = _open(path, _O_WRONLY | _O_CREAT | _O_TRUNC, 0600);
+    int saved = _dup(2);
+    T_ASSERT(fd >= 0 && saved >= 0);
+    _dup2(fd, 2);
+    _close(fd);
+    int err = lex_parse_errors(src);
+    fflush(stderr);
+    _dup2(saved, 2);
+    _close(saved);
+    FILE *f = fopen(path, "rb");
+    T_ASSERT(f != NULL);
+    char buf[4096];
+    size_t total = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    remove(path);
+    buf[total] = '\0';
+    T_ASSERT(err);
+    T_ASSERT(strstr(buf, "Nested functions are not supported") != NULL);
+#else
     int p[2];
     T_ASSERT_EQ_INT(pipe(p), 0);
     pid_t pid = fork();
@@ -294,8 +323,7 @@ static void test_nested_function(void) {
         close(p[0]);
         dup2(p[1], 2);
         close(p[1]);
-        int err = lex_parse_errors(
-            "package main; int main() { int nested(int x) { return x * 2; } return nested(21); }");
+        int err = lex_parse_errors(src);
         _exit(err ? 1 : 0);
     }
     close(p[1]);
@@ -311,6 +339,7 @@ static void test_nested_function(void) {
     buf[total] = '\0';
     T_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 1);  /* rejected */
     T_ASSERT(strstr(buf, "Nested functions are not supported") != NULL);
+#endif
 }
 
 static void test_stmt_expr(void) {

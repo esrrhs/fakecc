@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 // Darwin libc drops %n; fakecc's runtime implements it, so exits differ.
 // skip_oracle: darwin

@@ -1,4 +1,3 @@
-// skip_oracle: windows
 /* PR tree-optimization/58209 */
 
 // expect: 0

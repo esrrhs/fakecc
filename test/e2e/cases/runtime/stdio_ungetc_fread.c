@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 // fread must consume a prior ungetc, and fopen("rb+") must be readable.
 // skip_oracle: clang

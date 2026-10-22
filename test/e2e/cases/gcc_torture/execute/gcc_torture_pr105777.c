@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 package main;
 int foo(int x) { int r; return __builtin_mul_overflow(x, 35, &r); }

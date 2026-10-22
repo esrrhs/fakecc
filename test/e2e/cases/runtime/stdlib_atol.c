@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // runtime.atol: like runtime.atoi but returns long, so it can represent the full 64-bit
 // range instead of being truncated to int.  Pin a plain value, a negative,
 // skip_oracle: clang

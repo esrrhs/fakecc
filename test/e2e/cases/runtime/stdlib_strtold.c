@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // runtime.strtold: like runtime.strtod but returns long double.  Pin integer-valued
 // literals (parsed exactly), a negative, zero, an exponent, and endptr
 // skip_oracle: clang

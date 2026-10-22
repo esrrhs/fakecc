@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // runtime.sscanf / runtime.fscanf: %n, length modifiers, %x/%ld, assignment
 // suppression.  Must match glibc conversion and assignment counts.
 // skip_oracle: clang

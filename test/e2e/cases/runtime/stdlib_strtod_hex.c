@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // runtime.strtod / runtime.strtold: hex float literals with more than 16 hex
 // digits must round like glibc, not drop low digits into the exponent.
 // skip_oracle: clang

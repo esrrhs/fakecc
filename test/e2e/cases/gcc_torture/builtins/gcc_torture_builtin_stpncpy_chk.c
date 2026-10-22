@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 // flags: -O1
 package main;

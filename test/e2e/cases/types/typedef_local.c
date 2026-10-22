@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 9
 /* Typedefs in different functions are independent scopes. */
 package main;

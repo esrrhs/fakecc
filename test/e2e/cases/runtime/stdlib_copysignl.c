@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 0
 // copysignl copies the 80-bit sign bit; a double round-trip would drop it
 // skip_oracle: clang

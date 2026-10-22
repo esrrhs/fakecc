@@ -14,8 +14,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include "win_isolate.h"
+#endif
 
 /* Compile one TU into an EmitModule (no main required). */
 static void compile_tu(const char *src, EmitModule *out) {
@@ -58,7 +62,11 @@ static int fork_dies(void (*fn)(void)) {
 }
 
 static void test_obj_roundtrip(void) {
+#ifdef _WIN32
+    const char *path = win_tmp("fakecc_test_link_roundtrip.o");
+#else
     const char *path = "/tmp/fakecc_test_link_roundtrip.o";
+#endif
     EmitModule em;
     compile_tu("package main; int add(int a, int b) { return a + b; }", &em);
     emit_obj(&em, path);
@@ -73,7 +81,11 @@ static void test_obj_roundtrip(void) {
 }
 
 static void test_link_two_modules(void) {
+#ifdef _WIN32
+    const char *path = win_tmp("fakecc_test_link_two.exe");
+#else
     const char *path = "/tmp/fakecc_test_link_two";
+#endif
     EmitModule a, b;
     compile_tu("package main; int add(int a, int b) { return a + b; }", &a);
     compile_tu("package main; int add(int a, int b); int main(void) { return add(20, 22); }", &b);
@@ -102,7 +114,11 @@ static void link_no_main_body(void) {
     compile_tu("package main; int foo(void) { return 1; }", &a);
     EmitModule *mods[1];
     mods[0] = &a;
+#ifdef _WIN32
+    emit_link(mods, 1, win_tmp("fakecc_test_link_nomain.exe"), NULL, 0, 0, NULL, 0, 0, 0);
+#else
     emit_link(mods, 1, "/tmp/fakecc_test_link_nomain", NULL, 0, 0, NULL, 0, 0, 0);
+#endif
     emit_module_free(&a);
 }
 
@@ -111,7 +127,11 @@ static void test_link_rejects_no_main(void) {
 }
 
 static void test_link_static_no_collision(void) {
+#ifdef _WIN32
+    const char *path = win_tmp("fakecc_test_link_static.exe");
+#else
     const char *path = "/tmp/fakecc_test_link_static";
+#endif
     EmitModule a, b;
     compile_tu("package main; static int x = 9; int get(void) { return x; }", &a);
     compile_tu("package main; static int x = 1; int get(void); int main(void) { return get() + x; }", &b);
@@ -140,6 +160,8 @@ int main(void) {
      * pinned to the x86-64 ELF backend, which executes natively on Linux. */
 #if defined(__APPLE__) && defined(__aarch64__)
     target_set_current(target_arm64_macos());
+#elif defined(_WIN32)
+    target_set_current(target_x86_64_windows());
 #else
     target_set_current(target_x86_64_linux());
 #endif

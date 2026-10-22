@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // expect: 12
 // Darwin's syscall numbers differ from Linux, so the oracle's __syscall(1,
 // ...) is a different call.

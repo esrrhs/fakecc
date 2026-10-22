@@ -1,4 +1,3 @@
-// skip_oracle: windows
 // runtime.fprintf to a real file (not stdout): format mixed types, close,
 // reopen for reading, and verify the bytes written.  import_file_type.c and
 // skip_oracle: clang
