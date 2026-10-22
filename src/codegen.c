@@ -1536,6 +1536,52 @@ static void emit_sse_store_sib(Buffer *b, int base, int index, int scale2,
     emit_modrm_sib_disp(b, src, base, index, scale2, off);
 }
 
+
+/* movss/sd xmm, symb(,%index,scale) — R_X86_64_32S like emit_load_abs32. */
+static size_t emit_sse_load_abs32(Buffer *b, int dst, int index, int scale2,
+                                  int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        emit_rex_if(b, 0, dst, 0, index);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0x10);
+        emit_modrm(b, 2, dst & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        emit_rex_if(b, 0, dst, idx, 0);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0x10);
+        emit_modrm(b, 0, dst & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
+static size_t emit_sse_store_abs32(Buffer *b, int src, int index, int scale2,
+                                   int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        emit_rex_if(b, 0, src, 0, index);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0x11);
+        emit_modrm(b, 2, src & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        emit_rex_if(b, 0, src, idx, 0);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0x11);
+        emit_modrm(b, 0, src & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
 /* Absolute + index addressing for local globals (gcc -O0 -fno-pic):
  *   movzx dst, symb(%index)           scale2 == 0
  *   movzx dst, symb(,%index,2^scale2) scale2 != 0
@@ -1980,10 +2026,12 @@ static int ensure_index(Buffer *b, IRValue v, const RAResult *ra) {
 }
 
 /* Indirect *p / *p=: use p's GP home when live (chacha quarter).  Spilled
- * pointers still stage through %rcx. */
+ * pointers still stage through %rcx.  Refuse %rsp/%rbp (mod=0 rm=4/5 are
+ * SIB / disp32) and r8-r15 (x87 fldt/fstpt emitters omit REX.B). */
 static int ensure_ptr(Buffer *b, IRValue v, const RAResult *ra) {
     int home = gp_home(ra, v);
-    if (home >= 0) return home;
+    if (home >= 0 && home < 8 && home != REG_RSP && home != REG_RBP)
+        return home;
     ensure_reg(b, v, REG_RCX, ra);
     return REG_RCX;
 }
@@ -4465,19 +4513,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         int aligned_call_saved_sp_rbp_off = (aligned_call_saved_sp_rsp_off >= 0)
             ? -(frame_down - aligned_call_saved_sp_rsp_off) : 0;
 
-        /* SysV red zone: leaf frames ≤128 bytes below rsp need no
-         * sub/add rsp (gcc -O0 is_prime/clear_prime). */
-        int is_leaf = 1;
-        for (size_t j = 0; j < fn->insts.len; j++) {
-            if (fn->insts.data[j].op == IR_CALL) {
-                is_leaf = 0;
-                break;
-            }
-        }
-        int use_red_zone = is_leaf && !fn->is_variadic && !fn->needs_apply_args
-            && !fn->needs_apply && !fn->has_dyn_alloca && cs_count == 0
-            && bottom_extra == 0 && frame_down > 0 && frame_down <= 128;
-        int prologue_stack = use_red_zone ? 0 : stack_size;
+        /* SysV red zone skipped: this backend still uses push/pop for
+         * SysV param materialization and several ALU temps; those writes
+         * sit in the 128B red zone and clobber rbp-relative locals when
+         * prologue omits `sub %rsp` (bitfield_packed_spill / unit prologue). */
+        int prologue_stack = stack_size;
 
         emit_byte(&out->text, 0x55);              /* pushq %rbp */
         size_t after_push_rbp_pc = out->text.len;
@@ -4940,10 +4980,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     continue;
                 int64_t imm = 0;
                 if (!ssa_const_imm(fn, ssa_def, cv, &imm)) continue;
+                /* Only i32 immediates: bitwise_u32 consts (e.g. 0x80808080)
+                 * are fine for and/or/xor $imm,r but mem-RMW still falls
+                 * back to a register form — skipping the CONST then leaves
+                 * that register undefined (pr63843). */
                 int ok = imm_fits_i32(imm);
-                if ((ad->op == IR_BAND || ad->op == IR_BOR || ad->op == IR_BXOR)
-                    && imm_fits_bitwise_u32(imm))
-                    ok = 1;
                 if ((ad->op == IR_SHL || ad->op == IR_SHR || ad->op == IR_ROL)
                     && (imm < 0 || imm >= 64))
                     ok = 0;
@@ -6409,15 +6450,27 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 emit_sse_load_disp(&out->text, dst_xmm, REG_RBP,
                                                    af_disp, is_float);
                         } else if (af_kind == AF_SIB) {
+                            const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
+                            int gsym = (gn && gaddr_is_local_abs(ir, gn))
+                                       ? emit_module_find_symbol(out, gn) : -1;
+                            int abs_ok = gsym >= 0
+                                         && out->syms[gsym].shndx != SECT_UNDEF;
                             int idx_r = af_idx >= 0
                                         ? ensure_index(&out->text, af_idx, ra) : -1;
-                            ensure_reg(&out->text, af_base, REG_RAX, ra);
-                            if (af_idx >= 0)
-                                emit_sse_load_sib(&out->text, dst_xmm, REG_RAX,
-                                                  idx_r, af_sc, af_disp, is_float);
-                            else
-                                emit_sse_load_disp(&out->text, dst_xmm, REG_RAX,
-                                                   af_disp, is_float);
+                            if (abs_ok) {
+                                size_t patch = emit_sse_load_abs32(
+                                    &out->text, dst_xmm, idx_r, af_sc, is_float);
+                                emit_module_add_reloc(out, patch, R_X86_64_32S,
+                                                      gsym, af_disp);
+                            } else {
+                                ensure_reg(&out->text, af_base, REG_RAX, ra);
+                                if (af_idx >= 0)
+                                    emit_sse_load_sib(&out->text, dst_xmm, REG_RAX,
+                                                      idx_r, af_sc, af_disp, is_float);
+                                else
+                                    emit_sse_load_disp(&out->text, dst_xmm, REG_RAX,
+                                                       af_disp, is_float);
+                            }
                         } else
                             emit_sse_load_via_ptr(&out->text, dst_xmm, ptr_r, is_float);
                     }
@@ -6539,8 +6592,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (folded)
                         emit_x87_fstpt_disp(&out->text, REG_RBP, ptr_off);
                     else {
+                        /* emit_ld_load addresses the spill via %rcx; the
+                         * pointer must be refreshed before fstpt. */
+                        ensure_reg(&out->text, inst->a, REG_RCX, ra);
                         emit_byte(&out->text, 0xDB);
-                        emit_modrm(&out->text, 0, 7, ptr_r & 7);
+                        emit_modrm(&out->text, 0, 7, REG_RCX & 7);
                     }
                 } else if (value_is_float_class(fn, inst->b)) {
                     ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm,
@@ -6579,16 +6635,30 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 emit_sse_store_disp(&out->text, REG_RBP,
                                                     XMM_SCRATCH0, af_disp, is_float);
                         } else if (af_kind == AF_SIB) {
+                            const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
+                            int gsym = (gn && gaddr_is_local_abs(ir, gn))
+                                       ? emit_module_find_symbol(out, gn) : -1;
+                            int abs_ok = gsym >= 0
+                                         && out->syms[gsym].shndx != SECT_UNDEF;
                             int idx_r = af_idx >= 0
                                         ? ensure_index(&out->text, af_idx, ra) : -1;
-                            ensure_reg(&out->text, af_base, REG_RAX, ra);
-                            if (af_idx >= 0)
-                                emit_sse_store_sib(&out->text, REG_RAX, idx_r,
-                                                   af_sc, af_disp, XMM_SCRATCH0,
-                                                   is_float);
-                            else
-                                emit_sse_store_disp(&out->text, REG_RAX,
-                                                    XMM_SCRATCH0, af_disp, is_float);
+                            if (abs_ok) {
+                                size_t patch = emit_sse_store_abs32(
+                                    &out->text, XMM_SCRATCH0, idx_r, af_sc,
+                                    is_float);
+                                emit_module_add_reloc(out, patch, R_X86_64_32S,
+                                                      gsym, af_disp);
+                            } else {
+                                ensure_reg(&out->text, af_base, REG_RAX, ra);
+                                if (af_idx >= 0)
+                                    emit_sse_store_sib(&out->text, REG_RAX, idx_r,
+                                                       af_sc, af_disp, XMM_SCRATCH0,
+                                                       is_float);
+                                else
+                                    emit_sse_store_disp(&out->text, REG_RAX,
+                                                        XMM_SCRATCH0, af_disp,
+                                                        is_float);
+                            }
                         } else
                             emit_sse_store_via_ptr(&out->text, ptr_r, XMM_SCRATCH0,
                                                    is_float);
@@ -6847,10 +6917,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_BR: {
-                /* Fall-through: next instruction is the target label. */
-                if (j + 1 < fn->insts.len
-                    && fn->insts.data[j + 1].op == IR_LABEL
-                    && fn->insts.data[j + 1].imm == inst->imm)
+                /* Fall-through: next real insn is the target label.
+                 * Skip IR_DBG_VALUE — markers emit no bytes, so -g must
+                 * not force a jmp that plain builds omit. */
+                size_t nbr = j + 1;
+                while (nbr < fn->insts.len
+                       && fn->insts.data[nbr].op == IR_DBG_VALUE)
+                    nbr++;
+                if (nbr < fn->insts.len
+                    && fn->insts.data[nbr].op == IR_LABEL
+                    && fn->insts.data[nbr].imm == inst->imm)
                     break;
                 if (inst->imm >= 0 && inst->imm < nlabels
                     && label_off[inst->imm] != (size_t)-1
@@ -6943,12 +7019,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_test_r_w(&out->text, tr, cwidth);
                     }
                 }
-                int true_fall = (j + 1 < fn->insts.len
-                                 && fn->insts.data[j + 1].op == IR_LABEL
-                                 && fn->insts.data[j + 1].imm == inst->imm);
-                int false_fall = (j + 1 < fn->insts.len
-                                  && fn->insts.data[j + 1].op == IR_LABEL
-                                  && (int)fn->insts.data[j + 1].imm == inst->b);
+                size_t ncbr = j + 1;
+                while (ncbr < fn->insts.len
+                       && fn->insts.data[ncbr].op == IR_DBG_VALUE)
+                    ncbr++;
+                int true_fall = (ncbr < fn->insts.len
+                                 && fn->insts.data[ncbr].op == IR_LABEL
+                                 && fn->insts.data[ncbr].imm == inst->imm);
+                int false_fall = (ncbr < fn->insts.len
+                                  && fn->insts.data[ncbr].op == IR_LABEL
+                                  && (int)fn->insts.data[ncbr].imm == inst->b);
                 if (true_fall) {
                     /* j<inv> false; fall into true. */
                     int tlab = (int)inst->b;
