@@ -2899,12 +2899,81 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
                 buffer_append(&file, dsec[di].buf->data, dsec[di].buf->len);
                 bpad(&file, dsec[di].rs - dsec[di].buf->len);
             }
-            if (pe_strtab.len > 4) {
-                uint32_t slen = (uint32_t)pe_strtab.len;
-                memcpy(pe_strtab.data, &slen, 4);
-                uint32_t symptr = (uint32_t)file.len;
-                memcpy(file.data + pe_symptr_at, &symptr, 4);
-                buffer_append(&file, pe_strtab.data, pe_strtab.len);
+            /* COFF symbol table + string table.  gdb's `break main` without
+             * -g needs EXTERNAL symbols; DWARF alone is not enough.  Long
+             * section names (/offset) and long symbol names share pe_strtab. */
+            {
+                Buffer pe_symtab;
+                buffer_init(&pe_symtab);
+                if (pe_strtab.len < 4) {
+                    buffer_init(&pe_strtab);
+                    bu32(&pe_strtab, 4);
+                }
+                /* 1-based section numbers matching put_section order above. */
+                uint16_t sec_text = 1, sec_rdata = 2, sec_data = 3;
+                uint16_t sec_next = 4;
+                uint16_t sec_pdata = 0, sec_xdata = 0, sec_tls = 0, sec_reloc = 0;
+                if (has_pdata) sec_pdata = sec_next++;
+                if (has_xdata) sec_xdata = sec_next++;
+                if (have_tls) sec_tls = sec_next++;
+                if (has_reloc) sec_reloc = sec_next++;
+                (void)sec_pdata; (void)sec_xdata; (void)sec_tls; (void)sec_reloc;
+
+                for (size_t si = 0; si < ngs; si++) {
+                    GSym *e = &gs[si];
+                    if (!e->name || e->imp || !e->strong) continue;
+                    uint64_t a = e->addr;
+                    uint16_t sn = 0;
+                    uint32_t off = 0;
+                    uint16_t ty = 0;
+                    if (a >= L.text_va && a < L.text_va + text.len) {
+                        sn = sec_text;
+                        off = (uint32_t)(a - L.text_va);
+                        ty = 0x20; /* IMAGE_SYM_DTYPE_FUNCTION */
+                    } else if (a >= L.rdata_va && a < L.rdata_va + rodata.len) {
+                        sn = sec_rdata;
+                        off = (uint32_t)(a - L.rdata_va);
+                    } else if (a >= L.data_va &&
+                               a < L.data_va + data_vsize) {
+                        sn = sec_data;
+                        off = (uint32_t)(a - L.data_va);
+                    } else {
+                        continue;
+                    }
+                    /* Symbol name: 8-byte field or string-table offset. */
+                    {
+                        char nm[8];
+                        memset(nm, 0, 8);
+                        size_t nl = strlen(e->name);
+                        if (nl <= 8) {
+                            memcpy(nm, e->name, nl);
+                        } else {
+                            uint32_t soff = (uint32_t)pe_strtab.len;
+                            buffer_append(&pe_strtab, e->name, nl + 1);
+                            memset(nm, 0, 8);
+                            memcpy(nm + 4, &soff, 4);
+                        }
+                        buffer_append(&pe_symtab, nm, 8);
+                    }
+                    bu32(&pe_symtab, off);
+                    bu16(&pe_symtab, sn);
+                    bu16(&pe_symtab, ty);
+                    bu8(&pe_symtab, IMAGE_SYM_CLASS_EXTERNAL);
+                    bu8(&pe_symtab, 0);
+                }
+
+                uint32_t nsyms = (uint32_t)(pe_symtab.len / 18);
+                if (nsyms > 0 || pe_strtab.len > 4) {
+                    uint32_t slen = (uint32_t)pe_strtab.len;
+                    memcpy(pe_strtab.data, &slen, 4);
+                    uint32_t symptr = (uint32_t)file.len;
+                    memcpy(file.data + pe_symptr_at, &symptr, 4);
+                    memcpy(file.data + pe_symptr_at + 4, &nsyms, 4);
+                    if (nsyms > 0)
+                        buffer_append(&file, pe_symtab.data, pe_symtab.len);
+                    buffer_append(&file, pe_strtab.data, pe_strtab.len);
+                }
+                buffer_free(&pe_symtab);
             }
             FILE *fp = fopen(path, "wb");
             if (!fp) {

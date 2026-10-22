@@ -216,11 +216,11 @@ static long long fakecc_oracle_syscall(long long n, long long a, long long b, lo
 #endif
 EOF
                 fi
-                if grep -q 'jmp_buf' "$WORK/$name.prep.c"; then
-                    # The torture port carries its own `long jmp_buf[32]`,
-                    # which is the glibc layout.  Use the host setjmp instead.
-                    echo '#include <setjmp.h>'
-                fi
+                # Do not #include <setjmp.h> when the case declares a variable
+                # named jmp_buf (e.g. pr60003's buffer for __builtin_setjmp).
+                # MinGW's typedef jmp_buf would collide.  __builtin_setjmp /
+                # __builtin_longjmp need no header; typedef jmp_buf lines are
+                # stripped from the body below.
                 cat <<'EOF'
 /* MinGW stdout is not a linkable object.  Header dumps declare
  * `extern FILE *stdout`, which we drop; this is the real pointer. */
@@ -431,6 +431,15 @@ void *__wrap_malloc(unsigned long long n) {
 }
 EOF
                     extra_flags="$extra_flags -Wl,--wrap=malloc"
+                fi
+                ;;
+        esac
+        # Cases that define their own snprintf (builtin chk tests) collide with
+        # the MinGW #define snprintf fakecc_snprintf wrapper above.
+        case "$(uname -s 2>/dev/null)" in
+            MSYS*|MINGW*|CYGWIN*)
+                if grep -qE '^snprintf[[:space:]]*\(' "$WORK/$name.prep.c"; then
+                    echo '#undef snprintf'
                 fi
                 ;;
         esac
@@ -680,8 +689,9 @@ EOF
                     echo '#undef __WINT_TYPE__'
                     echo '#define __WINT_TYPE__ unsigned int'
                     echo '#define __builtin_c23_va_start __builtin_va_start'
-                    if grep -q 'jmp_buf' "$WORK/$name.prep.c"; then
-                        echo '#include <setjmp.h>'
+                    # See header-free path: no setjmp.h -- jmp_buf may be a var.
+                    if grep -qE '^snprintf[[:space:]]*\(' "$WORK/$name.body.c"; then
+                        echo '#undef snprintf'
                     fi
                     ;;
             esac

@@ -130,6 +130,24 @@ def widen_long(src):
             i = j
             continue
         if c.isdigit():
+            # Leading-dot float: ".5L" -- the dot was already emitted as a
+            # character, so the digit path must not treat "5L" as an integer
+            # with an L suffix (that becomes ".5ll", which MinGW rejects).
+            if out and out[-1] == ".":
+                j = i + 1
+                while j < n and src[j].isdigit():
+                    j += 1
+                if j < n and src[j] in "eE":
+                    j += 1
+                    if j < n and src[j] in "+-":
+                        j += 1
+                    while j < n and src[j].isdigit():
+                        j += 1
+                while j < n and src[j] in "fFlL":
+                    j += 1
+                out.append(src[i:j])
+                i = j
+                continue
             j = i + 1
             hexnum = False
             if src[i] == "0" and j < n and src[j] in "xX":
