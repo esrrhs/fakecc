@@ -109,6 +109,20 @@ endif()
 add_executable(fakecc src/main.c)
 target_link_libraries(fakecc PRIVATE fakecc_core)
 
+# Windows PE default stack is 1MB.  ASan frames blow through it while the host
+# compiler parses large modules (cg64.c etc.), which shows up as
+# AddressSanitizer stack-overflow / exit 139 on almost every compile.  pe.c
+# already stamps 8MB on binaries fakecc emits; the clang-built host needs the
+# same via the link line.  target_link_options covers fakecc (already added
+# above); add_link_options covers later test exes.  16MB: 8MB still overflowed
+# under clang ASan locally while compiling examples/return0.c.
+if(WIN32 AND NOT MSVC)
+    if(CMAKE_C_FLAGS MATCHES "-fsanitize")
+        target_link_options(fakecc PRIVATE -Wl,--stack,16777216)
+        add_link_options(-Wl,--stack,16777216)
+    endif()
+endif()
+
 set_target_properties(fakecc PROPERTIES
     INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}"
 )

@@ -3600,9 +3600,13 @@ static const char *peel_gaddr_name_unique(const IRFunction *fn, const int *def,
     return NULL;
 }
 
-/* Local non-TLS global defined in this TU — safe for R_X86_64_32S. */
+/* Local non-TLS global defined in this TU — safe for R_X86_64_32S on ELF
+ * small-code-model hosts.  PE ImageBase is 0x140000000, so a 32-bit absolute
+ * cannot encode the VA; keep RIP-relative on Windows. */
 static int gaddr_is_local_abs(const IRModule *ir, const char *name) {
     if (!ir || !name) return 0;
+    if (target_current()->objfmt == TARGET_OBJFMT_PE)
+        return 0;
     for (size_t i = 0; i < ir->globals.len; i++) {
         const IRGlobal *g = &ir->globals.data[i];
         if (g->name && strcmp(g->name, name) == 0)

@@ -215,6 +215,37 @@ def widen_long(src):
     return "".join(out)
 
 
+
+def remap_long_libcalls(src):
+    """Fix MinGW builtin width after widen_long for abs/uabs torture ports.
+
+    `-fno-builtin-abs` keeps `labs` as a builtin while `abs` is a real call.
+    After LP64 widening the tripwire `labs` has a long-long signature, but
+    MinGW's builtin `labs` still takes 32-bit `long`, so the oracle calls the
+    tripwire and aborts (exit 3) while fakecc folds and exits 0.  Remap call
+    sites only; leave the definition as a tripwire.  Same idea for `ulabs`
+    under `-fno-builtin-uabs`.  abs-2 defines its own labs/llabs and must not
+    be rewritten -- gate on the flags line.
+    """
+    import re
+    flags_m = re.search(r"(?m)^//\s*flags:\s*(.*)$", src)
+    flags = flags_m.group(1) if flags_m else ""
+    out = src
+
+    def protect_and_remap(text, name, builtin):
+        pat_def = r"(\b(?:unsigned\s+)?long(?:\s+long)?\s+)(" + name + r")(\s*\()"
+        text = re.sub(pat_def, r"\1__FAKECC_DEF_" + name + r"\3", text)
+        text = re.sub(r"\b" + name + r"\s*\(", builtin + "(", text)
+        text = text.replace("__FAKECC_DEF_" + name, name)
+        return text
+
+    if "-fno-builtin-abs" in flags:
+        out = protect_and_remap(out, "labs", "__builtin_llabs")
+    if "-fno-builtin-uabs" in flags:
+        out = protect_and_remap(out, "ulabs", "__builtin_ulabs")
+    return out
+
+
 def _drop_host_idents(src):
     """MinGW's stdin/stdout/stderr are macros, not linkable objects."""
     import re
@@ -238,6 +269,8 @@ def main():
     if os.environ.get("FAKECC_ORACLE_LP64") == "1":
         prep = widen_long(prep)
         body = widen_long(body)
+        prep = remap_long_libcalls(prep)
+        body = remap_long_libcalls(body)
         prep = _drop_host_idents(prep)
         body = _drop_host_idents(body)
     with open(sys.argv[1], "wb") as fh:

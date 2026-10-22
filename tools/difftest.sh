@@ -261,6 +261,16 @@ static long long fakecc_strtoll(const char *s, char **end, int base) {
 #define __builtin_ulabs(x) ((unsigned long long)((x) < 0 ? 0ull - (unsigned long long)(x) : (unsigned long long)(x)))
 #define __builtin_ullabs(x) __builtin_ulabs(x)
 #define __builtin_umaxabs(x) __builtin_ulabs(x)
+/* After FAKECC_ORACLE_LP64 widens long to long long, MinGW *l bit
+ * builtins still take 32-bit unsigned long.  Point them at the *ll
+ * forms so oracle results match fakecc (and my_* reference code that
+ * uses sizeof(unsigned long) == 8). */
+#define __builtin_ffsl __builtin_ffsll
+#define __builtin_clzl __builtin_clzll
+#define __builtin_ctzl __builtin_ctzll
+#define __builtin_clrsbl __builtin_clrsbll
+#define __builtin_popcountl __builtin_popcountll
+#define __builtin_parityl __builtin_parityll
 /* -mlong-double-64 makes long double an IEEE double, but MinGW's
  * copysignl still drops the sign of zero.  Copy the sign bit explicitly. */
 static long double fakecc_copysignl(long double x, long double y) {
@@ -531,6 +541,16 @@ static long long fakecc_strtoll(const char *s, char **end, int base) {
 #define __builtin_ulabs(x) ((unsigned long long)((x) < 0 ? 0ull - (unsigned long long)(x) : (unsigned long long)(x)))
 #define __builtin_ullabs(x) __builtin_ulabs(x)
 #define __builtin_umaxabs(x) __builtin_ulabs(x)
+/* After FAKECC_ORACLE_LP64 widens long to long long, MinGW *l bit
+ * builtins still take 32-bit unsigned long.  Point them at the *ll
+ * forms so oracle results match fakecc (and my_* reference code that
+ * uses sizeof(unsigned long) == 8). */
+#define __builtin_ffsl __builtin_ffsll
+#define __builtin_clzl __builtin_clzll
+#define __builtin_ctzl __builtin_ctzll
+#define __builtin_clrsbl __builtin_clrsbll
+#define __builtin_popcountl __builtin_popcountll
+#define __builtin_parityl __builtin_parityll
 static long double fakecc_copysignl(long double x, long double y) {
     union { long double d; unsigned long long u; } a, b;
     a.d = x;
