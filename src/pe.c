@@ -15,6 +15,7 @@
 
 #include "fakecc/pe.h"
 #include "fakecc/emit.h"
+#include "fakecc/debug.h"
 #include "fakecc/common.h"
 
 #include <stdint.h>
@@ -1418,6 +1419,41 @@ static void put_section(Buffer *b, const char *name, uint32_t vsize, uint32_t va
     bu32(b, chars);
 }
 
+/* Long PE section names (/offset into the COFF string table). */
+static void put_section_long(Buffer *b, Buffer *strtab, const char *name,
+                             uint32_t vsize, uint32_t va, uint32_t rawsize,
+                             uint32_t rawptr, uint32_t chars) {
+    char nm[8];
+    memset(nm, 0, 8);
+    size_t n = strlen(name);
+    if (n <= 8) {
+        memcpy(nm, name, n);
+    } else {
+        if (strtab->len < 4) {
+            buffer_init(strtab);
+            bu32(strtab, 4);
+        }
+        uint32_t off = (uint32_t)strtab->len;
+        buffer_append(strtab, name, n + 1);
+        snprintf(nm, sizeof nm, "/%u", off);
+    }
+    buffer_append(b, nm, 8);
+    bu32(b, vsize);
+    bu32(b, va);
+    bu32(b, rawsize);
+    bu32(b, rawptr);
+    bu32(b, 0);
+    bu32(b, 0);
+    bu16(b, 0);
+    bu16(b, 0);
+    bu32(b, chars);
+}
+
+static int pe_module_has_debug(const EmitModule *em) {
+    return em && (em->num_dbg_lines > 0 || em->num_dbg_funcs > 0
+                  || em->num_dbg_globals > 0 || em->dbg_tu_name != NULL);
+}
+
 static int name_defined(EmitModule **mods, size_t n, const char *name) {
     for (size_t i = 0; i < n; i++) {
         for (size_t s = 0; s < mods[i]->num_syms; s++) {
@@ -2563,6 +2599,89 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
 
     if (rc == 0) build_reloc_section(&reloc, abs, nabs);
 
+    Buffer debug_abbrev, debug_info, debug_str, debug_line, debug_frame, debug_loc;
+    buffer_init(&debug_abbrev); buffer_init(&debug_info);
+    buffer_init(&debug_str); buffer_init(&debug_line);
+    buffer_init(&debug_frame); buffer_init(&debug_loc);
+    int have_dbg = 0;
+    typedef struct { const char *name; Buffer *buf; uint32_t rva, raw, rs; } PeDbgSec;
+    PeDbgSec dsec[6];
+    size_t ndsec = 0;
+    uint32_t dbg_init_sum = 0;
+    Buffer pe_strtab;
+    buffer_init(&pe_strtab);
+    bu32(&pe_strtab, 4);
+
+    if (rc == 0) {
+        for (size_t i = 0; i < nmods && !have_dbg; i++)
+            have_dbg = pe_module_has_debug(mods[i]);
+    }
+    if (rc == 0 && have_dbg) {
+        EmitModule dbg;
+        emit_module_init(&dbg);
+        for (size_t i = 0; i < nmods; i++) {
+            EmitModule *m = mods[i];
+            if (!dbg.dbg_tu_name && m->dbg_tu_name)
+                dbg.dbg_tu_name = xstrdup(m->dbg_tu_name);
+            for (size_t j = 0; j < m->num_dbg_lines; j++) {
+                const DebugLineEntry *line = &m->dbg_lines[j];
+                emit_module_add_dbg_line(&dbg, line->file, line->line,
+                                         line->col,
+                                         mod_text[i] + line->pc_off);
+            }
+            for (size_t j = 0; j < m->num_dbg_funcs; j++) {
+                const DebugFunc *f = &m->dbg_funcs[j];
+                int fi = emit_module_add_dbg_func(
+                    &dbg, f->name, f->file, f->line,
+                    mod_text[i] + f->start_pc);
+                emit_module_dbg_func_end(
+                    &dbg, fi, mod_text[i] + f->end_pc,
+                    mod_text[i] + f->prologue_end_pc);
+                for (size_t k = 0; k < f->num_vars; k++) {
+                    emit_module_add_dbg_var(&dbg, fi, &f->vars[k]);
+                    DebugVar *dv = &dbg.dbg_funcs[fi].vars[
+                        dbg.dbg_funcs[fi].num_vars - 1];
+                    for (size_t r = 0; r < dv->num_ranges; r++) {
+                        dv->ranges[r].pc_start += mod_text[i];
+                        dv->ranges[r].pc_end += mod_text[i];
+                    }
+                }
+                for (size_t k = 0; k < f->num_call_sites; k++) {
+                    DebugCallSite cs = f->call_sites[k];
+                    cs.call_pc += mod_text[i];
+                    cs.return_pc += mod_text[i];
+                    emit_module_add_dbg_call_site(&dbg, fi, &cs);
+                }
+            }
+            for (size_t j = 0; j < m->num_dbg_globals; j++) {
+                DebugVar gv = m->dbg_globals[j];
+                switch (gv.addr_sect) {
+                case SECT_RODATA: gv.addr_off += mod_ro[i]; break;
+                case SECT_DATA:   gv.addr_off += mod_data[i]; break;
+                case SECT_BSS:    gv.addr_off += mod_bss[i]; break;
+                case SECT_TDATA:  gv.addr_off += mod_tdata[i]; break;
+                case SECT_TBSS:   gv.addr_off += mod_tbss[i]; break;
+                default: break;
+                }
+                emit_module_add_dbg_global(&dbg, &gv);
+            }
+        }
+        uint64_t sec_vaddr[16];
+        memset(sec_vaddr, 0, sizeof sec_vaddr);
+        sec_vaddr[SECT_TEXT]   = L.text_va;
+        sec_vaddr[SECT_RODATA] = L.rdata_va;
+        sec_vaddr[SECT_DATA]   = L.data_va;
+        sec_vaddr[SECT_BSS]    = L.data_va + (uint64_t)data.len;
+        if (have_tls) {
+            sec_vaddr[SECT_TDATA] = L.tls_va;
+            sec_vaddr[SECT_TBSS]  = L.tls_va + (uint64_t)tdata.len;
+        }
+        debug_emit_dwarf(&dbg, L.text_va, &debug_abbrev, &debug_info,
+                         &debug_str, &debug_line, &debug_frame, &debug_loc,
+                         sec_vaddr);
+        emit_module_free(&dbg);
+    }
+
     if (rc == 0) {
         int has_pdata = pdata.len > 0;
         int has_xdata = xdata.len > 0;
@@ -2591,6 +2710,52 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
             image_end = align_up_u32(reloc_rva + (uint32_t)reloc.len, SECT_ALIGN);
         }
 
+        /* DWARF sections: discardable, named via the COFF string table. */
+        ndsec = 0;
+        dbg_init_sum = 0;
+        if (have_dbg) {
+            Buffer *bufs[6] = {
+                &debug_abbrev, &debug_info, &debug_str,
+                &debug_line, &debug_frame, &debug_loc
+            };
+            const char *names[6] = {
+                ".debug_abbrev", ".debug_info", ".debug_str",
+                ".debug_line", ".debug_frame", ".debug_loc"
+            };
+            uint32_t dbg_file = reloc_raw + reloc_rs;
+            uint32_t dbg_rva = image_end;
+            for (size_t di = 0; di < 6; di++) {
+                if (bufs[di]->len == 0) continue;
+                dsec[ndsec].name = names[di];
+                dsec[ndsec].buf = bufs[di];
+                dsec[ndsec].rva = dbg_rva;
+                dsec[ndsec].raw = dbg_file;
+                dsec[ndsec].rs = align_up_u32((uint32_t)bufs[di]->len, FILE_ALIGN);
+                dbg_rva = align_up_u32(dbg_rva + (uint32_t)bufs[di]->len, SECT_ALIGN);
+                dbg_file += dsec[ndsec].rs;
+                dbg_init_sum += dsec[ndsec].rs;
+                ndsec++;
+            }
+            if (ndsec) {
+                nsec += (int)ndsec;
+                image_end = dbg_rva;
+                headers = align_up_u32(0x80u + 4u + 20u + 240u + (uint32_t)nsec * 40u,
+                                       FILE_ALIGN);
+                if (headers != text_raw) {
+                    int32_t delta = (int32_t)headers - (int32_t)text_raw;
+                    text_raw = headers;
+                    rdata_raw = (uint32_t)((int32_t)rdata_raw + delta);
+                    data_raw = (uint32_t)((int32_t)data_raw + delta);
+                    pdata_raw = (uint32_t)((int32_t)pdata_raw + delta);
+                    xdata_raw = (uint32_t)((int32_t)xdata_raw + delta);
+                    if (tls_raw) tls_raw = (uint32_t)((int32_t)tls_raw + delta);
+                    reloc_raw = (uint32_t)((int32_t)reloc_raw + delta);
+                    for (size_t di = 0; di < ndsec; di++)
+                        dsec[di].raw = (uint32_t)((int32_t)dsec[di].raw + delta);
+                }
+            }
+        }
+
         uint16_t coff_chars = 0x0022;
         if (shared) coff_chars = (uint16_t)(coff_chars | 0x2000);
         uint16_t dll_chars = 0x0100;
@@ -2614,14 +2779,16 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
         bu16(&file, 0x8664);
         bu16(&file, (uint16_t)nsec);
         bu32(&file, 0);
-        bu32(&file, 0);
-        bu32(&file, 0);
+        size_t pe_symptr_at = file.len;
+        bu32(&file, 0); /* PointerToSymbolTable */
+        bu32(&file, 0); /* NumberOfSymbols */
         bu16(&file, 240);
         bu16(&file, coff_chars);
         bu16(&file, 0x20B);
         bu8(&file, 1); bu8(&file, 0);
         bu32(&file, text_rs);
-        bu32(&file, rdata_rs + data_rs + pdata_rs + xdata_rs + reloc_rs + tls_rs);
+        bu32(&file, rdata_rs + data_rs + pdata_rs + xdata_rs + reloc_rs + tls_rs
+                    + dbg_init_sum);
         bu32(&file, (uint32_t)bss + (uint32_t)tbss);
         bu32(&file, entry_rva);
         bu32(&file, text_rva);
@@ -2694,6 +2861,12 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
             put_section(&file, ".reloc", (uint32_t)reloc.len, reloc_rva,
                         reloc_rs, reloc_raw,
                         SCN_IDATA | SCN_READ | SCN_DISCARD);
+        for (size_t di = 0; di < ndsec; di++) {
+            put_section_long(&file, &pe_strtab, dsec[di].name,
+                             (uint32_t)dsec[di].buf->len, dsec[di].rva,
+                             dsec[di].rs, dsec[di].raw,
+                             SCN_IDATA | SCN_READ | SCN_DISCARD);
+        }
 
         if (file.len > headers) {
             fprintf(stderr, "fakecc: internal: PE headers overflowed\n");
@@ -2722,6 +2895,17 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
                 buffer_append(&file, reloc.data, reloc.len);
                 bpad(&file, reloc_rs - reloc.len);
             }
+            for (size_t di = 0; di < ndsec; di++) {
+                buffer_append(&file, dsec[di].buf->data, dsec[di].buf->len);
+                bpad(&file, dsec[di].rs - dsec[di].buf->len);
+            }
+            if (pe_strtab.len > 4) {
+                uint32_t slen = (uint32_t)pe_strtab.len;
+                memcpy(pe_strtab.data, &slen, 4);
+                uint32_t symptr = (uint32_t)file.len;
+                memcpy(file.data + pe_symptr_at, &symptr, 4);
+                buffer_append(&file, pe_strtab.data, pe_strtab.len);
+            }
             FILE *fp = fopen(path, "wb");
             if (!fp) {
                 fprintf(stderr, "fakecc: cannot write '%s'\n", path);
@@ -2748,6 +2932,11 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
             rc = -1;
         free(isyms);
     }
+
+    buffer_free(&debug_abbrev); buffer_free(&debug_info);
+    buffer_free(&debug_str); buffer_free(&debug_line);
+    buffer_free(&debug_frame); buffer_free(&debug_loc);
+    buffer_free(&pe_strtab);
 
 done:
     buffer_free(&text); buffer_free(&rodata); buffer_free(&data);
