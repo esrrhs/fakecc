@@ -305,7 +305,7 @@ jobs:
           - label: windows-latest · clang ASan
             cc: clang
             cxx: clang++
-            cflags: "-fsanitize=address,undefined -g -fno-omit-frame-pointer"
+            cflags: "-fsanitize=address,undefined -static-libsan -g -fno-omit-frame-pointer"
             ctest_args: "-E difftest_O1"
             pkgs: mingw-w64-x86_64-clang mingw-w64-x86_64-compiler-rt
           - label: windows-latest · clang
@@ -361,6 +361,9 @@ jobs:
             -DCMAKE_CXX_COMPILER=${{ matrix.config.cxx }} \
             -DCMAKE_C_FLAGS="${{ matrix.config.cflags }}" \
             $EXTRA_FLAGS
+          if echo "${{ matrix.config.cflags }}" | grep -q sanitize; then
+            find /mingw64/lib/clang -iname '*asan*' -o -iname '*ubsan*' | head -50 || true
+          fi
 
       - name: Build
         run: cmake --build build --parallel

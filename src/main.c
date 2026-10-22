@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(FAKECC_SELFHOST)
 #include <direct.h>
 #define rt_mkdir_one(p) _mkdir(p)
 #else

@@ -783,7 +783,15 @@ static void parent_lib(char *out, size_t n, const char *exe) {
     s = strrchr(buf, '\\');
     if (!s) s = strrchr(buf, '/');
     if (s) *s = 0;
-    snprintf(out, n, "%s\\lib", buf);
+    {
+        size_t len = strlen(buf);
+        if (len + 5 > n) {
+            out[0] = 0;
+            return;
+        }
+        memcpy(out, buf, len);
+        memcpy(out + len, "\\lib", 5);
+    }
 }
 
 int main(void) {
