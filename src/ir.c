@@ -4733,7 +4733,15 @@ static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e) 
         /* A compound literal yields an lvalue: its address is the base for `&`
          * or member access (e.g. `(struct S){1,2}.x`). */
         return lower_compound_literal_addr(fn, st, e);
-    default: break;
+    default:
+        /* Rvalue aggregates (complex arith like `__real (dc * dc)`, casts,
+         * ternaries, …) materialize to a stack slot and return that address
+         * from lower_expr — same contract as EX_CALL above.  Without this,
+         * member lowering of those temps fed LOAD_PTR a=-1 and crashed isel. */
+        if (e->type.kind == TY_STRUCT || e->type.is_vector
+            || type_is_pair16(e->type))
+            return lower_expr(fn, st, e);
+        break;
     }
     return -1;
 }

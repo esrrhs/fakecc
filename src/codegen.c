@@ -3540,6 +3540,7 @@ static int fold_gep(const IRFunction *fn, const int *def,
                     const int *alloca_off, IRValue v,
                     IRValue *base_out, IRValue *idx_out, int *scale2_out,
                     int *disp_out) {
+    if (v < 0 || v >= fn->next_value_id || !def) return 0;
     IRValue cur = v;
     int disp = 0;
     int expect = def[v];
