@@ -404,7 +404,10 @@ jobs:
         run: |
           set -x
           cd build
-          lcov --directory ./ --capture --output-file coverage.info --ignore-errors source --ignore-errors mismatch
+          # MSYS2 pacboy ships lcov 1.16: it knows --ignore-errors source, but
+          # not "mismatch" (that arrived in lcov 2.x, which the Linux leg
+          # installs from source). Passing mismatch here exits 25.
+          lcov --directory ./ --capture --output-file coverage.info --ignore-errors source
           ls -l coverage.info
           lcov --list coverage.info
 
@@ -734,7 +737,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  # A fixed point alone does not prove correctness â€” a deterministic but
+  # A fixed point alone does not prove correctness â€?a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
   # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are
   # promoted out of memory, so they stay separate matrix legs.
