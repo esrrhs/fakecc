@@ -2637,7 +2637,9 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
         bu32(&file, 0);
         bu16(&file, 3);
         bu16(&file, dll_chars);
-        bu64(&file, 0x100000);
+        /* 8MB, the usual host default.  1MB overflows while the self-hosted
+         * compiler parses a large module such as cg64.c. */
+        bu64(&file, 0x800000);
         bu64(&file, 0x1000);
         bu64(&file, 0x100000);
         bu64(&file, 0x1000);
