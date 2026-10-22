@@ -3197,13 +3197,43 @@ static int alloca_dyn_align(const IRFunction *fn, const int *def, IRValue slot) 
     return al->op == IR_ALLOCA && al->imm >= 32;
 }
 
+/* One count per SSA value for the function currently in codegen.
+ * Phi elimination emits several IR_COPY with the same dst; ssa_def keeps
+ * only the last, so folds must not follow that copy unless it is the only
+ * definition.  Filled in after codegen_build_defs, cleared before it is freed. */
+static int *g_def_count;
+static int g_def_count_n;
+
+static int value_unique_def(const IRFunction *fn, IRValue v);
+
+static void codegen_set_def_count(const IRFunction *fn) {
+    int n = fn ? fn->next_value_id : 0;
+    free(g_def_count);
+    g_def_count = NULL;
+    g_def_count_n = 0;
+    if (n <= 0) return;
+    g_def_count = xmalloc((size_t)n * sizeof(int));
+    memset(g_def_count, 0, (size_t)n * sizeof(int));
+    g_def_count_n = n;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        int d = fn->insts.data[i].dst;
+        if (d >= 0 && d < n) g_def_count[d]++;
+    }
+}
+
+static void codegen_clear_def_count(void) {
+    free(g_def_count);
+    g_def_count = NULL;
+    g_def_count_n = 0;
+}
+
 static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_off,
                         IRValue v, int *out_off, int depth) {
     if (depth > 8 || v < 0 || v >= fn->next_value_id || !def || !alloca_off) return 0;
     int di = def[v];
     if (di < 0) return 0;
     const IRInst *d = &fn->insts.data[di];
-    if (d->op == IR_COPY)
+    if (d->op == IR_COPY && value_unique_def(fn, v))
         return fold_ptr_off(fn, def, alloca_off, d->a, out_off, depth + 1);
     if (d->op == IR_ADDR && d->a >= 0 && d->a < fn->next_value_id && alloca_off[d->a] != 0) {
         if (alloca_dyn_align(fn, def, d->a)) return 0;
@@ -3385,6 +3415,8 @@ static const char *peel_gaddr_name(const IRFunction *fn, const int *def,
  * merge.  Rip-fold only when `v` has a single defining instruction. */
 static int value_unique_def(const IRFunction *fn, IRValue v) {
     if (!fn || v < 0 || v >= fn->next_value_id) return 0;
+    if (g_def_count && v < g_def_count_n)
+        return g_def_count[v] == 1;
     int n = 0;
     for (size_t i = 0; i < fn->insts.len; i++) {
         if (fn->insts.data[i].dst == v && ++n > 1) return 0;
@@ -4566,6 +4598,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
 
         int *ssa_def = codegen_build_defs(fn);
+        codegen_set_def_count(fn);
         char *skip_body = xmalloc(fn->insts.len ? fn->insts.len : 1);
         memset(skip_body, 0, fn->insts.len ? fn->insts.len : 1);
         int *param_home_off = NULL;
@@ -4871,6 +4904,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             int found = 0;
             for (int depth = 0; depth < 4 && cur >= 0 && cur < nvals_f; depth++) {
                 if (ssa_uses_f[cur] != 1) break;
+                /* ssa_def keeps the last phi copy.  Folding that constant
+                 * stores one predecessor's value on every path. */
+                if (!value_unique_def(fn, cur)) break;
                 int di = ssa_def[cur];
                 if (di < 0 || skip_body[di] || fused_skip[di]) break;
                 const IRInst *d = &fn->insts.data[di];
@@ -4881,8 +4917,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     found = 1;
                     break;
                 }
-                if ((d->op == IR_ZEXT || d->op == IR_SEXT || d->op == IR_TRUNC
-                     || d->op == IR_COPY) && d->a >= 0) {
+                /* Follow COPY only.  ZEXT/SEXT/TRUNC change the stored bits;
+                 * using the raw CONST immediate writes the pre-cast value
+                 * (-O0 pinned locals). */
+                if (d->op == IR_COPY && d->a >= 0) {
                     skip_chain[nskip++] = di;
                     cur = d->a;
                     continue;
@@ -8678,6 +8716,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(arrive_reg);
         free(arrive_is_xmm);
         free(stack_off);
+        codegen_clear_def_count();
         free(ssa_def);
         free(skip_body);
         free(store_imm);

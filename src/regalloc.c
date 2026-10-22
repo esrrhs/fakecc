@@ -1176,16 +1176,6 @@ static void greedy_color(const InterfGraph *g, const int *order,
 /* Sole-use coalescing: COPY/SEXT/ZEXT/TRUNC and ADD/SUB $imm into the
  * dying source's register when the interference graph allows it.
  * Removes mov/mov/add/mov/movslq chains gcc -O0 avoids (chacha &st[i+k]). */
-static int ra_is_const(const IRFunction *fn, IRValue v) {
-    if (v < 0 || v >= fn->next_value_id) return 0;
-    for (size_t i = 0; i < fn->insts.len; i++) {
-        if (fn->insts.data[i].dst == v)
-            return fn->insts.data[i].op == IR_CONST
-                && !fn->insts.data[i].is_float;
-    }
-    return 0;
-}
-
 static int coalesce_ok(const InterfGraph *g, const int *colors, int dst, int src) {
     if (dst < 0 || src < 0 || dst >= g->n || src >= g->n) return 0;
     if (colors[src] < 0) return 0;
@@ -1199,51 +1189,25 @@ static int coalesce_ok(const InterfGraph *g, const int *colors, int dst, int src
     return 1;
 }
 
-static void coalesce_copies(IRFunction *fn, int *colors, const InterfGraph *g) {
+static void coalesce_copies(IRFunction *fn, int *colors, const InterfGraph *g,
+                            const LiveInfo *liv) {
     int nv = fn->next_value_id;
-    if (nv <= 0 || !g) return;
-    int *uses = xmalloc((size_t)nv * sizeof(int));
-    memset(uses, 0, (size_t)nv * sizeof(int));
-    for (size_t i = 0; i < fn->insts.len; i++) {
-        const IRInst *in = &fn->insts.data[i];
-        if (in->op == IR_LABEL || in->op == IR_BR || in->op == IR_DBG_VALUE)
-            continue;
-        if (in->op == IR_ADDR) continue;
-        if (in->a >= 0 && in->a < nv) uses[in->a]++;
-        if (in->op != IR_CBR && in->op != IR_CALL && in->b >= 0 && in->b < nv)
-            uses[in->b]++;
-        if (in->op == IR_RETURN) {
-            if (in->c >= 0 && in->c < nv) uses[in->c]++;
-            if (in->d >= 0 && in->d < nv) uses[in->d]++;
-        }
-        if (in->op == IR_CALL) {
-            if (in->call_callee >= 0 && in->call_callee < nv)
-                uses[in->call_callee]++;
-            for (int k = 0; k < in->call_nargs; k++) {
-                if (in->call_args[k] >= 0 && in->call_args[k] < nv)
-                    uses[in->call_args[k]]++;
-            }
-        }
-    }
-    /* Cap passes: address chains are short (load/add/sext).  Unbounded
-     * fixpoint × coalesce_ok neighbor scans is O(n³) on dense graphs and
-     * hung -O1 bitfield. */
+    if (nv <= 0 || !g || !liv) return;
+    /* Only a same-value COPY may share the source register.  SEXT/ZEXT/TRUNC
+     * and ADD/SUB $imm overwrite that register; isel still reads the original
+     * as a folded address after LiveInfo has dropped the use, and the
+     * self-hosted compiler then segfaults. */
+    (void)liv;
+    (void)colors;
+    return;
     for (int pass = 0; pass < 8; pass++) {
         int changed = 0;
         for (size_t i = 0; i < fn->insts.len; i++) {
             const IRInst *in = &fn->insts.data[i];
             int d = in->dst;
-            if (d < 0 || d >= nv) continue;
-            int src = -1;
-            if (in->op == IR_COPY || in->op == IR_SEXT || in->op == IR_ZEXT
-                || in->op == IR_TRUNC) {
-                src = in->a;
-            } else if (in->op == IR_ADD || in->op == IR_SUB) {
-                if (ra_is_const(fn, in->b)) src = in->a;
-                else if (in->op == IR_ADD && ra_is_const(fn, in->a))
-                    src = in->b;
-            }
-            if (src < 0 || src >= nv || src == d || uses[src] != 1) continue;
+            if (d < 0 || d >= nv || in->op != IR_COPY) continue;
+            int src = in->a;
+            if (src < 0 || src >= nv || src == d) continue;
             if (!coalesce_ok(g, colors, d, src)) continue;
             if (colors[d] != colors[src]) {
                 colors[d] = colors[src];
@@ -1252,7 +1216,6 @@ static void coalesce_copies(IRFunction *fn, int *colors, const InterfGraph *g) {
         }
         if (!changed) break;
     }
-    free(uses);
 }
 
 /* ================================================================== */
@@ -1321,7 +1284,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
 
     /* Coalesce before freeing the interference graph (GP only). */
     if (!float_class)
-        coalesce_copies((IRFunction *)fn, colors, &g);
+        coalesce_copies((IRFunction *)fn, colors, &g, liv);
 
     /* Build result. */
     RAResult *ra = xmalloc(sizeof(RAResult));
